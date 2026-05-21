@@ -129,8 +129,16 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
           "kb_edge_id": str,            # passthrough (T2 hypothesize)
         }
 
-    Unknown keys are ignored. ``provenance`` defaults to ``'llm_direct'``
+    Unknown keys are ignored. ``provenance`` defaults to ``'default_grid'``
     when the LLM/specialist forgot to stamp it.
+
+    PR-A9 (Arbor-into-Hyperloom): the legacy ``'llm_direct'`` default
+    was retired. PolicyGate's ``explore_requires_specialist_provenance``
+    rule denies grids whose variants are all ``llm_direct``, so we
+    fall back to ``'default_grid'`` for unstamped variants — that
+    keeps the executor running on cold-start grids while still
+    letting the policy gate flag deliberately llm_direct-stamped
+    grids upstream.
     """
     out: list[GridVariant] = []
     for raw in payload or []:
@@ -150,7 +158,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         # without round-tripping through a parallel list. GridVariant is
         # a plain dataclass, so adding attrs is safe (they just aren't
         # part of equality).
-        gv.provenance = str(raw.get("provenance") or "llm_direct")  # type: ignore[attr-defined]
+        gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
         gv.kb_evidence = list(raw.get("kb_evidence") or [])         # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])         # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or []) # type: ignore[attr-defined]

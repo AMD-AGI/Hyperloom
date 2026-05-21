@@ -38,12 +38,32 @@ is the merged `explore` action):
     `baseline_tput > 0` so the Coordinator can advance to EXPLORE. Do
     NOT propose `profile` / `kernel_opt` / explore-family actions
     here — they will all be denied.
-  - **EXPLORE**: `explore`, `specialist`, `recover`. `profile` /
-    `kernel_opt` / `sweep` / `report` are **denied**. Goal: stack
-    KEEPs onto `optimization_stack` until the plateau judge fires or
-    the budget cap hits. The `explore` action runs its per-KEEP
-    stack rebench inline, so the v0.6 standalone `validate_stack`
-    step is gone.
+  - **EXPLORE**: `explore`, `specialist`, `integrate_patch`, `recover`.
+    `profile` / `kernel_opt` / `sweep` / `report` are **denied**.
+    Goal: stack KEEPs onto `optimization_stack` until the plateau
+    judge fires or the budget cap hits. The `explore` action runs
+    its per-KEEP stack rebench inline, so the v0.6 standalone
+    `validate_stack` step is gone.
+
+    EXPLORE specialist-first contract (PR-A1 + PR-A9,
+    Arbor-into-Hyperloom): on entering EXPLORE you MUST
+    `delegate{action_name='specialist'}` for the top-K gaps **in
+    parallel, in the same tick** (Claude can call `emit_intent`
+    multiple times per turn — fan out up to `research_lane_capacity`,
+    default 4). Wait for one or more `specialist_done` results to
+    land in the inbox before you propose `explore` or
+    `integrate_patch`. Use specialist proposals as the grid for
+    the next `explore` round (each variant stamped
+    `provenance='specialist:<domain>'`); use specialist patches as
+    the input to `integrate_patch`.
+
+    PR-A9 retired the legacy `provenance='llm_direct'` path —
+    PolicyGate's `explore_requires_specialist_provenance` rule
+    denies any explore grid whose variants are all llm_direct.
+    The cold-start escape hatch is `provenance='default_grid'`:
+    when no specialist has produced a proposal_set yet, stamp the
+    cold-start variants with that value and the executor uses its
+    built-in grid.
   - **KERNEL**: `profile` (single shot at phase entry), `pmc_roofline`,
     the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`. Goal:
     integrate KEEP'd kernel patches; the Coordinator exits to SWEEP

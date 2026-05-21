@@ -17,6 +17,13 @@ from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 
 
 # DESIGN §16.1 + v0.8 KB_design §3.4 (merged ``explore``).
+# PR-A1 (Arbor-into-Hyperloom): added ``specialist`` (creative) and
+# ``integrate_patch`` (shallow). ``specialist`` had previously been a
+# *synthetic* action with no yaml meta (parameterised by ``params.domain``);
+# the missing yaml made it invisible to ``prompt_builder._section_action_catalogue``,
+# so the Orchestration LLM never emitted ``delegate{action='specialist'}``.
+# ``integrate_patch`` is the new orchestrator-side apply+restart+gate
+# step that consumes specialist worktree patches.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
     # prep (2)
     "target_analysis":      "prep",
@@ -24,13 +31,18 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # analysis (2)
     "profile":              "analysis",
     "pmc_roofline":         "analysis",
-    # shallow (4) — v0.8 M3 + KB_gaps/Dead-A merged the v0.6
+    # shallow (5) — v0.8 M3 + KB_gaps/Dead-A merged the v0.6
     # ``backends`` / ``params`` / ``validate_stack`` actions into
     # ``explore``; their yamls + executors were physically deleted.
+    # PR-A1: ``integrate_patch`` joins the shallow family as the
+    # EXPLORE-phase serving-lane-locked patch integration step.
     "explore":              "shallow",
+    "integrate_patch":      "shallow",
     "sweep":                "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
+    # creative (1) — PR-A1: specialist LLM sub-agent dispatch.
+    "specialist":           "creative",
     # deep_kernel (5)
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",
@@ -120,7 +132,16 @@ def test_every_action_has_valid_family(registry):
 
 
 def test_every_action_uses_only_known_lanes(registry):
-    known = {"server_lifecycle", "workspace_mutation", "benchmark_lane", "profile_lane"}
+    # v0.8 M5 (KB_design §3.7) introduced ``research_lane`` for the
+    # LLM specialist sub-agent (capacity-N, no conflict with serving
+    # lanes). PR-A1 (Arbor-into-Hyperloom) registers the first action
+    # that actually declares ``research_lane`` in its yaml meta —
+    # ``specialist`` — so the known-lanes set must include it.
+    known = {
+        "server_lifecycle", "workspace_mutation",
+        "benchmark_lane", "profile_lane",
+        "research_lane",
+    }
     for m in registry.all():
         bad = set(m.requires_lanes) - known
         assert not bad, f"{m.name}: unknown lanes {bad}"
