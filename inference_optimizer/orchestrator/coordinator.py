@@ -1047,6 +1047,77 @@ class Coordinator:
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )
 
+        # N31 (May 2026): if the session has accumulated validated
+        # gain but only the baseline roofline snapshot exists, enqueue
+        # a final ``roofline`` task BEFORE the closing report so the
+        # report's ``## Roofline Comparison`` section can render a
+        # real before/after view of the hot-kernel distribution.
+        #
+        # Skip when:
+        # * cumulative_gain_validated <= 0 (no real improvement to
+        #   compare against -- the latest snapshot IS the final view)
+        # * optimization_stack empty (same reason)
+        # * roofline_snapshot_id >= 2 already (a snapshot has been
+        #   captured post-optimization, no need for another)
+        # * stop_reason set (the run aborted before getting here;
+        #   running an expensive ~20min roofline before report would
+        #   delay the diagnostic the operator is waiting for)
+        # Honors the same N31 exception in ``_proposal_denial_for_
+        # roofline`` so the LLM and Coordinator agree on when a
+        # post-optimization snapshot is wanted.
+        cached_final = self.shared_state.last_trace_analyze or {}
+        snap_id = cached_final.get("roofline_snapshot_id", 0)
+        validated_gain = float(
+            self.shared_state.cumulative_gain_validated or 0.0
+        )
+        stack_len = len(self.shared_state.optimization_stack or [])
+        want_final_roofline = (
+            isinstance(snap_id, int) and snap_id == 1
+            and validated_gain > 0.0
+            and stack_len >= 1
+            and not (self.shared_state.stop_reason or "").strip()
+        )
+        if want_final_roofline:
+            roofline_key = (
+                f"closing-roofline-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
+            )
+            try:
+                roofline_task, _ = await self.tasks.create_or_return_existing(
+                    kind="roofline",
+                    params={
+                        "session_dir": str(self.session_dir),
+                        "notes": (
+                            "N31 closing-phase final snapshot for the "
+                            "Roofline Comparison report section "
+                            "(post-optimization vs baseline)."
+                        ),
+                    },
+                    idempotency_key=roofline_key,
+                    requires_lanes=["profile_lane"],
+                    allowed_tools=[],
+                    side_effects=["writes_results"],
+                    lease_ttl_sec=int(grace_sec),
+                )
+                log.info(
+                    "Coordinator: N31 enqueued final roofline task=%s "
+                    "(validated_gain=%.2f%%, stack_len=%d) before report",
+                    roofline_task.task_id, validated_gain, stack_len,
+                )
+                await self.bus.append_and_seq(Message.new(
+                    "coordinator", "*", "event",
+                    {
+                        "kind": "n31_final_roofline_enqueued",
+                        "task_id": roofline_task.task_id,
+                        "validated_gain": validated_gain,
+                        "stack_len": stack_len,
+                    },
+                ))
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "Coordinator: N31 final roofline enqueue failed; "
+                    "report will fall through to single-snapshot mode",
+                )
+
         idempotency_key = (
             f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         )
@@ -2338,6 +2409,32 @@ class Coordinator:
         if not isinstance(snapshot_id, int) or snapshot_id < 1:
             # First roofline — always allowed.
             return None
+        # N31 (May 2026): post-optimization "before/after" exception.
+        # When the session has actually accumulated validated gain
+        # (``cumulative_gain_validated > 0`` AND
+        # ``optimization_stack`` non-empty) but only one roofline
+        # snapshot exists, the kernel rewrites + integrate changes
+        # have shifted the hot-kernel distribution AND a fresh
+        # snapshot is required for the final ``## Roofline
+        # Comparison`` report section. Allow a single re-roofline
+        # (snapshot_id == 1 -> snapshot_id == 2) regardless of whether
+        # discovered_flags changed -- the gain itself is the signal
+        # that the analysis.md needs refreshing.
+        #
+        # This does NOT re-open cheap exploration loops: the gate
+        # exception only fires once per session (snapshot_id == 1
+        # check + stack-non-empty + validated gain). Subsequent
+        # rooflines hit the regular flags-changed check.
+        validated_gain = float(
+            self.shared_state.cumulative_gain_validated or 0.0
+        )
+        stack_len = len(self.shared_state.optimization_stack or [])
+        if (
+            snapshot_id == 1
+            and validated_gain > 0.0
+            and stack_len >= 1
+        ):
+            return None  # N31: allow the final "after" snapshot
         current = self.shared_state.discovered_flags or {}
         frozen = self.shared_state.discovered_flags_at_last_snapshot or {}
         if self._flags_equivalent(current, frozen):
@@ -3578,6 +3675,30 @@ class Coordinator:
             # is the symmetric reset.
             self.shared_state.roofline_failure_streak = 0
             changed = True
+            # N31: freeze the FIRST successful roofline as the
+            # ``baseline`` snapshot for the final ``## Roofline
+            # Comparison`` report section. Skip on subsequent
+            # rooflines so the freeze stays at snapshot #1 even when
+            # the N31 gate exception fires a snapshot #2 after
+            # optimization completes.
+            cached_now = self.shared_state.last_trace_analyze or {}
+            current_snap_id = cached_now.get("roofline_snapshot_id", 0)
+            baseline_locked = bool(self.shared_state.last_trace_analyze_baseline)
+            if (
+                not baseline_locked
+                and isinstance(current_snap_id, int)
+                and current_snap_id >= 1
+            ):
+                self.shared_state.last_trace_analyze_baseline = {
+                    "roofline_snapshot_id": current_snap_id,
+                    "analysis_md_path": str(
+                        cached_now.get("analysis_md_path") or ""
+                    ),
+                    "trace_input": str(cached_now.get("trace_input") or ""),
+                    "ts": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds",
+                    ),
+                }
             # N21 / N19c: freeze current discovered_flags into
             # `discovered_flags_at_last_snapshot` so the next-tick
             # `_proposal_denial_for_roofline` gate can compare and

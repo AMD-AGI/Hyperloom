@@ -244,6 +244,22 @@ class SharedState:
     # `trace_input`. Coordinator short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+    # N31 (May 2026): freeze the FIRST successful roofline snapshot
+    # ("baseline" snapshot) so the final `report` can render a
+    # before/after Roofline Comparison section. The Coordinator writes
+    # this field on the first promotion of `roofline` and never updates
+    # it after -- subsequent rooflines (N31 gate exception, or future
+    # snapshot refreshes) only update ``last_trace_analyze``. Carries
+    # minimal fields needed by ``report.py``'s
+    # ``## Roofline Comparison`` section:
+    # * ``roofline_snapshot_id`` -- always 1 (the first)
+    # * ``analysis_md_path``     -- path to the on-disk analysis.md
+    # * ``trace_input``          -- which profile trace produced it
+    # * ``ts``                   -- when it was promoted
+    # We deliberately do NOT freeze ``analysis_md_text`` here -- the
+    # path is enough (report extracts the Executive Summary at render
+    # time) and the text can be hundreds of KB.
+    last_trace_analyze_baseline: dict[str, Any] = field(default_factory=dict)
     # Roofline-v2 N19c (May 2026): "gain-driven kernel_opt unlock" +
     # "flags-conditional roofline" replace the N14 counter-driven
     # (>=2/>=2/>=3) hard requirements. Two new fields drive the gates.
@@ -662,6 +678,7 @@ class SharedState:
             tick=int(self.tick or 0),
             target_gap_mult=target_mult,
             k=int(top_k),
+            shared_state=self,  # N30: enable cheap-exhausted deep boost
         )
         if not rows:
             return False
@@ -1589,6 +1606,7 @@ class SharedState:
             tick=int(self.tick or 0),
             target_gap_mult=target_mult,
             k=int(top_k),
+            shared_state=self,  # N30: enable cheap-exhausted deep boost
         )
         lines: list[str] = [
             f"=== Action scores (top {len(rows)} by eff_score, tick={self.tick}) ==="
