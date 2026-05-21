@@ -69,7 +69,7 @@ You need an AMD GPU machine that supports MI300X or MI355X, using an SGLang or v
 
 Choose one environment:
 
-- **SaFE Authoring Pod**: create an Authoring Pod on [Primus-SaFE Authoring](https://core42.primus-safe.amd.com/authoring), select one of the SGLang or vLLM images above, and wait for the Pod to become ready.
+- **Recommended — SaFE Authoring Pod**: create an Authoring Pod on [Primus-SaFE Authoring](https://core42.primus-safe.amd.com/authoring), select one of the SGLang or vLLM images above, and wait for the Pod to become ready.
 - **Your own GPU machine**: start a long-running ROCm inference container that can access the GPU. The container name, workspace path, model path, and image version in the example below can all be changed for your environment.
 
 Minimal Docker example for your own GPU machine:
