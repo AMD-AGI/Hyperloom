@@ -49,6 +49,79 @@ def _now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
+# N26 — auto-recover from TraceLens steady_state_chunk_* failures
+# ---------------------------------------------------------------------------
+# Pre-N26 the RooflineExecutor returned `status=failed` whenever
+# trace_analyze sub-step failed -- including the (very recoverable)
+# N25 case where the splitter produced a structurally empty chunk for
+# the requested mode but other modes' chunks did carry real GPU work.
+# Operators had to manually kill the session, set
+# INFERENCE_OPTIMIZER_STEADY_STATE_MODE=<other_mode>, and restart.
+#
+# N26 closes that loop: when trace_analyze fails with a structured
+# steady_state_chunk_{empty,missing} warning that carries
+# `non_empty_modes`, we re-issue trace_analyze ONCE with the first
+# non-empty mode automatically. This is NOT a busy-% heuristic or
+# inference_optimizer-side chunk ordering -- the alternate mode comes
+# directly from TraceLens splitter's own execution_details.csv. We
+# are simply consuming the splitter's structured recovery hint.
+#
+# Single-retry contract: prevents infinite loops. If the retry also
+# fails (or no alternate mode was offered) we propagate the original
+# failure unchanged so existing error-handling paths still apply.
+_AUTO_RETRY_WARNING_CODES = frozenset({
+    "steady_state_chunk_empty",
+    "steady_state_chunk_missing",
+})
+
+
+def _extract_steady_state_retry_mode(
+    ta_result: dict[str, Any],
+) -> "tuple[str, dict[str, Any]] | None":
+    """Inspect a failed trace_analyze result for a structured
+    steady-state recovery hint from tracelens_analysis.py.
+
+    Returns ``(mode, warning_dict)`` when the result carries a
+    ``steady_state_chunk_empty`` or ``steady_state_chunk_missing``
+    warning with at least one alternate mode in ``non_empty_modes``
+    (or ``available_modes``, used by the missing-chunk warning).
+    Returns ``None`` otherwise -- caller falls through to the
+    existing _failed() path.
+
+    The first alternate is picked (TraceLens splitter sorts them
+    deterministically via dict-iter order set in
+    ``_check_selected_chunk_has_gpu_events``). If you have a use case
+    for picking a different one (e.g. operator prefers decode_only
+    when both decode_only and prefilldecode are non-empty) we can
+    revisit; for now first-non-empty is the simplest correct policy.
+    """
+    if not isinstance(ta_result, dict):
+        return None
+    warnings = ta_result.get("trace_health_warnings") or []
+    if not isinstance(warnings, list):
+        return None
+    for w in warnings:
+        if not isinstance(w, dict):
+            continue
+        if w.get("code") not in _AUTO_RETRY_WARNING_CODES:
+            continue
+        # `steady_state_chunk_empty` carries `non_empty_modes`.
+        # `steady_state_chunk_missing` carries `available_modes`.
+        # Both name the alternates the splitter would accept.
+        modes = (
+            w.get("non_empty_modes")
+            or w.get("available_modes")
+            or []
+        )
+        if not isinstance(modes, list):
+            continue
+        for candidate in modes:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip(), w
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Stub (N2a) — kept for the §11 fallback wiring path
 # ---------------------------------------------------------------------------
 class RooflineStubExecutor:
@@ -268,6 +341,75 @@ class RooflineExecutor:
                 "trace_analyze",
                 f"trace_analyze_handler returned non-dict: {type(ta_result).__name__}",
             )
+
+        # N26 auto-retry: when trace_analyze failed AND the failure
+        # carries a steady_state_chunk_{empty,missing} warning with
+        # `non_empty_modes`, the TraceLens splitter is telling us
+        # exactly which alternate mode it CAN serve. Re-issue ONCE
+        # with that mode rather than bubbling a failure up to the
+        # operator. We never retry more than once (idempotency_key
+        # carries the retry flag so a second auto-retry on the same
+        # action would be denied at the handler boundary; we also
+        # gate locally below).
+        retry_hint: "tuple[str, dict[str, Any]] | None" = None
+        if ta_result.get("status") != "ok":
+            retry_hint = _extract_steady_state_retry_mode(ta_result)
+        if retry_hint is not None:
+            retry_mode, source_warning = retry_hint
+            ta_payload_retry: dict[str, Any] = {
+                "trace_input": str(trace_path),
+                "steady_state_mode": retry_mode,
+                # Marker so a second iteration of this block (if any
+                # downstream code ever reaches here twice) does not
+                # cascade into a retry loop. The actual single-retry
+                # invariant is enforced by NOT re-entering the
+                # `if retry_hint is not None` block below regardless
+                # of the second attempt's outcome.
+                "_n26_auto_retry": True,
+                "_n26_retry_from_mode": (
+                    source_warning.get("requested_mode") or ""
+                ),
+            }
+            try:
+                ta_result = await trace_analyze_handler(
+                    ta_payload_retry,
+                    session_dir=session_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.shared_state.last_trace_analyze = {}
+                return _failed(
+                    "trace_analyze",
+                    (
+                        f"trace_analyze_handler raised on N26 auto-retry "
+                        f"(mode={retry_mode}): {exc!r}"
+                    ),
+                )
+            if not isinstance(ta_result, dict):
+                self.shared_state.last_trace_analyze = {}
+                return _failed(
+                    "trace_analyze",
+                    (
+                        f"trace_analyze_handler returned non-dict on N26 "
+                        f"auto-retry (mode={retry_mode}): "
+                        f"{type(ta_result).__name__}"
+                    ),
+                )
+            # Stamp the result so the recorder / prompt renderer can
+            # surface "this snapshot came from N26 auto-retry" to the
+            # LLM (helps it self-document any subsequent re_explore
+            # decisions). Stamping is best-effort; field naming is
+            # under `n26_auto_retry` to keep it discoverable in
+            # SharedState dumps.
+            if isinstance(ta_result, dict):
+                ta_result.setdefault("n26_auto_retry", {
+                    "applied": True,
+                    "from_mode": (
+                        source_warning.get("requested_mode") or "mixed"
+                    ),
+                    "to_mode": retry_mode,
+                    "source_warning_code": source_warning.get("code"),
+                })
+
         if ta_result.get("status") != "ok":
             self.shared_state.last_trace_analyze = {}
             return _failed(
