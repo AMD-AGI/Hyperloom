@@ -16,7 +16,11 @@ from inference_optimizer.orchestrator.backends import (
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.coordinator import Coordinator
+from inference_optimizer.orchestrator.action_executors import report_executor
+from inference_optimizer.orchestrator.coordinator import (
+    Coordinator,
+    effective_closing_grace_sec,
+)
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.objective import (
     Objective,
@@ -29,6 +33,7 @@ from inference_optimizer.orchestrator.objective import (
 )
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
+from inference_optimizer.session_paths import target_baseline_json
 
 
 # ===========================================================================
@@ -246,6 +251,98 @@ async def test_run_stops_on_time_exhausted(session_dir):
         # enforced AFTER each tick so we always run >=1 tick.
         reason = await c.run(max_minutes=0.001, max_ticks=1000)
         assert reason == "time_exhausted"
+    finally:
+        await c.stop()
+
+
+def test_closing_grace_default_scales_with_max_hours():
+    # max_minutes is wall-clock budget in minutes (CLI: max_hours * 60).
+    assert effective_closing_grace_sec(120.0, None) == pytest.approx(120.0)
+    assert effective_closing_grace_sec(0.6, None) == pytest.approx(0.72)
+    assert effective_closing_grace_sec(120.0, 30.0) == 30.0
+    assert effective_closing_grace_sec(120.0, 0.0) == 0.0
+
+
+def _write_marker_target_baseline(session_dir: Path) -> None:
+    path = target_baseline_json(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "status": "no_target",
+            "reason": "no_target_gpu_configured",
+            "row_count": 0,
+        }),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_closing_phase_writes_report_on_time_exhausted(session_dir):
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_backends_silent())
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.save(session_dir)
+    try:
+        reason = await c.run(
+            max_minutes=0.0001,
+            max_ticks=50,
+            closing_grace_sec=30.0,
+            tick_interval_sec=0.0,
+        )
+        assert reason == "time_exhausted"
+        assert (session_dir / "reports" / "final.md").exists()
+        assert (session_dir / "reports" / "final.json").exists()
+        state = json.loads((session_dir / "state.json").read_text())
+        assert state["closing_phase"] is False
+        assert state["closing_report_task_id"]
+        assert state["closing_started_unix"] > 0
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_closing_phase_skips_reactor(session_dir):
+    _write_marker_target_baseline(session_dir)
+
+    class _SpyBackend(MockBackend):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.calls = 0
+
+        async def run(self, prompt: str, **kwargs):
+            self.calls += 1
+            return await super().run(prompt, **kwargs)
+
+    spy = _SpyBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="o")
+    backends = {
+        "orchestration": spy,
+        "kernel":        MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="k"),
+        "critic":        MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="c"),
+        "robustness":    MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="r"),
+    }
+    c = Coordinator(session_dir, backends=backends)
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 50.0
+    c.shared_state.save(session_dir)
+    calls_at_closing: list[int] = []
+    real_enter = c._enter_closing_phase
+
+    async def _enter_and_record(*, grace_sec: float) -> float:
+        calls_at_closing.append(spy.calls)
+        return await real_enter(grace_sec=grace_sec)
+
+    c._enter_closing_phase = _enter_and_record  # type: ignore[method-assign]
+    try:
+        await c.run(
+            max_minutes=0.0001,
+            max_ticks=30,
+            closing_grace_sec=5.0,
+            tick_interval_sec=0.0,
+        )
+        assert spy.calls >= 1
+        assert calls_at_closing, "expected closing phase to be entered"
+        assert spy.calls == calls_at_closing[0]
     finally:
         await c.stop()
 

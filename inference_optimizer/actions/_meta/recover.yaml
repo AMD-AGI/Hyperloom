@@ -27,3 +27,32 @@ pipeline_phase: support
 typical_runtime_min: 5.0
 applicable_when:
   - "needs_recovery == true"
+# Descriptive (not validated by ActionRegistry) — surface the knobs
+# the recover sub-agent / RecoverExecutor honors. Robustness emits
+# delegate(recover) with these params when ``gpu_memory_leaked``
+# fires; see ``orchestrator/action_executors/recover.py``.
+params_schema:
+  reason:
+    type: string
+    description: |
+      Free-form trigger label echoed into ``runs/recover/<task_id>/
+      result.json``. Robustness sets ``reason="gpu_memory_leaked"``
+      when escalating from the leak detector; Orchestration may use
+      its own labels (e.g. ``reason="crash_after_revert"``).
+  force_gpu_cleanup:
+    type: boolean
+    description: |
+      When true, RecoverExecutor walks the SIGTERM -> SIGKILL ladder
+      against every PID matching the inference-server owner patterns
+      (sglang.launch_server / vllm.entrypoints / EngineCore / Magpie /
+      benchmark_serving). When false, the executor only probes the
+      GPUs and emits a needs_review proposal. Robustness sets True;
+      operator-driven recover may set False to surface a probe-only
+      diagnostic.
+  evidence:
+    type: object
+    description: |
+      Optional per-GPU evidence forwarded from the symptom (free MiB,
+      consecutive_hits, owner patterns scanned). Stored verbatim in
+      result.json for the audit trail; the executor itself does not
+      branch on its contents.
