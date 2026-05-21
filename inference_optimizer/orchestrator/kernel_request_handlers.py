@@ -694,6 +694,21 @@ async def select_kernels_handler(
     )
     if capture_folder:
         cmd += ["--capture-folder", str(capture_folder)]
+    # N25: forward TraceLens splitter steady-state mode (mixed /
+    # decode_only / prefilldecode). Set via payload OR env so the
+    # coordinator can re-issue roofline with a different mode after a
+    # steady_state_chunk_missing / steady_state_chunk_empty warning
+    # lands (e.g. SOLAR-10.7B TP=1 mixed-window degenerates to PD=0
+    # with all forward inside CUDA graph + no rocprofiler Dispatch
+    # Task aggregate; prefilldecode chunk carries the real GEMM /
+    # attention workload).
+    steady_state_mode = (
+        payload.get("steady_state_mode")
+        or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
+    )
+    steady_state_mode = str(steady_state_mode).strip()
+    if steady_state_mode:
+        cmd += ["--steady-state-mode", steady_state_mode]
     if payload.get("roofline_json"):
         cmd += ["--roofline-json", str(payload["roofline_json"])]
     if payload.get("dry_run"):
