@@ -33,7 +33,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, ClassVar, Mapping
 
 from ..cortex_kb_client import CortexKBClient
 from ..paths import asset_actions_dir
@@ -227,14 +227,154 @@ class KnowledgePlane:
         return self.pr_monitor_mcp_url
 
     # ------------------------------------------------------------------
-    # PR-A5 (Arbor-into-Hyperloom): KB sub-graph traverse for specialists
+    # PR-A10 (Arbor-into-Hyperloom): per-domain content fallback when
+    # the legacy anchor-canonical_id lookup misses (which it does on
+    # 100% of fresh KBs because the KB has no anchor "hub" points).
+    # Per-domain strategies pick the most useful entity_type / kind
+    # filter so specialists at least see *some* concrete prior.
     # ------------------------------------------------------------------
+    # Each entry: (label, query_body, apply_hw_filter).
+    # - query_body MUST be a valid ``QueryPointRequest`` (kind /
+    #   entity_type / attrs_filter / limit / neighbor_preview).
+    # - apply_hw_filter=True overlays ``attrs_filter.hardware = hw_slug``
+    #   only when records carry hardware as a *top-level* attr (e.g.
+    #   ``recipe`` kind). Geak records nest hardware under
+    #   ``attrs.scope.hardware`` which KB's shallow ``attrs_filter``
+    #   cannot drill into, so they set apply_hw_filter=False and rely
+    #   on the prompt builder / specialist to filter by scope itself.
+    _DOMAIN_FALLBACK_STRATEGIES: ClassVar[
+        dict[str, tuple[tuple[str, dict[str, Any], bool], ...]]
+    ] = {
+        "framework_specialist": (
+            ("vllm_serve_recipe",
+             {"entity_type": "vllm_serve_recipe",
+              "limit": 10, "neighbor_preview": False},
+             True),
+            ("any_recipe_same_hw",
+             {"kind": "recipe",
+              "limit": 10, "neighbor_preview": False},
+             True),
+        ),
+        "kernel_specialist": (
+            ("geak_experience",
+             {"entity_type": "geak_experience",
+              "limit": 10, "neighbor_preview": False},
+             False),
+            ("geak_skill",
+             {"entity_type": "geak_skill",
+              "limit": 10, "neighbor_preview": False},
+             False),
+        ),
+        "compiler_specialist": (
+            ("geak_skill_compiler",
+             {"entity_type": "geak_skill",
+              "limit": 10, "neighbor_preview": False},
+             False),
+        ),
+        "system_specialist": (
+            ("any_recipe_same_hw_system",
+             {"kind": "recipe",
+              "limit": 10, "neighbor_preview": False},
+             True),
+        ),
+        "comm_specialist": (
+            ("any_recipe_same_hw_comm",
+             {"kind": "recipe",
+              "limit": 10, "neighbor_preview": False},
+             True),
+        ),
+        "pr_intel_specialist": (
+            ("hypothesis",
+             {"kind": "hypothesis",
+              "limit": 10, "neighbor_preview": False},
+             False),
+        ),
+    }
+
+    def _domain_fallback_query(
+        self,
+        *,
+        domain: str,
+        anchor: str,
+        hw_slug: str | None,
+        warnings: list[str],
+    ) -> dict[str, Any] | None:
+        """Try the per-domain content fallback. Returns a fully-formed
+        select_kb_for_domain result dict on first non-empty hit, else
+        None (so the caller emits the legacy empty-result envelope).
+        """
+        from ..cortex_kb_constants import PATH_QUERY_POINT
+
+        strategies = self._DOMAIN_FALLBACK_STRATEGIES.get(domain) or ()
+        if not strategies:
+            return None
+
+        for label, base_body, apply_hw_filter in strategies:
+            body: dict[str, Any] = dict(base_body)
+            # Only overlay an hw_slug filter when the strategy says the
+            # candidate records expose hardware as a *top-level* attr.
+            if hw_slug and apply_hw_filter:
+                af = dict(body.get("attrs_filter") or {})
+                af.setdefault("hardware", hw_slug)
+                body["attrs_filter"] = af
+            try:
+                resp = self.cortex_kb._post(  # type: ignore[union-attr]
+                    PATH_QUERY_POINT, body,
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                warnings.append(
+                    f"cortex_kb:fallback_{label}_failed:{exc!r}"[:240]
+                )
+                continue
+            points = resp.get("points") or []
+            if not isinstance(points, list) or not points:
+                continue
+
+            # Render the candidates into the legacy schema. We use
+            # canonical_id as the "point" label and the attrs.model
+            # (or attrs.kernel_name) as the neighbor label so the
+            # specialist prompt has both an id and a human-readable
+            # peek into each candidate.
+            point_strs: list[str] = []
+            neighbor_strs: list[str] = []
+            for p in points[:12]:
+                if not isinstance(p, dict):
+                    continue
+                cid = str(p.get("canonical_id") or p.get("id") or "")[:240]
+                if cid:
+                    point_strs.append(cid)
+                attrs = p.get("attrs") or {}
+                label_bits: list[str] = []
+                for k in ("model", "kernel_name", "title", "framework",
+                          "hardware", "scope"):
+                    v = attrs.get(k)
+                    if v:
+                        label_bits.append(f"{k}={v}")
+                if label_bits:
+                    neighbor_strs.append(", ".join(label_bits)[:240])
+            if not point_strs:
+                continue
+            warnings.append(
+                f"cortex_kb:fallback_hit:{label}:{len(point_strs)}"
+            )
+            return {
+                "anchor": anchor,
+                "domain": domain,
+                "points": point_strs,
+                "neighbors": neighbor_strs[:20],
+                "paths": [],
+                "candidates": [],
+                "warnings": warnings,
+            }
+        return None
+
     def select_kb_for_domain(
         self,
         domain: str,
         *,
         budget_steps: int = 4,
         budget_branches: int = 20,
+        hw_slug: str | None = None,
     ) -> dict[str, Any]:
         """Traverse the Cortex KB starting from the specialist domain's
         ``kb_anchor`` and return a compact dict the prompt builder
@@ -329,6 +469,19 @@ class KnowledgePlane:
         start_points = start_resp.get(F_POINTS) or start_resp.get("points") or []
         if not start_points:
             warnings.append(f"cortex_kb:anchor_not_found:{anchor}")
+            # PR-A10 (Arbor-into-Hyperloom): the anchor canonical_id
+            # (``framework`` / ``kernel`` / ``systems`` / ...) is
+            # essentially a placeholder — the Cortex KB doesn't carry
+            # explicit anchor "hub" points, so the legacy lookup misses
+            # 100% of the time on a fresh KB. Fall back to per-domain
+            # content searches (recipe / experience / lesson points)
+            # so specialists still get something concrete to anchor on.
+            fallback = self._domain_fallback_query(
+                domain=domain, anchor=anchor, hw_slug=hw_slug,
+                warnings=warnings,
+            )
+            if fallback is not None:
+                return fallback
             return {
                 "anchor": anchor,
                 "domain": domain,
