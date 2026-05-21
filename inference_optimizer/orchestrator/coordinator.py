@@ -4238,7 +4238,14 @@ class Coordinator:
             and "kb_subgraph" not in params
         ):
             try:
-                subgraph = plane.select_kb_for_domain(domain)
+                # PR-A10: pass the (lowercased) hw_slug so the per-domain
+                # fallback in select_kb_for_domain can filter recipe
+                # candidates to the same GPU.
+                from ..cortex_kb_client import _slug as _kb_slug
+                hw_slug = _kb_slug(state.gpu_type or "", "")
+                subgraph = plane.select_kb_for_domain(
+                    domain, hw_slug=hw_slug or None,
+                )
                 params["kb_subgraph"] = subgraph or {}
             except Exception as exc:  # noqa: BLE001
                 log.warning(
@@ -4270,11 +4277,29 @@ class Coordinator:
                     "failed: %r", exc,
                 )
 
-        # Hardware hints (cheap; pulled from SharedState which T0
-        # populates from manifest).
+        # Hardware + workload hints (cheap; pulled from SharedState which
+        # ``cli._init_fresh_session`` populates from CLI flags / env at
+        # session start, and which ``cli`` re-exports back into env on
+        # ``--resume``). Without these the SpecialistPromptInputs
+        # dataclass defaults silently win — most notably ``tp=0`` /
+        # ``tp=1``, which makes comm_specialist self-veto on TP>1
+        # sessions with "cross-GPU collectives non-actionable". The same
+        # workload hints surface to the specialist's prompt section 2,
+        # so framework / system / kernel specialists reason against the
+        # real benchmark workload rather than the dataclass defaults.
         params.setdefault("gpu_type", state.gpu_type or "")
-        # tp lives on baseline_config when seeded; otherwise the prompt
-        # builder is fine with the dataclass default of 1.
+        if int(getattr(state, "tp", 0) or 0) > 0:
+            params.setdefault("tp", int(state.tp))
+        if getattr(state, "precision", "") or "":
+            params.setdefault("precision", str(state.precision))
+        if int(getattr(state, "conc", 0) or 0) > 0:
+            params.setdefault("conc", int(state.conc))
+        if int(getattr(state, "isl", 0) or 0) > 0:
+            params.setdefault("isl", int(state.isl))
+        if int(getattr(state, "osl", 0) or 0) > 0:
+            params.setdefault("osl", int(state.osl))
+        if int(getattr(state, "max_model_len", 0) or 0) > 0:
+            params.setdefault("max_model_len", int(state.max_model_len))
 
         # v0.8 KB_gaps/Gap-09 — fill gap-specific anchors from the
         # gaps[] ledger. Orchestration carries a ``gap_canonical_id``

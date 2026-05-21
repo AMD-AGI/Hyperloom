@@ -222,16 +222,28 @@ def run_t0_anchor(
     # against the registered ``recipe`` kind schema, so this is the
     # idempotent (model, hardware) anchor downstream warm-start /
     # kb-explorer rely on.
+    # PR-A10: stamp model_class / model_family / framework into the
+    # recipe anchor so future T4 (same-class) / T3 (same-family)
+    # fallback lookups can succeed across sessions.
+    from ..cortex_kb_client import model_family as _model_family
+    _model_class = (extra_attrs or {}).get("model_class") if isinstance(extra_attrs, Mapping) else ""
+    _framework = (extra_attrs or {}).get("framework") if isinstance(extra_attrs, Mapping) else ""
+    _attrs = {
+        "model":        workload,
+        "hardware":     hw,
+        "model_family": _model_family(workload),
+        "isl":          getattr(shared_state, "last_profile_args", "") or None,
+    }
+    if _model_class:
+        _attrs["model_class"] = str(_model_class)
+    if _framework:
+        _attrs["framework"] = str(_framework)
     try:
         client.propose_point(
             canonical_id=canonical,
             kind=C.KIND_RECIPE,
             authority=C.AUTHORITY_EXPERIENTIAL,
-            attrs={
-                "model":    workload,
-                "hardware": hw,
-                "isl":      getattr(shared_state, "last_profile_args", "") or None,
-            },
+            attrs=_attrs,
             evidence=[
                 f"log:hyperloom-session-{getattr(shared_state, 'session_id', '')}",
             ],
@@ -239,24 +251,48 @@ def run_t0_anchor(
     except CortexKBError as exc:
         log.warning("propose_point recipe anchor failed: %s", exc)
 
-    # warm_start_recipe — non-fatal.
-    warm_text = ""
+    # warm_start_recipe — non-fatal. PR-A10: graceful fallback ladder
+    # so a cold-start session for a model with no exact KB recipe can
+    # still pick up a same-family / same-class / same-hw prior.
+    model_class = (extra_attrs or {}).get("model_class") if isinstance(extra_attrs, Mapping) else None
+    framework = (extra_attrs or {}).get("framework") if isinstance(extra_attrs, Mapping) else None
+    warm_point: dict[str, Any] = {}
+    warm_tier: str = "miss"
+    warm_conf: float = 0.0
     try:
-        warm_text = client.find_recipe(workload=workload, hw=hw)
+        warm_point, warm_tier, warm_conf = client.find_recipe_with_fallback(
+            workload=workload,
+            hw=hw,
+            model_class=str(model_class) if model_class else None,
+            framework=str(framework) if framework else None,
+        )
     except CortexKBError as exc:
-        log.info("find_recipe non-fatal failure: %s", exc)
+        log.info("find_recipe_with_fallback non-fatal failure: %s", exc)
+    # Keep a legacy raw text envelope on disk so existing readers
+    # (kb_explorer, breakdown collectors) keep working; new readers
+    # should prefer shared_state.warm_start_recipe["tier"] /
+    # ["confidence"] / ["recipe"].
+    warm_text = json.dumps(
+        {"points": [warm_point] if warm_point else []}, sort_keys=True,
+    )
     try:
         warm_path = sd / "runtime" / "cortex" / ".kb_warm.json"
         warm_path.parent.mkdir(parents=True, exist_ok=True)
         warm_path.write_text(
             json.dumps(
-                {"workload": workload, "hw": hw, "raw": warm_text},
+                {
+                    "workload": workload, "hw": hw,
+                    "tier": warm_tier, "confidence": warm_conf,
+                    "recipe": warm_point, "raw": warm_text,
+                },
                 indent=2,
             ),
             encoding="utf-8",
         )
         shared_state.warm_start_recipe = {
-            "workload": workload, "hw": hw, "raw": warm_text,
+            "workload": workload, "hw": hw,
+            "tier": warm_tier, "confidence": warm_conf,
+            "recipe": warm_point, "raw": warm_text,
         }
     except OSError as exc:
         log.warning("warm_start snapshot write failed: %s", exc)
@@ -291,12 +327,24 @@ def run_t0_anchor(
                 sid, workload,
             )
 
-    warm_present = bool((warm_text or "").strip())
+    # PR-A10: warm_present reflects whether the fallback ladder actually
+    # found a usable record (i.e. tier != "miss" and confidence > 0). The
+    # old `bool(warm_text.strip())` check fired on every 200 OK including
+    # empty `{"points":[]}` responses, which misled operators into
+    # thinking KB warm-start was working when it was silently empty.
+    # traps_present keeps the legacy semantics because the traps payload
+    # is still flat JSON text.
+    warm_present = bool(warm_point) and warm_conf > 0.0
     traps_present = bool((traps_text or "").strip())
     if began_now:
+        warm_label = (
+            f"hit:{warm_tier}@{warm_conf:.2f}" if warm_present else
+            "seed_only" if warm_point else
+            "empty"
+        )
         emit(
             f"Cortex KB        : session_id={sid} workload={canonical} "
-            f"(warm={'hit' if warm_present else 'empty'}, "
+            f"(warm={warm_label}, "
             f"traps={'hit' if traps_present else 'empty'})"
         )
     return T0Result(
