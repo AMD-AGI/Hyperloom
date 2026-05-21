@@ -97,16 +97,24 @@ run() {
 }
 
 # --- 0. Resolve PYTHON ---
-# Prefer the existing PYTHON env (callers may have already pinned it),
-# then /opt/venv/bin/python (default for hyperloom containers), then
-# whatever python3 is on PATH. We do NOT hardcode /opt/venv/bin into
-# subsequent PATH; we only use this binary to drive `pip install`.
+# On hyperloom / sgl-workspace containers the canonical ROCm stack lives in
+# /opt/venv (preinstalled torch+rocm, sglang, vllm, aiter, sgl_kernel,
+# triton, Magpie, inference_optimizer, claude_agent_sdk, ray). Always
+# prefer that interpreter — bare-image PYTHONs (e.g. /usr/bin/python3) on a
+# ROCm pod silently pull plain `torch` from PyPI on `pip install -e .[test]`,
+# which is the NVIDIA CUDA wheel and crashes downstream RAG / baseline
+# steps with "Found no NVIDIA driver". Operators who really need a custom
+# interpreter can opt out with INFERENCE_OPTIMIZER_FORCE_PYTHON=1.
 resolve_python() {
-  if [ -n "${PYTHON:-}" ] && [ -x "$PYTHON" ]; then
+  if [ -x "/opt/venv/bin/python" ] && [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" != "1" ]; then
+    if [ -n "${PYTHON:-}" ] && [ "${PYTHON}" != "/opt/venv/bin/python" ]; then
+      log "preferring /opt/venv/bin/python over PYTHON=${PYTHON} (canonical ROCm stack)"
+      log "  set INFERENCE_OPTIMIZER_FORCE_PYTHON=1 to honor PYTHON verbatim"
+    fi
+    PYTHON="/opt/venv/bin/python"
     return 0
   fi
-  if [ -x "/opt/venv/bin/python" ]; then
-    PYTHON="/opt/venv/bin/python"
+  if [ -n "${PYTHON:-}" ] && [ -x "$PYTHON" ]; then
     return 0
   fi
   if command -v python3 >/dev/null 2>&1; then
@@ -118,6 +126,84 @@ resolve_python() {
 
 resolve_python
 log "PYTHON=${PYTHON}"
+# Export PYTHON + prepend its bin dir so the chained kernel-agent installer's
+# bare `python3 -m pip ...` calls (kernel-agent/scripts/install.sh) land in
+# the same interpreter. Otherwise PATH-only resolution can split the
+# installation across two different pythons.
+export PYTHON
+PATH="$(dirname "$PYTHON"):${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export PATH
+
+# --- 0a. Torch compatibility gate (ROCm-aware) ---
+# If rocm-smi reports devices, the resolved PYTHON must already have a
+# ROCm-built torch importable. Two failure modes we explicitly catch:
+#   1. torch missing entirely on a ROCm pod -- letting pip install proceed
+#      will pull the NVIDIA CUDA wheel from PyPI (default `torch`).
+#   2. torch present but built against CUDA (torch.version.hip is None)
+#      -- the chained RAG-index step auto-detects device=cuda and crashes
+#      at torch._C._cuda_init() with "Found no NVIDIA driver".
+ensure_torch_compatible_with_gpu() {
+  if ! command -v rocm-smi >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! rocm-smi --showid >/dev/null 2>&1; then
+    return 0
+  fi
+  local probe
+  probe="$("$PYTHON" - <<'PY' 2>/dev/null || true
+import json, sys
+out = {"rc": 0}
+try:
+    import torch
+    out["torch_version"] = torch.__version__
+    out["hip"] = getattr(torch.version, "hip", None)
+    out["cuda_str"] = getattr(torch.version, "cuda", None)
+except Exception as exc:
+    out["rc"] = 2
+    out["error"] = type(exc).__name__ + ": " + str(exc)[:200]
+print(json.dumps(out))
+PY
+)"
+  if [ -z "$probe" ]; then
+    warn "torch probe produced no output (PYTHON=${PYTHON})"
+    return 0
+  fi
+  local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe" 2>/dev/null || echo 0)"
+  if [ "$rc" = "2" ]; then
+    warn "torch is NOT importable from PYTHON=${PYTHON}"
+    warn "this pod has ROCm GPUs (rocm-smi works) -- letting pip install proceed"
+    warn "would pull plain 'torch' from PyPI (= NVIDIA CUDA wheel) and break"
+    warn "downstream RAG / baseline / kernel steps with 'Found no NVIDIA driver'."
+    warn "Fixes (pick one):"
+    warn "  * use the canonical ROCm stack:   unset PYTHON; install.sh will pick /opt/venv"
+    warn "  * install the ROCm torch wheel:    \"\$PYTHON\" -m pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.x"
+    warn "  * opt out of this gate:            INFERENCE_OPTIMIZER_FORCE_PYTHON=1 INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 install.sh"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install on ROCm pod with no torch in PYTHON=${PYTHON}"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite missing torch"
+    return 0
+  fi
+  local hip; hip="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('hip') or '')" "$probe" 2>/dev/null || echo "")"
+  local tv;  tv="$("$PYTHON"  -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('torch_version') or '')" "$probe" 2>/dev/null || echo "")"
+  if [ -z "$hip" ]; then
+    warn "torch=${tv} in PYTHON=${PYTHON} is NOT a ROCm build (torch.version.hip is None)"
+    warn "but this pod reports ROCm GPUs via rocm-smi. RAG-index / baseline / kernel"
+    warn "steps will crash at torch._C._cuda_init() with 'Found no NVIDIA driver'."
+    warn "Fixes (pick one):"
+    warn "  * use the canonical ROCm stack:   unset PYTHON; install.sh will pick /opt/venv"
+    warn "  * install the ROCm torch wheel:    \"\$PYTHON\" -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/rocm6.x"
+    warn "  * opt out of this gate:            INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 install.sh"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install: torch=${tv} is CUDA-built on a ROCm pod"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite torch/GPU mismatch"
+    return 0
+  fi
+  log "torch=${tv} (hip=${hip}) -- ROCm-compatible OK"
+}
+
+ensure_torch_compatible_with_gpu
 log "REPO_ROOT=${REPO_ROOT}"
 log "USER_DATA_PATH=${USER_DATA_PATH}"
 log "HYPERLOOM_RUNTIME_DIR=${HYPERLOOM_RUNTIME_DIR}"
@@ -139,15 +225,30 @@ fi
 
 # pip --break-system-packages when PYTHON is the system interpreter
 # (e.g. bare ubuntu/debian image without a venv). Detect by comparing
-# sys.prefix vs sys.base_prefix; equal == not in venv.
+# sys.prefix vs sys.base_prefix; equal == not in venv. The flag was added
+# in pip 23.0.1; older pips reject it as an unknown option, so we probe
+# `pip install --break-system-packages --help` before adopting it.
 PIP_EXTRA=()
 if "$PYTHON" - <<'PY' 2>/dev/null
 import sys
 raise SystemExit(0 if sys.prefix == sys.base_prefix else 1)
 PY
 then
-  PIP_EXTRA=(--break-system-packages)
-  log "non-venv PYTHON; pip will use --break-system-packages"
+  if "$PYTHON" -m pip install --break-system-packages --help >/dev/null 2>&1; then
+    PIP_EXTRA=(--break-system-packages)
+    log "non-venv PYTHON; pip will use --break-system-packages"
+  else
+    pip_ver="$("$PYTHON" -m pip --version 2>&1 | awk '{print $2}')"
+    warn "non-venv PYTHON detected (PYTHON=${PYTHON}) but pip ${pip_ver}"
+    warn "is too old for --break-system-packages (requires >= 23.0.1)."
+    warn "Fixes (pick one):"
+    warn "  * use the canonical ROCm stack: unset PYTHON; install.sh will pick /opt/venv"
+    warn "  * create a venv:                python3 -m venv \"\$USER_DATA_PATH/venv\" \\"
+    warn "                                  && \"\$USER_DATA_PATH/venv/bin/python\" -m pip install -U pip wheel \\"
+    warn "                                  && export PYTHON=\"\$USER_DATA_PATH/venv/bin/python\""
+    warn "  * upgrade system pip:           \"\$PYTHON\" -m pip install --user -U 'pip>=23.0.1'"
+    die "refusing to run pip without a working --break-system-packages on a non-venv interpreter"
+  fi
 fi
 
 # --- 1. inference_optimizer + claude_agent_sdk via [test] ---
