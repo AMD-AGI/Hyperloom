@@ -192,6 +192,56 @@ def session_dir() -> Path:
     return workspace_root()
 
 
+def find_latest_per_session_dir(
+    model_name: str | os.PathLike[str] | None = None,
+) -> Path | None:
+    """Locate the latest per-session subdir under :func:`workspace_root`.
+
+    Used by ``--resume`` (no explicit ``--resume-from``) to pick up where
+    the most recent run left off. The per-model/ts layout produced by
+    :func:`make_session_dir` writes
+    ``<workspace_root>/<model_basename>/<UTC_YYYYMMDDTHHMMSSZ>/``; we
+    return the latest such timestamp directory under the matching model
+    basename (or, when ``model_name`` is None, the latest across all
+    models). Returns None when no matching subdir exists (caller falls
+    back to flat layout / errors out).
+
+    The selection criterion is the timestamp **in the directory name**
+    (sorted lexicographically — works because the name is fixed
+    ``%Y%m%dT%H%M%SZ``), not filesystem mtime, so a touched
+    ``state.json`` in an older subdir doesn't shadow a freshly-created
+    later run.
+    """
+    ws = workspace_root()
+    if not ws.is_dir():
+        return None
+    if model_name:
+        basename = _sanitize_model_basename(model_name)
+        model_root = ws / basename
+        if not model_root.is_dir():
+            return None
+        candidates = [
+            p for p in model_root.iterdir()
+            if p.is_dir() and len(p.name) == 16 and p.name.endswith("Z")
+        ]
+    else:
+        # Scan every model_basename subdir under workspace_root for the
+        # latest per-launch timestamp. Skip workspace-shared subdirs
+        # (runtime/, logs/) by checking the timestamp-shaped name.
+        candidates: list[Path] = []
+        for model_dir in ws.iterdir():
+            if not model_dir.is_dir() or model_dir.name in ("runtime", "logs"):
+                continue
+            for p in model_dir.iterdir():
+                if p.is_dir() and len(p.name) == 16 and p.name.endswith("Z"):
+                    candidates.append(p)
+    if not candidates:
+        return None
+    # Lex sort on the YYYYMMDDTHHMMSSZ name works as chronological sort.
+    candidates.sort(key=lambda p: p.name)
+    return candidates[-1]
+
+
 def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
     """Create the session directory + per-session subdirectory skeleton.
 
@@ -383,5 +433,6 @@ __all__ = [
     "runtime_dir",
     "session_dir",
     "source_mirrors_dir",
+    "find_latest_per_session_dir",
     "workspace_root",
 ]
