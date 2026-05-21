@@ -76,25 +76,68 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS = (
+_REUSABLE_SOURCE_ROOTS_STATIC = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
     "/sgl-workspace/vllm/",
+    "/sgl-workspace/flydsl/",
+    "/sgl-workspace/mori/",
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/opt/venv/lib/python3.10/site-packages/flydsl/",
+    "/opt/venv/lib/python3.10/site-packages/mori/",
     # Production vLLM wheel install layout (system dist-packages). Keep
     # this in sync with ``kernel-agent/tools/tracelens_analysis.py`` so
     # both the kernel-agent classifier and the orchestrator-side gate
     # in ``run_optimization_handler`` agree on what counts as a
-    # reusable framework source.
+    # reusable framework source. ``flydsl/`` + ``mori/`` were added per
+    # issue #211 so FlyDSL kernels in production workloads (helios-demo
+    # MLA decode, AITER FlyDSL ops, user-local kernels) pass the gate
+    # instead of being skipped with ``source not under a reusable
+    # framework root``.
     "/usr/local/lib/python3.12/dist-packages/aiter/",
     "/usr/local/lib/python3.12/dist-packages/sglang/",
     "/usr/local/lib/python3.12/dist-packages/vllm/",
+    "/usr/local/lib/python3.12/dist-packages/flydsl/",
+    "/usr/local/lib/python3.12/dist-packages/mori/",
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
+    "/usr/local/lib/python3.10/dist-packages/flydsl/",
+    "/usr/local/lib/python3.10/dist-packages/mori/",
 )
+
+
+def _extra_reusable_roots_from_env() -> tuple[str, ...]:
+    """User-supplied reusable source roots from ``HYPERLOOM_EXTRA_REUSABLE_ROOTS``.
+
+    Mirrors the helper in ``kernel-agent/tools/tracelens_analysis.py``
+    so the orchestrator-side guard in ``run_optimization_handler``
+    (``_validate_reusable_native_kernel``) honours the same operator
+    override the classifier honours. Issue #211 motivates this for
+    "user's local FlyDSL kernels" that don't ship under one of the
+    hard-coded framework roots.
+    """
+    raw = os.environ.get("HYPERLOOM_EXTRA_REUSABLE_ROOTS", "")
+    if not raw:
+        return ()
+    extra: list[str] = []
+    for entry in raw.split(":"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if not entry.endswith("/"):
+            entry = entry + "/"
+        extra.append(entry.lower())
+    return tuple(extra)
+
+
+def _reusable_source_roots() -> tuple[str, ...]:
+    return _REUSABLE_SOURCE_ROOTS_STATIC + _extra_reusable_roots_from_env()
+
+
+_REUSABLE_SOURCE_ROOTS = _REUSABLE_SOURCE_ROOTS_STATIC
 _APPLY_TOOL_MODULE: Any | None = None
 _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
 _DEFAULT_KERNEL_BATCH_PARALLEL = 3
@@ -150,7 +193,7 @@ def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
     if any(marker in lower_file for marker in _RUNTIME_GENERATED_SOURCE_MARKERS):
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
-        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+        return not any(root in lower_file for root in _reusable_source_roots())
     return False
 
 
@@ -367,7 +410,7 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "source_file": source_file,
         }
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+    if not any(root in lower_file for root in _reusable_source_roots()):
         return {
             "status": "failed",
             "error_class": "unstable_source_path",

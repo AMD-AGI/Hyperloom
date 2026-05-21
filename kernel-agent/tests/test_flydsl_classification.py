@@ -10,17 +10,22 @@ the downstream GEAK kernel_type mapping.
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 from tracelens_analysis import (  # noqa: E402
+    _extra_reusable_roots_from_env,
     _looks_like_flydsl_source,
+    _reusable_source_roots,
+    classify_patchability,
     source_type_for,
 )
 
@@ -117,6 +122,131 @@ class TestFlyDSLClassification(unittest.TestCase):
         self.assertFalse(_looks_like_flydsl_source(""))
         self.assertFalse(_looks_like_flydsl_source("/nonexistent/path.py"))
         self.assertEqual(source_type_for("k", ""), "unknown")
+
+
+class TestReusableSourceRoots(unittest.TestCase):
+    """Issue #211: FlyDSL / mori install paths must pass the patchability gate.
+
+    Tests isolate the path-allowlist check by using ``source_type="python"``
+    (which is admitted today). The ``source_type="flydsl"`` admission is
+    item 3 of the integration plan; tests are flipped once that lands.
+    """
+
+    def _flydsl_candidate(self, source_file: str) -> dict:
+        return {
+            "name": "flydsl_indexed_pv_kernel",
+            "source_file": source_file,
+            "source_type": "python",
+        }
+
+    def test_flydsl_sgl_workspace_root_is_reusable(self) -> None:
+        roots = _reusable_source_roots()
+        self.assertIn("/sgl-workspace/flydsl/", roots)
+        cand = self._flydsl_candidate(
+            "/sgl-workspace/flydsl/python/flydsl/ops/some_kernel.py",
+        )
+        reusable, skip = classify_patchability(cand)
+        self.assertTrue(reusable, msg=skip)
+        self.assertEqual(skip, "")
+
+    def test_flydsl_site_packages_root_is_reusable(self) -> None:
+        cand = self._flydsl_candidate(
+            "/usr/local/lib/python3.12/dist-packages/flydsl/kernels/k.py",
+        )
+        reusable, skip = classify_patchability(cand)
+        self.assertTrue(reusable, msg=skip)
+
+    def test_mori_root_is_reusable(self) -> None:
+        cand = {
+            "name": "mori_kernel",
+            "source_file": "/sgl-workspace/mori/ops/k.py",
+            "source_type": "python",
+        }
+        reusable, skip = classify_patchability(cand)
+        self.assertTrue(reusable, msg=skip)
+
+    def test_random_path_still_rejected(self) -> None:
+        cand = self._flydsl_candidate("/wekafs/random/user/checkout/k.py")
+        reusable, skip = classify_patchability(cand)
+        self.assertFalse(reusable)
+        self.assertIn("reusable framework root", skip)
+
+    def test_env_extension_admits_extra_root(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": "/wekafs/yunkai/helios-demo/app/"},
+        ):
+            self.assertIn(
+                "/wekafs/yunkai/helios-demo/app/",
+                _extra_reusable_roots_from_env(),
+            )
+            self.assertIn(
+                "/wekafs/yunkai/helios-demo/app/", _reusable_source_roots(),
+            )
+            cand = self._flydsl_candidate(
+                "/wekafs/yunkai/helios-demo/app/helios_demo/flydsl_mla_decode/"
+                "flydsl_indexed_pv_kernel.py",
+            )
+            reusable, skip = classify_patchability(cand)
+            self.assertTrue(reusable, msg=skip)
+
+    def test_env_extension_normalizes_trailing_slash(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": "/no/trailing/slash"},
+        ):
+            roots = _extra_reusable_roots_from_env()
+            self.assertEqual(roots, ("/no/trailing/slash/",))
+
+    def test_env_extension_multiple_colon_separated(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": "/a/:/b/:/c"},
+        ):
+            roots = _extra_reusable_roots_from_env()
+            self.assertEqual(roots, ("/a/", "/b/", "/c/"))
+
+    def test_env_extension_absent_returns_empty(self) -> None:
+        env = dict(os.environ)
+        env.pop("HYPERLOOM_EXTRA_REUSABLE_ROOTS", None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(_extra_reusable_roots_from_env(), ())
+
+
+class TestOrchestratorReusableRootsInSync(unittest.TestCase):
+    """The reusable-root allowlist is duplicated in two files on purpose
+    (kernel-agent side vs orchestrator-side guard). Both lists must
+    advertise FlyDSL / mori roots and honour ``HYPERLOOM_EXTRA_REUSABLE_ROOTS``
+    so callers see identical routing behaviour from either entry point.
+    """
+
+    def setUp(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        sys.path.insert(0, str(repo_root))
+        from inference_optimizer.orchestrator import kernel_request_handlers
+        self.handlers = kernel_request_handlers
+
+    def test_orchestrator_allowlist_has_flydsl(self) -> None:
+        self.assertIn(
+            "/sgl-workspace/flydsl/", self.handlers._REUSABLE_SOURCE_ROOTS_STATIC,
+        )
+        self.assertIn(
+            "/usr/local/lib/python3.12/dist-packages/flydsl/",
+            self.handlers._REUSABLE_SOURCE_ROOTS_STATIC,
+        )
+
+    def test_orchestrator_allowlist_has_mori(self) -> None:
+        self.assertIn(
+            "/sgl-workspace/mori/", self.handlers._REUSABLE_SOURCE_ROOTS_STATIC,
+        )
+
+    def test_orchestrator_honours_env_override(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": "/wekafs/yunkai/helios-demo/app/"},
+        ):
+            roots = self.handlers._reusable_source_roots()
+            self.assertIn("/wekafs/yunkai/helios-demo/app/", roots)
 
 
 if __name__ == "__main__":

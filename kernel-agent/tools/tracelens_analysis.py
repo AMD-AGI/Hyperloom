@@ -383,26 +383,80 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS = (
+_REUSABLE_SOURCE_ROOTS_STATIC = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
     "/sgl-workspace/vllm/",
+    "/sgl-workspace/flydsl/",
+    "/sgl-workspace/mori/",
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/opt/venv/lib/python3.10/site-packages/flydsl/",
+    "/opt/venv/lib/python3.10/site-packages/mori/",
     # Production vLLM wheel install layout (system dist-packages).
     # Required since vLLM in the current image ships under
     # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
     # editable ``/sgl-workspace/vllm/`` checkout the legacy entries
     # assumed. The python3.10 fallback covers older images where the
-    # interpreter has not yet been bumped.
+    # interpreter has not yet been bumped. ``flydsl/`` + ``mori/`` were
+    # added per issue #211 so FlyDSL kernels in production workloads
+    # (helios-demo MLA decode, AITER FlyDSL ops, user-local kernels)
+    # pass ``classify_patchability`` instead of being skipped with
+    # ``source not under a reusable framework root``.
     "/usr/local/lib/python3.12/dist-packages/aiter/",
     "/usr/local/lib/python3.12/dist-packages/sglang/",
     "/usr/local/lib/python3.12/dist-packages/vllm/",
+    "/usr/local/lib/python3.12/dist-packages/flydsl/",
+    "/usr/local/lib/python3.12/dist-packages/mori/",
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
+    "/usr/local/lib/python3.10/dist-packages/flydsl/",
+    "/usr/local/lib/python3.10/dist-packages/mori/",
 )
+
+
+def _extra_reusable_roots_from_env() -> tuple[str, ...]:
+    """Read user-supplied reusable source roots from the environment.
+
+    Issue #211 calls out "user's local FlyDSL kernels" as a first-class
+    optimization target alongside aiter / mori. Hard-coding every
+    customer checkout in :data:`_REUSABLE_SOURCE_ROOTS_STATIC` is not
+    feasible, so operators can extend the allowlist at runtime via the
+    ``HYPERLOOM_EXTRA_REUSABLE_ROOTS`` env var (``:``-separated, same
+    convention as ``$PATH``). Trailing slashes are normalized so callers
+    don't have to remember the ``classify_patchability`` substring-match
+    quirk.
+    """
+    raw = os.environ.get("HYPERLOOM_EXTRA_REUSABLE_ROOTS", "")
+    if not raw:
+        return ()
+    extra: list[str] = []
+    for entry in raw.split(":"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if not entry.endswith("/"):
+            entry = entry + "/"
+        extra.append(entry.lower())
+    return tuple(extra)
+
+
+def _reusable_source_roots() -> tuple[str, ...]:
+    """All reusable framework roots, static + env-extended.
+
+    Recomputed on each call rather than cached: tests and the CI
+    harness flip ``HYPERLOOM_EXTRA_REUSABLE_ROOTS`` per case to exercise
+    the override path. Cost is negligible (tuple of <30 strings).
+    """
+    return _REUSABLE_SOURCE_ROOTS_STATIC + _extra_reusable_roots_from_env()
+
+
+# Back-compat alias. Older call sites read the constant directly; keep
+# the name pointing at the static tuple so they continue to work without
+# the env-driven extension (which is opt-in via the helpers above).
+_REUSABLE_SOURCE_ROOTS = _REUSABLE_SOURCE_ROOTS_STATIC
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
 # raw memcpy/copy ops, and PyTorch native copy. Folded from the feature
@@ -438,7 +492,7 @@ def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
         # A stable in-repo SGLang/vLLM Triton source can still be reusable.
-        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+        return not any(root in lower_file for root in _reusable_source_roots())
     return False
 
 
@@ -487,7 +541,7 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"runtime-generated (torch.compile / Inductor cache): {source_file}"
         )
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+    if not any(root in lower_file for root in _reusable_source_roots()):
         return False, (
             f"source not under a reusable framework root: {source_file}"
         )
