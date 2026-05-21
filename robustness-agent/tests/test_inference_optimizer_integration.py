@@ -141,7 +141,16 @@ async def test_backend_high_severity_path_passes_gate(tmp_path):
 async def test_heartbeat_passes_gate(tmp_path):
     from robustness_agent.config import Config
 
-    config = Config(session_dir=tmp_path, robustness_server_url="")
+    # Heartbeat path requires no live alarms — disable the auto-probe
+    # defaults so an inert test host (no auth-proxy / no inference
+    # server) doesn't fire ``local_server_unreachable`` alerts that
+    # would mask the heartbeat ``send_message``.
+    config = Config(
+        session_dir=tmp_path,
+        robustness_server_url="",
+        auto_probe_auth_proxy=False,
+        auto_probe_inference_server=False,
+    )
     intents, bundle = await _drive_reactor_with_prompt(
         config,
         "=== Shared session state ===\n"
