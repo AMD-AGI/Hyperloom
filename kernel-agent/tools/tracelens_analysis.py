@@ -2473,6 +2473,13 @@ def main() -> int:
         update_status(status_path, state="failed", current_step="failed",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at, error=f"{type(exc).__name__}: {exc}")
+        # N26: include any trace_health_warnings accumulated before the
+        # exception fired so the handler / Coordinator can auto-recover
+        # (e.g. re-issue with a different --steady-state-mode when a
+        # steady_state_chunk_empty warning carries non_empty_modes).
+        # Pre-N26 the failure JSON dropped warnings on the floor, so
+        # the RooflineExecutor saw `status=failed` without the structured
+        # hint it needed to decide between hard-fail and auto-retry.
         print(json.dumps({
             "tool": "tracelens_analysis",
             "session_id": session_id,
@@ -2481,6 +2488,7 @@ def main() -> int:
             "error": f"{type(exc).__name__}: {exc}",
             "cli_log_path": str(log_path),
             "status_path": str(status_path),
+            "trace_health_warnings": trace_health_warnings,
         }, indent=2, sort_keys=True))
         return 1
 
