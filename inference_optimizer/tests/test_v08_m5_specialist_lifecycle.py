@@ -499,6 +499,11 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             specialist_max_turns=4,
             specialist_per_turn_max_seconds=300.0,
             research_lane_capacity=1,
+            # PR-A2: pin in-process dispatch because this test mocks
+            # the ClaudeBackend class. Subprocess mode would skip the
+            # mock entirely and try to spawn a real claude CLI.
+            specialist_dispatch_mode="inprocess",
+            specialist_mcp_config=None,
         )
         # Mock primary-role backends (orchestration / kernel / critic
         # / robustness). They don't get invoked in this test — the

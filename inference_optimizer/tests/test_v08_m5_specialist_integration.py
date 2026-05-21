@@ -115,6 +115,12 @@ def _build_args(**overrides) -> argparse.Namespace:
         specialist_max_turns=4,
         specialist_per_turn_max_seconds=300.0,
         research_lane_capacity=1,
+        # PR-A2: integration tests rely on the in-process ClaudeBackend
+        # path so MockBackend / monkeypatched factories work end-to-end.
+        # Subprocess mode would skip them and try to spawn a real
+        # claude CLI from the test harness, which we don't want here.
+        specialist_dispatch_mode="inprocess",
+        specialist_mcp_config=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -503,10 +509,14 @@ def test_cli_specialist_flags_have_safe_defaults():
     args = parser.parse_args([
         "optimize", "--model", "/tmp/dummy-model",
     ])
-    # Default capacity = 1 (M5 default per KB_design §3.13 M5 / §3.7).
-    assert args.research_lane_capacity == 1
+    # PR-A3 (Arbor-into-Hyperloom): default capacity raised from 1 → 4
+    # so the Orchestration LLM's multi-emit fan-out shape (one specialist
+    # per top-K gap in a single tick) actually runs in parallel.
+    assert args.research_lane_capacity == 4
     assert args.specialist_max_turns == 8
     assert args.specialist_per_turn_max_seconds == 600.0
     # Specialist model defaults to None → cli factory falls back to
     # ``--claude-model`` (the orchestration backend's choice).
     assert args.specialist_model is None
+    # PR-A2 / PR-A3: subprocess dispatch is the production default.
+    assert args.specialist_dispatch_mode == "subprocess"
