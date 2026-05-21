@@ -195,7 +195,7 @@ Requirements:
 
 Follow the script output. In the default flow, users do not need to manually configure GEAK, OOB, InferenceX, or TraceLens.
 
-**Optional (Cursor kernel-opt backend):**
+**Optional (Cursor kernel-opt backend):** add these to the same `$REPO_ROOT/.env` if you want Hyperloom to use the Cursor SDK as one of the kernel-opt backends. Leave them blank to keep using claude/codex/geak only.
 
 | Variable | Description | Example |
 |----------|-------------|---------|
