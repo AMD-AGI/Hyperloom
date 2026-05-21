@@ -29,6 +29,7 @@ direct MCP tool access. The facade is purely Coordinator-side glue.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -224,6 +225,183 @@ class KnowledgePlane:
         if not self.pr_monitor_enabled:
             return ""
         return self.pr_monitor_mcp_url
+
+    # ------------------------------------------------------------------
+    # PR-A5 (Arbor-into-Hyperloom): KB sub-graph traverse for specialists
+    # ------------------------------------------------------------------
+    def select_kb_for_domain(
+        self,
+        domain: str,
+        *,
+        budget_steps: int = 4,
+        budget_branches: int = 20,
+    ) -> dict[str, Any]:
+        """Traverse the Cortex KB starting from the specialist domain's
+        ``kb_anchor`` and return a compact dict the prompt builder
+        renders verbatim into the specialist's ``## 4. KB SUB-GRAPH``
+        section.
+
+        Schema returned:
+
+            {
+                "anchor": "<kb_anchor>",
+                "domain": "<domain>",
+                "points":    [<canonical_id strings, ≤ 12>],
+                "neighbors": [<edge summaries, ≤ 20>],
+                "paths":     [<path summaries, ≤ 5>],
+                "candidates": [<id strings, ≤ 5>],
+                "warnings": [<short status strings>],
+            }
+
+        Fail-soft: when Cortex is disabled, the anchor can't be
+        resolved, or the HTTP call fails, returns an empty dict
+        ``{"anchor": "...", "warnings": ["..."]}`` so the specialist
+        prompt still renders cleanly.
+
+        Notes
+        -----
+        - PR-A5 is the prompt-layer counterpart of Arbor's
+          ``select_kb(domain)``: Arbor reads a local KB tree;
+          Hyperloom queries the Cortex KB HTTP service.
+        - The implementation mirrors the existing
+          :meth:`pr_feed_warm` defensive shape — every failure mode is
+          a warning string, not an exception.
+        """
+        from .specialist_domains import get_domain
+        from ..cortex_kb_constants import (
+            F_BUDGET_BRANCHES,
+            F_BUDGET_STEPS,
+            F_NEIGHBORS,
+            F_PATHS,
+            F_POINTS,
+            F_CANDIDATES,
+            F_START_POINT,
+            PATH_QUERY_POINT,
+            PATH_TRAVERSE,
+        )
+
+        warnings: list[str] = []
+        spec_dom = get_domain(domain)
+        if spec_dom is None:
+            return {
+                "anchor": "",
+                "domain": domain,
+                "points": [],
+                "neighbors": [],
+                "paths": [],
+                "candidates": [],
+                "warnings": [f"unknown_domain:{domain}"],
+            }
+        anchor = spec_dom.kb_anchor or domain
+        if not self.cortex_enabled:
+            return {
+                "anchor": anchor,
+                "domain": domain,
+                "points": [],
+                "neighbors": [],
+                "paths": [],
+                "candidates": [],
+                "warnings": ["cortex_kb:disabled"],
+            }
+
+        # Step 1: resolve the anchor canonical_id → point_id via
+        # POST /v1/points/query. Cortex traverse needs a numeric
+        # start_point id.
+        try:
+            start_resp = self.cortex_kb._post(  # type: ignore[union-attr]
+                PATH_QUERY_POINT,
+                {
+                    "canonical_id": anchor,
+                    "limit": 1,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"cortex_kb:anchor_lookup_failed:{exc!r}"[:240])
+            return {
+                "anchor": anchor,
+                "domain": domain,
+                "points": [],
+                "neighbors": [],
+                "paths": [],
+                "candidates": [],
+                "warnings": warnings,
+            }
+        start_points = start_resp.get(F_POINTS) or start_resp.get("points") or []
+        if not start_points:
+            warnings.append(f"cortex_kb:anchor_not_found:{anchor}")
+            return {
+                "anchor": anchor,
+                "domain": domain,
+                "points": [],
+                "neighbors": [],
+                "paths": [],
+                "candidates": [],
+                "warnings": warnings,
+            }
+        first = start_points[0] if isinstance(start_points, list) else {}
+        # Find the numeric point id. KB returns ``point_id`` (int).
+        start_id = first.get("point_id") or first.get("id")
+        if start_id is None:
+            warnings.append("cortex_kb:anchor_point_id_missing")
+            return {
+                "anchor": anchor,
+                "domain": domain,
+                "points": [str(first.get("canonical_id") or anchor)],
+                "neighbors": [],
+                "paths": [],
+                "candidates": [],
+                "warnings": warnings,
+            }
+
+        # Step 2: traverse.
+        try:
+            traverse_resp = self.cortex_kb._post(  # type: ignore[union-attr]
+                PATH_TRAVERSE,
+                {
+                    F_START_POINT: int(start_id),
+                    F_BUDGET_STEPS: int(budget_steps),
+                    F_BUDGET_BRANCHES: int(budget_branches),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"cortex_kb:traverse_failed:{exc!r}"[:240])
+            return {
+                "anchor": anchor,
+                "domain": domain,
+                "points": [str(first.get("canonical_id") or anchor)],
+                "neighbors": [],
+                "paths": [],
+                "candidates": [],
+                "warnings": warnings,
+            }
+
+        def _str_list(raw: Any, cap: int) -> list[str]:
+            if not isinstance(raw, list):
+                return []
+            out: list[str] = []
+            for entry in raw[:cap]:
+                if isinstance(entry, str):
+                    out.append(entry[:240])
+                elif isinstance(entry, dict):
+                    # Prefer canonical_id; fall back to a short repr.
+                    cid = entry.get("canonical_id") or entry.get("id")
+                    if cid:
+                        out.append(str(cid)[:240])
+                    else:
+                        out.append(json.dumps(entry, sort_keys=True)[:240])
+                else:
+                    out.append(str(entry)[:240])
+            return out
+
+        return {
+            "anchor": anchor,
+            "domain": domain,
+            "points": _str_list(traverse_resp.get(F_POINTS), 12),
+            "neighbors": _str_list(traverse_resp.get(F_NEIGHBORS), 20),
+            "paths": _str_list(traverse_resp.get(F_PATHS), 5),
+            "candidates": _str_list(traverse_resp.get(F_CANDIDATES), 5),
+            "warnings": warnings,
+        }
 
     def pr_feed_warm_all_domains(
         self,
