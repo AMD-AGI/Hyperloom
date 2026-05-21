@@ -55,7 +55,7 @@ def state_path(session_dir: Path) -> Path:
 # but mission TODOs never cleared. Driving the set from ``pipeline_phase``
 # keeps the four sources aligned automatically.
 _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
-    "measure", "analysis", "explore", "deep", "validate",
+    "measure", "analysis", "explore", "deep", "validate", "support",
 })
 
 # Hardcoded fallback used only when ActionRegistry can't be loaded
@@ -63,6 +63,15 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # sync with the union of actions whose pipeline_phase is in
 # ``_RUNS_WORKSPACE_PHASES``; the regression test in
 # ``tests/test_p1_2_full_action_catalogue.py`` enforces this.
+#
+# ``support`` was added in 2026-05 alongside the real ``recover``
+# executor (Change C of the gpu-leak-robustness-fix plan). The other
+# four ``support`` actions (``dream`` / ``re_explore`` /
+# ``comm_optimization`` / ``compiler_tuning``) are still un-registered
+# stubs — including their names here is harmless because SubAgentRunner
+# only consults this set inside ``_pre_mkdir_workspace``, which is only
+# reached when a task with that kind actually lands; un-registered kinds
+# never get that far.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline", "profile", "pmc_roofline",
     "roofline",
@@ -70,6 +79,8 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
     "validate_stack",
+    "recover", "dream", "re_explore",
+    "comm_optimization", "compiler_tuning",
 })
 
 
