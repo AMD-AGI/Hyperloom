@@ -533,9 +533,13 @@ chain_framework_agent() {
     return 0
   fi
   log "delegating fa CLI install to ${script}"
+  # Pass through the resolved PYTHON so framework-agent's installer picks
+  # the same /opt/venv interpreter (avoids /usr/bin/pip 22.0.2 which fails
+  # the PEP 660 build_editable hook on our pyproject).
   export REPO_ROOT FRAMEWORK_AGENT_ROOT
+  export VENV_PYTHON="${PYTHON}"
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would run: bash '$script'"
+    log "would run: bash '$script' (VENV_PYTHON=${VENV_PYTHON})"
     return 0
   fi
   bash "$script" || warn "framework-agent install returned non-zero; framework_pr arm will fail at runtime"
