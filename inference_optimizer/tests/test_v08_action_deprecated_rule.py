@@ -192,9 +192,16 @@ def test_deprecation_fires_before_kernel_owned_check(gate):
 # ===========================================================================
 def test_phase_explore_allowlist_drops_legacy_actions():
     """KB_gaps/Gap-10 PR 5.1 — the EXPLORE allowlist contains only the
-    v0.8 canonical action set."""
+    v0.8 canonical action set.
+
+    PR-A1 (Arbor-into-Hyperloom) added ``integrate_patch`` as the
+    EXPLORE-phase serving-lane-locked patch integration step (consumes
+    specialist worktree patches). It is a canonical addition, not a
+    legacy re-emergence; the test below still pins out the v0.6
+    deprecated names via ``test_full_enabled_actions_drops_legacy_grid_actions``.
+    """
     assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
-        "explore", "specialist", "recover",
+        "explore", "specialist", "integrate_patch", "recover",
     })
 
 
