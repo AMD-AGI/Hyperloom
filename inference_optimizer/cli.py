@@ -546,6 +546,20 @@ def _seed_shared_state(
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
 
+    # Resolve workload metadata from CLI flags first, then env. The
+    # same fields are mirrored into manifest.json by manifest.build_manifest
+    # (single source of truth); we duplicate the parse here so SharedState
+    # can be populated without re-reading the file we just wrote.
+    def _int_env_or_arg(arg_name: str, env_name: str) -> int:
+        val = getattr(args, arg_name, None)
+        if val is None or val == 0:
+            raw = (os.environ.get(env_name, "") or "").strip()
+            return int(raw) if raw.isdigit() else 0
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return 0
+
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -555,6 +569,20 @@ def _seed_shared_state(
         model_class=args.model_class or "",
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
+        # Workload metadata mirrored from CLI / env at fresh-session time
+        # so downstream consumers (specialist prompt builder,
+        # orchestration tick prompt) see the real values. Without this
+        # the specialist prompt's "## 2. HARDWARE CONTEXT" silently uses
+        # the SpecialistPromptInputs dataclass defaults (e.g. TP=1) and
+        # comm_specialist self-vetoes on TP=8 sessions.
+        tp=_int_env_or_arg("tp", "TP"),
+        precision=(
+            str(getattr(args, "precision", None) or os.environ.get("PRECISION", "") or "").strip()
+        ),
+        conc=_int_env_or_arg("conc", "CONC"),
+        isl=_int_env_or_arg("isl", "ISL"),
+        osl=_int_env_or_arg("osl", "OSL"),
+        max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
         kernel_enabled=not getattr(args, "no_kernel", False),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
@@ -700,6 +728,7 @@ def _build_specialist_executor(
     """
     import shutil
 
+    from .orchestrator.specialist_mcp_config import write_specialist_mcp_config
     from .orchestrator.specialist_runner import (
         DEFAULT_SPECIALIST_TOOLS,
         SpecialistRunner,
@@ -738,13 +767,31 @@ def _build_specialist_executor(
         )
 
     if use_subprocess:
+        # Operator-supplied --specialist-mcp-config wins. When unset,
+        # auto-generate ``<session_dir>/runtime/specialist_mcp.json``
+        # from the live KnowledgePlane so the spawned claude subprocess
+        # actually has the PR Monitor MCP server wired (without it the
+        # ``mcp__pr_monitor__*`` tool names in the whitelist resolve to
+        # nothing and the specialist falls back to WebSearch).
+        mcp_config_path: str | None = str(
+            getattr(args, "specialist_mcp_config", "") or ""
+        ) or None
+        if mcp_config_path is None and knowledge_plane is not None:
+            try:
+                pr_mcp_url = knowledge_plane.specialist_mcp_url()
+            except AttributeError:
+                pr_mcp_url = ""
+            generated = write_specialist_mcp_config(
+                session_dir=session_dir,
+                pr_monitor_mcp_url=pr_mcp_url,
+            )
+            if generated is not None:
+                mcp_config_path = str(generated)
         sub_config = SpecialistSubprocessConfig(
             claude_executable=claude_bin or "claude",
             model=claude_model,
             framework_source_roots=framework_source_roots,
-            mcp_config_path=str(
-                getattr(args, "specialist_mcp_config", "") or ""
-            ) or None,
+            mcp_config_path=mcp_config_path,
             per_turn_max_seconds=per_turn_max_seconds,
         )
         runner = SpecialistRunner(
@@ -2423,6 +2470,27 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
             if runner_gpu_type != state.gpu_type:
                 print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
+        # Re-export workload metadata (TP / CONC / ISL / OSL /
+        # MAX_MODEL_LEN / PRECISION) from SharedState so a resume in
+        # a fresh shell sees the same workload contract baseline ran
+        # under. Without this, the resumed shell's executors fall
+        # back to YAML defaults (TP=1, CONC=8, ISL=256, OSL=256) and
+        # the specialist prompt builder renders TP=1 (which makes
+        # comm_specialist self-veto on TP=8 sessions).
+        for state_attr, env_name in (
+            ("tp", "TP"),
+            ("conc", "CONC"),
+            ("isl", "ISL"),
+            ("osl", "OSL"),
+            ("max_model_len", "MAX_MODEL_LEN"),
+        ):
+            val = getattr(state, state_attr, 0) or 0
+            if val:
+                os.environ[env_name] = str(val)
+                print(f"  re-exported {env_name:<14s}: {val}")
+        if state.precision:
+            os.environ["PRECISION"] = state.precision
+            print(f"  re-exported PRECISION     : {state.precision}")
         # Honour persisted kernel_enabled flag on resume; CLI --no-kernel
         # can still override on a previously-enabled session.
         if not state.kernel_enabled:

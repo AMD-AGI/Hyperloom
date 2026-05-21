@@ -557,6 +557,27 @@ class SpecialistSubprocessDispatcher:
                 done_file, type(data).__name__,
             )
             return None
+        if (
+            str(data.get("intent_type") or "") == "specialist_done"
+            and isinstance(data.get("payload"), dict)
+        ):
+            inner = data["payload"]
+            merged: dict[str, Any] = {}
+            for k, v in data.items():
+                if k in ("intent_type", "payload"):
+                    continue
+                merged[k] = v
+            for k, v in inner.items():
+                merged[k] = v
+            log.info(
+                "_read_done: unwrapped specialist_done intent envelope at %s "
+                "(proposal_set_len=%d, empty=%s)",
+                done_file,
+                len(inner.get("proposal_set") or [])
+                if isinstance(inner.get("proposal_set"), list) else 0,
+                inner.get("empty"),
+            )
+            return merged
         return data
 
 

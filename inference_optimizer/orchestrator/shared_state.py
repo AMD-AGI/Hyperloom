@@ -138,6 +138,26 @@ class SharedState:
     model_class: str = ""
     framework: str = ""
     gpu_type: str = ""
+    # Workload metadata mirrored from manifest.json at session start
+    # (KB_design_continue §3.4 / TP-leak fix). Used by:
+    #   * Coordinator._warm_specialist_params to populate
+    #     specialist task params so SpecialistPromptInputs renders
+    #     real hardware context in "## 2. HARDWARE CONTEXT" instead
+    #     of the dataclass defaults (which silently render TP=1 and
+    #     make comm_specialist self-veto with "TP=1 → cross-GPU
+    #     collectives non-actionable" even on TP=8 sessions).
+    #   * the per-tick orchestration prompt's SESSION CONTEXT block.
+    # Populated by ``cli._init_fresh_session`` from CLI flags / env;
+    # resumed sessions read them back from state.json verbatim and
+    # cli.py re-exports the env vars (TP/CONC/ISL/OSL/MAX_MODEL_LEN/
+    # PRECISION) so downstream executors see the same values the
+    # original run used. Zero / empty means "unspecified".
+    tp: int = 0
+    precision: str = ""
+    conc: int = 0
+    isl: int = 0
+    osl: int = 0
+    max_model_len: int = 0
     kernel_enabled: bool = True
     target_summary: str = ""
     baseline_tput: float = 0.0
