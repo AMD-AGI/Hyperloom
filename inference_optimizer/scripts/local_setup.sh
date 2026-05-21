@@ -222,13 +222,6 @@ print_next_steps() {
 Open this folder in Cursor as the workspace:
   ${REPO_ROOT}
 
-Before launching Hyperloom from Cursor Chat, ask the agent to run exactly:
-
-\`\`\`bash
-source ${quoted_env}
-export USER_DATA_PATH=${quoted_user_data}
-\`\`\`
-
 Paste this into Cursor Chat and fill in your workload:
 
 @inference_optimizer/SKILL.md

@@ -154,7 +154,7 @@ export USER_DATA_PATH=/path/to/hyperloom-run
 bash inference_optimizer/scripts/local_setup.sh
 ```
 
-`USER_DATA_PATH` is Hyperloom's runtime directory for dependency checkouts, logs, state, and optimization results. It is not the Hyperloom source checkout, and you can point it at any location with enough space. `local_setup.sh` derives `REPO_ROOT` from its own location, clones and wires OOB, InferenceX, and TraceLens, and writes a local env file. When it finishes, it prints:
+`USER_DATA_PATH` is Hyperloom's runtime directory for dependency code, logs, state, and optimization results. It is not the Hyperloom source directory, and you can point it at any location with enough space. `local_setup.sh` clones and wires OOB, InferenceX, and TraceLens into this directory, and writes a local env file. When it finishes, it prints:
 
 - the Hyperloom workspace path to open in Cursor;
 - the prompt template to paste into Cursor Chat;
@@ -165,13 +165,6 @@ Example output snippet:
 ````text
 Open this folder in Cursor as the workspace:
   /path/to/Hyperloom
-
-Before launching Hyperloom from Cursor Chat, ask the agent to run exactly:
-
-```bash
-source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
-export USER_DATA_PATH='/path/to/hyperloom-run'
-```
 
 Paste this into Cursor Chat and fill in your workload:
 
