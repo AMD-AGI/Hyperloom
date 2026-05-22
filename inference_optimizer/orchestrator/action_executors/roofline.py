@@ -72,6 +72,13 @@ def _now_iso() -> str:
 _AUTO_RETRY_WARNING_CODES = frozenset({
     "steady_state_chunk_empty",
     "steady_state_chunk_missing",
+    # N36 (May 2026): low-quality chunk (non-empty but busy_ratio
+    # below threshold AND a materially-higher-busy_ratio alternate
+    # exists). Same recovery path as N25 — alternate mode comes from
+    # the warning's ``non_empty_modes`` list, populated by the
+    # tracelens_analysis._check_selected_chunk_has_gpu_events_quality
+    # gate.
+    "steady_state_chunk_low_quality",
 })
 
 
