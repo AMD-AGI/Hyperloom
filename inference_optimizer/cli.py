@@ -1105,6 +1105,63 @@ def _check_shm_disk() -> None:
         )
 
 
+_TRACELENS_REQUIRED_CLIS: tuple[str, ...] = (
+    "TraceLens_generate_perf_report_pytorch_inference",
+)
+
+
+def _check_tracelens_cli() -> None:
+    """Hard-gate TraceLens CLI presence — abort BEFORE Coordinator starts.
+
+    Why this is hard-fail (vs ``_check_node_claude_cli`` which is WARN-only):
+
+    The ``TraceLens_*`` console_scripts are installed by
+    ``kernel-agent/scripts/install.sh`` (chained from
+    ``inference_optimizer/scripts/install.sh``) into the *pod-local*
+    ``/opt/venv/bin/`` — they do NOT persist across pod restarts even
+    when ``$USER_DATA_PATH`` (typically ``/workspace/hyperloom``) is a
+    WekaFS-backed session dir that survives pod recycling. SKILL §IR-2
+    therefore requires running ``install.sh`` before every launch; the
+    only carve-out is ``--resume`` in the *same shell* that earlier ran
+    install.sh.
+
+    Brain-generated launchers that source only
+    ``runtime/kernel-agent.env.sh`` and skip install.sh (fresh-start
+    ``--model`` path) land here with no TraceLens CLI on PATH. Until this
+    gate was added, the missing-CLI failure was surfaced only by the
+    robustness agent's J3 signal at tick ~6 (HIGH severity
+    ``tracelens_cli_missing``) — after baseline had already completed
+    (or hung) and a multi-minute setup cost was wasted.
+    ``select_kernels`` / ``kernel_opt`` then fail downstream when they
+    shell out to ``tracelens_analysis.py``.
+
+    Moving discovery to launch — mirroring ``_gate_claude_model``
+    (SKILL §Step 2 step 10) — turns a delayed silent strike into a
+    fail-fast with an actionable error pointing at the install.sh fix.
+    """
+    missing = [
+        name for name in _TRACELENS_REQUIRED_CLIS
+        if shutil.which(name) is None
+    ]
+    if not missing:
+        return
+    session_dir = os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")
+    print(
+        f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
+        f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
+        f"kernel-agent/scripts/install.sh (chained from "
+        f"inference_optimizer/scripts/install.sh) and do NOT persist "
+        f"across pod restarts. SKILL IR-2 requires running install.sh "
+        f"before every launch (carve-out applies only to --resume in "
+        f"the same shell that earlier ran install.sh). Re-run:\n"
+        f"  bash $REPO_ROOT/inference_optimizer/scripts/install.sh\n"
+        f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
+        f"then retry `inference_optimizer optimize`. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def _check_node_claude_cli() -> None:
     """WARN-only presence check for the bundled agent CLIs and ``@cursor/sdk``.
 
@@ -1632,6 +1689,12 @@ def _preflight() -> tuple[str, str] | None:
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
+
+    # --- TraceLens CLI presence (HARD-FAIL; SKILL Step 2 step 8.5) ---
+    # Catches brain-generated launchers that source only env.sh and skip
+    # install.sh — without this gate the missing-CLI symptom would not
+    # surface until robustness J3 fires at tick ~6, after baseline.
+    _check_tracelens_cli()
 
     # --- Single canonical diagnostics block ---
     _emit_preflight_diagnostics(
