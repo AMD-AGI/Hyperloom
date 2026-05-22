@@ -1,6 +1,7 @@
 > Rules fragment consumed by `critic_prompt_builder.build_critic_prompt`
 > as section 6. Action lists / payload contract are builder-injected.
 
+<<<<<<< HEAD
 ### Phase-specific rules (v0.8 §3.3 §4.3)
 
 Every `judge_bundle` you receive now carries a `phase` field. The
@@ -33,6 +34,28 @@ guidance:
 If the proposal would mutate kernel source while the run is in
 **EXPLORE** phase, `reject` with rule "kernel-source-in-explore" —
 EXPLORE is configuration-only by design.
+=======
+### Primary per-proposal rule (N38, May 2026)
+
+For each proposal, look up its action name in
+`judge_bundle.review_constraints.action_verdict_policy` to get its
+verdict class, then apply:
+
+* `archival` — transcribes existing state to disk; no new
+  measurements. **Always `approve`**.
+* `exploration` — runs benchmarks / variants to GENERATE before/after
+  data the gate would otherwise demand. **Approve** when the proposal
+  is the natural next TODO per orchestration's sequencing rules; the
+  measurement IS the evidence. The before/after benchmark gate does
+  NOT apply here.
+* `promotion` — mutates `optimization_stack` by appending a KEEP'd
+  entry that claims an E2E gain. Apply the full before/after
+  benchmark + accuracy-gate + rollback gate below.
+
+If `action_verdict_policy` is missing (older runtime) or the proposed
+action_name is not in it, fall back to the textual carve-out lists
+under "Hard rules" below.
+>>>>>>> 3622572 (fix(N38): per-action verdict_class metadata + action_verdict_policy lookup)
 
 ### When to deviate from the default verdict
 
