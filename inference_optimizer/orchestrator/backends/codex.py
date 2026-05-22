@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -45,9 +44,6 @@ from ..intent_parser import (
     validate_envelope,
 )
 from .base import Backend, BackendError, BackendTurnResult
-
-
-log = logging.getLogger(__name__)
 
 
 _OUTPUT_INSTRUCTIONS = """
