@@ -10,7 +10,10 @@
 #      pyproject `[test]` extra)
 #   2. Magpie (benchmark engine) into $HYPERLOOM_RUNTIME_DIR/Magpie
 #      (= $USER_DATA_PATH/runtime/Magpie by default)
-#   3. InferenceX checkout detection (sets INFERENCEX_PATH for runtime)
+#   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
+#       (bugs.md §C #1 root-cause fix; fail-loud)
+#   3. InferenceX checkout: clone latest from upstream (no SHA pin yet),
+#      sets INFERENCEX_PATH for runtime
 #   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
 #      bring-up, Node/npm, TraceLens, GEAK, OOB and the auth-proxy. kernel-agent
 #      itself is the canonical owner of those — we just chain to it
@@ -37,6 +40,8 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
+INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
+INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${HYPERLOOM_RUNTIME_DIR}/InferenceX}"
 
 DRY_RUN=0
 CHECK_ONLY=0
@@ -61,8 +66,11 @@ Options:
 
 Env overrides:
   REPO_ROOT, KERNEL_AGENT_ROOT, MAGPIE_REPO, MAGPIE_DIR,
-  INFERENCEX_PATH, PYTHON, TRACELENS_ROOT, USER_DATA_PATH,
-  HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT
+  INFERENCEX_REPO, INFERENCEX_DEFAULT_DIR, INFERENCEX_PATH,
+  PYTHON, TRACELENS_ROOT, USER_DATA_PATH,
+  HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT,
+  PATCH_MAGPIE (=1; set 0 only if upstream Magpie atomic-write
+  PR is already merged into your clone)
 EOF
 }
 
@@ -89,16 +97,24 @@ run() {
 }
 
 # --- 0. Resolve PYTHON ---
-# Prefer the existing PYTHON env (callers may have already pinned it),
-# then /opt/venv/bin/python (default for hyperloom containers), then
-# whatever python3 is on PATH. We do NOT hardcode /opt/venv/bin into
-# subsequent PATH; we only use this binary to drive `pip install`.
+# On hyperloom / sgl-workspace containers the canonical ROCm stack lives in
+# /opt/venv (preinstalled torch+rocm, sglang, vllm, aiter, sgl_kernel,
+# triton, Magpie, inference_optimizer, claude_agent_sdk, ray). Always
+# prefer that interpreter — bare-image PYTHONs (e.g. /usr/bin/python3) on a
+# ROCm pod silently pull plain `torch` from PyPI on `pip install -e .[test]`,
+# which is the NVIDIA CUDA wheel and crashes downstream RAG / baseline
+# steps with "Found no NVIDIA driver". Operators who really need a custom
+# interpreter can opt out with INFERENCE_OPTIMIZER_FORCE_PYTHON=1.
 resolve_python() {
-  if [ -n "${PYTHON:-}" ] && [ -x "$PYTHON" ]; then
+  if [ -x "/opt/venv/bin/python" ] && [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" != "1" ]; then
+    if [ -n "${PYTHON:-}" ] && [ "${PYTHON}" != "/opt/venv/bin/python" ]; then
+      log "preferring /opt/venv/bin/python over PYTHON=${PYTHON} (canonical ROCm stack)"
+      log "  set INFERENCE_OPTIMIZER_FORCE_PYTHON=1 to honor PYTHON verbatim"
+    fi
+    PYTHON="/opt/venv/bin/python"
     return 0
   fi
-  if [ -x "/opt/venv/bin/python" ]; then
-    PYTHON="/opt/venv/bin/python"
+  if [ -n "${PYTHON:-}" ] && [ -x "$PYTHON" ]; then
     return 0
   fi
   if command -v python3 >/dev/null 2>&1; then
@@ -110,6 +126,84 @@ resolve_python() {
 
 resolve_python
 log "PYTHON=${PYTHON}"
+# Export PYTHON + prepend its bin dir so the chained kernel-agent installer's
+# bare `python3 -m pip ...` calls (kernel-agent/scripts/install.sh) land in
+# the same interpreter. Otherwise PATH-only resolution can split the
+# installation across two different pythons.
+export PYTHON
+PATH="$(dirname "$PYTHON"):${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export PATH
+
+# --- 0a. Torch compatibility gate (ROCm-aware) ---
+# If rocm-smi reports devices, the resolved PYTHON must already have a
+# ROCm-built torch importable. Two failure modes we explicitly catch:
+#   1. torch missing entirely on a ROCm pod -- letting pip install proceed
+#      will pull the NVIDIA CUDA wheel from PyPI (default `torch`).
+#   2. torch present but built against CUDA (torch.version.hip is None)
+#      -- the chained RAG-index step auto-detects device=cuda and crashes
+#      at torch._C._cuda_init() with "Found no NVIDIA driver".
+ensure_torch_compatible_with_gpu() {
+  if ! command -v rocm-smi >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! rocm-smi --showid >/dev/null 2>&1; then
+    return 0
+  fi
+  local probe
+  probe="$("$PYTHON" - <<'PY' 2>/dev/null || true
+import json, sys
+out = {"rc": 0}
+try:
+    import torch
+    out["torch_version"] = torch.__version__
+    out["hip"] = getattr(torch.version, "hip", None)
+    out["cuda_str"] = getattr(torch.version, "cuda", None)
+except Exception as exc:
+    out["rc"] = 2
+    out["error"] = type(exc).__name__ + ": " + str(exc)[:200]
+print(json.dumps(out))
+PY
+)"
+  if [ -z "$probe" ]; then
+    warn "torch probe produced no output (PYTHON=${PYTHON})"
+    return 0
+  fi
+  local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe" 2>/dev/null || echo 0)"
+  if [ "$rc" = "2" ]; then
+    warn "torch is NOT importable from PYTHON=${PYTHON}"
+    warn "this pod has ROCm GPUs (rocm-smi works) -- letting pip install proceed"
+    warn "would pull plain 'torch' from PyPI (= NVIDIA CUDA wheel) and break"
+    warn "downstream RAG / baseline / kernel steps with 'Found no NVIDIA driver'."
+    warn "Fixes (pick one):"
+    warn "  * use the canonical ROCm stack:   unset PYTHON; install.sh will pick /opt/venv"
+    warn "  * install the ROCm torch wheel:    \"\$PYTHON\" -m pip install --pre torch --index-url https://download.pytorch.org/whl/rocm6.x"
+    warn "  * opt out of this gate:            INFERENCE_OPTIMIZER_FORCE_PYTHON=1 INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 install.sh"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install on ROCm pod with no torch in PYTHON=${PYTHON}"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite missing torch"
+    return 0
+  fi
+  local hip; hip="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('hip') or '')" "$probe" 2>/dev/null || echo "")"
+  local tv;  tv="$("$PYTHON"  -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('torch_version') or '')" "$probe" 2>/dev/null || echo "")"
+  if [ -z "$hip" ]; then
+    warn "torch=${tv} in PYTHON=${PYTHON} is NOT a ROCm build (torch.version.hip is None)"
+    warn "but this pod reports ROCm GPUs via rocm-smi. RAG-index / baseline / kernel"
+    warn "steps will crash at torch._C._cuda_init() with 'Found no NVIDIA driver'."
+    warn "Fixes (pick one):"
+    warn "  * use the canonical ROCm stack:   unset PYTHON; install.sh will pick /opt/venv"
+    warn "  * install the ROCm torch wheel:    \"\$PYTHON\" -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/rocm6.x"
+    warn "  * opt out of this gate:            INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 install.sh"
+    if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
+      die "refusing to install: torch=${tv} is CUDA-built on a ROCm pod"
+    fi
+    warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite torch/GPU mismatch"
+    return 0
+  fi
+  log "torch=${tv} (hip=${hip}) -- ROCm-compatible OK"
+}
+
+ensure_torch_compatible_with_gpu
 log "REPO_ROOT=${REPO_ROOT}"
 log "USER_DATA_PATH=${USER_DATA_PATH}"
 log "HYPERLOOM_RUNTIME_DIR=${HYPERLOOM_RUNTIME_DIR}"
@@ -117,6 +211,8 @@ log "HYPERLOOM_ROOT=${HYPERLOOM_ROOT}"
 log "KERNEL_AGENT_ROOT=${KERNEL_AGENT_ROOT}"
 log "KERNEL_AGENT_ENV=${KERNEL_AGENT_ENV}"
 log "MAGPIE_DIR=${MAGPIE_DIR}"
+log "INFERENCEX_REPO=${INFERENCEX_REPO}"
+log "INFERENCEX_DEFAULT_DIR=${INFERENCEX_DEFAULT_DIR}"
 export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
 export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Pre-create the writable runtime root so ensure_magpie / chain_kernel_agent
@@ -129,15 +225,30 @@ fi
 
 # pip --break-system-packages when PYTHON is the system interpreter
 # (e.g. bare ubuntu/debian image without a venv). Detect by comparing
-# sys.prefix vs sys.base_prefix; equal == not in venv.
+# sys.prefix vs sys.base_prefix; equal == not in venv. The flag was added
+# in pip 23.0.1; older pips reject it as an unknown option, so we probe
+# `pip install --break-system-packages --help` before adopting it.
 PIP_EXTRA=()
 if "$PYTHON" - <<'PY' 2>/dev/null
 import sys
 raise SystemExit(0 if sys.prefix == sys.base_prefix else 1)
 PY
 then
-  PIP_EXTRA=(--break-system-packages)
-  log "non-venv PYTHON; pip will use --break-system-packages"
+  if "$PYTHON" -m pip install --break-system-packages --help >/dev/null 2>&1; then
+    PIP_EXTRA=(--break-system-packages)
+    log "non-venv PYTHON; pip will use --break-system-packages"
+  else
+    pip_ver="$("$PYTHON" -m pip --version 2>&1 | awk '{print $2}')"
+    warn "non-venv PYTHON detected (PYTHON=${PYTHON}) but pip ${pip_ver}"
+    warn "is too old for --break-system-packages (requires >= 23.0.1)."
+    warn "Fixes (pick one):"
+    warn "  * use the canonical ROCm stack: unset PYTHON; install.sh will pick /opt/venv"
+    warn "  * create a venv:                python3 -m venv \"\$USER_DATA_PATH/venv\" \\"
+    warn "                                  && \"\$USER_DATA_PATH/venv/bin/python\" -m pip install -U pip wheel \\"
+    warn "                                  && export PYTHON=\"\$USER_DATA_PATH/venv/bin/python\""
+    warn "  * upgrade system pip:           \"\$PYTHON\" -m pip install --user -U 'pip>=23.0.1'"
+    die "refusing to run pip without a working --break-system-packages on a non-venv interpreter"
+  fi
 fi
 
 # --- 1. inference_optimizer + claude_agent_sdk via [test] ---
@@ -182,29 +293,98 @@ ensure_magpie() {
   fi
 }
 
-# --- 3. InferenceX detection ---
-ensure_inferencex() {
-  if [ -n "${INFERENCEX_PATH:-}" ] && [ -d "$INFERENCEX_PATH" ]; then
-    log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env)"
+# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts ---
+# Hyperloom bugs.md §C #1 (vllm_mi300x.sh / sglang_mi300x.sh sourced by a
+# leaked bash while a new Magpie subprocess is mid-`shutil.copy2` →
+# `syntax error near unexpected token 'fi'`). Magpie is invoked as a
+# subprocess, so monkey-patching from the Coordinator process does not
+# reach it; we patch the cloned source in place at install time. The
+# patcher itself is idempotent + flock-serialised + atomic-rename
+# (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
+#
+# Escalation: this is a known root-cause fix. A `False` return means
+# Magpie was refactored upstream and our pattern no longer matches; we
+# `die` so the operator notices instead of silently shipping a broken
+# install. Override the gate via PATCH_MAGPIE=0 for the (rare) case
+# where you've already landed an upstream PR locally.
+ensure_magpie_atomic_scripts_patch() {
+  if [ "${PATCH_MAGPIE:-1}" -eq 0 ]; then
+    log "PATCH_MAGPIE=0 — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
     return 0
   fi
-  for candidate in \
-      "$MAGPIE_DIR/InferenceX" \
-      "${HYPERLOOM_RUNTIME_DIR}/InferenceX" \
-      "/wekafs/hyperloom/InferenceX" \
-      "/opt/hyperloom/InferenceX" \
-      "/wekafs/fully-local/inference_optimization/InferenceX"
-  do
-    if [ -d "$candidate" ]; then
-      INFERENCEX_PATH="$candidate"
-      export INFERENCEX_PATH
-      log "INFERENCEX_PATH = $INFERENCEX_PATH"
-      return 0
-    fi
-  done
-  warn "InferenceX not found. GSM8K eval will fail without it. Set"
-  warn "INFERENCEX_PATH or clone https://github.com/SemiAnalysisAI/InferenceX"
-  warn "into \$MAGPIE_DIR/InferenceX."
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would apply Hyperloom #C1 atomic-write patch to ${MAGPIE_DIR}/Magpie/modes/benchmark/benchmarker.py"
+    return 0
+  fi
+  log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
+  MAGPIE_DIR="$MAGPIE_DIR" "$PYTHON" - <<'PY' || die "Magpie atomic-write patch failed; see warnings above. bugs.md §C #1 is NOT mitigated. Set PATCH_MAGPIE=0 to skip if you know what you are doing."
+import os, sys
+from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
+    ensure_magpie_atomic_scripts_patch,
+)
+ok = ensure_magpie_atomic_scripts_patch(os.environ["MAGPIE_DIR"])
+sys.exit(0 if ok else 1)
+PY
+  log "Magpie #C1 patch OK"
+}
+
+# --- 3. InferenceX checkout: fresh clone from upstream ---
+#
+# Previously this function scanned a list of shared-filesystem candidates
+# (`/wekafs/hyperloom/InferenceX`, `/wekafs/fully-local/.../InferenceX`,
+# etc.) and pointed every install at whichever it found first. That
+# multi-install / shared-checkout layout is the upstream source of the
+# concurrent-write races in bugs.md §C #1 — every fresh Magpie
+# subprocess `shutil.copy2`'d its scripts on top of the same shared
+# files, while bash interpreters from neighbouring installs were
+# `source`-ing them. Cloning a per-install copy here eliminates the
+# cross-install fan-in (Magpie's in-place atomic-write patch then
+# closes the intra-install race window — both fixes are needed; this
+# one alone is not sufficient).
+#
+# Policy:
+#   * INFERENCEX_PATH set and exists -> preserve verbatim. This is the
+#     dev / CI override (caller is explicitly opting out of fresh
+#     clones, e.g. iterating on a local edit).
+#   * Otherwise -> always `git clone --depth 1` from INFERENCEX_REPO
+#     into INFERENCEX_DEFAULT_DIR. If a clone already exists there from
+#     a previous install we leave it as-is (idempotent re-runs) — the
+#     per-install isolation guarantee is already met, and re-cloning
+#     would just churn benchmark scripts that the Magpie patch already
+#     keeps consistent on disk.
+#   * No SHA pin yet (deferred). We record whatever commit `git clone`
+#     resolves into the session manifest (see manifest.py) so failed
+#     runs can be reproduced.
+ensure_inferencex() {
+  if [ -n "${INFERENCEX_PATH:-}" ] && [ -d "$INFERENCEX_PATH" ]; then
+    log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env; skipping fresh clone)"
+    export INFERENCEX_PATH
+    return 0
+  fi
+  INFERENCEX_PATH="$INFERENCEX_DEFAULT_DIR"
+  if [ -d "$INFERENCEX_PATH/.git" ] || [ -d "$INFERENCEX_PATH/benchmarks" ]; then
+    log "InferenceX already cloned at ${INFERENCEX_PATH}; preserving existing checkout"
+    export INFERENCEX_PATH
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "InferenceX not present at ${INFERENCEX_PATH} (check-only mode, skipping clone)"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would: git clone --depth 1 ${INFERENCEX_REPO} ${INFERENCEX_PATH}"
+    export INFERENCEX_PATH
+    return 0
+  fi
+  log "cloning fresh InferenceX from ${INFERENCEX_REPO} -> ${INFERENCEX_PATH}"
+  mkdir -p "$(dirname "$INFERENCEX_PATH")"
+  if ! git clone --depth 1 "$INFERENCEX_REPO" "$INFERENCEX_PATH"; then
+    warn "InferenceX clone failed. GSM8K eval will fail without it. Set"
+    warn "INFERENCEX_PATH to a pre-cloned tree to skip this step."
+    return 0
+  fi
+  export INFERENCEX_PATH
+  log "InferenceX cloned at ${INFERENCEX_PATH}"
 }
 
 # --- 4. Chain to kernel-agent ---
@@ -235,6 +415,7 @@ chain_kernel_agent() {
 
 ensure_inference_optimizer
 ensure_magpie
+ensure_magpie_atomic_scripts_patch
 ensure_inferencex
 chain_kernel_agent
 
