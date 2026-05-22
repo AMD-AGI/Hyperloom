@@ -164,3 +164,31 @@ def test_grid_runner_emits_expected_error_class_labels():
     }
     missing = [label for label in expected if f'"{label}"' not in src]
     assert not missing, f"missing error_class labels in run_grid: {missing}"
+
+
+def test_variant_result_carries_error_class_field():
+    """The ``VariantResult`` dataclass MUST expose ``error_class`` so
+    ``to_dict()`` propagates the failure tag into the ``all_results``
+    blob the Coordinator consumes via
+    ``coordinator._summarize_failed_variants``. Without this field every
+    ``failed_variants[*].error_class`` lands as ``None`` (PR-2 cosmetic
+    gap observed in sccjr's first round)."""
+    vr = _grid_runner.VariantResult(
+        name="x",
+        extra_sglang_args="--foo",
+        extra_envs={},
+        status="failed",
+        error="boom",
+        error_class="mn_server_restart_failed",
+    )
+    d = vr.to_dict()
+    assert d["error_class"] == "mn_server_restart_failed"
+    assert d["status"] == "failed"
+
+    # Default for succeeded variants is empty string (not None) — matches
+    # the dataclass declaration so the dict shape is uniform across
+    # success / failure rows.
+    vr_ok = _grid_runner.VariantResult(
+        name="ok", extra_sglang_args="", extra_envs={}, status="succeeded",
+    )
+    assert vr_ok.to_dict()["error_class"] == ""
