@@ -310,31 +310,6 @@ def _validate_review_verdict_payload(
                 )
 
 
-def parse_codex_validated_json(raw: str) -> list[Intent]:
-    """Codex transport — single JSON object containing one envelope."""
-    try:
-        envelope = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise IntentValidationError(f"codex json parse error: {exc}", raw=raw) from exc
-    return validate_envelope(envelope)
-
-
-def parse_claude_tool_calls(tool_uses: list[dict[str, Any]]) -> list[Intent]:
-    """Claude transport — gather every ``emit_intent`` tool_use into intents."""
-    items: list[dict[str, Any]] = []
-    for use in tool_uses:
-        if use.get("name") != EMIT_INTENT_TOOL_SCHEMA["name"]:
-            continue
-        inp = use.get("input") or {}
-        items.append({
-            "intent_type": inp.get("intent_type"),
-            "payload": inp.get("payload") or {},
-        })
-    if not items:
-        raise NoIntentEmitted("no emit_intent tool_use blocks in Claude reply")
-    return validate_envelope({"intents": items})
-
-
 __all__ = [
     "EMIT_INTENT_TOOL_SCHEMA",
     "INTENT_ENVELOPE_SCHEMA",
@@ -342,7 +317,5 @@ __all__ = [
     "IntentType",
     "IntentValidationError",
     "NoIntentEmitted",
-    "parse_claude_tool_calls",
-    "parse_codex_validated_json",
     "validate_envelope",
 ]
