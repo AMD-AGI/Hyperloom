@@ -15,7 +15,7 @@ yaml: §3.5 §5 says "domain 是 prompt 装配维度, 不是新 IntentType, 不�
 新 Role" — adding a domain is a one-line change here plus a prompt
 template entry in ``specialist_prompt_builder.py``.
 
-M5 ships only ``framework_specialist`` (per §3.13 M5 §2 scope); the
+M5 ships only ``serving_specialist`` (per §3.13 M5 §2 scope); the
 other five (kernel/comm/compiler/system/pr_intel) are listed here so
 PolicyGate R2 already knows their identifiers but the prompt builder
 falls back to a *generic* template until M6 lands per-domain prompts.
@@ -29,7 +29,7 @@ Field reference (KB_design §3.5 §5):
   assembly (M4/M5).
 * ``pr_repos`` — repos the PR Monitor (M4) should pull recent PRs from
   for this domain.
-* ``available_in`` — ``"M5"`` for framework_specialist, ``"M6"`` for the
+* ``available_in`` — ``"M5"`` for serving_specialist, ``"M6"`` for the
   others; PolicyGate R2 currently accepts both groups but
   SpecialistRunner falls back to the generic template for M6-only
   domains until the M6 prompt PR lands.
@@ -55,7 +55,7 @@ class SpecialistDomain:
 # `specialist_unknown_domain` rule reads this set.
 SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
     SpecialistDomain(
-        key="framework_specialist",
+        key="serving_specialist",
         layer="sglang / vllm scheduler / cuda_graph / kv_cache",
         kb_anchor="framework",
         pr_repos=("sgl-project/sglang", "ROCm/vllm"),
@@ -66,7 +66,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         ),
     ),
     SpecialistDomain(
-        key="kernel_specialist",
+        key="kernel_switch_specialist",
         layer="aiter / sglang kernels / triton",
         kb_anchor="kernel",
         pr_repos=("ROCm/aiter", "triton-lang/triton"),
@@ -130,7 +130,7 @@ SPECIALIST_DOMAIN_KEYS: frozenset[str] = frozenset(
 
 # M5 active set — domains whose prompt templates are fully wired
 # in the specialist_prompt_builder. PR-A6 (Arbor-into-Hyperloom)
-# added per-domain focus templates for ``kernel_specialist`` /
+# added per-domain focus templates for ``kernel_switch_specialist`` /
 # ``comm_specialist`` / ``compiler_specialist`` / ``system_specialist`` /
 # ``pr_intel_specialist`` (previously M6-only fallbacks), so the M5
 # active set now matches the catalogue and Orchestration can dispatch
