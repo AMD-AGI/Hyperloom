@@ -2356,22 +2356,11 @@ class SharedState:
         file on disk; only the in-memory string injected into the
         LLM prompt is modified. The on-disk file remains intact for
         operator inspection.
+        Implementation lives in ``inference_optimizer.tracelens_md``.
         """
-        if not text or "data:image/" not in text:
-            return text
-        # Match `![<alt>](data:image/<type>;base64,<payload>)` greedily
-        # against the closing `)`. The payload itself is base64 so it
-        # only contains [A-Za-z0-9+/=] and never the closing paren,
-        # which makes the non-greedy `[^)]*` safe.
-        pattern = re.compile(
-            r"!\[(?P<alt>[^\]]*)\]\(data:image/[^;]+;base64,[^)]+\)"
-        )
+        from inference_optimizer.tracelens_md import strip_base64_data_urls
 
-        def _sub(match: "re.Match[str]") -> str:
-            alt = match.group("alt") or "image"
-            return f"![{alt}](<<stripped: base64 image — {alt}>>)"
-
-        return pattern.sub(_sub, text)
+        return strip_base64_data_urls(text)
 
     def _format_analysis_md_full(self) -> str:
         """Roofline-v2 N5: inject TraceLens analysis.md verbatim into
