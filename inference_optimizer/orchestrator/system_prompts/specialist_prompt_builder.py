@@ -56,7 +56,7 @@ _NONE_PLACEHOLDER = "(none)"
 # ---------------------------------------------------------------------------
 
 
-def _focus_framework_specialist(inp: SpecialistPromptInputs) -> list[str]:
+def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
     return [
         "You target **vLLM / SGLang scheduler / cuda_graph / kv_cache** code.",
         "",
@@ -79,7 +79,7 @@ def _focus_framework_specialist(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
-def _focus_kernel_specialist(inp: SpecialistPromptInputs) -> list[str]:
+def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
     return [
         "You target **aiter / SGLang kernels / triton** code (attention,",
         "MoE, GEMM, fused-attention paths).",
@@ -185,7 +185,7 @@ def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "  touched, NVIDIA equivalent if any).",
         "- Surface as ``proposal_set`` entries where ``provenance`` = research",
         "  and ``pr_evidence`` is non-empty. Do NOT propose source patches",
-        "  yourself — that's the kernel / framework specialist's job once",
+        "  yourself — that's the kernel-switch / serving specialist's job once",
         "  they read your PR list.",
         "",
         "**Pitfalls**",
@@ -199,8 +199,8 @@ def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
 _DOMAIN_FOCUS_TEMPLATES: dict[
     str, "Callable[[SpecialistPromptInputs], list[str]]"
 ] = {
-    "framework_specialist": _focus_framework_specialist,
-    "kernel_specialist":    _focus_kernel_specialist,
+    "serving_specialist": _focus_serving_specialist,
+    "kernel_switch_specialist":    _focus_kernel_switch_specialist,
     "comm_specialist":      _focus_comm_specialist,
     "compiler_specialist":  _focus_compiler_specialist,
     "system_specialist":    _focus_system_specialist,

@@ -922,8 +922,8 @@ LLM prompt 决定, 不在系统侧建固定 taxonomy). 但为了让 PolicyGate +
 Cortex KB 能按 domain 分流, Coordinator 维护一份 *运行时* specialist
 domain 清单, 至少包含:
 
-- `kernel_specialist` — 关心 attention / MoE / GEMM / fusion
-- `framework_specialist` — sglang / vllm 调度器、cuda_graph、kv_cache
+- `kernel_switch_specialist` — 关心 attention / MoE / GEMM / fusion
+- `serving_specialist` — sglang / vllm 调度器、cuda_graph、kv_cache
 - `comm_specialist` — RCCL / NCCL / QuickReduce / AllReduce 算法
 - `compiler_specialist` — torch.compile / inductor / triton / AMDGCN
 - `system_specialist` — KFD / driver / 内存碎片 / dispatch overhead
@@ -1266,7 +1266,7 @@ v0.6 → v0.8 不是单 PR, 按下表分阶段推进, 每阶段独立可发布:
 | **M2: phase 状态机 + scoreboard 砍除** | 引入 5-phase 管线, PolicyGate 加 phase 兼容性, SharedState 加 phase / phase_history, 删除 action_scores, prompt 删除 scoreboard | v0.6 老 yaml session 能 resume; phase 自动推进; 不再依赖 MARATHON_PRIORS 也能跑完整 loop |
 | **M3: explore 合并** | 新增 explore action / explore_search ledger; 老 backends/params 降级为内部 mode; ledger 迁移逻辑 | 单次 EXPLORE 跑出与 v0.6 同等吞吐, breakdown 显示统一 explore 行 |
 | **M4: PR Monitor 接入** | KnowledgePlane 抽象; specialist 注入 PR MCP; Coordinator 预热 pr_feed; cortex pr_node 写回 | specialist prompt 中能看到 pr_feed; Cortex 中 pr_node + url evidence 能查到 |
-| **M5: Specialist 框架(MVP)** | 新 sub-agent runner 类型; research_lane(单容量起步); 一类 specialist (`framework_specialist`) 跑通 | EXPLORE 中能并发出 1 个 specialist + 1 个 explore executor, 不抢锁 |
+| **M5: Specialist 框架(MVP)** | 新 sub-agent runner 类型; research_lane(单容量起步); 一类 specialist (`serving_specialist`) 跑通 | EXPLORE 中能并发出 1 个 specialist + 1 个 explore executor, 不抢锁 |
 | **M6: Specialist 多 domain + 并发** | research_lane 容量提到 6; 6 类 specialist 全部接入; dispatcher per-lane 并发 | EXPLORE 中并发 N 个 specialist (N≤研究 lane 容量), serial integrate 不变 |
 | **M7: SWEEP / KERNEL 收敛 + plateau 调参** | plateau 阈值字段, escalate_strategy_change 软退路径, robustness specialist 探活 | 整段端到端跑完会自然进入 SWEEP 然后 CLOSE, breakdown 中 phase_history 完整 |
 
