@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Robustness monitor for long-running ``inference_optimizer optimize`` runs.
+#
+# Polls ``$INFERENCE_OPTIMIZER_SESSION_DIR/state.json`` every 300s. On a
+# terminal ``stop_reason`` (``target_reached`` / ``no_more_leverage`` /
+# ``time_exhausted`` / ``max_ticks``), exits 0. If the optimizer process has
+# disappeared from ``/proc`` (crashed / killed), re-launches it with
+# ``--resume`` and updates ``$PID_FILE`` with the new pid. Logs the
+# resume invocation to ``$REPO_ROOT/optimizer_runs/resume_<ts>.log``.
+#
+# Required env (caller MUST export):
+#   PID_FILE        path to the optimizer's pidfile; rewritten on each resume
+#   REPO_ROOT       Hyperloom checkout root; resume logs land in
+#                   ``$REPO_ROOT/optimizer_runs/resume_<timestamp>.log``
+#
+# Optional env (defaults shown):
+#   MAX_HOURS                          24    deadline (this watchdog exits
+#                                            after MAX_HOURS + 1 buffer)
+#   TARGET_GAIN                        10    --target-gain forwarded to
+#                                            ``inference_optimizer optimize --resume``
+#   INFERENCE_OPTIMIZER_SESSION_DIR    /workspace/hyperloom
+#                                            session-dir holding state.json
+#   MAGPIE_PYTHON                      /opt/venv/bin/python
+#                                            interpreter forwarded to the
+#                                            resume launch
+#
+# Invocation pattern (see ``inference_optimizer/SKILL.md`` §"Robustness
+# Monitor for Long Runs"):
+#
+#   export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
+#   mkdir -p "$RUN_DIR"
+#   cp "$REPO_ROOT/optimizer_runs/robustness_monitor.sh.example" \
+#      "$RUN_DIR/robustness_monitor.sh"
+#   chmod +x "$RUN_DIR/robustness_monitor.sh"
+#   setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
+#     > "$RUN_DIR/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
+#     2>&1 < /dev/null &
+#
+# Edit the defaults above before copying if your run uses different
+# values. The ``stop_reason`` interpretation matches the ``Monitoring``
+# section of SKILL.md (same terminal-state set).
+
+set -u
+
+# Required envs — fail early with a clear message instead of a generic
+# "unbound variable" cascade further down.
+# (NOTE: avoid apostrophes inside the :? text; bash tracks quote state
+# through parameter-expansion default values and would treat them as
+# unmatched single-quote openers.)
+: "${PID_FILE:?error: PID_FILE must point at the optimizer pidfile (set before invoking robustness_monitor.sh)}"
+: "${REPO_ROOT:?error: REPO_ROOT must be the Hyperloom checkout root (resume logs land in \$REPO_ROOT/optimizer_runs/)}"
+
+export MAGPIE_PYTHON="${MAGPIE_PYTHON:-/opt/venv/bin/python}"
+session_dir="${INFERENCE_OPTIMIZER_SESSION_DIR:-/workspace/hyperloom}"
+deadline=$(( $(date +%s) + (${MAX_HOURS:-24} + 1) * 3600 ))
+
+read_stop() {
+  python3 -c "import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); print((json.loads(p.read_text()).get('stop_reason') or '').strip() if p.exists() else '')" "$session_dir/state.json"
+}
+
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  pid=""
+  [ -f "$PID_FILE" ] && read -r pid < "$PID_FILE" || true
+
+  case "$(read_stop)" in
+    target_reached|no_more_leverage|time_exhausted|max_ticks)
+      echo "[robustness] terminal $(date -Is)"
+      exit 0
+      ;;
+  esac
+
+  if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+    sleep 300
+    continue
+  fi
+
+  echo "[robustness] optimizer stopped; resuming $(date -Is)"
+  resume_log="$REPO_ROOT/optimizer_runs/resume_$(date +%Y%m%d_%H%M%S).log"
+  MAGPIE_PYTHON="${MAGPIE_PYTHON}" setsid nohup inference_optimizer --verbose optimize --resume \
+    --target-gain "${TARGET_GAIN:-10}" --max-hours "${MAX_HOURS:-24}" \
+    --tick-interval-sec 30 --kernel-claude \
+    > "$resume_log" 2>&1 < /dev/null &
+  echo $! > "$PID_FILE"
+  sleep 300
+done
