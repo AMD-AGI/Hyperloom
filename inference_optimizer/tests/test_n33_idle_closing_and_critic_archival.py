@@ -199,14 +199,22 @@ async def test_silent_ticks_reset_on_pending_proposal(session_dir, monkeypatch):
 # ---------------------------------------------------------------------------
 def test_critic_md_carves_out_archival_actions():
     """Critic prompt must explicitly approve archival actions so the
-    LLM's ``report`` proposals never bounce."""
+    LLM's ``report`` proposals never bounce. The wording moved under
+    a structured Archival/Exploration bullet pair in N35; this test
+    pins the action names + the "always approve" semantics regardless
+    of the exact phrasing."""
     path = (
         Path(__file__).resolve().parent.parent
         / "orchestrator" / "system_prompts" / "critic.md"
     )
     text = path.read_text(encoding="utf-8")
-    assert "archival actions" in text.lower()
+    assert "Archival" in text, "expected an Archival bullet header"
     assert "`report`" in text
     assert "`session_breakdown`" in text
     assert "`target_analysis`" in text
-    assert "Always `approve` archival actions" in text
+    # The carve-out must say "always approve" in some form so future
+    # readers can't argue the rule is conditional.
+    lowered = text.lower()
+    assert "always `approve`" in lowered or "always approve" in lowered, (
+        "expected the carve-out to state 'always approve' archival actions"
+    )

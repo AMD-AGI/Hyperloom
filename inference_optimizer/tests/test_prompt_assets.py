@@ -64,7 +64,11 @@ def test_critic_md_is_rules_fragment():
     assert p.is_file(), f"missing critic rules fragment: {p}"
     text = p.read_text(encoding="utf-8")
     lines = [ln for ln in text.splitlines() if ln.strip()]
-    assert len(lines) <= 30, (
+    # Cap bumped from 30 → 45 by N35 (May 2026) to fit the structured
+    # archival + exploration carve-out bullets that name every action
+    # currently exempt from the before/after benchmark gate. Future
+    # bumps require equivalent justification (a new action class).
+    assert len(lines) <= 45, (
         f"critic.md should be a concise fragment, got {len(lines)} non-empty lines"
     )
     assert "judge_bundle" in text
