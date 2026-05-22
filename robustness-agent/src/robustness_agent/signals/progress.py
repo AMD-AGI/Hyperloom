@@ -181,6 +181,30 @@ class ProgressDetector:
             # Validated gain exists even though stack count is 0 — odd
             # but not our problem; let it be.
             return None
+        # PR-B Fix 2: do not claim "no lever" while kernel_opt is in
+        # flight or its KEEP queue is waiting to integrate.
+        #
+        # The Qwen3-30B-A3B-Base session (20260522T093903Z) burned a
+        # 4.13x KEEP because the previous version of this signal only
+        # looked at optimization_stack_size + cumulative_gain. While a
+        # long GEAK batch was running (90min wall clock), stack_size=0
+        # and cumulative_gain=0 were both true, and the signal pushed
+        # Orch toward early ``report`` despite a valid lever sitting on
+        # disk waiting for integrate.
+        if snap.kernel_opt_attempts_count > 0:
+            # At least one kernel_opt run has landed on disk this
+            # session. Even if it didn't (yet) move the stack, that's
+            # not "no lever found" -- it's "lever in flight" or
+            # "lever rejected by integrate", both of which have their
+            # own dedicated signals (kernel_opt_no_progress, etc).
+            return None
+        if snap.has_keep_pending_integrate:
+            # Multi-KEEP queue is non-empty. Coordinator's integrate
+            # gate will drive the next tick into ``integrate``, which
+            # will either grow optimization_stack (KEEP path) or fire
+            # its own REVERT signal. Either way, ``no_levers`` is
+            # the wrong call here.
+            return None
         if snap.elapsed_minutes < cfg.no_levers_min_minutes:
             return None
         if snap.tick < cfg.no_levers_min_ticks:
@@ -198,6 +222,8 @@ class ProgressDetector:
                 "tick": snap.tick,
                 "optimization_stack_size": 0,
                 "cumulative_gain_validated": snap.cumulative_gain_validated,
+                "kernel_opt_attempts_count": snap.kernel_opt_attempts_count,
+                "has_keep_pending_integrate": snap.has_keep_pending_integrate,
                 "min_observation_minutes": cfg.no_levers_min_minutes,
                 "min_observation_ticks": cfg.no_levers_min_ticks,
             },
