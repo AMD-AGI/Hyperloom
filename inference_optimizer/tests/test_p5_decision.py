@@ -242,7 +242,7 @@ async def test_run_optimization_response_records_to_shared_state(
         c.shared_state.save(session_dir)
         # Stub the handler so we don't shell out.
         from inference_optimizer.orchestrator import kernel_request_handlers
-        async def fake(payload, *, session_dir):
+        async def fake(payload, *, session_dir, **kwargs):
             return {
                 "status": "ok",
                 "kernel_id": "k006",
