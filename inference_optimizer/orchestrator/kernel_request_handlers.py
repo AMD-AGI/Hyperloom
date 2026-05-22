@@ -622,6 +622,22 @@ async def select_kernels_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
+    # Load the materialized baseline workload metadata once. Used twice:
+    # (1) here to feed CONC / OSL / RANDOM_RANGE_RATIO into the splitter
+    #     CLI flags (`--split-conc` / `--split-osl` / `--split-r`) so
+    #     TraceLens.TraceUtils.split_inference_trace_annotation picks the
+    #     correct steady-state window — without these the splitter falls
+    #     back to in-trace heuristics that can yield 0 chunks
+    #     (`trace_split_no_steady_state`) and collapse the whole
+    #     select_kernels / kernel_opt / integrate chain.
+    # (2) downstream below to enrich result.hot_kernels and the
+    #     kernel_candidates artifact with the same runtime context.
+    metadata = _load_materialized_workload_metadata(state.baseline_config_path)
+    workload = (
+        metadata.get("runtime_args", {}).get("workload", {})
+        if isinstance(metadata, dict) else {}
+    )
+
     cmd = [
         "python3",
         str(_kernel_agent_tool_path("tracelens_analysis.py")),
@@ -638,6 +654,28 @@ async def select_kernels_handler(
         cmd += ["--target-platform", str(target_platform)]
     if analysis_mode:
         cmd += ["--analysis-mode", str(analysis_mode)]
+
+    # Splitter workload hints. Priority chain: payload (explicit
+    # operator/critic override) > materialized baseline metadata > drop
+    # the flag entirely so tracelens_analysis.py keeps its existing env
+    # fallback (TRACELENS_SPLIT_* / CONC / OSL / RANDOM_RANGE_RATIO).
+    # Without these, the splitter has historically had to guess the
+    # mixed-window selection's PD ratio from heuristics; on workloads
+    # where heuristics miss, all three steady-state windows come back
+    # empty and `select_kernels` returns
+    # ``status=failed error=trace_split_no_steady_state``, blocking the
+    # entire kernel-optimization chain (select_kernels -> kernel_opt ->
+    # integrate -> operator_tuning -> deep_kernel_analysis).
+    split_conc = payload.get("split_conc") or workload.get("conc")
+    if split_conc not in (None, ""):
+        cmd += ["--split-conc", str(split_conc).strip()]
+    split_osl = payload.get("split_osl") or workload.get("osl")
+    if split_osl not in (None, ""):
+        cmd += ["--split-osl", str(split_osl).strip()]
+    split_r = payload.get("split_r") or workload.get("random_range_ratio")
+    if split_r not in (None, ""):
+        cmd += ["--split-r", str(split_r).strip()]
+
     capture_folder = (
         payload.get("capture_folder")
         or payload.get("graph_capture_path")
@@ -707,7 +745,9 @@ async def select_kernels_handler(
         # a ``None``-guard. Empty list = steady-state ("nothing wrong").
         result.setdefault("trace_health_warnings", [])
 
-        metadata = _load_materialized_workload_metadata(state.baseline_config_path)
+        # ``metadata`` was loaded once at the top of the handler so both
+        # the splitter CLI hints and the downstream candidate enrichment
+        # see the same materialized baseline workload state.
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
         candidates_path = result.get("candidates_path")
         if isinstance(candidates_path, str):
