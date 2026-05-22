@@ -90,7 +90,7 @@ def _make_fake_claude(
     script_path = bin_dir / "claude"
     payload_json = json.dumps(payload or {
         "gap_canonical_id": "gap.test.example",
-        "domain": "framework_specialist",
+        "domain": "serving_specialist",
         "proposal_set": [{
             "name": "fake_variant", "extra_args": "--fake",
             "extra_envs": {}, "reason": "fake",
@@ -128,7 +128,7 @@ exit 0
         patch_payload = json.dumps({
             **(payload or {}),
             "gap_canonical_id": "gap.test.example",
-            "domain": "framework_specialist",
+            "domain": "serving_specialist",
             "proposal_set": [{
                 "name": "patched_variant", "extra_args": "",
                 "extra_envs": {}, "reason": "see patch",
@@ -175,7 +175,7 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
         kind="specialist",
         state="queued",
         params={
-            "domain": "framework_specialist",
+            "domain": "serving_specialist",
             "gap_canonical_id": "gap.test.example",
             "max_turns": 2,
         },
@@ -300,7 +300,7 @@ async def test_subprocess_path_harvests_done_file(
 
     assert result.status == "succeeded"
     assert result.specialist_done["empty"] is False
-    assert result.specialist_done["domain"] == "framework_specialist"
+    assert result.specialist_done["domain"] == "serving_specialist"
     # Workspace + done.json + worktree exist on disk
     workspace = session_dir / "runs" / "specialist" / "t-spec-done"
     assert (workspace / "specialist_done.json").exists()

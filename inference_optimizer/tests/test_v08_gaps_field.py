@@ -78,7 +78,7 @@ def test_gaps_field_roundtrip_through_state_json(tmp_path):
             "symptom": "MoE routing overhead dominates",
             "layer": "kernel",
             "severity": "high",
-            "domain_hint": "kernel_specialist",
+            "domain_hint": "kernel_switch_specialist",
             "source": "baseline",
             "first_seen_ts": "2025-01-01T00:00:00+00:00",
             "last_updated_ts": "2025-01-01T00:00:00+00:00",
@@ -307,7 +307,7 @@ async def test_refresh_gaps_seeds_throughput_gap_from_baseline(coord):
     gap = matches[0]
     assert gap["layer"] == "framework"
     assert gap["severity"] == "high"  # 12% gap → high severity
-    assert gap["domain_hint"] == "framework_specialist"
+    assert gap["domain_hint"] == "serving_specialist"
     assert gap["source"] == "baseline"
 
 
@@ -369,7 +369,7 @@ async def test_refresh_gaps_emits_explore_plateau_after_streak(coord):
         g for g in s.gaps if g["canonical_id"].endswith("#explore_plateau")
     ]
     assert plateau, "explore_plateau gap missing"
-    assert plateau[0]["domain_hint"] == "framework_specialist"
+    assert plateau[0]["domain_hint"] == "serving_specialist"
 
 
 @pytest.mark.asyncio
@@ -438,13 +438,13 @@ def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
         "symptom": "MoE routing overhead",
         "layer": "kernel",
         "severity": "high",
-        "domain_hint": "kernel_specialist",
+        "domain_hint": "kernel_switch_specialist",
     })
     s.append_gap_attempt("issue.moe.routing", {
         "action": "explore", "variant_name": "moe_x", "outcome": "REVERT",
     })
     params: dict[str, Any] = {
-        "domain": "kernel_specialist",
+        "domain": "kernel_switch_specialist",
         "gap_canonical_id": "issue.moe.routing",
     }
     coord._warm_specialist_params(params)
@@ -476,12 +476,12 @@ def test_warm_specialist_params_noop_when_gap_unknown(coord):
     """Unknown ``gap_canonical_id`` must not clobber existing params
     (no silent reset of ``domain`` / ``gap_symptom``)."""
     params: dict[str, Any] = {
-        "domain": "framework_specialist",
+        "domain": "serving_specialist",
         "gap_canonical_id": "issue.unknown",
         "gap_symptom": "preset",
     }
     coord._warm_specialist_params(params)
-    assert params["domain"] == "framework_specialist"
+    assert params["domain"] == "serving_specialist"
     assert params["gap_symptom"] == "preset"
 
 
@@ -516,7 +516,7 @@ async def test_refresh_gaps_merges_cortex_traverse_rows(coord):
             "symptom": "prior session refuted fp8 kv at bs=256",
             "layer": "kernel",
             "severity": "medium",
-            "domain_hint": "kernel_specialist",
+            "domain_hint": "kernel_switch_specialist",
         },
     ])
     coord.shared_state.baseline_tput = 900.0

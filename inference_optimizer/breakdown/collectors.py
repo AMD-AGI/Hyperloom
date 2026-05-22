@@ -2816,7 +2816,7 @@ def _collect_phase_breakdown(
             "explore": {
                 "total_gain_pct": 18.4,
                 "by_domain": {
-                    "framework_specialist": 9.7,
+                    "serving_specialist": 9.7,
                     "default_grid":         2.5,
                     ...
                 },

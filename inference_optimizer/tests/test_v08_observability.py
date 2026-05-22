@@ -54,7 +54,7 @@ def _specialist_round(round_id: int = 1, **extras) -> dict:
         "round_id":          round_id,
         "dispatched_at":     "2025-01-01T00:00:00Z",
         "completed_at":      "2025-01-01T00:01:00Z",
-        "domains":           ["kernel_specialist"],
+        "domains":           ["kernel_switch_specialist"],
         "parallelism":       1,
         "proposals_total":   3,
         "proposals_kept":    1,
@@ -63,13 +63,13 @@ def _specialist_round(round_id: int = 1, **extras) -> dict:
         "kb_edge_ids":       ["edge-1"],
         "confidence_avg":    0.7,
         "domain_breakdown": {
-            "kernel_specialist": {
+            "kernel_switch_specialist": {
                 "dispatched": 1, "proposals_total": 3,
                 "proposals_kept": 1, "proposals_rejected": 1,
             },
         },
         "task_ids":     ["t-abc"],
-        "task_domains": {"t-abc": "kernel_specialist"},
+        "task_domains": {"t-abc": "kernel_switch_specialist"},
         "notes":        [],
     }
     base.update(extras)
@@ -156,7 +156,7 @@ def test_specialist_runs_populated_from_state(tmp_path):
     # written; the round-merge still runs).
     assert entry["transcripts"] == []
     # Domain breakdown round-trips with int normalisation.
-    breakdown_ks = entry["domain_breakdown"]["kernel_specialist"]
+    breakdown_ks = entry["domain_breakdown"]["kernel_switch_specialist"]
     assert breakdown_ks == {
         "dispatched": 1, "proposals_total": 3,
         "proposals_kept": 1, "proposals_rejected": 1,
@@ -180,7 +180,7 @@ def test_specialist_runs_attaches_transcript_path_when_present(tmp_path):
     refs = b["specialist_runs"][0]["transcripts"]
     assert len(refs) == 1
     assert refs[0]["task_id"] == "t-abc"
-    assert refs[0]["domain"] == "kernel_specialist"
+    assert refs[0]["domain"] == "kernel_switch_specialist"
     assert refs[0]["path"].endswith("specialist_done.json")
     assert "body" not in refs[0]
 

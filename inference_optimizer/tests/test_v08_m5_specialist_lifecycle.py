@@ -141,7 +141,7 @@ def coord(tmp_path: Path):
 
 def _done_payload(
     *,
-    domain: str = "framework_specialist",
+    domain: str = "serving_specialist",
     gap: str = "gap.attention.fp8_kv",
     proposals: list | None = None,
     empty: bool = False,
@@ -179,7 +179,7 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
     task = _StubTask(task_id="task-1", params={})
     coord.tasks.register(task)
 
-    payload = _done_payload(domain="framework_specialist")
+    payload = _done_payload(domain="serving_specialist")
     await coord._record_specialist_result(
         task=task,
         done_payload=payload,
@@ -190,18 +190,18 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
     assert len(state.specialist_rounds) == 1
     row = state.specialist_rounds[0]
     assert row["task_id"] == "task-1"
-    assert row["domain"] == "framework_specialist"
+    assert row["domain"] == "serving_specialist"
     assert row["gap_canonical_id"] == "gap.attention.fp8_kv"
     assert row["empty"] is False
     assert row["proposals_total"] == 1
     assert row["round_id"] == "task-1"  # default fallback
     # Non-empty → streak reset.
-    assert state.specialist_domain_empty_streak.get("framework_specialist", 0) == 0
+    assert state.specialist_domain_empty_streak.get("serving_specialist", 0) == 0
     # last_specialist mirror updated.
     assert state.last_specialist["task_id"] == "task-1"
     assert state.last_specialist["empty"] is False
     assert state.last_specialist["proposals_total"] == 1
-    assert state.last_specialist["domain"] == "framework_specialist"
+    assert state.last_specialist["domain"] == "serving_specialist"
     # SharedState.save fired.
     assert state.saved == 1
     # Observation event fired with the right kind.
@@ -217,7 +217,7 @@ async def test_record_specialist_result_empty_proposal_set_bumps_streak(coord):
     task = _StubTask(task_id="task-empty-1", params={})
     coord.tasks.register(task)
 
-    payload = _done_payload(empty=True, domain="kernel_specialist")
+    payload = _done_payload(empty=True, domain="kernel_switch_specialist")
     await coord._record_specialist_result(
         task=task,
         done_payload=payload,
@@ -227,7 +227,7 @@ async def test_record_specialist_result_empty_proposal_set_bumps_streak(coord):
     state: _StubSharedState = coord.shared_state
     assert len(state.specialist_rounds) == 1
     assert state.specialist_rounds[0]["empty"] is True
-    assert state.specialist_domain_empty_streak.get("kernel_specialist") == 1
+    assert state.specialist_domain_empty_streak.get("kernel_switch_specialist") == 1
     assert state.last_specialist["empty"] is True
 
 
@@ -265,9 +265,9 @@ async def test_record_specialist_result_per_domain_streak_independent(coord):
     state: _StubSharedState = coord.shared_state
 
     for tid, dom in [
-        ("t-fw-1", "framework_specialist"),
-        ("t-kn-1", "kernel_specialist"),
-        ("t-fw-2", "framework_specialist"),
+        ("t-fw-1", "serving_specialist"),
+        ("t-kn-1", "kernel_switch_specialist"),
+        ("t-fw-2", "serving_specialist"),
     ]:
         t = _StubTask(task_id=tid, params={})
         coord.tasks.register(t)
@@ -277,8 +277,8 @@ async def test_record_specialist_result_per_domain_streak_independent(coord):
             source=f"{SPECIALIST_FROM_AGENT_PREFIX}{tid}",
         )
 
-    assert state.specialist_domain_empty_streak["framework_specialist"] == 2
-    assert state.specialist_domain_empty_streak["kernel_specialist"] == 1
+    assert state.specialist_domain_empty_streak["serving_specialist"] == 2
+    assert state.specialist_domain_empty_streak["kernel_switch_specialist"] == 1
 
 
 @pytest.mark.asyncio
@@ -320,7 +320,7 @@ async def test_handle_specialist_done_routes_known_task(coord):
 
     intent = Intent(
         type=IntentType.SPECIALIST_DONE,
-        payload=_done_payload(domain="framework_specialist"),
+        payload=_done_payload(domain="serving_specialist"),
     )
     await coord._handle_specialist_done(
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-route",
@@ -339,7 +339,7 @@ async def test_handle_specialist_done_unknown_task_logs_and_skips(coord, caplog)
     bookkeeping — no ledger row, no streak bump."""
     intent = Intent(
         type=IntentType.SPECIALIST_DONE,
-        payload=_done_payload(domain="framework_specialist"),
+        payload=_done_payload(domain="serving_specialist"),
     )
     await coord._handle_specialist_done(
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}unknown-id",
@@ -404,7 +404,7 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
         params={"round_id": "round-9"},
     )
     payload = _done_payload(
-        domain="framework_specialist",
+        domain="serving_specialist",
         proposals=[
             {"variant_name": "v1"},
             {"variant_name": "v2"},
@@ -473,7 +473,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
 
     # Specialist plan: emit a single SPECIALIST_DONE intent on turn 1.
     done_payload = _done_payload(
-        domain="framework_specialist",
+        domain="serving_specialist",
         proposals=[
             {
                 "variant_name": "moe_exp_par",
@@ -539,7 +539,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             kind="specialist",
             state="queued",
             params={
-                "domain": "framework_specialist",
+                "domain": "serving_specialist",
                 "gap_canonical_id": "gap.attention.fp8_kv",
                 "max_turns": 4,
                 "pr_feed": [],
@@ -563,15 +563,15 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         "dispatcher hook should have triggered record_specialist_round"
     )
     row = coord.shared_state.specialist_rounds[0]
-    assert row["domain"] == "framework_specialist"
+    assert row["domain"] == "serving_specialist"
     assert row["proposals_total"] == 1
     assert row["empty"] is False
     # Streak reset (non-empty).
     assert coord.shared_state.specialist_domain_empty_streak.get(
-        "framework_specialist", -1
+        "serving_specialist", -1
     ) == 0
     # last_specialist mirror populated.
-    assert coord.shared_state.last_specialist.get("domain") == "framework_specialist"
+    assert coord.shared_state.last_specialist.get("domain") == "serving_specialist"
     # Transcript artefacts on disk (from Gap-01's runner path).
     workspace = session_dir / "runs" / "specialist"
     assert workspace.exists()
