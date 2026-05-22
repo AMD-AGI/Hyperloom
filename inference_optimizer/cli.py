@@ -437,11 +437,27 @@ def _build_backends(
             raise ValueError(
                 "_build_backends: critic_choice='agent' requires critic_agent_root"
             )
+        # N38 (May 2026) — feed the registry-derived per-action
+        # verdict policy so the critic-agent runtime sees
+        # ``review_constraints.action_verdict_policy[<action_name>]``
+        # and approves exploration / archival actions without
+        # demanding the before/after evidence they themselves produce.
+        # Replaces the prompt-hardcoded carve-out lists N33/N35/N37
+        # had to patch one action at a time.
+        try:
+            from inference_optimizer.orchestrator.action_registry import (
+                ActionRegistry,
+            )
+            _reg = ActionRegistry().load()
+            _policy = {a.name: a.verdict_class for a in _reg.all()}
+        except Exception:  # noqa: BLE001 — degrade to empty policy
+            _policy = {}
         critic_backend = CriticAgentBackend(
             critic_agent_root=critic_agent_root,
             session_dir=session_dir,
             codex_model=codex_model,
             kb_mode=critic_kb_mode,
+            action_verdict_policy=_policy,
         )
 
     if robustness_choice not in ("mock", "agent"):
