@@ -47,6 +47,7 @@ from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from ._grid_runner import sanitize_result_dir, sanitize_script_name
+from ._subprocess_kill import run_with_session_kill
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -412,24 +413,23 @@ class BaselineExecutor:
         log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s",
                  cmd, output_dir)
 
-        # subprocess.run is sync — wrap in asyncio.to_thread so we don't
-        # block the Coordinator reactor loop. We snapshot the wall-clock
-        # immediately before launch so extract_benchmark_measurement can
-        # mtime-gate the documented Magpie leak destinations (e.g.
-        # ``/workspace/inferencex_result.json``) — only files written
-        # *after* this run started are valid salvage candidates.
+        # Magpie is launched via ``run_with_session_kill`` (a
+        # ``subprocess.run``-compatible wrapper that ALSO tears down
+        # the entire descendant tree on every exit path — success,
+        # nonzero, timeout, exception). Plain ``subprocess.run`` leaks
+        # vLLM / SGLang server processes for any wrapper that
+        # ``nohup`` / ``setsid`` / daemonizes the server (bugs.md §B);
+        # those leaks were the root cause of the bash-source race in
+        # bugs.md §C #1, where a leaked bash re-sources a benchmark
+        # script while the next Magpie subprocess is mid-
+        # ``shutil.copy2``. See ``_subprocess_kill.py``.
         subprocess_started_unix = time.time()
         try:
             proc = await asyncio.to_thread(
-                subprocess.run, cmd,
-                capture_output=True, text=True, timeout=timeout_sec,
-                env=env, cwd=str(self.cwd),
+                run_with_session_kill, cmd,
+                env=env, cwd=str(self.cwd), timeout=timeout_sec,
             )
         except subprocess.TimeoutExpired as exc:
-            # Harvest whatever the wrapper managed to write before the
-            # timer fired — particularly ``server.log`` (often the
-            # smoking gun: "failed to allocate memory" / "could not
-            # load checkpoint" etc.) and ``gpu_metrics.csv``.
             timeout_candidates = sorted(output_dir.glob("benchmark_*"))
             timeout_destination = (
                 timeout_candidates[-1] if timeout_candidates else output_dir
@@ -449,6 +449,9 @@ class BaselineExecutor:
                     for src, _ in timeout_harvested
                 ],
             }
+        proc_returncode = proc.returncode
+        proc_stdout = proc.stdout
+        proc_stderr = proc.stderr
 
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
@@ -481,12 +484,12 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
             }
-            if proc.returncode != 0:
-                tail = (proc.stderr or proc.stdout or "")[-2000:]
+            if proc_returncode != 0:
+                tail = (proc_stderr or proc_stdout or "")[-2000:]
                 return {
                     "status": "failed",
                     "error_class": "subprocess_nonzero",
-                    "returncode": proc.returncode,
+                    "returncode": proc_returncode,
                     "error": tail,
                     **failure_extras,
                 }
@@ -513,14 +516,14 @@ class BaselineExecutor:
             subprocess_started_unix=subprocess_started_unix,
         )
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
-        if proc.returncode != 0:
+        if proc_returncode != 0:
             warnings.append("magpie_nonzero_after_valid_measurement")
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
-            if proc.returncode != 0:
-                tail = (proc.stderr or proc.stdout or "")[-2000:]
+            if proc_returncode != 0:
+                tail = (proc_stderr or proc_stdout or "")[-2000:]
                 error_class = "subprocess_nonzero"
                 error = tail
             elif not report_path.exists():
@@ -532,7 +535,7 @@ class BaselineExecutor:
             return {
                 "status": "failed",
                 "error_class": error_class,
-                "returncode": proc.returncode,
+                "returncode": proc_returncode,
                 "error": error,
                 "output_dir": str(output_dir),
                 "workspace": str(workspace),
@@ -545,7 +548,7 @@ class BaselineExecutor:
             "status": "succeeded",
             **measurement,
             "nonfatal_warnings": warnings,
-            "returncode": proc.returncode,
+            "returncode": proc_returncode,
             "report_path": str(report_path) if report_path.exists() else None,
             "workspace": str(workspace),
             # Path to the materialized YAML used for THIS baseline. Coordinator
