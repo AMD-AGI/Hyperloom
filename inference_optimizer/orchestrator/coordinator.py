@@ -125,23 +125,6 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "disable_run_eval",
 )
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
-_VALIDATE_STACK_FAIL_THRESHOLD: int = 10
-
-
-def effective_closing_grace_sec(
-    max_minutes: float | None,
-    closing_grace_sec: float | None,
-) -> float:
-    """Resolve the closing-phase grace window after the wall-clock deadline.
-
-    When ``closing_grace_sec`` is explicitly set (including ``0`` to disable
-    closing), that value wins. Otherwise default to
-    ``min(120, max_minutes * 60 * 0.02)`` so short smoke runs do not burn
-  2 minutes on report flush.
-    """
-    if closing_grace_sec is not None:
-        return float(closing_grace_sec)
-    return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
 def effective_closing_grace_sec(
@@ -493,7 +476,6 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
-        self._validate_stack_gate_skip_warned: bool = False
 
         # Per-agent consecutive ``BackendError`` streak. Successful turns
         # reset the counter for that agent; a streak crossing
@@ -2838,44 +2820,6 @@ class Coordinator:
             hint=hint,
         )
 
-    def _validate_stack_gate_skipped(self) -> bool:
-        """Drop the mandatory ``validate_stack`` gate after
-        ``_VALIDATE_STACK_FAIL_THRESHOLD`` consecutive failures.
-
-        Walks ``validate_stack_attempts`` from the tail; a single
-        ``status="succeeded"`` resets the streak. Returns ``True`` once
-        the threshold is reached, emitting one ``log.warning`` on the
-        transition (subsequent ticks return ``True`` silently).
-        """
-        attempts = list(self.shared_state.validate_stack_attempts or [])
-        consecutive_failures = 0
-        last_failure: dict[str, Any] | None = None
-        for entry in reversed(attempts):
-            if not isinstance(entry, dict):
-                break
-            if entry.get("status") == "succeeded":
-                break
-            consecutive_failures += 1
-            if last_failure is None:
-                last_failure = entry
-        if consecutive_failures < _VALIDATE_STACK_FAIL_THRESHOLD:
-            self._validate_stack_gate_skip_warned = False
-            return False
-        if not self._validate_stack_gate_skip_warned:
-            err_class = (last_failure or {}).get("error_class") or "unknown"
-            err_excerpt = (last_failure or {}).get("error_excerpt") or ""
-            log.warning(
-                "validate_stack gate SKIPPED after %d consecutive failures "
-                "(>= threshold %d). Other actions are now allowed; "
-                "cumulative_gain_validated will remain stale until a "
-                "validate_stack succeeds. Last failure: "
-                "error_class=%r error_excerpt=%r.",
-                consecutive_failures, _VALIDATE_STACK_FAIL_THRESHOLD,
-                err_class, err_excerpt,
-            )
-            self._validate_stack_gate_skip_warned = True
-        return True
-
     def _sequence_denial_for_action(
         self,
         action_name: str,
@@ -2884,17 +2828,18 @@ class Coordinator:
         """Reject orchestration action/delegate attempts that skip required steps.
 
         Phase 2 addition: once optimization_stack has unvalidated KEEPs,
-        the only allowed actions are ``validate_stack`` itself, ``recover``,
-        and ``report`` (the last only when stop_reason is set, which we
-        already short-circuit above). Everything else is denied with a
-        ``validate_stack_required`` rule so Orchestration sees the
-        ``policy_denied`` and self-corrects on the next tick.
+        the next ``explore`` round must carry the inlined stack rebench
+        (PolicyGate rule ``stack_rebench_required``). The legacy
+        ``validate_stack`` standalone action was retired in v0.8 M3; this
+        function now only enforces the cross-action ordering (target_analysis
+        before baseline, baseline before everything else, baseline
+        self-loop guard, profile/integrate kernel-agent guards).
 
         ``proposed_params`` is the ``intent.payload["params"]`` dict
         (propose_action / delegate path). Currently only consumed by
         the baseline self-loop guard above, but the kwarg signature is
-        kept open so other per-action stop-losses (e.g. params/backends
-        loop guards) can plug in without further call-site churn.
+        kept open so other per-action stop-losses can plug in without
+        further call-site churn.
         """
         action = str(action_name or "").strip()
         # v0.8 M3 + KB_gaps/Dead-A/Dead-C — the legacy
