@@ -111,6 +111,8 @@ _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
 # ``KERNEL_OPT_MAX_PARALLEL`` env (>=1) on nodes with fewer GPUs or when
 # the LLM API gateway becomes the new bottleneck.
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
+_DEFAULT_OOB_BUDGET_MINUTES = 60.0
+_DEFAULT_GEAK_BUDGET_MINUTES = 90.0
 _CANDIDATE_ENV_KEYS = {
     "CONC",
     "ISL",
@@ -502,6 +504,23 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
         if not resolved.get("source_file") and last_kernel.get("source_file"):
             resolved["source_file"] = str(last_kernel["source_file"])
 
+    # Multi-KEEP queue fallback (PR-B B-5):
+    # ``last_kernel_opt`` only ever holds the strongest pending KEEP.
+    # When the queue drains a second/third KEEP whose kernel_id != that
+    # of ``last_kernel_opt``, the block above doesn't fire and we'd
+    # bail out with ``missing_integration_inputs``. Pull patch_path /
+    # source_file out of the per-kernel ledger so any queued KEEP can
+    # integrate.
+    if (
+        kernel_id
+        and not resolved.get("patch_path")
+    ):
+        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        if attempt.get("last_artifact_path"):
+            resolved["patch_path"] = str(attempt["last_artifact_path"])
+        if not resolved.get("source_file") and attempt.get("last_source_file"):
+            resolved["source_file"] = str(attempt["last_source_file"])
+
     if kernel_id and not (resolved.get("target_file") or resolved.get("source_file")):
         source = _find_selected_kernel_source(state, kernel_id)
         if source:
@@ -730,7 +749,10 @@ async def select_kernels_handler(
 
 # ---------------------------------------------------------------------------
 async def run_optimization_handler(
-    payload: dict, *, session_dir: Path,
+    payload: dict,
+    *,
+    session_dir: Path,
+    record_partial: Callable[[dict], None] | None = None,
 ) -> HandlerResult:
     """Run kernel optimization.
 
@@ -738,6 +760,14 @@ async def run_optimization_handler(
     single-kernel requests into a batch over all reusable native kernels. Each
     kernel is optimized concurrently, while backends are tried sequentially per
     kernel in the preferred order: Claude → Codex → Cursor → GEAK.
+
+    ``record_partial`` (optional) is a synchronous callback invoked the
+    instant each batch sub-result completes -- before ``asyncio.gather``
+    wait-all returns. The Coordinator passes
+    :meth:`Coordinator._record_kernel_opt_partial` here so SharedState
+    sees KEEP/REVERT decisions on the next tick even while slow GEAK
+    siblings are still running. Single-kernel runs ignore it (the same
+    end-of-handler ``record_kernel_opt`` path covers them).
     """
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
@@ -748,7 +778,36 @@ async def run_optimization_handler(
             single_payload["kernel_id"] = candidates[0].get("kernel_id")
         single_payload["_single_kernel"] = True
         return await _run_optimization_single(single_payload, session_dir=session_dir)
-    return await _run_optimization_batch(payload, candidates, session_dir=session_dir)
+    return await _run_optimization_batch(
+        payload, candidates,
+        session_dir=session_dir,
+        record_partial=record_partial,
+    )
+
+
+def _geak_budget_minutes(payload: dict) -> float:
+    return float(
+        payload.get("geak_budget_min")
+        or os.environ.get("HYPERLOOM_GEAK_BUDGET_MIN", _DEFAULT_GEAK_BUDGET_MINUTES)
+    )
+
+
+def _optimization_budget_minutes(payload: dict) -> float:
+    """Wall-clock budget mirrored by the kernel_optimization.py wrapper."""
+    oob_budget = float(payload.get("budget_minutes", _DEFAULT_OOB_BUDGET_MINUTES))
+    geak_budget = _geak_budget_minutes(payload)
+    backend = str(payload.get("backends") or "").strip().lower()
+    if backend == "geak":
+        return geak_budget
+    if backend in {"claude", "codex", "cursor"}:
+        return oob_budget
+    # Empty / multi-backend payloads may still run GEAK first in the ladder.
+    return max(oob_budget, geak_budget)
+
+
+def _optimization_wrapper_timeout_sec(payload: dict) -> int:
+    # +180s grace so kernel_optimization.py can salvage partial artifacts.
+    return int(_optimization_budget_minutes(payload) * 60) + 180
 
 
 def _backend_order(payload: dict) -> list[str]:
@@ -917,6 +976,13 @@ async def _run_kernel_backend_sequence(
     best = dict(best)
     best["backend_fallback_attempts"] = attempts
     best["batch_kernel_id"] = kernel_id
+    # Preserve source_file on the aggregated best so the streaming
+    # record callback in _run_optimization_batch can group by file
+    # without re-reading kernel_candidates.json.
+    if not best.get("source_file"):
+        cand_src = candidate.get("source_file") if isinstance(candidate, dict) else None
+        if cand_src:
+            best["source_file"] = str(cand_src)
     return best
 
 
@@ -925,7 +991,17 @@ async def _run_optimization_batch(
     candidates: list[dict[str, Any]],
     *,
     session_dir: Path,
+    record_partial: Callable[[dict], None] | None = None,
 ) -> HandlerResult:
+    """Fan ``run_optimization`` out across reusable native kernels.
+
+    If ``record_partial`` is provided, every sub-attempt streams its
+    result into SharedState the moment :func:`_run_kernel_backend_sequence`
+    returns -- *before* ``asyncio.gather`` wait-all unblocks. This is
+    what lets a fast KEEP land on the integrate queue without waiting
+    for a slow GEAK sibling to time out (Qwen3-30B-A3B-Base session
+    20260522T093903Z burned 3 hours on this).
+    """
     max_parallel = int(
         payload.get("max_parallel")
         or os.environ.get("KERNEL_OPT_MAX_PARALLEL", _DEFAULT_KERNEL_BATCH_PARALLEL)
@@ -935,9 +1011,34 @@ async def _run_optimization_batch(
 
     async def _guarded(candidate: dict[str, Any]) -> HandlerResult:
         async with sem:
-            return await _run_kernel_backend_sequence(
+            result = await _run_kernel_backend_sequence(
                 payload, candidate, session_dir=session_dir,
             )
+        # Stamp the candidate's source_file onto the sub-result so
+        # SharedState's same-source-file conflict guard
+        # (``_source_files_in_optimization_stack``) can detect when two
+        # KEEPs target the same file. ``_run_kernel_backend_sequence``
+        # already preserves ``source_file`` from the candidate payload,
+        # but defensively re-stamp here in case a backend dropped it.
+        if isinstance(result, dict) and not result.get("source_file"):
+            cand_src = candidate.get("source_file") if isinstance(candidate, dict) else None
+            if cand_src:
+                result["source_file"] = str(cand_src)
+        if record_partial is not None:
+            try:
+                record_partial(result)
+            except Exception:  # noqa: BLE001
+                # Per-sub-attempt callback failures must not abort the
+                # batch -- log and continue. The final aggregation below
+                # still runs, and the Coordinator's post-gather
+                # ``record_kernel_opt`` skips dedup only when batch_mode
+                # is set (so the lost streaming write is recoverable on
+                # next batch).
+                log.exception(
+                    "record_partial callback failed for kernel_id=%s",
+                    (result or {}).get("kernel_id") if isinstance(result, dict) else None,
+                )
+        return result
 
     results = await asyncio.gather(*(_guarded(c) for c in candidates))
     best = max(
@@ -973,7 +1074,8 @@ async def _run_optimization_single(
 
     Optional payload:
         backends:        comma-separated 'geak,claude,codex,cursor' (auto-pick if empty)
-        budget_minutes:  default 60
+        budget_minutes:  default 60 (OOB backends)
+        geak_budget_min: default 90 (GEAK only; also ``HYPERLOOM_GEAK_BUDGET_MIN``)
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
         extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
@@ -1052,14 +1154,32 @@ async def _run_optimization_single(
         cmd += ["--disable-xs-memory"]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
+    geak_budget_min = _geak_budget_minutes(payload)
+    backend = str(payload.get("backends") or "").strip().lower()
+    if backend == "geak" or not backend:
+        cmd += ["--geak-budget-min", str(geak_budget_min)]
+    if payload.get("budget_minutes") is not None:
+        cmd += ["--budget-minutes", str(payload["budget_minutes"])]
     # Give kernel_optimization.py time to handle its own backend timeout and
-    # salvage partial artifacts. The backend receives budget_minutes as its
-    # hard wall-clock; killing this wrapper at the exact same second loses
-    # optimized_versions/ and report paths.
-    timeout_sec = int(payload.get("budget_minutes", 60)) * 60 + 180
+    # salvage partial artifacts. GEAK defaults to 90 min; OOB defaults to 60.
+    timeout_sec = _optimization_wrapper_timeout_sec(payload)
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
-    return _shape_tool_result(rc, stdout, stderr)
+    result = _shape_tool_result(rc, stdout, stderr)
+    # Stamp source_file / kernel_id from the payload onto the parsed
+    # tool result so the multi-KEEP integrate queue
+    # (``SharedState.next_pending_keep_kernel_id``) can group same-file
+    # KEEPs and the streaming-record callback can record the source
+    # without re-resolving from candidates_path. kernel_optimization.py
+    # already prints kernel_id, but in failure modes (timeout, crash)
+    # it may be missing; payload always has it because we just passed
+    # it on the CLI above.
+    if isinstance(result, dict):
+        if not result.get("kernel_id") and payload.get("kernel_id"):
+            result["kernel_id"] = str(payload["kernel_id"])
+        if not result.get("source_file") and payload.get("source_file"):
+            result["source_file"] = str(payload["source_file"])
+    return result
 
 
 # ---------------------------------------------------------------------------
