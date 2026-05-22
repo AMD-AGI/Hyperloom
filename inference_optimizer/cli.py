@@ -1768,11 +1768,15 @@ def _validate_and_resolve_claude_model(
         )
         sys.exit(2)
 
-    base_url = ""
-    if proxy_urls is not None:
-        base_url = proxy_urls[1]  # OpenAI-compat URL keeps the /v1 suffix
-    if not base_url:
-        base_url = os.environ.get("OPENAI_BASE_URL", "")
+    # Catalog probe uses GET <base>/models. The local auth-proxy (:4002) does
+    # not implement that route (404); _preflight snapshots the upstream SaFE
+    # URL in INFERENCE_OPTIMIZER_CATALOG_PROBE_URL before rewriting OPENAI_BASE_URL.
+    base_url = (
+        os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
+        or os.environ.get("OPENAI_BASE_URL", "")
+    )
+    if not base_url and proxy_urls is not None:
+        base_url = proxy_urls[1]
 
     api_key = (
         os.environ.get("SAFE_API_KEY", "")
@@ -1916,6 +1920,9 @@ def _preflight(
     # The two env vars MUST stay consistent — either both proxy or both orig.
     orig_anthropic = os.environ.get("ANTHROPIC_BASE_URL", "")
     orig_openai = os.environ.get("OPENAI_BASE_URL", "")
+    catalog_probe_url = (orig_openai or base_url or "").strip()
+    if catalog_probe_url:
+        os.environ["INFERENCE_OPTIMIZER_CATALOG_PROBE_URL"] = catalog_probe_url
     proxy_urls = _ensure_auth_proxy_and_claude_config(safe_key, base_url)
     if proxy_urls is not None:
         proxy_anthropic, proxy_openai = proxy_urls
