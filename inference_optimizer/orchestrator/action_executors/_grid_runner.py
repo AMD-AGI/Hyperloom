@@ -1051,6 +1051,17 @@ async def run_grid(
                 benchmark_script=benchmark_script,
             )
         except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: yaml_build_error: %r",
+                i + 1, len(grid), variant.name, exc,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="yaml_build_error",
+                error_summary=repr(exc),
+                extra_args=variant.extra_sglang_args,
+            )
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
@@ -1093,6 +1104,18 @@ async def run_grid(
                 ep=int(os.environ.get("EP") or 0) or None,
             )
         except ServerRestartFailed as exc:
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: "
+                "mn_server_restart_failed: %s",
+                i + 1, len(grid), variant.name, exc,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="mn_server_restart_failed",
+                error_summary=str(exc),
+                extra_args=variant.extra_sglang_args,
+            )
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
@@ -1132,6 +1155,18 @@ async def run_grid(
                 to_destination,
                 subprocess_started_unix=variant_started_unix,
             )
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: "
+                "magpie timeout (timeout_sec=%d): %s",
+                i + 1, len(grid), variant.name, variant_timeout_sec, exc,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="magpie_timeout",
+                error_summary=str(exc),
+                extra_args=variant.extra_sglang_args,
+            )
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
@@ -1170,15 +1205,28 @@ async def run_grid(
             )
         if not candidates:
             harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
+            no_ws_error_summary = (
+                (stderr or stdout)[-2000:]
+                if rc != 0 else "no benchmark_* workspace produced"
+            )
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: "
+                "no_benchmark_workspace (rc=%s)",
+                i + 1, len(grid), variant.name, rc,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="no_benchmark_workspace",
+                error_summary=no_ws_error_summary,
+                extra_args=variant.extra_sglang_args,
+            )
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 returncode=rc,
-                error=(
-                    (stderr or stdout)[-2000:]
-                    if rc != 0 else "no benchmark_* workspace produced"
-                ),
+                error=no_ws_error_summary,
                 nonfatal_warnings=harvest_tags,
                 note=variant.note,
             ))
@@ -1203,10 +1251,24 @@ async def run_grid(
         if not measurement.get("valid_measurement"):
             if rc != 0:
                 error = (stderr or stdout)[-2000:]
+                invalid_class = "magpie_nonzero_invalid_measurement"
             elif not report:
                 error = "benchmark_report missing"
+                invalid_class = "benchmark_report_missing"
             else:
                 error = "benchmark_report missing valid throughput/completed requests"
+                invalid_class = "benchmark_report_invalid_metric"
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s): %s",
+                i + 1, len(grid), variant.name, invalid_class, rc, error[:200],
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class=invalid_class,
+                error_summary=error,
+                extra_args=variant.extra_sglang_args,
+            )
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
@@ -1303,6 +1365,59 @@ def pick_winners(
 def _safe(name: str) -> str:
     """Filesystem-safe slug for variant directory names."""
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
+
+
+def _write_variant_abort_marker(
+    slot: Path,
+    *,
+    variant_name: str,
+    error_class: str,
+    error_summary: str,
+    extra_args: str = "",
+) -> None:
+    """Write ``abort_reason.json`` into the variant slot directory.
+
+    Why this exists: when a variant aborts before benchmark_report.json
+    is produced (ServerRestartFailed / yaml_build_error / magpie timeout
+    / no benchmark_* workspace / invalid measurement), the slot dir is
+    left with only ``config.yaml`` and a session reader cannot tell
+    "tested-but-failed" from "untested / skipped". The final-report
+    renderer and any later post-mortem tool then under-report grid
+    coverage.
+
+    Drop a small JSON marker so:
+
+    * final-report / breakdown can count failed-but-tested variants;
+    * a session reader inspecting ``runs/<action>/<task_id>/<variant>/``
+      sees an explicit reason even after the main process log was
+      rotated or truncated;
+    * the marker pairs with the ``log.warning`` line emitted next to
+      each catch site for grep-from-log triage.
+
+    Failure to write the marker is non-fatal — log and continue so a
+    full-disk / permissions issue can't escalate a single-variant
+    abort into a whole-grid abort.
+    """
+    try:
+        slot.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "variant": variant_name,
+            "error_class": error_class,
+            "error": (error_summary or "")[:2000],
+            "extra_args": extra_args,
+            "aborted_at_utc": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(),
+            ),
+        }
+        (slot / "abort_reason.json").write_text(
+            json.dumps(marker, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning(
+            "_grid_runner: failed to write abort_reason.json at %s: %s",
+            slot, exc,
+        )
 
 
 __all__ = [
