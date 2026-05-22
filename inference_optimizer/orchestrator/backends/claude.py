@@ -204,6 +204,10 @@ class ClaudeBackend:
                 f"Claude backend timed out after {self.call_timeout_s:.0f}s "
                 "(likely upstream proxy stall)"
             ) from exc
+        except Exception as exc:
+            if self._is_mislabeled_sdk_success_error(exc):
+                raise BackendError(self._format_sdk_proxy_error(exc)) from exc
+            raise
         self.calls.append({
             "prompt_chars": len(full_prompt),
             "tool_blocks": tool_block_count,
@@ -260,6 +264,27 @@ class ClaudeBackend:
         text = line.strip()
         if text:
             self.calls.append({"stderr": text})
+
+    @staticmethod
+    def _is_mislabeled_sdk_success_error(exc: BaseException) -> bool:
+        """Detect CLI is_error with empty errors (SDK shows 'error result: success')."""
+        return "error result: success" in str(exc)
+
+    def _format_sdk_proxy_error(self, exc: BaseException) -> str:
+        """Turn opaque SDK errors into an actionable proxy/port diagnosis."""
+        stderr_lines = [
+            c["stderr"] for c in self.calls if isinstance(c, dict) and c.get("stderr")
+        ]
+        tail = stderr_lines[-3:] if stderr_lines else []
+        hint = (
+            "Claude CLI returned is_error=true (SDK mislabels empty errors as "
+            "'success'). On shared hosts, port :4002 is often dfdaemon (empty 404), "
+            "not auth_proxy — run ensure_auth_proxy.sh with AUTH_PROXY_PORT=4010 "
+            "and point ANTHROPIC_BASE_URL / ~/.claude/config.json at :4010."
+        )
+        if tail:
+            hint += f" CLI stderr tail: {' | '.join(tail)}"
+        return f"{hint} Original: {exc}"
 
     async def _invoke_and_collect(
         self, prompt: str, options: Any
