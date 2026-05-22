@@ -1,119 +1,194 @@
-name: Manual poke issues (ops tool)
+name: Scan & poke stale issues
 
-# Manually-triggered ops tool. Lets a SaFE maintainer push selected
-# issues into the auto-stale / auto-close pipeline as
-# github-actions[bot]. Useful for:
-#   - Backfilling history that predates the auto-stale workflow
-#   - Forcing a "responding soon or closing" nudge on a specific issue
-#   - Closing an issue immediately with the standard farewell comment
+# Manually-triggered ops tool. Scans every open issue and, for those where:
+#   - the issue author is NOT on the AMD-AGI/safe team, AND
+#   - the last real (non-bot) reply was from a SaFE member, AND
+#   - that reply was >= HOURS_THRESHOLD hours ago
+# adds labels 'awaiting-author-response' + 'stale' and posts the standard
+# warning comment, as github-actions[bot]. The stale-issues workflow will
+# then close those issues ~24h later.
 #
-# Trigger from: Actions tab -> "Manual poke issues (ops tool)" -> Run workflow
+# Default mode is dry-run: it just prints the list and changes nothing.
+# Flip dry_run to false to actually act.
 #
-# Modes:
-#   tag-only        add 'awaiting-author-response'
-#                   (lets stale-issues handle the standard 48h+24h flow)
-#   tag-and-warn    add 'awaiting-author-response' + 'stale' + warning comment
-#                   (skips the 48h warm-up; stale-issues will close in ~24h)
-#   close-now       add labels + close-farewell comment + close immediately
-#
-# Comment text intentionally matches what stale-issues.yml posts.
+# Use cases:
+#   - Backfilling history that predates the auto-stale automation
+#   - Periodic audit of "ball-on-author" issues that somehow lost their label
 
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: 'What to do for each issue'
+      dry_run:
+        description: 'Dry-run only (just list matching issues, no labels/comments)'
         required: true
-        type: choice
-        default: 'tag-only'
-        options:
-          - 'tag-only'
-          - 'tag-and-warn'
-          - 'close-now'
-      issue_numbers:
-        description: 'Comma-separated issue numbers (e.g. 255,231,219)'
-        required: true
+        type: boolean
+        default: true
+      hours_threshold:
+        description: 'Hours since SaFE last reply to consider the issue stale'
+        required: false
         type: string
+        default: '48'
 
 permissions:
   issues: write
 
 jobs:
-  poke:
+  scan-and-poke:
     runs-on: ubuntu-latest
     steps:
-      - name: Poke issues
+      - name: Fetch SaFE team members
+        id: team
+        env:
+          GH_TOKEN: ${{ secrets.SAFE_TEAM_READ_TOKEN }}
+        run: |
+          set -e
+
+          MEMBERS_RAW=$(gh api orgs/AMD-AGI/teams/safe/members --paginate --jq '.[].login' 2>&1 || true)
+          MEMBERS_CLEAN=$(echo "$MEMBERS_RAW" | grep -E '^[a-zA-Z][a-zA-Z0-9_-]*$' || true)
+          COUNT=$(echo "$MEMBERS_CLEAN" | grep -c . || true)
+
+          if [ "${COUNT:-0}" -ge 1 ]; then
+            echo "Fetched $COUNT SaFE members live:"
+            echo "$MEMBERS_CLEAN"
+            JSON=$(echo "$MEMBERS_CLEAN" | jq -R . | jq -s -c .)
+            {
+              echo "members=$JSON"
+              echo "source=live"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Could not fetch SaFE team live; using fallback list"
+            echo "API response was:"
+            echo "$MEMBERS_RAW"
+            # Fallback list (last refreshed: 2026-05-21)
+            # To refresh:
+            #   gh api orgs/AMD-AGI/teams/safe/members --paginate --jq '.[].login'
+            {
+              echo 'members=["nehaprakriya","haishuok0525","chaojhou","weilei0120","zhanglei-amd","fengshaoyi-amd","xiaofei-zheng","chennyiiis","lishuoshuo-amd","luochen-amd","BaoYunkai","ZhengGong-amd"]'
+              echo "source=fallback"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Scan & poke
         uses: actions/github-script@v7
         env:
-          MODE: ${{ inputs.mode }}
-          ISSUE_NUMBERS: ${{ inputs.issue_numbers }}
+          SAFE_TEAM_JSON: ${{ steps.team.outputs.members }}
+          SAFE_TEAM_SOURCE: ${{ steps.team.outputs.source }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          HOURS_THRESHOLD: ${{ inputs.hours_threshold }}
         with:
           script: |
-            const mode = process.env.MODE;
-            const nums = process.env.ISSUE_NUMBERS
-              .split(',')
-              .map(s => parseInt(s.trim(), 10))
-              .filter(n => !isNaN(n) && n > 0);
+            const SAFE_TEAM = JSON.parse(process.env.SAFE_TEAM_JSON);
+            const source = process.env.SAFE_TEAM_SOURCE;
+            const safeSet = new Set(SAFE_TEAM.map(s => s.toLowerCase()));
+            const dryRun = process.env.DRY_RUN === 'true';
+            const hoursThreshold = parseFloat(process.env.HOURS_THRESHOLD) || 48;
 
-            if (nums.length === 0) {
-              core.setFailed('No valid issue numbers provided');
+            core.info(`SaFE roster (${source}, ${safeSet.size}): ${[...safeSet].join(', ')}`);
+            core.info(`Dry-run: ${dryRun}`);
+            core.info(`Hours threshold: ${hoursThreshold}`);
+            core.info('');
+
+            const { owner, repo } = context.repo;
+            const now = new Date();
+
+            // List all open issues; filter out PRs
+            const allItems = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const issues = allItems.filter(i => !i.pull_request);
+            core.info(`Open issues to scan: ${issues.length}`);
+            core.info('');
+
+            const candidates = [];
+
+            for (const issue of issues) {
+              const authorLogin = issue.user.login.toLowerCase();
+              // Skip if author is SaFE (their own internal issues)
+              if (safeSet.has(authorLogin)) continue;
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: issue.number, per_page: 100,
+              });
+
+              let lastSafeAt = null;
+              let lastSafeBy = null;
+              let nonSafeAfterSafe = false;
+
+              for (const c of comments) {
+                const cAuthor = c.user.login.toLowerCase();
+                const isBot = c.user.type === 'Bot' || cAuthor.endsWith('[bot]');
+                if (isBot) continue;
+                if (safeSet.has(cAuthor)) {
+                  lastSafeAt = new Date(c.created_at);
+                  lastSafeBy = c.user.login;
+                  nonSafeAfterSafe = false;
+                } else {
+                  if (lastSafeAt) nonSafeAfterSafe = true;
+                }
+              }
+
+              if (lastSafeAt && !nonSafeAfterSafe) {
+                const hours = (now - lastSafeAt) / 3600000;
+                if (hours >= hoursThreshold) {
+                  candidates.push({
+                    num: issue.number,
+                    author: issue.user.login,
+                    lastSafeBy,
+                    hours: Math.round(hours * 10) / 10,
+                    title: issue.title,
+                    currentLabels: new Set((issue.labels || []).map(l => typeof l === 'string' ? l : l.name)),
+                  });
+                }
+              }
+            }
+
+            candidates.sort((a, b) => b.hours - a.hours);
+
+            core.info('=== Matching issues ===');
+            core.info(`Found: ${candidates.length}`);
+            for (const c of candidates) {
+              core.info(`  #${c.num} (${c.author}, ${c.hours}h since @${c.lastSafeBy}): ${c.title}`);
+            }
+            core.info('');
+
+            if (candidates.length === 0) {
+              core.info('Nothing to do.');
               return;
             }
-            core.info(`Mode: ${mode}`);
-            core.info(`Targets: ${nums.join(', ')}`);
+
+            if (dryRun) {
+              core.info('Dry-run mode: not making any changes.');
+              core.info('To actually act on these issues, re-run with dry_run=false.');
+              return;
+            }
 
             const warnMsg =
               `This issue has been quiet for about **2 days** since our last reply.\n\n` +
               `It will be closed automatically in **1 day** if there is no further activity. ` +
               `If you are still working on this, please leave a comment with any update — that will reset the timer.`;
 
-            const closeMsg =
-              `This issue has been automatically closed because there was no response for about **3 days** after our last comment.\n\n` +
-              `If you would like to continue the discussion, please feel free to reopen this issue or leave a new comment — we will be happy to take another look.`;
-
-            const { owner, repo } = context.repo;
             const errors = [];
-
-            for (const issue_number of nums) {
-              core.info(`--- #${issue_number} ---`);
+            for (const c of candidates) {
+              core.info(`--- Poking #${c.num} ---`);
               try {
-                if (mode === 'tag-only') {
+                const newLabels = ['awaiting-author-response', 'stale']
+                  .filter(l => !c.currentLabels.has(l));
+                if (newLabels.length > 0) {
                   await github.rest.issues.addLabels({
-                    owner, repo, issue_number,
-                    labels: ['awaiting-author-response'],
+                    owner, repo, issue_number: c.num,
+                    labels: newLabels,
                   });
-                  core.info(`  + awaiting-author-response`);
-                } else if (mode === 'tag-and-warn') {
-                  await github.rest.issues.addLabels({
-                    owner, repo, issue_number,
-                    labels: ['awaiting-author-response', 'stale'],
-                  });
-                  await github.rest.issues.createComment({
-                    owner, repo, issue_number, body: warnMsg,
-                  });
-                  core.info(`  + awaiting-author-response, stale`);
-                  core.info(`  + warning comment`);
-                } else if (mode === 'close-now') {
-                  await github.rest.issues.addLabels({
-                    owner, repo, issue_number,
-                    labels: ['awaiting-author-response', 'stale'],
-                  });
-                  await github.rest.issues.createComment({
-                    owner, repo, issue_number, body: closeMsg,
-                  });
-                  await github.rest.issues.update({
-                    owner, repo, issue_number, state: 'closed',
-                    state_reason: 'not_planned',
-                  });
-                  core.info(`  + awaiting-author-response, stale`);
-                  core.info(`  + closing comment`);
-                  core.info(`  -> closed`);
+                  core.info(`  + labels: ${newLabels.join(', ')}`);
                 } else {
-                  throw new Error(`Unknown mode: ${mode}`);
+                  core.info('  labels already present, skipping');
                 }
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: c.num, body: warnMsg,
+                });
+                core.info('  + warning comment');
               } catch (e) {
-                core.error(`#${issue_number}: ${e.message}`);
-                errors.push({ num: issue_number, msg: e.message });
+                core.error(`#${c.num}: ${e.message}`);
+                errors.push({ num: c.num, msg: e.message });
               }
             }
 
@@ -123,5 +198,6 @@ jobs:
                 errors.map(e => `#${e.num} (${e.msg})`).join(', ')
               );
             } else {
-              core.info(`Done. Processed ${nums.length} issue(s).`);
+              core.info('');
+              core.info(`Done. Processed ${candidates.length} issue(s).`);
             }
