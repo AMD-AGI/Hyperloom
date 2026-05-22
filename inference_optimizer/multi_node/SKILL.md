@@ -58,6 +58,94 @@ Run `<subcommand> --help` for the full flag set. **Do not invent flags.**
   `--gpus-per-node`→`8`, `--display-name`→`$DISPLAY_NAME` else
   `multi_node_<unix-ts>`, `--owner-id`→`$WORKLOAD_ID`.
 
+### Map the user Environment block → CLI (do not re-ask)
+
+When the user prompt already lists topology / workload / kernel knobs, the
+launcher **maps** them — it does not need the user to repeat them in chat.
+Typical prompt fields and where they land:
+
+| User prompt | Launcher action |
+|---|---|
+| `Nodes=N` / `N nodes` | `create-rayjob --nodes N`; `optimize --nodes N` |
+| `RayJob image: …` | `create-rayjob --image …`; `optimize --rayjob-image …` |
+| `TP=N`, `EP=…` | `restart-server --tp N`; `optimize --tp` / `--ep` |
+| `ISL` / `OSL` / `CONC` / `PRECISION` | `export` + `optimize --isl` / `--osl` / `--conc` / `--precision` |
+| `KERNEL_OPT_*` / `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX` | `export` before `install.sh` / `optimize` |
+| MoE JIT cold-start (often omitted in prompt) | `export HYPERLOOM_MN_POLL_TIMEOUT_S=1800` and `HYPERLOOM_MN_HEALTH_WAIT_S=1800` — see below |
+
+If the prompt already contains the first rows, **do not** claim the
+“environment block is incomplete”; wire them into `setsid nohup optimize`
+and `multi_node` subcommands. Only add exports the prompt did not cover
+(chiefly `HYPERLOOM_MN_*` for 30 min polls on large MoE RayJobs).
+
+**Env file:** same as parent skill — copy
+`inference_optimizer/scripts/setup_env.sh.example` to
+`$USER_DATA_PATH/optimizer_runs/setup_env.sh`, set `MODEL_PATH` / workload
+from the prompt, and add multi-node exports below (e.g. `HYPERLOOM_MN_*`,
+`INFERENCE_OPTIMIZER_RAYJOB_IMAGE`) before `install.sh` / `optimize`.
+
+Example `optimize` tail (values from prompt):
+
+```bash
+export HYPERLOOM_MN_POLL_TIMEOUT_S=1800
+export HYPERLOOM_MN_HEALTH_WAIT_S=1800
+export KERNEL_OPT_BACKEND_ORDER=claude   # or prompt's KERNEL_OPT_BACKENDS
+export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0
+
+setsid nohup inference_optimizer --verbose optimize \
+  --model "$MODEL_PATH" --framework sglang --gpu-type mi300x \
+  --nodes 2 --rayjob-image "$INFERENCE_OPTIMIZER_RAYJOB_IMAGE" \
+  --tp 16 --ep 1 --conc 64 --isl 1024 --osl 1024 --precision FP8 \
+  --target-gain 30 --max-hours 24 --kernel-claude \
+  --claude-model claude-opus-4-7 \
+  > "$RUN_LOG" 2>&1 < /dev/null &
+```
+
+### `DISPLAY_NAME` (SaFE workload create only)
+
+Only `create-rayjob` sets the SaFE workload name (`displayName` /
+`--display-name` / `$DISPLAY_NAME`). Rules from the admission webhook:
+
+* Length **1–36**, lowercase letters, digits, hyphens only (`[a-z0-9-]`).
+* Must **start with a letter**, **end with alphanumeric**.
+* **No underscores**, no long dotted timestamps — SaFE returns `Primus.00002`.
+
+Good: `hl-run-$(date +%m%d%H%M)`. Bad: `hyperloom-sglang-2node-20260522_022937` (too long / underscores).
+
+### SaFE workload `phase` (source of truth)
+
+`create-rayjob` polls **SaFE GetWorkload `phase`** until it is **`Running`**.
+Do **not** treat individual pod `phase=Running` as a substitute while the
+workload is still `Pending` — bootstrap / `head_pod_ip` / benchmarks must
+wait for the workload object to flip. If poll times out with `phase=Pending`,
+re-run the **same** `create-rayjob` (idempotent resume) with a longer
+`HYPERLOOM_MN_POLL_TIMEOUT_S` or `--poll-timeout`; inspect
+`conditions` / `message` on the workload for queue or dispatch issues.
+
+### MoE JIT poll budget (110s default is too short)
+
+First `restart-server` on a multi-node RayJob often needs **20–30 minutes**
+(weight load + aiter JIT). The default per-invocation poll is **~110s**
+(ADDENDUM-09). Export before `restart-server` / `optimize --nodes >=2`:
+
+```bash
+export HYPERLOOM_MN_POLL_TIMEOUT_S=1800
+export HYPERLOOM_MN_HEALTH_WAIT_S=1800
+```
+
+On timeout, re-run the **same** subcommand (no `while sleep` wrapper).
+`restart-server` checkpoints `last_restart_submission_id` so retries can
+resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
+
+### Cross-node asset mirror (optional)
+
+If `$TRACELENS_ROOT` / `$OOB_SRC` / `$GEAK_REPO` / `$MAGPIE_DIR` /
+`$INFERENCEX_PATH` differ per node, `rsync -a` into a writable tree under
+`$USER_DATA_PATH` and override env vars **before** sandbox `install.sh`.
+Production WekaFS single-mount sandboxes usually need only
+`USER_DATA_PATH=/workspace/hyperloom` — `install.sh` mirrors read-only
+sources into `$USER_DATA_PATH/runtime/source-mirrors/` automatically.
+
 ## Call Order
 
 1. **`create-rayjob`** — once. Persists `rayjob_id` before polling
@@ -65,7 +153,9 @@ Run `<subcommand> --help` for the full flag set. **Do not invent flags.**
    `head_pod_ip` / `service_url` once phase is `Running`.
 2. **`bootstrap`** — once. Submits `bootstrap.sh` via Ray Dashboard REST
    to install oob / claude / codex / tracelens on the head pod.
-3. **`verify`** — once. Confirms toolchain on PATH; bail if it fails.
+3. **`verify`** — once. Confirms toolchain on PATH on the RayJob head pod.
+   Missing `oob` is common on minimal BYOI images: WARN for baseline-only
+   runs; kernel-opt needs OOB in the image or a fixed `bootstrap`.
 4. **`restart-server`** — every framework / model / TP / flag change.
    Kills the previous server via PID file (never `pkill -f`), relaunches
    under `nohup` so Ray pods do NOT restart and the aiter JIT cache
@@ -89,9 +179,13 @@ After step 4 route all benchmark / OOB / Magpie traffic to
 
 ## Hard Rules
 
-* **ADDENDUM-09** (bash budget): each CLI invocation polls ~110s then
-  exits. Timeout → rerun the same subcommand. Never wrap in `sleep` /
-  `while true ...; sleep 60; done`.
+* **ADDENDUM-09** (bash budget): each CLI invocation polls until
+  `--poll-timeout` (default 110s unless `HYPERLOOM_MN_POLL_TIMEOUT_S`
+  is set) then exits. For MoE JIT cold-start on RayJob pods, export
+  `HYPERLOOM_MN_POLL_TIMEOUT_S=1800` and `HYPERLOOM_MN_HEALTH_WAIT_S=1800`
+  before `restart-server` / `optimize --nodes >=2`. Timeout → rerun the
+  **same** subcommand (resume uses `last_restart_submission_id`). Never
+  wrap in `sleep` / `while true ...; sleep 60; done`.
 * **ADDENDUM-13** (credentials): `SAFE_API_URL` / `SAFE_API_KEY` must be
   in sandbox env at CLI start (Brain injects). CLI fans them out (plus
   `OOB_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `*_BASE_URL`)
