@@ -199,7 +199,14 @@ class _AlwaysFailingBackend(Backend):
         self.name = name
         self.calls = 0
 
-    async def run(self, prompt, system_prompt, tools, max_turns):  # noqa: D401
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         from inference_optimizer.orchestrator.backends.base import BackendError
         self.calls += 1
         raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
