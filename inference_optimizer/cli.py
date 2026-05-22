@@ -653,13 +653,13 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 # rebench (KB_design §3.4 §4.4); validate_stack is no longer a
 # standalone action.
 #
-# The executor Python modules (``action_executors/backends.py`` etc.)
-# stay in the tree so unit tests that exercise them directly via
-# ``SubAgentRunner.register_executor`` still pass, and the v0.6
-# resume audit trails (``backends_attempts`` etc.) keep their
-# meaning. New sessions never see these names because PolicyGate
-# denies them with ``rule='action_deprecated'`` before a task is
-# ever queued.
+# The legacy executor Python modules (``action_executors/backends.py``,
+# ``params.py``, ``validate_stack.py``) have been physically deleted
+# from the tree. The v0.6 resume audit trails (``backends_attempts``
+# etc.) keep their meaning on disk so legacy session resumes still
+# render correctly. New sessions never see these action names because
+# PolicyGate denies them with ``rule='action_deprecated'`` before a
+# task is ever queued.
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline":          baseline_executor,
     "explore":           explore_executor,
@@ -948,7 +948,7 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     else:
         print(
             f"  cumulative_gain_val  : 0.00% "
-            f"⚠ never validated — no `validate_stack` action ran"
+            f"⚠ never validated — no `explore` stack-rebench has succeeded yet"
         )
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
