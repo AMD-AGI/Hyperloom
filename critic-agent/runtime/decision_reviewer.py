@@ -575,7 +575,7 @@ class DecisionReviewer:
         new_msg_ids = self.session_memory.filter_unreviewed(
             req.session_id, [p.msg_id for p in parsed.proposals]
         )
-        keep = {mid for mid in new_msg_ids}
+        keep = set(new_msg_ids)
         req.proposals = [p for p in parsed.proposals if p.msg_id in keep]
 
     def _review_constraints(self) -> dict[str, Any]:
