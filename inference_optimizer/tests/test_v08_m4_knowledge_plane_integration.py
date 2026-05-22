@@ -265,6 +265,11 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
         warm_start_recipe: dict | None = None
         cortex_session_id: str = ""
         cortex_session_summary: dict = field(default_factory=dict)
+        # closing_report_task_id is read by _enqueue_internal_report_task
+        # (step 1 of the CLOSE sequencer); empty string means "no
+        # wall-clock-deadline path enqueued one earlier, fall through
+        # to fresh insert".
+        closing_report_task_id: str = ""
         stop_reason: str = ""
         current_best: dict = field(default_factory=dict)
         last_baseline: dict = field(default_factory=dict)
@@ -273,6 +278,13 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
 
         def save(self, _session_dir: Path | None) -> None:
             return None
+
+        def set_stop_reason(self, value: str) -> str:
+            # Mirror SharedState.set_stop_reason's lenient writer
+            # signature (Inv-8.3 vocab validation is enforced by the
+            # production type, not exercised here).
+            self.stop_reason = value
+            return value
     coord.shared_state = _BareState()
     coord.role_registry = {}   # _kernel_enabled() reads role_registry
     coord.cortex_kb = None
