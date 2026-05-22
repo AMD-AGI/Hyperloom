@@ -2291,6 +2291,96 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
 
 
 @pytest.mark.asyncio
+async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
+    session_dir,
+):
+    """Sub-task exceptions must NOT propagate out of ``asyncio.gather`` while
+    sibling tasks are still in flight.
+
+    Default ``asyncio.gather(return_exceptions=False)`` re-raises on the
+    first exception while the other coroutines keep running in the
+    background. That would unblock the Coordinator mid-batch, let it
+    dispatch an integrate, and collide with the still-running
+    kernel_opt subprocesses on the same GPU lease.
+
+    The fix wraps each sub-task in a try/except inside ``_guarded`` so
+    exceptions surface as structured ``failed`` results. gather then
+    behaves as true wait-all and ``record_partial`` sees every
+    candidate -- including the failed one -- with a stamped kernel_id
+    so the per-kernel attempts ledger stays consistent.
+    """
+    candidates = [
+        {"kernel_id": "kFast", "source_file": "/p/fast.py", "reusable_native_kernel": True},
+        {"kernel_id": "kCrash", "source_file": "/p/crash.py", "reusable_native_kernel": True},
+        {"kernel_id": "kSlow", "source_file": "/p/slow.py", "reusable_native_kernel": True},
+    ]
+
+    recorded: list[dict] = []
+    completion_order: list[str] = []
+
+    async def fake_sequence(base_payload, candidate, *, session_dir):
+        kid = str(candidate.get("kernel_id"))
+        if kid == "kFast":
+            await asyncio.sleep(0.01)
+            completion_order.append(kid)
+            return {
+                "status": "ok",
+                "kernel_id": kid,
+                "source_file": candidate["source_file"],
+                "proposal": {"decision": "KEEP"},
+                "verification": {"micro_speedup": 1.6},
+            }
+        if kid == "kCrash":
+            await asyncio.sleep(0.02)
+            completion_order.append(kid)
+            raise RuntimeError("simulated GEAK crash mid-batch")
+        # kSlow finishes last; gather must wait for it.
+        await asyncio.sleep(0.06)
+        completion_order.append(kid)
+        return {
+            "status": "ok",
+            "kernel_id": kid,
+            "source_file": candidate["source_file"],
+            "proposal": {"decision": "REVERT"},
+            "verification": {"micro_speedup": 0.9},
+        }
+
+    def record_partial(result: dict) -> None:
+        recorded.append({
+            "kernel_id": result.get("kernel_id"),
+            "status": result.get("status"),
+            "decision": (result.get("proposal") or {}).get("decision"),
+            "error_class": result.get("error_class"),
+        })
+
+    with patch.object(krh, "_run_kernel_backend_sequence",
+                       side_effect=fake_sequence):
+        result = await krh._run_optimization_batch(
+            payload={"candidates_path": "/dummy"},
+            candidates=candidates,
+            session_dir=session_dir,
+            record_partial=record_partial,
+        )
+
+    # Gather MUST have waited for all three (kSlow finishes last).
+    assert completion_order == ["kFast", "kCrash", "kSlow"], completion_order
+
+    # record_partial got exactly one call per candidate, in completion
+    # order, and the crashed sibling came through as a structured
+    # ``status=failed`` with kernel_id preserved (NOT swallowed).
+    assert [r["kernel_id"] for r in recorded] == ["kFast", "kCrash", "kSlow"]
+    crash_record = next(r for r in recorded if r["kernel_id"] == "kCrash")
+    assert crash_record["status"] == "failed"
+    assert crash_record["error_class"] == "subtask_exception"
+
+    # Batch handler still returns the best KEEP (kFast) and tags
+    # batch_mode so Coordinator's post-gather record_kernel_opt dedups.
+    assert isinstance(result, dict)
+    assert result.get("batch_mode") is True
+    assert result.get("kernel_id") == "kFast"
+
+
+@pytest.mark.asyncio
 async def test_coordinator_streams_batch_results_and_dedups_final_record(
     session_dir, monkeypatch,
 ):
