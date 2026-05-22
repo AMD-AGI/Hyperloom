@@ -339,27 +339,26 @@ Where each parameter comes from:
   - `--gpus-per-node` only if the prompt explicitly asks for less than a
     full node (default 8)
   - `--extra-env KEY=VAL` (repeatable) for any `env:` block items in the
-    prompt that aren't covered by the sandbox-env / fanout list. Typical
-    cluster-specific keys: `PATH_TO_BNXT_TAR_PACKAGE=/wekafs/...`.
-    Brain-reserved key `RAY_JOB_ENTRYPOINT` and the `*_API_KEY` /
-    `*_BASE_URL` set are auto-injected — don't
-    duplicate them.
+    prompt that aren't covered by the sandbox-env / fanout list (e.g.
+    cluster-specific tarball / library paths the operator surfaces).
+    The Brain-reserved key `RAY_JOB_ENTRYPOINT` and the `*_API_KEY` /
+    `*_BASE_URL` set are auto-injected — do NOT duplicate them.
 * **CLI computes / generates**: PID files, log files, dist-init address,
   Ray dashboard URL, ClusterIP service URL.
 
-Minimum sequence (use the values verbatim from the user prompt; the
-example below is for a "Nodes=3 / CPU=96 / GPU=8 / memory=1024Gi /
-ephemeralStorage=400Gi" prompt with one cluster-specific env var):
+Minimum sequence (use the literal values from the user prompt; the
+placeholders below — `<image>`, `<N>`, `<framework>`, etc. — must
+come from the prompt, not from this example):
 
 ```bash
 # 1. Create the RayJob (writes rayjob_id to state immediately; safe to retry while Pending).
 python3 -m inference_optimizer.multi_node create-rayjob \
-    --image harbor.core42.example-internal-host.invalid/custom/sync/sglang:202604290707 \
-    --nodes 3 \
-    --cpus-per-node 96 \
-    --mem-per-node 1024 \
-    --ephemeral-per-node 400 \
-    --extra-env PATH_TO_BNXT_TAR_PACKAGE=/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz
+    --image <prompt's RayJob image> \
+    --nodes <N> \
+    --cpus-per-node <prompt's CPU> \
+    --mem-per-node <prompt's memory in GiB> \
+    --ephemeral-per-node <prompt's ephemeralStorage in GiB> \
+    [--extra-env KEY=VAL repeated for any cluster-specific env: block items]
 
 # 2. Install the toolchain (oob/claude/codex/tracelens) inside the head pod.
 python3 -m inference_optimizer.multi_node bootstrap
@@ -368,9 +367,9 @@ python3 -m inference_optimizer.multi_node bootstrap
 python3 -m inference_optimizer.multi_node verify
 
 # 4. Now launch the optimizer with the same N. Add restart-server before
-#    benchmarking to bring the actual vllm/sglang server up on the head pod.
+#    benchmarking to bring the actual server up on the head pod.
 python3 -m inference_optimizer.multi_node restart-server \
-    --framework sglang --model "$MODEL_PATH" --tp <N*8>
+    --framework <sglang|vllm> --model "$MODEL_PATH" --tp <N * gpus-per-node>
 inference_optimizer optimize ... --nodes <N>
 
 # 5. At session end (always do this):
