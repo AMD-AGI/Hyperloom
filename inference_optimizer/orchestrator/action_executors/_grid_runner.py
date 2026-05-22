@@ -1241,6 +1241,7 @@ async def run_grid(
                 status="failed",
                 returncode=rc,
                 error=no_ws_error_summary,
+                error_class="no_benchmark_workspace",
                 nonfatal_warnings=harvest_tags,
                 note=variant.note,
             ))
@@ -1294,6 +1295,7 @@ async def run_grid(
                 returncode=rc,
                 nonfatal_warnings=warnings,
                 error=error,
+                error_class=invalid_class,
                 note=variant.note,
             ))
             await _pulse_after_variant(i)
