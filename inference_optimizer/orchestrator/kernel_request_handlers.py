@@ -1042,20 +1042,50 @@ async def _run_optimization_batch(
     sem = asyncio.Semaphore(max_parallel)
 
     async def _guarded(candidate: dict[str, Any]) -> HandlerResult:
+        cand_kid = str(candidate.get("kernel_id") or "") if isinstance(candidate, dict) else ""
+        cand_src = (
+            str(candidate.get("source_file") or "")
+            if isinstance(candidate, dict) else ""
+        )
         async with sem:
-            result = await _run_kernel_backend_sequence(
-                payload, candidate, session_dir=session_dir,
-            )
+            try:
+                result = await _run_kernel_backend_sequence(
+                    payload, candidate, session_dir=session_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # A sub-task exception (network blip, GEAK crash, ...)
+                # must NOT propagate out of asyncio.gather while sibling
+                # tasks are still in flight. With the default
+                # ``return_exceptions=False``, gather would re-raise on
+                # first exception while siblings keep running in the
+                # background -- the Coordinator would then unblock
+                # mid-batch, potentially dispatch an integrate, and
+                # collide with still-running kernel_opt subprocesses on
+                # the GPU. We turn every sub-task failure into a
+                # structured failed result so gather behaves as wait-all
+                # regardless of sub-task outcomes, and so the streaming
+                # ``record_partial`` callback still has a kernel_id to
+                # ledger against (preserving rejection / retire logic).
+                log.exception(
+                    "kernel-opt sub-task crashed for kernel_id=%s; "
+                    "wrapping as failed result so gather wait-all holds",
+                    cand_kid or "?",
+                )
+                result = {
+                    "status": "failed",
+                    "kernel_id": cand_kid,
+                    "source_file": cand_src,
+                    "error_class": "subtask_exception",
+                    "error": repr(exc),
+                }
         # Stamp the candidate's source_file onto the sub-result so
         # SharedState's same-source-file conflict guard
         # (``_source_files_in_optimization_stack``) can detect when two
         # KEEPs target the same file. ``_run_kernel_backend_sequence``
         # already preserves ``source_file`` from the candidate payload,
         # but defensively re-stamp here in case a backend dropped it.
-        if isinstance(result, dict) and not result.get("source_file"):
-            cand_src = candidate.get("source_file") if isinstance(candidate, dict) else None
-            if cand_src:
-                result["source_file"] = str(cand_src)
+        if isinstance(result, dict) and not result.get("source_file") and cand_src:
+            result["source_file"] = cand_src
         if record_partial is not None:
             try:
                 record_partial(result)
