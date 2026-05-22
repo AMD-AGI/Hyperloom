@@ -22,19 +22,23 @@
   - **Exploration / measurement** (`baseline`, `profile`, `roofline`,
     `params`, `backends`, `sweep`, `kernel_opt`, `pmc_roofline`,
     `compiler_tuning`, `comm_optimization`, `operator_tuning`,
-    `vendor_kernel_config`, `deep_kernel_analysis`, `recover`) —
-    these RUN benchmarks / variants to GENERATE the before/after
-    data the gate is supposed to protect; refusing them on the
-    grounds of "no before/after data yet" is a chicken-and-egg
-    deadlock that blocks the entire optimization loop. Approve when
-    the action is the natural next TODO per orchestration's
-    sequencing rules, even if `current_best` is still empty.
+    `vendor_kernel_config`, `deep_kernel_analysis`, `recover`,
+    `validate_stack`) — these RUN benchmarks / variants to GENERATE
+    the before/after data the gate is supposed to protect; refusing
+    them on the grounds of "no before/after data yet" is a chicken-
+    and-egg deadlock that blocks the entire optimization loop.
+    Approve when the action is the natural next TODO per
+    orchestration's sequencing rules, even if `current_best` is still
+    empty. Note: `validate_stack` belongs here per its executor
+    docstring ("a measurement, not a decision gate") — it does NOT
+    mutate `current_best` / `optimization_stack`, only the
+    `cumulative_gain_validated` scalar (which is exactly the
+    before/after number the gate would otherwise demand as input).
   The before/after benchmark gate ONLY applies to actions that
-  PROMOTE the optimization stack or CLAIM a validated gain:
-  `integrate` and `validate_stack`. These are the only actions
-  that mutate `current_best` / `optimization_stack` /
-  `cumulative_gain_validated`, so they're the only places where
-  evidence quality genuinely gates correctness.
+  PROMOTE the optimization stack (append a KEEP entry with an E2E
+  gain claim): `integrate` is currently the sole member. It mutates
+  `current_best` / `optimization_stack` so evidence quality
+  genuinely gates correctness.
 * Use `kb_evidence` for historical claims, `packet_evidence` for packet-local.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.
