@@ -124,7 +124,7 @@ def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -147,7 +147,7 @@ def test_run_magpie_explicit_result_dir_overrides_default(tmp_path, monkeypatch)
 
     with patch(
         "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -176,7 +176,7 @@ async def test_run_grid_forwards_benchmark_script_per_variant(tmp_path):
     grid = [GridVariant("v0"), GridVariant("v1")]
     with patch(
         "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -210,7 +210,7 @@ async def test_run_grid_forwards_result_dir_to_subprocess_env(tmp_path):
     grid = [GridVariant("v0"), GridVariant("v1")]
     with patch(
         "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         await run_grid(
@@ -242,7 +242,7 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
     grid = [GridVariant("vA"), GridVariant("vB")]
     with patch(
         "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         await run_grid(
