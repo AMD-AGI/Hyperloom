@@ -1784,6 +1784,19 @@ async def test_select_kernels_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
+def test_optimization_wrapper_timeout_sec_geak_default_90min():
+    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 90 * 60 + 180
+
+
+def test_optimization_wrapper_timeout_sec_oob_default_60min():
+    assert krh._optimization_wrapper_timeout_sec({"backends": "claude"}) == 60 * 60 + 180
+
+
+def test_optimization_wrapper_timeout_sec_geak_env_override(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "120")
+    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 120 * 60 + 180
+
+
 @pytest.mark.asyncio
 async def test_run_optimization_handler_missing_kernel_id(session_dir):
     res = await krh.run_optimization_handler({}, session_dir=session_dir)
@@ -2146,8 +2159,9 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
 
     captured: dict = {}
 
-    async def fake_handler(payload, *, session_dir):
+    async def fake_handler(payload, *, session_dir, **kwargs):
         captured["payload"] = dict(payload)
+        captured["kwargs"] = kwargs
         return {"status": "ok"}
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
@@ -2194,8 +2208,9 @@ async def test_coordinator_does_not_overwrite_explicit_candidates_path(
 
     captured: dict = {}
 
-    async def fake_handler(payload, *, session_dir):
+    async def fake_handler(payload, *, session_dir, **kwargs):
         captured["payload"] = dict(payload)
+        captured["kwargs"] = kwargs
         return {"status": "ok"}
 
     with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
@@ -2215,3 +2230,302 @@ async def test_coordinator_does_not_overwrite_explicit_candidates_path(
             assert captured["payload"].get("candidates_path") == explicit
         finally:
             await c.stop()
+
+
+# ===========================================================================
+# PR-B: multi-KEEP integrate queue + streaming batch record
+# ---------------------------------------------------------------------------
+# Tests for the Coordinator <-> kernel_request_handlers wiring that
+# implements:
+#   1) Streaming record_partial callback so each batch sub-attempt's
+#      KEEP/REVERT lands in SharedState *before* asyncio.gather() wait-all
+#      unblocks (mid-batch visibility).
+#   2) batch_mode dedup so the post-gather record_kernel_opt(best) call
+#      doesn't double-count attempts already recorded via the callback.
+#   3) base_tput auto-injection from current_best.tput on ``integrate``
+#      requests where the LLM forgot to populate it (a routine miss on
+#      the 2nd/3rd integrate of a multi-KEEP drain).
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
+    session_dir,
+):
+    """Each batch sub-attempt's result must flow through record_partial
+    the moment _run_kernel_backend_sequence returns, NOT only after
+    asyncio.gather() wait-all releases. Without this, a single slow
+    GEAK sibling delays integrate-queue visibility for all the fast
+    KEEPs (the Qwen3-30B-A3B-Base 20260522T093903Z regression).
+    """
+    candidates = [
+        {"kernel_id": "kA", "source_file": "/p/a.py", "reusable_native_kernel": True},
+        {"kernel_id": "kB", "source_file": "/p/b.py", "reusable_native_kernel": True},
+        {"kernel_id": "kC", "source_file": "/p/c.py", "reusable_native_kernel": True},
+    ]
+
+    completion_log: list[str] = []
+    recorded: list[dict] = []
+
+    async def fake_sequence(base_payload, candidate, *, session_dir):
+        kid = str(candidate.get("kernel_id"))
+        # Stagger completion times so kA finishes last; the streaming
+        # callback should still see kB and kC's results before kA.
+        delay = {"kA": 0.05, "kB": 0.01, "kC": 0.02}[kid]
+        await asyncio.sleep(delay)
+        completion_log.append(kid)
+        return {
+            "status": "ok",
+            "kernel_id": kid,
+            "source_file": candidate["source_file"],
+            "proposal": {"decision": "KEEP" if kid in ("kB", "kC") else "REVERT"},
+            "verification": {"micro_speedup": 1.5 if kid == "kB" else 2.0},
+        }
+
+    def record_partial(result: dict) -> None:
+        recorded.append({
+            "kernel_id": result.get("kernel_id"),
+            "decision": (result.get("proposal") or {}).get("decision"),
+        })
+
+    with patch.object(krh, "_run_kernel_backend_sequence",
+                       side_effect=fake_sequence):
+        await krh._run_optimization_batch(
+            payload={"candidates_path": "/dummy"},
+            candidates=candidates,
+            session_dir=session_dir,
+            record_partial=record_partial,
+        )
+
+    # Callback must have fired for every candidate, in completion order
+    # (NOT input order). kB finishes first (sleep=0.01), then kC, then kA.
+    assert [r["kernel_id"] for r in recorded] == ["kB", "kC", "kA"], recorded
+    assert completion_log == ["kB", "kC", "kA"]
+
+
+@pytest.mark.asyncio
+async def test_coordinator_streams_batch_results_and_dedups_final_record(
+    session_dir, monkeypatch,
+):
+    """End-to-end through Coordinator._handle_request:
+
+    * record_partial is wired so each sub-attempt records once via
+      ``record_kernel_opt`` while the batch is in flight, and
+    * the post-gather ``record_kernel_opt(best)`` call is skipped when
+      ``result["batch_mode"]`` is True (no double-counting).
+
+    Verified by counting how many times SharedState.record_kernel_opt is
+    invoked relative to the number of batch sub-results.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
+    c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 1234.5
+    c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
+    c.shared_state.last_trace_analyze = {
+        "trace_input": "/wekafs/trace/x.json.gz",
+        "candidates_path": "/wekafs/cached/candidates.json",
+    }
+    # The sequence gate on this branch still consults
+    # ``last_select_kernels`` (M3 will rename it to ``trace_analyze``).
+    c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
+
+    record_calls: list[dict] = []
+    orig_record = c.shared_state.record_kernel_opt
+
+    def counting_record(result):
+        record_calls.append({
+            "kernel_id": (result or {}).get("kernel_id"),
+            "batch_mode": (result or {}).get("batch_mode"),
+        })
+        return orig_record(result)
+
+    async def fake_handler(payload, *, session_dir, record_partial=None, **kwargs):
+        # Simulate two batch sub-attempts streaming through.
+        for kid, decision, micro, src in [
+            ("kA", "KEEP", 4.0, "/p/a.py"),
+            ("kB", "REVERT", 0.8, "/p/b.py"),
+        ]:
+            sub = {
+                "status": "ok",
+                "kernel_id": kid,
+                "source_file": src,
+                "proposal": {"decision": decision},
+                "verification": {"micro_speedup": micro},
+            }
+            if record_partial is not None:
+                record_partial(sub)
+        # Return aggregate best result with batch_mode set so
+        # Coordinator's post-gather record_kernel_opt skips dedup.
+        return {
+            "status": "ok",
+            "batch_mode": True,
+            "kernel_id": "kA",
+            "source_file": "/p/a.py",
+            "proposal": {"decision": "KEEP"},
+            "verification": {"micro_speedup": 4.0},
+        }
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
+                     {"run_optimization": fake_handler}), \
+         patch.object(c.shared_state, "record_kernel_opt",
+                      side_effect=counting_record):
+        try:
+            await c._handle_intent("orchestration", Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel",
+                    "kind": "run_optimization",
+                    "params": {"kernel_id": "kA"},
+                },
+            ))
+        finally:
+            await c.stop()
+
+    # 2 streaming records (kA + kB) + 0 dedup record (batch_mode skipped)
+    # = exactly 2 invocations.
+    assert len(record_calls) == 2, record_calls
+    assert [r["kernel_id"] for r in record_calls] == ["kA", "kB"]
+    assert all(r["batch_mode"] is None for r in record_calls), \
+        "streaming sub-results should not carry batch_mode"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_auto_injects_base_tput_on_integrate_when_missing(
+    session_dir, monkeypatch,
+):
+    """When Orchestration emits ``integrate`` without ``base_tput``, the
+    Coordinator must fill it from ``current_best.tput`` so the handler
+    doesn't bail with ``integrate_handler requires base_tput > 0``.
+    This routinely affects the 2nd/3rd integrate of a multi-KEEP drain
+    where the LLM only remembered the field on the first request.
+    """
+    c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 4319.5
+    c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
+    c.shared_state.last_trace_analyze = {
+        "trace_input": "/wekafs/trace/x.json.gz",
+        "candidates_path": "/wekafs/cached/candidates.json",
+    }
+    c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
+    c.shared_state.current_best = {
+        "action": "integrate",
+        "tput": 4500.0,
+        "kernel_id": "k009",
+    }
+
+    captured: dict = {}
+
+    async def fake_handler(payload, *, session_dir, **kwargs):
+        captured["payload"] = dict(payload)
+        return {"status": "ok", "decision": "KEEP", "new_tput": 4620.0,
+                "gain_pct": 2.7, "kernel_id": "k001"}
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
+                     {"integrate": fake_handler}):
+        try:
+            await c._handle_intent("orchestration", Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel",
+                    "kind": "integrate",
+                    "params": {
+                        "kernel_id": "k001",
+                        "patch_path": "/tmp/k001.py",
+                        "target_file": "/p/moe_op.py",
+                        # no base_tput intentionally
+                    },
+                },
+            ))
+        finally:
+            await c.stop()
+
+    assert captured["payload"].get("base_tput") == 4500.0, \
+        "Coordinator must auto-inject base_tput from current_best.tput"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
+    session_dir,
+):
+    """Explicit operator-supplied ``base_tput`` must NOT be clobbered by
+    the auto-injection -- some flows (e.g. resume from a saved snapshot)
+    intentionally pin a different baseline."""
+    c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 4319.5
+    c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
+    c.shared_state.last_trace_analyze = {
+        "trace_input": "/wekafs/trace/x.json.gz",
+        "candidates_path": "/wekafs/cached/candidates.json",
+    }
+    c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
+    c.shared_state.current_best = {"action": "backends", "tput": 4500.0}
+
+    captured: dict = {}
+
+    async def fake_handler(payload, *, session_dir, **kwargs):
+        captured["payload"] = dict(payload)
+        return {"status": "ok", "decision": "NEEDS_REVIEW", "new_tput": 4400.0,
+                "gain_pct": 0.0, "kernel_id": "k009"}
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
+                     {"integrate": fake_handler}):
+        try:
+            await c._handle_intent("orchestration", Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel",
+                    "kind": "integrate",
+                    "params": {
+                        "kernel_id": "k009",
+                        "patch_path": "/tmp/k009.py",
+                        "target_file": "/p/rmsnorm.py",
+                        "base_tput": 4200.0,  # operator override
+                    },
+                },
+            ))
+        finally:
+            await c.stop()
+
+    assert captured["payload"].get("base_tput") == 4200.0, \
+        "Explicit base_tput must take precedence over current_best.tput"
+
+
+def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
+    session_dir,
+):
+    """The multi-KEEP queue drains kernel_ids that aren't the current
+    ``last_kernel_opt`` slot. ``_resolve_integrate_payload`` must look up
+    patch_path / source_file from the per-kernel ``kernel_opt_attempts``
+    ledger so any queued KEEP can integrate.
+    """
+    from inference_optimizer.orchestrator.shared_state import SharedState
+    state = SharedState.load_or_init(session_dir)
+    # Pretend the streaming record path landed two KEEPs but
+    # last_kernel_opt only holds the strongest (k009).
+    state.last_kernel_opt = {
+        "kernel_id": "k009",
+        "decision": "KEEP",
+        "best_artifact_path": "/tmp/k009.py",
+        "source_file": "/p/rmsnorm.py",
+    }
+    state.kernel_opt_attempts = {
+        "k009": {
+            "last_decision": "KEEP", "last_micro_speedup": 4.13,
+            "last_artifact_path": "/tmp/k009.py", "last_source_file": "/p/rmsnorm.py",
+        },
+        "k001": {
+            "last_decision": "KEEP", "last_micro_speedup": 2.0,
+            "last_artifact_path": "/tmp/k001.py", "last_source_file": "/p/moe_op.py",
+        },
+    }
+    state.save(session_dir)
+
+    # Orch sends integrate(k001) with only the kernel_id -- it's the
+    # *second* KEEP from the queue, not last_kernel_opt.
+    resolved, missing = krh._resolve_integrate_payload(
+        {"kernel_id": "k001", "base_tput": 4500.0},
+        session_dir=session_dir,
+    )
+    assert missing is None, missing
+    assert resolved.get("patch_path") == "/tmp/k001.py", \
+        "patch_path must fall back to kernel_opt_attempts[k001].last_artifact_path"
+    assert resolved.get("source_file") == "/p/moe_op.py", \
+        "source_file must fall back to kernel_opt_attempts[k001].last_source_file"
