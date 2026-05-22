@@ -2,9 +2,8 @@
 
 Covers:
 
-* IntentEnvelope schema validation (parse_codex_validated_json,
-  parse_claude_tool_calls, validate_envelope) — including v0.6 additions
-  REVIEW_VERDICT and removed-in-v0.6 OBJECTION/VOTE rejection
+* IntentEnvelope schema validation (validate_envelope) — including v0.6
+  additions REVIEW_VERDICT and removed-in-v0.6 OBJECTION/VOTE rejection
 * MessageBus append/tail/replay/lookup + topic allowlist + priority bound
 * ResourceLockManager: 4 KNOWN_LANES + LANE_CONFLICTS + acquire_many
   atomicity + heartbeat + release + reap_expired
@@ -15,7 +14,6 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -27,9 +25,6 @@ from inference_optimizer.orchestrator.intent_parser import (
     Intent,
     IntentType,
     IntentValidationError,
-    NoIntentEmitted,
-    parse_claude_tool_calls,
-    parse_codex_validated_json,
     validate_envelope,
 )
 from inference_optimizer.orchestrator.message_bus import (
@@ -119,42 +114,6 @@ def test_validate_envelope_propose_action_requires_predicted_gain():
     envelope = {"intents": [{"intent_type": "propose_action", "payload": {"action_name": "baseline"}}]}
     with pytest.raises(IntentValidationError, match="predicted_gain_pct"):
         validate_envelope(envelope)
-
-
-def test_parse_codex_validated_json_round_trip():
-    raw = json.dumps({
-        "intents": [
-            {"intent_type": "alert", "payload": {"severity": "high", "summary": "OOM"}}
-        ]
-    })
-    intents = parse_codex_validated_json(raw)
-    assert intents[0].payload["severity"] == "high"
-
-
-def test_parse_codex_validated_json_bad_json():
-    with pytest.raises(IntentValidationError, match="codex json parse error"):
-        parse_codex_validated_json("not json")
-
-
-def test_parse_claude_tool_calls_with_emit_intent():
-    tool_uses = [
-        {"name": "emit_intent", "input": {
-            "intent_type": "request",
-            "payload": {"target_agent": "kernel", "kind": "select_kernels"},
-        }},
-        {"name": "Read", "input": {"path": "/tmp/x"}},  # ignored
-        {"name": "emit_intent", "input": {
-            "intent_type": "send_message",
-            "payload": {"topic": "heartbeat"},
-        }},
-    ]
-    intents = parse_claude_tool_calls(tool_uses)
-    assert [i.type for i in intents] == [IntentType.REQUEST, IntentType.SEND_MESSAGE]
-
-
-def test_parse_claude_tool_calls_no_emit_intent_raises():
-    with pytest.raises(NoIntentEmitted):
-        parse_claude_tool_calls([{"name": "Bash", "input": {"cmd": "ls"}}])
 
 
 def test_emit_intent_tool_schema_is_complete():
