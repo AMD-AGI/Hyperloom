@@ -33,7 +33,6 @@ slow cooldown.
 
 from __future__ import annotations
 
-import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -44,8 +43,6 @@ from ..sources.base import SourceData
 from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
-
-log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
