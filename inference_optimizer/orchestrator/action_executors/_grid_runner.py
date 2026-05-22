@@ -29,6 +29,7 @@ from typing import Any
 import yaml
 
 from ._robustness_pulse import pulse as _robustness_pulse
+from ._subprocess_kill import run_with_session_kill
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
@@ -533,9 +534,15 @@ def _run_magpie(
         "--output-dir", str(output_dir),
         "--run-mode", "local",
     ]
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout_sec,
-        env=env, cwd=cwd,
+    # ``run_with_session_kill`` (imported at module level so tests can
+    # patch it as ``_grid_runner.run_with_session_kill``) is the
+    # ``subprocess.run``-compatible wrapper that launches Magpie in its
+    # own POSIX session and tears down the whole descendant tree on
+    # every exit path (bugs.md §B — leaked vLLM / SGLang servers across
+    # grid variants were what later sourced half-truncated benchmark
+    # scripts in bugs.md §C #1). See ``_subprocess_kill.py``.
+    proc = run_with_session_kill(
+        cmd, env=env, cwd=cwd, timeout=timeout_sec,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
