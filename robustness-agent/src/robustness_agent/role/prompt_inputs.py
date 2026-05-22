@@ -64,6 +64,14 @@ _SCALAR_KEYS = {
     "tick",
     "stop_reason",
     "optimization_stack",
+    # PR-B Fix 2: in-flight kernel-opt visibility. ``no_levers_found``
+    # used to fire while a long batch was still running (stack_size=0 +
+    # cumulative_gain=0 + elapsed>threshold), even though the LLM had
+    # already dispatched kernel_opt and a KEEP was waiting to integrate.
+    # Reading these two fields lets ``_no_levers_symptom`` short-circuit
+    # when in-flight work is the explanation, not "no lever found".
+    "kernel_opt_attempts_count",
+    "has_keep_pending_integrate",
 }
 
 # Pattern for the Coordinator's Time-budget body line, e.g.:
@@ -122,6 +130,17 @@ class SharedStateSnapshot:
     remaining_minutes: float = 0.0
     budget_minutes: float = 0.0
     closing_phase: bool = False
+    # PR-B Fix 2: kernel-opt in-flight visibility (see _SCALAR_KEYS).
+    # ``kernel_opt_attempts_count`` is the number of unique kernel_ids
+    # that have at least one recorded attempt (KEEP / REVERT / PARTIAL /
+    # failure). Non-zero means "the LLM has run kernel_opt at least once
+    # this session", which is a strong reason NOT to claim
+    # ``no_levers_found``. ``has_keep_pending_integrate`` is True when
+    # the multi-KEEP integrate queue still has work queued; firing
+    # ``no_levers`` then is also wrong because the next integrate is
+    # imminent.
+    kernel_opt_attempts_count: int = 0
+    has_keep_pending_integrate: bool = False
 
 
 @dataclass
@@ -261,6 +280,10 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
             snapshot.stop_reason = "" if head == "(none)" else head
         elif key == "optimization_stack":
             snapshot.optimization_stack_size = _count_optimization_stack(head)
+        elif key == "kernel_opt_attempts_count":
+            snapshot.kernel_opt_attempts_count = _coerce_int(head)
+        elif key == "has_keep_pending_integrate":
+            snapshot.has_keep_pending_integrate = head.lower() == "true"
     return snapshot
 
 
