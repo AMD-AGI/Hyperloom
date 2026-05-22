@@ -19,6 +19,8 @@ def _ctx(
     optimization_stack_size: int = 0,
     closing_phase: bool = False,
     stop_reason: str = "",
+    kernel_opt_attempts_count: int = 0,
+    has_keep_pending_integrate: bool = False,
 ) -> ReactorContext:
     snap = SharedStateSnapshot(
         session_id="sess-1",
@@ -28,6 +30,8 @@ def _ctx(
         optimization_stack_size=optimization_stack_size,
         closing_phase=closing_phase,
         stop_reason=stop_reason,
+        kernel_opt_attempts_count=kernel_opt_attempts_count,
+        has_keep_pending_integrate=has_keep_pending_integrate,
     )
     return ReactorContext(tick_index=tick, shared_state=snap, now_unix=1.0)
 
@@ -164,3 +168,70 @@ def test_no_levers_silent_when_validated_gain_present():
         SourceData(),
     )
     assert all(s.name != "no_levers_found" for s in out)
+
+
+# ---------------------------------------------------------------------------
+# PR-B Fix 2: in-flight kernel-opt short-circuits no_levers_found
+# ---------------------------------------------------------------------------
+def test_no_levers_silent_when_kernel_opt_attempts_in_progress():
+    """While a batch kernel_opt is in flight (or completed but no integrate
+    yet), ``kernel_opt_attempts_count > 0`` even though
+    ``optimization_stack_size == 0``. The signal must short-circuit so
+    Orch does not race to ``report`` before the next integrate fires.
+
+    Repro of the Qwen3-30B-A3B-Base 20260522T093903Z regression: a
+    GEAK batch ran 90+ min with stack=0 + gain=0 the whole time;
+    pre-Fix-2 this signal would have emitted HIGH alert and pushed the
+    LLM toward early report.
+    """
+    det = ProgressDetector(ProgressConfig(
+        no_levers_min_minutes=45.0, no_levers_min_ticks=8,
+    ))
+    out = det.evaluate(
+        _ctx(
+            tick=20, elapsed_minutes=70.0, optimization_stack_size=0,
+            kernel_opt_attempts_count=3,  # batch of 3 kernels in flight
+        ),
+        SourceData(),
+    )
+    assert all(s.name != "no_levers_found" for s in out), \
+        "kernel_opt_attempts_count>0 must silence no_levers_found"
+
+
+def test_no_levers_silent_when_keep_pending_integrate():
+    """When the multi-KEEP queue has work waiting, the Coordinator's
+    integrate gate is about to fire -- not a "no lever found" condition.
+    """
+    det = ProgressDetector(ProgressConfig(
+        no_levers_min_minutes=45.0, no_levers_min_ticks=8,
+    ))
+    out = det.evaluate(
+        _ctx(
+            tick=20, elapsed_minutes=70.0, optimization_stack_size=0,
+            kernel_opt_attempts_count=2,
+            has_keep_pending_integrate=True,
+        ),
+        SourceData(),
+    )
+    assert all(s.name != "no_levers_found" for s in out)
+
+
+def test_no_levers_evidence_includes_in_flight_fields():
+    """When no_levers DOES fire (genuinely no kernel_opt run yet), the
+    emitted evidence dict should carry the in-flight bookkeeping so an
+    operator can inspect the decision after the fact.
+    """
+    det = ProgressDetector(ProgressConfig(
+        no_levers_min_minutes=45.0, no_levers_min_ticks=8,
+    ))
+    out = det.evaluate(
+        _ctx(
+            tick=20, elapsed_minutes=70.0, optimization_stack_size=0,
+            kernel_opt_attempts_count=0,
+            has_keep_pending_integrate=False,
+        ),
+        SourceData(),
+    )
+    sym = next(s for s in out if s.name == "no_levers_found")
+    assert sym.evidence["kernel_opt_attempts_count"] == 0
+    assert sym.evidence["has_keep_pending_integrate"] is False
