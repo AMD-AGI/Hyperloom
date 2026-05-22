@@ -64,11 +64,14 @@ def test_critic_md_is_rules_fragment():
     assert p.is_file(), f"missing critic rules fragment: {p}"
     text = p.read_text(encoding="utf-8")
     lines = [ln for ln in text.splitlines() if ln.strip()]
-    # Cap bumped from 30 → 45 by N35 (May 2026) to fit the structured
-    # archival + exploration carve-out bullets that name every action
-    # currently exempt from the before/after benchmark gate. Future
-    # bumps require equivalent justification (a new action class).
-    assert len(lines) <= 45, (
+    # Cap bumped 30 → 45 by N35 (structured carve-out bullets), then
+    # 45 → 65 by N38 (the "primary per-proposal rule" section that
+    # introduces the action_verdict_policy lookup as the canonical
+    # source of truth — replaces having to hand-edit carve-out lists
+    # every time a new action class lands; see N38 docstring). Future
+    # bumps require equivalent justification (new mechanism, not just
+    # adding more action names to existing lists).
+    assert len(lines) <= 65, (
         f"critic.md should be a concise fragment, got {len(lines)} non-empty lines"
     )
     assert "judge_bundle" in text
