@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # kernel-agent OOB auth-proxy supervisor.
 #
-# The auth-proxy (auth_proxy.py from OOB) listens on 127.0.0.1:4010 by
-# default (:4002 is often occupied by dfdaemon on shared dev hosts).
+# The auth-proxy (auth_proxy.py from OOB) listens on 127.0.0.1:4002 and
 # rewrites the agent CLIs' x-api-key header into Authorization: Bearer for
 # the AMD LLM gateway. Without it, claude/codex CLI requests get HTTP 401
 # "token not present" because the gateway's auth is non-standard.
@@ -13,8 +12,8 @@
 #   bash $REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh
 #
 # Behaviour:
-#   * If the proxy forwards GET <upstream>/models with Bearer auth (HTTP 200),
-#     treat it as healthy and noop.
+#   * If port :4002 is open AND a benign HTTP probe gets ANY HTTP status
+#     back, treat the proxy as healthy and noop.
 #   * If port is open but the probe times out (proxy stuck), kill any
 #     auth_proxy.py PIDs and relaunch.
 #   * If port is closed, launch the proxy.
@@ -36,16 +35,16 @@ set -euo pipefail
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
+PROXY_PY="${PROXY_PY:-${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py}"
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _HYPERLOOM_REPO="$(cd "${_SCRIPT_DIR}/../.." && pwd)"
-PROXY_PY="${PROXY_PY:-${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py}"
 if [ ! -f "$PROXY_PY" ]; then
   PROXY_PY="${HYPERLOOM_ROOT}/OOB/auth_proxy.py"
 fi
 if [ ! -f "$PROXY_PY" ]; then
   PROXY_PY="${_HYPERLOOM_REPO}/OOB/auth_proxy.py"
 fi
-PROXY_PORT="${AUTH_PROXY_PORT:-4010}"
+PROXY_PORT="${AUTH_PROXY_PORT:-4002}"
 # Auth-proxy stdout/stderr lands under $USER_DATA_PATH/logs/auth-proxy/
 # by default so a single $USER_DATA_PATH tail covers it. Override
 # AUTH_PROXY_LOG_DIR if you want the legacy ${HYPERLOOM_ROOT}/logs location.
@@ -65,25 +64,27 @@ port_open() {
   (echo > "/dev/tcp/127.0.0.1/${PROXY_PORT}") >/dev/null 2>&1
 }
 
-# Returns 0 when the listener forwards LLM catalog traffic (HTTP 200 on
-# GET .../models with Bearer). Empty 404 on :4002 usually means dfdaemon,
-# not auth_proxy — do not treat that as healthy.
-proxy_forwards_llm() {
+# Returns 0 if proxy responds with any HTTP status (proof of life), 1 if
+# the connection times out / hangs / is refused. We don't care WHICH
+# status — even a 4xx from upstream means the proxy is forwarding.
+proxy_responds() {
   if ! command -v curl >/dev/null 2>&1; then
+    # No curl → fall back to TCP-level liveness only.
     port_open
     return $?
   fi
-  if [ -z "$OOB_BASE_URL_VAL" ] || [ -z "$OOB_API_KEY_VAL" ]; then
-    return 1
-  fi
-  derive_proxy_urls
-  local models_url="${PROXY_OPENAI_BASE_URL%/}/models"
   local http_code=""
-  http_code=$(curl -sk -o /dev/null -w '%{http_code}' \
-    --max-time "$PROBE_TIMEOUT" \
-    -H "Authorization: Bearer ${OOB_API_KEY_VAL}" \
-    "$models_url" 2>/dev/null) || true
-  [ "$http_code" = "200" ]
+  # Capture http_code separately; do NOT use `|| echo 000` inside $(...)
+  # because curl -w '%{http_code}' already outputs "000" on connect failure,
+  # and the fallback echo would concatenate to "000000" which doesn't match
+  # the "000" case pattern below → false positive "healthy".
+  http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+                   --max-time "$PROBE_TIMEOUT" \
+                   "http://127.0.0.1:${PROXY_PORT}/" 2>/dev/null) || true
+  case "$http_code" in
+    ""|"000"|"0") return 1 ;;  # connect refused / timeout / no output
+    *)            return 0 ;;  # any real HTTP status = proxy is alive
+  esac
 }
 
 # Best-effort kill of any python auth_proxy.py owning :4002 so the relaunch
@@ -158,8 +159,8 @@ start_proxy() {
 
   local elapsed=0
   while [ "$elapsed" -lt "$START_WAIT_SEC" ]; do
-    if proxy_forwards_llm; then
-      log "auth-proxy forwarding on :${PROXY_PORT} after ${elapsed}s"
+    if port_open; then
+      log "auth-proxy bound :${PROXY_PORT} after ${elapsed}s"
       emit_proxy_urls
       return 0
     fi
@@ -171,8 +172,8 @@ start_proxy() {
 }
 
 main() {
-  if proxy_forwards_llm; then
-    log "auth-proxy already healthy on :${PROXY_PORT} (GET /models -> 200)"
+  if proxy_responds; then
+    log "auth-proxy already healthy on :${PROXY_PORT}"
     # Always emit PROXY_*_BASE_URL on the healthy-noop path too — install.sh
     # parses our stdout to populate the pod-local kernel-agent env. Without this, that env
     # silently lacks ANTHROPIC_BASE_URL/OPENAI_BASE_URL whenever the proxy
@@ -183,11 +184,7 @@ main() {
   fi
 
   if port_open; then
-    if [ "$PROXY_PORT" = "4002" ]; then
-      warn "port :4002 is open but does not forward /models (often dfdaemon, not auth_proxy); use AUTH_PROXY_PORT=4010"
-    else
-      warn "port :${PROXY_PORT} open but GET /models != 200 — killing auth_proxy.py and relaunching"
-    fi
+    warn "port :${PROXY_PORT} open but probe timed out — proxy is stuck; killing and relaunching"
     kill_stuck_proxy
   fi
 
