@@ -258,6 +258,186 @@ def _check_selected_chunk_has_gpu_events(
     }
 
 
+# ---------------------------------------------------------------------------
+# N36 — chunk-quality gate (busy_ratio threshold + alternate-mode lookup)
+# ---------------------------------------------------------------------------
+# Background: N25 deliberately stays a STRUCTURAL gate (num_gpu_events>0 AND
+# gpu_busy_duration>0). The DSR1-0528 (671B FP8 MoE) TP=8 10k/1k production
+# run on 2026-05-21 exposed a gap: TraceLens' splitter happily produced a
+# ``mixed_steady_state`` chunk with 160 events / 2053us busy out of 3.26s
+# (0.063% busy) -- structurally non-empty so N25 passed -- but
+# substantively garbage. Downstream analysis.md reported "Compute %=0.09%
+# / Idle %=99.90%" with ``reusable_native_kernel_ids=[]`` and the LLM
+# was left with nothing to feed GEAK with.
+#
+# Root cause: the profile window calibration in ``_workload_envs``
+# computes ``delay_iters = OSL * (R+1) * 3 - max_iters/2`` -- it only
+# considers OSL, so a 10k/1k workload (10x ISL prefill) lands at the
+# same ``start_step=6016`` as a 1k/1k workload. With CONC=64, by step
+# 6016 every batch has finished its single prefill iter and the
+# profiler captures only decode iters where the 8x MI300X is sparse.
+#
+# N36 closes that gap: this helper checks busy_ratio AND looks for an
+# alternate mode with materially higher busy_ratio. When such an
+# alternate exists we emit ``steady_state_chunk_low_quality`` (in the
+# N26 retry allowlist) so the coordinator re-issues trace_analyze
+# automatically. When NO mode is better we return ``None`` -- emitting
+# a retry-warning would spin the same bad trace forever; the
+# ``roofline_failure_streak`` path handles that case (N27 fallback).
+_DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
+# Alternate mode must beat the requested mode by at least this margin
+# for the auto-retry to be worth it. Otherwise we'd thrash between
+# equally-bad modes.
+_CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
+
+
+def _resolve_min_busy_ratio() -> float:
+    raw = os.environ.get(
+        "INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO", "",
+    ).strip()
+    if not raw:
+        return _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
+    try:
+        v = float(raw)
+        return v if 0.0 <= v <= 1.0 else _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
+    except ValueError:
+        return _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
+
+
+def _busy_ratio(num_events: float, busy_us: float, dur_us: float) -> float | None:
+    """Return ``busy_us / dur_us`` or ``None`` when undefined (zero
+    duration). Caller treats ``None`` as "no signal, defer to N25".
+    """
+    if dur_us <= 0.0 or num_events <= 0:
+        return None
+    return max(0.0, min(1.0, busy_us / dur_us))
+
+
+def _check_selected_chunk_has_gpu_events_quality(
+    *,
+    split_dir: "Path",
+    selected_chunk: "Path",
+    mode: str,
+    available_modes: "dict[str, tuple[str, list[Path]]]",
+) -> "dict[str, Any] | None":
+    """Quality gate that complements N25's structural gate.
+
+    Returns ``None`` when the selected chunk is acceptable (busy_ratio
+    >= threshold) OR no alternate mode is materially better OR the CSV
+    is missing / row not found. Returns a structured warning dict
+    (``code=steady_state_chunk_low_quality``, same shape as N25 for
+    drop-in compatibility with the N26 retry path) when an alternate
+    mode with materially higher busy_ratio exists.
+
+    See module-level N36 comment for the empirical case + design.
+    """
+    import csv as _csv
+
+    details_path = split_dir / "execution_details.csv"
+    if not details_path.is_file():
+        return None
+    try:
+        with details_path.open("r", encoding="utf-8") as fh:
+            rows = list(_csv.DictReader(fh))
+    except (OSError, _csv.Error):
+        return None
+
+    def _row_for(chunk_path: "Path") -> "dict[str, str] | None":
+        resolved = str(chunk_path.resolve())
+        for row in rows:
+            out_path = row.get("output_path", "")
+            if not out_path:
+                continue
+            try:
+                if str(Path(out_path).resolve()) == resolved:
+                    return row
+            except (OSError, ValueError):
+                continue
+        return None
+
+    def _stats(row: "dict[str, str] | None") -> "tuple[int, float, float]":
+        if row is None:
+            return 0, 0.0, 0.0
+        def _f(k: str) -> float:
+            try:
+                return float(row.get(k) or "0") or 0.0
+            except (TypeError, ValueError):
+                return 0.0
+        return int(_f("num_gpu_events")), _f("gpu_busy_duration"), _f("gpu_duration")
+
+    selected_row = _row_for(selected_chunk)
+    if selected_row is None:
+        return None
+    sel_events, sel_busy, sel_dur = _stats(selected_row)
+    sel_ratio = _busy_ratio(sel_events, sel_busy, sel_dur)
+    if sel_ratio is None:
+        # Can't measure ratio; N25 already covers the structural empty
+        # case. Defer.
+        return None
+    threshold = _resolve_min_busy_ratio()
+    if sel_ratio >= threshold:
+        return None
+
+    # Selected chunk is below threshold. Look for an alternate mode
+    # whose chunk has materially higher busy_ratio (otherwise retrying
+    # is pointless).
+    alternates: list[tuple[str, float]] = []
+    for other_mode, (_label, chunks) in available_modes.items():
+        if other_mode == mode or not chunks:
+            continue
+        other_row = _row_for(chunks[0])
+        if other_row is None:
+            continue
+        oth_events, oth_busy, oth_dur = _stats(other_row)
+        oth_ratio = _busy_ratio(oth_events, oth_busy, oth_dur)
+        if oth_ratio is None:
+            continue
+        if oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
+            alternates.append((other_mode, oth_ratio))
+    if not alternates:
+        return None  # No better mode exists; let roofline_failure_streak path handle.
+
+    # Sort by descending busy_ratio so the best alternate is first --
+    # roofline._extract_steady_state_retry_mode picks the head of the
+    # non_empty_modes list.
+    alternates.sort(key=lambda mr: -mr[1])
+    non_empty_modes = [m for m, _r in alternates]
+    return {
+        "code": "steady_state_chunk_low_quality",
+        "severity": "blocking",
+        "requested_mode": mode,
+        "selected_chunk": str(selected_chunk),
+        "num_gpu_events": sel_events,
+        "gpu_busy_duration": sel_busy,
+        "gpu_duration": sel_dur,
+        "busy_ratio": sel_ratio,
+        "threshold": threshold,
+        "non_empty_modes": non_empty_modes,
+        "alternate_busy_ratios": dict(alternates),
+        "remediation": (
+            "Re-issue roofline with env "
+            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
+            f"{non_empty_modes}. The TraceLens splitter chunk for the "
+            f"requested mode '{mode}' is {sel_ratio*100:.2f}% busy "
+            f"(threshold {threshold*100:.0f}%) -- non-empty but "
+            "substantively garbage. Most common cause for prefill-"
+            "heavy workloads: profile window misalignment "
+            "(_workload_envs.delay_iters formula only considers OSL, "
+            "so high-ISL workloads land in pure-decode windows)."
+        ),
+        "message": (
+            f"TraceLens splitter selected chunk ({mode}) busy_ratio="
+            f"{sel_ratio*100:.3f}% (events={sel_events}, "
+            f"busy={sel_busy:.1f}us / dur={sel_dur:.1f}us) -- below "
+            f"the {threshold*100:.0f}% threshold and alternate "
+            f"modes have higher busy_ratio. Refusing to feed it into "
+            "TraceLens analysis (would produce a misleading analysis.md "
+            "with reusable_native_kernel_ids=[] and stall the "
+            "optimization loop, per DSR1-0528 10k/1k case)."
+        ),
+    }
+
+
 KERNEL_HINTS = (
     "kernel", "triton", "hip", "cuda", "rocblas", "hipblas", "aiter",
     "fmha", "gemm", "attention", "moe", "rmsnorm", "layernorm",
@@ -2205,6 +2385,48 @@ def main() -> int:
                         f"selected chunk has zero GPU events; available "
                         f"non-empty modes: "
                         f"{empty_chunk_warning['non_empty_modes']}"
+                    )
+
+                # N36 (May 2026) — quality gate on busy_ratio. N25
+                # only catches structurally empty chunks (events==0
+                # OR busy==0); a chunk like the DSR1-0528 10k/1k case
+                # (160 events / 2ms busy / 3.26s duration = 0.06%
+                # busy) passes N25 but is substantively garbage. The
+                # quality gate looks for an alternate mode with
+                # materially higher busy_ratio and emits a
+                # ``steady_state_chunk_low_quality`` warning the
+                # coordinator's N26 retry path consumes -- same
+                # remediation flow as the empty-chunk case, no
+                # additional wiring required. See N36 module-level
+                # comment + test_n36_chunk_quality_gate.py.
+                low_quality_warning = _check_selected_chunk_has_gpu_events_quality(
+                    split_dir=split_dir,
+                    selected_chunk=cli_trace_path,
+                    mode=args.steady_state_mode,
+                    available_modes=_mode_to_chunks,
+                )
+                if low_quality_warning is not None:
+                    trace_health_warnings.append(low_quality_warning)
+                    append_log(
+                        log_path,
+                        f"ERROR: --steady-state-mode={args.steady_state_mode} "
+                        f"selected chunk {cli_trace_path.name} is "
+                        f"non-empty but low-quality: busy_ratio="
+                        f"{low_quality_warning['busy_ratio']*100:.3f}% "
+                        f"(threshold "
+                        f"{low_quality_warning['threshold']*100:.0f}%); "
+                        f"alternate modes with higher busy_ratio: "
+                        f"{low_quality_warning['non_empty_modes']}. "
+                        "Refusing to analyze (would yield misleading "
+                        "high-idle Executive Summary).",
+                    )
+                    raise RuntimeError(
+                        f"steady_state_chunk_low_quality: requested "
+                        f"--steady-state-mode={args.steady_state_mode} chunk "
+                        f"busy_ratio="
+                        f"{low_quality_warning['busy_ratio']*100:.3f}%; "
+                        f"better alternates: "
+                        f"{low_quality_warning['non_empty_modes']}"
                     )
 
                 artifacts["tracelens_trace_split_dir"] = str(split_dir)
