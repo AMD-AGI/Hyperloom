@@ -1103,6 +1103,39 @@ def _build_multinode_revert_patch_entrypoint(
     )
 
 
+def _build_multinode_apply_tracelens_patch_entrypoint(
+    tracelens_root: str,
+    sglang_version_pin: str,
+) -> str:
+    """Compose the Ray Dashboard entrypoint that fans out the TraceLens
+    SGLang patch set to every pod via apply_tracelens_patch_multinode.py
+    (heredoc-embedded).
+
+    Unlike apply-patch (which carries the patch payload base64-encoded in
+    the entrypoint), this one only forwards ``$TRACELENS_ROOT`` because the
+    patches live on a wekafs path mounted on every pod and the in-pod
+    script reads them directly. Avoids inflating the entrypoint by ~50KB
+    of patch bytes per restart.
+
+    The in-pod script is idempotent (sentinel grep before applying), so
+    the controller can call this on every ``restart_server_for_round``
+    without worrying about double-patching.
+    """
+    py = _read_pod_script("apply_tracelens_patch_multinode.py")
+    pin_arg = ""
+    if sglang_version_pin:
+        pin_arg = f" --sglang-version-pin {sglang_version_pin!r}"
+    return (
+        f"{_MN_ENTRYPOINT_PREAMBLE}"
+        f"cat > \"$WORK_DIR/apply_tracelens_patch_multinode.py\" "
+        f"<<'__MN_TLPATCH_PY_EOF__'\n"
+        f"{py}__MN_TLPATCH_PY_EOF__\n"
+        f"python3 \"$WORK_DIR/apply_tracelens_patch_multinode.py\" "
+        f"--tracelens-root {tracelens_root!r}"
+        f"{pin_arg}"
+    )
+
+
 def _build_multinode_kernel_bench_entrypoint(
     workspace: str,
     bench_command: str,
@@ -1323,6 +1356,94 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
         return EXIT_TRANSIENT
     print(json.dumps(parsed, indent=2, sort_keys=True))
     return rc
+
+
+def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
+    """Fan-out the TraceLens SGLang patch set to every pod (head + workers).
+
+    Submitted via Ray Dashboard REST as ``apply_tracelens_patch_multinode.py``;
+    that script enumerates all alive nodes and spawns per-node actors that
+    ``import sglang`` + ``git apply`` the per-version TraceLens patches.
+
+    Why this command exists
+    -----------------------
+
+    Single-node Hyperloom runs ``_server_patcher.ensure_sglang_patched_for_
+    tracelens`` directly because the same Python process imports SGLang
+    and can locate the install root. On multi-node the controller
+    (sandbox) cannot ``import sglang`` (it's only installed in the
+    RayJob pods), so the local patcher silently skips and SGLang starts
+    without the TraceLens annotation patches — torch.profiler then emits
+    only ``step[DECODE bs=N]`` / ``step[EXTEND bs=N toks=M]`` markers
+    which the TraceLens splitter does not recognise, so
+    ``tracelens_analysis.py`` raises ``trace_split_no_steady_state`` and
+    the orchestration agent stalls in a ``proposals=0`` loop.
+
+    Idempotency
+    -----------
+
+    The in-pod script grep-checks the sentinel files BEFORE running
+    ``git apply``. Already-patched pods return ``status=skipped`` after a
+    cheap file read, so the controller can call this on every
+    ``restart_server_for_round`` without worrying about double-patch.
+
+    Stdout
+    ------
+
+    JSON document with ``status`` (``applied`` / ``skipped`` / ``failed``)
+    and ``per_pod`` (list of per-host summaries). Same shape as
+    ``apply_tracelens_patch_multinode.py`` emits, re-printed verbatim.
+
+    Multi-node only.
+    """
+    state = _load_state()
+    head_ip = (state.get("head_pod_ip") or "").strip()
+    if not head_ip:
+        err(
+            "apply-tracelens-patch requires head_pod_ip in state file; "
+            "run create-rayjob first"
+        )
+        return EXIT_CONFIG_ERROR
+
+    tracelens_root = (
+        args.tracelens_root
+        or os.environ.get("TRACELENS_ROOT", "").strip()
+    )
+    if not tracelens_root:
+        err(
+            "apply-tracelens-patch requires --tracelens-root or "
+            "$TRACELENS_ROOT to point at the TraceLens-internal checkout "
+            "(must be visible from every pod, typically a wekafs path)"
+        )
+        return EXIT_CONFIG_ERROR
+
+    info(
+        f"apply-tracelens-patch: tracelens_root={tracelens_root!r} "
+        f"version_pin={args.sglang_version_pin!r}"
+    )
+
+    entrypoint = _build_multinode_apply_tracelens_patch_entrypoint(
+        tracelens_root, args.sglang_version_pin or "",
+    )
+    rc, parsed, logs = _submit_and_collect_pod_json(
+        head_ip, entrypoint, label="apply-tracelens-patch",
+        poll_interval=args.poll_interval, poll_timeout=args.poll_timeout,
+    )
+    if parsed is None:
+        err("apply-tracelens-patch: could not parse per-pod JSON from dashboard logs")
+        if args.print_logs:
+            print(logs)
+        return EXIT_TRANSIENT
+    print(json.dumps(parsed, indent=2, sort_keys=True))
+    # ``_submit_and_collect_pod_json`` expects the in-pod script to emit
+    # ``"status": "ok"`` (kernel_patch_multinode.py convention). Our
+    # tracelens patcher emits ``"applied"`` / ``"skipped"`` so the helper
+    # mis-classifies a successful run as transient. Derive the exit code
+    # ourselves from the parsed payload — driver_exit_code is already
+    # baked into ``status``: SUCCEEDED before we reach this branch.
+    if parsed.get("status") in ("applied", "skipped"):
+        return EXIT_OK
+    return EXIT_TRANSIENT
 
 
 def cmd_kernel_bench(args: argparse.Namespace) -> int:
@@ -1963,6 +2084,34 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_revert_patch)
+
+    # apply-tracelens-patch (multi-node only)
+    sp = sub.add_parser(
+        "apply-tracelens-patch",
+        help=(
+            "fan-out the TraceLens SGLang patch set to every pod; "
+            "multi-node only. Idempotent: skips pods already patched."
+        ),
+    )
+    sp.add_argument(
+        "--tracelens-root", default=None,
+        help=(
+            "absolute path to TraceLens-internal checkout (must be visible "
+            "from every pod, typically /wekafs/...). Defaults to "
+            "$TRACELENS_ROOT."
+        ),
+    )
+    sp.add_argument(
+        "--sglang-version-pin", default=None,
+        help=(
+            "advisory pin (e.g. '0.5.11'); logged on mismatch with the "
+            "sglang installed in the pod. Optional."
+        ),
+    )
+    sp.add_argument("--print-logs", action="store_true",
+                    help="dump full dashboard job_logs on parse failure")
+    _add_common_poll_flags(sp)
+    sp.set_defaults(func=cmd_apply_tracelens_patch)
 
     # kernel-bench (multi-node only)
     sp = sub.add_parser(
