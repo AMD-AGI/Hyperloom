@@ -660,12 +660,52 @@ until the patch lands on `optimization_stack`. Payload:
           params: {kernel_id, patch_path, target_file, base_tput,
                    extra_sglang_args, config_path}}
 
+If you omit `base_tput`, the Coordinator auto-fills it from
+`current_best.tput` so chained integrates (multi-KEEP drain, see below)
+do not need you to track the running baseline manually. Explicit operator
+override still wins.
+
+If you omit `patch_path` / `source_file`, the Coordinator resolves them
+from `last_kernel_opt.best_artifact_path` first, then from
+`kernel_opt_attempts[<kernel_id>].last_artifact_path` (the per-kernel
+ledger). This second fallback is what makes multi-KEEP queue drain
+work: queued KEEPs whose kernel_id != `last_kernel_opt.kernel_id` still
+resolve to a real patch.
+
 If `result.proposal.decision` is `PARTIAL` or `REVERT`, the patch is
 rejected — do NOT integrate. The Coordinator unlocks immediately; consult
 the scoreboard for the next action like normal. A second `kernel_opt`
 round on the next reusable kernel_id often surfaces as top-1 (because
 the previous KEEP/REVERT decayed only that kernel_id's branch), but is
 not required — the scoreboard decides.
+
+#### Multi-KEEP integrate queue (PR-B)
+
+A single `run_optimization` batch may produce KEEPs for multiple
+kernels at once. The Coordinator streams each sub-result into
+SharedState the instant it lands (not after gather wait-all), and
+maintains a queue keyed off `kernel_opt_attempts`. Read these state
+fields to drive the drain:
+
+  * `pending_keep_kernels`         — list[str] of queued KEEP
+    `kernel_id`s, sorted strongest-first by micro_speedup. The TODO 4/5
+    integrate gate stays open as long as this list is non-empty, so
+    DO NOT propose `report` while pending KEEPs remain.
+  * `has_keep_pending_integrate`   — bool mirror, convenient short-circuit.
+
+For each tick where `has_keep_pending_integrate=true`:
+  1. Pick `pending_keep_kernels[0]` (highest micro) as the next
+     `integrate` target.
+  2. Emit the `integrate` request; the Coordinator fills in
+     `patch_path` / `source_file` / `base_tput` automatically.
+  3. After the result lands, the queue either advances to the next
+     pending KEEP or drains to empty — `validate_stack` (TODO 5/5)
+     fires once the integrate stack has new unvalidated entries.
+
+Same-source-file collision: `apply_kernel_patch` is a whole-file
+overwrite, so if two KEEPs target the same `source_file`, the
+queue collapses to the strongest one and silently drops the rest
+(no manual conflict handling required).
 
 After every successful `integrate` (KEEP), the Coordinator records a
 new entry on `optimization_stack` and the TODO 5/5 `validate_stack`
