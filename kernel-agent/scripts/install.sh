@@ -14,6 +14,7 @@ set -euo pipefail
 # /usr/bin even when callers only prepend /opt/venv/bin. Prepend the
 # standard system bins so multi-node RayJob children resolve them.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+export PATH="/opt/venv/bin:$PATH"
 
 # Default every writable artefact location under $USER_DATA_PATH so a single
 # session-dir move relocates Magpie / source mirrors / GEAK config / the
