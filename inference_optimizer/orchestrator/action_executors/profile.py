@@ -87,6 +87,14 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
     ]
 
 
+def _safe_mtime(p: Path) -> float:
+    """Return st_mtime, or 0 on stat() failure (e.g. NFS stale handle)."""
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _default_profile_config() -> Path:
     """Resolve default profile YAML based on $FRAMEWORK env (sglang/vllm)."""
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
@@ -117,6 +125,43 @@ class ProfileExecutor(BaselineExecutor):
     def _resolve_default_config(self) -> Path:
         """Override BaselineExecutor's resolver to pick the profile yaml."""
         return _default_profile_config()
+
+    def _resolve_mn_round_trace_root(self, ctx) -> str:
+        """Return the shared wekafs torch-trace base for multi-node, or ''.
+
+        Returns the SAME base dir for every profile round in the session.
+        ``cli.py`` exports it as
+        ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` =
+        ``/wekafs/hyperloom/profile-traces/<rayjob>/torch_trace`` at
+        provisioning time. Sglang server's ``SGLANG_TORCH_PROFILER_DIR``
+        is pinned to this base on first launch (see
+        ``multi_node/scripts/launch_multinode.py``), so all profile
+        rounds write trace.json.gz files into a single shared dir.
+
+        The ``__call__`` mtime gate (records ``task_started_unix`` and
+        filters trace files newer than that) is what isolates the
+        current round's traces from earlier rounds' leftovers.
+
+        Why not round-scoped subdirs anymore: the multi_node restart
+        path now resumes a running launch (cli.py's
+        ``MULTI_NODE_RESTART_RESUME_RUNNING``), so SGLANG_TORCH_PROFILER_DIR
+        never gets re-injected per round — only the first sglang launch
+        sees that env. A single shared base + mtime gate is the simplest
+        fix that keeps resume's 14-min cold-start saving intact.
+
+        Falls back to ``/wekafs/hyperloom/profile-traces/default/torch_trace``
+        if HYPERLOOM_MN_PROFILE_TRACE_DIR is missing so the executor still
+        produces a usable path rather than crashing.
+        """
+        from ._multi_node_env import is_multi_node
+        if not is_multi_node():
+            return ""
+        provisioned = os.environ.get(
+            "HYPERLOOM_MN_PROFILE_TRACE_DIR", ""
+        ).strip()
+        if provisioned:
+            return provisioned
+        return "/wekafs/hyperloom/profile-traces/default/torch_trace"
 
     def _after_materialize_config(
         self, config_path: Path, output_dir: Path,
@@ -193,12 +238,136 @@ class ProfileExecutor(BaselineExecutor):
             # Stash so BaselineExecutor.__call__ picks it up via extra.
             if extra is None:
                 ctx.extra = {"workspace": str(output_dir)}
+                extra = ctx.extra
             else:
                 extra["workspace"] = str(output_dir)
+
+        # Mtime gate for the multi-node shared-trace-dir layout. Captured
+        # BEFORE super().__call__ kicks off the magpie subprocess so any
+        # trace.json.gz written by this round's /start_profile request is
+        # newer than this timestamp. Previous rounds' traces (which live
+        # in the same wekafs base dir under the resume path) stay below
+        # this watermark and are filtered out. See
+        # ``_resolve_mn_round_trace_root`` for why we share a single base.
+        import time as _time
+        task_started_unix = _time.time()
+
+        # Multi-node banner: silent for single-node. Surfaces head pod /
+        # service_url + the round's trace dir so an operator tailing the
+        # log can tell apart a multi-node profile round (uses shared
+        # wekafs trace base) from a single-node one (uses workspace-local
+        # torch_trace/).
+        from ._multi_node_env import log_mn_banner
+        log_mn_banner(
+            "profile_executor", log,
+            trace_dir=self._resolve_mn_round_trace_root(ctx),
+        )
+
+        # Multi-node only: pre-restart the inference server with this
+        # round's profiler dir so sglang launches with
+        # ``--torch-profiler-dir <round_path>`` and writes traces to a
+        # round-scoped wekafs directory both pods and the sandbox can
+        # see. Mark ctx.extra so BaselineExecutor.__call__ doesn't run a
+        # second restart on top of ours. No-op in single-node mode (the
+        # helper short-circuits and ``round_trace_root`` is "").
+        round_trace_root = self._resolve_mn_round_trace_root(ctx)
+        if round_trace_root:
+            from ._multi_node_server_lifecycle import (
+                ServerRestartFailed,
+                restart_server_for_round,
+            )
+            try:
+                # PD knobs auto-resolved by the helper from $PD_* env
+                # (cli.py exported them). See baseline.py for rationale.
+                await restart_server_for_round(
+                    extra_sglang_args=str(params.get("extra_sglang_args") or ""),
+                    torch_profiler_dir=round_trace_root,
+                    framework=os.environ.get("FRAMEWORK") or None,
+                    model_path=(
+                        str(params.get("model_path") or "").strip()
+                        or os.environ.get("MODEL_PATH") or None
+                    ),
+                    tp=int(os.environ.get("TP") or 0) or None,
+                    ep=int(os.environ.get("EP") or 0) or None,
+                )
+            except ServerRestartFailed as exc:
+                return {
+                    "status": "failed",
+                    "error_class": "mn_server_restart_failed",
+                    "error": str(exc),
+                    "trace_dir": round_trace_root,
+                }
+            extra["mn_round_restarted"] = True
+
+        # NOTE: InferenceX patches (``ensure_benchmark_lib_patched`` and
+        # ``ensure_benchmark_serving_patched``) used to live here on the
+        # multi-node feature branch. Main moved them into the
+        # ``_after_materialize_config`` hook (run earlier in the
+        # materialize step) so the patch always covers the exact
+        # InferenceX checkout Magpie will execute, regardless of which
+        # subdirectory benchmark.inferencex_path resolves to. Removing
+        # the duplicate calls here keeps the patch idempotent (same
+        # behaviour) while letting the single-source-of-truth in
+        # ``_after_materialize_config`` carry the resolved-path
+        # validation.
         result = await super().__call__(ctx)
-        # Augment with trace_dir if the workspace produced one.
+        # Multi-node: trace files live at the round-scoped wekafs dir we
+        # just restarted with. We do NOT read $HYPERLOOM_MN_PROFILE_TRACE_DIR
+        # here because the helper restored it back to the rayjob-root
+        # default after restart so a subsequent non-profile round won't
+        # leak this round's path. Single-node falls through to the
+        # workspace/torch_trace branch below.
         workspace_str = result.get("workspace")
-        if workspace_str:
+        if round_trace_root:
+            # Multi-node branch: torch traces land at the SHARED wekafs
+            # base dir that sglang's ``SGLANG_TORCH_PROFILER_DIR`` was
+            # pinned to on first launch (see
+            # ``_resolve_mn_round_trace_root`` for design rationale).
+            # main's ``_candidate_trace_dirs`` is workspace-local, so it
+            # never matches in multi-node — handle it explicitly here.
+            #
+            # Mtime gate: every profile round writes into the same base
+            # dir under the resume path, so we filter to files created
+            # at-or-after this round's ``task_started_unix``. Without
+            # this, the executor would always pick up the FIRST round's
+            # stale trace.
+            trace_dir = Path(round_trace_root)
+            if trace_dir.is_dir():
+                all_files = sorted(trace_dir.glob("*.trace.json.gz"))
+                trace_files = [
+                    p for p in all_files
+                    if _safe_mtime(p) >= task_started_unix
+                ]
+                result["trace_dir"] = str(trace_dir)
+                result["trace_files"] = [str(p) for p in trace_files]
+                if trace_files:
+                    result["main_trace_path"] = str(trace_files[0])
+                elif all_files:
+                    log.warning(
+                        "profile_executor: multi-node trace dir %s has "
+                        "%d historical trace(s) but none with mtime >= "
+                        "%.0f (this round's start); sglang may have "
+                        "skipped /start_profile or the trace flush is "
+                        "lagging", trace_dir, len(all_files),
+                        task_started_unix,
+                    )
+                else:
+                    log.warning(
+                        "profile_executor: multi-node trace dir %s exists "
+                        "but no .trace.json.gz files found yet (server "
+                        "pods may still be flushing)", trace_dir,
+                    )
+            else:
+                result["trace_dir"] = None
+                result["trace_files"] = []
+                log.warning(
+                    "profile_executor: round trace dir %s does not exist "
+                    "after magpie completed; check sglang server logs for "
+                    "torch profiler errors",
+                    round_trace_root,
+                )
+        elif workspace_str:
+            # Single-node branch: main's multi-candidate trace discovery.
             workspace = Path(workspace_str)
             selected_trace_dir: Path | None = None
             selected_trace_files: list[Path] = []

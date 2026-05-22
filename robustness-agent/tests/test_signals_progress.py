@@ -19,6 +19,7 @@ def _ctx(
     optimization_stack_size: int = 0,
     closing_phase: bool = False,
     stop_reason: str = "",
+    explore_started: bool = False,
 ) -> ReactorContext:
     snap = SharedStateSnapshot(
         session_id="sess-1",
@@ -28,6 +29,7 @@ def _ctx(
         optimization_stack_size=optimization_stack_size,
         closing_phase=closing_phase,
         stop_reason=stop_reason,
+        explore_started=explore_started,
     )
     return ReactorContext(tick_index=tick, shared_state=snap, now_unix=1.0)
 
@@ -50,26 +52,67 @@ def test_short_history_silent_until_window_full():
 
 
 def test_plateau_with_productive_gain_fires_medium():
-    """Productive gain ≥ threshold → flat = "exhausted but shippable" → medium."""
+    """Productive gain ≥ threshold → flat = "exhausted but shippable" → medium.
+
+    The non-zero ``cumulative_gain_validated`` implies at least one
+    candidate has been promoted, so ``optimization_stack_size`` must
+    be > 0 for the scenario to be physically realisable.
+    """
     det = ProgressDetector(ProgressConfig(
         gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
     ))
-    det.evaluate(_ctx(tick=0, cumulative_gain_validated=10.0), SourceData())
-    det.evaluate(_ctx(tick=1, cumulative_gain_validated=10.1), SourceData())
-    out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=10.2), SourceData())
+    det.evaluate(_ctx(tick=0, cumulative_gain_validated=10.0,
+                      optimization_stack_size=2), SourceData())
+    det.evaluate(_ctx(tick=1, cumulative_gain_validated=10.1,
+                      optimization_stack_size=2), SourceData())
+    out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=10.2,
+                            optimization_stack_size=2), SourceData())
     sym = next(s for s in out if s.name == "gain_plateau")
     assert sym.severity is SymptomSeverity.MEDIUM
 
 
 def test_plateau_with_zero_gain_fires_high():
+    """After at least one promotion attempt has landed something on the
+    stack, a still-zero validated gain across the window is genuine
+    plateau territory and must fire HIGH so Orchestration can wind
+    down. ``optimization_stack_size > 0`` is what distinguishes this
+    from the cold-start case (see
+    :func:`test_plateau_suppressed_when_stack_empty`)."""
     det = ProgressDetector(ProgressConfig(
         gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
     ))
-    det.evaluate(_ctx(tick=0, cumulative_gain_validated=0.0), SourceData())
-    det.evaluate(_ctx(tick=1, cumulative_gain_validated=0.1), SourceData())
-    out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=0.0), SourceData())
+    det.evaluate(_ctx(tick=0, cumulative_gain_validated=0.0,
+                      optimization_stack_size=1), SourceData())
+    det.evaluate(_ctx(tick=1, cumulative_gain_validated=0.1,
+                      optimization_stack_size=1), SourceData())
+    out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=0.0,
+                            optimization_stack_size=1), SourceData())
     sym = next(s for s in out if s.name == "gain_plateau")
     assert sym.severity is SymptomSeverity.HIGH
+
+
+def test_plateau_suppressed_when_stack_empty():
+    """Cold-start regression guard: baseline + profile fill the 6-tick
+    history window with zeros before any candidate has been promoted.
+    We must NOT fire ``gain_plateau`` in that window because
+    ``no_levers_found`` already owns the empty-stack case (with the
+    proper elapsed_minutes + tick floors). Firing both produces two
+    HIGH escalations on the same condition, biasing Coordinator
+    toward ``delegate(report)`` before backends/params ever run.
+    Repro: sandbox primus-claw-20260522020448-z6rg6, tick=6,
+    optimization_stack=(none), gain_history=[0]*6 → falsely fired
+    ``gain_plateau HIGH`` + ``escalate_strategy_change HIGH``.
+    """
+    det = ProgressDetector(ProgressConfig(
+        gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
+    ))
+    det.evaluate(_ctx(tick=0, cumulative_gain_validated=0.0,
+                      optimization_stack_size=0), SourceData())
+    det.evaluate(_ctx(tick=1, cumulative_gain_validated=0.0,
+                      optimization_stack_size=0), SourceData())
+    out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=0.0,
+                            optimization_stack_size=0), SourceData())
+    assert all(s.name != "gain_plateau" for s in out)
 
 
 def test_plateau_resets_on_movement():
@@ -131,11 +174,17 @@ def test_no_levers_silent_before_min_ticks():
 
 
 def test_no_levers_fires_high_when_quotas_met():
+    """Once exploration has started (any of last_backends/params/sweep/
+    validate_stack rendered as non-(none)) and the elapsed/tick floors
+    are met with stack still empty, fire HIGH so Coordinator can wind
+    down. ``explore_started=True`` is the new precondition added by
+    the 2026-05-22 PR (cold-start regression in xkk9f turn=7)."""
     det = ProgressDetector(ProgressConfig(
         no_levers_min_minutes=45.0, no_levers_min_ticks=8,
     ))
     out = det.evaluate(
-        _ctx(tick=20, elapsed_minutes=70.0, optimization_stack_size=0),
+        _ctx(tick=20, elapsed_minutes=70.0, optimization_stack_size=0,
+             explore_started=True),
         SourceData(),
     )
     sym = next(s for s in out if s.name == "no_levers_found")
@@ -146,7 +195,8 @@ def test_no_levers_fires_high_when_quotas_met():
 def test_no_levers_silent_when_stack_not_empty():
     det = ProgressDetector()
     out = det.evaluate(
-        _ctx(tick=20, elapsed_minutes=70.0, optimization_stack_size=2),
+        _ctx(tick=20, elapsed_minutes=70.0, optimization_stack_size=2,
+             explore_started=True),
         SourceData(),
     )
     assert all(s.name != "no_levers_found" for s in out)
@@ -160,7 +210,30 @@ def test_no_levers_silent_when_validated_gain_present():
             elapsed_minutes=70.0,
             optimization_stack_size=0,
             cumulative_gain_validated=5.0,
+            explore_started=True,
         ),
+        SourceData(),
+    )
+    assert all(s.name != "no_levers_found" for s in out)
+
+
+def test_no_levers_silent_before_explore_started():
+    """Cold-start regression guard: baseline + profile + sglang launch
+    + turnaround can run past the 45 min / 8 tick floors before any
+    explore family (backends / params / sweep / validate_stack) is
+    actually attempted. In that window stack_size=0 and validated_gain
+    =0 are both by-construction (the explore phase has not started),
+    so ``no_levers_found`` must stay silent. Repro: sandbox
+    primus-claw-20260522034541-xkk9f turn=7 fired HIGH at elapsed
+    47.6min / tick=8 — 12 minutes BEFORE backends phase 1 actually
+    started (04:56:31). The escalate_strategy_change + delegate(report)
+    intents would have ended the run before the first variant ran."""
+    det = ProgressDetector(ProgressConfig(
+        no_levers_min_minutes=45.0, no_levers_min_ticks=8,
+    ))
+    out = det.evaluate(
+        _ctx(tick=20, elapsed_minutes=70.0, optimization_stack_size=0,
+             explore_started=False),
         SourceData(),
     )
     assert all(s.name != "no_levers_found" for s in out)

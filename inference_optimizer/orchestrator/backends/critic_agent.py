@@ -342,8 +342,8 @@ class CriticAgentBackend:
                     "(CriticAgentBackend cannot reach Codex for review reasoning)"
                 )
             base_url = (
-                os.environ.get("ANTHROPIC_BASE_URL")
-                or os.environ.get("OPENAI_BASE_URL")
+                os.environ.get("OPENAI_BASE_URL")
+                or os.environ.get("ANTHROPIC_BASE_URL")
             )
             kwargs: dict[str, Any] = {"api_key": api_key}
             if base_url:

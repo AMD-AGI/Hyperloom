@@ -218,6 +218,27 @@ SOURCE_FILE_ALLOWLIST: tuple[str, ...] = resolve_source_file_allowlist()
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
 
 
+# Multi-node profile trace shared dirs. In multi-node runs, server pods
+# write torch traces to a wekafs path that the sandbox also mounts; that
+# path lives outside session_dir but must be referenceable by trace_dir
+# / main_trace_path / trace_input so kernel-agent input flows work. The
+# allowlist intentionally only covers prefixes mkdir'd by the sandbox
+# CLI under our namespace; arbitrary wekafs writes remain blocked.
+TRACE_PATH_ALLOWLIST: tuple[str, ...] = (
+    "/wekafs/hyperloom/profile-traces/",
+)
+
+# Subset of PATH_LIKE_FIELDS for which TRACE_PATH_ALLOWLIST is also
+# accepted (in addition to session_dir containment). Other path fields
+# such as workspace, output_dir, report_path remain strictly session-
+# rooted to preserve sandbox-isolation guarantees.
+TRACE_PATH_LIKE_FIELDS: frozenset[str] = frozenset({
+    "trace_dir",
+    "main_trace_path",
+    "trace_input",
+})
+
+
 # ---------------------------------------------------------------------------
 # Core SharedState fields that only the Coordinator may mutate.
 # ---------------------------------------------------------------------------
@@ -589,6 +610,15 @@ class PolicyGate:
         s = str(value)
         return any(s.startswith(p) for p in SOURCE_FILE_ALLOWLIST)
 
+    def _path_in_trace_allowlist(self, value: str) -> bool:
+        """Match a value against TRACE_PATH_ALLOWLIST prefixes.
+
+        Used only for trace-input-style fields in multi-node mode where
+        the shared profile dir lives on wekafs outside session_dir.
+        """
+        s = str(value)
+        return any(s.startswith(p) for p in TRACE_PATH_ALLOWLIST)
+
     def _validate_payload_paths(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any],
     ) -> None:
@@ -628,12 +658,22 @@ class PolicyGate:
             if key not in PATH_LIKE_FIELDS:
                 return
             if not self._path_under_session(node):
+                # Multi-node profile traces live on a shared wekafs path
+                # outside session_dir by design; allow only the specific
+                # trace-input fields, only against TRACE_PATH_ALLOWLIST.
+                if (
+                    key in TRACE_PATH_LIKE_FIELDS
+                    and self._path_in_trace_allowlist(node)
+                ):
+                    return
                 raise PolicyDenied(
                     f"role={role.name!r} {intent_type.value} payload field "
                     f"{key!r}={node!r} escapes session_dir={self.session_dir!s}",
                     rule="path_outside_session_dir",
                     hint=("emit paths verbatim from SharedState (e.g. "
-                          "last_profile_trace) or under SESSION_DIR"),
+                          "last_profile_trace) or under SESSION_DIR; "
+                          "multi-node trace fields may also resolve under "
+                          f"{list(TRACE_PATH_ALLOWLIST)!r}"),
                 )
 
         visit(payload, ())
@@ -669,5 +709,7 @@ __all__ = [
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
     "SOURCE_FILE_ALLOWLIST",
+    "TRACE_PATH_ALLOWLIST",
+    "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",
 ]

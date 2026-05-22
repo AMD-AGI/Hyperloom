@@ -27,6 +27,12 @@
 
 set -euo pipefail
 
+# Ray/K8s subprocesses may inherit a minimal PATH; git/apt live under /usr/bin.
+# Prepend the standard system bins so multi-node RayJob subprocesses (and any
+# K8s-spawned child shell) still resolve git/apt/python3 when callers only
+# prepend /opt/venv/bin.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+
 # Single artefact root: everything writable defaults to $USER_DATA_PATH so
 # operators can monitor a run end-to-end by tailing one directory. Magpie
 # clone, source mirrors, generated env / GEAK config, and the pod-local
@@ -105,6 +111,12 @@ run() {
 # which is the NVIDIA CUDA wheel and crashes downstream RAG / baseline
 # steps with "Found no NVIDIA driver". Operators who really need a custom
 # interpreter can opt out with INFERENCE_OPTIMIZER_FORCE_PYTHON=1.
+#
+# bare-image bootstrap fallback: when nothing in the search order exists AND
+# apt-get is available (Debian/Ubuntu sandbox), try a best-effort
+# `apt-get install -y python3 python3-venv python3-pip` before giving up.
+# Gated by apt-get present, not --check-only / --dry-run, and
+# INFERENCE_OPTIMIZER_SKIP_APT_BOOTSTRAP unset.
 resolve_python() {
   if [ -x "/opt/venv/bin/python" ] && [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" != "1" ]; then
     if [ -n "${PYTHON:-}" ] && [ "${PYTHON}" != "/opt/venv/bin/python" ]; then
@@ -121,7 +133,29 @@ resolve_python() {
     PYTHON="$(command -v python3)"
     return 0
   fi
-  die "no usable python found (set PYTHON, install python3, or mount /opt/venv)"
+
+  # Bare-image bootstrap (Debian/Ubuntu only). Skipped silently when
+  # apt-get is missing (RHEL/Alpine/etc.) or the operator opted out.
+  if command -v apt-get >/dev/null 2>&1 \
+      && [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ] \
+      && [ -z "${INFERENCE_OPTIMIZER_SKIP_APT_BOOTSTRAP:-}" ]; then
+    log "no python3 found; attempting bare-image apt bootstrap " \
+        "(set INFERENCE_OPTIMIZER_SKIP_APT_BOOTSTRAP=1 to disable)"
+    export DEBIAN_FRONTEND=noninteractive
+    if apt-get update -qq >/dev/null 2>&1 \
+        && apt-get install -y --no-install-recommends \
+              python3 python3-venv python3-pip >/dev/null 2>&1; then
+      if command -v python3 >/dev/null 2>&1; then
+        PYTHON="$(command -v python3)"
+        log "apt bootstrap succeeded: PYTHON=$PYTHON"
+        return 0
+      fi
+    fi
+    warn "apt bootstrap failed; falling through to die()"
+  fi
+
+  die "no usable python found (set PYTHON, install python3, mount /opt/venv, " \
+      "or run on an apt-based image so install.sh can bootstrap python3 itself)"
 }
 
 resolve_python
@@ -387,7 +421,67 @@ ensure_inferencex() {
   log "InferenceX cloned at ${INFERENCEX_PATH}"
 }
 
-# --- 4. Chain to kernel-agent ---
+# --- 4. InferenceX bench_serving runtime deps ---
+#
+# `benchmark_serving.py` lives under InferenceX (not under Magpie's
+# pyproject.toml), so `pip install -e Magpie` does NOT pull its client-side
+# dependencies. Without these, every Magpie variant launch dies with
+# `ModuleNotFoundError: No module named 'aiohttp'` (or transformers,
+# huggingface_hub, datasets, ...) BEFORE the sglang server is even hit.
+#
+# We install into the same $PYTHON that Magpie uses (resolved to
+# `/opt/venv/bin/python3` on Claw sandboxes via the active PATH at run
+# time). The version pins are intentionally loose: these are stable
+# client-only packages and we want to inherit whatever the container's
+# base image already has rather than forcing churn.
+_BENCH_SERVING_DEPS=(
+  aiohttp
+  tqdm
+  numpy
+  requests
+  transformers
+  huggingface_hub
+  datasets
+  pandas
+)
+
+ensure_bench_serving_deps() {
+  log "ensuring InferenceX benchmark_serving client deps in $PYTHON"
+  local missing=()
+  for m in "${_BENCH_SERVING_DEPS[@]}"; do
+    # Map pip name -> import name (only aiohttp/etc. happen to match).
+    local import_name="$m"
+    case "$m" in
+      huggingface_hub) import_name="huggingface_hub" ;;
+    esac
+    if ! "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1; then
+      missing+=("$m")
+    fi
+  done
+  if [ ${#missing[@]} -eq 0 ]; then
+    log "bench_serving deps already satisfied"
+    return 0
+  fi
+  log "installing missing bench_serving deps: ${missing[*]}"
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "check-only mode; would install: ${missing[*]}"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "dry-run; skipping pip install"
+    return 0
+  fi
+  "$PYTHON" -m pip install --quiet --no-cache-dir \
+    "${PIP_EXTRA[@]}" "${missing[@]}" \
+    || die "failed to install bench_serving deps: ${missing[*]}"
+  for m in "${missing[@]}"; do
+    "$PYTHON" -c "import ${m}" >/dev/null 2>&1 \
+      || die "bench_serving dep ${m} still not importable after install"
+  done
+  log "bench_serving deps installed OK"
+}
+
+# --- 5. Chain to kernel-agent ---
 chain_kernel_agent() {
   if [ "$SKIP_KERNEL_AGENT" -eq 1 ]; then
     log "skipping kernel-agent installer (--skip-kernel-agent)"
@@ -417,6 +511,7 @@ ensure_inference_optimizer
 ensure_magpie
 ensure_magpie_atomic_scripts_patch
 ensure_inferencex
+ensure_bench_serving_deps
 chain_kernel_agent
 
 _probe_framework_source_roots() {
