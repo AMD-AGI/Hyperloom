@@ -41,7 +41,13 @@ from ._grid_runner import (
     GridVariant,
     VariantResult,
     _resolve_session_dir,
+    apply_compatibility_filter,
+    apply_multi_node_invalid_variants,
+    apply_single_node_invalid_variants,
+    apply_user_skip_list,
+    reorder_grid_for_multi_node,
     pick_winners,
+    resolve_skip_spec,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -105,6 +111,34 @@ DEFAULT_BACKENDS_GRID: list[GridVariant] = [
     # Tier 5: comm
     GridVariant("custom_ar",       "--enable-custom-ar",
                  note="tier5_comm"),
+    # Tier-MN: multi-node-only additions. ALL variants in this tier are
+    # gated by ``apply_single_node_invalid_variants`` (via ``note``
+    # prefix ``multi_node_only_*``) so single-node runs keep their
+    # legacy grid bit-for-bit and these never appear in single-node
+    # benchmark output. ``apply_compatibility_filter`` further drops
+    # them when the current model class (MLA / MoE) or sglang version
+    # can't support the flag — defer to graceful failure on probe
+    # error.
+    #
+    # Why all four are scoped to multi-node only:
+    #   * flashinfer_mla    — MLA decode path; primary win is on
+    #     long-context multi-node MLA models (DeepSeek/GLM-5/Kimi).
+    #   * deepep_moe        — DeepEP MoE cross-node expert distribution;
+    #     literally no-op in single-node.
+    #   * ep_moe            — Same as DeepEP, simpler routing.
+    #   * torch_compile     — works on single-node too, but the multi-node
+    #     reorder priority order is what surfaces it as a candidate
+    #     here. Tagging multi_node_only_* keeps single-node grid
+    #     unchanged per operator request; the corresponding params
+    #     grid still has its own torch-compile-related coverage.
+    GridVariant("flashinfer_mla",  "--enable-flashinfer-mla",
+                 note="multi_node_only_mla"),
+    GridVariant("deepep_moe",      "--enable-deepep-moe",
+                 note="multi_node_only_moe"),
+    GridVariant("ep_moe",          "--enable-ep-moe",
+                 note="multi_node_only_moe_ep"),
+    GridVariant("torch_compile",   "--enable-torch-compile",
+                 note="multi_node_only_compile"),
 ]
 
 # vLLM-specific backends grid. The SGLang grid above uses flags vLLM doesn't
@@ -624,7 +658,8 @@ class BackendsExecutor:
             # value-typed flags (where a bare presence is meaningless),
             # so the appended set is intentionally conservative — the LLM
             # remains the source of truth for value-typed combinations
-            # via ``params.grid``.
+            # via ``params.grid``. Only runs for the default grid path;
+            # LLM-supplied grids are taken as authoritative.
             disable_discovery = bool(params.get("disable_discovery", False))
             if not disable_discovery:
                 # Resolve the discovery path through the module globals so
@@ -660,6 +695,56 @@ class BackendsExecutor:
                         source_path=src_path_str,
                         discovery_error=discovery_note,
                     )
+
+        # User-declared variant skip list (operator prompt / --skip-variants
+        # / task params). Pure name/glob match; hyperloom holds zero policy
+        # about which (model, TP, framework) combinations are incompatible
+        # — every static rule we considered (e.g. "DSr1 + TP>8 ⇒ drop
+        # attn_aiter") was wrong as soon as the operator changed TP or
+        # swapped to a head-count fork. Incompatibility knowledge lives
+        # with the caller (prompt / brain agent / operator); we just
+        # honour the spec. Applied AFTER the default grid is augmented by
+        # AST discovery, so skip-globs match the final grid (both
+        # operator-typed names and discovery-injected names).
+        skip_spec = resolve_skip_spec(params)
+        grid, dropped_variants = apply_user_skip_list(
+            grid, skip_spec=skip_spec,
+        )
+        for d in dropped_variants:
+            log.info("backends: user-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        grid, mn_dropped = apply_multi_node_invalid_variants(grid)
+        for d in mn_dropped:
+            log.info("backends: multi-node-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        # A+B filter step 1: single-node-side filter for
+        # ``note=multi_node_only_*`` variants (noop in multi-node).
+        grid, sn_dropped = apply_single_node_invalid_variants(grid)
+        for d in sn_dropped:
+            log.info("backends: single-node-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        # A+B filter step 2: compatibility filter for model-class /
+        # sglang-version mismatches (e.g. FlashInfer MLA on dense
+        # model). Conservative — probe failures fall through, so
+        # bad-variant cost falls back to one wasted sglang restart.
+        grid, compat_dropped = apply_compatibility_filter(grid)
+        for d in compat_dropped:
+            log.info("backends: compatibility-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        dropped_variants = (
+            list(dropped_variants) + list(mn_dropped)
+            + list(sn_dropped) + list(compat_dropped)
+        )
+        # M2: multi-node grid reorder (single-node noop).
+        # Surfaces high-leverage aiter variants (attn_aiter / decode_aiter
+        # / moe_aiter, historically +10-30%) ahead of the long-tail
+        # comm/fusion variants so multi-node runs plateau within budget.
+        # See _grid_runner._MN_BACKENDS_PRIORITY for the tag order.
+        from ._grid_runner import _MN_BACKENDS_PRIORITY
+        grid = reorder_grid_for_multi_node(
+            grid, priority_tags=_MN_BACKENDS_PRIORITY,
+        )
+
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
 
@@ -969,6 +1054,7 @@ class BackendsExecutor:
             "output_throughput": best.output_throughput if best else None,
             "workspace": output_root.as_posix(),
             "phase2_combos_tested": len(combo_results),
+            "dropped_variants": dropped_variants,
             # T1/T2 — Coordinator picks these up to update SharedState.
             "discovered_flags_update": self._pop_discovered_update(),
             "synergy_attempted_new": new_attempts,
