@@ -441,19 +441,19 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
     Uses ``explore`` because v0.8 M3 / KB_gaps/Gap-10 merged the legacy
     ``backends`` / ``params`` / ``validate_stack`` actions into it; the
     nested-key plumbing the test guards is identical across kinds.
+
+    NOTE: this test deliberately omits ``params.grid`` because the
+    Critic gate (PR after PR-A11) re-routes
+    ``delegate{action_name='explore', params={grid: [...]}}`` through
+    ``_handle_propose_action`` so the Critic can per-variant veto.
+    The nested-idempotency-key plumbing we guard here lives further
+    down ``_handle_delegate``, on the legacy direct-task path; an
+    empty/missing grid falls through to that path, which is exactly
+    the surface this test exercises.
     """
-    # PR-A9 (Arbor-into-Hyperloom): explore grid variants must carry
-    # provenance ∈ {default_grid, specialist:<domain>}. This test is
-    # about idempotency-key plumbing, not provenance semantics, so we
-    # use the cold-start ``default_grid`` value.
     delegate = Intent(type=IntentType.DELEGATE, payload={
         "action_name": "explore",
         "params": {
-            "grid": [{
-                "name": "round2",
-                "extra_sglang_args": "--x",
-                "provenance": "default_grid",
-            }],
             "idempotency_key": "explore-round-2",
         },
     })

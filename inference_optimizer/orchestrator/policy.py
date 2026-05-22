@@ -39,6 +39,7 @@ from .phase_state import (
     PHASE_ALLOWED_ACTIONS,
     PHASE_EXPLORE,
     PHASE_NAMES,
+    PHASE_SWEEP,
     allowed_actions_for,
     is_action_allowed_in_phase,
 )
@@ -178,6 +179,12 @@ INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 # as a named constant alongside SPECIALIST_ACTION_NAME so the
 # explore-provenance gate has a single source of truth.
 EXPLORE_ACTION_NAME: str = "explore"
+
+# v0.8 §3.2 §5.4 — the sweep action; named constant so the
+# ``sweep_phase_singleton`` rule (deny LLM-emitted sweep when
+# Coordinator's auto-enqueue already landed one in SWEEP phase) has
+# a single source of truth.  See _validate_sweep_singleton.
+SWEEP_ACTION_NAME: str = "sweep"
 
 # PR-A9: provenance values that survive the explore-provenance gate.
 # Every other value (``llm_direct``, missing, unknown) is denied.
@@ -753,6 +760,12 @@ class PolicyGate:
         # for every round, matching Arbor's optimization loop.
         if action_name == EXPLORE_ACTION_NAME:
             self._validate_explore_provenance(payload)
+        # v0.8 §3.2 §5.4 — sweep_phase_singleton: deny LLM-emitted
+        # sweep when the Coordinator's SWEEP-entry hook already
+        # auto-enqueued one. Two concurrent sweep tasks crash both
+        # vllm engines on init; see _validate_sweep_singleton.
+        if action_name == SWEEP_ACTION_NAME:
+            self._validate_sweep_singleton(payload, intent_kind="delegate")
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
         # No registry → fall through (P0 / dev-mode where registry isn't loaded).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -831,6 +844,13 @@ class PolicyGate:
                 f"propose_action: unknown action_name={action_name!r} "
                 f"(not in ActionRegistry)",
                 rule="unknown_action",
+            )
+        # v0.8 §3.2 §5.4 — sweep_phase_singleton (defense in depth on
+        # the propose_action channel; same shape as the delegate
+        # validator). See _validate_sweep_singleton.
+        if action_name == SWEEP_ACTION_NAME:
+            self._validate_sweep_singleton(
+                payload, intent_kind="propose_action",
             )
         # v0.8 M2 — R1 phase_incompatible (KB_design §3.11 §4.1).
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
@@ -1346,6 +1366,91 @@ class PolicyGate:
                     "yet — use the executor's built-in grid')."
                 ),
             )
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.2 §5.4 — ``sweep_phase_singleton``
+    # ------------------------------------------------------------------
+    def _validate_sweep_singleton(
+        self, payload: dict[str, Any], *, intent_kind: str,
+    ) -> None:
+        """Enforce one sweep per SWEEP phase.
+
+        ``Coordinator._on_enter_sweep`` (KB_design §3.2 §5.4 +
+        KB_gaps/Gap-05) auto-enqueues a single internal sweep task on
+        SWEEP entry, stamping
+        ``state.phase_history[-1].evidence.auto_sweep_task_id`` with
+        the resulting task id. The Coordinator's own enqueue bypasses
+        PolicyGate (it calls TaskRegistry.create_or_return_existing
+        directly), so this rule is dormant for the auto-path.
+
+        For agent-emitted intents (``delegate{action_name='sweep'}``
+        and ``propose_action{action_name='sweep'}``), this rule
+        denies any sweep proposal once the auto-enqueue has committed
+        within the active SWEEP phase. Concrete signal: latest
+        phase_history row has ``to_phase='SWEEP'`` (cheaper to read
+        than ``state.phase`` and immune to stale-phase reads after a
+        crash) AND ``evidence.auto_sweep_task_id`` is non-empty.
+
+        Why this is the right shape:
+
+        * Two concurrent sweep tasks make every variant fail engine
+          init: both ``vllm serve`` instances race for the same 8
+          GPUs and the same TCP port. ``HSA_STATUS_ERROR_OUT_OF_
+          RESOURCES`` for both, all sweep variants written as
+          ``success=false``, the report's workload-curve section is
+          empty.
+        * The auto-enqueue already covers the SKILL.md default grid
+          + the Cortex ``recipe.sweep_grid`` field, which together
+          are the entirety of the documented sweep contract — there
+          is no remaining workload the LLM could legitimately add.
+        * The rule self-clears at SWEEP→CLOSE: phase_history[-1]
+          becomes the new CLOSE row, ``evidence.auto_sweep_task_id``
+          is no longer present, the gate goes back to inert.
+
+        Operator escape hatch: ``params.bypass_sweep_singleton=True``
+        is honoured so a debug session can intentionally run a
+        second sweep with a custom grid (e.g. ``CONC=128``). The
+        denial-then-bypass pattern keeps the override on the audit
+        trail (Inv-9.4).
+        """
+        params = payload.get("params") or {}
+        if isinstance(params, dict) and params.get("bypass_sweep_singleton"):
+            return
+        ss = getattr(self, "shared_state", None)
+        if ss is None:
+            return
+        history = getattr(ss, "phase_history", None) or []
+        if not history:
+            return
+        latest = history[-1]
+        if not isinstance(latest, dict):
+            return
+        if str(latest.get("to_phase") or "").strip() != PHASE_SWEEP:
+            return
+        evidence = latest.get("evidence")
+        if not isinstance(evidence, dict):
+            return
+        auto_id = str(evidence.get("auto_sweep_task_id") or "").strip()
+        if not auto_id:
+            return
+        raise PolicyDenied(
+            f"sweep: SWEEP phase already has an auto-enqueued sweep "
+            f"task (auto_sweep_task_id={auto_id!r}); concurrent "
+            f"sweep proposals would race for the same GPUs and "
+            f"port and crash both vllm engines on init.",
+            rule="sweep_phase_singleton",
+            hint=(
+                "The Coordinator's SWEEP-entry hook already covers "
+                "the SKILL.md default grid plus the Cortex "
+                "recipe.sweep_grid field — no further sweep "
+                "proposal is needed. Wait for the auto-sweep to "
+                "finish (SWEEP→CLOSE transitions automatically). "
+                "If you genuinely need a second grid for debug, "
+                f"set params.bypass_sweep_singleton=True on the "
+                f"{intent_kind} payload (the override is recorded "
+                f"on the audit trail)."
+            ),
+        )
 
     def _validate_integrate_patch_critic_gate(
         self, payload: dict[str, Any],

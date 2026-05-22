@@ -756,3 +756,179 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     names = [v["name"] for v in grid]
     assert names == ["v_a", "v_b", "v_c"]
     assert "critic_filtered_count" not in create_calls[0]["params"]
+
+
+# ===========================================================================
+# 6. _handle_delegate — explore grid re-routes through Critic verdict_map path
+# ===========================================================================
+#
+# Until this guard landed, ``delegate{action_name='explore', params={grid}}``
+# created an explore task directly via ``tasks.create_or_return_existing``,
+# bypassing the per-variant Critic + KB priors lookup entirely. The new
+# branch in ``_handle_delegate`` hands the intent off to
+# ``_handle_propose_action`` so the proposal lands in ``pending_proposals``
+# and the Critic emits a ``verdict_map``. Other delegate actions
+# (specialist / integrate_patch / sweep / recover) and empty-grid
+# explore delegates keep the legacy direct path.
+def _delegate_coord(tmp_path: Path):
+    """Coordinator double exposing just the surface ``_handle_delegate``
+    needs to reach (and stop at) the explore re-route branch.
+
+    Stubs out ``is_pruned`` / ``_sequence_denial_for_action`` /
+    ``_cortex_t2_hook`` so we never reach the per-test-irrelevant
+    pruned + sequence + cortex sub-systems.
+    """
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+
+    class _State(_BareSharedState):
+        baseline_config_path: str = ""
+
+        def is_pruned(self, _action_name: str) -> bool:
+            return False
+
+        def reset_policy_denial_streak(self, _action_name: str) -> None:
+            return None
+
+    c.shared_state = _State()
+    c.state = CoordinatorState()
+    c.cortex_kb = _StubCortexKB()
+    c.bus = _StubBus()
+    c._record_observation = AsyncMock()  # type: ignore[method-assign]
+    c._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
+    c._sequence_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
+    c._cortex_t2_hook = AsyncMock()  # type: ignore[method-assign]
+    # _handle_delegate's deprecation guard reads from policy directly.
+    # We bypass it by short-circuiting the guard at the source.
+    c.policy = None
+    return c
+
+
+@pytest.mark.asyncio
+async def test_delegate_explore_with_grid_routes_to_pending_proposals(tmp_path: Path):
+    """The Critic gate re-route: a delegate explore with a non-empty
+    grid lands in ``pending_proposals`` (so Critic can review per
+    variant) and never reaches ``tasks.create_or_return_existing``."""
+    coord = _delegate_coord(tmp_path)
+    create_calls: list[dict[str, Any]] = []
+
+    class _TaskRegistry:
+        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+            create_calls.append(dict(kwargs))
+            raise AssertionError(
+                "delegate explore with grid must NOT create a task directly"
+            )
+
+    coord.tasks = _TaskRegistry()
+    grid = [
+        {"name": "v_a", "extra_args": "--flag-a",
+         "provenance": "specialist:serving_specialist"},
+        {"name": "v_b", "extra_args": "--flag-b",
+         "provenance": "specialist:serving_specialist"},
+    ]
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "explore",
+            "params": {"grid": grid},
+        },
+    )
+    await coord._handle_delegate("orchestration", intent)
+    assert create_calls == []
+    assert len(coord.state.pending_proposals) == 1
+    pending = next(iter(coord.state.pending_proposals.values()))
+    assert pending.action_name == "explore"
+    assert pending.from_agent == "orchestration"
+    assert pending.payload["params"]["grid"] == grid
+    # T2 hook fires on the proposal path so KB edge ids land on the
+    # PendingProposal before Critic review.
+    coord._cortex_t2_hook.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delegate_explore_with_empty_grid_does_not_route_to_critic(tmp_path: Path):
+    """Empty / missing grid has nothing for the Critic to filter, so the
+    re-route guard must NOT fire — the intent should fall through to
+    the legacy direct-task path. We mock ``_handle_propose_action`` so
+    the test stays scoped to the guard contract; the post-guard
+    legacy path is exercised by separate integration tests."""
+    coord = _delegate_coord(tmp_path)
+    coord._handle_propose_action = AsyncMock()  # type: ignore[method-assign]
+    # Stop execution at the first downstream call we don't want to
+    # plumb. The guard runs BEFORE this point, so reaching a raised
+    # exception proves the re-route did not intercept.
+    coord.tasks = None
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "explore", "params": {"grid": []}},
+    )
+    with pytest.raises(AttributeError):
+        await coord._handle_delegate("orchestration", intent)
+    coord._handle_propose_action.assert_not_awaited()
+    assert coord.state.pending_proposals == {}
+
+
+@pytest.mark.asyncio
+async def test_delegate_non_explore_action_does_not_route_to_critic(tmp_path: Path):
+    """``delegate{action_name='specialist', ...}`` (and every other
+    non-explore action) must NOT be intercepted by the explore guard,
+    even if the caller smuggles in a ``grid`` param."""
+    coord = _delegate_coord(tmp_path)
+    coord._handle_propose_action = AsyncMock()  # type: ignore[method-assign]
+    coord.tasks = None
+    coord._warm_specialist_params = lambda _params: None  # type: ignore[method-assign]
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "specialist",
+            "params": {
+                "domain": "serving_specialist",
+                "gap_canonical_id": "gap-x",
+                "grid": [{"name": "v_a"}],
+            },
+        },
+    )
+    with pytest.raises(AttributeError):
+        await coord._handle_delegate("orchestration", intent)
+    coord._handle_propose_action.assert_not_awaited()
+    assert coord.state.pending_proposals == {}
+
+
+# ===========================================================================
+# 7. Specialist prompt — max_proposals self-curation contract (Section 1 + 8)
+# ===========================================================================
+def _build_specialist_prompt_text(max_proposals: int) -> str:
+    from inference_optimizer.orchestrator.specialist_domains import get_domain
+    from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
+        SpecialistPromptInputs,
+        build_specialist_prompts,
+    )
+
+    inputs = SpecialistPromptInputs(
+        task_id="t-test",
+        domain=get_domain("serving_specialist"),
+        max_turns=12,
+        max_proposals=max_proposals,
+        gap_canonical_id="gap-x",
+    )
+    system_prompt, user_prompt = build_specialist_prompts(inputs)
+    return system_prompt + "\n" + user_prompt
+
+
+def test_specialist_prompt_renders_default_top_5_cap():
+    text = _build_specialist_prompt_text(max_proposals=5)
+    # Section 8 hard cap line.
+    assert "AT MOST **5** entries" in text
+    # Section 1 autonomy paragraph mentions the cap once.
+    assert "top-5" in text
+    # The Critic-feedback warning is present so the specialist knows
+    # marginal candidates have a cost.
+    assert "reviews each surviving variant" in text
+
+
+def test_specialist_prompt_renders_override():
+    text = _build_specialist_prompt_text(max_proposals=3)
+    assert "AT MOST **3** entries" in text
+    assert "top-3" in text
+    # The default 5 must not appear when the override is set.
+    assert "AT MOST **5** entries" not in text
