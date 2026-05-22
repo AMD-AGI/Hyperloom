@@ -78,11 +78,13 @@ from .orchestrator.system_prompts.prompt_builder import (
 )
 from .paths import (
     DEFAULT_SESSION_DIR,
+    ENV_CURRENT_SESSION_DIR,
     ENV_USER_DATA_PATH,
     _SESSION_SKELETON,
     asset_system_prompts_dir,
     make_session_dir,
     session_dir as _session_dir_resolve,
+    workspace_root,
 )
 from .session_paths import (
     agent_prompt_snapshot,
@@ -1283,9 +1285,14 @@ def _emit_preflight_diagnostics(
     print("Preflight diagnostics:")
     print(f"  asset_root          = {asset_root()}")
     print(
-        f"  session_dir         = {_session_dir_resolve()}  "
+        f"  workspace_root      = {workspace_root()}  "
         f"({ENV_USER_DATA_PATH}="
-        f"{os.environ.get(ENV_USER_DATA_PATH, '<unset>')}, "
+        f"{os.environ.get(ENV_USER_DATA_PATH, '<unset>')})"
+    )
+    print(
+        f"  session_dir         = {_session_dir_resolve()}  "
+        f"({ENV_CURRENT_SESSION_DIR}="
+        f"{os.environ.get(ENV_CURRENT_SESSION_DIR, '<unset>')}, "
         f"default={DEFAULT_SESSION_DIR})"
     )
     print(f"  magpie_python       = {magpie_python}")
@@ -2166,10 +2173,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_options=robustness_options,
         no_kernel=no_kernel,
     )
-    # Bug A fix: expose the active session_dir to in-process executors
-    # (e.g. ReportExecutor) that don't get session_dir threaded through
-    # task.params. This is read in report.py::_resolve_session_dir.
-    os.environ["USER_DATA_PATH"] = str(session_dir)
+    # Session dir is already pinned via $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR
+    # (make_session_dir / --resume). Do NOT overwrite $USER_DATA_PATH here —
+    # workspace_root() must keep pointing at the launcher-provided workspace
+    # so runtime/ + kernel-agent.env.sh resolution stays correct (N17).
+    # ReportExecutor resolves session_dir via paths.session_dir() → pin.
     # Production: enable strict path-containment checks in PolicyGate so
     # any LLM-emitted intent whose path field escapes session_dir lands
     # as `policy_denied` in its inbox. Tests omit this and keep the
