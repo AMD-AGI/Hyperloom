@@ -99,7 +99,8 @@ jobs:
             core.info(`Open issues to scan: ${issues.length}`);
             core.info('');
 
-            const candidates = [];
+            const candidates = [];     // matching issues, not yet poked
+            const alreadyPoked = [];   // matching issues but already have 'stale' label
 
             for (const issue of issues) {
               const authorLogin = issue.user.login.toLowerCase();
@@ -130,24 +131,39 @@ jobs:
               if (lastSafeAt && !nonSafeAfterSafe) {
                 const hours = (now - lastSafeAt) / 3600000;
                 if (hours >= hoursThreshold) {
-                  candidates.push({
+                  const labels = new Set((issue.labels || []).map(l => typeof l === 'string' ? l : l.name));
+                  const entry = {
                     num: issue.number,
                     author: issue.user.login,
                     lastSafeBy,
                     hours: Math.round(hours * 10) / 10,
                     title: issue.title,
-                    currentLabels: new Set((issue.labels || []).map(l => typeof l === 'string' ? l : l.name)),
-                  });
+                    currentLabels: labels,
+                  };
+                  // 'stale' label means we have already poked this issue; skip to avoid
+                  // re-posting the warning comment every time the workflow is run.
+                  if (labels.has('stale')) {
+                    alreadyPoked.push(entry);
+                  } else {
+                    candidates.push(entry);
+                  }
                 }
               }
             }
 
             candidates.sort((a, b) => b.hours - a.hours);
+            alreadyPoked.sort((a, b) => b.hours - a.hours);
 
             core.info('=== Matching issues ===');
-            core.info(`Found: ${candidates.length}`);
+            core.info(`To process: ${candidates.length}`);
             for (const c of candidates) {
               core.info(`  #${c.num} (${c.author}, ${c.hours}h since @${c.lastSafeBy}): ${c.title}`);
+            }
+            if (alreadyPoked.length > 0) {
+              core.info(`Already poked (skipped, have 'stale' label): ${alreadyPoked.length}`);
+              for (const c of alreadyPoked) {
+                core.info(`  #${c.num} (${c.author}, ${c.hours}h since @${c.lastSafeBy}): ${c.title}`);
+              }
             }
             core.info('');
 
