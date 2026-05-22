@@ -245,7 +245,7 @@ class KnowledgePlane:
     _DOMAIN_FALLBACK_STRATEGIES: ClassVar[
         dict[str, tuple[tuple[str, dict[str, Any], bool], ...]]
     ] = {
-        "framework_specialist": (
+        "serving_specialist": (
             ("vllm_serve_recipe",
              {"entity_type": "vllm_serve_recipe",
               "limit": 10, "neighbor_preview": False},
@@ -255,7 +255,7 @@ class KnowledgePlane:
               "limit": 10, "neighbor_preview": False},
              True),
         ),
-        "kernel_specialist": (
+        "kernel_switch_specialist": (
             ("geak_experience",
              {"entity_type": "geak_experience",
               "limit": 10, "neighbor_preview": False},

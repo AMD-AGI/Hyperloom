@@ -4230,7 +4230,7 @@ class Coordinator:
         # ``tp=1``, which makes comm_specialist self-veto on TP>1
         # sessions with "cross-GPU collectives non-actionable". The same
         # workload hints surface to the specialist's prompt section 2,
-        # so framework / system / kernel specialists reason against the
+        # so serving / system / kernel-switch specialists reason against the
         # real benchmark workload rather than the dataclass defaults.
         params.setdefault("gpu_type", state.gpu_type or "")
         if int(getattr(state, "tp", 0) or 0) > 0:
@@ -4397,7 +4397,7 @@ class Coordinator:
                 ),
                 "layer": "framework",
                 "severity": severity,
-                "domain_hint": "framework_specialist",
+                "domain_hint": "serving_specialist",
                 "source": "baseline",
             })
         if state.baseline_failure_streak > 0:
@@ -4481,7 +4481,7 @@ class Coordinator:
                 ),
                 "layer": "framework",
                 "severity": "high" if no_promote >= 6 else "medium",
-                "domain_hint": "framework_specialist",
+                "domain_hint": "serving_specialist",
                 "source": "attempts",
             })
         return gaps
@@ -4492,20 +4492,20 @@ class Coordinator:
 
         Centralised so the four call sites (baseline / attempts /
         explore / specialist_done) agree on the routing. Falls back
-        to ``("framework", "framework_specialist")`` for unknown
+        to ``("framework", "serving_specialist")`` for unknown
         action names — that's the broadest catch-all in the M5
         specialist catalogue.
         """
         a = str(action or "").strip().lower()
         if a in {"kernel_opt", "integrate", "select_kernels", "run_optimization"}:
-            return ("kernel", "kernel_specialist")
+            return ("kernel", "kernel_switch_specialist")
         if a in {"profile", "pmc_roofline"}:
-            return ("kernel", "kernel_specialist")
+            return ("kernel", "kernel_switch_specialist")
         if a in {"sweep", "explore"}:
-            return ("framework", "framework_specialist")
+            return ("framework", "serving_specialist")
         if a in {"baseline"}:
             return ("system", "system_specialist")
-        return ("framework", "framework_specialist")
+        return ("framework", "serving_specialist")
 
     def _record_explore_round_gaps(
         self, *, task: "Task | None", result: dict[str, Any],
@@ -4541,7 +4541,7 @@ class Coordinator:
                 "symptom": "explore round outcomes",
                 "layer": "framework",
                 "severity": "medium",
-                "domain_hint": "framework_specialist",
+                "domain_hint": "serving_specialist",
                 "source": "attempts",
             })
         for outcome in per_variant:

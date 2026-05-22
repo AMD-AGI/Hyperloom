@@ -95,9 +95,9 @@ def test_select_kb_for_domain_returns_traverse_dict():
         },
     )
     plane = _make_plane(cortex)
-    result = plane.select_kb_for_domain("framework_specialist")
+    result = plane.select_kb_for_domain("serving_specialist")
     assert result["anchor"] == "framework"
-    assert result["domain"] == "framework_specialist"
+    assert result["domain"] == "serving_specialist"
     assert "framework.cuda_graph" in result["points"]
     assert any("framework.cuda_graph" in n for n in result["neighbors"])
     assert result["warnings"] == []
@@ -114,7 +114,7 @@ def test_select_kb_for_domain_returns_traverse_dict():
 def test_select_kb_for_domain_cortex_disabled():
     cortex = _FakeCortexKBClient(enabled=False)
     plane = _make_plane(cortex)
-    result = plane.select_kb_for_domain("framework_specialist")
+    result = plane.select_kb_for_domain("serving_specialist")
     assert result["anchor"] == "framework"
     assert result["points"] == []
     assert "cortex_kb:disabled" in result["warnings"]
@@ -140,7 +140,7 @@ def test_select_kb_for_domain_anchor_not_found():
         responses={"/v1/points/query": {"points": []}},
     )
     plane = _make_plane(cortex)
-    result = plane.select_kb_for_domain("kernel_specialist")
+    result = plane.select_kb_for_domain("kernel_switch_specialist")
     assert any("anchor_not_found" in w for w in result["warnings"])
     assert result["points"] == []
     # The legacy anchor query still happens first; fallback adds
@@ -155,7 +155,7 @@ def test_select_kb_for_domain_anchor_query_raises():
         raise_on={"/v1/points/query": RuntimeError("transport down")},
     )
     plane = _make_plane(cortex)
-    result = plane.select_kb_for_domain("framework_specialist")
+    result = plane.select_kb_for_domain("serving_specialist")
     assert any("anchor_lookup_failed" in w for w in result["warnings"])
 
 
@@ -170,7 +170,7 @@ def test_select_kb_for_domain_traverse_raises():
         raise_on={"/v1/traverse": RuntimeError("5xx")},
     )
     plane = _make_plane(cortex)
-    result = plane.select_kb_for_domain("framework_specialist")
+    result = plane.select_kb_for_domain("serving_specialist")
     assert any("traverse_failed" in w for w in result["warnings"])
     # Anchor still surfaces via the points list (best-effort).
     assert "framework" in result["points"]
@@ -195,7 +195,7 @@ def test_select_kb_for_domain_caps_lists():
         },
     )
     plane = _make_plane(cortex)
-    result = plane.select_kb_for_domain("framework_specialist")
+    result = plane.select_kb_for_domain("serving_specialist")
     assert len(result["points"]) == 12       # cap
     assert len(result["neighbors"]) == 20    # cap
     assert len(result["paths"]) == 5         # cap
@@ -235,7 +235,7 @@ def test_warm_specialist_params_pipes_kb_subgraph_through(tmp_path: Path):
     c.shared_state = SharedState(session_id="kb-warmup-test")
     c.knowledge_plane = plane
 
-    params: dict[str, Any] = {"domain": "framework_specialist"}
+    params: dict[str, Any] = {"domain": "serving_specialist"}
     c._warm_specialist_params(params)
     assert "kb_subgraph" in params
     sub = params["kb_subgraph"]
@@ -252,7 +252,7 @@ def test_warm_specialist_params_kb_subgraph_when_cortex_disabled(tmp_path: Path)
     c.shared_state = SharedState(session_id="kb-disabled-test")
     c.knowledge_plane = plane
 
-    params: dict[str, Any] = {"domain": "framework_specialist"}
+    params: dict[str, Any] = {"domain": "serving_specialist"}
     c._warm_specialist_params(params)
     # Defensive default: empty dict so the prompt builder renders
     # ``(none)`` instead of NameError'ing.

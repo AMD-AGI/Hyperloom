@@ -319,7 +319,7 @@ async def test_t2_hook_per_variant_carries_variant_attrs(coord):
             "name": "vA",
             "extra_sglang_args": "--mla 1",
             "extra_envs": {"FOO": "bar"},
-            "provenance": "specialist:framework_specialist",
+            "provenance": "specialist:serving_specialist",
         },
     ]
     pending = _pending(grid=grid)
@@ -330,14 +330,14 @@ async def test_t2_hook_per_variant_carries_variant_attrs(coord):
     assert attrs["variant_name"] == "vA"
     assert attrs["extra_sglang_args"] == "--mla 1"
     assert attrs["extra_envs"] == {"FOO": "bar"}
-    assert attrs["provenance"] == "specialist:framework_specialist"
+    assert attrs["provenance"] == "specialist:serving_specialist"
     assert attrs["proposal_msg_id"] == "msg-1"
 
     # Hypothesize attrs carry variant_name + provenance + phase.
     h_call = coord.cortex_kb.hypothesize_calls[0]
     h_attrs = h_call["attrs"]
     assert h_attrs["variant_name"] == "vA"
-    assert h_attrs["provenance"] == "specialist:framework_specialist"
+    assert h_attrs["provenance"] == "specialist:serving_specialist"
     assert h_attrs["phase"] == "EXPLORE"
     assert h_attrs["proposal_msg_id"] == "msg-1"
 
