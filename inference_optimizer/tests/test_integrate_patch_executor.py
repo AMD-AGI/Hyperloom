@@ -98,7 +98,7 @@ def _write_specialist_workspace(
         patch_paths.append(f"patches/{path.name}")
     payload: dict[str, Any] = {
         "gap_canonical_id": "gap.test.integrate",
-        "domain": "framework_specialist",
+        "domain": "serving_specialist",
         "proposal_set": [],
         "patches_written": patch_paths,
         "empty": False,
@@ -323,7 +323,7 @@ async def test_executor_no_patches_returns_no_patches(tmp_path: Path):
     workspace.mkdir(parents=True)
     (workspace / "specialist_done.json").write_text(json.dumps({
         "gap_canonical_id": "gap.empty",
-        "domain": "framework_specialist",
+        "domain": "serving_specialist",
         "proposal_set": [],
         "patches_written": [],
         "empty": True,
@@ -345,7 +345,7 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     workspace.mkdir(parents=True)
     (workspace / "specialist_done.json").write_text(json.dumps({
         "gap_canonical_id": "gap.cfg",
-        "domain": "framework_specialist",
+        "domain": "serving_specialist",
         "proposal_set": [],
         "patches_written": [],
         "empty": False,
