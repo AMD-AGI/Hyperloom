@@ -653,6 +653,59 @@ def _read_rules_fragment(path: Path | None) -> str:
         return ""
 
 
+def _section_multi_node_doctrine(*, kernel_enabled: bool) -> list[str]:
+    """Multi-node-only doctrine appended between DECISION FRAMEWORK and RULES.
+
+    Only emitted when the optimizer is operating on a >=2-node RayJob
+    cluster (gated by ``is_multi_node()`` at the call site). Single-node
+    runs skip this section entirely, preserving their existing prompt
+    text bit-for-bit.
+
+    Two empirically-driven rules, no phase-ordering hacks:
+
+    * Rule 1 nudges the FIRST explore round towards ``backends`` (where
+      aiter/decode_aiter historically yield +10-30% on multi-node) and
+      explicitly preserves the scoreboard's natural KEEP-cooldown
+      alternation for subsequent rounds. KV-cache class params are
+      called out as a documented exception so the LLM does not
+      over-prune ``--max-num-seqs`` / ``--mem-fraction-static`` etc.
+    * Rule 2 informs the LLM that the grid runner now silently drops
+      ``--cuda-graph-max-bs N < $CONC`` variants on multi-node (see
+      ``_grid_runner.apply_multi_node_invalid_variants``), so manual
+      re-proposals are wasted turns rather than rejections.
+
+    Both rules are advisory; PolicyGate does not gate on them. The
+    ``kernel_enabled`` parameter is accepted for parity with other
+    section builders but unused today — kept so adding a future
+    kernel-only rule does not change the signature.
+    """
+    del kernel_enabled  # accepted for parity; no kernel-specific text yet
+    return [
+        "## 5b. MULTI-NODE TESTING DOCTRINE",
+        "",
+        "This run is on a >=2-node RayJob cluster. Single variant cost:",
+        "~35-40 min (cmd_restart_server 9-10 min + bench 25-30 min).",
+        "Prioritise actions by per-minute leverage:",
+        "",
+        "1. **First explore round prefers `backends`** when both `backends`",
+        "   and `params` are uncooldowned + unlocked in the scoreboard.",
+        "   Rationale: multi-node aiter/decode_aiter historically yields",
+        "   +10-30%, while `--cuda-graph-max-bs` (params) typically yields",
+        "   <2% and is mostly pre-filtered (rule 2). After the first round,",
+        "   follow the scoreboard's natural KEEP-cooldown alternation — do",
+        "   NOT hand-roll ordering. EXCEPTION: KV-cache class params",
+        "   (`--max-num-seqs`, `--mem-fraction-static`, `--max-prefill-tokens`)",
+        "   remain high-leverage and follow the scoreboard as normal.",
+        "",
+        "2. `--cuda-graph-max-bs N` variants where `N < $CONC` are",
+        "   **silently dropped at the grid runner** (NOT a `policy_denied`;",
+        "   the runner just skips them and logs `multi-node-skipped`).",
+        "   Manual re-proposals are no-ops at runtime — they waste a turn",
+        "   but cannot crash anything. Prefer other `params` candidates",
+        "   from `SharedState.discovered_flags`.",
+    ]
+
+
 def _section_rules(rules_md: str) -> list[str]:
     body = rules_md.strip() or (
         "(orchestration.md rules fragment not found — Coordinator will still"
@@ -723,6 +776,13 @@ def build_orchestration_prompt(
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
     ]
+    # Multi-node doctrine: only rendered when running on a >=2-node RayJob.
+    # Single-node runs skip this entirely so their prompt stays bit-for-bit
+    # identical to the pre-multi-node-doctrine builds (snapshot diffs in
+    # test_prompt_assets only flip when the multi_node state file is set).
+    from ..action_executors._multi_node_env import is_multi_node
+    if is_multi_node():
+        sections.append(_section_multi_node_doctrine(kernel_enabled=kernel_enabled))
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
     sections.append(_section_rules(rules_md))
