@@ -446,6 +446,34 @@ class Coordinator:
         except ValueError:
             self._backend_error_streak_threshold = 5
 
+        # Per-agent consecutive ``BackendError`` streak. Successful turns
+        # reset the counter for that agent; a streak crossing
+        # ``_backend_error_streak_threshold`` records a single
+        # ``backend_unhealthy`` observation so operators (and the
+        # robustness reactor, which tails Coordinator events) notice the
+        # subprocess transport is degraded — particularly relevant for
+        # the robustness-agent / critic-agent subprocess backends whose
+        # in-loop failures otherwise would only show up as scattered
+        # ``backend_error`` events. The escalation observation fires once
+        # per crossing, then the counter must reset and re-arm before it
+        # can fire again, so we never spam the inbox.
+        self._backend_error_streak: dict[str, int] = {
+            name: 0 for name in self.role_registry
+        }
+        self._backend_error_alarm_armed: dict[str, bool] = {
+            name: True for name in self.role_registry
+        }
+        try:
+            self._backend_error_streak_threshold: int = max(
+                1,
+                int(os.environ.get(
+                    "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
+                    "5",
+                )),
+            )
+        except ValueError:
+            self._backend_error_streak_threshold = 5
+
         # Stable tick order derived from the live role_registry. Must NOT
         # use the module-level `roles_for_run()` which is a cached hardcoded
         # tuple containing "kernel" even when --no-kernel stripped it.
