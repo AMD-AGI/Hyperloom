@@ -22,8 +22,14 @@ This file covers:
 * End-to-end Coordinator path: real ``record_phase_transition`` +
   ``_on_phase_entered`` lands a real ``sweep`` task on the
   TaskRegistry with the expected idempotency_key.
-* Back-compat: LLM-emitted ``propose_action='sweep'`` still works
-  (different idempotency key from the internal hook).
+* PolicyGate ``sweep_phase_singleton`` rule: once the auto-enqueue
+  has stamped ``evidence.auto_sweep_task_id``, any LLM-emitted
+  ``delegate{action_name='sweep'}`` /
+  ``propose_action{action_name='sweep'}`` is denied (closing the
+  duplicate-task race that crashed both vllm engines on init).
+  The internal idempotency key shape is asserted as a structural
+  cross-check so a future refactor can't quietly let the LLM's
+  ``approved-<msg_id>`` key collide with the internal one.
 """
 
 from __future__ import annotations
@@ -460,15 +466,270 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
 
 
 # ===========================================================================
-# 5. Back-compat: LLM-emitted propose_action='sweep' uses a different key
+# 5. Idempotency key structural cross-check
 # ===========================================================================
 def test_internal_sweep_idempotency_key_does_not_collide_with_llm_path():
     """The internal hook uses ``internal-sweep-<reason>``; the LLM
     propose_action path uses ``approved-<proposal_msg_id>``. They
-    must NEVER collide because both can run in the same session."""
+    must NEVER collide structurally — but note that PolicyGate's
+    ``sweep_phase_singleton`` rule (next section) denies the
+    LLM-emitted sweep regardless, because two concurrent sweep
+    tasks crash both vllm engines on init."""
     internal_key = "internal-sweep-phase_entry"
     # Mirror the format _materialize_approved_proposal builds.
     llm_key = "approved-msg_abc123"
     assert internal_key != llm_key
     assert not llm_key.startswith("internal-")
     assert not internal_key.startswith("approved-")
+
+
+# ===========================================================================
+# 6. PolicyGate sweep_phase_singleton rule
+# ===========================================================================
+class _SweepSingletonState:
+    """SharedState stand-in carrying just the fields the
+    ``sweep_phase_singleton`` rule reads. Keeps the test independent
+    of the full SharedState dataclass."""
+
+    def __init__(self, phase_history=None):
+        self.phase_history = list(phase_history or [])
+
+
+def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
+    """Build a phase_history row mirroring what
+    ``record_phase_transition`` + ``_record_phase_entry_evidence``
+    produce on SWEEP entry."""
+    evidence: dict = {}
+    if auto_sweep_task_id:
+        evidence["auto_sweep_task_id"] = auto_sweep_task_id
+        evidence["auto_sweep_enqueued"] = True
+    return {
+        "to_phase": "SWEEP",
+        "from_phase": "EXPLORE",
+        "reason": "explore_done",
+        "evidence": evidence,
+    }
+
+
+def _make_policy_gate(*, shared_state):
+    """Plain PolicyGate wired only to the role registry + the test's
+    SharedState double — enough for ``_validate_sweep_singleton``,
+    ``_validate_phase_action`` is bypassed because we feed intents
+    through the helper directly."""
+    from inference_optimizer.orchestrator.agent_role import (
+        default_role_registry,
+    )
+    from inference_optimizer.orchestrator.policy import PolicyGate
+    return PolicyGate(
+        role_registry=default_role_registry(),
+        shared_state=shared_state,
+    )
+
+
+def test_sweep_singleton_denies_delegate_after_auto_enqueue_stamped():
+    """Happy path of the bug fix: SWEEP phase row carries
+    ``evidence.auto_sweep_task_id`` (Coordinator's auto-enqueue
+    finished), so any LLM-emitted ``delegate{action='sweep'}`` is
+    denied with the ``sweep_phase_singleton`` rule."""
+    from inference_optimizer.orchestrator.policy import PolicyDenied
+
+    state = _SweepSingletonState(
+        phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc123")],
+    )
+    gate = _make_policy_gate(shared_state=state)
+
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate._validate_sweep_singleton(
+            payload={"action_name": "sweep", "params": {}},
+            intent_kind="delegate",
+        )
+    assert excinfo.value.rule == "sweep_phase_singleton"
+    # Hint must mention bypass switch so the operator-debug path is
+    # discoverable from the denial alone.
+    assert "bypass_sweep_singleton" in (excinfo.value.hint or "")
+
+
+def test_sweep_singleton_denies_propose_action_after_auto_enqueue_stamped():
+    """Same shape on the propose_action channel — defense in depth."""
+    from inference_optimizer.orchestrator.policy import PolicyDenied
+
+    state = _SweepSingletonState(
+        phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-xyz")],
+    )
+    gate = _make_policy_gate(shared_state=state)
+
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate._validate_sweep_singleton(
+            payload={"action_name": "sweep", "params": {}},
+            intent_kind="propose_action",
+        )
+    assert excinfo.value.rule == "sweep_phase_singleton"
+
+
+def test_sweep_singleton_inert_before_auto_enqueue_stamps_evidence():
+    """Race-window: SWEEP phase row exists but the auto-enqueue
+    hook hasn't yet stamped ``auto_sweep_task_id`` (e.g. an LLM
+    intent landed between ``record_phase_transition`` and
+    ``_on_enter_sweep``). The rule MUST stay inert so the
+    Coordinator's own subsequent auto-enqueue is not falsely
+    blocked. The ``_validate_phase_action`` rule (PHASE_SWEEP
+    allows ``sweep``) handles the LLM intent in this race window."""
+    state = _SweepSingletonState(
+        phase_history=[_sweep_phase_row(auto_sweep_task_id="")],
+    )
+    gate = _make_policy_gate(shared_state=state)
+
+    # Must NOT raise.
+    gate._validate_sweep_singleton(
+        payload={"action_name": "sweep", "params": {}},
+        intent_kind="delegate",
+    )
+
+
+def test_sweep_singleton_inert_outside_sweep_phase():
+    """Phase_history's latest row is EXPLORE / KERNEL / CLOSE etc. —
+    rule stays silent so ``_validate_phase_action`` (R1
+    phase_incompatible) is the one that fires for sweep proposals
+    landing in the wrong phase."""
+    explore_row = {
+        "to_phase": "EXPLORE",
+        "from_phase": "PRELUDE",
+        "reason": "prelude_done",
+        "evidence": {"auto_sweep_task_id": "stale"},
+    }
+    state = _SweepSingletonState(phase_history=[explore_row])
+    gate = _make_policy_gate(shared_state=state)
+    # Even though evidence carries a stale auto_sweep_task_id, the
+    # rule keys on phase_history[-1].to_phase=="SWEEP" so this is
+    # inert.
+    gate._validate_sweep_singleton(
+        payload={"action_name": "sweep"},
+        intent_kind="delegate",
+    )
+
+
+def test_sweep_singleton_inert_when_phase_history_empty():
+    """Defensive: PolicyGate built without any phase_history yet
+    (e.g. P0 dev mode, or pre-PRELUDE replay) MUST not raise."""
+    state = _SweepSingletonState(phase_history=[])
+    gate = _make_policy_gate(shared_state=state)
+    gate._validate_sweep_singleton(
+        payload={"action_name": "sweep"},
+        intent_kind="delegate",
+    )
+
+
+def test_sweep_singleton_inert_when_shared_state_is_none():
+    """PolicyGate without a SharedState reference (legacy tests +
+    p0 dev) — rule self-defends with an early return."""
+    from inference_optimizer.orchestrator.agent_role import (
+        default_role_registry,
+    )
+    from inference_optimizer.orchestrator.policy import PolicyGate
+
+    gate = PolicyGate(role_registry=default_role_registry())
+    assert gate.shared_state is None
+    gate._validate_sweep_singleton(
+        payload={"action_name": "sweep"},
+        intent_kind="delegate",
+    )
+
+
+def test_sweep_singleton_self_clears_at_sweep_to_close_transition():
+    """Once SWEEP→CLOSE happens, the latest phase_history row turns
+    over to CLOSE. The rule stops firing, so the LLM (in CLOSE
+    phase) is no longer denied by ``sweep_phase_singleton``. Note
+    that ``_validate_phase_action`` will still deny sweep in CLOSE
+    via R1 phase_incompatible — the singleton rule is just one
+    layer."""
+    state = _SweepSingletonState(
+        phase_history=[
+            _sweep_phase_row(auto_sweep_task_id="auto-sweep-abc"),
+            {
+                "to_phase": "CLOSE",
+                "from_phase": "SWEEP",
+                "reason": "sweep_done",
+                "evidence": {},
+            },
+        ],
+    )
+    gate = _make_policy_gate(shared_state=state)
+    # Must NOT raise — the singleton rule looks at phase_history[-1],
+    # which is now CLOSE.
+    gate._validate_sweep_singleton(
+        payload={"action_name": "sweep"},
+        intent_kind="delegate",
+    )
+
+
+def test_sweep_singleton_bypass_flag_lets_operator_force_second_sweep():
+    """Operator escape hatch: ``params.bypass_sweep_singleton=True``
+    silences the rule so a debug session can run a second sweep
+    with a custom grid. The audit trail still records the
+    proposal, so the override is observable."""
+    state = _SweepSingletonState(
+        phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc")],
+    )
+    gate = _make_policy_gate(shared_state=state)
+    # Must NOT raise.
+    gate._validate_sweep_singleton(
+        payload={
+            "action_name": "sweep",
+            "params": {
+                "bypass_sweep_singleton": True,
+                "grid": {"conc_values": [128]},
+            },
+        },
+        intent_kind="delegate",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6b. End-to-end through full validate_intent (delegate / propose_action)
+# ---------------------------------------------------------------------------
+def test_validate_intent_denies_llm_sweep_delegate_in_active_sweep_phase():
+    """Through the full ``PolicyGate.validate_intent`` path: a
+    ``delegate{action_name='sweep'}`` from orchestration in active
+    SWEEP phase fires the singleton rule before
+    ``_validate_phase_action`` even runs (orthogonality with
+    Inv-11.3: deeper / more diagnostic rules win)."""
+    from inference_optimizer.orchestrator.intent_parser import (
+        Intent, IntentType,
+    )
+    from inference_optimizer.orchestrator.policy import PolicyDenied
+
+    state = _SweepSingletonState(
+        phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc")],
+    )
+    gate = _make_policy_gate(shared_state=state)
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "sweep",
+            "predicted_gain_pct": 1.0,
+            "params": {"grid": {"conc_values": [64]}},
+        },
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "sweep_phase_singleton"
+
+
+def test_validate_intent_denies_llm_sweep_propose_in_active_sweep_phase():
+    """Same shape on propose_action."""
+    from inference_optimizer.orchestrator.intent_parser import (
+        Intent, IntentType,
+    )
+    from inference_optimizer.orchestrator.policy import PolicyDenied
+
+    state = _SweepSingletonState(
+        phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc")],
+    )
+    gate = _make_policy_gate(shared_state=state)
+    intent = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={"action_name": "sweep"},
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "sweep_phase_singleton"
