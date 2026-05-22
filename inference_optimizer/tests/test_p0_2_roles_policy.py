@@ -35,6 +35,8 @@ from inference_optimizer.orchestrator.intent_parser import (
 )
 from inference_optimizer.orchestrator.policy import (
     CORE_STATE_FIELDS,
+    DELEGATE_ACTION_REQUIRED_PAYLOAD,
+    DELEGATE_ACTION_SOURCE_ALLOWLIST,
     KERNEL_OWNED_ACTIONS,
     KILL_TASK_SOURCE_ALLOWLIST,
     PolicyDenied,
@@ -187,6 +189,127 @@ def test_gate_orchestration_delegate_normal_action_ok(gate):
         type=IntentType.DELEGATE,
         payload={"action_name": "baseline"},
     ))
+
+
+# ---------------------------------------------------------------------------
+# Per-action delegate source allowlist (DELEGATE_ACTION_SOURCE_ALLOWLIST)
+#
+# ``recover`` walks SIGTERM/SIGKILL against matching processes and is
+# env-gated to optionally invoke ``rocm-smi --gpureset``. The
+# robustness-agent path emits it as the tail of the gpu_memory_leaked
+# action ladder; any other source must be rejected so PolicyGate is the
+# single chokepoint between an LLM-generated intent and a kill spree.
+# ---------------------------------------------------------------------------
+def test_delegate_action_source_allowlist_constant_shape():
+    """``recover`` is the only entry today; if more side-effecting
+    actions need source gating the test should be extended deliberately."""
+    assert DELEGATE_ACTION_SOURCE_ALLOWLIST == {
+        "recover": frozenset({"robustness"}),
+    }
+
+
+def test_delegate_action_required_payload_constant_shape():
+    assert DELEGATE_ACTION_REQUIRED_PAYLOAD == {
+        "recover": ("reason", "evidence"),
+    }
+
+
+def test_gate_robustness_delegate_recover_with_evidence_ok(gate):
+    """Robustness with full evidence at top of payload passes the gate."""
+    gate.validate_intent("robustness", Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "recover",
+            "reason": "gpu_memory_leaked",
+            "force_gpu_cleanup": True,
+            "evidence": {
+                "consecutive_hits": 2,
+                "per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
+            },
+        },
+    ))
+
+
+def test_gate_robustness_delegate_recover_with_nested_params_ok(gate):
+    """Real-world shape: ``build_delegate`` nests ``reason`` / ``evidence``
+    inside ``payload["params"]`` so the executor reads them via
+    ``ctx.task.params``. The gate must accept that shape too."""
+    gate.validate_intent("robustness", Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "recover",
+            "params": {
+                "reason": "gpu_memory_leaked",
+                "force_gpu_cleanup": True,
+                "evidence": {
+                    "consecutive_hits": 2,
+                    "per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
+                },
+            },
+            "idempotency_key": "recover-gpu-leak-tick-1",
+        },
+    ))
+
+
+def test_gate_orchestration_delegate_recover_rejected_by_source(gate):
+    """Orchestration must NOT initiate ``recover`` even with full payload —
+    the only valid path is robustness escalation via the action ladder."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "recover",
+                "reason": "gpu_memory_leaked",
+                "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
+            },
+        ))
+    assert exc.value.rule == "delegate_action_source"
+    assert "robustness" in str(exc.value)
+
+
+def test_gate_robustness_delegate_recover_missing_evidence_rejected(gate):
+    """Even from robustness, ``recover`` without evidence is denied so the
+    audit trail always captures the symptom that justified the kill."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("robustness", Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "recover",
+                "reason": "gpu_memory_leaked",
+                # no `evidence`
+            },
+        ))
+    assert exc.value.rule == "delegate_action_evidence"
+    assert "evidence" in str(exc.value)
+
+
+def test_gate_robustness_delegate_recover_missing_reason_rejected(gate):
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("robustness", Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "recover",
+                # no `reason`
+                "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
+            },
+        ))
+    assert exc.value.rule == "delegate_action_evidence"
+    assert "reason" in str(exc.value)
+
+
+def test_gate_robustness_delegate_recover_empty_evidence_rejected(gate):
+    """Empty dict / empty string count as missing — the gate is asserting
+    *information presence*, not just key existence."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("robustness", Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "recover",
+                "reason": "   ",  # whitespace-only string
+                "evidence": {},   # empty dict
+            },
+        ))
+    assert exc.value.rule == "delegate_action_evidence"
 
 
 def test_gate_orchestration_request_to_kernel_ok(gate):
