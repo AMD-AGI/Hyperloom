@@ -2,30 +2,36 @@
 
 Two distinct path concepts:
 
-1. **Session paths** — per-run mutable artifacts (SQLite DB, state.json,
-   personas, results, kernel-agent workspace, patches, logs). State
-   lives in one fixed directory::
+1. **Workspace + session paths** (N17, May 2026) — two roots:
 
-        /workspace/hyperloom/
-            manifest.json
-            state.json
-            storage/coordinator.db
-            agents/{orchestration,kernel,critic,robustness}/...
-            personas/  checkpoints/  findings/  kb/
-            runs/{baseline,profile,backends,params,sweep,
-                  integrate,kernel_opt}/<task_id>/...
-            kernel-agent-workspace/<kernel_id>/
-            patches/<kernel_id>/
-            reports/  logs/
+   * **Workspace root** (:func:`workspace_root`) — ``$USER_DATA_PATH``
+     (default ``/workspace/hyperloom``). Holds workspace-shared dirs
+     ``runtime/`` (Magpie, kernel-agent.env.sh, source mirrors) and
+     ``logs/``. Set once by the operator / Claw / SaFE launcher.
+     **Must stay at this level** through the whole run — do not repoint
+     ``$USER_DATA_PATH`` at a per-session subdir after ``optimize``
+     starts.
+   * **Session dir** (:func:`session_dir`) — per optimization run.
+     Default layout ``per_model_ts``::
 
-   Each sandbox is single-use, so there is no session_id subdirectory.
+         $USER_DATA_PATH/<model_basename>/<UTC_YYYYMMDDTHHMMSSZ>/
+             manifest.json  state.json  storage/  agents/  runs/  ...
 
-   Resolution order (see :func:`session_dir`):
+     Legacy ``flat`` layout (``INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat``):
+     session_dir == workspace_root.
 
-   1. ``USER_DATA_PATH`` — user-facing env (documented in
-      ``.env.template`` and ``SKILL.md``); production launchers and
-      the SDK set this.
-   2. ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``).
+   When Claw / SaFE provisions a pod, ``$USER_DATA_PATH`` is often
+   already a run-scoped directory (e.g.
+   ``/hyperloom/users/<uid>/<model>-<job_ts>/``). The optimizer still
+   adds ``<model_basename>/<UTC_ts>/`` underneath unless layout is
+   ``flat``.
+
+   Session dir resolution (see :func:`session_dir`):
+
+   1. ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` — pin set by
+      :func:`make_session_dir` / ``--resume`` (authoritative).
+   2. ``$USER_DATA_PATH`` — only when no pin (legacy flat / tests).
+   3. ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``).
 
 2. **Runtime asset paths** — read-only files shipped with the package
    (shell scripts, kernel-opt prompt templates, action metadata, agent
