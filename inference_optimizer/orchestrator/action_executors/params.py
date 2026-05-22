@@ -35,6 +35,13 @@ from ._grid_runner import (
     GridVariant,
     VariantResult,
     _resolve_session_dir,
+    MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT,
+    apply_compatibility_filter,
+    apply_multi_node_invalid_variants,
+    apply_single_node_invalid_variants,
+    apply_user_skip_list,
+    reorder_grid_for_multi_node,
+    resolve_skip_spec,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -443,8 +450,25 @@ class ParamsExecutor:
         base_tput = float(params.get("base_tput", 0.0))
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
-        keep_threshold_pct = float(params.get("keep_threshold_pct",
-                                              self.keep_threshold_pct))
+        # M1: KEEP threshold resolution with multi-node noise awareness.
+        # Resolution order: explicit task param > multi-node default
+        # (2.0%) > single-node default (self.keep_threshold_pct, 0.5%).
+        # Explicit caller value always wins so unit tests and the Brain
+        # agent can still tighten/loosen the threshold per-task. The
+        # multi-node fallback exists because the empirical noise floor
+        # on >=2-node TP runs is ~1-2% (cross-node RDMA jitter + Ray
+        # scheduling drift); the 0.5% single-node default would otherwise
+        # flag noise as KEEP and trigger a wasted ~40-min validate_stack.
+        explicit_keep = params.get("keep_threshold_pct")
+        if explicit_keep is not None:
+            keep_threshold_pct = float(explicit_keep)
+        else:
+            from ._multi_node_env import is_multi_node
+            keep_threshold_pct = (
+                MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT
+                if is_multi_node()
+                else self.keep_threshold_pct
+            )
         max_candidates = int(params.get(
             "max_candidates_per_round", self.default_max_candidates_per_round,
         ))
@@ -495,6 +519,53 @@ class ParamsExecutor:
                     f"discover_param_flags: no flags from {discovered_source} "
                     f"({discovery_error})"
                 )
+
+        # User-declared variant skip list (operator prompt / --skip-variants
+        # / task params). Same helper as backends.py so the contract is
+        # uniform: a single SKIP_VARIANTS spec prunes both grids. Pure
+        # name/glob match; no model knowledge required. Anything the agent
+        # already knows is incompatible should come through here. Applied
+        # AFTER discovery so dropped flags don't accidentally re-appear.
+        skip_spec = resolve_skip_spec(params)
+        grid, user_dropped = apply_user_skip_list(grid, skip_spec=skip_spec)
+        for d in user_dropped:
+            log.info("params: user-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        grid, mn_dropped = apply_multi_node_invalid_variants(grid)
+        for d in mn_dropped:
+            log.info("params: multi-node-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        # A+B filter step 1: single-node-side filter for
+        # ``note=multi_node_only_*`` variants (noop in multi-node).
+        # The default params grid currently ships zero multi-node-only
+        # variants — the helper is wired anyway so a future LLM
+        # grid-override injecting MN-only flags is silently filtered
+        # in single-node runs instead of crashing them.
+        grid, sn_dropped = apply_single_node_invalid_variants(grid)
+        for d in sn_dropped:
+            log.info("params: single-node-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        # A+B filter step 2: compatibility filter for model-class /
+        # sglang-version mismatches. Conservative — probe failures
+        # fall through, so bad-variant cost falls back to one wasted
+        # sglang restart (same as the no-filter baseline).
+        grid, compat_dropped = apply_compatibility_filter(grid)
+        for d in compat_dropped:
+            log.info("params: compatibility-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        dropped_variants = (
+            list(user_dropped) + list(mn_dropped)
+            + list(sn_dropped) + list(compat_dropped)
+        )
+        # M2: multi-node grid reorder (single-node noop).
+        # Surfaces likely-winners (cuda_graph_max_bs == CONC,
+        # mem_fraction, max_num_seqs, ...) ahead of low-leverage tail
+        # so the run can plateau within --max-hours budget. See
+        # _grid_runner._MN_PARAMS_PRIORITY for the tag order.
+        from ._grid_runner import _MN_PARAMS_PRIORITY
+        grid = reorder_grid_for_multi_node(
+            grid, priority_tags=_MN_PARAMS_PRIORITY,
+        )
 
         search = dict(params.get("params_search") or _initial_search_state())
         # Schema versions: v1 keyed tested by variant name; v2 keys by
@@ -582,6 +653,7 @@ class ParamsExecutor:
                 "workspace": output_root.as_posix(),
                 "params_search_update": search,
                 "params_search_exhausted": True,
+                "dropped_variants": dropped_variants,
                 "discovered_flags_update": (
                     {
                         "framework": framework or "sglang",
@@ -773,6 +845,7 @@ class ParamsExecutor:
             "workspace": output_root.as_posix(),
             "params_search_update": search_update,
             "params_search_exhausted": params_search_exhausted,
+            "dropped_variants": dropped_variants,
             "discovered_flags_update": (
                 {
                     "framework": framework or "sglang",
