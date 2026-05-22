@@ -274,6 +274,87 @@ def test_write_manifest_writes_v1_schema(tmp_path, monkeypatch):
     assert on_disk == m
 
 
+# ---------------------------------------------------------------------------
+# manifest "dependencies" block (Hyperloom bugs.md §C #1 follow-up:
+# install.sh clones a fresh InferenceX per install, so the SHA recorded
+# here is the only way to answer "which upstream did this run hit?")
+# ---------------------------------------------------------------------------
+def test_manifest_records_dependencies_block_empty_when_envs_unset(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    sd = paths.make_session_dir()
+    m = write_manifest(sd, args=None, session_id="empty-deps")
+    deps = m["dependencies"]
+    assert set(deps.keys()) == {"magpie", "inferencex"}
+    for sub in deps.values():
+        assert sub == {"path": "", "commit": "", "remote": ""}
+
+
+def test_manifest_records_dependencies_block_picks_up_git_metadata(
+    tmp_path, monkeypatch,
+):
+    """Plant two fake git checkouts on disk and confirm we capture both
+    the SHA and origin URL."""
+    import subprocess
+
+    def _init_repo(path, remote_url, file_contents):
+        path.mkdir(parents=True)
+        (path / "stub.txt").write_text(file_contents, encoding="utf-8")
+        for cmd in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.email", "ci@hyperloom.test"],
+            ["git", "config", "user.name", "ci"],
+            ["git", "config", "commit.gpgsign", "false"],
+            ["git", "add", "."],
+            ["git", "commit", "-q", "-m", "init"],
+            ["git", "remote", "add", "origin", remote_url],
+        ):
+            subprocess.run(cmd, cwd=path, check=True, capture_output=True)
+
+    fake_magpie = tmp_path / "Magpie"
+    fake_infx = tmp_path / "InferenceX"
+    _init_repo(fake_magpie, "https://example.test/Magpie.git", "m")
+    _init_repo(fake_infx, "https://example.test/InferenceX.git", "i")
+
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
+    monkeypatch.setenv("MAGPIE_DIR", str(fake_magpie))
+    monkeypatch.setenv("INFERENCEX_PATH", str(fake_infx))
+
+    sd = paths.make_session_dir()
+    m = write_manifest(sd, args=None, session_id="full-deps")
+
+    deps = m["dependencies"]
+    assert deps["magpie"]["path"] == str(fake_magpie)
+    assert deps["magpie"]["remote"] == "https://example.test/Magpie.git"
+    assert deps["magpie"]["commit"], "expected non-empty magpie SHA"
+    assert deps["inferencex"]["path"] == str(fake_infx)
+    assert deps["inferencex"]["remote"] == "https://example.test/InferenceX.git"
+    assert deps["inferencex"]["commit"], "expected non-empty inferencex SHA"
+
+
+def test_manifest_dependencies_block_is_fail_soft_on_non_repo_paths(
+    tmp_path, monkeypatch,
+):
+    """Path exists but isn't a git checkout -> path is recorded, sha/remote stay empty."""
+    not_a_repo = tmp_path / "plain_dir"
+    not_a_repo.mkdir()
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
+    monkeypatch.setenv("MAGPIE_DIR", str(not_a_repo))
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+
+    sd = paths.make_session_dir()
+    m = write_manifest(sd, args=None, session_id="non-repo-deps")
+    assert m["dependencies"]["magpie"] == {
+        "path": str(not_a_repo), "commit": "", "remote": "",
+    }
+    assert m["dependencies"]["inferencex"] == {
+        "path": "", "commit": "", "remote": "",
+    }
+
+
 def test_build_session_id_includes_uuid_and_model(monkeypatch):
     sid = build_session_id("Qwen3-8B")
     assert sid.startswith("Qwen3-8B_")
