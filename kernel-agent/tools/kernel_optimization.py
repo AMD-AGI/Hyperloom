@@ -1195,6 +1195,9 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         except Exception:
             full_report = ""
         if full_report:
+            from inference_optimizer.tracelens_md import strip_base64_data_urls
+
+            full_report = strip_base64_data_urls(full_report)
             rank = candidate.get("tracelens_pitem_rank")
             title = candidate.get("tracelens_pitem_title", "")
             if rank:
@@ -2341,12 +2344,12 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
-    # Goal threshold: 1.20x lets shape-specific 5-30% wins (claude r19 GEMM
-    # 1.32x, GEAK r39 rms_norm 1.18x, codex r25 GEMM 1.66x) through to
-    # human KEEP review. Below 1.20x is treated as noise / not worth the
-    # production risk and routed to NEEDS_REVIEW with reason. Originally
-    # 1.50 (overly strict — too many real wins fell through to PARTIAL).
-    KEEP_THRESHOLD = 1.20
+    # Goal threshold: 1.10x lets modest but real shape-specific wins
+    # (claude r19 GEMM 1.32x, GEAK r39 rms_norm 1.18x, codex r25 GEMM 1.66x)
+    # through to human KEEP review. Below 1.10x is treated as noise / not
+    # worth the production risk and routed to NEEDS_REVIEW with reason.
+    # Originally 1.50 (overly strict), then 1.20; lowered to 1.10 May 2026.
+    KEEP_THRESHOLD = 1.10
     if verification["micro_speedup"] < KEEP_THRESHOLD:
         reasons.append(
             f"speedup {verification['micro_speedup']:.3f}x below KEEP "

@@ -279,7 +279,13 @@ def test_extract_executive_summary_strips_base64_images(tmp_path):
         encoding="utf-8",
     )
     out = _extract_executive_summary(str(md))
-    assert "[image stripped]" in out
+    # ``strip_base64_data_urls`` (shared helper) rewrites the data URL to
+    # ``![<alt>](<<stripped: base64 image — <alt>>>)`` so downstream agents
+    # see that a chart was present without the binary payload. Assert on
+    # the structural marker rather than a free-text string so future
+    # marker tweaks only need the helper + this one test updated together.
+    assert "stripped: base64 image" in out
+    assert "chart" in out  # alt-text preserved
     assert big_b64[:100] not in out
     assert "Real text after image" in out
 
@@ -298,67 +304,84 @@ def test_extract_executive_summary_caps_at_2kb(tmp_path):
 
 
 def test_format_comparison_section_single_snapshot(tmp_path):
-    """No re-roofline triggered -> render single snapshot with
-    explanatory note (cumulative_gain stayed at 0, no point spending
-    20min on a second snapshot just for the report)."""
-    md = tmp_path / "baseline.md"
-    md.write_text(
-        "## Executive Summary\n\n"
-        "Compute 80%, idle 20%.\n\n"
-        "## Compute Kernel\n\n",
-        encoding="utf-8",
-    )
+    """No re-roofline triggered -> render single snapshot table."""
     cmp = {
+        "mode": "single_snapshot",
         "baseline": {
             "snapshot_id": 1,
-            "analysis_md_path": str(md),
             "ts": "2026-05-21T07:50:00+00:00",
+            "compute_pct": 80.0,
+            "idle_pct": 20.0,
+            "comm_pct": 0.0,
+            "top_bottleneck": "GEMM",
+            "top_kernel": {
+                "name": "gemm_kernel",
+                "gpu_pct": 50.0,
+                "efficiency_pct": 29.7,
+                "bound_type": "compute",
+            },
         },
         "latest": {
             "snapshot_id": 1,
-            "analysis_md_path": str(md),  # same as baseline
             "ts": "2026-05-21T07:50:00+00:00",
+            "compute_pct": 80.0,
+            "idle_pct": 20.0,
+            "comm_pct": 0.0,
+            "top_bottleneck": "GEMM",
         },
     }
     lines = _format_roofline_comparison_section(cmp)
     text = "\n".join(lines)
     assert "## Roofline Comparison" in text
     assert "Only one roofline snapshot was captured" in text
-    assert "Compute 80%" in text
+    assert "| Compute % | 80.0% |" in text
 
 
 def test_format_comparison_section_before_after(tmp_path):
-    """Two distinct snapshots -> render both Executive Summaries with
-    before/after section headings."""
-    base = tmp_path / "baseline.md"
-    base.write_text(
-        "## Executive Summary\n\nBaseline: compute 60%\n\n## Next\n",
-        encoding="utf-8",
-    )
-    after = tmp_path / "optimized.md"
-    after.write_text(
-        "## Executive Summary\n\nOptimized: compute 75%\n\n## Next\n",
-        encoding="utf-8",
-    )
+    """Two distinct snapshots -> render Base / Opt / Δ table."""
     cmp = {
+        "mode": "before_after",
         "baseline": {
             "snapshot_id": 1,
-            "analysis_md_path": str(base),
             "ts": "2026-05-21T07:50:00+00:00",
+            "compute_pct": 60.0,
+            "idle_pct": 10.0,
+            "comm_pct": 5.0,
+            "top_bottleneck": "GEMM",
+            "top_kernel": {
+                "name": "gemm_kernel",
+                "efficiency_pct": 29.7,
+                "bound_type": "compute",
+            },
         },
         "latest": {
             "snapshot_id": 2,
-            "analysis_md_path": str(after),
             "ts": "2026-05-21T08:30:00+00:00",
+            "compute_pct": 75.0,
+            "idle_pct": 8.0,
+            "comm_pct": 4.0,
+            "top_bottleneck": "GEMM",
+            "top_kernel": {
+                "name": "gemm_kernel",
+                "efficiency_pct": 34.9,
+                "bound_type": "compute",
+            },
+        },
+        "delta": {
+            "compute_pct": 15.0,
+            "idle_pct": -2.0,
+            "comm_pct": -1.0,
+            "top_kernel_efficiency_pct": 5.2,
         },
     }
     lines = _format_roofline_comparison_section(cmp)
     text = "\n".join(lines)
     assert "## Roofline Comparison" in text
-    assert "### Baseline snapshot #1" in text
-    assert "### Post-optimization snapshot #2" in text
-    assert "Baseline: compute 60%" in text
-    assert "Optimized: compute 75%" in text
+    assert "| Metric | Base | Opt | Δ |" in text
+    assert "Baseline snapshot #1" in text
+    assert "Optimized snapshot #2" in text
+    assert "60.0%" in text
+    assert "75.0%" in text
 
 
 def test_format_comparison_section_no_snapshot_at_all():
