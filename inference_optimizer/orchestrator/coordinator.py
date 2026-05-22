@@ -1245,13 +1245,18 @@ class Coordinator:
         breakdown collector (KB_design §3.12) can verify the hook
         fired and which grid source was used.
 
-        LLM remains free to ``propose_action='sweep'`` after this hook
-        runs — duplicate proposals will collide with their own
-        ``idempotency_key`` derived from the proposal_msg_id (a
-        different key from the internal one), so the LLM-emitted
-        sweep would create a second task. PolicyGate's phase
-        allowlist still permits sweep in SWEEP phase; the auto-hook
-        only guarantees a sweep runs at all.
+        Singleton enforcement: PolicyGate's
+        ``sweep_phase_singleton`` rule denies any LLM-emitted
+        ``delegate{action_name='sweep'}`` or
+        ``propose_action{action_name='sweep'}`` once this hook has
+        stamped ``evidence.auto_sweep_task_id`` for the active SWEEP
+        phase. Two concurrent sweep tasks would race for the same 8
+        GPUs and the same TCP port, crashing both vllm engines on
+        init (``HSA_STATUS_ERROR_OUT_OF_RESOURCES``) and producing
+        zero workload-curve coverage. The rule self-clears at
+        SWEEP→CLOSE because phase_history[-1] turns over. Operator
+        debug override: ``params.bypass_sweep_singleton=True`` on
+        the LLM intent payload.
         """
         state = self.shared_state
         try:
@@ -1624,6 +1629,20 @@ class Coordinator:
 
         # ---------------- Step 5: mark done ----------------
         self.shared_state.close_sequence_done = True
+        # v0.8 §3.2 §5.5 — phase-machine CLOSE path must set
+        # ``stop_reason`` so the main run loop's outer check
+        # (Coordinator.run line ~1936) terminates the run on the next
+        # tick. Without this the sequencer completes, writes the
+        # report + breakdown, and the loop keeps ticking forever
+        # (orchestration re-proposing report, robustness re-emitting
+        # alerts, Cortex returning 409 on the committed session).
+        # The wall-clock deadline path (``_enter_closing_phase``) sets
+        # ``time_exhausted`` from the loop body (line ~1971); both
+        # paths converge on the same vocab term per
+        # ``STOP_REASON_VOCAB``. The ``not stop_reason`` guard
+        # preserves Step 4's ``cortex_commit_failed`` setter.
+        if not self.shared_state.stop_reason:
+            self.shared_state.set_stop_reason("time_exhausted")
         try:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
@@ -3989,6 +4008,29 @@ class Coordinator:
             await self._record_policy_denied(
                 source, intent, denied, action_name=action_name,
             )
+            return
+        # Critic gate for explore grids: every ``delegate{action_name='explore',
+        # params={grid: [...]}}`` is reviewed per-variant by the Critic before
+        # any benchmark runs. We re-route through ``_handle_propose_action``
+        # so the proposal lands in ``pending_proposals``, the Critic emits a
+        # ``verdict_map``, and ``_handle_verdict_map`` materialises only the
+        # approved subset (variants the Critic rejects fire a KB ``refuted``
+        # edge via ``_cortex_t3_critic_rejected`` and never reach the executor).
+        # The proposal path re-runs is_pruned + _sequence_denial_for_action,
+        # and ``_materialize_approved_proposal`` writes the task via
+        # ``tasks.create_or_return_existing`` directly, so this re-route
+        # cannot recurse back into ``_handle_delegate``. Empty/missing grid
+        # falls through to the legacy delegate path (nothing to filter).
+        params_preview = intent.payload.get("params") or {}
+        grid_preview = (
+            params_preview.get("grid") if isinstance(params_preview, dict) else None
+        )
+        if (
+            action_name == "explore"
+            and isinstance(grid_preview, list)
+            and grid_preview
+        ):
+            await self._handle_propose_action(source, intent)
             return
         params = dict(intent.payload.get("params") or {})
         # The schema says delegate idempotency_key is top-level, but LLMs

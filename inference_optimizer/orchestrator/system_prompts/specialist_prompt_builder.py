@@ -38,6 +38,13 @@ from ..specialist_domains import (
 _NONE_PLACEHOLDER = "(none)"
 
 
+# Soft cap on how many entries a specialist may emit in its final
+# ``proposal_set``. Enforced via prompt instructions only (the Critic
+# rejects any marginal-quality survivors against KB priors). Override
+# per-task via ``SpecialistPromptInputs.max_proposals``.
+DEFAULT_SPECIALIST_MAX_PROPOSALS = 5
+
+
 # ---------------------------------------------------------------------------
 # PR-A6 (Arbor-into-Hyperloom) — per-domain focus templates
 #
@@ -216,6 +223,10 @@ class SpecialistPromptInputs:
     task_id: str
     domain: SpecialistDomain
     max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS
+    # Soft cap on ``proposal_set`` size — rendered into Sections 1 + 8
+    # so the specialist self-curates to its top-K picks rather than
+    # padding with marginal candidates.
+    max_proposals: int = DEFAULT_SPECIALIST_MAX_PROPOSALS
 
     # Hardware context (§3.5 §6 part 2). ``tp`` defaults to 0
     # (sentinel for "unspecified"), NOT 1 — a silent default of 1
@@ -284,7 +295,9 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "probe the host via Bash, **author source patches into your isolated",
         "worktree**, and use as many of your ``max_turns`` LLM turns as you need",
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
-        "are discouraged when a real bottleneck is on the table.",
+        "are discouraged when a real bottleneck is on the table. Quality is",
+        f"scored over quantity: cap your final ``proposal_set`` at the",
+        f"**top-{inp.max_proposals}** ranked picks (see Section 8).",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
@@ -520,6 +533,20 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "Field contract (KB_design §3.5 §7 + PR-A2 Arbor extensions):",
         "",
         "- ``proposal_set`` items reuse the §3.4 explore variant schema.",
+        (
+            f"- ``proposal_set`` MUST contain AT MOST **{inp.max_proposals}** "
+            "entries. You are a curator, not a brainstormer: rank candidates "
+            "by expected gain x your confidence, drop everything that "
+            "contradicts ``kb_subgraph`` / ``pr_feed`` evidence already in "
+            f"your prompt, and only emit the surviving top {inp.max_proposals}. "
+            "Fewer is better than padding."
+        ),
+        (
+            "- The Critic reviews each surviving variant against the KB "
+            "before benchmarking, so a marginal-quality proposal costs you "
+            "a reject (and a refuted KB edge that will follow you on "
+            "future rounds)."
+        ),
         "- ``patches_written`` (PR-A2) lists paths (relative to your",
         "  workspace or worktree) of any unified-diff patch files you",
         "  authored this round. Empty list = no patches; downstream",
