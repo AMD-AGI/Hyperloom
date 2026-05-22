@@ -292,7 +292,7 @@ async def test_validate_stack_executor_combines_stack_and_returns_validated_fiel
     )
     sub.register_executor("validate_stack", ValidateStackExecutor(session_dir=tmp_path))
 
-    with patch("subprocess.run", return_value=fake_completed):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -479,7 +479,7 @@ async def test_validate_stack_executor_warns_when_stack_empty(tmp_path):
     sub.register_executor(
         "validate_stack", ValidateStackExecutor(session_dir=tmp_path),
     )
-    with patch("subprocess.run", return_value=fake_completed):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -520,7 +520,7 @@ async def test_validate_stack_executor_accepts_explicit_stack_param(tmp_path):
     sub.register_executor(
         "validate_stack", ValidateStackExecutor(session_dir=tmp_path),
     )
-    with patch("subprocess.run", return_value=fake_completed):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"

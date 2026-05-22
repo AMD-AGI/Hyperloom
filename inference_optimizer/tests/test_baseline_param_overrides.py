@@ -246,7 +246,7 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -280,7 +280,7 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -311,7 +311,7 @@ def test_baseline_executor_rejects_bad_param(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -342,7 +342,7 @@ def test_baseline_executor_rejects_bad_result_dir(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
