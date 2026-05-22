@@ -354,6 +354,57 @@ async def test_close_sequencer_runs_all_5_steps_in_order_happy_path(
     assert coord.cortex_kb.drain_calls == 1
     # session_summary populated from the commit return.
     assert coord.shared_state.cortex_session_summary == {"status": "committed"}
+    # v0.8 §3.2 §5.5 — sequencer step 5 must set stop_reason so the
+    # main loop terminates on the next tick. Without this the loop
+    # keeps re-firing the report executor + robustness alerts (the
+    # bug we're closing here).
+    assert coord.shared_state.stop_reason == "time_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_sets_time_exhausted_stop_reason(coord):
+    """Step 5 stamps ``stop_reason='time_exhausted'`` when no other
+    step set it first. ``time_exhausted`` is the canonical CLOSE
+    vocab term in :data:`STOP_REASON_VOCAB` and matches the
+    wall-clock-deadline path's terminator (Coordinator.run).
+    """
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    assert coord.shared_state.stop_reason == ""
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    assert coord.shared_state.stop_reason == "time_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_does_not_overwrite_existing_stop_reason(
+    coord,
+):
+    """If step 4 already set ``stop_reason='cortex_commit_failed'``
+    (or any other value), step 5's setter must leave it alone — the
+    earlier observation carries the more diagnostic information."""
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.cortex_kb = _StubCortex(commit_raises=RuntimeError("synthetic"))
+    coord.shared_state.cortex_session_id = "sid"
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    # Step 4 set this; step 5 must NOT overwrite to time_exhausted.
+    assert coord.shared_state.stop_reason == "cortex_commit_failed"
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
+    coord,
+):
+    """An operator-set ``stop_reason`` (e.g. ``signal`` from a
+    SIGTERM that arrived during the sequencer) must survive step 5."""
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.shared_state.stop_reason = "signal"
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    assert coord.shared_state.stop_reason == "signal"
 
 
 @pytest.mark.asyncio
