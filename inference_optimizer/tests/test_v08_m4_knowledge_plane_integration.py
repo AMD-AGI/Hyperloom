@@ -143,7 +143,7 @@ def test_pr_feed_warm_all_domains_isolates_per_domain_failures():
 
     def _flaky_pr_feed_warm(domain: str, **kwargs):
         call_log.append(domain)
-        if domain == "framework_specialist":
+        if domain == "serving_specialist":
             raise RuntimeError("synthetic PR monitor outage")
         return real_pr_feed_warm(domain, **kwargs)
 
@@ -153,9 +153,9 @@ def test_pr_feed_warm_all_domains_isolates_per_domain_failures():
     # Every domain still got a turn.
     assert set(call_log) == set(SPECIALIST_DOMAIN_KEYS)
     # The poisoned domain has a non-empty warnings entry.
-    prs, warns = out["framework_specialist"]
+    prs, warns = out["serving_specialist"]
     assert prs == []
-    assert any("framework_specialist" in w for w in warns)
+    assert any("serving_specialist" in w for w in warns)
 
 
 # ===========================================================================
@@ -174,7 +174,7 @@ class _FakePlane:
     def pr_feed_warm_all_domains(self, **kwargs):
         self.warm_calls += 1
         self.last_kwargs = kwargs
-        return {"framework_specialist": ([], [])}
+        return {"serving_specialist": ([], [])}
 
     def pr_feed_warm(self, domain, **_kw):
         return [], []

@@ -216,7 +216,7 @@ Coordinator → SpecialistRunner. 每次 specialist 派发前
 
 **严重度**: **P0** — KB_design §3.6 的"具体特性 = pr_feed + kb_subgraph"
 完全失效; pr_intel_specialist domain 退化为"看 KB + 源码" (相当于
-framework_specialist 子集), 失去 §3.6 §5 提供的 PR 视野.
+serving_specialist 子集), 失去 §3.6 §5 提供的 PR 视野.
 
 **关联**: §3.6 §5 / §6; §3.13 M4 §6; `cli.py:1918–1975` 已写函数; 调用
 点 0.

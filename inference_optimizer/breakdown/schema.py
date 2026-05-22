@@ -449,7 +449,7 @@ class SourceBreakdown(TypedDict, total=False):
 class PhaseBreakdownExplore(TypedDict, total=False):
     """v0.8 M7 (KB_design §3.12 §4.6) — explore-phase gain split by
     specialist domain. ``by_domain`` keys are SpecialistDomain.key
-    strings (``framework_specialist`` / …) plus ``default_grid`` /
+    strings (``serving_specialist`` / …) plus ``default_grid`` /
     ``llm_direct`` for non-specialist provenance."""
     total_gain_pct: float
     by_domain: dict[str, float]

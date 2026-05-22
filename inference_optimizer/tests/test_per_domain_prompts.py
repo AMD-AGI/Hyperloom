@@ -1,7 +1,7 @@
 """PR-A6 (Arbor-into-Hyperloom): per-domain specialist prompt templates.
 
 The v0.8 M5 ``specialist_prompt_builder`` shipped one template
-(``framework_specialist``) and let the other five domains fall back
+(``serving_specialist``) and let the other five domains fall back
 to the generic identity. PR-A6 ports Arbor's "agent expertise" table
 into per-domain focus templates so each specialist starts with the
 right corner of the search space (KB anchor, source roots, winning
@@ -71,19 +71,19 @@ def test_specialist_domains_m5_covers_all_six():
 # ---------------------------------------------------------------------------
 # 2. Per-domain content checks — each template mentions its signature
 # ---------------------------------------------------------------------------
-def test_framework_specialist_mentions_scheduler_and_kv_cache():
-    text = _build("framework_specialist")
+def test_serving_specialist_mentions_scheduler_and_kv_cache():
+    text = _build("serving_specialist")
     for marker in (
-        "framework_specialist", "scheduler", "cuda_graph", "kv_cache",
+        "serving_specialist", "scheduler", "cuda_graph", "kv_cache",
         "max-num-seqs",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
 
-def test_kernel_specialist_mentions_aiter_and_attention_backends():
-    text = _build("kernel_specialist")
+def test_kernel_switch_specialist_mentions_aiter_and_attention_backends():
+    text = _build("kernel_switch_specialist")
     for marker in (
-        "kernel_specialist", "aiter", "ROCM_AITER_MLA", "TRITON_MLA",
+        "kernel_switch_specialist", "aiter", "ROCM_AITER_MLA", "TRITON_MLA",
         "CDNA3",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
@@ -143,7 +143,7 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
 
     done = {
         "gap_canonical_id": "gap.x",
-        "domain": "kernel_specialist",
+        "domain": "kernel_switch_specialist",
         "proposal_set": [],
         "empty": True,
         "summary": "test",
@@ -165,7 +165,7 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
         kind="specialist",
         state="queued",
         params={
-            "domain": "kernel_specialist",
+            "domain": "kernel_switch_specialist",
             "gap_canonical_id": "gap.x",
             "max_turns": 2,
         },
@@ -177,5 +177,5 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
     for note in result.notes or []:
         assert "generic prompt template" not in note, (
             f"PR-A6 should have widened SPECIALIST_DOMAINS_M5 to cover "
-            f"kernel_specialist; got note={note!r}"
+            f"kernel_switch_specialist; got note={note!r}"
         )

@@ -259,14 +259,14 @@ def test_matches_keywords_case_insensitive():
 def test_load_domain_repos_returns_six_domains():
     repos = load_domain_repos()
     assert set(repos.keys()) == {
-        "kernel_specialist", "framework_specialist", "comm_specialist",
+        "kernel_switch_specialist", "serving_specialist", "comm_specialist",
         "compiler_specialist", "system_specialist", "pr_intel_specialist",
     }
 
 
-def test_framework_specialist_has_expected_repos():
+def test_serving_specialist_has_expected_repos():
     repos = load_domain_repos()
-    fr = repos["framework_specialist"]
+    fr = repos["serving_specialist"]
     assert fr.is_wildcard is False
     assert "sgl-project/sglang" in fr.repos
     assert "vllm" in " ".join(fr.default_keywords)
@@ -287,12 +287,12 @@ def test_load_domain_repos_missing_file_returns_empty(tmp_path):
 def test_load_domain_repos_ignores_unknown_domain(tmp_path):
     bad = tmp_path / "bad.yaml"
     bad.write_text(
-        "framework_specialist:\n  repos: [a/b]\n  default_keywords: [x]\n"
+        "serving_specialist:\n  repos: [a/b]\n  default_keywords: [x]\n"
         "ghost_specialist:\n  repos: [c/d]\n",
         encoding="utf-8",
     )
     out = load_domain_repos(bad)
-    assert "framework_specialist" in out
+    assert "serving_specialist" in out
     assert "ghost_specialist" not in out
 
 
@@ -316,7 +316,7 @@ def test_plane_default_disabled_states(plane_with_disabled_pr):
 
 def test_plane_pr_feed_warm_disabled_returns_empty(plane_with_disabled_pr):
     plane = plane_with_disabled_pr
-    prs, warns = plane.pr_feed_warm("framework_specialist")
+    prs, warns = plane.pr_feed_warm("serving_specialist")
     assert prs == []
     assert "pr_monitor:disabled" in warns
     assert plane.last_warnings == warns
@@ -347,7 +347,7 @@ def test_plane_pr_feed_warm_dispatches_to_repos(monkeypatch):
         "inference_optimizer.orchestrator.pr_monitor.urllib.request.urlopen",
         _stub,
     )
-    prs, warns = plane.pr_feed_warm("framework_specialist")
+    prs, warns = plane.pr_feed_warm("serving_specialist")
     assert len(prs) > 0
     # No warnings on the happy path.
     assert warns == [] or all(not w.startswith("pr_monitor:exception") for w in warns)
@@ -424,7 +424,7 @@ def test_mint_pr_node_calls_cortex_with_correct_canonical():
     )
     out = plane.mint_pr_node(
         repo="ROCm/aiter", number=3067,
-        attrs={"specialist": "kernel_specialist"},
+        attrs={"specialist": "kernel_switch_specialist"},
     )
     assert out["status"] == "ok"
     assert captured["canonical_id"] == "pr.ROCm/aiter#3067"

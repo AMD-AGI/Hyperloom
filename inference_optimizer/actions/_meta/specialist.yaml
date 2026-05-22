@@ -51,7 +51,7 @@ params_schema:
     type: string
     description: |
       Required. One of the six SpecialistDomain keys:
-      ``framework_specialist`` / ``kernel_specialist`` / ``comm_specialist``
+      ``serving_specialist`` / ``kernel_switch_specialist`` / ``comm_specialist``
       / ``compiler_specialist`` / ``system_specialist`` / ``pr_intel_specialist``.
       Picks the KB sub-graph anchor, PR Monitor repo subset, and per-domain
       prompt template (KB_design §3.5 §5).
