@@ -79,6 +79,37 @@ STATE_FILE = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state
 # attempts ≈ 110s. Caller can shrink by passing a stricter budget.
 _DEFAULT_POLL_INTERVAL_S = 6
 _DEFAULT_POLL_TIMEOUT_S = 110
+# MoE cold-start (weight load + aiter JIT) often needs 20-30 min on
+# multi-node RayJobs. Export HYPERLOOM_MN_POLL_TIMEOUT_S=1800 (and
+# HYPERLOOM_MN_HEALTH_WAIT_S=1800 for /health) before optimize / restart.
+_DEFAULT_JIT_POLL_TIMEOUT_S = 1800
+
+
+def _resolve_poll_timeout_s() -> int:
+    """Poll budget for one multi_node CLI invocation (seconds).
+
+    Resolution: ``HYPERLOOM_MN_POLL_TIMEOUT_S`` env > ``_DEFAULT_POLL_TIMEOUT_S``.
+    Large-model / JIT runs should set 1800 (30 min) in the launcher env.
+    """
+    raw = (os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S") or "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            warn(
+                f"invalid HYPERLOOM_MN_POLL_TIMEOUT_S={raw!r}; "
+                f"using {_DEFAULT_POLL_TIMEOUT_S}"
+            )
+    return _DEFAULT_POLL_TIMEOUT_S
+
+
+def _poll_timeout_from_args(args: argparse.Namespace) -> int:
+    """CLI flag wins; else env/default from :func:`_resolve_poll_timeout_s`."""
+    pt = getattr(args, "poll_timeout", None)
+    if pt is not None:
+        return max(1, int(pt))
+    return _resolve_poll_timeout_s()
+
 
 # SaFE may return 404 on GET /workloads/{id} briefly after POST create returns
 # an id (read-after-write lag). Treat as benign for this window only.
@@ -583,7 +614,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
                 is_ok=lambda w: w.get("phase") in _TERMINAL_OK_PHASES,
                 is_fail=lambda w: w.get("phase") in _TERMINAL_FAIL_PHASES,
                 interval_s=args.poll_interval,
-                timeout_s=args.poll_timeout,
+                timeout_s=_poll_timeout_from_args(args),
                 failure_diag=_summarize_workload_failure,
                 quiet_fetch_error_grace_s=_SAFE_GET_WORKLOAD_404_GRACE_S,
                 is_quiet_fetch_error=_is_safe_get_workload_404,
@@ -668,7 +699,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
             is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
-            timeout_s=args.poll_timeout,
+            timeout_s=_poll_timeout_from_args(args),
         )
         info(f"bootstrap done: {result.get('status')}")
         if args.print_logs:
@@ -718,7 +749,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
             is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
-            timeout_s=args.poll_timeout,
+            timeout_s=_poll_timeout_from_args(args),
         )
         if args.print_logs or str(result.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES:
             logs = ray.get_job_logs(sub_id)
@@ -849,7 +880,7 @@ def _exec_kill_submission(
             is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
             is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
-            timeout_s=args.poll_timeout,
+            timeout_s=_poll_timeout_from_args(args),
         )
         if getattr(args, "print_logs", False):
             logs = ray.get_job_logs(kill_sub)
@@ -1305,7 +1336,7 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
         head_ip, entrypoint, label="apply-patch",
-        poll_interval=args.poll_interval, poll_timeout=args.poll_timeout,
+        poll_interval=args.poll_interval, poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
         err("apply-patch: could not parse per-pod JSON from dashboard logs")
@@ -1347,7 +1378,7 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
         head_ip, entrypoint, label="revert-patch",
-        poll_interval=args.poll_interval, poll_timeout=args.poll_timeout,
+        poll_interval=args.poll_interval, poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
         err("revert-patch: could not parse per-pod JSON from dashboard logs")
@@ -1427,7 +1458,7 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
         head_ip, entrypoint, label="apply-tracelens-patch",
-        poll_interval=args.poll_interval, poll_timeout=args.poll_timeout,
+        poll_interval=args.poll_interval, poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
         err("apply-tracelens-patch: could not parse per-pod JSON from dashboard logs")
@@ -1484,7 +1515,7 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
         head_ip, entrypoint, label="kernel-bench",
-        poll_interval=args.poll_interval, poll_timeout=args.poll_timeout,
+        poll_interval=args.poll_interval, poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
         err("kernel-bench: could not parse pod JSON from dashboard logs")
@@ -1635,7 +1666,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                 is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
                 is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
                 interval_s=args.poll_interval,
-                timeout_s=args.poll_timeout,
+                timeout_s=_poll_timeout_from_args(args),
             )
             launch_status = str(result.get("status", "")).upper()
             if args.print_logs or launch_status in _TERMINAL_FAIL_STATUSES:
@@ -1700,7 +1731,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                     is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
                     is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
                     interval_s=args.poll_interval,
-                    timeout_s=args.poll_timeout,
+                    timeout_s=_poll_timeout_from_args(args),
                 )
                 router_status = str(router_result.get("status", "")).upper()
                 if args.print_logs or router_status in _TERMINAL_FAIL_STATUSES:
@@ -1780,7 +1811,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
             is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
-            timeout_s=args.poll_timeout,
+            timeout_s=_poll_timeout_from_args(args),
         )
         if args.print_logs or str(result.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES:
             logs = ray.get_job_logs(sub_id)
@@ -1834,7 +1865,7 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
         pid_file=None,
         print_logs=False,
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
-        poll_timeout=_DEFAULT_POLL_TIMEOUT_S,
+        poll_timeout=_resolve_poll_timeout_s(),
     )
     try:
         cmd_kill_inference(ns)
@@ -1875,10 +1906,17 @@ def cmd_stop_rayjob(args: argparse.Namespace) -> int:
 def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--poll-interval", type=int, default=_DEFAULT_POLL_INTERVAL_S,
                    help=f"seconds between polls (default {_DEFAULT_POLL_INTERVAL_S})")
-    p.add_argument("--poll-timeout", type=int, default=_DEFAULT_POLL_TIMEOUT_S,
-                   help=f"max seconds before this CLI invocation gives up "
-                        f"(default {_DEFAULT_POLL_TIMEOUT_S}). Re-run the same "
-                        f"subcommand to keep polling.")
+    p.add_argument(
+        "--poll-timeout",
+        type=int,
+        default=None,
+        help=(
+            "max seconds before this CLI invocation gives up "
+            f"(default: HYPERLOOM_MN_POLL_TIMEOUT_S env or {_DEFAULT_POLL_TIMEOUT_S}; "
+            f"use 1800 for MoE JIT cold-start). Re-run the same subcommand to "
+            "keep polling."
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
