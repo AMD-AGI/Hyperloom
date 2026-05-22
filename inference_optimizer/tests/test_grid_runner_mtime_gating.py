@@ -133,7 +133,7 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
 
     with patch(
         "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -181,7 +181,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors._grid_runner."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         results = await run_grid(
