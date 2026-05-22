@@ -11,10 +11,10 @@ Why this lives in its own module:
 * Avoids a hard dependency from ``paths`` (called by everything) on
   ``argparse`` and Python version helpers.
 
-Schema v2 (image added)::
+Schema v3 (dependencies added)::
 
     {
-      "schema_version":    2,
+      "schema_version":    3,
       "session_id":        "<UTC_YYYYMMDDTHHMMSSZ>_<uuid8>",
       "claw_session_id":   "<uuid>" or null,   # Primus-Claw session UUID
       "sandbox_user_id":   "<str>"  or null,   # Primus-Claw sandbox user
@@ -32,8 +32,24 @@ Schema v2 (image added)::
                             "value":...},
       "max_minutes":       N,
       "code_revision":     "<git sha or empty>",
+      "dependencies":      {
+        "magpie":     {"path": "...", "commit": "<git sha or empty>",
+                        "remote": "<origin url or empty>"},
+        "inferencex": {"path": "...", "commit": "<git sha or empty>",
+                        "remote": "<origin url or empty>"},
+      },
       "pid":               N
     }
+
+The ``dependencies`` block records the on-disk Magpie / InferenceX
+checkout each session ran against. With install.sh now `git clone`-ing
+a fresh InferenceX per install (rather than scanning a shared `wekafs`
+mirror, see `bugs.md` §C #1 root-cause fix), the commit fields are the
+only reliable provenance for "which upstream did this run actually
+exercise". The block is best-effort: each subfield is empty when the
+path is unset or the directory is not a git checkout. We do **not**
+fail the manifest write on git lookup failures — provenance gaps must
+not block session bring-up.
 
 ``claw_session_id`` / ``sandbox_user_id`` are read from the
 ``CLAW_SESSION_ID`` / ``SANDBOX_USER_ID`` env vars (set by the
@@ -73,8 +89,9 @@ log = logging.getLogger(__name__)
 
 # Schema bumped to 3 in v0.8 M1 to add ``stack_fingerprint`` (rocm / aiter /
 # sglang / vllm versions, mandatory attrs for Cortex KB ``session begin``
-# per KB_design §3.6.5.1 + §3.13 M1). Older v2 readers stay compatible
-# because all new fields are additive.
+# per KB_design §3.6.5.1 + §3.13 M1) plus the ``dependencies`` provenance
+# block (Magpie / InferenceX commit + remote — bugs.md §C #1). Older v2
+# readers stay compatible because all new fields are additive.
 SCHEMA_VERSION = 3
 
 
@@ -158,14 +175,69 @@ def _detect_stack_fingerprint() -> dict[str, str]:
 def _git_revision() -> str:
     """Best-effort short git SHA of the repo containing this package; empty on failure."""
     here = Path(__file__).resolve().parent
+    return _git_revision_at(here)
+
+
+def _git_revision_at(path: Path) -> str:
+    """Best-effort short git SHA at ``path``; empty when not a checkout."""
     try:
         out = subprocess.run(
-            ["git", "-C", str(here), "rev-parse", "--short", "HEAD"],
+            ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, timeout=2,
         )
+        if out.returncode != 0:
+            return ""
         return out.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         return ""
+
+
+def _git_remote_at(path: Path) -> str:
+    """Best-effort ``origin`` remote URL at ``path``; empty on failure."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(path), "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode != 0:
+            return ""
+        return out.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        return ""
+
+
+def _describe_dep(env_var: str) -> dict[str, str]:
+    """Build a `{path, commit, remote}` provenance dict for one dependency
+    pointed at by ``$env_var``. All fields default to empty string when
+    the env var is unset, the directory is missing, or git is unhappy —
+    we never raise out of here.
+    """
+    raw = (os.environ.get(env_var) or "").strip()
+    if not raw:
+        return {"path": "", "commit": "", "remote": ""}
+    path = Path(raw)
+    if not path.is_dir():
+        return {"path": raw, "commit": "", "remote": ""}
+    return {
+        "path":   raw,
+        "commit": _git_revision_at(path),
+        "remote": _git_remote_at(path),
+    }
+
+
+def _build_dependencies() -> dict[str, dict[str, str]]:
+    """Provenance for the third-party trees this session executes against.
+
+    Magpie / InferenceX are cloned per-install by ``install.sh``
+    (bugs.md §C #1 root-cause fix — see ``ensure_inferencex`` there).
+    Recording the commit SHA + remote URL is how downstream debuggers
+    answer "which upstream did this run hit?" once the clones have
+    moved on.
+    """
+    return {
+        "magpie":     _describe_dep("MAGPIE_DIR"),
+        "inferencex": _describe_dep("INFERENCEX_PATH"),
+    }
 
 
 def _detect_image() -> str | None:
@@ -287,6 +359,7 @@ def build_manifest(
         "objective":         _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
         "max_minutes":       int((getattr(args, "max_hours", 0) or 0) * 60) if args is not None else 0,
         "code_revision":     _git_revision(),
+        "dependencies":      _build_dependencies(),
         "pid":               os.getpid(),
         "host":              platform.node() or socket.gethostname() or "",
         "image":             _detect_image(),
