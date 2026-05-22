@@ -386,6 +386,64 @@ async def restart_server_for_round(
         os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
         _LAST_ROUND_TRACE_DIR = ""
 
+    # Multi-node TraceLens SGLang patch fan-out (fail-soft).
+    #
+    # Single-node ``ensure_sglang_patched_for_tracelens`` runs in the
+    # same Python process that imports SGLang; multi-node SGLang lives
+    # in head/worker pods so the controller cannot ``import sglang`` and
+    # the local patcher silently skips. Without these patches SGLang's
+    # torch.profiler emits step boundaries the TraceLens splitter does
+    # NOT recognise (``step[DECODE bs=N]`` instead of vLLM-style
+    # ``execute_*_context_*_generation_*``), so every profile round
+    # ends in ``trace_split_no_steady_state`` and the orchestration
+    # agent stalls. We invoke the multi-node fan-out (idempotent: each
+    # pod sentinel-greps before applying) BEFORE ``cmd_restart_server``
+    # so the restarted SGLang already has the patches in place.
+    #
+    # Fail-soft: if the patch fan-out fails (TraceLens missing, ssh
+    # error, version unsupported, ...) we log a warning and proceed with
+    # the restart anyway. The trace will be unannotated and tracelens
+    # analysis will surface the splitter warning, but every other phase
+    # (baseline / grid / validate_stack / kernel) keeps working — far
+    # better than blocking the entire restart on what is supposed to be
+    # an opt-in profiling enhancement.
+    try:
+        from ._server_patcher import _tracelens_patch_enabled
+    except Exception:  # noqa: BLE001
+        _tracelens_patch_enabled_fn = lambda: True  # noqa: E731 - safe default
+    else:
+        _tracelens_patch_enabled_fn = _tracelens_patch_enabled
+    if _tracelens_patch_enabled_fn() and (
+        os.environ.get("TRACELENS_ROOT", "").strip()
+    ):
+        try:
+            from ...multi_node.cli import cmd_apply_tracelens_patch
+
+            patch_ns = argparse.Namespace(
+                tracelens_root=os.environ.get("TRACELENS_ROOT", "").strip(),
+                sglang_version_pin=os.environ.get(
+                    "HYPERLOOM_SGLANG_VERSION_PIN", "",
+                ).strip() or None,
+                print_logs=False,
+                poll_interval=poll_interval_s,
+                poll_timeout=health_timeout_s,
+            )
+            patch_rc = await asyncio.to_thread(cmd_apply_tracelens_patch, patch_ns)
+            if patch_rc != 0:
+                log.warning(
+                    "restart_server_for_round: TraceLens SGLang patch fan-out "
+                    "returned rc=%d; proceeding with restart (trace will be "
+                    "unannotated; tracelens splitter may report "
+                    "trace_split_no_steady_state until patches succeed)",
+                    patch_rc,
+                )
+        except Exception as exc:  # noqa: BLE001 - fail-soft envelope
+            log.warning(
+                "restart_server_for_round: TraceLens patch fan-out raised "
+                "(%s); proceeding with restart (fail-soft)",
+                exc,
+            )
+
     try:
         # Local import: avoid pulling httpx into the import path of any
         # caller that doesn't actually invoke the helper (single-node).
