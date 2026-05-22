@@ -5574,6 +5574,35 @@ class Coordinator:
             if handler is not None:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
+                # PR-X (1cd9f7d): force batch dispatch for run_optimization.
+                # ``kernel_request_handlers.run_optimization_handler`` upgrades
+                # the request to ``_run_optimization_batch`` only when the
+                # payload carries ``candidates_path`` (so it can fan out to
+                # every reusable kernel concurrently, bounded by
+                # ``_DEFAULT_KERNEL_BATCH_PARALLEL`` / Ray's per-task
+                # ``num_gpus`` reservation). A missing / malformed value
+                # would silently collapse the dispatch back to a
+                # single-kernel run — wasting 7 idle GPUs on a typical
+                # MI300X node and serializing the rest of the candidates
+                # over many LLM turns. Inject it from the
+                # ``last_trace_analyze`` snapshot so batch mode is
+                # deterministic regardless of LLM compliance.
+                # LLM-supplied value still wins.
+                if (
+                    kind == "run_optimization"
+                    and self.shared_state.last_trace_analyze
+                    and not merged_payload.get("candidates_path")
+                ):
+                    cached_candidates_path = self.shared_state.last_trace_analyze.get(
+                        "candidates_path"
+                    )
+                    if cached_candidates_path:
+                        merged_payload["candidates_path"] = cached_candidates_path
+                # Note: main commit 1cd9f7d also auto-injects
+                # ``roofline_json`` from ``last_profile_roofline`` for
+                # ``trace_analyze`` requests; that field does not exist on
+                # this branch (Roofline-v2 caches the trace under
+                # ``last_trace_analyze`` instead), so the inject is omitted.
                 cache_hit_source = None
                 cached_result = self._cached_kernel_request(kind, merged_payload)
                 if cached_result is not None:
