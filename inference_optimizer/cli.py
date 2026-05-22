@@ -1805,6 +1805,16 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     nodes = int(getattr(args, "nodes", 1) or 1)
     if nodes >= 2:
         options["auto_probe_inference_server"] = False
+        # B3 no_levers_found floor — multi-node large-model spends
+        # 35-50 min on sglang cold start + baseline + profile +
+        # turnaround alone before the first explore family runs.
+        # Bumping the elapsed-time floor from 45 to 60 minutes layers
+        # a wall-clock buffer on top of the explore_started gate
+        # (commit 97318ee) so the symptom only fires when both
+        # exploration has started AND a full hour has elapsed
+        # without finding a lever. Single-node default (45.0) stays
+        # untouched.
+        options["progress_no_levers_min_minutes"] = 60.0
     return options
 
 
