@@ -68,7 +68,24 @@ def test_multi_node_disables_inference_probe():
     ``probe_targets``. ``auto_probe_auth_proxy`` is intentionally
     NOT touched (auth-proxy is local even on multi-node)."""
     opts = _build_robustness_options(_ns(nodes=2))
-    assert opts == {"auto_probe_inference_server": False}
+    assert opts == {
+        "auto_probe_inference_server": False,
+        "progress_no_levers_min_minutes": 60.0,
+    }
+
+
+def test_multi_node_bumps_no_levers_floor_to_60_minutes():
+    """``nodes >= 2`` → progress_no_levers_min_minutes=60.0 layers a
+    wall-clock buffer on top of the explore_started gate so multi-
+    node + large-model setups (sglang cold start 10-15 min +
+    baseline + profile + turnaround = 35-50 min before first
+    explore family runs) do not trip the symptom prematurely.
+    Single-node MUST keep the 45.0 default; we assert the key is
+    absent there so runtime CLI falls back to its config default."""
+    multi = _build_robustness_options(_ns(nodes=2))
+    assert multi["progress_no_levers_min_minutes"] == 60.0
+    single = _build_robustness_options(_ns(nodes=1))
+    assert "progress_no_levers_min_minutes" not in single
 
 
 def test_multi_node_preserves_operator_flags():
@@ -81,28 +98,31 @@ def test_multi_node_preserves_operator_flags():
     assert opts == {
         "robustness_server_url": "http://robustness.svc:8080",
         "auto_probe_inference_server": False,
+        "progress_no_levers_min_minutes": 60.0,
     }
 
 
 def test_missing_nodes_attr_treated_as_single_node():
     """Legacy entry points that build a Namespace without ``nodes`` at
     all must not crash and must default to single-node semantics
-    (no auto-disable)."""
+    (no auto-disable, no no_levers floor bump)."""
     ns = argparse.Namespace(
         robustness_server_url=None,
         robustness_llm_rca=None,
     )
     opts = _build_robustness_options(ns)
     assert "auto_probe_inference_server" not in opts
+    assert "progress_no_levers_min_minutes" not in opts
 
 
 def test_nodes_zero_or_none_treated_as_single_node():
     """``nodes=0`` and ``nodes=None`` are both nonsensical inputs in
     practice but must safely degrade to single-node semantics
-    rather than triggering the auto-disable path."""
-    assert "auto_probe_inference_server" not in _build_robustness_options(
-        _ns(nodes=0)
-    )
-    assert "auto_probe_inference_server" not in _build_robustness_options(
-        _ns(nodes=None)
-    )
+    rather than triggering the auto-disable path or the
+    no_levers floor bump."""
+    for opts in (
+        _build_robustness_options(_ns(nodes=0)),
+        _build_robustness_options(_ns(nodes=None)),
+    ):
+        assert "auto_probe_inference_server" not in opts
+        assert "progress_no_levers_min_minutes" not in opts
