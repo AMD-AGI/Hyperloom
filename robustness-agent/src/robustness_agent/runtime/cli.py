@@ -173,14 +173,6 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         "ROBUSTNESS_AGENT_SESSION_DIR", str(config.session_dir),
     )
 
-    # L4 — advertise our session_dir to co-deployed Critic processes so
-    # their ``prepare-review`` can find ``agents/robustness/findings/
-    # <session>.jsonl`` without explicit configuration. Setdefault keeps
-    # an operator-supplied override intact.
-    os.environ.setdefault(
-        "ROBUSTNESS_AGENT_SESSION_DIR", str(config.session_dir),
-    )
-
     tick_index_raw = context.get("tick_index", 0)
     tick_index = int(tick_index_raw) if isinstance(tick_index_raw, (int, float)) else 0
     now_unix_raw = context.get("now_unix")
