@@ -10,7 +10,10 @@
 #      pyproject `[test]` extra)
 #   2. Magpie (benchmark engine) into $HYPERLOOM_RUNTIME_DIR/Magpie
 #      (= $USER_DATA_PATH/runtime/Magpie by default)
-#   3. InferenceX checkout detection (sets INFERENCEX_PATH for runtime)
+#   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
+#       (bugs.md §C #1 root-cause fix; fail-loud)
+#   3. InferenceX checkout: clone latest from upstream (no SHA pin yet),
+#      sets INFERENCEX_PATH for runtime
 #   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
 #      bring-up, Node/npm, TraceLens, GEAK, OOB and the auth-proxy. kernel-agent
 #      itself is the canonical owner of those — we just chain to it
@@ -37,6 +40,8 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
+INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
+INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${HYPERLOOM_RUNTIME_DIR}/InferenceX}"
 
 DRY_RUN=0
 CHECK_ONLY=0
@@ -61,8 +66,11 @@ Options:
 
 Env overrides:
   REPO_ROOT, KERNEL_AGENT_ROOT, MAGPIE_REPO, MAGPIE_DIR,
-  INFERENCEX_PATH, PYTHON, TRACELENS_ROOT, USER_DATA_PATH,
-  HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT
+  INFERENCEX_REPO, INFERENCEX_DEFAULT_DIR, INFERENCEX_PATH,
+  PYTHON, TRACELENS_ROOT, USER_DATA_PATH,
+  HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT,
+  PATCH_MAGPIE (=1; set 0 only if upstream Magpie atomic-write
+  PR is already merged into your clone)
 EOF
 }
 
@@ -203,6 +211,8 @@ log "HYPERLOOM_ROOT=${HYPERLOOM_ROOT}"
 log "KERNEL_AGENT_ROOT=${KERNEL_AGENT_ROOT}"
 log "KERNEL_AGENT_ENV=${KERNEL_AGENT_ENV}"
 log "MAGPIE_DIR=${MAGPIE_DIR}"
+log "INFERENCEX_REPO=${INFERENCEX_REPO}"
+log "INFERENCEX_DEFAULT_DIR=${INFERENCEX_DEFAULT_DIR}"
 export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
 export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
 # Pre-create the writable runtime root so ensure_magpie / chain_kernel_agent
@@ -283,29 +293,98 @@ ensure_magpie() {
   fi
 }
 
-# --- 3. InferenceX detection ---
-ensure_inferencex() {
-  if [ -n "${INFERENCEX_PATH:-}" ] && [ -d "$INFERENCEX_PATH" ]; then
-    log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env)"
+# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts ---
+# Hyperloom bugs.md §C #1 (vllm_mi300x.sh / sglang_mi300x.sh sourced by a
+# leaked bash while a new Magpie subprocess is mid-`shutil.copy2` →
+# `syntax error near unexpected token 'fi'`). Magpie is invoked as a
+# subprocess, so monkey-patching from the Coordinator process does not
+# reach it; we patch the cloned source in place at install time. The
+# patcher itself is idempotent + flock-serialised + atomic-rename
+# (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
+#
+# Escalation: this is a known root-cause fix. A `False` return means
+# Magpie was refactored upstream and our pattern no longer matches; we
+# `die` so the operator notices instead of silently shipping a broken
+# install. Override the gate via PATCH_MAGPIE=0 for the (rare) case
+# where you've already landed an upstream PR locally.
+ensure_magpie_atomic_scripts_patch() {
+  if [ "${PATCH_MAGPIE:-1}" -eq 0 ]; then
+    log "PATCH_MAGPIE=0 — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
     return 0
   fi
-  for candidate in \
-      "$MAGPIE_DIR/InferenceX" \
-      "${HYPERLOOM_RUNTIME_DIR}/InferenceX" \
-      "/wekafs/hyperloom/InferenceX" \
-      "/opt/hyperloom/InferenceX" \
-      "/wekafs/fully-local/inference_optimization/InferenceX"
-  do
-    if [ -d "$candidate" ]; then
-      INFERENCEX_PATH="$candidate"
-      export INFERENCEX_PATH
-      log "INFERENCEX_PATH = $INFERENCEX_PATH"
-      return 0
-    fi
-  done
-  warn "InferenceX not found. GSM8K eval will fail without it. Set"
-  warn "INFERENCEX_PATH or clone https://github.com/SemiAnalysisAI/InferenceX"
-  warn "into \$MAGPIE_DIR/InferenceX."
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would apply Hyperloom #C1 atomic-write patch to ${MAGPIE_DIR}/Magpie/modes/benchmark/benchmarker.py"
+    return 0
+  fi
+  log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
+  MAGPIE_DIR="$MAGPIE_DIR" "$PYTHON" - <<'PY' || die "Magpie atomic-write patch failed; see warnings above. bugs.md §C #1 is NOT mitigated. Set PATCH_MAGPIE=0 to skip if you know what you are doing."
+import os, sys
+from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
+    ensure_magpie_atomic_scripts_patch,
+)
+ok = ensure_magpie_atomic_scripts_patch(os.environ["MAGPIE_DIR"])
+sys.exit(0 if ok else 1)
+PY
+  log "Magpie #C1 patch OK"
+}
+
+# --- 3. InferenceX checkout: fresh clone from upstream ---
+#
+# Previously this function scanned a list of shared-filesystem candidates
+# (`/wekafs/hyperloom/InferenceX`, `/wekafs/fully-local/.../InferenceX`,
+# etc.) and pointed every install at whichever it found first. That
+# multi-install / shared-checkout layout is the upstream source of the
+# concurrent-write races in bugs.md §C #1 — every fresh Magpie
+# subprocess `shutil.copy2`'d its scripts on top of the same shared
+# files, while bash interpreters from neighbouring installs were
+# `source`-ing them. Cloning a per-install copy here eliminates the
+# cross-install fan-in (Magpie's in-place atomic-write patch then
+# closes the intra-install race window — both fixes are needed; this
+# one alone is not sufficient).
+#
+# Policy:
+#   * INFERENCEX_PATH set and exists -> preserve verbatim. This is the
+#     dev / CI override (caller is explicitly opting out of fresh
+#     clones, e.g. iterating on a local edit).
+#   * Otherwise -> always `git clone --depth 1` from INFERENCEX_REPO
+#     into INFERENCEX_DEFAULT_DIR. If a clone already exists there from
+#     a previous install we leave it as-is (idempotent re-runs) — the
+#     per-install isolation guarantee is already met, and re-cloning
+#     would just churn benchmark scripts that the Magpie patch already
+#     keeps consistent on disk.
+#   * No SHA pin yet (deferred). We record whatever commit `git clone`
+#     resolves into the session manifest (see manifest.py) so failed
+#     runs can be reproduced.
+ensure_inferencex() {
+  if [ -n "${INFERENCEX_PATH:-}" ] && [ -d "$INFERENCEX_PATH" ]; then
+    log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env; skipping fresh clone)"
+    export INFERENCEX_PATH
+    return 0
+  fi
+  INFERENCEX_PATH="$INFERENCEX_DEFAULT_DIR"
+  if [ -d "$INFERENCEX_PATH/.git" ] || [ -d "$INFERENCEX_PATH/benchmarks" ]; then
+    log "InferenceX already cloned at ${INFERENCEX_PATH}; preserving existing checkout"
+    export INFERENCEX_PATH
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "InferenceX not present at ${INFERENCEX_PATH} (check-only mode, skipping clone)"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would: git clone --depth 1 ${INFERENCEX_REPO} ${INFERENCEX_PATH}"
+    export INFERENCEX_PATH
+    return 0
+  fi
+  log "cloning fresh InferenceX from ${INFERENCEX_REPO} -> ${INFERENCEX_PATH}"
+  mkdir -p "$(dirname "$INFERENCEX_PATH")"
+  if ! git clone --depth 1 "$INFERENCEX_REPO" "$INFERENCEX_PATH"; then
+    warn "InferenceX clone failed. GSM8K eval will fail without it. Set"
+    warn "INFERENCEX_PATH to a pre-cloned tree to skip this step."
+    return 0
+  fi
+  export INFERENCEX_PATH
+  log "InferenceX cloned at ${INFERENCEX_PATH}"
 }
 
 # --- 4. Chain to kernel-agent ---
@@ -336,6 +415,7 @@ chain_kernel_agent() {
 
 ensure_inference_optimizer
 ensure_magpie
+ensure_magpie_atomic_scripts_patch
 ensure_inferencex
 chain_kernel_agent
 
