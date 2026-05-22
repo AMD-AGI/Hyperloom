@@ -24,7 +24,6 @@ constructs one detector instance per reactor and calls
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,8 +32,6 @@ from ..sources.base import SourceData
 from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
-
-log = logging.getLogger(__name__)
 
 
 # Default inference-server / benchmark owners whose presence proves the
