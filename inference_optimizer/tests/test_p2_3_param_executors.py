@@ -219,7 +219,7 @@ def test_resolve_magpie_python_skips_interpreter_without_magpie(monkeypatch):
     )
     monkeypatch.setattr(Path, "exists", fake_exists)
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         fake_run,
     )
 
@@ -238,7 +238,7 @@ def test_run_magpie_prepends_magpie_dir_to_pythonpath(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         fake_run,
     )
 
@@ -281,7 +281,7 @@ async def test_run_grid_writes_per_variant_yaml_and_parses_report(tmp_path):
         GridVariant("b", "--attention-backend triton"),
         GridVariant("c", "--enable-fused-moe"),
     ]
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         results = await run_grid(
             base_yaml_path=base, base_extra_args="--mem-fraction-static 0.85",
@@ -314,7 +314,7 @@ async def test_run_grid_keeps_valid_measurement_with_report_failure_and_nonzero_
         )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         results = await run_grid(
@@ -358,7 +358,7 @@ async def test_run_grid_keeps_going_on_subprocess_failure(tmp_path):
         )
 
     grid = [GridVariant("a"), GridVariant("b")]
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         results = await run_grid(
             base_yaml_path=base, base_extra_args="",
@@ -391,7 +391,7 @@ async def test_run_grid_writes_variant_extra_envs(tmp_path):
             extra_envs={"SGLANG_OPT_USE_MULTI_STREAM_OVERLAP": "1"},
         ),
     ]
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         results = await run_grid(
             base_yaml_path=base, base_extra_args="",
@@ -421,7 +421,7 @@ async def test_run_grid_writes_vllm_extra_args_for_vllm_configs(tmp_path):
         )
 
     grid = [GridVariant("vllm_block_size_256", "--block-size 256")]
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         results = await run_grid(
             base_yaml_path=base, base_extra_args="--kv-cache-dtype fp8",
@@ -555,7 +555,7 @@ async def test_backends_executor_picks_best_and_winners(sub_agent_runner, tmp_pa
         idempotency_key="be-1",
     )
     sub.register_executor("backends", BackendsExecutor())
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -595,7 +595,7 @@ async def test_params_executor_with_default_grid(sub_agent_runner, tmp_path):
         idempotency_key="pa-1",
     )
     sub.register_executor("params", ParamsExecutor())
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -677,7 +677,7 @@ async def test_params_executor_uses_vllm_grid_for_vllm_config(sub_agent_runner, 
         idempotency_key="pa-vllm-1",
     )
     sub.register_executor("params", ParamsExecutor())
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         res = await sub.run_task(task)
 
@@ -724,7 +724,7 @@ async def test_sweep_executor_returns_pareto_front(sub_agent_runner, tmp_path):
         idempotency_key="sw-1",
     )
     sub.register_executor("sweep", SweepExecutor())
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -805,7 +805,7 @@ async def test_params_variants_inherit_process_env_workload(
         idempotency_key="pa-workload-1",
     )
     sub.register_executor("params", ParamsExecutor())
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         res = await sub.run_task(task)
 
@@ -855,7 +855,7 @@ async def test_backends_variants_inherit_process_env_workload(
         idempotency_key="be-workload-1",
     )
     sub.register_executor("backends", BackendsExecutor())
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         res = await sub.run_task(task)
 
@@ -904,7 +904,7 @@ async def test_sweep_per_variant_envs_still_win_over_baseline_workload(
         idempotency_key="sw-workload-1",
     )
     sub.register_executor("sweep", SweepExecutor())
-    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+    with patch("inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
                 side_effect=_fake_run):
         res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -965,7 +965,7 @@ def test_baseline_executor_surfaces_materialized_config_path(tmp_path):
 
             sub.register_executor("baseline", BaselineExecutor(cwd=tmp_path))
             with patch(
-                "inference_optimizer.orchestrator.action_executors.baseline.subprocess.run",
+                "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
                 side_effect=_fake_run,
             ):
                 return await sub.run_task(task)
