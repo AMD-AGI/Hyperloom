@@ -2025,77 +2025,6 @@ class SharedState:
             "workspace": result.get("workspace", ""),
         }
 
-    def push_params_winner(
-        self,
-        *,
-        action: str,
-        variant_name: str,
-        tput: float,
-        gain_pct: float,
-        extra_sglang_args: str | None = None,
-        extra_envs: dict[str, Any] | None = None,
-        max_history: int = 10,
-    ) -> None:
-        """Append one round's winner to the rolling history buffer.
-
-        ``extra_sglang_args`` + ``extra_envs`` (when provided) are folded
-        into the row as ``fingerprint`` so the cross-round
-        :meth:`consistent_winner` detector and the IR-26 idea generator
-        see content identity, not just the display name. Old callers
-        passing only ``variant_name`` still work (fingerprint = empty).
-        """
-        from .action_executors._grid_runner import variant_fingerprint
-        fp = (
-            variant_fingerprint(extra_sglang_args, extra_envs)
-            if (extra_sglang_args is not None or extra_envs is not None)
-            else ""
-        )
-        self.params_winner_history.append({
-            "action": action,
-            "variant_name": variant_name,
-            "tput": float(tput) if tput is not None else 0.0,
-            "gain_pct": float(gain_pct) if gain_pct is not None else 0.0,
-            "fingerprint": fp,
-            "ts": _now_iso(),
-        })
-        if len(self.params_winner_history) > max_history:
-            self.params_winner_history = self.params_winner_history[-max_history:]
-
-    def consistent_winner(self, *, lookback: int = 3,
-                          min_appearances: int = 2,
-                          min_avg_gain_pct: float = 0.3) -> dict[str, Any] | None:
-        """Detect a variant_name that consistently wins across recent rounds.
-
-        Returns the winning variant's most-recent record (so callers can
-        promote it) or ``None`` if no variant qualifies.
-        """
-        if len(self.params_winner_history) < min_appearances:
-            return None
-        recent = self.params_winner_history[-lookback:]
-        from collections import Counter
-        counts = Counter(w["variant_name"] for w in recent if w.get("variant_name"))
-        for name, n in counts.most_common():
-            if n < min_appearances:
-                continue
-            picks = [w for w in recent if w.get("variant_name") == name]
-            avg_gain = sum(w["gain_pct"] for w in picks) / len(picks)
-            if avg_gain >= min_avg_gain_pct:
-                # Return the most-recent record for this winner so caller
-                # can lift its tput / extra_sglang_args into current_best.
-                return picks[-1]
-        return None
-
-    def apply_params_search_update(self, update: dict[str, Any]) -> None:
-        """Merge a v0.6 params DFS update into persistent state.
-
-        Kept for v0.6 resume parity (Inv-10.1); fresh v0.8 sessions
-        write the merged :attr:`explore_search` ledger instead via
-        :meth:`apply_explore_search_update`.
-        """
-        if not isinstance(update, dict):
-            return
-        self.params_search = dict(update)
-
     # ------------------------------------------------------------------
     # v0.8 M5 — specialist round bookkeeping (KB_design §3.5 / §3.10)
     # ------------------------------------------------------------------
@@ -2491,74 +2420,6 @@ class SharedState:
         search["winners_history"] = wh
         self.explore_search = search
 
-    def apply_backends_search_update(self, update: dict[str, Any]) -> None:
-        """Merge a v0.6 backends DFS update into persistent state.
-
-        Kept for v0.6 resume parity (Inv-10.1); fresh v0.8 sessions
-        write the merged :attr:`explore_search` ledger instead.
-        Preserves any ``accepted`` already promoted.
-        """
-        if not isinstance(update, dict):
-            return
-        # Preserve any ``accepted`` we already promoted: the executor's
-        # update only touches tested/rejected/last_round; overwriting
-        # ``accepted`` from a fresh round would lose history.
-        prior_accepted = list(
-            (self.backends_search or {}).get("accepted") or []
-        )
-        merged = dict(update)
-        if "accepted" not in update or not update.get("accepted"):
-            merged["accepted"] = prior_accepted
-        self.backends_search = merged
-
-    def record_backends_accepted(self, variant: dict[str, Any]) -> None:
-        """Append one promoted variant to ``backends_search.accepted``.
-
-        Called by Coordinator after a backends winner is lifted to
-        ``current_best``. Dedupes by ``fingerprint`` (computed on the fly
-        if absent) so repeated promotes of the same content don't bloat
-        the list. Also removes a matching entry from ``rejected`` so a
-        previously-rejected variant that later won doesn't appear in
-        both buckets.
-        """
-        if not isinstance(variant, dict) or not variant:
-            return
-        from .action_executors._grid_runner import variant_fingerprint
-        args = str(
-            variant.get("candidate_extra_sglang_args")
-            or variant.get("extra_sglang_args") or ""
-        )
-        envs = dict(variant.get("extra_envs") or {})
-        fp = str(variant.get("fingerprint") or variant_fingerprint(args, envs))
-        entry = {
-            "name": str(variant.get("name") or ""),
-            "extra_sglang_args": args,
-            "extra_envs": envs,
-            "note": str(variant.get("note") or ""),
-            "fingerprint": fp,
-            "tput": variant.get("output_throughput") or variant.get("tput"),
-            "gain_pct": variant.get("gain_pct"),
-        }
-        search = dict(self.backends_search or {})
-        search.setdefault("schema_version", 1)
-        accepted = list(search.get("accepted") or [])
-        accepted = [
-            v for v in accepted
-            if not (isinstance(v, dict) and v.get("fingerprint") == fp)
-        ]
-        accepted.append(entry)
-        search["accepted"] = accepted
-        rejected = [
-            v for v in (search.get("rejected") or [])
-            if not (isinstance(v, dict) and v.get("fingerprint") == fp)
-        ]
-        search["rejected"] = rejected
-        name_index = dict(search.get("name_index") or {})
-        if entry["name"]:
-            name_index[entry["name"]] = fp
-        search["name_index"] = name_index
-        self.backends_search = search
-
     # ------------------------------------------------------------------
     # T1/T2 — search-space expansion bookkeeping
     # ------------------------------------------------------------------
@@ -2654,30 +2515,6 @@ class SharedState:
             self.backend_winners_history = (
                 self.backend_winners_history[-max_history:]
             )
-
-    def mark_synergy_attempted(self, combo_names: list[str]) -> None:
-        """Record one synergy combo as already tested.
-
-        ``combo_names`` is a list of GridVariant.name members ordered by
-        the synergy group; the canonical key is ``"+".join(sorted(names))``
-        so the same set isn't double-counted regardless of input order.
-        """
-        if not combo_names:
-            return
-        key = "+".join(sorted(str(n) for n in combo_names if n))
-        if not key:
-            return
-        if key in self.synergy_attempted:
-            return
-        self.synergy_attempted.append(key)
-        if len(self.synergy_attempted) > 100:
-            self.synergy_attempted = self.synergy_attempted[-100:]
-
-    def is_synergy_attempted(self, combo_names: list[str]) -> bool:
-        if not combo_names:
-            return False
-        key = "+".join(sorted(str(n) for n in combo_names if n))
-        return bool(key) and key in self.synergy_attempted
 
     # ------------------------------------------------------------------
     # v0.8 §3.9 — scoring helpers removed (KB_design §3.9 Inv-9.1)
@@ -3311,9 +3148,10 @@ class SharedState:
         ``params_search.accepted`` is built from ``_variant_to_dict()`` and
         does NOT persist ``gain_pct``; the matching ``tested[fingerprint]``
         entry does. ``backends_search.accepted`` already stamps gain on
-        promote (see :meth:`record_backends_accepted`), so this is a no-op
-        there. Pulling the value across at render time keeps the renderer
-        symmetric and avoids a second writer for accepted entries.
+        promote (legacy v0.6 ledger written via resume migration only), so
+        this is a no-op there. Pulling the value across at render time
+        keeps the renderer symmetric and avoids a second writer for
+        accepted entries.
         """
         if (
             entry.get("gain_pct") is not None
