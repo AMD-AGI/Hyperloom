@@ -1,0 +1,127 @@
+name: Manual poke issues (ops tool)
+
+# Manually-triggered ops tool. Lets a SaFE maintainer push selected
+# issues into the auto-stale / auto-close pipeline as
+# github-actions[bot]. Useful for:
+#   - Backfilling history that predates the auto-stale workflow
+#   - Forcing a "responding soon or closing" nudge on a specific issue
+#   - Closing an issue immediately with the standard farewell comment
+#
+# Trigger from: Actions tab -> "Manual poke issues (ops tool)" -> Run workflow
+#
+# Modes:
+#   tag-only        add 'awaiting-author-response'
+#                   (lets stale-issues handle the standard 48h+24h flow)
+#   tag-and-warn    add 'awaiting-author-response' + 'stale' + warning comment
+#                   (skips the 48h warm-up; stale-issues will close in ~24h)
+#   close-now       add labels + close-farewell comment + close immediately
+#
+# Comment text intentionally matches what stale-issues.yml posts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'What to do for each issue'
+        required: true
+        type: choice
+        default: 'tag-only'
+        options:
+          - 'tag-only'
+          - 'tag-and-warn'
+          - 'close-now'
+      issue_numbers:
+        description: 'Comma-separated issue numbers (e.g. 255,231,219)'
+        required: true
+        type: string
+
+permissions:
+  issues: write
+
+jobs:
+  poke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poke issues
+        uses: actions/github-script@v7
+        env:
+          MODE: ${{ inputs.mode }}
+          ISSUE_NUMBERS: ${{ inputs.issue_numbers }}
+        with:
+          script: |
+            const mode = process.env.MODE;
+            const nums = process.env.ISSUE_NUMBERS
+              .split(',')
+              .map(s => parseInt(s.trim(), 10))
+              .filter(n => !isNaN(n) && n > 0);
+
+            if (nums.length === 0) {
+              core.setFailed('No valid issue numbers provided');
+              return;
+            }
+            core.info(`Mode: ${mode}`);
+            core.info(`Targets: ${nums.join(', ')}`);
+
+            const warnMsg =
+              `This issue has been quiet for about **2 days** since our last reply.\n\n` +
+              `It will be closed automatically in **1 day** if there is no further activity. ` +
+              `If you are still working on this, please leave a comment with any update — that will reset the timer.`;
+
+            const closeMsg =
+              `This issue has been automatically closed because there was no response for about **3 days** after our last comment.\n\n` +
+              `If you would like to continue the discussion, please feel free to reopen this issue or leave a new comment — we will be happy to take another look.`;
+
+            const { owner, repo } = context.repo;
+            const errors = [];
+
+            for (const issue_number of nums) {
+              core.info(`--- #${issue_number} ---`);
+              try {
+                if (mode === 'tag-only') {
+                  await github.rest.issues.addLabels({
+                    owner, repo, issue_number,
+                    labels: ['awaiting-author-response'],
+                  });
+                  core.info(`  + awaiting-author-response`);
+                } else if (mode === 'tag-and-warn') {
+                  await github.rest.issues.addLabels({
+                    owner, repo, issue_number,
+                    labels: ['awaiting-author-response', 'stale'],
+                  });
+                  await github.rest.issues.createComment({
+                    owner, repo, issue_number, body: warnMsg,
+                  });
+                  core.info(`  + awaiting-author-response, stale`);
+                  core.info(`  + warning comment`);
+                } else if (mode === 'close-now') {
+                  await github.rest.issues.addLabels({
+                    owner, repo, issue_number,
+                    labels: ['awaiting-author-response', 'stale'],
+                  });
+                  await github.rest.issues.createComment({
+                    owner, repo, issue_number, body: closeMsg,
+                  });
+                  await github.rest.issues.update({
+                    owner, repo, issue_number, state: 'closed',
+                    state_reason: 'not_planned',
+                  });
+                  core.info(`  + awaiting-author-response, stale`);
+                  core.info(`  + closing comment`);
+                  core.info(`  -> closed`);
+                } else {
+                  throw new Error(`Unknown mode: ${mode}`);
+                }
+              } catch (e) {
+                core.error(`#${issue_number}: ${e.message}`);
+                errors.push({ num: issue_number, msg: e.message });
+              }
+            }
+
+            if (errors.length > 0) {
+              core.setFailed(
+                `${errors.length} issue(s) failed: ` +
+                errors.map(e => `#${e.num} (${e.msg})`).join(', ')
+              );
+            } else {
+              core.info(`Done. Processed ${nums.length} issue(s).`);
+            }
