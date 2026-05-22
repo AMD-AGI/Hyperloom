@@ -272,10 +272,9 @@ def test_no_levers_silent_when_keep_pending_integrate():
 def test_no_levers_silent_before_explore_started():
     """Cold-start regression guard (PR #239 followup 97318ee):
     baseline + profile + sglang launch + turnaround can run past the
-    45 min / 8 tick floors before any explore family
-    (backends / params / sweep / validate_stack) is actually attempted.
-    In that window stack_size=0 and validated_gain=0 are both
-    by-construction (the explore phase has not started), so
+    45 min / 8 tick floors before any explore family is actually
+    attempted. In that window stack_size=0 and validated_gain=0 are
+    both by-construction (the explore phase has not started), so
     ``no_levers_found`` must stay silent. Repro: sandbox
     primus-claw-20260522034541-xkk9f turn=7 fired HIGH at elapsed
     47.6min / tick=8 — 12 minutes BEFORE backends phase 1 actually
