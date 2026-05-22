@@ -64,6 +64,16 @@ is the merged `explore` action):
     when no specialist has produced a proposal_set yet, stamp the
     cold-start variants with that value and the executor uses its
     built-in grid.
+
+    Every `delegate{action_name='explore', params={grid: ...}}`
+    you emit is now reviewed per-variant by the Critic before any
+    benchmark runs (the Critic consults KB priors for each variant
+    via `judge_bundle.kb_priors_by_proposal`). Variants the Critic
+    rejects are dropped silently and never reach the executor;
+    `critic_filtered_count` in the resulting `explore_done` row
+    tells you how many were dropped. Do NOT pre-filter the grid
+    yourself — emit every variant a specialist surfaced and let
+    the Critic + KB do the rejection.
   - **KERNEL**: `profile` (single shot at phase entry), `pmc_roofline`,
     the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`. Goal:
     integrate KEEP'd kernel patches; the Coordinator exits to SWEEP
