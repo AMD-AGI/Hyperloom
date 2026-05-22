@@ -78,26 +78,33 @@ If the prompt already contains the first rows, **do not** claim the
 and `multi_node` subcommands. Only add exports the prompt did not cover
 (chiefly `HYPERLOOM_MN_*` for 30 min polls on large MoE RayJobs).
 
-**Env file:** same as parent skill — copy
-`inference_optimizer/scripts/setup_env.sh.example` to
-`$USER_DATA_PATH/optimizer_runs/setup_env.sh`, set `MODEL_PATH` / workload
-from the prompt, and add multi-node exports below (e.g. `HYPERLOOM_MN_*`,
-`INFERENCE_OPTIMIZER_RAYJOB_IMAGE`) before `install.sh` / `optimize`.
-
-Example `optimize` tail (values from prompt):
+Example `optimize` tail (**example only** — map each flag from the user
+Environment block / `setup_env.sh`; do not treat literals below as defaults):
 
 ```bash
+# Multi-node poll budget (large MoE RayJobs; see "MoE JIT poll budget" below)
 export HYPERLOOM_MN_POLL_TIMEOUT_S=1800
 export HYPERLOOM_MN_HEALTH_WAIT_S=1800
-export KERNEL_OPT_BACKEND_ORDER=claude   # or prompt's KERNEL_OPT_BACKENDS
-export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0
+# Optional kernel exports — only when the prompt specifies them
+export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-claude}"
+export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-0}"
 
 setsid nohup inference_optimizer --verbose optimize \
-  --model "$MODEL_PATH" --framework sglang --gpu-type mi300x \
-  --nodes 2 --rayjob-image "$INFERENCE_OPTIMIZER_RAYJOB_IMAGE" \
-  --tp 16 --ep 1 --conc 64 --isl 1024 --osl 1024 --precision FP8 \
-  --target-gain 30 --max-hours 24 --kernel-claude \
-  --claude-model claude-opus-4-7 \
+  --model "$MODEL_PATH" \
+  --framework "${FRAMEWORK:-sglang}" \
+  --gpu-type "${GPU_TYPE:?set from prompt}" \
+  --nodes "${NODES:?set from prompt Nodes=N}" \
+  --rayjob-image "${INFERENCE_OPTIMIZER_RAYJOB_IMAGE:?set from prompt RayJob image}" \
+  --tp "${TP:?set from prompt TP=N}" \
+  ${EP:+--ep "$EP"} \
+  --conc "${CONC:?set from prompt}" \
+  --isl "${ISL:?set from prompt}" \
+  --osl "${OSL:?set from prompt}" \
+  --precision "${PRECISION:?set from prompt}" \
+  --target-gain "${TARGET_GAIN:?set from prompt}" \
+  --max-hours "${MAX_HOURS:?set from prompt}" \
+  ${KERNEL_CLAUDE:+--kernel-claude} \
+  ${CLAUDE_MODEL:+--claude-model "$CLAUDE_MODEL"} \
   > "$RUN_LOG" 2>&1 < /dev/null &
 ```
 
@@ -108,7 +115,6 @@ Only `create-rayjob` sets the SaFE workload name (`displayName` /
 
 * Length **1–36**, lowercase letters, digits, hyphens only (`[a-z0-9-]`).
 * Must **start with a letter**, **end with alphanumeric**.
-* **No underscores**, no long dotted timestamps — SaFE returns `Primus.00002`.
 
 Good: `hl-run-$(date +%m%d%H%M)`. Bad: `hyperloom-sglang-2node-20260522_022937` (too long / underscores).
 
@@ -136,15 +142,6 @@ export HYPERLOOM_MN_HEALTH_WAIT_S=1800
 On timeout, re-run the **same** subcommand (no `while sleep` wrapper).
 `restart-server` checkpoints `last_restart_submission_id` so retries can
 resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
-
-### Cross-node asset mirror (optional)
-
-If `$TRACELENS_ROOT` / `$OOB_SRC` / `$GEAK_REPO` / `$MAGPIE_DIR` /
-`$INFERENCEX_PATH` differ per node, `rsync -a` into a writable tree under
-`$USER_DATA_PATH` and override env vars **before** sandbox `install.sh`.
-Production WekaFS single-mount sandboxes usually need only
-`USER_DATA_PATH=/workspace/hyperloom` — `install.sh` mirrors read-only
-sources into `$USER_DATA_PATH/runtime/source-mirrors/` automatically.
 
 ## Call Order
 
