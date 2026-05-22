@@ -130,6 +130,52 @@ def effective_closing_grace_sec(
     return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
+def _summarize_failed_variants(
+    all_results: Any, *, max_entries: int = 10,
+) -> list[dict[str, Any]]:
+    """Project the ``status=='failed'`` rows of a grid_runner result list.
+
+    Returns a compact ``[{name, error_class, error_excerpt,
+    extra_sglang_args}, ...]`` so the audit-trail extras can carry
+    per-variant failure context without ballooning the prompt context.
+
+    Why this exists: backends / params executors run a multi-variant
+    grid via ``run_grid`` and reduce it to one ``record_action_attempt``
+    entry (1 task = 1 attempt, by Coordinator design). Before this
+    helper the only place a failed variant landed was the
+    ``all_results`` blob inside the raw delegated_result and the
+    ``rejected`` list inside ``backends_search`` / ``params_search``;
+    neither surface bubbles up into ``last_<action>`` /
+    ``<action>_attempts``. The LLM critic prompt assembled from
+    SharedState therefore could not see prior silent aborts and might
+    keep re-proposing the same variant on the next round.
+
+    Truncation: at most ``max_entries`` failed rows so a runaway grid
+    can't bloat attempts_history. ``error_excerpt`` is capped at
+    400 chars (smaller than the per-entry 2000-char cap used by
+    ``_write_variant_abort_marker`` because this lives inside a
+    promptable audit trail, not on-disk forensics).
+    """
+    if not isinstance(all_results, list):
+        return []
+    failed: list[dict[str, Any]] = []
+    for row in all_results:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "") != "failed":
+            continue
+        err = str(row.get("error") or "")
+        failed.append({
+            "name": str(row.get("name") or ""),
+            "error_class": str(row.get("error_class") or "") or None,
+            "error_excerpt": err[:400] if err else None,
+            "extra_sglang_args": str(row.get("extra_sglang_args") or ""),
+        })
+        if len(failed) >= max_entries:
+            break
+    return failed
+
+
 def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
     """Project ``params`` to the keys that determine baseline behavior.
 
@@ -3376,6 +3422,14 @@ class Coordinator:
                 "gain_vs_cb": (
                     float(gain_vs_cb)
                     if isinstance(gain_vs_cb, (int, float)) else None
+                ),
+                # PR-2: surface per-variant failures into the audit
+                # extras so the LLM critic prompt sees which variants
+                # silently aborted and avoids re-proposing them.
+                # Pairs with the on-disk abort_reason.json markers
+                # written by _grid_runner._write_variant_abort_marker.
+                "failed_variants": _summarize_failed_variants(
+                    result.get("all_results"),
                 ),
             }
         # Out-of-band score updates for the task_kinds that don't have a

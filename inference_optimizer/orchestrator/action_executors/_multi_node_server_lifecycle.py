@@ -59,7 +59,16 @@ log = logging.getLogger(__name__)
 # 20-30 min through aiter JIT; warm restarts typically finish in 3-5 min.
 # 1800 s (30 min) leaves headroom on cold while still failing-fast on
 # truly stuck launches. Override per-call via ``health_timeout_s``.
-DEFAULT_HEALTH_TIMEOUT_S = 1800
+DEFAULT_HEALTH_TIMEOUT_S = 900  # 15 min.
+# Tightened from 1800s after multi-node sessions observed variants
+# silent-aborting after exactly 30 min of sglang launch-poll RUNNING —
+# the variant's config was incompatible with the model's multi-node
+# cold-start path and the launcher driver never reached /health 200.
+# Typical multi-node MoE cold-start finishes in 5-7 min, so 900s is
+# ~2x normal headroom and still aborts ~2x faster than the old 1800s
+# ceiling. Override per-run via HYPERLOOM_MN_HEALTH_WAIT_S when a
+# slower workload genuinely needs more — the env override path in
+# restart_server_for_round is preserved.
 
 # Defaults Magpie's sglang_mi*x.sh always appends to the server cmd when
 # the variant did not explicitly override them. Keeping the SAME flag set
