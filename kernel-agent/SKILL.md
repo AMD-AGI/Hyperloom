@@ -414,6 +414,46 @@ needs human judgement on shape coverage / risk.
 If any KEEP-required evidence is merely missing (not failed), the proposal
 falls back to `NEEDS_REVIEW` with the missing fields listed in `reasons`.
 
+## Multi-node mode
+
+When the workload runs with `--nodes >= 2`
+(`/tmp/multi_node_state.json` has `nodes >= 2`), the sandbox is
+CPU-only and the inference server lives only on RayJob pods. The
+kernel-agent flow adapts transparently:
+
+* Reading source — `/sgl-workspace/{aiter,sglang,vllm}/` is image-baked
+  on both sandbox and pods, same commit on all sides, so `cat` /
+  `read_file` work as usual.
+* Applying patches — `apply_kernel_patch.py` detects multi-node via
+  `_is_multi_node()` and, after writing the sandbox-local copy,
+  fans the SAME patch bytes to every pod via
+  `python3 -m inference_optimizer.multi_node apply-patch`. Per-host
+  backup paths are persisted into the manifest so revert can hit the
+  same pods. Pod fan-out failure → sandbox copy is auto-restored from
+  the source backup (strict 3-way transaction: sandbox + head + workers
+  all on v1, or all on v0; no partial state).
+* Reverting — `revert_kernel_patch` reads `manifest.multinode.host_backup_map`
+  and dispatches `python3 -m inference_optimizer.multi_node revert-patch`
+  before returning.
+* Compiling + benchmarking — the sandbox has no GPU. Backend prompts
+  (Claude/Codex/GEAK) get a `MULTI-NODE SANDBOX` block in their safety
+  instructions directing them to
+  `python3 -m inference_optimizer.multi_node kernel-bench` instead of
+  local `hipcc` / `torch.cuda.*` / `torch.utils.cpp_extension.load`.
+  The CLI base64-encodes any helper files, stages them on a
+  GPU-bearing pod, runs `bash --bench-command`, and returns
+  stdout/stderr plus matching `result*.json` artifacts.
+* Integrating — `integrate_handler` invokes
+  `restart_server_for_round(force_full_restart=True)` after a
+  successful apply so the resume fast-path is bypassed and sglang
+  re-imports the patched modules. Without this the re-baseline would
+  measure pre-patch behaviour and integrate decisions become noise.
+* RayJob recreate — when a fresh RayJob is provisioned (after OOM /
+  manual recreate), `_replay_kernel_patches_for_multi_node` in
+  `inference_optimizer/cli.py` scans the session's kernel-agent
+  workspace for applied manifests and replays each via `apply-patch`
+  so the new pods start in the post-stack state.
+
 ## Hard Rules
 
 - Do not implement ports or RPC.

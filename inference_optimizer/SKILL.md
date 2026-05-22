@@ -32,6 +32,14 @@ The CLI starts a Python Coordinator that coordinates:
 - Robustness: default `--robustness-agent` — drives the `robustness-agent/`
   subprocess runtime for health monitoring, RCA, and scheduling-police
   intents. `--robustness-mock` for offline / smoke tests.
+  - **Multi-node auto-downgrade (`--nodes >= 2`)**: the agent backend's
+    `LocalProbeSource` targets sandbox-local resources only (ray status,
+    inference server, auth-proxy, GPU, FD, disk, shm). On multi-node every
+    such resource lives in a separate pod (head / worker / RayJob), so each
+    probe surfaces as a HIGH false positive that floods the bus. The CLI
+    auto-downgrades to `--robustness-mock` (heartbeat only) and prints a
+    WARNING; pass `--robustness-mock` explicitly to suppress it. See
+    `multi_node/SKILL.md` (Robustness limitation in multi-node mode).
 
 State lives in **one fixed session directory** — `/workspace/hyperloom`
 by default. Every sandbox is single-use, so the path is flat (no
@@ -223,6 +231,8 @@ production default) need none of this — `ensure_tracelens` / `ensure_oob`
 already handle the read-only-source case.
 
 ### Step 2 — Launch
+
+**Multi-node (`nodes >= 2`):** [`multi_node/SKILL.md`](multi_node/SKILL.md).
 
 ```bash
 inference_optimizer optimize \
