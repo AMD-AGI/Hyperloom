@@ -1398,11 +1398,15 @@ def _validate_and_resolve_claude_model(
         )
         sys.exit(2)
 
-    base_url = ""
-    if proxy_urls is not None:
-        base_url = proxy_urls[1]  # OpenAI-compat URL keeps the /v1 suffix
-    if not base_url:
-        base_url = os.environ.get("OPENAI_BASE_URL", "")
+    # Catalog probe uses GET <base>/models. The local auth-proxy (:4002) does
+    # not implement that route (404); _preflight snapshots the upstream SaFE
+    # URL in INFERENCE_OPTIMIZER_CATALOG_PROBE_URL before rewriting OPENAI_BASE_URL.
+    base_url = (
+        os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
+        or os.environ.get("OPENAI_BASE_URL", "")
+    )
+    if not base_url and proxy_urls is not None:
+        base_url = proxy_urls[1]
 
     # Catalog probe targets the SaFE LLM proxy
     # (default ``OPENAI_BASE_URL=https://<safe-host>/api/v1/llm-proxy/v1``).
@@ -1553,6 +1557,9 @@ def _preflight() -> tuple[str, str] | None:
     # The two env vars MUST stay consistent — either both proxy or both orig.
     orig_anthropic = os.environ.get("ANTHROPIC_BASE_URL", "")
     orig_openai = os.environ.get("OPENAI_BASE_URL", "")
+    catalog_probe_url = (orig_openai or base_url or "").strip()
+    if catalog_probe_url:
+        os.environ["INFERENCE_OPTIMIZER_CATALOG_PROBE_URL"] = catalog_probe_url
     proxy_urls = _ensure_auth_proxy_and_claude_config(safe_key, base_url)
     if proxy_urls is not None:
         proxy_anthropic, proxy_openai = proxy_urls
@@ -1775,6 +1782,18 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
 
     Only emits keys the operator actually passed so the runtime CLI
     falls back to its own defaults / env-discovery for the rest.
+
+    Multi-node auto-disable: when ``args.nodes >= 2`` the inference
+    server runs in the head pod (separate Kubernetes pod from the
+    sandbox where the robustness-agent subprocess lives), so the
+    hardcoded ``http://127.0.0.1:8888/health`` probe baked into
+    ``robustness_agent.config.Config.auto_probe_inference_server``
+    can never succeed and floods the bus with false-positive
+    ``local_server_unreachable`` symptoms each tick. Disable the
+    auto-probe by default in multi-node so single-node semantics stay
+    intact while multi-node stops emitting the bogus alert. Operators
+    who configure an explicit cluster-local probe target can re-enable
+    via a future ``--robustness-auto-probe-inference-server`` flag.
     """
     options: dict[str, Any] = {}
     server_url = getattr(args, "robustness_server_url", None)
@@ -1783,6 +1802,9 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     llm_rca = getattr(args, "robustness_llm_rca", None)
     if llm_rca is not None:
         options["llm_rca_enabled"] = bool(llm_rca)
+    nodes = int(getattr(args, "nodes", 1) or 1)
+    if nodes >= 2:
+        options["auto_probe_inference_server"] = False
     return options
 
 
@@ -1904,7 +1926,9 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         no_wait=False,
         recreate=False,
         poll_interval=6,
-        poll_timeout=110,
+        poll_timeout=int(
+            os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110
+        ),
     )
     rc = cmd_create_rayjob(ns_create)
     if rc != 0:
@@ -1917,7 +1941,9 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
             force=False,
             print_logs=False,
             poll_interval=6,
-            poll_timeout=110,
+            poll_timeout=int(
+                os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110
+            ),
         )
         rc_boot = cmd_bootstrap(ns_boot)
         if rc_boot != 0:

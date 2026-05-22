@@ -136,6 +136,15 @@ class ProgressDetector:
         cfg = self._config
         if len(self._gain_history) < cfg.gain_window_ticks:
             return None
+        # Plateau semantics require "explored but stalled". Before any
+        # candidate has been promoted onto the optimization_stack,
+        # cumulative_gain_validated is 0 by construction (baseline +
+        # profile alone fill the 6-tick window with zeros on multi-node
+        # cold start). Defer to ``no_levers_found`` which has the right
+        # elapsed/tick floors for the empty-stack case so the two
+        # B-family rules don't fire HIGH twice on the same condition.
+        if snap.optimization_stack_size == 0:
+            return None
         window = self._gain_history[-cfg.gain_window_ticks:]
         delta = max(window) - min(window)
         if delta > cfg.gain_epsilon_pct:
