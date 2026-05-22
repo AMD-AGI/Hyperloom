@@ -1,33 +1,30 @@
-"""Unit tests for ``inference_optimizer.cli._build_robustness_options``.
+"""Unit tests for ``inference_optimizer.cli`` robustness backend wiring.
 
-The helper translates ``argparse.Namespace`` into the ``request.options``
-overrides that :class:`RobustnessAgentBackend` forwards verbatim to
-``python -m robustness_agent.runtime.cli tick``. Two important
-behaviours covered here:
+Covers two helpers:
 
-* Single-node default — only operator-supplied overrides land in
-  ``options``; nothing is auto-injected so the runtime CLI keeps its
-  factory defaults (matters for hosts running sglang/vLLM/Magpie
-  locally on 127.0.0.1:8888 that the auto-probe was designed for).
+* ``_build_robustness_options`` — translates ``argparse.Namespace`` into
+  the ``request.options`` overrides that :class:`RobustnessAgentBackend`
+  forwards verbatim to ``python -m robustness_agent.runtime.cli tick``.
 
-* Multi-node auto-disable — when ``args.nodes >= 2`` the inference
-  server runs in the head pod (separate Kubernetes pod), so the
-  hardcoded ``http://127.0.0.1:8888/health`` probe in the runtime
-  config can never succeed inside the sandbox container and floods
-  the bus with false-positive ``local_server_unreachable`` symptoms
-  each tick. Repro: sandbox primus-claw-20260522020448-z6rg6 emitted
-  ``local server probe http://127.0.0.1:8888/health status=error``
-  every tick alongside the (also false-positive) ``gain_plateau``.
-  We expect ``_build_robustness_options`` to pre-set
-  ``auto_probe_inference_server=False`` so the runtime config skips
-  appending the local URL to ``probe_targets``.
+* ``_resolve_robustness_choice`` — picks ``"mock"`` vs ``"agent"`` from
+  the operator flag with multi-node auto-downgrade (the agent backend's
+  ``LocalProbeSource`` family targets sandbox-local resources that all
+  live in separate pods on ``--nodes >= 2``, so the cleanest path is to
+  fall back to the heartbeat-only mock). Repro: sandbox
+  primus-claw-20260522063032-mcctl turn=0 emitted ``ray_head_dead`` HIGH
+  + ``prune_branch(kernel_opt)`` + ``escalate_strategy_change`` from a
+  ``ray status`` probe failing because the Ray head lives in a separate
+  RayJob pod, unreachable from the sandbox.
 """
 
 from __future__ import annotations
 
 import argparse
 
-from inference_optimizer.cli import _build_robustness_options
+from inference_optimizer.cli import (
+    _build_robustness_options,
+    _resolve_robustness_choice,
+)
 
 
 def _ns(**kwargs) -> argparse.Namespace:
@@ -36,6 +33,7 @@ def _ns(**kwargs) -> argparse.Namespace:
         "nodes": 1,
         "robustness_server_url": None,
         "robustness_llm_rca": None,
+        "robustness_backend": None,  # CLI default; resolves to DEFAULT_*
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -126,3 +124,77 @@ def test_nodes_zero_or_none_treated_as_single_node():
     ):
         assert "auto_probe_inference_server" not in opts
         assert "progress_no_levers_min_minutes" not in opts
+
+
+# ---------------------------------------------------------------------------
+# _resolve_robustness_choice — multi-node auto-downgrade to mock
+# ---------------------------------------------------------------------------
+
+def test_resolve_choice_single_node_default_keeps_agent():
+    """Default path on single-node must stay ``"agent"`` so the
+    real LocalProbe coverage is preserved on hosts where the
+    inference server / auth-proxy / ray actually live in the
+    sandbox container."""
+    ns = _ns(nodes=1, robustness_backend=None)
+    assert _resolve_robustness_choice(ns) == "agent"
+
+
+def test_resolve_choice_single_node_explicit_mock_kept():
+    """Explicit ``--robustness-mock`` on single-node passes through."""
+    ns = _ns(nodes=1, robustness_backend="mock")
+    assert _resolve_robustness_choice(ns) == "mock"
+
+
+def test_resolve_choice_multi_node_default_downgrades_to_mock(capsys):
+    """``args.nodes >= 2`` with the default agent choice → mock,
+    silently (the implicit default does not warrant a WARNING because
+    the operator did not actively ask for the agent backend)."""
+    ns = _ns(nodes=2, robustness_backend=None)
+    chosen = _resolve_robustness_choice(ns)
+    assert chosen == "mock"
+    captured = capsys.readouterr()
+    assert "WARN" not in captured.err
+    assert "WARN" not in captured.out
+
+
+def test_resolve_choice_multi_node_explicit_agent_downgrades_with_warning(capsys):
+    """``args.nodes >= 2`` with ``--robustness-agent`` explicitly → mock
+    with a WARNING on stderr that points operators at the multi-node
+    SKILL section so they can read the rationale (LocalProbe family
+    targets sandbox-local resources only; multi-node has every
+    target in a separate pod)."""
+    ns = _ns(nodes=2, robustness_backend="agent")
+    chosen = _resolve_robustness_choice(ns)
+    assert chosen == "mock"
+    captured = capsys.readouterr()
+    assert "WARN" in captured.err
+    assert "auto-downgrad" in captured.err.lower()
+    assert "multi_node/SKILL.md" in captured.err
+
+
+def test_resolve_choice_multi_node_explicit_mock_no_warning(capsys):
+    """Operators who anticipate the auto-downgrade and pass
+    ``--robustness-mock`` explicitly must NOT see the WARNING (they
+    already know)."""
+    ns = _ns(nodes=4, robustness_backend="mock")
+    chosen = _resolve_robustness_choice(ns)
+    assert chosen == "mock"
+    captured = capsys.readouterr()
+    assert "WARN" not in captured.err
+
+
+def test_resolve_choice_missing_nodes_attr_treated_as_single_node():
+    """Legacy entry points that omit ``nodes`` keep the agent default
+    rather than auto-downgrading (single-node semantics)."""
+    ns = argparse.Namespace(robustness_backend=None)
+    assert _resolve_robustness_choice(ns) == "agent"
+
+
+def test_resolve_choice_nodes_zero_or_none_treated_as_single_node():
+    """``nodes=0`` / ``nodes=None`` must NOT trip the multi-node
+    downgrade — they degrade to single-node semantics."""
+    for ns in (
+        _ns(nodes=0, robustness_backend="agent"),
+        _ns(nodes=None, robustness_backend="agent"),
+    ):
+        assert _resolve_robustness_choice(ns) == "agent"
