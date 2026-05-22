@@ -1158,6 +1158,143 @@ async def test_select_kernels_handler_backfills_workload_context_from_state(
     assert "--analysis-mode" in cmd and "inference" in cmd
 
 
+def _write_baseline_config_for_split_tests(
+    session_dir, conc=64, osl=1024, random_range_ratio=0.8,
+):
+    """Materialize a minimal benchmark config + point SharedState at it.
+
+    Mirrors the shape ``_load_materialized_workload_metadata`` expects so
+    the select_kernels handler can backfill splitter hints from baseline
+    state without needing a real Magpie run.
+    """
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    config_path = session_dir / "baseline_config.with_envs.yaml"
+    config_path.write_text(
+        f"""
+benchmark:
+  framework: sglang
+  envs:
+    TP: 16
+    CONC: {conc}
+    ISL: 1024
+    OSL: {osl}
+    RANDOM_RANGE_RATIO: {random_range_ratio}
+""",
+        encoding="utf-8",
+    )
+    state = SharedState.load_or_init(session_dir)
+    state.baseline_config_path = str(config_path)
+    state.save(session_dir)
+    return config_path
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_passes_split_args_from_baseline_metadata(
+    session_dir, monkeypatch,
+):
+    """CONC / OSL / RANDOM_RANGE_RATIO from baseline metadata must reach
+    the splitter as ``--split-conc`` / ``--split-osl`` / ``--split-r``.
+
+    Without this, splitter falls back to in-trace heuristics and on
+    workloads where heuristics miss returns 0 chunks
+    (``trace_split_no_steady_state``) - pre-fix regression: single-node
+    sandbox with no env-side CONC saw mixed=0/decode_only=0/prefill=0
+    and the whole kernel-opt chain collapsed.
+    """
+    _write_baseline_config_for_split_tests(
+        session_dir, conc=128, osl=2048, random_range_ratio=0.5,
+    )
+
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok"}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--split-conc" in cmd
+    assert cmd[cmd.index("--split-conc") + 1] == "128"
+    assert "--split-osl" in cmd
+    assert cmd[cmd.index("--split-osl") + 1] == "2048"
+    assert "--split-r" in cmd
+    assert cmd[cmd.index("--split-r") + 1] == "0.5"
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_payload_overrides_baseline_metadata_for_split(
+    session_dir, monkeypatch,
+):
+    """Explicit ``payload.split_*`` wins over baseline metadata.
+
+    Pins the priority chain: payload (operator/critic override) >
+    materialized baseline metadata > drop flag (let tracelens_analysis
+    fall back to its env-default chain). This lets the critic / a
+    targeted re-run dial in a different CONC/OSL/R without rewriting
+    the baseline config.
+    """
+    _write_baseline_config_for_split_tests(
+        session_dir, conc=64, osl=1024, random_range_ratio=0.8,
+    )
+
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok"}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {
+            "trace_input": str(session_dir),
+            "dry_run": True,
+            "split_conc": 256,
+            "split_osl": 4096,
+            "split_r": 0.25,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--split-conc") + 1] == "256"
+    assert cmd[cmd.index("--split-osl") + 1] == "4096"
+    assert cmd[cmd.index("--split-r") + 1] == "0.25"
+
+
+@pytest.mark.asyncio
+async def test_select_kernels_omits_split_args_when_no_baseline_config(
+    session_dir, monkeypatch,
+):
+    """When neither payload nor baseline metadata supply CONC/OSL/R the
+    handler MUST omit ``--split-*`` so tracelens_analysis keeps its
+    existing env fallback (TRACELENS_SPLIT_* / CONC / OSL /
+    RANDOM_RANGE_RATIO) and ultimately the splitter's built-in
+    heuristic. Forcing empty values would crash the splitter parser.
+    """
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok"}), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.select_kernels_handler(
+        {"trace_input": str(session_dir), "dry_run": True},
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    cmd = captured["cmd"]
+    assert "--split-conc" not in cmd
+    assert "--split-osl" not in cmd
+    assert "--split-r" not in cmd
+
+
 @pytest.mark.asyncio
 async def test_select_kernels_handler_surfaces_trace_report_path(
     session_dir, monkeypatch,
