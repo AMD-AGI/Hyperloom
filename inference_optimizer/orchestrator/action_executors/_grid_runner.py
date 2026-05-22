@@ -600,6 +600,15 @@ class VariantResult:
     returncode: int | None = None
     nonfatal_warnings: list[str] = field(default_factory=list)
     error: str | None = None
+    # Short tag for failure classification — matches the label used by
+    # ``_write_variant_abort_marker`` (e.g. ``mn_server_restart_failed``,
+    # ``magpie_timeout``, ``yaml_build_error``, ``no_benchmark_workspace``,
+    # ``magpie_nonzero_invalid_measurement``, ``benchmark_report_missing``,
+    # ``benchmark_report_invalid_metric``). Empty string for succeeded
+    # variants. Threaded into ``coordinator._summarize_failed_variants``
+    # so the LLM critic prompt sees ``failed_variants[*].error_class``
+    # instead of a generic ``None``.
+    error_class: str = ""
     note: str = ""
 
     @property
@@ -628,6 +637,7 @@ class VariantResult:
             "returncode":         self.returncode,
             "nonfatal_warnings":  self.nonfatal_warnings,
             "error":              self.error,
+            "error_class":        self.error_class,
             "note":               self.note,
         }
 
@@ -1066,6 +1076,7 @@ async def run_grid(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed", error=f"yaml_build_error: {exc!r}",
+                error_class="yaml_build_error",
                 note=variant.note,
             ))
             await _pulse_after_variant(i)
@@ -1121,6 +1132,7 @@ async def run_grid(
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 error=f"mn_server_restart_failed: {exc}",
+                error_class="mn_server_restart_failed",
                 note=variant.note,
             ))
             if not keep_going_on_failure:
@@ -1170,7 +1182,9 @@ async def run_grid(
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
-                status="failed", error=f"timeout: {exc}", note=variant.note,
+                status="failed", error=f"timeout: {exc}",
+                error_class="magpie_timeout",
+                note=variant.note,
                 nonfatal_warnings=[
                     f"harvested_leaked_artifact:{src}"
                     for src, _ in to_harvested
