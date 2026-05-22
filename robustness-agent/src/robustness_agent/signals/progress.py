@@ -20,7 +20,6 @@ Both detectors short-circuit when the session is in ``closing_phase``
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,8 +28,6 @@ from ..sources.base import SourceData
 from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
-
-log = logging.getLogger(__name__)
 
 
 @dataclass

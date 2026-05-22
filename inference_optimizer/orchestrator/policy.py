@@ -41,6 +41,40 @@ if TYPE_CHECKING:  # pragma: no cover — type-only
 
 
 # ---------------------------------------------------------------------------
+def _value_is_present(value: Any) -> bool:
+    """Treat a value as present iff it is a non-empty string OR a
+    non-empty container (dict/list/tuple/set). ``None`` and whitespace-
+    only strings count as absent. Used by the delegate required-payload
+    check, where ``reason`` is a short string and ``evidence`` is a dict
+    (per-GPU snapshot, consecutive_hits, ...)."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (dict, list, tuple, set)):
+        return len(value) > 0
+    return True
+
+
+def _delegate_field_present(payload: dict[str, Any], field_name: str) -> bool:
+    """Return True iff ``field_name`` is present (per :func:`_value_is_present`)
+    at the top of ``payload`` OR nested under ``payload["params"]``.
+
+    Robustness builds delegate envelopes with the action knobs (``reason``,
+    ``evidence``, ``force_gpu_cleanup``) under ``payload["params"]`` so the
+    downstream executor reads them via ``ctx.task.params``. We accept either
+    location so PolicyGate is the chokepoint regardless of the producer's
+    payload-shape choice — see ``robustness_agent/role/envelope.py``
+    ``build_delegate`` and ``recover_executor.__call__``.
+    """
+    if _value_is_present(payload.get(field_name)):
+        return True
+    nested = payload.get("params")
+    if isinstance(nested, dict) and _value_is_present(nested.get(field_name)):
+        return True
+    return False
+
+
 class PolicyDenied(RuntimeError):
     """Intent rejected by PolicyGate.
 
@@ -74,6 +108,37 @@ KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
     "operator_tuning",
     "vendor_kernel_config",
 })
+
+
+# ---------------------------------------------------------------------------
+# Per-action delegate source allowlist (action_name → set of source roles).
+#
+# This is the action-name analogue of ROBUSTNESS_ONLY_SOURCE_ALLOWLIST
+# (which gates IntentType, not action_name). Some actions have side
+# effects narrow enough that even roles with ``can_delegate_side_effects``
+# must NOT initiate them — e.g. ``recover`` walks SIGTERM/SIGKILL against
+# matching processes and is env-gated to optionally invoke
+# ``rocm-smi --gpureset``. Letting Orchestration drive it bypasses the
+# robustness escalation path (symptom → ActionLadder → delegate), so we
+# limit the source to the robustness agent only.
+#
+# Actions not listed here fall through to the general delegate rules
+# (kernel-owned guard + ActionRegistry lookup).
+# ---------------------------------------------------------------------------
+DELEGATE_ACTION_SOURCE_ALLOWLIST: dict[str, frozenset[str]] = {
+    "recover": frozenset({"robustness"}),
+}
+
+
+# ---------------------------------------------------------------------------
+# Per-action delegate required payload fields. The values are stringified
+# and stripped; empty / missing fields raise PolicyDenied. This is the
+# minimum evidence we require alongside a side-effecting delegate so the
+# downstream executor + result.json audit have something to anchor on.
+# ---------------------------------------------------------------------------
+DELEGATE_ACTION_REQUIRED_PAYLOAD: dict[str, tuple[str, ...]] = {
+    "recover": ("reason", "evidence"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -304,9 +369,11 @@ class PolicyGate:
             IntentType.ANSWER,
         ):
             return None
-        if intent.type == IntentType.PROPOSE_ACTION:
-            if (intent.payload or {}).get("action_name") == "report":
-                return None
+        if (
+            intent.type == IntentType.PROPOSE_ACTION
+            and (intent.payload or {}).get("action_name") == "report"
+        ):
+            return None
         return PolicyDenied(
             f"closing_phase: {intent.type.value} denied "
             f"(only `report` proposals allowed during wind-down)",
@@ -370,6 +437,42 @@ class PolicyGate:
                 rule="unknown_action",
                 hint="register a yaml under inference_optimizer/actions/_meta/<name>.yaml",
             )
+        # Per-action source allowlist (e.g. ``recover`` is robustness-only).
+        allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
+        if allowed_sources is not None and role.name not in allowed_sources:
+            raise PolicyDenied(
+                f"role={role.name!r} cannot delegate action={action_name!r} "
+                f"(allowed: {sorted(allowed_sources)!r})",
+                rule="delegate_action_source",
+                hint=(
+                    "side-effecting actions like `recover` are reserved for "
+                    "the robustness agent; emit an ALERT and let robustness "
+                    "escalate via its action-ladder instead"
+                ),
+            )
+        # Per-action required-payload guard (e.g. ``recover`` must carry
+        # ``reason`` + ``evidence`` so the audit trail captures the symptom).
+        # Fields are accepted at the top of the payload OR nested under
+        # ``payload["params"]`` (the structure robustness emits).
+        required = DELEGATE_ACTION_REQUIRED_PAYLOAD.get(action_name)
+        if required:
+            missing = [
+                field_name
+                for field_name in required
+                if not _delegate_field_present(payload, field_name)
+            ]
+            if missing:
+                raise PolicyDenied(
+                    f"delegate(action_name={action_name!r}) missing required "
+                    f"payload field(s): {missing!r}",
+                    rule="delegate_action_evidence",
+                    hint=(
+                        "side-effecting delegates must carry the symptom "
+                        "evidence that justified them (e.g. "
+                        "{'reason': 'gpu_memory_leaked', "
+                        "'evidence': {...}})"
+                    ),
+                )
 
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         action_name = str(payload.get("action_name", "")).strip()
@@ -592,6 +695,8 @@ class PolicyGate:
 
 __all__ = [
     "CORE_STATE_FIELDS",
+    "DELEGATE_ACTION_REQUIRED_PAYLOAD",
+    "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "KERNEL_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",
     "KILL_TASK_SOURCE_ALLOWLIST",

@@ -39,7 +39,6 @@ P2#7 documented:
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,8 +48,6 @@ from ..sources.base import SourceData
 from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
-
-log = logging.getLogger(__name__)
 
 
 # URL substring that identifies the auth_proxy among generic local
