@@ -293,7 +293,7 @@ ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05   # +5 percentage points per hint
 ESCALATE_HINT_BUDGET_BUMP_CAP:   float = 0.80   # absolute ceiling
 
 # Whether a hint string is structurally a pause-specialist directive.
-# ``pause_specialist_kernel_specialist`` etc.; the suffix is the domain
+# ``pause_specialist_kernel_switch_specialist`` etc.; the suffix is the domain
 # key (specialist_domains.SPECIALIST_DOMAIN_KEYS membership is checked
 # by the Coordinator handler, not here, so this module stays pure).
 def is_pause_specialist_hint(hint: str) -> bool:

@@ -67,7 +67,7 @@ def test_escalate_hint_vocab_closed():
 
 def test_is_valid_escalate_hint_accepts_vocab_and_pause_specialist():
     assert is_valid_escalate_hint("skip_to_kernel")
-    assert is_valid_escalate_hint("pause_specialist_framework_specialist")
+    assert is_valid_escalate_hint("pause_specialist_serving_specialist")
     assert is_valid_escalate_hint("pause_specialist_anything")
     assert not is_valid_escalate_hint("garbage")
     assert not is_valid_escalate_hint("")
@@ -594,14 +594,14 @@ def test_collect_phase_breakdown_buckets_by_phase():
         ],
         "explore_search": {
             "winners_history": [
-                {"fingerprint": "fpfp", "provenance": "framework_specialist"},
+                {"fingerprint": "fpfp", "provenance": "serving_specialist"},
             ],
         },
     }
     out = collect_attribution(state, [], [], [], [])
     pb = out["phase_breakdown"]
     assert pb["explore"]["total_gain_pct"] == 5.0
-    assert pb["explore"]["by_domain"]["framework_specialist"] == 5.0
+    assert pb["explore"]["by_domain"]["serving_specialist"] == 5.0
     assert pb["kernel"]["total_gain_pct"] == 7.5
     assert pb["kernel"]["by_kernel_id"]["fmoe_fp8"] == 7.5
     # No prelude/sweep contributions.

@@ -91,11 +91,11 @@ class _ConcurrencyProbe:
         return {
             "runner_status": "succeeded",
             "task_id": ctx.task.task_id,
-            "domain": "framework_specialist",
+            "domain": "serving_specialist",
             "gap_canonical_id": ctx.task.params.get("gap_canonical_id", ""),
             "specialist_done": {
                 "gap_canonical_id": ctx.task.params.get("gap_canonical_id", ""),
-                "domain": "framework_specialist",
+                "domain": "serving_specialist",
                 "proposal_set": [],
                 "empty": True,
                 "summary": "concurrency-probe noop",
@@ -153,7 +153,7 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
         await coord.tasks.create_or_return_existing(
             kind="specialist",
             params={
-                "domain": "framework_specialist",
+                "domain": "serving_specialist",
                 "gap_canonical_id": f"gap.test.{i}",
                 "max_turns": 2,
             },
@@ -196,7 +196,7 @@ async def test_dispatcher_caps_at_capacity_when_more_queued(tmp_path: Path):
         await coord.tasks.create_or_return_existing(
             kind="specialist",
             params={
-                "domain": "framework_specialist",
+                "domain": "serving_specialist",
                 "gap_canonical_id": f"gap.test.{i}",
                 "max_turns": 2,
             },
@@ -228,7 +228,7 @@ async def test_dispatcher_capacity_one_falls_back_to_serial(tmp_path: Path):
         await coord.tasks.create_or_return_existing(
             kind="specialist",
             params={
-                "domain": "framework_specialist",
+                "domain": "serving_specialist",
                 "gap_canonical_id": f"gap.test.{i}",
                 "max_turns": 2,
             },
