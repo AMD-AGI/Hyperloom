@@ -50,26 +50,67 @@ def test_short_history_silent_until_window_full():
 
 
 def test_plateau_with_productive_gain_fires_medium():
-    """Productive gain ≥ threshold → flat = "exhausted but shippable" → medium."""
+    """Productive gain ≥ threshold → flat = "exhausted but shippable" → medium.
+
+    The non-zero ``cumulative_gain_validated`` implies at least one
+    candidate has been promoted, so ``optimization_stack_size`` must
+    be > 0 for the scenario to be physically realisable.
+    """
     det = ProgressDetector(ProgressConfig(
         gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
     ))
-    det.evaluate(_ctx(tick=0, cumulative_gain_validated=10.0), SourceData())
-    det.evaluate(_ctx(tick=1, cumulative_gain_validated=10.1), SourceData())
-    out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=10.2), SourceData())
+    det.evaluate(_ctx(tick=0, cumulative_gain_validated=10.0,
+                      optimization_stack_size=2), SourceData())
+    det.evaluate(_ctx(tick=1, cumulative_gain_validated=10.1,
+                      optimization_stack_size=2), SourceData())
+    out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=10.2,
+                            optimization_stack_size=2), SourceData())
     sym = next(s for s in out if s.name == "gain_plateau")
     assert sym.severity is SymptomSeverity.MEDIUM
 
 
 def test_plateau_with_zero_gain_fires_high():
+    """After at least one promotion attempt has landed something on the
+    stack, a still-zero validated gain across the window is genuine
+    plateau territory and must fire HIGH so Orchestration can wind
+    down. ``optimization_stack_size > 0`` is what distinguishes this
+    from the cold-start case (see
+    :func:`test_plateau_suppressed_when_stack_empty`)."""
     det = ProgressDetector(ProgressConfig(
         gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
     ))
-    det.evaluate(_ctx(tick=0, cumulative_gain_validated=0.0), SourceData())
-    det.evaluate(_ctx(tick=1, cumulative_gain_validated=0.1), SourceData())
-    out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=0.0), SourceData())
+    det.evaluate(_ctx(tick=0, cumulative_gain_validated=0.0,
+                      optimization_stack_size=1), SourceData())
+    det.evaluate(_ctx(tick=1, cumulative_gain_validated=0.1,
+                      optimization_stack_size=1), SourceData())
+    out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=0.0,
+                            optimization_stack_size=1), SourceData())
     sym = next(s for s in out if s.name == "gain_plateau")
     assert sym.severity is SymptomSeverity.HIGH
+
+
+def test_plateau_suppressed_when_stack_empty():
+    """Cold-start regression guard: baseline + profile fill the 6-tick
+    history window with zeros before any candidate has been promoted.
+    We must NOT fire ``gain_plateau`` in that window because
+    ``no_levers_found`` already owns the empty-stack case (with the
+    proper elapsed_minutes + tick floors). Firing both produces two
+    HIGH escalations on the same condition, biasing Coordinator
+    toward ``delegate(report)`` before backends/params ever run.
+    Repro: sandbox primus-claw-20260522020448-z6rg6, tick=6,
+    optimization_stack=(none), gain_history=[0]*6 → falsely fired
+    ``gain_plateau HIGH`` + ``escalate_strategy_change HIGH``.
+    """
+    det = ProgressDetector(ProgressConfig(
+        gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
+    ))
+    det.evaluate(_ctx(tick=0, cumulative_gain_validated=0.0,
+                      optimization_stack_size=0), SourceData())
+    det.evaluate(_ctx(tick=1, cumulative_gain_validated=0.0,
+                      optimization_stack_size=0), SourceData())
+    out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=0.0,
+                            optimization_stack_size=0), SourceData())
+    assert all(s.name != "gain_plateau" for s in out)
 
 
 def test_plateau_resets_on_movement():
