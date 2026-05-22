@@ -89,8 +89,8 @@ def test_policy_allows_grid_with_default_grid_variant():
 def test_policy_allows_grid_with_specialist_provenance():
     gate = _gate()
     intent = _delegate([
-        {"name": "v1", "provenance": "specialist:framework_specialist"},
-        {"name": "v2", "provenance": "specialist:kernel_specialist"},
+        {"name": "v1", "provenance": "specialist:serving_specialist"},
+        {"name": "v2", "provenance": "specialist:kernel_switch_specialist"},
     ])
     gate.validate_intent("orchestration", intent)  # no raise
 
@@ -134,11 +134,11 @@ def test_grid_variants_from_payload_defaults_to_default_grid():
     now falls back to ``default_grid``."""
     out = _grid_variants_from_payload([
         {"name": "vA", "extra_args": "--foo"},
-        {"name": "vB", "extra_args": "--bar", "provenance": "specialist:kernel_specialist"},
+        {"name": "vB", "extra_args": "--bar", "provenance": "specialist:kernel_switch_specialist"},
     ])
     assert len(out) == 2
     assert getattr(out[0], "provenance") == "default_grid"
-    assert getattr(out[1], "provenance") == "specialist:kernel_specialist"
+    assert getattr(out[1], "provenance") == "specialist:kernel_switch_specialist"
 
 
 # ---------------------------------------------------------------------------

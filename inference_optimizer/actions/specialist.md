@@ -61,7 +61,7 @@ in the v0.8-Hyperloom topology — they do not contend with the serving GPUs.
 
 | Key                  | Type     | Required | Description |
 |----------------------|----------|----------|-------------|
-| `domain`             | string   | yes      | One of `framework_specialist` / `kernel_specialist` / `comm_specialist` / `compiler_specialist` / `system_specialist` / `pr_intel_specialist`. |
+| `domain`             | string   | yes      | One of `serving_specialist` / `kernel_switch_specialist` / `comm_specialist` / `compiler_specialist` / `system_specialist` / `pr_intel_specialist`. |
 | `gap_canonical_id`   | string   | yes      | Stable id of the gap (e.g. `gap.framework.cuda_graph_inefficient.session-<sid>`). |
 | `gap_symptom`        | string   | no       | Human summary of the symptom (e.g. `decode kernel at 30% HBM peak`). |
 | `gap_layer`          | string   | no       | Layer label (`kernel` / `framework` / `communication` / …). |
@@ -74,7 +74,7 @@ in the v0.8-Hyperloom topology — they do not contend with the serving GPUs.
 delegate{
   action_name = 'specialist',
   params = {
-    domain            = 'framework_specialist',
+    domain            = 'serving_specialist',
     gap_canonical_id  = 'gap.framework.cuda_graph_inefficient.session-<sid>',
     gap_symptom       = 'cuda graphs disabled at TP=8 on FP8',
     gap_layer         = 'framework',
