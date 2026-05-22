@@ -218,6 +218,57 @@ After step 4 route all benchmark / OOB / Magpie traffic to
   Integrate path auto-restarts the server after `apply-patch`
   (bypassing the resume fast-path) and RayJob recreate auto-replays
   applied patches — do not invoke either step manually.
+* **ADDENDUM-16** (robustness LocalProbe is sandbox-scoped): the
+  `robustness-agent` backend's `LocalProbeSource` family probes
+  sandbox-local resources only — `ray status`, the inference server
+  health URL (`http://127.0.0.1:8888`), the auth-proxy URL
+  (`http://127.0.0.1:4002`), GPU / FD / disk / shm metrics, the local
+  log-error scanner, etc. On `--nodes >= 2` every one of those
+  resources lives in a separate Kubernetes pod (head pod / worker
+  pod / RayJob submitter, on a different subnet from the sandbox in
+  some clusters), so each probe surfaces as a HIGH-severity false
+  positive (`ray_head_dead`, `local_server_unreachable`,
+  `auth_proxy_unhealthy`, `gpu_memory_leaked`, ...). The CLI
+  auto-downgrades `--robustness-agent` to `--robustness-mock`
+  (heartbeat-only) when `args.nodes >= 2` and prints a WARNING.
+  Operators who want to suppress the WARNING pass `--robustness-mock`
+  explicitly. Until `robustness-agent` grows multi-node-aware probe
+  targeting (probe head pod over the cluster service URL, route
+  GPU / log probes through `kubectl exec` or a sidecar), the
+  multi-node path keeps robustness on the mock heartbeat.
+
+## Robustness limitation in multi-node mode
+
+`inference_optimizer.cli._resolve_robustness_choice` enforces the
+contract above:
+
+```python
+# pseudo-code mirroring the actual logic
+if args.nodes >= 2 and chosen == "agent":
+    if explicit:
+        print("WARN: ... auto-downgrading to --robustness-mock ...",
+              file=sys.stderr)
+    chosen = "mock"
+```
+
+Operator-visible effects:
+
+* All robustness intents are heartbeats — no `alert(HIGH)`,
+  no `escalate_strategy_change`, no `delegate(report)` /
+  `delegate(recover)` / `delegate(server_lifecycle)`,
+  no `prune_branch`, no `force_dispatch`, no `kill_task`.
+* The `<session_dir>/robustness-workdir/` and
+  `<session_dir>/agents/robustness/` directories stay empty (mock
+  backend does not write them).
+* Long-run health monitoring still works at the **shell** level via
+  `optimizer_runs/robustness_monitor.sh` (polls `state.json`,
+  detects terminal `stop_reason`, auto-resumes a dead optimizer);
+  that monitor is independent of the in-process robustness backend.
+
+The auto-downgrade is unconditional on `args.nodes >= 2`. The
+explicit-flag WARNING is the only operator signal (silent when the
+default `--robustness-agent` was selected via
+`DEFAULT_ROBUSTNESS_BACKEND` rather than an explicit CLI flag).
 
 ## Exit Codes (for the controller / agent)
 
