@@ -880,6 +880,26 @@ class SharedState:
         """Capture the result returned by kernel_optimization_handler so the
         next Orch turn knows what's already been tried (and the outcome).
 
+        Two overwrite invariants protect the multi-KEEP integrate queue:
+
+        * **Empty kernel_id is a no-op.** A metadata-less failure result
+          (e.g. ``{"status":"failed", "error":"TimeoutExpired"}`` wrapped
+          by the Coordinator's batch handler exception path) must NOT
+          clobber a previously-recorded KEEP. Otherwise streaming
+          ``record_partial`` writes from a batch's fast KEEPs would be
+          erased the moment one slow sibling times out, and Orchestration
+          would never see ``last_kernel_opt.decision == "KEEP"`` -- which
+          is the only gate that opens TODO 4/5 integrate.
+
+        * **Non-KEEP cannot overwrite a pending KEEP.** During a
+          ``_run_optimization_batch`` fan-out, sub-results land in
+          completion order, not micro_speedup order. A late-arriving
+          REVERT / PARTIAL must not displace an earlier KEEP that hasn't
+          been integrated yet. We keep the strongest unresolved KEEP in
+          ``last_kernel_opt`` and let the integrate queue
+          (``next_pending_keep_kernel_id``) drain via the per-kernel
+          ``kernel_opt_attempts`` ledger.
+
         Retires ``kernel_id`` into ``rejected_kernel_ids`` when the same
         kernel has accumulated >= ``max_partial`` PARTIAL outcomes (no
         measurable speedup), not just on REVERT. Without this guard, an
@@ -891,26 +911,32 @@ class SharedState:
         """
         if not isinstance(result, dict):
             return
+        kernel_id = str(result.get("kernel_id") or "")
+        if not kernel_id:
+            # Metadata-less failure (batch handler exception, programmatic
+            # rejection, ...). Preserve last_kernel_opt + attempts so a
+            # prior streaming-record KEEP survives.
+            return
+
         verification = result.get("verification") or {}
         proposal = result.get("proposal") or {}
-        decision = str(proposal.get("decision", ""))
-        self.last_kernel_opt = {
-            "kernel_id": result.get("kernel_id", ""),
-            "decision": decision,
-            "reasons": proposal.get("reasons", []),
-            "micro_speedup": verification.get("micro_speedup", 0.0),
-            "compile_passed": verification.get("compile_passed"),
-            "correctness_passed": verification.get("correctness_passed"),
-            "best_artifact_path": verification.get("best_artifact_path", ""),
-            "ts": _now_iso(),
-        }
-        kernel_id = str(self.last_kernel_opt.get("kernel_id") or "")
-        if not kernel_id:
-            return
+        decision = str(proposal.get("decision", "")).upper()
+        micro_speedup = verification.get("micro_speedup", 0.0)
+        try:
+            micro_float = float(micro_speedup)
+        except (TypeError, ValueError):
+            micro_float = 0.0
+        best_artifact_path = str(verification.get("best_artifact_path", "") or "")
+        source_file = str(
+            result.get("source_file")
+            or (result.get("candidate") or {}).get("source_file")
+            or ""
+        )
+        ts = _now_iso()
 
         entry = dict(self.kernel_opt_attempts.get(kernel_id) or {})
         history = list(entry.get("history") or [])
-        history.append({"decision": decision, "ts": self.last_kernel_opt["ts"]})
+        history.append({"decision": decision, "micro": micro_float, "ts": ts})
         history = history[-10:]
         entry["attempts"] = int(entry.get("attempts", 0)) + 1
         if decision == "PARTIAL":
@@ -920,8 +946,37 @@ class SharedState:
             # regression should not be auto-retired on stale history.
             entry["partial_count"] = 0
         entry["last_decision"] = decision
-        entry["last_ts"] = self.last_kernel_opt["ts"]
+        entry["last_micro_speedup"] = micro_float
+        entry["last_artifact_path"] = best_artifact_path
+        entry["last_source_file"] = source_file
+        entry["last_ts"] = ts
         entry["history"] = history
+
+        # Overwrite policy for last_kernel_opt:
+        #   * KEEP always wins (highest micro bubbles up).
+        #   * Non-KEEP only writes when there's no pending KEEP to protect.
+        prev = self.last_kernel_opt or {}
+        prev_decision = str(prev.get("decision", "")).upper()
+        prev_kid = str(prev.get("kernel_id", ""))
+        integrated_ids = self._kernel_ids_in_optimization_stack()
+        prev_pending = (
+            prev_decision == "KEEP"
+            and bool(prev_kid)
+            and prev_kid not in (self.rejected_kernel_ids or [])
+            and prev_kid not in integrated_ids
+        )
+        if decision == "KEEP" or not prev_pending:
+            self.last_kernel_opt = {
+                "kernel_id": kernel_id,
+                "decision": decision,
+                "reasons": proposal.get("reasons", []),
+                "micro_speedup": micro_float,
+                "compile_passed": verification.get("compile_passed"),
+                "correctness_passed": verification.get("correctness_passed"),
+                "best_artifact_path": best_artifact_path,
+                "source_file": source_file,
+                "ts": ts,
+            }
 
         max_partial = _DEFAULT_KERNEL_OPT_MAX_PARTIAL
         env_v = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL")
@@ -947,6 +1002,125 @@ class SharedState:
             )
 
         self.kernel_opt_attempts[kernel_id] = entry
+
+    # ------------------------------------------------------------------
+    # Multi-KEEP integrate queue helpers (PR-B follow-up).
+    # ------------------------------------------------------------------
+    def _kernel_ids_in_optimization_stack(self) -> set[str]:
+        """kernel_ids already absorbed into optimization_stack as integrate entries."""
+        return {
+            str(e.get("kernel_id"))
+            for e in (self.optimization_stack or [])
+            if isinstance(e, dict)
+            and e.get("action") == "integrate"
+            and e.get("kernel_id")
+        }
+
+    def _source_files_in_optimization_stack(self) -> set[str]:
+        """source_file paths already touched by an integrate entry on the stack.
+
+        Used to enforce "same source_file, only the strongest KEEP gets
+        integrated" -- ``apply_kernel_patch`` is a ``shutil.copy2`` whole-
+        file overwrite, so two patches on the same file would silently
+        clobber each other.
+        """
+        sources: set[str] = set()
+        for e in (self.optimization_stack or []):
+            if not isinstance(e, dict) or e.get("action") != "integrate":
+                continue
+            src = str(e.get("target_file") or e.get("source_file") or "")
+            if src:
+                sources.add(src)
+        return sources
+
+    def next_pending_keep_kernel_id(self) -> str:
+        """Return next KEEP kernel_id awaiting integrate, or "" if drained.
+
+        Ordering:
+          1. Exclude already-integrated (in optimization_stack), rejected
+             kernels, and any KEEP whose source_file is already covered
+             by an earlier integrate (same-file conflict guard).
+          2. Among the remaining KEEPs, pick the highest
+             ``last_micro_speedup`` so the strongest lever lands first.
+
+        Consumers: Coordinator's ``_kernel_opt_keep_pending`` for the
+        TODO 4/5 integrate gate, plus the prompt_builder rendering used
+        by Orchestration / robustness to see how many KEEPs are queued.
+        """
+        integrated_ids = self._kernel_ids_in_optimization_stack()
+        integrated_sources = self._source_files_in_optimization_stack()
+        rejected = set(self.rejected_kernel_ids or [])
+
+        best_kid = ""
+        best_micro = float("-inf")
+        for kid, entry in (self.kernel_opt_attempts or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("last_decision", "")).upper() != "KEEP":
+                continue
+            if kid in integrated_ids or kid in rejected:
+                continue
+            src = str(entry.get("last_source_file") or "")
+            if src and src in integrated_sources:
+                # Same-file conflict: a stronger KEEP on this file was
+                # already integrated (or this KEEP came after one did).
+                continue
+            try:
+                micro = float(entry.get("last_micro_speedup") or 0.0)
+            except (TypeError, ValueError):
+                micro = 0.0
+            if micro > best_micro:
+                best_micro = micro
+                best_kid = kid
+        return best_kid
+
+    def pending_keep_kernel_ids(self) -> list[str]:
+        """All KEEP kernel_ids awaiting integrate, sorted strongest-first.
+
+        Used by the Orchestration prompt so the LLM sees how many
+        integrate cycles are queued and does NOT propose ``report``
+        before draining them.
+        """
+        integrated_ids = self._kernel_ids_in_optimization_stack()
+        integrated_sources = self._source_files_in_optimization_stack()
+        rejected = set(self.rejected_kernel_ids or [])
+        # Track which source_files we've already counted so the queue
+        # mirrors ``next_pending_keep_kernel_id``'s same-file conflict
+        # guard (only the strongest KEEP per source_file is queueable).
+        claimed_sources: set[str] = set()
+        ranked: list[tuple[float, str, str]] = []
+        for kid, entry in (self.kernel_opt_attempts or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("last_decision", "")).upper() != "KEEP":
+                continue
+            if kid in integrated_ids or kid in rejected:
+                continue
+            src = str(entry.get("last_source_file") or "")
+            if src and src in integrated_sources:
+                continue
+            try:
+                micro = float(entry.get("last_micro_speedup") or 0.0)
+            except (TypeError, ValueError):
+                micro = 0.0
+            ranked.append((micro, kid, src))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        result: list[str] = []
+        for _micro, kid, src in ranked:
+            if src and src in claimed_sources:
+                continue
+            if src:
+                claimed_sources.add(src)
+            result.append(kid)
+        return result
+
+    @property
+    def has_keep_pending_integrate(self) -> bool:
+        return bool(self.next_pending_keep_kernel_id())
+
+    @property
+    def kernel_opt_attempts_count(self) -> int:
+        return len(self.kernel_opt_attempts or {})
 
     # ------------------------------------------------------------------
     # Per-action audit (kernel parity for non-kernel actions)
@@ -1901,6 +2075,20 @@ class SharedState:
             f"backend_winners_history={self._format_backend_winners_history()}",
             f"synergy_attempted={len(self.synergy_attempted)} combos",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
+            # PR-B multi-KEEP integrate queue: surfaces the full set of
+            # pending KEEPs the integrate gate will drain (strongest-
+            # first), plus the per-kernel attempts count Fix-2 reads to
+            # silence ``no_levers_found`` false positives while batch
+            # kernel_opt is in flight.
+            (
+                "pending_keep_kernels="
+                f"{self.pending_keep_kernel_ids() or '(none)'}"
+            ),
+            (
+                "has_keep_pending_integrate="
+                f"{'true' if self.has_keep_pending_integrate else 'false'}"
+            ),
+            f"kernel_opt_attempts_count={self.kernel_opt_attempts_count}",
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
