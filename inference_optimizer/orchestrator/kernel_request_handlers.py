@@ -97,7 +97,20 @@ _REUSABLE_SOURCE_ROOTS = (
 )
 _APPLY_TOOL_MODULE: Any | None = None
 _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
-_DEFAULT_KERNEL_BATCH_PARALLEL = 3
+# Soft upper bound on concurrent ``_run_kernel_backend_sequence`` coroutines
+# inside ``_run_optimization_batch``. The real GPU scheduling happens one
+# layer below: GEAK / OOB submitters register their work as
+# ``ray.remote(num_gpus=...)`` tasks, so Ray serializes any oversubscription
+# against the cluster's actual GPU resources (typical MI300X / MI355X node
+# = 8 GPU). This default mirrors that node size so a single
+# ``run_optimization`` request can fan out to one GEAK/OOB attempt per GPU
+# without the asyncio semaphore artificially capping below Ray's view.
+# Pre-PR-X default was 3, which throttled even small batches (e.g. A3B's
+# 3 kernel units were already at the cap, and larger TraceLens outputs
+# silently serialized behind sem). Override via
+# ``KERNEL_OPT_MAX_PARALLEL`` env (>=1) on nodes with fewer GPUs or when
+# the LLM API gateway becomes the new bottleneck.
+_DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _CANDIDATE_ENV_KEYS = {
     "CONC",
     "ISL",

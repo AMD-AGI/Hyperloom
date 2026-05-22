@@ -2087,3 +2087,131 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
             assert "boom" in r.payload["result"]["error"]
         finally:
             await c.stop()
+
+
+# ===========================================================================
+# PR-X: batch dispatch enablers
+#   1) _DEFAULT_KERNEL_BATCH_PARALLEL is sized for a full MI300X-class node
+#      so a single ``run_optimization`` batch fans out to one GEAK / OOB
+#      attempt per GPU (Ray then schedules against actual ``num_gpus``).
+#   2) Coordinator force-injects ``candidates_path`` from SharedState into
+#      every ``run_optimization`` payload so the batch path
+#      (``_run_optimization_batch``) fires deterministically regardless of
+#      whether the LLM remembered to include the field. LLM-supplied
+#      values still win, so future prompts can target a different
+#      TraceLens snapshot.
+# ===========================================================================
+def test_default_kernel_batch_parallel_matches_full_node():
+    """Default fanout is sized for a single MI300X / MI355X node (8 GPU)
+    so a typical ``run_optimization`` batch (TraceLens emits 3-8 reusable
+    units) does NOT serialize behind an asyncio semaphore tighter than
+    Ray's view of the cluster. Pre-PR-X value was 3, which throttled even
+    the small batches actually observed in production sessions."""
+    assert krh._DEFAULT_KERNEL_BATCH_PARALLEL == 8
+
+
+@pytest.mark.asyncio
+async def test_coordinator_injects_candidates_path_for_run_optimization(
+    session_dir, monkeypatch,
+):
+    """When the LLM emits ``run_optimization`` without ``candidates_path``,
+    the Coordinator must pull it from ``state.last_trace_analyze`` and
+    inject it into the handler payload so ``_run_optimization_batch``
+    fires instead of silently collapsing to ``_run_optimization_single``
+    (which would waste 7 idle GPUs on an 8-GPU node)."""
+    # Bypass the N13/N19c sequence gate that normally denies
+    # ``run_optimization`` until a roofline snapshot + cheap exploration
+    # exist; this test focuses purely on the injection path.
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
+    c = Coordinator(session_dir, backends=_backends_silent())
+    # ``_sequence_denial_for_request`` requires both baseline_tput > 0
+    # and last_profile_trace to be set (kernel requests are denied with
+    # "baseline must run first" / "profile must run first" otherwise);
+    # simulate the post-baseline + post-profile state so we exercise the
+    # injection branch under realistic ordering preconditions.
+    c.shared_state.baseline_tput = 1234.5
+    c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
+    cached_path = "/wekafs/cached/kernel_candidates.json"
+    c.shared_state.last_trace_analyze = {
+        "trace_input": "/wekafs/trace/x.json.gz",
+        "candidates_path": cached_path,
+    }
+    # On this branch ``_sequence_denial_for_request`` still consults
+    # ``last_select_kernels`` (the rename to ``trace_analyze`` is
+    # planned for M3); seed it with the same trace so the gate clears.
+    c.shared_state.last_select_kernels = {
+        "trace_input": "/wekafs/trace/x.json.gz",
+        "candidates_path": cached_path,
+    }
+
+    captured: dict = {}
+
+    async def fake_handler(payload, *, session_dir):
+        captured["payload"] = dict(payload)
+        return {"status": "ok"}
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
+                     {"run_optimization": fake_handler}):
+        try:
+            await c._handle_intent("orchestration", Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel",
+                    "kind": "run_optimization",
+                    "params": {"kernel_id": "k001"},  # no candidates_path
+                },
+            ))
+            assert captured["payload"].get("candidates_path") == cached_path
+            # The original LLM-supplied kernel_id still rides along; the
+            # handler's batch path will ignore it in favour of the
+            # ``candidates_path`` fan-out, but we must not strip it here
+            # so single-kernel callers (legacy / overrides) keep working.
+            assert captured["payload"].get("kernel_id") == "k001"
+        finally:
+            await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_does_not_overwrite_explicit_candidates_path(
+    session_dir, monkeypatch,
+):
+    """If the LLM explicitly supplies a ``candidates_path`` (e.g. pointing
+    at an older TraceLens snapshot for a targeted re-run), the
+    Coordinator must NOT clobber it with the cached SharedState value."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
+    c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 1234.5
+    c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
+    c.shared_state.last_trace_analyze = {
+        "trace_input": "/wekafs/trace/x.json.gz",
+        "candidates_path": "/wekafs/cached/kernel_candidates.json",
+    }
+    c.shared_state.last_select_kernels = {
+        "trace_input": "/wekafs/trace/x.json.gz",
+        "candidates_path": "/wekafs/cached/kernel_candidates.json",
+    }
+    explicit = "/wekafs/operator/override_candidates.json"
+
+    captured: dict = {}
+
+    async def fake_handler(payload, *, session_dir):
+        captured["payload"] = dict(payload)
+        return {"status": "ok"}
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
+                     {"run_optimization": fake_handler}):
+        try:
+            await c._handle_intent("orchestration", Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel",
+                    "kind": "run_optimization",
+                    "params": {
+                        "kernel_id": "k001",
+                        "candidates_path": explicit,
+                    },
+                },
+            ))
+            assert captured["payload"].get("candidates_path") == explicit
+        finally:
+            await c.stop()
