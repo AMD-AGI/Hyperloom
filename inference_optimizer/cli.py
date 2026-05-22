@@ -1740,8 +1740,29 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     ``--robustness-mock`` / ``--robustness-agent`` (sets
     ``args.robustness_backend``); ``None`` falls back to
     :data:`DEFAULT_ROBUSTNESS_BACKEND`. Hard-fails on an invalid value.
+
+    Multi-node auto-downgrade: when ``args.nodes >= 2`` the
+    robustness-agent's ``LocalProbeSource`` family targets
+    sandbox-local resources only — ``ray status``, the inference
+    server health URL, the auth-proxy URL, GPU / FD / disk / shm
+    metrics, etc. On multi-node every one of those resources lives
+    in a separate Kubernetes pod (head pod / worker pod / RayJob
+    submitter), unreachable from the sandbox by design. Each probe
+    failure surfaces as a HIGH-severity false positive symptom
+    (``ray_head_dead``, ``local_server_unreachable``,
+    ``auth_proxy_unhealthy``, ``gpu_memory_leaked``, ...) that
+    drowns the bus, eats ActionLadder cooldown slots, and risks
+    tripping ``escalate_strategy_change`` chains that stall
+    Orchestration. Until ``robustness-agent`` grows multi-node-aware
+    probe targeting, the cleanest path is to disable the real
+    backend on multi-node and rely on the mock heartbeat. Operators
+    who explicitly pass ``--robustness-agent`` get a WARNING and
+    the auto-downgrade is honoured anyway; passing
+    ``--robustness-mock`` suppresses the WARNING. Single-node
+    behaviour is unchanged.
     """
     chosen = getattr(args, "robustness_backend", None)
+    explicit = chosen is not None
     if chosen is None:
         chosen = DEFAULT_ROBUSTNESS_BACKEND
     if chosen not in _VALID_ROBUSTNESS_BACKENDS:
@@ -1753,6 +1774,22 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
             file=sys.stderr,
         )
         sys.exit(2)
+    nodes = int(getattr(args, "nodes", 1) or 1)
+    if nodes >= 2 and chosen == "agent":
+        if explicit:
+            print(
+                f"WARN: --robustness-agent selected but nodes={nodes} — "
+                f"robustness-agent's LocalProbe family targets "
+                f"sandbox-local resources (ray, inference server, "
+                f"auth-proxy, GPU, ...) that all live in separate pods "
+                f"on multi-node and surface as HIGH false positives. "
+                f"Auto-downgrading to --robustness-mock; pass "
+                f"--robustness-mock explicitly to suppress this "
+                f"warning. See inference_optimizer/multi_node/SKILL.md "
+                f"(Robustness limitation in multi-node mode).",
+                file=sys.stderr,
+            )
+        chosen = "mock"
     return chosen
 
 
