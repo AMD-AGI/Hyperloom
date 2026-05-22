@@ -20,7 +20,7 @@
 # here but not yet monitored upstream are tolerated — the REST
 # wrapper logs a warning and skips them.
 
-kernel_specialist:
+kernel_switch_specialist:
   repos:
     - ROCm/aiter
     - triton-lang/triton
@@ -34,7 +34,7 @@ kernel_specialist:
     - ck
     - triton
 
-framework_specialist:
+serving_specialist:
   repos:
     - sgl-project/sglang
     - ROCm/vllm

@@ -89,7 +89,7 @@ class _StubTask:
 def _valid_done_payload(
     *,
     gap: str = "gap.attention.fp8_kv",
-    domain: str = "framework_specialist",
+    domain: str = "serving_specialist",
     empty: bool = False,
     proposals: list[dict[str, Any]] | None = None,
     extras: dict[str, Any] | None = None,
@@ -120,20 +120,20 @@ def test_specialist_domains_catalogue_has_six_entries():
     )
 
 
-def test_framework_specialist_is_M5_active():
+def test_serving_specialist_is_M5_active():
     """PR-A6 (Arbor-into-Hyperloom) widened ``SPECIALIST_DOMAINS_M5``
     to cover all six domains because each now has a per-domain prompt
-    template (``_DOMAIN_FOCUS_TEMPLATES``). framework_specialist
+    template (``_DOMAIN_FOCUS_TEMPLATES``). serving_specialist
     remains active; the other five are now also active.
     """
-    assert "framework_specialist" in SPECIALIST_DOMAINS_M5
+    assert "serving_specialist" in SPECIALIST_DOMAINS_M5
     # PR-A6: M5 active set now equals the full catalogue.
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
 
 
 def test_get_domain_returns_none_for_unknown():
     assert get_domain("nonsense_specialist") is None
-    assert get_domain("framework_specialist").kb_anchor == "framework"
+    assert get_domain("serving_specialist").kb_anchor == "framework"
 
 
 # ===========================================================================
@@ -171,7 +171,7 @@ def test_R2_orchestration_can_dispatch_specialist(gate):
         payload={
             "action_name": "specialist",
             "params": {
-                "domain": "framework_specialist",
+                "domain": "serving_specialist",
                 "gap_canonical_id": "gap.kv.fp8",
                 "max_turns": 4,
             },
@@ -186,7 +186,7 @@ def test_R2_robustness_cannot_dispatch_specialist(gate):
             payload={
                 "action_name": "specialist",
                 "params": {
-                    "domain": "framework_specialist",
+                    "domain": "serving_specialist",
                     "gap_canonical_id": "gap.kv.fp8",
                 },
             },
@@ -217,7 +217,7 @@ def test_R2_missing_gap_denied(gate):
             type=IntentType.DELEGATE,
             payload={
                 "action_name": "specialist",
-                "params": {"domain": "framework_specialist"},
+                "params": {"domain": "serving_specialist"},
             },
         ))
     assert exc.value.rule == "specialist_dispatch_source"
@@ -231,7 +231,7 @@ def test_R2_max_turns_excess_denied(gate):
             payload={
                 "action_name": "specialist",
                 "params": {
-                    "domain": "framework_specialist",
+                    "domain": "serving_specialist",
                     "gap_canonical_id": "gap.x",
                     "max_turns": SPECIALIST_MAX_TURNS_HARD_CAP + 1,
                 },
@@ -248,7 +248,7 @@ def test_R2_max_turns_zero_denied(gate):
             payload={
                 "action_name": "specialist",
                 "params": {
-                    "domain": "framework_specialist",
+                    "domain": "serving_specialist",
                     "gap_canonical_id": "gap.x",
                     "max_turns": 0,
                 },
@@ -274,7 +274,7 @@ def test_R2_specialist_action_skips_unknown_action_registry_path(gate):
         payload={
             "action_name": SPECIALIST_ACTION_NAME,
             "params": {
-                "domain": "framework_specialist",
+                "domain": "serving_specialist",
                 "gap_canonical_id": "gap.x",
             },
         },
@@ -423,7 +423,7 @@ def test_research_lane_has_no_conflicts():
 def test_prompt_builder_emits_nine_sections():
     sys_p, usr_p = build_specialist_prompts_for_domain(
         task_id="task-001",
-        domain_key="framework_specialist",
+        domain_key="serving_specialist",
         gap_canonical_id="gap.scheduler.long_isl",
         gpu_type="MI300X",
         tp=8,
@@ -444,7 +444,7 @@ def test_prompt_builder_emits_nine_sections():
 def test_prompt_builder_uses_none_placeholder_for_empty_sections():
     sys_p, usr_p = build_specialist_prompts_for_domain(
         task_id="task-002",
-        domain_key="framework_specialist",
+        domain_key="serving_specialist",
     )
     # Several user-side sections will be empty → "(none)" placeholder.
     assert "(none)" in usr_p
@@ -453,7 +453,7 @@ def test_prompt_builder_uses_none_placeholder_for_empty_sections():
 def test_prompt_builder_pr_feed_unavailable_renders_explanatory_line():
     sys_p, usr_p = build_specialist_prompts_for_domain(
         task_id="task-003",
-        domain_key="framework_specialist",
+        domain_key="serving_specialist",
         pr_monitor_available=False,
     )
     assert "pr_monitor unavailable" in usr_p
@@ -489,7 +489,7 @@ async def test_specialist_runner_happy_path(tmp_path):
     task = _StubTask(
         task_id="task-xyz",
         params={
-            "domain": "framework_specialist",
+            "domain": "serving_specialist",
             "gap_canonical_id": "gap.scheduler",
             "max_turns": 4,
         },
@@ -498,7 +498,7 @@ async def test_specialist_runner_happy_path(tmp_path):
     result = await runner.run(ctx)
 
     assert result.status == "succeeded"
-    assert result.specialist_done["domain"] == "framework_specialist"
+    assert result.specialist_done["domain"] == "serving_specialist"
     assert result.specialist_done["gap_canonical_id"] == "gap.scheduler"
     assert len(result.specialist_done["proposal_set"]) == 2
     assert result.turns_used == 1
@@ -535,7 +535,7 @@ async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
     task = _StubTask(
         task_id="task-stale",
         params={
-            "domain": "framework_specialist",
+            "domain": "serving_specialist",
             "gap_canonical_id": "gap.x",
             "max_turns": 2,
         },
@@ -546,7 +546,7 @@ async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
     assert result.status == "empty_synthesised"
     assert result.specialist_done["empty"] is True
     assert result.specialist_done["proposal_set"] == []
-    assert result.specialist_done["domain"] == "framework_specialist"
+    assert result.specialist_done["domain"] == "serving_specialist"
     assert "max_turns_exhausted" in result.specialist_done.get("reason", "")
     assert result.turns_used == 2  # max_turns reached
     # The synthesised payload is still valid against PolicyGate R3.
@@ -572,7 +572,7 @@ async def test_specialist_runner_backend_error_synthesises_empty_done(tmp_path):
     task = _StubTask(
         task_id="task-err",
         params={
-            "domain": "framework_specialist",
+            "domain": "serving_specialist",
             "gap_canonical_id": "gap.x",
             "max_turns": 2,
         },
@@ -638,7 +638,7 @@ def test_build_empty_specialist_done_is_R3_valid():
     PolicyGate R3 will accept."""
     done = build_empty_specialist_done(
         gap_canonical_id="gap.x",
-        domain="framework_specialist",
+        domain="serving_specialist",
         reason="example reason",
     )
     gate = PolicyGate(role_registry=default_role_registry())
@@ -663,17 +663,17 @@ def test_record_specialist_round_dedup_by_round_id():
     s = SharedState()
     s.record_specialist_round({
         "round_id": "explore-001",
-        "domains": ["framework_specialist"],
+        "domains": ["serving_specialist"],
         "proposals_total": 2,
     })
     s.record_specialist_round({
         "round_id": "explore-001",
-        "domains": ["framework_specialist"],
+        "domains": ["serving_specialist"],
         "proposals_total": 5,    # updated count
     })
     s.record_specialist_round({
         "round_id": "explore-002",
-        "domains": ["framework_specialist"],
+        "domains": ["serving_specialist"],
         "proposals_total": 1,
     })
     assert len(s.specialist_rounds) == 2
@@ -683,25 +683,25 @@ def test_record_specialist_round_dedup_by_round_id():
 
 def test_bump_specialist_domain_empty_streak():
     s = SharedState()
-    assert s.bump_specialist_domain_empty_streak("framework_specialist",
+    assert s.bump_specialist_domain_empty_streak("serving_specialist",
                                                   empty=True) == 1
-    assert s.bump_specialist_domain_empty_streak("framework_specialist",
+    assert s.bump_specialist_domain_empty_streak("serving_specialist",
                                                   empty=True) == 2
     # A non-empty proposal_set resets.
-    assert s.bump_specialist_domain_empty_streak("framework_specialist",
+    assert s.bump_specialist_domain_empty_streak("serving_specialist",
                                                   empty=False) == 0
     # Other domains don't share state.
-    assert s.bump_specialist_domain_empty_streak("kernel_specialist",
+    assert s.bump_specialist_domain_empty_streak("kernel_switch_specialist",
                                                   empty=True) == 1
-    assert s.specialist_domain_empty_streak["framework_specialist"] == 0
-    assert s.specialist_domain_empty_streak["kernel_specialist"] == 1
+    assert s.specialist_domain_empty_streak["serving_specialist"] == 0
+    assert s.specialist_domain_empty_streak["kernel_switch_specialist"] == 1
 
 
 def test_update_last_specialist_snapshot():
     s = SharedState()
     s.update_last_specialist({
         "task_id": "task-001",
-        "domain": "framework_specialist",
+        "domain": "serving_specialist",
         "status": "succeeded",
     })
     assert s.last_specialist["task_id"] == "task-001"

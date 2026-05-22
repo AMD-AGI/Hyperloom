@@ -251,7 +251,7 @@ def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
     )
     coord.shared_state = state
 
-    params: dict = {"domain": "framework_specialist"}
+    params: dict = {"domain": "serving_specialist"}
     coord._warm_specialist_params(params)
 
     # PR feed surfaced + flattened.
@@ -290,7 +290,7 @@ def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path):
         gpu_type: str = ""
     coord.shared_state = _State()
 
-    params: dict = {"domain": "framework_specialist"}
+    params: dict = {"domain": "serving_specialist"}
     coord._warm_specialist_params(params)
     assert params["pr_feed"] == []
     assert params["pr_monitor_available"] is False
@@ -314,7 +314,7 @@ def test_warm_specialist_params_respects_explicit_pr_feed(tmp_path: Path):
 
     explicit_pr_feed = [{"repo": "x/y", "title": "preset PR", "labels": []}]
     params: dict = {
-        "domain": "framework_specialist",
+        "domain": "serving_specialist",
         "pr_feed": explicit_pr_feed,
     }
     coord._warm_specialist_params(params)
@@ -342,7 +342,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
 
     done_payload = {
         "gap_canonical_id": "gap.scheduler.moe",
-        "domain": "framework_specialist",
+        "domain": "serving_specialist",
         "proposal_set": [
             {
                 "variant_name": "moe_expert_parallel",
@@ -387,7 +387,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
         task = _StubTask(
             task_id="task-int-1",
             params={
-                "domain": "framework_specialist",
+                "domain": "serving_specialist",
                 "gap_canonical_id": "gap.scheduler.moe",
                 "max_turns": 4,
             },
@@ -402,7 +402,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
     assert isinstance(result_dict, dict)
     assert result_dict["runner_status"] == "succeeded"
     assert result_dict["task_id"] == "task-int-1"
-    assert result_dict["domain"] == "framework_specialist"
+    assert result_dict["domain"] == "serving_specialist"
     assert result_dict["gap_canonical_id"] == "gap.scheduler.moe"
 
     # specialist_done payload bubbled through end-to-end.
@@ -459,7 +459,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
         task = _StubTask(
             task_id="task-stale-1",
             params={
-                "domain": "framework_specialist",
+                "domain": "serving_specialist",
                 "gap_canonical_id": "gap.x",
                 "max_turns": 2,
             },

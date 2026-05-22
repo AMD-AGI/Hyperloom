@@ -173,7 +173,7 @@ def _write_specialist_workspace_with_patch(
     patch_file.write_text("dummy patch contents\n")
     (workspace / "specialist_done.json").write_text(json.dumps({
         "gap_canonical_id": "gap.test",
-        "domain": "framework_specialist",
+        "domain": "serving_specialist",
         "proposal_set": [],
         "patches_written": ["patches/001_test.patch"],
         "empty": False,
@@ -258,7 +258,7 @@ async def test_executor_proceeds_when_verdict_is_approve(tmp_path: Path):
     (workspace / "worktree" / "patches" / "001.patch").write_text(patch_text)
     (workspace / "specialist_done.json").write_text(json.dumps({
         "gap_canonical_id": "gap.ok",
-        "domain": "framework_specialist",
+        "domain": "serving_specialist",
         "proposal_set": [],
         "patches_written": ["patches/001.patch"],
         "empty": False,
