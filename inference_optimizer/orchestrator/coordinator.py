@@ -3065,6 +3065,32 @@ class Coordinator:
                     and not merged_payload.get("roofline_json")
                 ):
                     merged_payload["roofline_json"] = self.shared_state.last_profile_roofline
+                # PR-X: Force batch dispatch for run_optimization.
+                # ``kernel_request_handlers.run_optimization_handler`` upgrades
+                # the request to ``_run_optimization_batch`` only when the
+                # payload carries ``candidates_path`` (so it can fan out to
+                # every reusable kernel concurrently, bounded by
+                # ``_DEFAULT_KERNEL_BATCH_PARALLEL`` / Ray's per-task
+                # ``num_gpus`` reservation). Orchestration prompts already
+                # teach the LLM to include this field, but a missing /
+                # malformed value would silently collapse the dispatch back
+                # to a single-kernel run -- wasting 7 idle GPUs on a typical
+                # MI300X node and serializing the rest of the candidates
+                # over many LLM turns. Inject it from the SharedState
+                # snapshot here so batch mode is deterministic regardless of
+                # LLM compliance. LLM-supplied value still wins (e.g. when
+                # operators or future prompts want to target a different
+                # TraceLens snapshot).
+                if (
+                    kind == "run_optimization"
+                    and self.shared_state.last_trace_analyze
+                    and not merged_payload.get("candidates_path")
+                ):
+                    cached_candidates_path = self.shared_state.last_trace_analyze.get(
+                        "candidates_path"
+                    )
+                    if cached_candidates_path:
+                        merged_payload["candidates_path"] = cached_candidates_path
                 cache_hit_source = None
                 cached_result = self._cached_kernel_request(kind, merged_payload)
                 if cached_result is not None:
