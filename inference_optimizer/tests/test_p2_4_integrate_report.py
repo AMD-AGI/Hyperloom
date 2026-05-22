@@ -143,7 +143,7 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("subprocess.run", side_effect=_fake_run):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -185,7 +185,7 @@ async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(s
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("subprocess.run", side_effect=_fake_run):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -218,7 +218,7 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("subprocess.run", side_effect=_fake_run):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "REVERT"
     assert res["gain_pct"] < -1
@@ -252,7 +252,7 @@ async def test_integrate_handler_reverts_applied_source_on_non_keep(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("subprocess.run", side_effect=_fake_run):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "REVERT"
@@ -299,7 +299,7 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("subprocess.run", side_effect=_fake_run):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -424,7 +424,7 @@ async def test_integrate_handler_injects_extra_sglang_args(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("subprocess.run", side_effect=_fake_run):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "KEEP"
@@ -457,7 +457,7 @@ async def test_integrate_handler_needs_review_when_within_threshold(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("subprocess.run", side_effect=_fake_run):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "NEEDS_REVIEW"
 
@@ -504,7 +504,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
             "reusable_native_kernel_ids": ["k1"],
         }
         c.shared_state.save(session_dir)
-        with patch("subprocess.run", side_effect=_fake_run):
+        with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
             await c._handle_intent("orchestration", Intent(
                 type=IntentType.REQUEST,
                 payload={
@@ -584,7 +584,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
                 "skip_rebuild": True,
             },
         }
-        with patch("subprocess.run", side_effect=_fake_run):
+        with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
             for _ in range(4):
                 await c._handle_intent(
                     "orchestration",

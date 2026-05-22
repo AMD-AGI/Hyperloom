@@ -33,7 +33,6 @@ P2#7 case study shows up there because all sweep tasks land on
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,8 +41,6 @@ from ..sources.base import SourceData
 from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
-
-log = logging.getLogger(__name__)
 
 
 @dataclass
