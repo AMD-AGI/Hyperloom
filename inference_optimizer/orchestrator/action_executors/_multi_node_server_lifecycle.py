@@ -435,7 +435,13 @@ async def restart_server_for_round(
                 ).strip() or None,
                 print_logs=False,
                 poll_interval=poll_interval_s,
-                poll_timeout=health_timeout_s,
+                poll_timeout=int(
+                    os.environ.get(
+                        "HYPERLOOM_MN_POLL_TIMEOUT_S",
+                        str(health_timeout_s),
+                    )
+                    or health_timeout_s
+                ),
             )
             patch_rc = await asyncio.to_thread(cmd_apply_tracelens_patch, patch_ns)
             if patch_rc != 0:
@@ -456,7 +462,24 @@ async def restart_server_for_round(
     try:
         # Local import: avoid pulling httpx into the import path of any
         # caller that doesn't actually invoke the helper (single-node).
-        from ...multi_node.cli import cmd_restart_server
+        from ...multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
+
+        poll_timeout_s = int(
+            os.environ.get(
+                "HYPERLOOM_MN_POLL_TIMEOUT_S",
+                str(health_timeout_s),
+            )
+            or health_timeout_s
+        )
+        health_wait_s = int(
+            os.environ.get(
+                "HYPERLOOM_MN_HEALTH_WAIT_S",
+                str(health_timeout_s),
+            )
+            or health_timeout_s
+        )
+        # Align launch-driver poll with /health wait for JIT-heavy MoE runs.
+        poll_timeout_s = max(poll_timeout_s, _resolve_poll_timeout_s())
 
         ns = argparse.Namespace(
             framework=fw,
@@ -469,7 +492,7 @@ async def restart_server_for_round(
             no_wait_health=False,
             print_logs=False,
             poll_interval=poll_interval_s,
-            poll_timeout=health_timeout_s,
+            poll_timeout=poll_timeout_s,
             # PD knobs forwarded to multi_node CLI; colocated mode passes
             # only pd_mode and the rest stay at argparse defaults.
             pd_mode=pd.get("pd_mode", "colocated"),
@@ -537,9 +560,7 @@ async def restart_server_for_round(
         # 200's or we hit health_timeout_s.
         try:
             await _wait_for_server_health_async(
-                timeout_s=int(os.environ.get(
-                    "HYPERLOOM_MN_HEALTH_WAIT_S", str(health_timeout_s),
-                )),
+                timeout_s=health_wait_s,
                 poll_every_s=int(os.environ.get(
                     "HYPERLOOM_MN_HEALTH_POLL_S", "10",
                 )),

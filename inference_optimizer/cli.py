@@ -743,10 +743,39 @@ def _proxy_alive(proxy_port: int, timeout: float = 2.0) -> bool:
         return False
 
 
+def _proxy_forwards_llm(
+    proxy_port: int,
+    *,
+    upstream_url: str,
+    api_key: str,
+    timeout: float = 4.0,
+) -> bool:
+    """True when GET <proxy>/.../models with Bearer returns HTTP 200."""
+    import urllib.error
+    import urllib.request
+
+    if not upstream_url or not api_key:
+        return False
+    _, proxy_openai = _derive_proxy_urls(upstream_url, proxy_port)
+    models_url = f"{proxy_openai.rstrip('/')}/models"
+    req = urllib.request.Request(
+        models_url,
+        headers={"Authorization": f"Bearer {api_key}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except urllib.error.HTTPError as exc:
+        return exc.code == 200
+    except OSError:
+        return False
+
+
 def _ensure_auth_proxy_and_claude_config(
     safe_key: str, base_url: str
 ) -> tuple[str, str] | None:
-    """Start auth-proxy on :4002 and ensure ~/.claude/config.json uses it.
+    """Start auth-proxy (default :4010) and ensure ~/.claude/config.json uses it.
 
     The AMD primus-safe gateway rejects x-api-key (returns "token not
     present"). Claude CLI only sends x-api-key. The auth_proxy bridges
@@ -764,7 +793,7 @@ def _ensure_auth_proxy_and_claude_config(
     """
     import json as _json
 
-    proxy_port = int(os.environ.get("AUTH_PROXY_PORT", "4002"))
+    proxy_port = int(os.environ.get("AUTH_PROXY_PORT", "4010"))
     # OPENAI_BASE_URL is the canonical LiteLLM endpoint; ANTHROPIC_BASE_URL is
     # the legacy fallback for older sandbox env where only the Anthropic alias
     # was exported. Prefer OPENAI to stay consistent with install.sh /
@@ -817,25 +846,37 @@ def _ensure_auth_proxy_and_claude_config(
             return False
         return True
 
+    proxy_api_key = safe_key or os.environ.get("ANTHROPIC_API_KEY", "")
     proxy_ready = False
     if proxy_script.exists():
-        if _run_supervisor() and _proxy_alive(proxy_port):
+        def _proxy_ok() -> bool:
+            return _proxy_alive(proxy_port) and _proxy_forwards_llm(
+                proxy_port,
+                upstream_url=upstream_url,
+                api_key=proxy_api_key,
+            )
+
+        if _run_supervisor() and _proxy_ok():
             proxy_ready = True
         else:
             # 127 retry leg — supervisor may have just unblocked a stuck
             # port or swapped credentials. One re-run is cheap and recovers
             # from "port_open but probe timed out" races.
-            print("Preflight: auth-proxy not alive after first attempt; retrying")
-            if _run_supervisor() and _proxy_alive(proxy_port):
+            print("Preflight: auth-proxy not forwarding after first attempt; retrying")
+            if _run_supervisor() and _proxy_ok():
                 proxy_ready = True
     else:
-        # Supervisor missing — best-effort: trust the port if it is open.
-        if _proxy_alive(proxy_port):
-            print("Preflight: auth-proxy :4002 already open")
+        # Supervisor missing — best-effort: trust forward probe only.
+        key = safe_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        if _proxy_forwards_llm(
+            proxy_port, upstream_url=upstream_url, api_key=key
+        ):
+            print(f"Preflight: auth-proxy :{proxy_port} already forwarding /models")
             proxy_ready = True
         else:
             print(
-                "Preflight: WARNING — auth-proxy :4002 not running and "
+                f"Preflight: WARNING — auth-proxy :{proxy_port} not forwarding "
+                f"(port 4002 is often dfdaemon; set AUTH_PROXY_PORT=4010) and "
                 f"ensure_auth_proxy.sh not found at {proxy_script}"
             )
 
@@ -1557,9 +1598,13 @@ def _preflight() -> tuple[str, str] | None:
     # The two env vars MUST stay consistent — either both proxy or both orig.
     orig_anthropic = os.environ.get("ANTHROPIC_BASE_URL", "")
     orig_openai = os.environ.get("OPENAI_BASE_URL", "")
-    catalog_probe_url = (orig_openai or base_url or "").strip()
-    if catalog_probe_url:
-        os.environ["INFERENCE_OPTIMIZER_CATALOG_PROBE_URL"] = catalog_probe_url
+    # Do not overwrite an explicit upstream probe URL (launcher sets this
+    # before sourcing kernel-agent.env.sh, which rewrites OPENAI_BASE_URL to
+    # the local auth-proxy that has no GET /models).
+    if not os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip():
+        catalog_probe_url = (orig_openai or base_url or "").strip()
+        if catalog_probe_url:
+            os.environ["INFERENCE_OPTIMIZER_CATALOG_PROBE_URL"] = catalog_probe_url
     proxy_urls = _ensure_auth_proxy_and_claude_config(safe_key, base_url)
     if proxy_urls is not None:
         proxy_anthropic, proxy_openai = proxy_urls
