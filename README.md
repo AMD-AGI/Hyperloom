@@ -50,34 +50,80 @@ The fastest way to start is through the hosted **AMD Hyperloom** web interface �
 
 ## Quickstart — Local Mode (Cursor)
 
-### Inference Optimization
+### Environment Setup
 
-`inference_optimizer/` is the single, canonical skill in this repo. It uses a multi-agent architecture with a Python Coordinator orchestrating four agent roles: Orchestration, Kernel, Critic, and Robustness. All optimization tools (GEAK, OOB, TraceLens) are scheduled via a local Ray cluster — no MCP remote services required.
+Local Mode runs Hyperloom in a remote AMD GPU environment, then uses Cursor to connect to that environment and launch optimization. Complete these three steps in order:
 
-#### Step 1 — Prepare GPU Environment
+1. Prepare the GPU environment.
+2. Connect Cursor to that environment.
+3. Clone Hyperloom in the remote environment and run the bootstrap script.
 
-An AMD GPU node is required, with MI300X and MI355X supported. Two recommended setups:
+#### 1. Prepare the GPU Environment
 
-- **Recommended — SaFE Authoring Pod**: create an Authoring Pod on [Primus-SaFE](https://core42.example-internal-host.invalid/authoring) using an SGLang or vLLM inference image.
-- **Bring your own GPU host**: if you run on your own AMD GPU server, you can use one of the image examples below.
-
-Image examples:
+You need an AMD GPU machine that supports MI300X or MI355X, using an SGLang or vLLM ROCm inference image. Example images:
 
 - SGLang MI300X: `lmsysorg/sglang:v0.5.11-rocm720-mi30x`
 - SGLang MI355X: `lmsysorg/sglang:v0.5.11-rocm720-mi35x`
-- vLLM MI300X: `vllm/vllm-openai-rocm:v0.18.0`
-- vLLM MI355X: `vllm/vllm-openai-rocm:v0.18.0`
+- vLLM MI300X: `vllm/vllm-openai-rocm:v0.19.0`
+- vLLM MI355X: `vllm/vllm-openai-rocm:v0.19.0`
 
-#### Step 2 — Prepare Source Trees and Configure Environment Variables
+Choose one environment:
 
-Prepare Hyperloom and its dependency source trees on the GPU node, then set the path environment variables explicitly. Hyperloom does not pin these internal source repositories to fixed paths; runtime uses the repo paths you provide through the environment.
+- **Recommended — SaFE Authoring Pod**: create an Authoring Pod on [Primus-SaFE Authoring](https://core42.example-internal-host.invalid/authoring), select one of the SGLang or vLLM images above, and wait for the Pod to become ready.
+- **Your own GPU machine**: start a long-running ROCm inference container that can access the GPU. The container name, workspace path, model path, and image version in the example below can all be changed for your environment.
 
-**Required credentials:**
-
-Hyperloom can read credentials from `$REPO_ROOT/.env`. The recommended setup is to copy the template and fill in your key:
+Minimal Docker example for your own GPU machine:
 
 ```bash
-cd "$REPO_ROOT"
+docker run -d \
+  --name hyperloom-local \
+  --shm-size 64g \
+  --device /dev/kfd \
+  --device /dev/dri \
+  --group-add video \
+  -v /path/to/workspace:/workspace \
+  -v /path/to/models:/models \
+  lmsysorg/sglang:v0.5.11-rocm720-mi30x \
+  tail -f /dev/null
+```
+
+If Hyperloom is already cloned on the host, you can mount that checkout directly into the container, for example by replacing `-v /path/to/workspace:/workspace` with `-v /path/on/host/Hyperloom:/workspace/Hyperloom`. Then open `/workspace/Hyperloom` after attaching Cursor to the container; you do not need to clone Hyperloom again inside the container.
+
+#### 2. Connect Cursor to the Runtime Environment
+
+- **SaFE Authoring Pod**: when the Pod is ready, check the connection instructions in the SaFE Authoring page and follow them to connect with Cursor Remote SSH.
+- **Your own GPU machine + Docker**: first connect Cursor Remote SSH to the server running Docker, then use Dev Containers / Attach to Running Container to select `hyperloom-local` and open `/workspace` inside the container.
+
+> Tip: to attach Cursor to a Docker container on a remote server:
+>
+> 1. Open the command palette in Cursor: `Ctrl+Shift+P`.
+> 2. Search for `Remote-SSH: Connect to Host...` and connect to the server running Docker.
+> 3. In that SSH remote window, open Extensions: `Ctrl+Shift+X`.
+> 4. Search for and install `Dev Containers`, making sure it is installed in the current remote environment.
+> 5. Open the command palette again: `Ctrl+Shift+P`.
+> 6. Search for `Dev Containers: Attach to Running Container...`.
+> 7. Select `hyperloom-local` (or your container name) and open `/workspace` inside the container.
+
+#### 3. Clone Hyperloom and Bootstrap Local Mode
+
+In the remote environment, first make sure GitHub authentication and AMD-AGI repository access are available. `local_setup.sh` will use the same access to clone dependency repositories.
+
+If the remote environment does not already have a Hyperloom checkout, clone this repository:
+
+```bash
+git clone https://github.com/AMD-AGI/Hyperloom.git
+cd Hyperloom
+```
+
+If Hyperloom was mounted through a Docker volume or a SaFE Authoring Pod, enter the mounted checkout directly:
+
+```bash
+cd /workspace/Hyperloom
+```
+
+Prepare Hyperloom credentials:
+
+```bash
 cp .env.template .env
 ```
 
@@ -86,73 +132,49 @@ Edit `.env`:
 ```env
 SAFE_API_KEY=ak-your-safe-apikey
 OPENAI_BASE_URL=https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1
+
+# Optional, only set if you want the Cursor kernel-opt backend:
+# CURSOR_API_KEY=crsr_xxxxxxxxxxxx
+# CURSOR_DEFAULT_MODEL=claude-opus-4-7
 ```
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
 | `OPENAI_BASE_URL` | LLM gateway endpoint | `https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1` |
+| `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to skip cursor and only use claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
+| `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 
-Shell environment variables take precedence over values in `.env`, so advanced users can still export these variables directly.
+> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.example-internal-host.invalid/litellm-gateway). GEAK and OOB (claude/codex) inherit their API key and base URL from `SAFE_API_KEY` / `OPENAI_BASE_URL` automatically — no separate GEAK, OOB, InferenceX, or TraceLens configuration is needed.
 
-**Optional (Cursor kernel-opt backend):**
+> If HTTPS requests to `core42.example-internal-host.invalid` or the AMD LLM Gateway fail with a certificate verification error inside the container, install the AMD certificate bundle manually. This is most common when running on your own GPU server or a custom container image:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
+> ```
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `CURSOR_API_KEY` | Cursor SDK key for the OOB cursor backend; independent issuer (Cursor account, prefix `crsr_...`). When unset, Hyperloom auto-skips cursor from default backend selection and only races claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
-| `CURSOR_DEFAULT_MODEL` | Override the default Cursor model id. | `claude-opus-4-7` (default) |
+Then run the Local Mode bootstrap:
 
-**Path configuration:**
-
-These paths are used by the agent and installer to wire together the local Hyperloom stack:
-
-| Path | Why it is needed |
-|------|------------------|
-| `REPO_ROOT` | Locates this Hyperloom repo, including `inference_optimizer/`, `kernel-agent/`, skills, scripts, and runtime assets. |
-| `OOB_SRC` | Provides the OOB CLI and auth-proxy used by kernel optimization backends. |
-| `INFERENCEX_PATH` | Provides InferenceX benchmark/evaluation code and reference data used during baseline and target analysis. |
-| `TRACELENS_ROOT` | Provides TraceLens profiling tooling for bottleneck analysis and kernel selection. |
-| `USER_DATA_PATH` | Session directory root for logs, runs, source mirrors, and all per-session artefacts. Optional, defaults to `/workspace/hyperloom`. |
-
-Prepare the source trees from the corresponding repositories:
-
-- Hyperloom: this repository; clone it and point `REPO_ROOT` at the repo root.
-- OOB: clone the [AMD-AGI/Primus-Claw](https://github.com/AMD-AGI/Primus-Claw) repository, then point `OOB_SRC` at its `OOB/` subdirectory.
-- InferenceX: [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX); point `INFERENCEX_PATH` at the local repo root.
-- TraceLens-internal: [AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/); checkout `release/hyperloom_integration_v0.3.1` (or the matching `Hyperloom_integration_v0.3.1` tag) and point `TRACELENS_ROOT` at that checkout. The per-version `sglang_roofline_patches/sglang_<minor>_<patch>/` layout is required; pre-v0.3.1 flat checkouts are no longer supported.
-
-> `SAFE_API_KEY` is obtained from [LLM Gateway](https://core42.example-internal-host.invalid/litellm-gateway). GEAK and OOB (claude/codex) API Key / Base URL are automatically inherited from `SAFE_API_KEY` / `OPENAI_BASE_URL`. You can place these values in `$REPO_ROOT/.env`; no separate GEAK or OOB configuration is needed. The OOB **cursor** backend is the exception: it talks to Cursor's own gateway and requires a separate `CURSOR_API_KEY`. If `CURSOR_API_KEY` is unset, cursor is silently skipped from default kernel-opt selection.
-
-#### Step 3 — Connect via Cursor Remote SSH
-
-1. Connect to the GPU node via Remote SSH in Cursor
-2. Open the Hyperloom directory pointed to by `$REPO_ROOT`
-3. `cd "$REPO_ROOT"` to ensure skill files load correctly
-
-#### Step 4 — Launch Inference Optimization in Cursor Chat
-
-Reference `inference_optimizer/SKILL.md` in Cursor chat and describe the workload. The agent reads the skill, installs dependencies automatically, translates your workload into the appropriate CLI/environment settings, launches `inference_optimizer optimize`, and reports progress.
-
-**Minimal launch:**
-
-Example prompt:
-
-```text
-@$REPO_ROOT/inference_optimizer/SKILL.md
-
-Optimize this model:
-- Model: /path/to/your/model
-- GPU: MI300X
-- Framework: sglang
-- Budget: 2 hours
+```bash
+export USER_DATA_PATH=/path/to/hyperloom-run
+bash inference_optimizer/scripts/local_setup.sh
 ```
 
-**Typical long-running launch:**
+`USER_DATA_PATH` is Hyperloom's runtime directory for dependency code, logs, state, and optimization results. It is not the Hyperloom source directory, and you can point it at any location with enough space. `local_setup.sh` clones and wires OOB, InferenceX, and TraceLens into this directory, and writes a local env file. When it finishes, it prints:
 
-Example prompt:
+- the Hyperloom workspace path to open in Cursor;
+- the prompt template to paste into Cursor Chat;
+- the env file that the agent should source before launch.
 
-```text
-@$REPO_ROOT/inference_optimizer/SKILL.md
+Example output snippet:
+
+````text
+Open this folder in Cursor as the workspace:
+  /path/to/Hyperloom
+
+Paste this into Cursor Chat and fill in your workload:
+
+@inference_optimizer/SKILL.md
 
 Optimize inference for this workload:
 - Model: /path/to/your/model
@@ -166,23 +188,29 @@ Optimize inference for this workload:
 - Goal: improve throughput by at least 10%
 - Budget: 24 hours
 
-Paths:
-- Hyperloom repo: $REPO_ROOT
-- OOB source: $OOB_SRC
-- InferenceX repo: $INFERENCEX_PATH
-- TraceLens repo: $TRACELENS_ROOT
+Before launch, run exactly:
+```bash
+source '/path/to/hyperloom-run/runtime/local-setup.env.sh'
+export USER_DATA_PATH='/path/to/hyperloom-run'
+```
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
 2. Monitor the process every 300s until the optimization is complete or failed.
-```
+````
+
+Follow the script output. In the default flow, users do not need to manually configure GEAK, OOB, InferenceX, or TraceLens.
+
+### Launch Inference Optimization
+
+After setup, open the Hyperloom workspace printed by `local_setup.sh` in Cursor, then paste the generated prompt template into Cursor Chat. Replace the model path, framework, GPU type, budget, and any other workload parameters before sending.
 
 **Resume an existing session:**
 
 Example prompt:
 
 ```text
-@$REPO_ROOT/inference_optimizer/SKILL.md
+@inference_optimizer/SKILL.md
 
 Resume the existing Hyperloom optimization session.
 
@@ -194,40 +222,26 @@ Requirements:
 5. Monitor the process every 300s until the optimization is complete or failed.
 ```
 
-The agent automatically:
+Prompt field reference:
 
-1. Installs all dependencies (Ray, TraceLens CLI, GEAK v3.1.0 CLI, OOB CLI + auth-proxy)
-2. Launches `inference_optimizer optimize` with the resolved workload settings
-3. Executes baseline → profile → param tuning → kernel optimization → E2E validation
-4. Reports the session directory, log path, PID, initial health check, current phase, cumulative gain, and best config until the run completes or fails
+| Field | Maps to | Description | Default |
+|---|---|---|---|
+| `Model` | `--model`, `MODEL_PATH` | Model path. Required for a new run; ignored when resuming. | required |
+| `Framework` | `--framework`, `FRAMEWORK` | Inference framework: `sglang` or `vllm`. Do not mix frameworks within one session. | `sglang` |
+| `GPU` | `--gpu-type`, `GPU_TYPE` | Target GPU type, such as `MI300X`, `MI325X`, or `MI355X`; can also be auto-detected. | auto-detect |
+| `Model class` | `--model-class` | Model architecture type used for action selection and scoring. | unset |
+| `Compare against GPU` | `--compare-against-gpu` | Optional external reference GPU, such as `B200`. When unset, optimization continues without fetching an external baseline. | unset |
+| `TP` | `TP` | Tensor parallel size. | `1` |
+| `CONC` | `CONC` | Benchmark concurrency. | YAML default, commonly `8` |
+| `ISL` | `--isl`, `ISL` | Input sequence length. | `256` |
+| `OSL` | `--osl`, `OSL` | Output sequence length. | `256` |
+| `Precision` | `--precision`, `PRECISION` | Model precision, for example `bf16`. | `bf16` |
+| `Goal` | `--target-gain`, `--target-tput`, `--target-baseline-dir` | Optional stop condition, such as target throughput gain. | unset |
+| `Budget` | `--max-hours` | Maximum optimization time. | `2.0` hours |
+| `Kernel optimization` | `--no-kernel` | Kernel optimization is enabled by default; ask to skip it if you only want parameter/backend search. | enabled |
+| `Resume` | `--resume` | Resume an existing session; requires `manifest.json` and `state.json`. | disabled |
 
 For first-launch errors, see `inference_optimizer/SKILL.md` §"Failure Handling".
-
-#### Workload Fields and Internal Mapping
-
-The chat examples use user-facing field names. The agent maps them to the optimizer's CLI flags and environment variables:
-
-| User-facing field | Maps to | Description | Default |
-|-------------------|---------|-------------|---------|
-| Model | `--model`, `MODEL_PATH` | Model path. Required for a new run; ignored when resuming. | required |
-| Framework | `--framework`, `FRAMEWORK` | Inference framework: `sglang` or `vllm`. A session cannot mix frameworks. | `sglang` |
-| GPU | `--gpu-type`, `GPU_TYPE` | Target GPU type: `mi300x`, `mi325x`, or `mi355x`; can also be auto-detected. | auto-detect |
-| Model class | `--model-class` | Model architecture family used by the orchestrator's scoring and action selection. Supply explicitly; the agent no longer derives this from a `classify` action. | unset |
-| Compare against GPU | `--compare-against-gpu` | Opt into InferenceX reference fetching for the named GPU (e.g. `B200`). When omitted, `target_analysis` records a `no_target_gpu_configured` marker and the run proceeds without an external reference. | unset |
-| TP | `TP` | Tensor parallel size used by Magpie benchmark configs. | `1` |
-| CONC | `CONC` | Benchmark concurrency. | YAML default, commonly `8` |
-| ISL | `--isl`, `ISL` | Input sequence length. | `256` |
-| OSL | `--osl`, `OSL` | Output sequence length. | `256` |
-| Precision | `--precision`, `PRECISION` | Model precision, for example `bf16`. | `bf16` |
-| Goal | `--target-gain`, `--target-tput`, `--target-baseline-dir` | Optional stop condition. If omitted, the run continues until the time budget or no-more-leverage stop reason. | unset |
-| Budget | `--max-hours` | Wall-clock optimization budget in hours. | `2.0` |
-| Kernel optimization | `--no-kernel` | By default kernel optimization is enabled. Ask to skip kernel optimization for parameter/backend search only. | enabled |
-| Hyperloom repo | `REPO_ROOT` | Hyperloom repository root. | set in Step 2 |
-| OOB source | `OOB_SRC` | OOB source root. | set in Step 2 |
-| InferenceX repo | `INFERENCEX_PATH` | InferenceX repository root. | set in Step 2 |
-| TraceLens repo | `TRACELENS_ROOT` | TraceLens-internal repository root. | set in Step 2 |
-| Session directory | `USER_DATA_PATH` | Session directory for state, logs, runs, reports, and resume. To override, set `USER_DATA_PATH` in the shell or specify the path in your prompt. | `/workspace/hyperloom` |
-| Resume | `--resume` | Resume the existing session from the session directory; requires `manifest.json` and `state.json`. | disabled |
 
 > Training and MLPerf-training skills have been retired from this repo. Only inference optimization is supported here.
 
