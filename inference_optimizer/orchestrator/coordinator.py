@@ -1565,38 +1565,25 @@ class Coordinator:
             return True
 
     def _kernel_opt_keep_pending(self) -> str:
-        """Return the kernel_id awaiting integrate, or "" if none.
+        """Return the next kernel_id awaiting integrate, or "" if none.
 
-        Detects the "kernel_opt produced a KEEP whose patch has not yet
-        been integrated into the optimization_stack" state. Returns the
-        kernel_id so the gate text can name it; empty string means the
-        gate is closed.
+        Delegates to :meth:`SharedState.next_pending_keep_kernel_id`,
+        which scans the per-kernel ``kernel_opt_attempts`` ledger instead
+        of the single ``last_kernel_opt`` slot. This is what lets the
+        TODO 4/5 integrate gate drain a batch's full KEEP queue (sorted
+        strongest-first, same-source-file collapsed) rather than only
+        the most recently recorded KEEP.
 
-        Closed when ANY of these hold:
-          * ``last_kernel_opt`` is empty (no recent kernel_opt call).
-          * Last decision is not ``KEEP``.
-          * The kernel_id is already retired (``rejected_kernel_ids``).
-          * An ``integrate`` entry with the same kernel_id is already on
-            ``optimization_stack`` (i.e. integrate already ran for this
-            patch and stuck).
+        Closed when ANY of these hold (all enforced by
+        :meth:`SharedState.next_pending_keep_kernel_id`):
+          * No ``KEEP`` entries in ``kernel_opt_attempts``.
+          * Every pending KEEP has been retired (``rejected_kernel_ids``)
+            or already absorbed into ``optimization_stack`` as an
+            ``integrate`` entry.
+          * Every pending KEEP shares its source_file with a KEEP that
+            already landed on the stack (whole-file overwrite conflict).
         """
-        last = self.shared_state.last_kernel_opt or {}
-        decision = str(last.get("decision") or "").upper()
-        if decision != "KEEP":
-            return ""
-        kernel_id = str(last.get("kernel_id") or "").strip()
-        if not kernel_id:
-            return ""
-        if kernel_id in (self.shared_state.rejected_kernel_ids or []):
-            return ""
-        for entry in self.shared_state.optimization_stack or []:
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("action") != "integrate":
-                continue
-            if str(entry.get("kernel_id") or "") == kernel_id:
-                return ""
-        return kernel_id
+        return self.shared_state.next_pending_keep_kernel_id()
 
     def _required_next_step(self) -> str:
         """Return the coordinator-enforced next step, or empty if flexible.
@@ -3118,10 +3105,45 @@ class Coordinator:
                         }
                         cache_hit_source = "shared_state_kernel_rejection"
                     else:
+                        # Inject base_tput tied to ``current_best.tput`` whenever
+                        # Orchestration omits it on an ``integrate`` request -- the
+                        # multi-KEEP integrate queue routinely drains 2-3 patches per
+                        # session, and a missing base_tput would otherwise fail the
+                        # second/third request with ``integrate_handler requires
+                        # base_tput > 0`` (the LLM only consistently remembers the
+                        # field for the first integrate). Explicit operator value
+                        # still wins. See PR-B follow-up.
+                        if (
+                            kind == "integrate"
+                            and not merged_payload.get("base_tput")
+                        ):
+                            cb_tput = (
+                                self.shared_state.current_best or {}
+                            ).get("tput")
+                            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                                merged_payload["base_tput"] = float(cb_tput)
+
+                        # Streaming-record callback for ``run_optimization`` batch.
+                        # Without this, each batch's KEEP/REVERT sub-result is
+                        # only seen by SharedState *after* asyncio.gather()
+                        # wait-all returns -- so one 60-min timeout sibling
+                        # starves a 5-min KEEP's integrate path for the rest
+                        # of the session. With it, each sub-attempt completion
+                        # writes immediately; the dispatch await still blocks
+                        # until gather finishes, but the moment it unblocks the
+                        # Orchestration LLM sees all KEEPs queued up via
+                        # ``next_pending_keep_kernel_id``.
+                        handler_kwargs: dict[str, Any] = {
+                            "session_dir": self.session_dir,
+                        }
+                        if kind == "run_optimization":
+                            handler_kwargs["record_partial"] = (
+                                self._record_kernel_opt_partial
+                            )
                         try:
                             result = await handler(
                                 merged_payload,
-                                session_dir=self.session_dir,
+                                **handler_kwargs,
                             )
                         except Exception as exc:  # noqa: BLE001
                             log.exception(
@@ -3159,7 +3181,17 @@ class Coordinator:
                 # sees decision/speedup in its prompt next tick and
                 # doesn't re-dispatch the same kernel_id forever.
                 if kind == "run_optimization":
-                    self.shared_state.record_kernel_opt(result)
+                    # In batch mode every sub-result was already streamed
+                    # via ``_record_kernel_opt_partial`` while the batch
+                    # was in flight. Re-recording the best sub-result
+                    # here would double-count attempts (+1 per kernel)
+                    # and could prematurely trip the PARTIAL retire gate.
+                    # Cache-hit results never carry ``batch_mode`` so they
+                    # still flow through ``record_kernel_opt`` normally.
+                    if not bool(
+                        isinstance(result, dict) and result.get("batch_mode")
+                    ):
+                        self.shared_state.record_kernel_opt(result)
                     # Wire run_optimization decision (KEEP / REVERT / PARTIAL)
                     # into the per-action scoring for kernel_opt. KEEP uses
                     # the micro_speedup if it surfaces a percentage-shaped
@@ -3410,6 +3442,38 @@ class Coordinator:
         if latest:
             top = latest[0]
             await self.cursors.advance(agent_name, seq=top.seq, msg_id=top.msg_id)
+
+    def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
+        """Streaming callback for ``_run_optimization_batch`` sub-attempts.
+
+        Every batch sub-result calls this the instant
+        :meth:`_run_kernel_backend_sequence` returns -- well before the
+        gather wait-all unblocks the parent ``run_optimization``
+        handler. Each call writes the per-kernel entry to
+        ``kernel_opt_attempts`` and (when warranted by the KEEP-wins
+        overwrite policy) updates ``last_kernel_opt``. The state.json
+        write is atomic via :meth:`SharedState.save`.
+
+        Why this exists: the Qwen3-30B-A3B-Base session
+        (20260522T093903Z) lost a k009 KEEP @4.13x because the
+        gather() was still blocked on k001's GEAK 63min timeout when
+        Orch tried to surface KEEPs. Streaming the record makes the
+        next-tick prompt accurate even mid-batch (and makes recovery
+        possible after a Coordinator crash).
+        """
+        try:
+            self.shared_state.record_kernel_opt(result)
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            # Never let a per-sub-attempt bookkeeping hiccup propagate
+            # back into asyncio.gather and poison the entire batch --
+            # the worst case is we miss this one sub-result and the
+            # final ``record_kernel_opt(result)`` call after gather
+            # picks it up later.
+            log.exception(
+                "_record_kernel_opt_partial failed for kernel_id=%s",
+                (result or {}).get("kernel_id") if isinstance(result, dict) else None,
+            )
 
     def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         new_tput = result.get("new_tput")

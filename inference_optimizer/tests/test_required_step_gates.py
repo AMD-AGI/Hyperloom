@@ -322,21 +322,43 @@ def test_integrate_gate_inactive_without_keep(session_dir):
     assert coord._required_next_step() == ""
 
 
+def _seed_kernel_opt_state(coord, *, kernel_id: str, decision: str,
+                            micro: float = 1.5,
+                            source_file: str = "/p/dummy.py",
+                            artifact: str = "/tmp/dummy.py") -> None:
+    """Mimic the streaming-record write path (PR-B) so the integrate gate,
+    which now reads ``kernel_opt_attempts`` via
+    :meth:`SharedState.next_pending_keep_kernel_id`, fires from a
+    realistic state shape (not just a bare ``last_kernel_opt`` stub).
+    """
+    coord.shared_state.record_kernel_opt({
+        "status": "ok",
+        "kernel_id": kernel_id,
+        "source_file": source_file,
+        "proposal": {"decision": decision, "reasons": []},
+        "verification": {
+            "micro_speedup": micro,
+            "best_artifact_path": artifact,
+            "compile_passed": True,
+            "correctness_passed": True,
+        },
+    })
+
+
 def test_integrate_gate_inactive_when_decision_not_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    coord.shared_state.last_kernel_opt = {
-        "kernel_id": "k-1", "decision": "REVERT",
-    }
+    _seed_kernel_opt_state(coord, kernel_id="k-1", decision="REVERT")
     assert coord._kernel_opt_keep_pending() == ""
 
 
 def test_integrate_gate_fires_when_keep_pending(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    coord.shared_state.last_kernel_opt = {
-        "kernel_id": "k-rmsnorm", "decision": "KEEP",
-    }
+    _seed_kernel_opt_state(
+        coord, kernel_id="k-rmsnorm", decision="KEEP", micro=4.13,
+        source_file="/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
+    )
     assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
     todo = coord._required_next_step()
     # P3 renumbered the integrate gate from 3/4 to 4/5 (analyze is the
@@ -350,11 +372,13 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
 def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    coord.shared_state.last_kernel_opt = {
-        "kernel_id": "k-rmsnorm", "decision": "KEEP",
-    }
+    _seed_kernel_opt_state(
+        coord, kernel_id="k-rmsnorm", decision="KEEP",
+        source_file="/p/rmsnorm.py",
+    )
     coord.shared_state.optimization_stack = [
-        {"action": "integrate", "kernel_id": "k-rmsnorm"},
+        {"action": "integrate", "kernel_id": "k-rmsnorm",
+         "target_file": "/p/rmsnorm.py"},
     ]
     assert coord._kernel_opt_keep_pending() == ""
     # The integrate entry counts as an unvalidated KEEP -> validate_stack
@@ -367,9 +391,7 @@ def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
 def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    coord.shared_state.last_kernel_opt = {
-        "kernel_id": "k-bad", "decision": "KEEP",
-    }
+    _seed_kernel_opt_state(coord, kernel_id="k-bad", decision="KEEP")
     coord.shared_state.rejected_kernel_ids = ["k-bad"]
     assert coord._kernel_opt_keep_pending() == ""
     assert coord._required_next_step() == ""
@@ -378,9 +400,10 @@ def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
 def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    coord.shared_state.last_kernel_opt = {
-        "kernel_id": "k-rmsnorm", "decision": "KEEP",
-    }
+    _seed_kernel_opt_state(
+        coord, kernel_id="k-rmsnorm", decision="KEEP",
+        source_file="/p/rmsnorm.py",
+    )
     # Explore actions denied
     for action in ("backends", "params", "sweep"):
         denied = coord._sequence_denial_for_action(action)
