@@ -179,6 +179,13 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 3. PIPELINE & TIME BUDGET",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
+        # N20-A: unnumbered auxiliary catalogue, emitted when `backends`
+        # is enabled. Sits between the decision framework (5) and the
+        # kernel-opt request reference (6) — the LLM reads it as a
+        # reference when proposing `backends`. Not numbered because
+        # it's a reference table, not a procedural section.
+        "## BACKENDS GRID CATALOGUE (SGLang)",
+        "## PARAMS GRID CATALOGUE (SGLang)",
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]

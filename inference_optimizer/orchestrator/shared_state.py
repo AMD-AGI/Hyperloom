@@ -27,13 +27,14 @@ v0.6 fields:
     max_minutes         int   — wall-clock budget (0 = unlimited)
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
-                                `select_kernels` REQUEST `trace_input` param
+                                `trace_analyze` REQUEST `trace_input` param
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -59,6 +60,21 @@ def _now_iso() -> str:
 # backend) consumes the whole run. Override via the matching env var
 # named in ``record_kernel_opt`` (1 disables the second-chance entirely).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
+# PR-C: a completed backend ladder (GEAK -> Claude -> Codex) that did
+# not produce a KEEP is the operator's definition of "this kernel
+# cannot be optimized". One such failure retires the kernel for the
+# rest of the session; the LLM does not get to re-dispatch the same
+# kernel via a fresh ``run_optimization`` request. Override via
+# ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
+_DEFAULT_KERNEL_OPT_MAX_FAILURES = 1
+# PR-C: hot-kernel report gate threshold. Reusable hot kernels with
+# ``gpu_pct`` >= this value MUST get at least one kernel_opt attempt
+# (or be rejected after one) before ``report`` is allowed to fire.
+_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
+# PR-C: cap how many hot kernels the report-gate will demand. Even on
+# a noisy trace with 15 reusable rows, only the top-N by gpu_pct are
+# enforced -- avoids the LLM stalling on dozens of tiny kernels.
+_DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
 
 # Per-action audit history cap. ``<action>_attempts`` lists keep the most
 # recent N entries (full audit trail — both successes and failures) so
@@ -80,6 +96,11 @@ _DEFAULT_LAST_FAILURES = 10
 # helpers so adding a new audit action is a one-line change.
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+    # Roofline-v2 N10: roofline composite action audit so each
+    # invocation lands in `roofline_attempts` (counted by N7
+    # verify/audit scripts as roofline_action_count). See
+    # coordinator.py _AUDIT_ACTIONS for the matching counterpart.
+    "roofline",
 })
 
 # Mapping from audit-action name to (result-dict key, prompt-display label).
@@ -90,6 +111,9 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "baseline":       ("output_throughput", "output_throughput"),
     "profile":        ("output_throughput", "output_throughput"),
+    # N10: roofline composite action — `snapshot_id` is the natural
+    # progress metric (each successful run produces a fresh snapshot).
+    "roofline":       ("snapshot_id",       "snapshot_id"),
     "backends":       ("gain_pct",          "gain_pct"),
     "params":         ("gain_pct",          "gain_pct"),
     "sweep":          ("output_throughput", "output_throughput"),
@@ -125,6 +149,51 @@ class SharedState:
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
+    # N27 (May 2026): consecutive roofline-action failures since the
+    # last successful roofline. Bumped by Coordinator's
+    # ``_promote_to_shared_state`` (roofline branch) whenever the
+    # executor returns ``status=failed`` (covers profile sub-step
+    # failures, trace_analyze sub-step failures, and N26 auto-retry
+    # exhausted). Reset to 0 the moment a roofline succeeds (i.e.
+    # ``last_trace_analyze.analysis_md_text`` gets re-populated by
+    # the C1 recorder).
+    #
+    # Read by ``_sequence_denial_for_action``: once this reaches
+    # ``INFERENCE_OPTIMIZER_ROOFLINE_FAILURE_FALLBACK_THRESHOLD``
+    # (default 2), the roofline-required gate on
+    # ``backends`` / ``params`` / ``comm_optimization`` downgrades
+    # from PolicyDenied to PASS-with-advisory. That lets the LLM
+    # fall back to the pre-roofline default-grid behaviour rather
+    # than hard-looping on roofline forever (the empirical case is
+    # rocprofiler-sdk corner cases or splitter chunk-quality
+    # failures that can't be auto-recovered by N26).
+    #
+    # IMPORTANT: streak only bumps on the OUTER roofline action
+    # status -- N26 inner retry attempts are NOT counted here
+    # because they live inside a single roofline action's
+    # execution. Two outer roofline failures imply at least
+    # 3-4 trace_analyze attempts already happened (each outer call
+    # tried mixed -> retry to alternate mode via N26).
+    roofline_failure_streak: int = 0
+    # N33 (May 2026): consecutive coordinator ticks in which nothing
+    # happened that would advance the run -- i.e. no queued tasks, no
+    # running tasks, no pending proposals (so no LLM proposal landed
+    # this tick either) and ``current_action`` is empty. The Coordinator
+    # tick loop bumps this when its end-of-tick snapshot matches the
+    # "idle" definition above; any change (new proposal, new task,
+    # stack growth) resets it back to 0.
+    #
+    # Read by the tick loop after the wall-clock-deadline check: once
+    # this exceeds ``INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS`` (default
+    # 120 -- ~10 min at the 5s sleep used in prod), the loop calls
+    # ``_enter_closing_phase`` to enqueue the final report instead of
+    # idling until the wall-clock deadline. This is the canonical
+    # remedy for "LLM has gone silent / refuses to propose anything
+    # actionable" cases that would otherwise burn the entire budget
+    # before the operator gets a report. Reset to 0 the moment we
+    # actually enter closing (the same field is the trigger, so we
+    # don't want the early-close to fire twice).
+    consecutive_silent_ticks: int = 0
     # Path to the YAML the baseline executor materialized with the operator's
     # workload envs (CONC/ISL/OSL/TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/...).
     # Coordinator injects this into params/backends/sweep tasks as
@@ -138,36 +207,16 @@ class SharedState:
     # records the incremental candidate that was accepted; current_best keeps
     # the materialized full args/env for execution.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
-    # Parallel ledger to ``optimization_stack``: one rich entry per KEEP
-    # event with both the cumulative gain (vs baseline) AT the moment the
-    # entry was promoted AND the incremental contribution this entry alone
-    # added (``delta_pct = cum_gain_after - cum_gain_after_of_prev``).
-    # Index ``i`` aligns with index ``i`` in ``optimization_stack``.
-    #
-    # Each entry conforms to ``breakdown.schema.StackGainEntry``::
-    #     {
-    #       "ts": iso8601,
-    #       "action": "params" | "backends" | "integrate" | "validate_stack",
-    #       "variant_name": str | None,
-    #       "stack_len_before": int,
-    #       "stack_len_after": int,
-    #       "cum_gain_before": float,
-    #       "cum_gain_after": float | None,
-    #       "delta_pct": float | None,        # None on resumed/seeded entries
-    #       "extra_sglang_args": str,
-    #     }
-    #
-    # Coordinator appends here at the same time it appends to
-    # ``optimization_stack`` via :meth:`append_stack_gain_entry`; the
-    # helper computes cum_gain_after + delta_pct from
-    # ``self.baseline_tput`` and the previous entry's ``cum_gain_after``
-    # so call sites only pass action / variant_name / new_tput.
-    #
-    # Pre-v0.7 sessions wrote ``list[float | None]`` (the cum_gain_after
-    # number only); ``breakdown/collectors.py:collect_attribution`` has a
-    # promotion shim that lifts the old shape into this rich one when it
-    # detects non-dict entries.
-    gain_per_stack_entry: list[dict[str, Any]] = field(default_factory=list)
+    # Parallel to ``optimization_stack``: per-entry incremental gain in
+    # percent (current_best vs. baseline at the moment that stack entry
+    # was promoted). Index ``i`` here aligns with index ``i`` in
+    # ``optimization_stack``. session_breakdown's capability_summary uses
+    # this to attribute "how much of the validated cumulative gain came
+    # from this action / capability" without re-walking the event log.
+    # Coordinator appends to this list at the same time it appends to
+    # ``optimization_stack`` (see ``_lift_to_current_best``); missing
+    # entries (e.g. on resumed sessions) are treated as ``None``.
+    gain_per_stack_entry: list[float | None] = field(default_factory=list)
     cumulative_gain: float = 0.0
     # Cumulative gain measured by the `validate_stack` action — i.e. by
     # actually re-baselining a fresh server with EVERY KEEP'd entry of
@@ -212,10 +261,59 @@ class SharedState:
     last_profile_pmc_summary: str = ""
     last_profile_roofline: str = ""
     last_profile_kernel_breakdown: str = ""
-    # Cached result of the most recent `select_kernels` request keyed by
+    # Cached result of the most recent `trace_analyze` request keyed by
     # `trace_input`. Coordinator short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
-    last_select_kernels: dict[str, Any] = field(default_factory=dict)
+    last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+    # N31 (May 2026): freeze the FIRST successful roofline snapshot
+    # ("baseline" snapshot) so the final `report` can render a
+    # before/after Roofline Comparison section. The Coordinator writes
+    # this field on the first promotion of `roofline` and never updates
+    # it after -- subsequent rooflines (N31 gate exception, or future
+    # snapshot refreshes) only update ``last_trace_analyze``. Carries
+    # minimal fields needed by ``report.py``'s
+    # ``## Roofline Comparison`` section:
+    # * ``roofline_snapshot_id`` -- always 1 (the first)
+    # * ``analysis_md_path``     -- path to the on-disk analysis.md
+    # * ``trace_input``          -- which profile trace produced it
+    # * ``ts``                   -- when it was promoted
+    # We deliberately do NOT freeze ``analysis_md_text`` here -- the
+    # path is enough (report extracts the Executive Summary at render
+    # time) and the text can be hundreds of KB.
+    last_trace_analyze_baseline: dict[str, Any] = field(default_factory=dict)
+    # Roofline-v2 N19c (May 2026): "gain-driven kernel_opt unlock" +
+    # "flags-conditional roofline" replace the N14 counter-driven
+    # (>=2/>=2/>=3) hard requirements. Two new fields drive the gates.
+    #
+    # `last_cheap_delta_gain` — delta_gain_pct of the last completed
+    # backends/params attempt vs SharedState.current_best (NOT vs
+    # baseline_tput; we care about marginal improvement from this round
+    # alone, not the cumulative gain). The Coordinator writes this in
+    # `_promote_to_shared_state` for task_kind in ("backends","params")
+    # using the same `gain_vs_cb` calculation it already does for
+    # promotion. None / 0.0 means "this round found no improvement",
+    # which is the signal N19 reads to unlock kernel_opt (cheap
+    # exhausted) and N21 reads to deny redundant roofline re-runs.
+    #
+    # `discovered_flags_at_last_snapshot` — frozen snapshot of
+    # `discovered_flags` at the moment a roofline action completes.
+    # The Coordinator writes this in `_promote_to_shared_state` for
+    # task_kind == "roofline" by deep-copying the current
+    # `discovered_flags`. N21 compares against the current
+    # `discovered_flags` to detect "flags unchanged since snapshot",
+    # in which case re-running roofline would produce a byte-equivalent
+    # trace (sglang launch args identical).
+    last_cheap_delta_gain: float | None = None
+    discovered_flags_at_last_snapshot: dict[str, Any] = field(default_factory=dict)
+    # Roofline-v2 N22: advisory messages from the PolicyGate's keyword-
+    # implied variant check. Each entry is a self-contained block of
+    # operator-facing text describing what the LLM missed and which
+    # analysis.md keyword triggered the advisory. Capped FIFO so a
+    # long-running session doesn't grow this list unbounded; the
+    # rendered orchestration prompt shows the most recent N (see
+    # prompt_builder._section_session_context's last_proposal_advice
+    # block). Empty = no outstanding advisories.
+    last_proposal_advice: list[str] = field(default_factory=list)
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
@@ -237,12 +335,19 @@ class SharedState:
     last_backends: dict[str, Any] = field(default_factory=dict)
     last_params: dict[str, Any] = field(default_factory=dict)
     last_validate_stack: dict[str, Any] = field(default_factory=dict)
+    # Roofline-v2 N10: composite roofline action audit snapshot +
+    # rolling history. Mirrors the v0 per-action audit pattern (one
+    # dict snapshot for "what was the most recent run", one capped
+    # list for "what was the per-tick history"). Counted by N7's
+    # verify_roofline_v2 / audit_roofline_decisions scripts.
+    last_roofline: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     backends_attempts: list[dict[str, Any]] = field(default_factory=list)
     params_attempts: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     validate_stack_attempts: list[dict[str, Any]] = field(default_factory=list)
+    roofline_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results, capped at
     # ``_DEFAULT_LAST_FAILURES``. Carries the rich failure context
     # (error_class / error_excerpt / stderr_tail / workspace /
@@ -594,6 +699,7 @@ class SharedState:
             tick=int(self.tick or 0),
             target_gap_mult=target_mult,
             k=int(top_k),
+            shared_state=self,  # N30: enable cheap-exhausted deep boost
         )
         if not rows:
             return False
@@ -796,6 +902,26 @@ class SharedState:
         """Capture the result returned by kernel_optimization_handler so the
         next Orch turn knows what's already been tried (and the outcome).
 
+        Two overwrite invariants protect the multi-KEEP integrate queue:
+
+        * **Empty kernel_id is a no-op.** A metadata-less failure result
+          (e.g. ``{"status":"failed", "error":"TimeoutExpired"}`` wrapped
+          by the Coordinator's batch handler exception path) must NOT
+          clobber a previously-recorded KEEP. Otherwise streaming
+          ``record_partial`` writes from a batch's fast KEEPs would be
+          erased the moment one slow sibling times out, and Orchestration
+          would never see ``last_kernel_opt.decision == "KEEP"`` -- which
+          is the only gate that opens TODO 4/5 integrate.
+
+        * **Non-KEEP cannot overwrite a pending KEEP.** During a
+          ``_run_optimization_batch`` fan-out, sub-results land in
+          completion order, not micro_speedup order. A late-arriving
+          REVERT / PARTIAL must not displace an earlier KEEP that hasn't
+          been integrated yet. We keep the strongest unresolved KEEP in
+          ``last_kernel_opt`` and let the integrate queue
+          (``next_pending_keep_kernel_id``) drain via the per-kernel
+          ``kernel_opt_attempts`` ledger.
+
         Retires ``kernel_id`` into ``rejected_kernel_ids`` when the same
         kernel has accumulated >= ``max_partial`` PARTIAL outcomes (no
         measurable speedup), not just on REVERT. Without this guard, an
@@ -807,37 +933,106 @@ class SharedState:
         """
         if not isinstance(result, dict):
             return
+        kernel_id = str(result.get("kernel_id") or "")
+        if not kernel_id:
+            # Metadata-less failure (batch handler exception, programmatic
+            # rejection, ...). Preserve last_kernel_opt + attempts so a
+            # prior streaming-record KEEP survives.
+            return
+
         verification = result.get("verification") or {}
         proposal = result.get("proposal") or {}
-        decision = str(proposal.get("decision", ""))
-        self.last_kernel_opt = {
-            "kernel_id": result.get("kernel_id", ""),
-            "decision": decision,
-            "reasons": proposal.get("reasons", []),
-            "micro_speedup": verification.get("micro_speedup", 0.0),
-            "compile_passed": verification.get("compile_passed"),
-            "correctness_passed": verification.get("correctness_passed"),
-            "best_artifact_path": verification.get("best_artifact_path", ""),
-            "ts": _now_iso(),
-        }
-        kernel_id = str(self.last_kernel_opt.get("kernel_id") or "")
-        if not kernel_id:
-            return
+        decision = str(proposal.get("decision", "")).upper()
+        micro_speedup = verification.get("micro_speedup", 0.0)
+        try:
+            micro_float = float(micro_speedup)
+        except (TypeError, ValueError):
+            micro_float = 0.0
+        best_artifact_path = str(verification.get("best_artifact_path", "") or "")
+        source_file = str(
+            result.get("source_file")
+            or (result.get("candidate") or {}).get("source_file")
+            or ""
+        )
+        status = str(result.get("status") or "").lower()
+        err_class = str(result.get("error_class") or "")
+        # PR-C: An "infra failure" is a backend ladder that finished
+        # WITHOUT delivering any verdict at all -- subprocess timeout,
+        # batch handler exception, GEAK/OOB rc!=0, missing inputs, etc.
+        # These are distinct from REVERT (which has its own
+        # ``should_reject`` rule) and PARTIAL (which has its own
+        # ``max_partial`` streak gate); we don't double-count them.
+        # The new ``max_failures = 1`` rule covers ONLY this pure
+        # infra-failure case: Qwen3-30B-A3B-Base 164405Z burned 8h
+        # because GEAK -> Claude -> Codex timed out repeatedly on the
+        # same k002/k004 and each ladder showed up as status=failed
+        # with empty decision -- silently bumping attempts but never
+        # tripping a retire gate.
+        is_infra_failure = (
+            decision == ""
+            and (
+                status in {"failed", "error", "timeout"}
+                or err_class in {
+                    "subtask_exception",
+                    "handler_exception",
+                    "subprocess_timeout",
+                    "kernel_agent_root_missing",
+                    "missing_integration_inputs",
+                }
+            )
+        )
+        ts = _now_iso()
 
         entry = dict(self.kernel_opt_attempts.get(kernel_id) or {})
         history = list(entry.get("history") or [])
-        history.append({"decision": decision, "ts": self.last_kernel_opt["ts"]})
+        history.append({
+            "decision": decision, "micro": micro_float,
+            "status": status, "ts": ts,
+        })
         history = history[-10:]
         entry["attempts"] = int(entry.get("attempts", 0)) + 1
         if decision == "PARTIAL":
             entry["partial_count"] = int(entry.get("partial_count", 0)) + 1
         elif decision == "KEEP":
-            # A successful attempt resets the partial streak; a future
-            # regression should not be auto-retired on stale history.
+            # A successful attempt resets streaks; a future regression
+            # should not be auto-retired on stale history.
             entry["partial_count"] = 0
+            entry["failure_count"] = 0
+        if is_infra_failure:
+            entry["failure_count"] = int(entry.get("failure_count", 0)) + 1
         entry["last_decision"] = decision
-        entry["last_ts"] = self.last_kernel_opt["ts"]
+        entry["last_status"] = status
+        entry["last_micro_speedup"] = micro_float
+        entry["last_artifact_path"] = best_artifact_path
+        entry["last_source_file"] = source_file
+        entry["last_ts"] = ts
         entry["history"] = history
+
+        # Overwrite policy for last_kernel_opt:
+        #   * KEEP always wins (highest micro bubbles up).
+        #   * Non-KEEP only writes when there's no pending KEEP to protect.
+        prev = self.last_kernel_opt or {}
+        prev_decision = str(prev.get("decision", "")).upper()
+        prev_kid = str(prev.get("kernel_id", ""))
+        integrated_ids = self._kernel_ids_in_optimization_stack()
+        prev_pending = (
+            prev_decision == "KEEP"
+            and bool(prev_kid)
+            and prev_kid not in (self.rejected_kernel_ids or [])
+            and prev_kid not in integrated_ids
+        )
+        if decision == "KEEP" or not prev_pending:
+            self.last_kernel_opt = {
+                "kernel_id": kernel_id,
+                "decision": decision,
+                "reasons": proposal.get("reasons", []),
+                "micro_speedup": micro_float,
+                "compile_passed": verification.get("compile_passed"),
+                "correctness_passed": verification.get("correctness_passed"),
+                "best_artifact_path": best_artifact_path,
+                "source_file": source_file,
+                "ts": ts,
+            }
 
         max_partial = _DEFAULT_KERNEL_OPT_MAX_PARTIAL
         env_v = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL")
@@ -849,9 +1044,23 @@ class SharedState:
                 # (already assigned above) instead of failing.
                 pass
 
+        # PR-C: max_failures defaults to 1 -- a single completed backend
+        # ladder (GEAK -> Claude -> Codex) that did not produce a KEEP
+        # is the operator's definition of "this kernel cannot be
+        # optimized; do not retry". Operators that want to give a
+        # flaky GEAK/OOB a second chance can bump via env.
+        max_failures = _DEFAULT_KERNEL_OPT_MAX_FAILURES
+        env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
+        if env_f:
+            try:
+                max_failures = max(1, int(env_f))
+            except (TypeError, ValueError):
+                pass
+
         should_reject = (
             decision == "REVERT"
             or int(entry.get("partial_count", 0)) >= max_partial
+            or int(entry.get("failure_count", 0)) >= max_failures
         )
         if should_reject:
             if kernel_id not in self.rejected_kernel_ids:
@@ -859,10 +1068,260 @@ class SharedState:
             entry["rejected_reason"] = (
                 "revert_decision"
                 if decision == "REVERT"
-                else f"max_partial_attempts_{max_partial}_without_keep"
+                else (
+                    f"max_partial_attempts_{max_partial}_without_keep"
+                    if int(entry.get("partial_count", 0)) >= max_partial
+                    else f"max_failures_{max_failures}_without_keep"
+                )
             )
 
         self.kernel_opt_attempts[kernel_id] = entry
+
+    # ------------------------------------------------------------------
+    # Multi-KEEP integrate queue helpers (PR-B follow-up).
+    # ------------------------------------------------------------------
+    def _kernel_ids_in_optimization_stack(self) -> set[str]:
+        """kernel_ids already absorbed into optimization_stack as integrate entries."""
+        return {
+            str(e.get("kernel_id"))
+            for e in (self.optimization_stack or [])
+            if isinstance(e, dict)
+            and e.get("action") == "integrate"
+            and e.get("kernel_id")
+        }
+
+    def _source_files_in_optimization_stack(self) -> set[str]:
+        """source_file paths already touched by an integrate entry on the stack.
+
+        Used to enforce "same source_file, only the strongest KEEP gets
+        integrated" -- ``apply_kernel_patch`` is a ``shutil.copy2`` whole-
+        file overwrite, so two patches on the same file would silently
+        clobber each other.
+        """
+        sources: set[str] = set()
+        for e in (self.optimization_stack or []):
+            if not isinstance(e, dict) or e.get("action") != "integrate":
+                continue
+            src = str(e.get("target_file") or e.get("source_file") or "")
+            if src:
+                sources.add(src)
+        return sources
+
+    def next_pending_keep_kernel_id(self) -> str:
+        """Return next KEEP kernel_id awaiting integrate, or "" if drained.
+
+        Ordering:
+          1. Exclude already-integrated (in optimization_stack), rejected
+             kernels, and any KEEP whose source_file is already covered
+             by an earlier integrate (same-file conflict guard).
+          2. Among the remaining KEEPs, pick the highest
+             ``last_micro_speedup`` so the strongest lever lands first.
+
+        Consumers: Coordinator's ``_kernel_opt_keep_pending`` for the
+        TODO 4/5 integrate gate, plus the prompt_builder rendering used
+        by Orchestration / robustness to see how many KEEPs are queued.
+        """
+        integrated_ids = self._kernel_ids_in_optimization_stack()
+        integrated_sources = self._source_files_in_optimization_stack()
+        rejected = set(self.rejected_kernel_ids or [])
+
+        best_kid = ""
+        best_micro = float("-inf")
+        for kid, entry in (self.kernel_opt_attempts or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("last_decision", "")).upper() != "KEEP":
+                continue
+            if kid in integrated_ids or kid in rejected:
+                continue
+            src = str(entry.get("last_source_file") or "")
+            if src and src in integrated_sources:
+                # Same-file conflict: a stronger KEEP on this file was
+                # already integrated (or this KEEP came after one did).
+                continue
+            try:
+                micro = float(entry.get("last_micro_speedup") or 0.0)
+            except (TypeError, ValueError):
+                micro = 0.0
+            if micro > best_micro:
+                best_micro = micro
+                best_kid = kid
+        return best_kid
+
+    def pending_keep_kernel_ids(self) -> list[str]:
+        """All KEEP kernel_ids awaiting integrate, sorted strongest-first.
+
+        Used by the Orchestration prompt so the LLM sees how many
+        integrate cycles are queued and does NOT propose ``report``
+        before draining them.
+        """
+        integrated_ids = self._kernel_ids_in_optimization_stack()
+        integrated_sources = self._source_files_in_optimization_stack()
+        rejected = set(self.rejected_kernel_ids or [])
+        # Track which source_files we've already counted so the queue
+        # mirrors ``next_pending_keep_kernel_id``'s same-file conflict
+        # guard (only the strongest KEEP per source_file is queueable).
+        claimed_sources: set[str] = set()
+        ranked: list[tuple[float, str, str]] = []
+        for kid, entry in (self.kernel_opt_attempts or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("last_decision", "")).upper() != "KEEP":
+                continue
+            if kid in integrated_ids or kid in rejected:
+                continue
+            src = str(entry.get("last_source_file") or "")
+            if src and src in integrated_sources:
+                continue
+            try:
+                micro = float(entry.get("last_micro_speedup") or 0.0)
+            except (TypeError, ValueError):
+                micro = 0.0
+            ranked.append((micro, kid, src))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        result: list[str] = []
+        for _micro, kid, src in ranked:
+            if src and src in claimed_sources:
+                continue
+            if src:
+                claimed_sources.add(src)
+            result.append(kid)
+        return result
+
+    @property
+    def has_keep_pending_integrate(self) -> bool:
+        return bool(self.next_pending_keep_kernel_id())
+
+    @property
+    def kernel_opt_attempts_count(self) -> int:
+        return len(self.kernel_opt_attempts or {})
+
+    # ------------------------------------------------------------------
+    # PR-C: hot-kernel report gate. Drives Coordinator's "report cannot
+    # fire until every meaningful hot reusable kernel has been
+    # attempted" guard, so the LLM cannot prematurely emit `report`
+    # (Qwen3-30B-A3B-Base 164910Z bug: tick=8 -> report_emitted with
+    # k001=24% / k002=37% / k004=9.7% untouched).
+    # ------------------------------------------------------------------
+    def untried_hot_reusable_kernels(
+        self,
+        *,
+        min_gpu_pct: float | None = None,
+        top_n: int | None = None,
+    ) -> list[str]:
+        """Hot kernels still owing at least one ``kernel_opt`` attempt.
+
+        A kernel qualifies when it satisfies ALL of:
+          * ``reusable_native_kernel is True`` in ``last_trace_analyze``
+          * ``gpu_pct >= min_gpu_pct`` (default 3.0; override via
+            ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``)
+          * no member of its ``task_group`` is already on
+            ``optimization_stack`` (i.e. nothing from this AST function
+            has been integrated)
+          * no member of its ``task_group`` appears in
+            ``rejected_kernel_ids`` (the whole group is "live")
+          * no member of its ``task_group`` has any
+            ``kernel_opt_attempts`` entry (zero attempts so far)
+          * its ``source_file`` has not been touched by any prior
+            ``integrate`` on the stack (same-file conflict guard)
+
+        The candidate set is capped to ``top_n`` (default 5; override
+        via ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``) by ``gpu_pct`` desc so
+        the gate cannot demand 15 tiny rmsnorms.
+
+        Each task_group contributes at most one kernel_id (the highest
+        ``gpu_pct`` member that satisfies the filters), matching what
+        ``_batch_kernel_candidates`` would actually dispatch.
+        """
+        info = self.last_trace_analyze or {}
+        hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
+        task_groups = info.get("task_groups") or []
+        if not isinstance(hot, list):
+            return []
+
+        if min_gpu_pct is None:
+            try:
+                min_gpu_pct = float(os.environ.get(
+                    "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
+                    _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+                ))
+            except (TypeError, ValueError):
+                min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+        if top_n is None:
+            try:
+                top_n = int(os.environ.get(
+                    "HYPERLOOM_KERNEL_OPT_GATE_TOP_N",
+                    _DEFAULT_HOT_KERNEL_GATE_TOP_N,
+                ))
+            except (TypeError, ValueError):
+                top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
+        top_n = max(1, int(top_n))
+
+        kid_to_group: dict[str, list[str]] = {}
+        for g in task_groups:
+            if not isinstance(g, dict):
+                continue
+            members = [str(m) for m in (g.get("kernel_ids") or []) if m]
+            for m in members:
+                kid_to_group[m] = members
+
+        integrated_ids = self._kernel_ids_in_optimization_stack()
+        integrated_sources = self._source_files_in_optimization_stack()
+        rejected = set(self.rejected_kernel_ids or [])
+        attempts = self.kernel_opt_attempts or {}
+
+        # Collect every reusable hot row above threshold, then sort by
+        # gpu_pct desc so dedup picks the STRONGEST member of each
+        # task_group (otherwise prompt order would arbitrarily make the
+        # 24% kernel represent a group whose 37% sibling exists -- bad
+        # signal for the LLM).
+        rows: list[tuple[float, str, str, list[str]]] = []
+        for k in hot:
+            if not isinstance(k, dict):
+                continue
+            if k.get("reusable_native_kernel") is not True:
+                continue
+            try:
+                gpu_pct = float(k.get("gpu_pct") or 0.0)
+            except (TypeError, ValueError):
+                gpu_pct = 0.0
+            if gpu_pct < min_gpu_pct:
+                continue
+            kid = str(k.get("kernel_id") or "")
+            if not kid:
+                continue
+            src = str(k.get("source_file") or "")
+            members = sorted(kid_to_group.get(kid, [kid]))
+            rows.append((gpu_pct, kid, src, members))
+        rows.sort(key=lambda x: x[0], reverse=True)
+
+        ranked: list[tuple[float, str, str, list[str]]] = []
+        seen_groups: set[tuple[str, ...]] = set()
+        for row in rows:
+            group_key = tuple(row[3])
+            if group_key in seen_groups:
+                continue
+            seen_groups.add(group_key)
+            ranked.append(row)
+        ranked = ranked[:top_n]
+
+        untried: list[str] = []
+        for _pct, kid, src, members in ranked:
+            # Whole task_group rejected -> skip
+            if members and all(m in rejected for m in members):
+                continue
+            # Any member already integrated -> skip
+            if any(m in integrated_ids for m in members):
+                continue
+            # Source already covered by a stack integrate -> skip
+            if src and src in integrated_sources:
+                continue
+            # Any member has been tried -> skip
+            if any(int((attempts.get(m) or {}).get("attempts", 0)) > 0
+                   for m in members):
+                continue
+            untried.append(kid)
+        return untried
 
     # ------------------------------------------------------------------
     # Per-action audit (kernel parity for non-kernel actions)
@@ -1046,9 +1505,9 @@ class SharedState:
         self.last_action_failures = history
         return entry
 
-    def record_select_kernels(self, payload: dict[str, Any],
+    def record_trace_analyze(self, payload: dict[str, Any],
                               result: dict[str, Any]) -> None:
-        """Cache the latest select_kernels output keyed by trace_input.
+        """Cache the latest trace_analyze output keyed by trace_input.
 
         We persist a wider window than the prompt-visible top5 so that when
         the very top GPU consumers are vendor-binary kernels (Tensile / CK)
@@ -1123,12 +1582,76 @@ class SharedState:
                 if isinstance(entry, dict) and entry.get("code"):
                     warnings_cleaned.append(dict(entry))
 
-        self.last_select_kernels = {
+        # Roofline-v2 C1: surface the TraceLens analysis.md full text on
+        # SharedState so the downstream ``roofline`` action (added in C4)
+        # can read the per-category bottleneck breakdown without re-hitting
+        # the filesystem on every tick, and so Orchestration can ground
+        # PRUNE_BRANCH / propose_action decisions on the actual report.
+        #
+        # Snapshot accounting (snapshot_id + baseline_gain_at_snapshot)
+        # lets the prompt show "report taken at gain=X%" and lets the
+        # re-profile guidance trigger when ``cumulative_gain_validated``
+        # has moved by ≥3% since the snapshot was taken. The counter
+        # lives inside ``last_trace_analyze`` (not as a new top-level
+        # field) so we do not widen the SharedState surface — every
+        # call reads the previous snapshot_id and bumps it by one.
+        prev_snapshot_id = 0
+        if isinstance(self.last_trace_analyze, dict):
+            prev_raw = self.last_trace_analyze.get("roofline_snapshot_id")
+            if isinstance(prev_raw, int):
+                prev_snapshot_id = prev_raw
+        snapshot_id = prev_snapshot_id + 1
+
+        analysis_md_path = result.get("trace_report_path") or ""
+        analysis_md_text = ""
+        if analysis_md_path:
+            try:
+                # Decision A3: no truncation — typical analysis.md is
+                # 10-20 KB, worst-case (long-ISL Case A-D) ~200 KB; even
+                # 100+ ticks against a 200 KB cached report stays well
+                # within the 200K-token Orchestration context budget once
+                # ``_format_roofline_decision`` (C5) replaces verbatim
+                # injection with the structured roofline-action output.
+                analysis_md_text = Path(analysis_md_path).read_text(
+                    encoding="utf-8", errors="replace",
+                )
+            except (OSError, ValueError):
+                # Degrade silently — empty text signals "no report
+                # available" to downstream prompt rendering, and the
+                # ``analysis_md_path`` field still lets a future
+                # read_artifact intent fetch it on demand.
+                analysis_md_text = ""
+
+        # PR-G: propagate ``task_groups`` from the handler result so the
+        # multi-KEEP integrate queue's source-of-truth lookups stay in
+        # sync with what ``_batch_kernel_candidates`` dispatched.
+        # Without this, ``untried_hot_reusable_kernels()`` and
+        # ``next_pending_keep_kernel_id()`` see ``task_groups=[]`` and
+        # fall through to per-kernel logic -- e.g. for
+        # ``primary=k004 kids=[k003,k004]`` they treat k003 as an
+        # untried independent kernel even though dispatching k004
+        # already covered the same AST function. The LLM then proposes
+        # a second ``run_optimization`` batch for k001/k003/..., wastes
+        # GEAK->Claude->Codex wall-clock on kernels that share patches
+        # with what the prior batch already produced
+        # (Qwen3-30B-A3B-Base session 20260523T035235Z saw this with
+        # k001/k003/k005 spinning up after k002/k004/k009 retired).
+        task_groups = result.get("task_groups") or []
+        if not isinstance(task_groups, list):
+            task_groups = []
+        self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "hot_kernels_top15": summary,
+            "task_groups": task_groups,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,
+            "analysis_md_path": str(analysis_md_path),
+            "analysis_md_text": analysis_md_text,
+            "roofline_snapshot_id": snapshot_id,
+            "roofline_baseline_gain_at_snapshot": float(
+                self.cumulative_gain_validated,
+            ),
             "ts": _now_iso(),
         }
 
@@ -1475,11 +1998,72 @@ class SharedState:
             tick=int(self.tick or 0),
             target_gap_mult=target_mult,
             k=int(top_k),
+            shared_state=self,  # N30: enable cheap-exhausted deep boost
         )
+        # B' (May 2026, follow-up to N30): per-row actionability tag
+        # so the LLM can tell at a glance whether the top eff_score
+        # row is something it can ``propose_action`` (cheap / analysis
+        # actions) or needs to emit as a ``request`` (kernel-owned
+        # deep actions like deep_kernel_analysis / operator_tuning /
+        # kernel_opt / integrate / vendor_kernel_config). Pre-B' the
+        # ranking just listed names, so when N30's boost surfaced two
+        # kernel-owned rows above kernel_opt (rank 1 + 2 unreachable
+        # via propose), the LLM tended to skip all the way down to a
+        # familiar shallow row like params (rank 6) instead of
+        # picking kernel_opt (rank 3, the top REQUEST-actionable
+        # deep choice).
+        from .policy import KERNEL_OWNED_ACTIONS as _KERNEL_OWNED
+        # Kernel-owned actions get an explicit "REQUEST kind=..." tag
+        # so the LLM sees the propose path next to the score.
+        _REQUEST_KIND_BY_ACTION = {
+            "kernel_opt": "run_optimization",
+            "integrate": "integrate",
+            "deep_kernel_analysis": "deep_kernel_analysis",
+            "operator_tuning": "operator_tuning",
+            "vendor_kernel_config": "vendor_kernel_config",
+        }
         lines: list[str] = [
             f"=== Action scores (top {len(rows)} by eff_score, tick={self.tick}) ==="
         ]
+        # B': surface the cheap-exhausted state as a header note so
+        # the LLM understands why the deep rows just jumped 6+ points
+        # in eff_score this tick. Pure informational -- no MUST/SHALL
+        # prescriptions; the scoreboard already encodes the priority.
+        try:
+            from .scoring import _is_cheap_exhausted as _scoring_cheap_exhausted
+            if _scoring_cheap_exhausted(self):
+                lines.append(
+                    "  (cheap_exploration_exhausted=True; N30 boost "
+                    "applied to deep-family rows so deep actions reflect "
+                    "their post-cheap priority)"
+                )
+        except ImportError:
+            pass
         locked_rows: list[tuple[str, str]] = []
+        # B': remember the highest-eff_score actionable row so we can
+        # mark it with a trailing "← top actionable" hint. We compute
+        # this in a first pass so the hint is correct even when the
+        # raw top rows are kernel-owned (LLM must REQUEST those, not
+        # propose them).
+        def _is_actionable(name: str, locked: str | None, cd: int) -> bool:
+            if locked or cd > 0:
+                return False
+            # All actions are actionable from LLM's point of view --
+            # kernel-owned via REQUEST, others via propose_action.
+            # "Top actionable" means top by eff_score among unlocked,
+            # uncooldown'd rows.
+            return True
+        top_actionable_name: str | None = None
+        top_actionable_eff = float("-inf")
+        for name, eff, a in rows:
+            cd_remaining = max(0, int(a.cooldown_until_tick) - int(self.tick or 0))
+            if eff < 0:
+                continue  # _LOCKED_SCORE
+            if not _is_actionable(name, a.locked_reason or None, cd_remaining):
+                continue
+            if eff > top_actionable_eff:
+                top_actionable_eff = eff
+                top_actionable_name = name
         for name, eff, a in rows:
             cd_remaining = max(0, int(a.cooldown_until_tick) - int(self.tick or 0))
             age = (
@@ -1493,6 +2077,19 @@ class SharedState:
                 locked_rows.append((name, a.locked_reason))
             elif cd_remaining > 0:
                 tag = f"   [cooldown {cd_remaining}]"
+            else:
+                # B' actionability tag (only on unlocked / unconcooldown'd
+                # rows; locked / cooldown'd take precedence above).
+                if name in _KERNEL_OWNED:
+                    kind = _REQUEST_KIND_BY_ACTION.get(name, name)
+                    tag = f"   [REQUEST: kernel-owned, kind={kind}]"
+                else:
+                    tag = "   [propose_action]"
+            # B': append "← top actionable" to the highest-scoring
+            # unlocked row so LLM doesn't have to scan two columns to
+            # find what it should propose this tick.
+            if name == top_actionable_name and eff > 0:
+                tag = tag + "  ← top actionable"
             eff_display = "  N/A" if eff < 0 else f"{eff:.2f}"
             lines.append(
                 f"  eff={eff_display:>5} base={a.base_score:.2f} "
@@ -1506,6 +2103,49 @@ class SharedState:
                 + ", ".join(f"{n}({r})" for n, r in sorted(locked_rows))
             )
         return "\n".join(lines)
+
+    def append_stack_gain_entry(
+        self,
+        *,
+        action: str,
+        variant_name: str | None,
+        new_tput: float,
+        extra_sglang_args: str = "",
+        ts: str | None = None,
+    ) -> float | None:
+        """N32b: Mirror an ``optimization_stack`` append into
+        ``gain_per_stack_entry`` so the two lists stay index-aligned.
+
+        Computes ``(new_tput - baseline_tput) / baseline_tput * 100``
+        and appends. Returns the computed gain_pct (None when
+        baseline_tput is 0 or new_tput is non-positive). Callers don't
+        usually consume the return value -- the list is the persisted
+        side-effect.
+
+        This method was a missing piece between main's
+        ``_lift_to_current_best`` (which calls it) and SharedState
+        (which previously only carried the ``gain_per_stack_entry``
+        field without an explicit mutator). Without this method, every
+        params/backends/integrate KEEP that promotes a winner crashes
+        with ``AttributeError``. Filling it in is a no-design-change
+        fix: the math + list append were already implied by the
+        adjacent comments on the call sites.
+        """
+        try:
+            base = float(self.baseline_tput or 0.0)
+        except (TypeError, ValueError):
+            base = 0.0
+        try:
+            tput = float(new_tput or 0.0)
+        except (TypeError, ValueError):
+            tput = 0.0
+        gain_pct: float | None
+        if base > 0 and tput > 0:
+            gain_pct = (tput - base) / base * 100.0
+        else:
+            gain_pct = None
+        self.gain_per_stack_entry.append(gain_pct)
+        return gain_pct
 
     def seed_stack_from_current_best(self) -> None:
         """Backfill stack for old sessions that only had current_best."""
@@ -1524,88 +2164,12 @@ class SharedState:
             "workspace": self.current_best.get("workspace"),
             "source": "seeded_from_current_best",
         }]
-        # Keep ``gain_per_stack_entry`` aligned with ``optimization_stack``.
-        # Seeded entries carry ``cum_gain_after = delta_pct = None`` so
-        # ``breakdown.attribution.method`` correctly classifies as
-        # ``reconstructed`` rather than ``validated``.
+        # Keep ``gain_per_stack_entry`` aligned with ``optimization_stack``
+        # (None == we don't know the per-entry gain for seeded entries).
         if len(self.gain_per_stack_entry) < len(self.optimization_stack):
-            for i in range(len(self.gain_per_stack_entry), len(self.optimization_stack)):
-                stk = self.optimization_stack[i] if i < len(self.optimization_stack) else {}
-                if not isinstance(stk, dict):
-                    stk = {}
-                self.gain_per_stack_entry.append({
-                    "ts": stk.get("ts") or "",
-                    "action": stk.get("action") or "unknown",
-                    "variant_name": stk.get("variant_name"),
-                    "stack_len_before": i,
-                    "stack_len_after": i + 1,
-                    "cum_gain_before": None,
-                    "cum_gain_after": None,
-                    "delta_pct": None,
-                    "extra_sglang_args": (
-                        stk.get("extra_sglang_args")
-                        or stk.get("candidate_extra_sglang_args")
-                        or ""
-                    ),
-                })
-
-    def append_stack_gain_entry(
-        self,
-        *,
-        action: str,
-        variant_name: str | None,
-        new_tput: float | int | None,
-        extra_sglang_args: str = "",
-        ts: str | None = None,
-    ) -> None:
-        """Append one V1-schema :class:`StackGainEntry` aligned with the
-        last ``optimization_stack`` push.
-
-        Computes ``cum_gain_after = (new_tput - baseline_tput) / baseline_tput * 100``
-        and ``delta_pct = cum_gain_after - prev_cum_gain_after`` so call
-        sites only need to pass action / variant_name / new_tput. Falls
-        back to ``None`` (for both cum_gain_after and delta_pct) when
-        ``baseline_tput`` is missing or ``new_tput`` isn't a finite
-        number; the entry is still emitted so index-alignment with
-        ``optimization_stack`` is preserved.
-        """
-        cum_after: float | None = None
-        try:
-            bt = float(self.baseline_tput or 0.0)
-            nt = float(new_tput) if new_tput is not None else None
-            if bt > 0 and nt is not None:
-                cum_after = (nt - bt) / bt * 100.0
-        except (TypeError, ValueError):
-            cum_after = None
-
-        # Find the previous entry's cum_gain_after to compute this entry's
-        # incremental delta. Skip seeded / unknown entries (cum_after=None).
-        prev_cum: float = 0.0
-        for prev in reversed(self.gain_per_stack_entry):
-            if not isinstance(prev, dict):
-                # legacy [float, ...] state: treat the number itself as
-                # the prior cum_gain_after.
-                if isinstance(prev, (int, float)):
-                    prev_cum = float(prev)
-                break
-            prior = prev.get("cum_gain_after")
-            if isinstance(prior, (int, float)):
-                prev_cum = float(prior)
-                break
-
-        delta = (cum_after - prev_cum) if cum_after is not None else None
-        stack_len_after = len(self.optimization_stack)
-        self.gain_per_stack_entry.append({
-            "ts": ts or datetime.now(timezone.utc).isoformat(),
-            "action": action,
-            "variant_name": variant_name,
-            "stack_len_before": stack_len_after - 1,
-            "stack_len_after": stack_len_after,
-            "cum_gain_before": prev_cum,
-            "cum_gain_after": cum_after,
-            "delta_pct": delta,
-            "extra_sglang_args": extra_sglang_args,
-        })
+            self.gain_per_stack_entry.extend(
+                [None] * (len(self.optimization_stack) - len(self.gain_per_stack_entry))
+            )
 
     # ------------------------------------------------------------------
     # Time-budget helpers (Phase 2 — consumed by Coordinator._compose_prompt)
@@ -1721,7 +2285,8 @@ class SharedState:
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_profile_roofline={self.last_profile_roofline or '(none)'}",
             f"last_profile_kernel_breakdown={self.last_profile_kernel_breakdown or '(none)'}",
-            f"last_select_kernels={self._format_last_select_kernels()}",
+            f"last_trace_analyze={self._format_last_trace_analyze()}",
+            f"analysis_md={self._format_analysis_md_full()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
             f"backends_search={self._format_backends_search()}",
@@ -1729,6 +2294,20 @@ class SharedState:
             f"backend_winners_history={self._format_backend_winners_history()}",
             f"synergy_attempted={len(self.synergy_attempted)} combos",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
+            # PR-B multi-KEEP integrate queue: surfaces the full set of
+            # pending KEEPs the integrate gate will drain (strongest-
+            # first), plus the per-kernel attempts count Fix-2 reads to
+            # silence ``no_levers_found`` false positives while batch
+            # kernel_opt is in flight.
+            (
+                "pending_keep_kernels="
+                f"{self.pending_keep_kernel_ids() or '(none)'}"
+            ),
+            (
+                "has_keep_pending_integrate="
+                f"{'true' if self.has_keep_pending_integrate else 'false'}"
+            ),
+            f"kernel_opt_attempts_count={self.kernel_opt_attempts_count}",
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
@@ -1738,6 +2317,7 @@ class SharedState:
             f"last_validate_stack={self._format_attempt(self.last_validate_stack)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
+            f"last_proposal_advice={self._format_last_proposal_advice()}",
             f"tick={int(self.tick or 0)}  "
             f"target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"stop_reason={self.stop_reason or '(none)'}",
@@ -1751,6 +2331,24 @@ class SharedState:
     # Audit-trail renderers (kernel-parity per-action attempts + global
     # failure log). Compact one-liners so the prompt stays readable.
     # ------------------------------------------------------------------
+    def _format_last_proposal_advice(self) -> str:
+        """N22: render the FIFO of keyword-implied variant advisories
+        so the orchestration LLM sees them on the next tick and can
+        extend its variants list. Empty list -> '(none)' so the prompt
+        stays consistent across ticks (LLM doesn't have to guess
+        whether the field even exists). Each entry is a multi-line
+        block; we join with a blank line for readability and prepend
+        the index so the LLM can reference them by number."""
+        advisories = self.last_proposal_advice or []
+        if not advisories:
+            return "(none)"
+        lines = [""]
+        for i, msg in enumerate(advisories, 1):
+            lines.append(f"--- advisory #{i} ---")
+            lines.append(str(msg))
+            lines.append("")
+        return "\n".join(lines)
+
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
         """Render one ``last_<action>`` snapshot or attempts[-1] entry."""
@@ -1839,16 +2437,93 @@ class SharedState:
         ] or "(none)"
 
     def _format_discovered_flags(self) -> str:
+        """Roofline-v2 N4: layered Z-scheme rendering of discovered flags.
+
+        Before N4 this method emitted only the per-framework count
+        summary (``sglang:backend=42/param=58, ...``). The 58 real
+        flag names were never visible to the main LLM, which left
+        flag selection to either prior knowledge (hallucination risk)
+        or implicit pattern-matching against ``params_search.tested``
+        fingerprints. Both routes are documented failure modes in
+        design §6.1.
+
+        N4 renders every discovered flag grouped by
+        ``<framework>.<action_kind>`` with a per-flag ``tested``
+        status tag derived from cross-referencing
+        ``params_search.tested`` / ``backends_search.tested``:
+
+        * ``[untested]`` — no fingerprint in tested[] contains this flag
+        * ``[tested: ±X.XX%]`` — exactly one variant tried, surface its gain
+        * ``[tested N vars, best ±X.XX%]`` — multiple variants tried
+
+        The status tags let the main LLM pick "untested + matches
+        bottleneck" flags directly (per §8.7 orchestration prompt
+        guidance) without needing to reverse-engineer the tested
+        ledger fingerprints.
+
+        Empty input degrades to the v0 placeholder message; missing
+        framework entries / non-dict children skip silently so a
+        malformed dict cannot crash the renderer.
+        """
         if not self.discovered_flags:
             return "(none — first backends/params round will populate)"
-        parts: list[str] = []
+        out_lines: list[str] = []
         for fw, entry in sorted(self.discovered_flags.items()):
             if not isinstance(entry, dict):
                 continue
-            n_b = len(entry.get("backend_flags") or [])
-            n_p = len(entry.get("param_flags") or [])
-            parts.append(f"{fw}:backend={n_b}/param={n_p}")
-        return ", ".join(parts) or "(none)"
+            for action_kind, key in (
+                ("backends", "backend_flags"),
+                ("params", "param_flags"),
+            ):
+                flags = entry.get(key) or []
+                if not isinstance(flags, (list, tuple)) or not flags:
+                    continue
+                out_lines.append(
+                    f"  {fw}.{action_kind} ({len(flags)} flags):"
+                )
+                for flag in sorted(str(f) for f in flags):
+                    tag = self._tested_tag_for_flag(flag, action_kind)
+                    out_lines.append(f"    {flag:42s} {tag}")
+        if not out_lines:
+            return "(none)"
+        return "\n" + "\n".join(out_lines)
+
+    def _tested_tag_for_flag(self, flag: str, action_kind: str) -> str:
+        """Cross-reference ``params_search.tested`` / ``backends_search.tested``
+        for variants whose extra_sglang_args contains ``flag`` and surface
+        the gain summary.
+
+        ``flag`` is a CLI-style string like ``--enable-two-batch-overlap``.
+        Matching is substring containment in ``extra_sglang_args`` —
+        accurate enough to catch the common case (single-flag variant)
+        and the multi-flag case (synergy combo includes this flag).
+        """
+        if action_kind == "params":
+            search = self.params_search or {}
+        elif action_kind == "backends":
+            search = self.backends_search or {}
+        else:
+            return "[untested]"
+        tested = search.get("tested") if isinstance(search, dict) else None
+        if not isinstance(tested, dict) or not tested:
+            return "[untested]"
+        matched_gains: list[float] = []
+        for snap in tested.values():
+            if not isinstance(snap, dict):
+                continue
+            args = str(snap.get("extra_sglang_args") or "")
+            if not args or flag not in args:
+                continue
+            gain = snap.get("gain_pct")
+            if isinstance(gain, (int, float)):
+                matched_gains.append(float(gain))
+        if not matched_gains:
+            return "[untested]"
+        n = len(matched_gains)
+        best = max(matched_gains)
+        if n == 1:
+            return f"[tested: {best:+.2f}%]"
+        return f"[tested {n} vars, best {best:+.2f}%]"
 
     @staticmethod
     def _format_variant_line(entry: dict[str, Any]) -> str:
@@ -2015,20 +2690,20 @@ class SharedState:
             )
         return parts or "(none)"
 
-    def _format_last_select_kernels(self) -> str:
-        if not self.last_select_kernels:
+    def _format_last_trace_analyze(self) -> str:
+        if not self.last_trace_analyze:
             return "(none)"
         ids = [
             str(e.get("kernel_id"))
-            for e in self.last_select_kernels.get("hot_kernels_top15", [])
+            for e in self.last_trace_analyze.get("hot_kernels_top15", [])
             if isinstance(e, dict) and e.get("kernel_id")
         ]
         reusable = list(
-            self.last_select_kernels.get("reusable_native_kernel_ids", [])
+            self.last_trace_analyze.get("reusable_native_kernel_ids", [])
         )
         base = (
-            f"trace={self.last_select_kernels.get('trace_input','?')} "
-            f"candidates_path={self.last_select_kernels.get('candidates_path','?')} "
+            f"trace={self.last_trace_analyze.get('trace_input','?')} "
+            f"candidates_path={self.last_trace_analyze.get('candidates_path','?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
         # T3 / T4 finishing-touches: when TraceLens emitted a routing
@@ -2041,7 +2716,7 @@ class SharedState:
         # and omit the suffix entirely in the steady-state (no
         # warnings) so existing prompt-format-stable tests don't see
         # gratuitous additions.
-        warnings = self.last_select_kernels.get("trace_health_warnings") or []
+        warnings = self.last_trace_analyze.get("trace_health_warnings") or []
         if not warnings:
             return base
         rendered: list[str] = []
@@ -2060,6 +2735,128 @@ class SharedState:
             else:
                 rendered.append(code)
         return f"{base} warnings=[{'; '.join(rendered)}]"
+
+    @staticmethod
+    def _strip_base64_data_urls(text: str) -> str:
+        """Roofline-v2 N11: replace `data:image/...;base64,...` blobs.
+
+        GPU-empirical context (DeepSeek-R1 session 16:06-02:00 of
+        2026-05-19): TraceLens analysis.md embeds a "Performance
+        Improvement" chart as a base64 PNG data URL inside a markdown
+        image (`![alt](data:image/png;base64,iVBOR...)`). For the R1
+        report the single line clocks in at 184530 chars / 184.5 KB
+        — i.e. 92% of the 200 KB analysis.md is base64 noise. The
+        main Orchestration LLM cannot see PNG pixels through base64,
+        so injecting it wholesale dilutes the prompt and obscures
+        the high-signal 🔴 P1 / 🟢 P1 recommendation sections (~16 KB
+        of pure text) that drive the entire roofline-v2 decision
+        loop.
+
+        This helper replaces every `data:image/...;base64,<payload>`
+        URL inside a markdown image with a short placeholder that
+        preserves the alt-text for context but drops the payload.
+        It is intentionally **not** TraceLens-specific — any
+        future report format that uses base64 data URLs gets the
+        same treatment automatically.
+
+        The strip is read-only relative to the source analysis.md
+        file on disk; only the in-memory string injected into the
+        LLM prompt is modified. The on-disk file remains intact for
+        operator inspection.
+        Implementation lives in ``inference_optimizer.tracelens_md``.
+        """
+        from inference_optimizer.tracelens_md import strip_base64_data_urls
+
+        return strip_base64_data_urls(text)
+
+    def _format_analysis_md_full(self) -> str:
+        """Roofline-v2 N5: inject TraceLens analysis.md verbatim into
+        the main Orchestration prompt.
+
+        This is the "directly give the report to the orchestrator"
+        contract the TraceLens team mandated and v1 violated by
+        introducing a sub-agent interpretation layer (see design §6.1).
+        The full report is read as-is — no truncation, no
+        reformatting, no markdown wrapper — so the main LLM sees the
+        same Executive Summary / Top Operations / Recommendations
+        sections a human engineer would consume.
+
+        Snapshot-stable: the underlying ``analysis_md_text`` only
+        changes when a new ``roofline`` action completes
+        (``record_trace_analyze`` overwrites the cache). Within one
+        snapshot every tick produces identical SECTION-B prompt
+        content, which is what lets Claude Code automatic prompt
+        caching (N6) cache this section verbatim across ticks. See
+        design §5.1.
+
+        Render modes:
+
+        * **No cache** (`last_trace_analyze` empty or
+          ``analysis_md_text`` missing) — emit a one-line hint asking
+          the LLM to propose `roofline`. Bookends absent so the
+          surrounding prompt summary stays compact when there's no
+          report to render.
+        * **Cache populated** — emit the full report between explicit
+          `=== TraceLens Analysis ... ===` bookends so the LLM can
+          syntactically distinguish report-content from surrounding
+          SharedState dump lines.
+
+        The header line includes ``snapshot=N`` and
+        ``gain_at_snapshot=X.XX%`` so the LLM can detect "report is
+        stale; gain has moved by ≥3% since snapshot" without parsing
+        the body. The re-profile guidance in orchestration.md
+        references these two fields directly.
+        """
+        cached = self.last_trace_analyze or {}
+        md_text = cached.get("analysis_md_text") or ""
+        if not md_text:
+            # N27: when the coordinator's roofline-required gate has
+            # already downgraded to fallback (roofline failed >= N
+            # consecutive times and the gate stamped
+            # ``fallback_mode_active=True`` on the otherwise-empty
+            # last_trace_analyze), tell the LLM it's in degraded
+            # mode and grid-tuning actions are unlocked WITHOUT
+            # analysis.md guidance. The LLM should still re-propose
+            # `roofline` when it suspects the upstream issue cleared
+            # (success resets the streak), but in the meantime
+            # backends/params/comm_optimization will pass-through and
+            # use the executor's default full grid (i.e. pre-roofline
+            # behaviour).
+            if cached.get("fallback_mode_active"):
+                streak = cached.get("fallback_after_failures", "?")
+                threshold = cached.get("fallback_threshold", "?")
+                return (
+                    f"(no TraceLens snapshot yet — N27 FALLBACK MODE: "
+                    f"roofline failed {streak} consecutive times "
+                    f"(>= threshold {threshold}); "
+                    "`backends` / `params` / `comm_optimization` are "
+                    "UNLOCKED and will run the executor's full default "
+                    "grid without analysis.md-driven N20-A subset / N22 "
+                    "advisory. Re-propose `roofline` whenever you think "
+                    "the upstream profile/trace issue may have cleared — "
+                    "success resets the streak and restores roofline-"
+                    "driven variant selection.)"
+                )
+            return (
+                "(no TraceLens snapshot yet — propose `roofline` to "
+                "produce one; roofline is a composite action that "
+                "runs profile + trace_analyze atomically)"
+            )
+        # N11: strip base64 image payloads before injection so the
+        # prompt is not 92% noise (see _strip_base64_data_urls).
+        md_text = self._strip_base64_data_urls(md_text)
+        snap = cached.get("roofline_snapshot_id", "?")
+        gain = cached.get("roofline_baseline_gain_at_snapshot", 0.0)
+        try:
+            gain_str = f"{float(gain):.2f}"
+        except (TypeError, ValueError):
+            gain_str = "?"
+        return (
+            f"\n=== TraceLens Analysis (snapshot #{snap}, "
+            f"gain at snapshot = {gain_str}%) ===\n"
+            f"{md_text}\n"
+            f"=== End TraceLens Analysis ===\n"
+        )
 
     def _format_last_sweep(self) -> str:
         if not self.last_sweep:

@@ -45,6 +45,12 @@ from .profile import (
 )
 from .pmc_roofline import PMCRooflineExecutor, pmc_roofline_executor
 from .report import ReportExecutor, report_executor
+from .roofline import (
+    RooflineExecutor,
+    RooflineStubExecutor,
+    make_roofline_executor,
+    make_roofline_stub_executor,
+)
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .sweep import (
     DEFAULT_CONC_VALUES,
@@ -57,6 +63,10 @@ from .validate_stack import (
     ValidateStackExecutor,
     combine_optimization_stack,
     validate_stack_executor,
+)
+from .recover import (
+    RecoverExecutor,
+    recover_executor,
 )
 
 __all__ = [
@@ -76,7 +86,12 @@ __all__ = [
     "ParamsExecutor",
     "PMCRooflineExecutor",
     "ProfileExecutor",
+    "RecoverExecutor",
     "ReportExecutor",
+    "RooflineExecutor",
+    "RooflineStubExecutor",
+    "make_roofline_executor",
+    "make_roofline_stub_executor",
     "SYNERGY_GROUPS",
     "SessionBreakdownExecutor",
     "SweepExecutor",
@@ -92,6 +107,7 @@ __all__ = [
     "params_executor",
     "pmc_roofline_executor",
     "profile_executor",
+    "recover_executor",
     "report_executor",
     "session_breakdown_executor",
     "sweep_executor",
