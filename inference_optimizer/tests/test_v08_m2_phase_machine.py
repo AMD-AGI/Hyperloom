@@ -134,6 +134,9 @@ def test_exit_terminal_prelude_after_three_baseline_failures():
 
 def test_exit_normal_explore_uses_budget_exhaustion():
     # Provide an in-the-past phase_started_unix so elapsed exceeds budget.
+    # IR-6 force-exit is disabled (thresholds=0) for this test so we
+    # isolate the budget_exhausted path; a dedicated suite in
+    # test_phase_force_exit.py exercises the force-exit gate.
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=1.0,
@@ -144,7 +147,11 @@ def test_exit_normal_explore_uses_budget_exhaustion():
         optimization_stack=[{"action": "params"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_explore(state)
+    out = phase_state.exit_normal_explore(
+        state,
+        force_exit_hours_remaining=0.0,
+        force_exit_budget_pct=0.0,
+    )
     assert out is not None and out[0] == "explore_phase_budget_exhausted"
 
 

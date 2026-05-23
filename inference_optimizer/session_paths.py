@@ -80,6 +80,11 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     # ``explore`` already includes it in the registry-derived set, the
     # fallback only matters when the yaml can't be loaded.
     "integrate_patch",
+    # IR-7 (Saturday May 2026): ``assess_remaining_gaps`` is a thin
+    # wrapper that dispatches the ``session_steward_specialist``
+    # domain. Pipeline_phase ``explore`` includes it in the
+    # registry-derived set; fallback covers the rare bootstrap miss.
+    "assess_remaining_gaps",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
     "recover",

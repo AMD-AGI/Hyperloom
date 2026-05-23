@@ -126,6 +126,15 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
 )
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
 
+# IR-7 — closed enum of session_steward_specialist recommendations.
+# Any value outside this set is coerced to ``stop_session`` in
+# :meth:`Coordinator._route_steward_verdict` (defense in depth — the
+# LLM can write any string but only the enum drives a phase-routing
+# change).
+_STEWARD_RECS: frozenset[str] = frozenset({
+    "continue_explore", "advance_to_kernel", "stop_session",
+})
+
 
 def effective_closing_grace_sec(
     max_minutes: float | None,
@@ -910,6 +919,11 @@ class Coordinator:
             disable_legacy_proxy=self._legacy_plateau_proxy_disabled,
         )
         if next_phase is None:
+            # IR-7 — on plateau but no steward verdict yet,
+            # compute_next_phase returns None and we enqueue the
+            # steward here. The dispatcher's normal loop picks it up;
+            # the next tick will see the verdict and route accordingly.
+            await self._maybe_enqueue_steward()
             return
         target, reason, evidence = next_phase
         if target == (state.phase or "").upper():
@@ -1715,6 +1729,112 @@ class Coordinator:
                 "state=%s)", task.task_id, task.state,
             )
         return task
+
+    async def _enqueue_internal_steward_task(
+        self, *, reason: str,
+    ) -> "Task | None":
+        """IR-7 — enqueue a Coordinator-owned session_steward_specialist task.
+
+        Mirrors :meth:`_enqueue_internal_report_task` shape, with two
+        differences:
+
+        * ``kind='specialist'`` (the standard SpecialistRunner path
+          handles the LLM dispatch + worktree-less subprocess);
+        * idempotency key includes the current EXPLORE round id so
+          repeated calls within the same round collapse to one task,
+          while a new plateau in a later round can dispatch fresh.
+
+        Bypasses PolicyGate the same way ``closing_report_task`` does
+        (Coordinator-internal callers don't go through the
+        propose/delegate validation path). LLM-side proposals of
+        ``assess_remaining_gaps`` are throttled separately by
+        :meth:`_assess_remaining_gaps_throttle_denial`.
+
+        Returns ``None`` when a task already exists in the registry
+        with the same idempotency key (whether queued / running /
+        succeeded). The caller (``_maybe_enqueue_steward``) treats
+        ``None`` as "nothing to do this tick".
+        """
+        round_id = int(
+            (self.shared_state.explore_search or {}).get("cursor") or 0
+        )
+        idempotency_key = f"internal-steward-round{round_id}"
+        # Avoid re-enqueueing if a steward verdict already landed in
+        # this round (paranoia — wants_steward_assessment should have
+        # returned False, but defense-in-depth).
+        last = self.shared_state.last_remaining_gaps_assessment or {}
+        if isinstance(last, dict) and last.get(
+            "round_at_assessment"
+        ) == round_id and last.get("recommendation"):
+            return None
+        params: dict[str, Any] = {
+            "domain": "session_steward_specialist",
+            "gap_canonical_id": f"gap.steward.round{round_id}",
+            "gap_symptom": (
+                "EXPLORE plateau triggered; assess remaining leverage "
+                "and recommend continue_explore / advance_to_kernel / "
+                "stop_session."
+            ),
+            "gap_layer": "session_strategy",
+            "max_turns": 8,
+            "source": "coordinator_internal",
+            "reason": str(reason),
+        }
+        # Warm the specialist params the same way the LLM-dispatch path
+        # does so the prompt sees real hardware + workload context.
+        self._warm_specialist_params(params)
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=["research_lane"],
+                allowed_tools=[
+                    "emit_intent", "Read", "Grep", "Glob", "Bash",
+                    "WebSearch", "WebFetch",
+                ],
+                side_effects=["workspace_write"],
+                lease_ttl_sec=1800,
+            )
+        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+            log.exception(
+                "internal-steward: enqueue failed (round=%d)", round_id,
+            )
+            return None
+        if was_existing:
+            log.info(
+                "internal-steward task reused (task_id=%s, state=%s)",
+                task.task_id, task.state,
+            )
+        else:
+            log.info(
+                "internal-steward dispatched: task_id=%s round=%d "
+                "reason=%s",
+                task.task_id, round_id, reason,
+            )
+        return task
+
+    async def _maybe_enqueue_steward(self) -> None:
+        """IR-7 — enqueue a steward task when phase_state says we need one.
+
+        Called from ``_advance_phase_if_needed`` after
+        ``compute_next_phase`` returns ``None``. The helper is pure
+        sugar over :meth:`_enqueue_internal_steward_task` + the
+        phase_state predicate.
+        """
+        try:
+            wants = _phase_state.wants_steward_assessment(
+                self.shared_state,
+                budget_pct=self._phase_budget_pct,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("steward: wants_steward_assessment failed")
+            return
+        if not wants:
+            return
+        await self._enqueue_internal_steward_task(
+            reason="coordinator_plateau",
+        )
 
     async def _enqueue_internal_session_breakdown_task(
         self, *, reason: str,
@@ -2838,6 +2958,55 @@ class Coordinator:
             rule="baseline_self_loop",
             hint=hint,
         )
+
+    def _assess_remaining_gaps_throttle_denial(
+        self,
+    ) -> PolicyDenied | None:
+        """IR-7 — throttle LLM-initiated ``assess_remaining_gaps``.
+
+        Coordinator-internal dispatches bypass this rule (they go via
+        :meth:`_enqueue_internal_steward_task` directly into
+        TaskRegistry). The LLM may also propose ``assess_remaining_gaps``
+        when it believes plateau is near, but back-to-back proposals
+        within ``INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC``
+        (default 1800) are denied to keep the dispatch budget bounded.
+        """
+        last = self.shared_state.last_remaining_gaps_assessment or {}
+        if not isinstance(last, dict):
+            return None
+        last_ts = str(last.get("ts") or "").strip()
+        if not last_ts:
+            return None
+        try:
+            from datetime import datetime, timezone
+            ts_dt = datetime.fromisoformat(last_ts)
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+            now_dt = datetime.now(timezone.utc)
+            elapsed = (now_dt - ts_dt).total_seconds()
+        except (ValueError, TypeError):
+            return None
+        try:
+            min_interval = float(os.environ.get(
+                "INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC",
+                "1800",
+            ))
+        except (TypeError, ValueError):
+            min_interval = 1800.0
+        if elapsed < min_interval:
+            return PolicyDenied(
+                f"action='assess_remaining_gaps' denied: throttled "
+                f"(last assessment {elapsed:.0f}s ago, min interval "
+                f"{int(min_interval)}s)",
+                rule="assess_remaining_gaps_throttle",
+                hint=(
+                    "Last steward assessment was recent. Wait for the "
+                    "Coordinator to enqueue the next internal steward "
+                    "on plateau, OR continue running variants until "
+                    "the throttle window elapses."
+                ),
+            )
+        return None
 
     def _sequence_denial_for_action(
         self,
@@ -4050,6 +4219,42 @@ class Coordinator:
             params.setdefault(
                 "config_path", self.shared_state.baseline_config_path
             )
+        # IR-7 — ``assess_remaining_gaps`` is a thin wrapper: rewrite
+        # the kind to ``specialist`` and force the
+        # ``session_steward_specialist`` domain (LLM cannot pick any
+        # other domain via this action). Throttle is checked separately
+        # via _assess_remaining_gaps_throttle_denial above.
+        if action_name == "assess_remaining_gaps":
+            throttle = self._assess_remaining_gaps_throttle_denial()
+            if throttle is not None:
+                await self._record_policy_denied(
+                    source, intent, throttle, action_name=action_name,
+                )
+                return
+            # Force the steward domain + a deterministic gap id so
+            # PolicyGate R2 passes. Preserve params.reason verbatim
+            # so the audit trail captures why the LLM proposed.
+            llm_reason = str(params.get("reason") or "").strip()
+            round_id = int(
+                (self.shared_state.explore_search or {}).get("cursor") or 0
+            )
+            params["domain"] = "session_steward_specialist"
+            params["gap_canonical_id"] = (
+                params.get("gap_canonical_id")
+                or f"gap.steward.round{round_id}.llm"
+            )
+            params["gap_symptom"] = (
+                "LLM-initiated steward assessment (reason="
+                f"{llm_reason or 'unspecified'!r})"
+            )
+            params.setdefault("gap_layer", "session_strategy")
+            params.setdefault("max_turns", 8)
+            params.setdefault("source", "orchestration")
+            params["reason"] = llm_reason or "llm_uncertainty"
+            # Rewire to the specialist task kind so the standard
+            # SpecialistRunner picks it up.
+            action_name = "specialist"
+
         # v0.8 §3.5 + KB_gaps/Gap-01 — specialist pre-dispatch warmup.
         # When the Orchestration role delegates a specialist task, the
         # Coordinator is the only place with the KnowledgePlane facade
@@ -4764,6 +4969,25 @@ class Coordinator:
             },
         )
 
+        # IR-7 — route session_steward_specialist verdicts. Done payload
+        # carries extra fields beyond the standard schema; see
+        # ``actions/assess_remaining_gaps.md`` and the prompt builder
+        # focus template. Coerce out-of-vocab recommendations to
+        # ``stop_session`` (defense in depth — the LLM is allowed to
+        # write any string but we only honour the closed enum).
+        if domain == "session_steward_specialist":
+            try:
+                await self._route_steward_verdict(
+                    task=task, done_payload=done_payload,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "steward routing failed for task=%s; assessment "
+                    "left in last_remaining_gaps_assessment but no "
+                    "phase-routing change applied",
+                    task.task_id,
+                )
+
         # v0.8 KB_gaps/Gap-09 — refresh the gaps ledger after a
         # specialist round closes. The dedupe-by-canonical-id keeps the
         # list bounded; the per-gap attempt log captures the
@@ -4788,6 +5012,144 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
+                task.task_id,
+            )
+
+    async def _route_steward_verdict(
+        self, *, task: "Task", done_payload: dict[str, Any],
+    ) -> None:
+        """IR-7 — process a session_steward_specialist verdict.
+
+        Side effects depending on ``recommendation``:
+
+        * ``stop_session``    → ``state.set_stop_reason('no_more_leverage')``.
+        * ``advance_to_kernel`` → ``state.set_pending_escalate_hint('skip_to_kernel')``.
+        * ``continue_explore`` → append ``next_gap_canonical_id`` to
+          ``state.gaps[]``, reset ``params_no_promote_streak`` and
+          per-domain empty streak counters, set
+          ``steward_continuation_used=True``.
+
+        Antiloop: only one continuation per session. A second
+        ``continue_explore`` is coerced to ``advance_to_kernel`` so
+        the EXPLORE→KERNEL transition becomes mandatory.
+
+        Out-of-vocab ``recommendation`` values are coerced to
+        ``stop_session`` (defense in depth — the LLM can write any
+        string, but we only honour the closed enum).
+        """
+        raw_rec = str(done_payload.get("recommendation") or "").strip().lower()
+        if raw_rec not in _STEWARD_RECS:
+            log.warning(
+                "steward: out-of-vocab recommendation=%r for task=%s; "
+                "coercing to 'stop_session'",
+                raw_rec, task.task_id,
+            )
+            raw_rec = "stop_session"
+        # Antiloop: only one continuation per session.
+        if (
+            raw_rec == "continue_explore"
+            and bool(getattr(
+                self.shared_state, "steward_continuation_used", False,
+            ))
+        ):
+            log.info(
+                "steward: continue_explore requested but continuation "
+                "already used this session; coercing to "
+                "'advance_to_kernel' (task=%s)",
+                task.task_id,
+            )
+            raw_rec = "advance_to_kernel"
+        next_gap = str(
+            done_payload.get("next_gap_canonical_id") or ""
+        ).strip()
+        if raw_rec == "continue_explore" and not next_gap:
+            log.warning(
+                "steward: continue_explore missing next_gap_canonical_id "
+                "for task=%s; coercing to 'advance_to_kernel'",
+                task.task_id,
+            )
+            raw_rec = "advance_to_kernel"
+
+        # Record the assessment unconditionally so the audit trail
+        # captures it even when the recommendation was coerced.
+        try:
+            potential_raw = done_payload.get(
+                "remaining_potential_pct_estimate"
+            )
+            potential = (
+                float(potential_raw)
+                if isinstance(potential_raw, (int, float)) else 0.0
+            )
+        except (TypeError, ValueError):
+            potential = 0.0
+        round_at = int(
+            (self.shared_state.explore_search or {}).get("cursor") or 0
+        )
+        self.shared_state.record_steward_assessment(
+            recommendation=raw_rec,
+            next_gap_canonical_id=next_gap,
+            remaining_potential_pct_estimate=potential,
+            rationale=str(done_payload.get("rationale") or ""),
+            task_id=task.task_id,
+            round_at_assessment=round_at,
+            source_payload=done_payload,
+        )
+        # Route — the heavy work is mostly already in helper writers
+        # on SharedState.
+        if raw_rec == "stop_session":
+            self.shared_state.set_stop_reason("no_more_leverage")
+            log.info(
+                "steward: recommendation='stop_session' for task=%s "
+                "-> stop_reason='no_more_leverage'",
+                task.task_id,
+            )
+        elif raw_rec == "advance_to_kernel":
+            from .phase_state import ESCALATE_HINT_SKIP_TO_KERNEL
+            self.shared_state.set_pending_escalate_hint(
+                ESCALATE_HINT_SKIP_TO_KERNEL,
+            )
+            log.info(
+                "steward: recommendation='advance_to_kernel' for task=%s "
+                "-> pending_escalate_hint='skip_to_kernel'",
+                task.task_id,
+            )
+        elif raw_rec == "continue_explore":
+            # Inject the next gap and reset plateau counters so the next
+            # tick does not immediately re-trigger plateau judgment on
+            # the same evidence.
+            try:
+                self.shared_state.append_gap_attempt(next_gap, {
+                    "action": "steward",
+                    "variant_name": "session_steward_specialist",
+                    "outcome": "CONTINUATION_GRANTED",
+                    "rationale": str(
+                        done_payload.get("rationale") or ""
+                    )[:480],
+                })
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "steward: append_gap_attempt failed for gap=%s",
+                    next_gap,
+                )
+            self.shared_state.params_no_promote_streak = 0
+            # Per-domain empty streak reset is a courtesy — Orchestration
+            # gets a clean slate to re-dispatch domains.
+            self.shared_state.specialist_domain_empty_streak = {}
+            self.shared_state.steward_continuation_used = True
+            log.info(
+                "steward: recommendation='continue_explore' for task=%s "
+                "-> next_gap=%r, plateau counters reset, "
+                "continuation marker set",
+                task.task_id, next_gap,
+            )
+        # Persist immediately so a crash between this routing and the
+        # broader _record_specialist_result.save still leaves the
+        # routing decision durable.
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "steward: SharedState.save after routing failed for task=%s",
                 task.task_id,
             )
 

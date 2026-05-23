@@ -111,6 +111,11 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # is deterministic (Python executor, no LLM) and bound to EXPLORE
         # only — KERNEL still uses the ``integrate`` (kernel-owned) path.
         "integrate_patch",
+        # IR-7 (Honest self-stop): thin wrapper that dispatches the
+        # session_steward_specialist domain. Coordinator also enqueues
+        # this internally on plateau (bypasses PolicyGate); LLM-side
+        # proposes are throttled by ``assess_remaining_gaps_throttle``.
+        "assess_remaining_gaps",
         "recover",
     }),
     PHASE_KERNEL: frozenset({
@@ -166,6 +171,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "sweep_budget_exhausted",
     "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
     "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
+    "explore_force_exit_low_budget",    # EXPLORE → next phase when total remaining or phase remaining drops below operator-configured thresholds
 
     # Terminal exits (any phase → CLOSE)
     "robustness_escalated",
@@ -227,6 +233,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "plateau_kernel",
     "no_kernel_skipped",
     "sweep_done",
+    "explore_force_exit_low_budget",
 })
 
 
@@ -262,6 +269,26 @@ DEFAULT_PLATEAU_EXPLORE_LOOKBACK:         int   = 5
 DEFAULT_PLATEAU_KERNEL_REVERT_STREAK:     int   = 3
 DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT:     float = 0.5
 DEFAULT_PLATEAU_KERNEL_LOOKBACK:          int   = 5
+
+# v0.8 — EXPLORE hard force-exit thresholds (HARD time gate; overrides
+# plateau + steward). The Coordinator may exit EXPLORE the moment EITHER
+# of the following holds:
+#
+# * total wall-clock remaining (``state.remaining_minutes()``) is below
+#   ``DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING`` hours, OR
+# * the EXPLORE phase's own remaining budget fraction is below
+#   ``DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT`` of its allocated slice.
+#
+# The defaults match the report iter 19 lesson: leave at least 3h or
+# 20% of EXPLORE budget for the downstream KERNEL/SWEEP/CLOSE phases so
+# the session can produce a clean report + recipe write-back instead of
+# burning the whole budget on diminishing-returns explore variants.
+# Operators tune via ``--explore-force-exit-hours-remaining`` /
+# ``--explore-force-exit-budget-pct`` (locked at session start into
+# ``SharedState.plateau_overrides`` under
+# ``force_exit_hours_remaining`` / ``force_exit_budget_pct``).
+DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
+DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:      float = 0.20
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +467,116 @@ def phase_budget_remaining_seconds(
         return None
     budget_seconds = mm * 60.0 * pct
     return max(0.0, budget_seconds - phase_elapsed_seconds(state, now_unix=now_unix))
+
+
+# ----------------------- EXPLORE hard force-exit (HARD time gate) -----------
+def session_remaining_seconds(
+    state: Any, *, now_unix: float | None = None,
+) -> float | None:
+    """Total wall-clock seconds remaining for the session.
+
+    Returns ``None`` when ``max_minutes`` is 0 (unlimited run) or
+    ``start_ts`` is unparseable. Mirrors
+    :meth:`SharedState.remaining_minutes` without taking a datetime
+    dependency so phase_state stays pure.
+    """
+    mm = _max_minutes(state)
+    if mm <= 0:
+        return None
+    start_ts = str(getattr(state, "start_ts", "") or "").strip()
+    if not start_ts:
+        return None
+    try:
+        from datetime import datetime, timezone
+        start = datetime.fromisoformat(start_ts)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        now_dt = datetime.now(timezone.utc)
+        elapsed_sec = max(0.0, (now_dt - start).total_seconds())
+    except (ValueError, TypeError):
+        return None
+    return max(0.0, mm * 60.0 - elapsed_sec)
+
+
+def should_force_exit_explore(
+    state: Any,
+    *,
+    hours_remaining_threshold: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+    budget_pct_threshold: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """Return ``(True, evidence)`` when HARD EXPLORE force-exit fires.
+
+    The gate fires when EITHER of:
+
+    * ``session_remaining_seconds(state) <= hours_remaining_threshold * 3600``
+      — total wall-clock budget about to run out; downstream phases need
+      buffer for report + recipe write-back (report iter 19 lesson).
+    * ``phase_budget_remaining_pct <= budget_pct_threshold`` — the EXPLORE
+      slice is almost exhausted; don't squeeze a final variant in only
+      to lose it to a half-finished benchmark.
+
+    Either gate alone is sufficient. Both fields land in ``evidence``
+    so the audit trail captures which condition fired. The Coordinator
+    routes EXPLORE→KERNEL (or →SWEEP when ``kernel_enabled=False``)
+    via the existing ``compute_next_phase`` plumbing — the new exit
+    reason ``explore_force_exit_low_budget`` reuses the same target
+    selection logic.
+
+    Returns ``(False, evidence)`` when neither condition holds; evidence
+    is still populated for diagnostics so callers can render
+    ``force_exit_remaining_sec`` into the Orchestration prompt.
+    """
+    evidence: dict[str, Any] = {
+        "hours_remaining_threshold":  float(hours_remaining_threshold),
+        "budget_pct_threshold":       float(budget_pct_threshold),
+    }
+    fired = False
+    fired_reasons: list[str] = []
+
+    # Non-positive threshold = disabled. Lets callers opt out of either
+    # sub-gate (e.g. tests that want to isolate budget_exhausted, or an
+    # operator who wants only the phase-pct backstop). Both thresholds
+    # disabled effectively turns IR-6 off for this call.
+    hours_threshold_enabled = float(hours_remaining_threshold) > 0.0
+    pct_threshold_enabled = float(budget_pct_threshold) > 0.0
+
+    session_remaining = session_remaining_seconds(state, now_unix=now_unix)
+    if session_remaining is not None and hours_threshold_enabled:
+        evidence["session_remaining_seconds"] = round(session_remaining, 2)
+        threshold_sec = float(hours_remaining_threshold) * 3600.0
+        if session_remaining <= threshold_sec:
+            fired = True
+            fired_reasons.append("session_remaining")
+
+    phase_remaining = phase_budget_remaining_seconds(
+        state, budget_pct=budget_pct, now_unix=now_unix,
+    )
+    if phase_remaining is not None:
+        # Compute the phase's *total* allotted budget so we can express
+        # remaining as a fraction.
+        mm = _max_minutes(state)
+        budget = normalize_budget_pct(
+            budget_pct or getattr(state, "phase_budget_pct", None)
+        )
+        pct_alloc = budget.get((getattr(state, "phase", "") or "").upper(), 0.0)
+        if mm > 0 and pct_alloc > 0:
+            phase_total_sec = mm * 60.0 * pct_alloc
+            remaining_pct = (
+                phase_remaining / phase_total_sec if phase_total_sec > 0 else 0.0
+            )
+            evidence["phase_remaining_pct"] = round(remaining_pct, 4)
+            evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
+            if (
+                pct_threshold_enabled
+                and remaining_pct <= float(budget_pct_threshold)
+            ):
+                fired = True
+                fired_reasons.append("phase_remaining_pct")
+
+    evidence["fired_reasons"] = fired_reasons
+    return fired, evidence
 
 
 # ----------------------- plateau pure functions (KB_design §3.8 §5) --------
@@ -704,11 +841,19 @@ def exit_normal_explore(
     plateau_empty_streak: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
     disable_legacy_proxy: bool = False,
+    force_exit_hours_remaining: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+    force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
 ) -> tuple[str, dict[str, Any]] | None:
     """EXPLORE normal exit (KB_design §3.8 §5.1 + §3.13 M7).
 
     Priority order:
 
+    0. HARD force-exit (:func:`should_force_exit_explore`) — overrides
+       every other gate. Fires when total session remaining wall-clock
+       drops below ``force_exit_hours_remaining`` hours OR when this
+       phase's remaining budget pct drops below ``force_exit_budget_pct``.
+       Iron Rule IR-6: the steward / plateau / LLM proposals do not get
+       to argue with this gate.
     1. ``escalate_strategy_change`` hint ``skip_to_kernel`` →
        ``plateau_explore`` (``evidence='llm_escalation'``).
     2. Real ``plateau_explore`` (:func:`compute_plateau_explore`)
@@ -724,6 +869,20 @@ def exit_normal_explore(
        fail closed.
     4. Phase budget exhausted.
     """
+    # Priority 0 — HARD force-exit (IR-6).
+    forced, force_ev = should_force_exit_explore(
+        state,
+        hours_remaining_threshold=force_exit_hours_remaining,
+        budget_pct_threshold=force_exit_budget_pct,
+        budget_pct=budget_pct,
+        now_unix=now_unix,
+    )
+    if forced:
+        return "explore_force_exit_low_budget", {
+            "evidence": "force_exit",
+            **force_ev,
+        }
+
     hint = _pending_escalate_hint(state)
     if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
         return "plateau_explore", {
@@ -743,8 +902,50 @@ def exit_normal_explore(
             empty_streak_threshold=plateau_empty_streak,
         )
         if triggered:
+            # IR-7 — steward gate. The plateau judge fired; consult the
+            # session_steward verdict before actually exiting. Three
+            # routes:
+            #   * steward_disabled override → exit immediately (plateau).
+            #   * no assessment yet → return None with a sentinel
+            #     evidence the Coordinator picks up (it enqueues the
+            #     steward internally; we stay in EXPLORE one more tick).
+            #   * recommendation == 'continue_explore' AND continuation
+            #     not yet used → stay in EXPLORE; Coordinator already
+            #     reset the plateau counters when it routed the verdict.
+            #   * otherwise → exit plateau normally; evidence carries
+            #     the recommendation so the audit trail reflects it.
+            overrides = _resolve_plateau_overrides(state)
+            steward_disabled = bool(overrides.get("steward_disabled", False))
+            if steward_disabled:
+                return "plateau_explore", {
+                    "evidence":           "plateau_judgment",
+                    "steward_disabled":   True,
+                    **evidence,
+                }
+            assessment = getattr(
+                state, "last_remaining_gaps_assessment", None,
+            ) or {}
+            rec = str(
+                assessment.get("recommendation") or ""
+            ).strip().lower() if isinstance(assessment, dict) else ""
+            steward_used = bool(getattr(
+                state, "steward_continuation_used", False,
+            ))
+            if not rec:
+                # No verdict yet — stay in EXPLORE one more tick and
+                # let the Coordinator enqueue an internal steward run
+                # (it polls ``wants_steward_assessment`` after
+                # ``compute_next_phase`` returns None).
+                return None
+            if rec == "continue_explore" and not steward_used:
+                # Continuation granted; the Coordinator already
+                # processed the verdict (reset plateau counters,
+                # injected next_gap). Stay in EXPLORE.
+                return None
+            # advance_to_kernel / stop_session / continuation exhausted.
             return "plateau_explore", {
-                "evidence": "plateau_judgment",
+                "evidence":              "plateau_judgment",
+                "steward_recommendation": rec,
                 **evidence,
             }
     elif not disable_legacy_proxy:
@@ -778,6 +979,78 @@ def exit_normal_explore(
             "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
         }
     return None
+
+
+def wants_steward_assessment(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+    plateau_keep_gain_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+    plateau_empty_streak: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
+    plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+) -> bool:
+    """Return True when Coordinator should enqueue a steward task NOW.
+
+    Pre-conditions (all must hold):
+
+    * current phase is EXPLORE,
+    * plateau has triggered (real plateau judgment, not the legacy
+      m2_proxy — the proxy is too noisy to drive a steward dispatch),
+    * no fresh ``last_remaining_gaps_assessment`` exists (otherwise we
+      already routed on the existing verdict),
+    * steward is not disabled by operator,
+    * HARD force-exit has not already fired (in which case there's no
+      time to dispatch an LLM run — IR-6 wins outright).
+
+    The Coordinator calls this on every tick after
+    :func:`compute_next_phase` returns ``None``; ``True`` means enqueue
+    a ``session_steward_specialist`` task (bypassing PolicyGate; the
+    same idempotency pattern as ``closing_report_task_id``).
+    """
+    phase = (getattr(state, "phase", "") or "").strip().upper()
+    if phase != PHASE_EXPLORE:
+        return False
+    overrides = _resolve_plateau_overrides(state)
+    if bool(overrides.get("steward_disabled", False)):
+        return False
+    # HARD force-exit takes precedence — if it fires, IR-6 routes us
+    # straight to KERNEL and the steward never runs.
+    forced, _ = should_force_exit_explore(
+        state,
+        hours_remaining_threshold=float(overrides.get(
+            "force_exit_hours_remaining",
+            DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+        )),
+        budget_pct_threshold=float(overrides.get(
+            "force_exit_budget_pct",
+            DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+        )),
+        budget_pct=budget_pct,
+        now_unix=now_unix,
+    )
+    if forced:
+        return False
+    explore_search = getattr(state, "explore_search", None) or {}
+    has_v08_signals = (
+        isinstance(explore_search, dict)
+        and (explore_search.get("winners_history") or [])
+    ) or bool(getattr(state, "specialist_rounds", None) or [])
+    if not has_v08_signals:
+        return False
+    triggered, _ = compute_plateau_explore(
+        state,
+        lookback=plateau_lookback,
+        keep_gain_threshold_pct=plateau_keep_gain_pct,
+        empty_streak_threshold=plateau_empty_streak,
+    )
+    if not triggered:
+        return False
+    assessment = getattr(state, "last_remaining_gaps_assessment", None) or {}
+    if isinstance(assessment, dict) and assessment.get("recommendation"):
+        # Already have a verdict; Coordinator should be routing on it.
+        return False
+    return True
 
 
 def exit_normal_kernel(
@@ -918,6 +1191,14 @@ def compute_next_phase(
                 DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
             )),
             disable_legacy_proxy=disable_legacy_proxy,
+            force_exit_hours_remaining=float(overrides.get(
+                "force_exit_hours_remaining",
+                DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+            )),
+            force_exit_budget_pct=float(overrides.get(
+                "force_exit_budget_pct",
+                DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+            )),
         )
         if norm is not None:
             if kernel_enabled:
@@ -1030,6 +1311,8 @@ def make_history_row(
 
 
 __all__ = [
+    "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT",
+    "DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING",
     "DEFAULT_PHASE_BUDGET_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
@@ -1077,4 +1360,7 @@ __all__ = [
     "phase_budget_remaining_seconds",
     "phase_elapsed_seconds",
     "phase_index",
+    "session_remaining_seconds",
+    "should_force_exit_explore",
+    "wants_steward_assessment",
 ]
