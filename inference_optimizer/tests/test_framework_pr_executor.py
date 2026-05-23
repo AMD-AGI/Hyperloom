@@ -12,7 +12,6 @@ Integration with a real fa binary + a real sglang worktree is covered by
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
