@@ -1114,11 +1114,37 @@ async def _run_kernel_backend_sequence(
         })
         verification = result.get("verification") or {}
         proposal = result.get("proposal") or {}
-        if best is None or float(verification.get("micro_speedup") or 0.0) > float(
-            (best.get("verification") or {}).get("micro_speedup") or 0.0
-        ):
+        # PR-F: prefer a KEEP verdict over a higher-micro non-KEEP. The
+        # ladder runs GEAK first; GEAK frequently returns NEEDS_REVIEW
+        # at e.g. 1.3x because it has no correctness gate, while a
+        # subsequent Claude/Codex attempt may deliver a real KEEP at
+        # 1.17x with full correctness. Before PR-F the higher-micro
+        # NEEDS_REVIEW won the best-selection contest, the ladder
+        # broke on KEEP but returned the wrong result -- the actual
+        # KEEP patch was silently discarded (Qwen3-30B-A3B-Base
+        # 20260523T035235Z k004: codex KEEP @1.17x lost to geak
+        # NEEDS_REVIEW @1.3x, never reached integrate).
+        # Mirror the batch handler's max-key in
+        # ``_run_optimization_batch`` so ladder + batch agree.
+        new_keep = (
+            result.get("status") == "ok"
+            and proposal.get("decision") == "KEEP"
+        )
+        new_micro = float(verification.get("micro_speedup") or 0.0)
+        if best is None:
             best = result
-        if result.get("status") == "ok" and proposal.get("decision") == "KEEP":
+        else:
+            best_proposal = (best.get("proposal") or {})
+            best_keep = (
+                best.get("status") == "ok"
+                and best_proposal.get("decision") == "KEEP"
+            )
+            best_micro = float(
+                (best.get("verification") or {}).get("micro_speedup") or 0.0
+            )
+            if (new_keep, new_micro) > (best_keep, best_micro):
+                best = result
+        if new_keep:
             break
     if best is None:
         best = {
