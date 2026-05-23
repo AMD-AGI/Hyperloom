@@ -51,12 +51,31 @@ log = logging.getLogger(__name__)
 
 # Where Hyperloom/kernel-agent's shell tools live. Env is set by
 # inference_optimizer/scripts/install.sh -> pod-local kernel-agent env.
+#
+# Why lazy: in May 2026 the R1 N14 GPU run stalled for 1h 12min because
+# this module was imported BEFORE the cli preflight had a chance to
+# source $USER_DATA_PATH/runtime/kernel-agent.env.sh (the launcher only
+# pre-sourced the user-level .env with 3 vars). A frozen module-level
+# snapshot meant HYPERLOOM_KERNEL_AGENT_ROOT was permanently None even
+# after preflight injected it into os.environ. Reading via a function
+# at each call site lets cli.py's late env injection win; the snapshot
+# constant is preserved (re-exported below) for backward compat.
 _KERNEL_AGENT_ROOT_ENV = "HYPERLOOM_KERNEL_AGENT_ROOT"
-HYPERLOOM_KERNEL_AGENT_ROOT = (
-    Path(os.environ[_KERNEL_AGENT_ROOT_ENV])
-    if os.environ.get(_KERNEL_AGENT_ROOT_ENV)
-    else None
-)
+
+
+def _kernel_agent_root_from_env() -> Path | None:
+    raw = os.environ.get(_KERNEL_AGENT_ROOT_ENV)
+    if not raw:
+        return None
+    return Path(raw)
+
+
+# Backward-compat re-export (NOT used by internal logic — kept as a
+# module-level alias for any external caller still doing `from
+# kernel_request_handlers import HYPERLOOM_KERNEL_AGENT_ROOT`).
+# Internal logic must use `_kernel_agent_root_from_env()` so a late
+# env injection still wins.
+HYPERLOOM_KERNEL_AGENT_ROOT = _kernel_agent_root_from_env()
 
 
 HandlerResult = dict[str, Any]
@@ -97,7 +116,22 @@ _REUSABLE_SOURCE_ROOTS = (
 )
 _APPLY_TOOL_MODULE: Any | None = None
 _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
-_DEFAULT_KERNEL_BATCH_PARALLEL = 3
+# Soft upper bound on concurrent ``_run_kernel_backend_sequence`` coroutines
+# inside ``_run_optimization_batch``. The real GPU scheduling happens one
+# layer below: GEAK / OOB submitters register their work as
+# ``ray.remote(num_gpus=...)`` tasks, so Ray serializes any oversubscription
+# against the cluster's actual GPU resources (typical MI300X / MI355X node
+# = 8 GPU). This default mirrors that node size so a single
+# ``run_optimization`` request can fan out to one GEAK/OOB attempt per GPU
+# without the asyncio semaphore artificially capping below Ray's view.
+# Pre-PR-X default was 3, which throttled even small batches (e.g. A3B's
+# 3 kernel units were already at the cap, and larger TraceLens outputs
+# silently serialized behind sem). Override via
+# ``KERNEL_OPT_MAX_PARALLEL`` env (>=1) on nodes with fewer GPUs or when
+# the LLM API gateway becomes the new bottleneck.
+_DEFAULT_KERNEL_BATCH_PARALLEL = 8
+_DEFAULT_OOB_BUDGET_MINUTES = 60.0
+_DEFAULT_GEAK_BUDGET_MINUTES = 90.0
 _CANDIDATE_ENV_KEYS = {
     "CONC",
     "ISL",
@@ -122,14 +156,15 @@ _SENSITIVE_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
 def _kernel_agent_root_error() -> str | None:
-    if HYPERLOOM_KERNEL_AGENT_ROOT is None:
+    root = _kernel_agent_root_from_env()
+    if root is None:
         return (
             f"{_KERNEL_AGENT_ROOT_ENV} is not set; run "
             "inference_optimizer/scripts/install.sh and source $KERNEL_AGENT_ENV "
             "(default: $USER_DATA_PATH/runtime/kernel-agent.env.sh)"
         )
-    if not HYPERLOOM_KERNEL_AGENT_ROOT.is_dir():
-        return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {HYPERLOOM_KERNEL_AGENT_ROOT}"
+    if not root.is_dir():
+        return f"{_KERNEL_AGENT_ROOT_ENV} does not exist: {root}"
     return None
 
 
@@ -137,8 +172,9 @@ def _kernel_agent_tool_path(tool_name: str) -> Path:
     err = _kernel_agent_root_error()
     if err:
         raise RuntimeError(err)
-    assert HYPERLOOM_KERNEL_AGENT_ROOT is not None
-    path = HYPERLOOM_KERNEL_AGENT_ROOT / "tools" / tool_name
+    root = _kernel_agent_root_from_env()
+    assert root is not None
+    path = root / "tools" / tool_name
     if not path.is_file():
         raise RuntimeError(f"kernel-agent tool not found: {path}")
     return path
@@ -449,8 +485,8 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
 
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
     kernels = (
-        (state.last_select_kernels or {}).get("hot_kernels_top15")
-        or (state.last_select_kernels or {}).get("hot_kernels")
+        (state.last_trace_analyze or {}).get("hot_kernels_top15")
+        or (state.last_trace_analyze or {}).get("hot_kernels")
         or []
     )
     for item in kernels:
@@ -466,7 +502,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
 
     Orchestration often knows only ``kernel_id`` after a successful
     ``run_optimization``. The concrete artifact path lives in
-    ``last_kernel_opt`` and the source target lives in ``last_select_kernels``.
+    ``last_kernel_opt`` and the source target lives in ``last_trace_analyze``.
     Resolve them here so integrate applies the optimized source before
     re-baselining; never silently run an E2E benchmark without applying a patch.
     """
@@ -488,6 +524,23 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
                 resolved["patch_path"] = str(artifact)
         if not resolved.get("source_file") and last_kernel.get("source_file"):
             resolved["source_file"] = str(last_kernel["source_file"])
+
+    # Multi-KEEP queue fallback (PR-B B-5):
+    # ``last_kernel_opt`` only ever holds the strongest pending KEEP.
+    # When the queue drains a second/third KEEP whose kernel_id != that
+    # of ``last_kernel_opt``, the block above doesn't fire and we'd
+    # bail out with ``missing_integration_inputs``. Pull patch_path /
+    # source_file out of the per-kernel ledger so any queued KEEP can
+    # integrate.
+    if (
+        kernel_id
+        and not resolved.get("patch_path")
+    ):
+        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        if attempt.get("last_artifact_path"):
+            resolved["patch_path"] = str(attempt["last_artifact_path"])
+        if not resolved.get("source_file") and attempt.get("last_source_file"):
+            resolved["source_file"] = str(attempt["last_source_file"])
 
     if kernel_id and not (resolved.get("target_file") or resolved.get("source_file")):
         source = _find_selected_kernel_source(state, kernel_id)
@@ -550,7 +603,7 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
 
 
 # ---------------------------------------------------------------------------
-async def select_kernels_handler(
+async def trace_analyze_handler(
     payload: dict, *, session_dir: Path,
 ) -> HandlerResult:
     """Run Hyperloom/kernel-agent's tracelens_analysis.py on a trace dir.
@@ -683,6 +736,21 @@ async def select_kernels_handler(
     )
     if capture_folder:
         cmd += ["--capture-folder", str(capture_folder)]
+    # N25: forward TraceLens splitter steady-state mode (mixed /
+    # decode_only / prefilldecode). Set via payload OR env so the
+    # coordinator can re-issue roofline with a different mode after a
+    # steady_state_chunk_missing / steady_state_chunk_empty warning
+    # lands (e.g. SOLAR-10.7B TP=1 mixed-window degenerates to PD=0
+    # with all forward inside CUDA graph + no rocprofiler Dispatch
+    # Task aggregate; prefilldecode chunk carries the real GEMM /
+    # attention workload).
+    steady_state_mode = (
+        payload.get("steady_state_mode")
+        or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
+    )
+    steady_state_mode = str(steady_state_mode).strip()
+    if steady_state_mode:
+        cmd += ["--steady-state-mode", steady_state_mode]
     if payload.get("roofline_json"):
         cmd += ["--roofline-json", str(payload["roofline_json"])]
     if payload.get("dry_run"):
@@ -761,7 +829,10 @@ async def select_kernels_handler(
 
 # ---------------------------------------------------------------------------
 async def run_optimization_handler(
-    payload: dict, *, session_dir: Path,
+    payload: dict,
+    *,
+    session_dir: Path,
+    record_partial: Callable[[dict], None] | None = None,
 ) -> HandlerResult:
     """Run kernel optimization.
 
@@ -769,17 +840,54 @@ async def run_optimization_handler(
     single-kernel requests into a batch over all reusable native kernels. Each
     kernel is optimized concurrently, while backends are tried sequentially per
     kernel in the preferred order: Claude → Codex → Cursor → GEAK.
+
+    ``record_partial`` (optional) is a synchronous callback invoked the
+    instant each batch sub-result completes -- before ``asyncio.gather``
+    wait-all returns. The Coordinator passes
+    :meth:`Coordinator._record_kernel_opt_partial` here so SharedState
+    sees KEEP/REVERT decisions on the next tick even while slow GEAK
+    siblings are still running. Single-kernel runs ignore it (the same
+    end-of-handler ``record_kernel_opt`` path covers them).
     """
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
-    candidates = _batch_kernel_candidates(payload)
+    candidates = _batch_kernel_candidates(payload, session_dir=session_dir)
     if len(candidates) <= 1:
         single_payload = dict(payload)
         if candidates and not single_payload.get("kernel_id"):
             single_payload["kernel_id"] = candidates[0].get("kernel_id")
         single_payload["_single_kernel"] = True
         return await _run_optimization_single(single_payload, session_dir=session_dir)
-    return await _run_optimization_batch(payload, candidates, session_dir=session_dir)
+    return await _run_optimization_batch(
+        payload, candidates,
+        session_dir=session_dir,
+        record_partial=record_partial,
+    )
+
+
+def _geak_budget_minutes(payload: dict) -> float:
+    return float(
+        payload.get("geak_budget_min")
+        or os.environ.get("HYPERLOOM_GEAK_BUDGET_MIN", _DEFAULT_GEAK_BUDGET_MINUTES)
+    )
+
+
+def _optimization_budget_minutes(payload: dict) -> float:
+    """Wall-clock budget mirrored by the kernel_optimization.py wrapper."""
+    oob_budget = float(payload.get("budget_minutes", _DEFAULT_OOB_BUDGET_MINUTES))
+    geak_budget = _geak_budget_minutes(payload)
+    backend = str(payload.get("backends") or "").strip().lower()
+    if backend == "geak":
+        return geak_budget
+    if backend in {"claude", "codex", "cursor"}:
+        return oob_budget
+    # Empty / multi-backend payloads may still run GEAK first in the ladder.
+    return max(oob_budget, geak_budget)
+
+
+def _optimization_wrapper_timeout_sec(payload: dict) -> int:
+    # +180s grace so kernel_optimization.py can salvage partial artifacts.
+    return int(_optimization_budget_minutes(payload) * 60) + 180
 
 
 def _backend_order(payload: dict) -> list[str]:
@@ -809,7 +917,45 @@ def _backend_order(payload: dict) -> list[str]:
     return selected
 
 
-def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
+def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
+    """Scan the kernel-agent run dir for status files in ``state=running``.
+
+    Used by :func:`_batch_kernel_candidates` to skip kernels that are
+    still being optimized by a prior batch's subprocess (Qwen3-30B-
+    A3B-Base 164405Z saw five concurrent ``kernel_optimization.py``
+    processes for the same k002/k004 because the LLM kept proposing
+    fresh ``run_optimization`` requests while subprocesses from
+    earlier batches were still alive).
+    """
+    in_flight: set[str] = set()
+    sid = session_dir.name
+    status_dir = session_dir / "kernel-agent" / "runs" / sid / "status" / "kernel_optimization"
+    if not status_dir.is_dir():
+        return in_flight
+    for p in status_dir.glob("ko-*.json"):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(d.get("state") or "").lower() != "running":
+            continue
+        kid = ""
+        for line in d.get("last_lines") or []:
+            if isinstance(line, str) and line.startswith("kernel_id="):
+                kid = line.split("=", 1)[1].strip()
+                break
+        if not kid:
+            kid = str(d.get("kernel_id") or "")
+        if kid:
+            in_flight.add(kid)
+    return in_flight
+
+
+def _batch_kernel_candidates(
+    payload: dict,
+    *,
+    session_dir: Path | None = None,
+) -> list[dict[str, Any]]:
     candidates_path = payload.get("candidates_path")
     if not candidates_path:
         return []
@@ -822,6 +968,66 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
         return []
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
+
+    # PR-C filters: build the "live" exclusion sets up front so both
+    # the task_group fallback and the legacy per-kernel pass can honor
+    # them. Without session_dir (legacy tests / dry-run paths) the
+    # filters degrade to empty sets and behaviour matches PR-A/B.
+    rejected_kernel_ids: set[str] = set()
+    attempts_by_kid: dict[str, dict] = {}
+    in_flight: set[str] = set()
+    max_attempts = 1
+    min_gpu_pct = 0.0
+    try:
+        max_attempts = max(1, int(os.environ.get(
+            "INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_ATTEMPTS", "1",
+        )))
+    except (TypeError, ValueError):
+        max_attempts = 1
+    # PR-I: default min_gpu_pct must match SharedState.untried_hot_
+    # reusable_kernels' default (3.0). Earlier code defaulted to 0.0
+    # here, so the LLM saw an empty "untried" queue (gate >=3%) but
+    # _batch_kernel_candidates would still dispatch <3% candidates
+    # picked up via task_group fallback (e.g. rmsnorm group's k006 at
+    # gpu_pct=1.3% in Qwen3-30B-A3B-Base session 20260523T035235Z's
+    # third batch round). Mirroring the SharedState default keeps the
+    # two layers in sync and avoids tiny kernels eating 30-90 min of
+    # ladder wall-clock for no E2E gain.
+    from .shared_state import _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+    try:
+        min_gpu_pct = float(os.environ.get(
+            "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
+            _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+        ))
+    except (TypeError, ValueError):
+        min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+    if session_dir is not None:
+        try:
+            from .shared_state import SharedState
+            state = SharedState.load_or_init(session_dir)
+            rejected_kernel_ids = set(state.rejected_kernel_ids or [])
+            attempts_by_kid = dict(state.kernel_opt_attempts or {})
+            in_flight = _in_flight_kernel_ids(session_dir)
+        except Exception:
+            log.exception(
+                "_batch_kernel_candidates: failed to load SharedState "
+                "from %s; PR-C filters disabled this dispatch",
+                session_dir,
+            )
+
+    def _is_live(kid: str) -> bool:
+        """A kernel_id is live (eligible for batch) iff it is NOT
+        rejected, NOT in-flight, and has fewer than max_attempts
+        recorded attempts. ``max_attempts = 1`` (default) means: any
+        prior attempt at all -> not live."""
+        if kid in rejected_kernel_ids:
+            return False
+        if kid in in_flight:
+            return False
+        entry = attempts_by_kid.get(kid) or {}
+        if int(entry.get("attempts", 0)) >= max_attempts:
+            return False
+        return True
 
     # PR-B §1: collapse kernels that share a source function into a
     # single dispatch via ``task_groups[]``. Each group emits exactly
@@ -842,26 +1048,33 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
     }
     grouped_kernel_ids: set[str] = set()
     selected: list[dict[str, Any]] = []
+    skipped: dict[str, str] = {}  # kid -> reason, for debug logging
     for group in task_groups:
         if not isinstance(group, dict):
             continue
         member_ids = [str(k) for k in (group.get("kernel_ids") or []) if k]
         if not member_ids:
             continue
+        # All members marked across the group so the legacy loop never
+        # picks them up regardless of which member we end up dispatching
+        # (or whether we skip the group entirely).
+        grouped_kernel_ids.update(member_ids)
         # Only members marked reusable_native_kernel survive (vendor /
         # aten:: / runtime-generated were filtered upstream by
         # ``classify_patchability``); the group's primary may itself
-        # have been rejected, in which case we fall through to the
-        # legacy path for the surviving non-primary reusable members
-        # (no special-casing needed — they just won't be in
-        # ``grouped_kernel_ids`` and the loop below picks them up).
+        # have been rejected, in which case we fall back to the next
+        # live reusable member of the same AST function (same source,
+        # equivalent leverage). When EVERY member is rejected /
+        # in-flight / exhausted, the whole group skips.
         primary = str(group.get("primary_kernel_id") or "")
         primary_cand = kernel_by_id.get(primary)
-        if primary_cand is None or primary_cand.get("reusable_native_kernel") is not True:
-            # Fall back to the first reusable member in priority order.
-            # ``primary`` itself is only read on the line above to look
-            # up ``primary_cand``; downstream code reads ``primary_cand``
-            # directly so we don't need to refresh ``primary`` here.
+        primary_live = (
+            primary_cand is not None
+            and primary_cand.get("reusable_native_kernel") is True
+            and bool(primary_cand.get("source_file"))
+            and _is_live(primary)
+        )
+        if not primary_live:
             primary_cand = next(
                 (
                     kernel_by_id[m]
@@ -869,21 +1082,32 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
                     if m in kernel_by_id
                     and kernel_by_id[m].get("reusable_native_kernel") is True
                     and kernel_by_id[m].get("source_file")
+                    and _is_live(m)
                 ),
                 None,
             )
             if primary_cand is None:
+                # Every reusable member exhausted -> nothing to dispatch
+                # for this group this round.
+                for m in member_ids:
+                    skipped.setdefault(m, "group_exhausted")
                 continue
         if not primary_cand.get("source_file"):
             continue
+        try:
+            picked_pct = float(primary_cand.get("gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            picked_pct = 0.0
+        if picked_pct < min_gpu_pct:
+            for m in member_ids:
+                skipped.setdefault(m, f"below_min_gpu_pct={min_gpu_pct}")
+            continue
         # Shallow copy + attach group so the kernel_optimization.py
         # subprocess sees ``candidate["task_group"]`` and can render
-        # benchmark cases. The non-primary member kernel_ids are
-        # marked seen so the legacy loop skips them.
+        # benchmark cases.
         item = dict(primary_cand)
         item["task_group"] = group
         selected.append(item)
-        grouped_kernel_ids.update(member_ids)
 
     # Legacy per-kernel pass for any reusable kernel that wasn't
     # absorbed into a task_group above (no parseable launcher path).
@@ -901,7 +1125,23 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
             continue
         if not item.get("source_file"):
             continue
+        if not _is_live(kernel_id):
+            skipped[kernel_id] = "not_live"
+            continue
+        try:
+            row_pct = float(item.get("gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            row_pct = 0.0
+        if row_pct < min_gpu_pct:
+            skipped[kernel_id] = f"below_min_gpu_pct={min_gpu_pct}"
+            continue
         selected.append(item)
+
+    if skipped:
+        log.info(
+            "batch candidates filtered: %d selected, skipped=%s",
+            len(selected), skipped,
+        )
     return selected
 
 
@@ -933,11 +1173,37 @@ async def _run_kernel_backend_sequence(
         })
         verification = result.get("verification") or {}
         proposal = result.get("proposal") or {}
-        if best is None or float(verification.get("micro_speedup") or 0.0) > float(
-            (best.get("verification") or {}).get("micro_speedup") or 0.0
-        ):
+        # PR-F: prefer a KEEP verdict over a higher-micro non-KEEP. The
+        # ladder runs GEAK first; GEAK frequently returns NEEDS_REVIEW
+        # at e.g. 1.3x because it has no correctness gate, while a
+        # subsequent Claude/Codex attempt may deliver a real KEEP at
+        # 1.17x with full correctness. Before PR-F the higher-micro
+        # NEEDS_REVIEW won the best-selection contest, the ladder
+        # broke on KEEP but returned the wrong result -- the actual
+        # KEEP patch was silently discarded (Qwen3-30B-A3B-Base
+        # 20260523T035235Z k004: codex KEEP @1.17x lost to geak
+        # NEEDS_REVIEW @1.3x, never reached integrate).
+        # Mirror the batch handler's max-key in
+        # ``_run_optimization_batch`` so ladder + batch agree.
+        new_keep = (
+            result.get("status") == "ok"
+            and proposal.get("decision") == "KEEP"
+        )
+        new_micro = float(verification.get("micro_speedup") or 0.0)
+        if best is None:
             best = result
-        if result.get("status") == "ok" and proposal.get("decision") == "KEEP":
+        else:
+            best_proposal = (best.get("proposal") or {})
+            best_keep = (
+                best.get("status") == "ok"
+                and best_proposal.get("decision") == "KEEP"
+            )
+            best_micro = float(
+                (best.get("verification") or {}).get("micro_speedup") or 0.0
+            )
+            if (new_keep, new_micro) > (best_keep, best_micro):
+                best = result
+        if new_keep:
             break
     if best is None:
         best = {
@@ -948,6 +1214,13 @@ async def _run_kernel_backend_sequence(
     best = dict(best)
     best["backend_fallback_attempts"] = attempts
     best["batch_kernel_id"] = kernel_id
+    # Preserve source_file on the aggregated best so the streaming
+    # record callback in _run_optimization_batch can group by file
+    # without re-reading kernel_candidates.json.
+    if not best.get("source_file"):
+        cand_src = candidate.get("source_file") if isinstance(candidate, dict) else None
+        if cand_src:
+            best["source_file"] = str(cand_src)
     return best
 
 
@@ -956,7 +1229,17 @@ async def _run_optimization_batch(
     candidates: list[dict[str, Any]],
     *,
     session_dir: Path,
+    record_partial: Callable[[dict], None] | None = None,
 ) -> HandlerResult:
+    """Fan ``run_optimization`` out across reusable native kernels.
+
+    If ``record_partial`` is provided, every sub-attempt streams its
+    result into SharedState the moment :func:`_run_kernel_backend_sequence`
+    returns -- *before* ``asyncio.gather`` wait-all unblocks. This is
+    what lets a fast KEEP land on the integrate queue without waiting
+    for a slow GEAK sibling to time out (Qwen3-30B-A3B-Base session
+    20260522T093903Z burned 3 hours on this).
+    """
     max_parallel = int(
         payload.get("max_parallel")
         or os.environ.get("KERNEL_OPT_MAX_PARALLEL", _DEFAULT_KERNEL_BATCH_PARALLEL)
@@ -965,10 +1248,65 @@ async def _run_optimization_batch(
     sem = asyncio.Semaphore(max_parallel)
 
     async def _guarded(candidate: dict[str, Any]) -> HandlerResult:
+        cand_kid = str(candidate.get("kernel_id") or "") if isinstance(candidate, dict) else ""
+        cand_src = (
+            str(candidate.get("source_file") or "")
+            if isinstance(candidate, dict) else ""
+        )
         async with sem:
-            return await _run_kernel_backend_sequence(
-                payload, candidate, session_dir=session_dir,
-            )
+            try:
+                result = await _run_kernel_backend_sequence(
+                    payload, candidate, session_dir=session_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # A sub-task exception (network blip, GEAK crash, ...)
+                # must NOT propagate out of asyncio.gather while sibling
+                # tasks are still in flight. With the default
+                # ``return_exceptions=False``, gather would re-raise on
+                # first exception while siblings keep running in the
+                # background -- the Coordinator would then unblock
+                # mid-batch, potentially dispatch an integrate, and
+                # collide with still-running kernel_opt subprocesses on
+                # the GPU. We turn every sub-task failure into a
+                # structured failed result so gather behaves as wait-all
+                # regardless of sub-task outcomes, and so the streaming
+                # ``record_partial`` callback still has a kernel_id to
+                # ledger against (preserving rejection / retire logic).
+                log.exception(
+                    "kernel-opt sub-task crashed for kernel_id=%s; "
+                    "wrapping as failed result so gather wait-all holds",
+                    cand_kid or "?",
+                )
+                result = {
+                    "status": "failed",
+                    "kernel_id": cand_kid,
+                    "source_file": cand_src,
+                    "error_class": "subtask_exception",
+                    "error": repr(exc),
+                }
+        # Stamp the candidate's source_file onto the sub-result so
+        # SharedState's same-source-file conflict guard
+        # (``_source_files_in_optimization_stack``) can detect when two
+        # KEEPs target the same file. ``_run_kernel_backend_sequence``
+        # already preserves ``source_file`` from the candidate payload,
+        # but defensively re-stamp here in case a backend dropped it.
+        if isinstance(result, dict) and not result.get("source_file") and cand_src:
+            result["source_file"] = cand_src
+        if record_partial is not None:
+            try:
+                record_partial(result)
+            except Exception:  # noqa: BLE001
+                # Per-sub-attempt callback failures must not abort the
+                # batch -- log and continue. The final aggregation below
+                # still runs, and the Coordinator's post-gather
+                # ``record_kernel_opt`` skips dedup only when batch_mode
+                # is set (so the lost streaming write is recoverable on
+                # next batch).
+                log.exception(
+                    "record_partial callback failed for kernel_id=%s",
+                    (result or {}).get("kernel_id") if isinstance(result, dict) else None,
+                )
+        return result
 
     results = await asyncio.gather(*(_guarded(c) for c in candidates))
     best = max(
@@ -1004,7 +1342,8 @@ async def _run_optimization_single(
 
     Optional payload:
         backends:        comma-separated 'geak,claude,codex,cursor' (auto-pick if empty)
-        budget_minutes:  default 60
+        budget_minutes:  default 60 (OOB backends)
+        geak_budget_min: default 90 (GEAK only; also ``HYPERLOOM_GEAK_BUDGET_MIN``)
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
         extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
@@ -1024,7 +1363,7 @@ async def _run_optimization_single(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
-    # Same convention as :func:`select_kernels_handler`: pass the session
+    # Same convention as :func:`trace_analyze_handler`: pass the session
     # root so ``kernel_optimization.py`` lands its run artefacts at
     # ``<session_dir>/kernel-agent/runs/<session_id>/`` while still reading
     # ``<session_dir>/kernel-agent-workspace/<kernel_id>/`` for the
@@ -1083,11 +1422,15 @@ async def _run_optimization_single(
         cmd += ["--disable-xs-memory"]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
+    geak_budget_min = _geak_budget_minutes(payload)
+    backend = str(payload.get("backends") or "").strip().lower()
+    if backend == "geak" or not backend:
+        cmd += ["--geak-budget-min", str(geak_budget_min)]
+    if payload.get("budget_minutes") is not None:
+        cmd += ["--budget-minutes", str(payload["budget_minutes"])]
     # Give kernel_optimization.py time to handle its own backend timeout and
-    # salvage partial artifacts. The backend receives budget_minutes as its
-    # hard wall-clock; killing this wrapper at the exact same second loses
-    # optimized_versions/ and report paths.
-    timeout_sec = int(payload.get("budget_minutes", 60)) * 60 + 180
+    # salvage partial artifacts. GEAK defaults to 90 min; OOB defaults to 60.
+    timeout_sec = _optimization_wrapper_timeout_sec(payload)
 
     from .action_executors._multi_node_env import is_multi_node
 
@@ -1099,7 +1442,21 @@ async def _run_optimization_single(
         await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
-    return _shape_tool_result(rc, stdout, stderr)
+    result = _shape_tool_result(rc, stdout, stderr)
+    # Stamp source_file / kernel_id from the payload onto the parsed
+    # tool result so the multi-KEEP integrate queue
+    # (``SharedState.next_pending_keep_kernel_id``) can group same-file
+    # KEEPs and the streaming-record callback can record the source
+    # without re-resolving from candidates_path. kernel_optimization.py
+    # already prints kernel_id, but in failure modes (timeout, crash)
+    # it may be missing; payload always has it because we just passed
+    # it on the CLI above.
+    if isinstance(result, dict):
+        if not result.get("kernel_id") and payload.get("kernel_id"):
+            result["kernel_id"] = str(payload["kernel_id"])
+        if not result.get("source_file") and payload.get("source_file"):
+            result["source_file"] = str(payload["source_file"])
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1362,7 +1719,7 @@ async def integrate_handler(
 
 # ---------------------------------------------------------------------------
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
-    "select_kernels":   select_kernels_handler,
+    "trace_analyze":   trace_analyze_handler,
     "run_optimization": run_optimization_handler,
     "integrate":        integrate_handler,
     "apply_patch":      integrate_handler,   # alias — same flow
@@ -1384,5 +1741,5 @@ __all__ = [
     "has_handler",
     "integrate_handler",
     "run_optimization_handler",
-    "select_kernels_handler",
+    "trace_analyze_handler",
 ]

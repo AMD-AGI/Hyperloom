@@ -32,6 +32,7 @@ action surfaces into the top eventually regardless of low base.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -121,6 +122,14 @@ COOLDOWN_TICKS: dict[str, int] = {
 # numbers in gain%/min units and doesn't compete with the 6-9 curated
 # rows. Keys are snake_case so :func:`seed_action_scores` can look them up
 # directly against ``ActionRegistry`` names.
+#
+# Roofline-v2 N2a: `roofline` is added at prior 7.5 in every model_class.
+# Sits between explore actions (params/backends ≥8.4) and operator_tuning
+# (≤7.0) so the LLM willingly proposes it once baseline lands but does not
+# crowd out actual optimisation work. The action is a sequence_denial
+# prerequisite for backends/params/kernel_opt/comm_optimization (see
+# §6.5/§8.5 in design/roofline-v2.md), so the LLM has to propose it
+# anyway — the prior just shapes the proposal ordering.
 MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
     "dense": {
         "deep_kernel_analysis": 2.0,
@@ -132,6 +141,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 6.0,
         "backends": 9.0,
         "params": 9.0,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
     "moe_mla": {
@@ -144,6 +154,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 3.0,
         "backends": 8.4,
         "params": 9.5,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
     "moe_swa": {
@@ -156,6 +167,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 3.0,
         "backends": 9.0,
         "params": 9.0,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
     "moe_mla_nsa": {
@@ -168,6 +180,7 @@ MODEL_CLASS_ACTION_PRIORS: dict[str, dict[str, float]] = {
         "compiler_tuning": 3.0,
         "backends": 9.0,
         "params": 9.0,
+        "roofline": 7.5,
         "sweep": 1.0,
     },
 }
@@ -361,6 +374,102 @@ def _aging_bonus(*, tick: int, last_run_tick: int) -> float:
     return AGING_RATE * float(age)
 
 
+# N30 (May 2026): when N19c gate has unlocked kernel_opt (cheap
+# exploration exhausted), boost deep-family base_score so kernel_opt
+# / operator_tuning / vendor_kernel_config actually rise to the top
+# of the eff_score ranking. Without this bridge, the gate would
+# UNLOCK but the scoreboard would still rank kernel_opt below
+# params/backends (base 6.0 vs 9.5/8.4 for moe_mla model_class), so
+# the LLM kept picking cheap actions forever even though
+# `last_cheap_delta_gain < EPS` signaled no more leverage there.
+#
+# Empirical case (SOLAR-10.7B TP=1, session 062837Z): after 1
+# baseline + 1 roofline + 3 params rounds + 1 backends round,
+# last_cheap_delta_gain hit -0.063% (< 0.3% EPS), but kernel_opt
+# eff_score was 6.74 vs params 9.06 / backends 8.32. Pre-N30 the
+# LLM kept proposing params (running into a 4th + 5th round) instead
+# of kernel_opt. Post-N30: deep base × 2.0 -> kernel_opt eff_score
+# ~13.5 (rank 1), LLM proposes kernel_opt naturally.
+#
+# Threshold default 2.0 chosen so the boost reliably surfaces deep
+# actions above the highest curated shallow base (params 9.5):
+#   kernel_opt boosted = min(base) * 2 = 6.0 * 2 = 12.0 > 9.5  ✓
+#   operator_tuning boosted = 7.0 * 2 = 14.0 > 9.5             ✓
+# Operators with a known-broken kernel agent can disable via
+# INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_DEEP_BOOST=1.0 (no-op).
+_CHEAP_EXHAUSTED_DEEP_BOOST_DEFAULT = 2.0
+_CHEAP_EXHAUSTED_DEEP_BOOST_ENV = (
+    "INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_DEEP_BOOST"
+)
+
+
+def _resolve_cheap_exhausted_deep_boost() -> float:
+    raw = os.environ.get(_CHEAP_EXHAUSTED_DEEP_BOOST_ENV, "").strip()
+    if not raw:
+        return _CHEAP_EXHAUSTED_DEEP_BOOST_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        return _CHEAP_EXHAUSTED_DEEP_BOOST_DEFAULT
+    if value <= 0.0:
+        return _CHEAP_EXHAUSTED_DEEP_BOOST_DEFAULT
+    return value
+
+
+def _is_cheap_exhausted(shared_state: Any) -> bool:
+    """N30 helper: same predicate as N19c gate's kernel_opt unlock --
+    keeps the two systems in sync without duplicating the logic.
+
+    Returns True when ALL of:
+    * ``roofline_snapshot_id >= 1`` (baseline analysis exists)
+    * at least one ``backends`` OR ``params`` attempt recorded
+    * ``last_cheap_delta_gain`` recorded and below
+      ``_cheap_exhausted_epsilon`` (default 0.3%)
+
+    The early-kernel-opt escape hatch
+    (``INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT``) is intentionally
+    NOT consulted here -- it bypasses the gate, but the scoreboard
+    should still reflect the empirical "cheap is exhausted" signal
+    only when the data supports it. Operators using the escape hatch
+    already opted out of the standard ordering, so they don't need
+    the boost.
+    """
+    if shared_state is None:
+        return False
+    snapshot = getattr(shared_state, "last_trace_analyze", {}) or {}
+    snapshot_id = snapshot.get("roofline_snapshot_id", 0)
+    if not isinstance(snapshot_id, int) or snapshot_id < 1:
+        return False
+    backends_attempts = len(getattr(shared_state, "backends_attempts", []) or [])
+    params_attempts = len(getattr(shared_state, "params_attempts", []) or [])
+    if backends_attempts + params_attempts < 1:
+        return False
+    delta = getattr(shared_state, "last_cheap_delta_gain", None)
+    if delta is None:
+        return False
+    # Imported here to avoid circular import at module load: coordinator
+    # imports scoring, but we need the same EPS helper.
+    try:
+        from .coordinator import _cheap_exhausted_epsilon
+    except ImportError:
+        return False
+    return float(delta) < _cheap_exhausted_epsilon()
+
+
+# Deep-family action names that get the N30 boost. We match by
+# ActionMetadata.family == "deep_kernel" (the canonical taxonomy in
+# ActionRegistry), with an explicit fallback name set so the boost
+# fires even on archived state.json that pre-dates the family
+# taxonomy.
+_DEEP_ACTION_NAMES = frozenset({
+    "kernel_opt",
+    "operator_tuning",
+    "vendor_kernel_config",
+    "deep_kernel_analysis",
+    "integrate",
+})
+
+
 def effective_score(
     a: ActionScore,
     *,
@@ -368,6 +477,8 @@ def effective_score(
     tick: int,
     total_runs: int,
     target_gap_mult: float = 1.0,
+    shared_state: Any = None,
+    action_name: str = "",
 ) -> float:
     """Compute the effective sort key for one action at the current tick.
 
@@ -377,6 +488,12 @@ def effective_score(
     :func:`apply_failure` / :func:`apply_no_promote`, so a non-zero
     ``cooldown_until_tick`` on a row no longer suppresses it — keep the
     field intact for backward compat with archived state.json snapshots.
+
+    ``shared_state`` (optional, defaulted to None for back-compat with
+    direct unit-tests) enables the N30 cheap-exhausted boost: when the
+    same predicate as N19c's kernel_opt unlock is satisfied, deep-family
+    actions get their base_score multiplied so they actually surface to
+    the top of the ranking.
     """
     if a.locked_reason:
         return _LOCKED_SCORE
@@ -389,6 +506,18 @@ def effective_score(
         * max(0.0, 1.0 - crash_risk)
         * float(target_gap_mult)
     )
+    # N30 boost: cheap exhausted -> push deep actions to top.
+    if shared_state is not None and _is_cheap_exhausted(shared_state):
+        is_deep = False
+        if meta is not None and meta.family == "deep_kernel":
+            is_deep = True
+        elif action_name and action_name in _DEEP_ACTION_NAMES:
+            # Fallback for archived state.json predating the family
+            # taxonomy AND for callers that don't have ActionMetadata
+            # handy (the rank_top_k path always passes both).
+            is_deep = True
+        if is_deep:
+            base *= _resolve_cheap_exhausted_deep_boost()
     return base + _ucb_bonus(total_runs=total_runs, runs=a.runs) + _aging_bonus(
         tick=tick, last_run_tick=a.last_run_tick,
     )
@@ -566,6 +695,7 @@ def rank_top_k(
     tick: int,
     target_gap_mult: float = 1.0,
     k: int = 12,
+    shared_state: Any = None,
 ) -> list[tuple[str, float, ActionScore]]:
     """Return ``[(name, eff_score, ActionScore), ...]`` sorted by eff_score desc.
 
@@ -573,6 +703,10 @@ def rank_top_k(
     positive rows, so the renderer can include them in the visible top-K to
     surface "you have backends and params on cooldown" context. Among the
     locked rows we keep deterministic ordering by name.
+
+    ``shared_state`` (N30): when provided, ``effective_score`` consults it
+    to apply the cheap-exhausted deep-action boost. Defaults to None so
+    direct unit tests don't have to construct a SharedState.
     """
     if not isinstance(scores, dict) or not scores:
         return []
@@ -593,6 +727,8 @@ def rank_top_k(
             tick=tick,
             total_runs=total_runs,
             target_gap_mult=target_gap_mult,
+            shared_state=shared_state,
+            action_name=name,
         )
         rows.append((name, eff, a))
     # Primary: descending effective score (locked rows tie at -1.0).
