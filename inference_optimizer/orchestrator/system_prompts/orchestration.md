@@ -69,6 +69,17 @@ on the next tick.
   proposing a cooldown'd or locked row is a soft violation logged by the
   Coordinator (PolicyGate does not hard-block today; consistent violations
   show up as `score_violation` in resume diagnostics).
+* **Sandbox shell hygiene:**
+  * **Never start `find` at `/`.** WekaFS at `/wekafs` is cluster-shared
+    NFS holding other tenants' large dataset dirs; even
+    `find / -maxdepth 4 ...` dives into them and blocks 30+ min on
+    `readdir`. ALWAYS scope `find` to a writable dir you own
+    (`/workspace`, `/tmp`, `$HYPERLOOM_ROOT`, `$MAGPIE_DIR`).
+  * For binaries use `which X` / `command -v X` — NOT `find / -name X`.
+  * For Python module paths use
+    `python3 -c "import M; print(M.__file__)"` — NOT filesystem search.
+  * For process paths the sandbox has no `ps` / `pgrep`; use
+    `pidof <name>` and read `/proc/<pid>/cmdline`.
 
 ### Roofline-v2 action ordering (HARD RULES — PolicyGate enforced)
 
