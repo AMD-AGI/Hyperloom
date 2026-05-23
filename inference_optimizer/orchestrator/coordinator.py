@@ -1704,6 +1704,26 @@ class Coordinator:
                     "`validate_stack` / `report`) before any further "
                     "explore."
                 )
+            # PR-C TODO 4a/5: hot-kernel must-try gate. Surfaces the
+            # untried hot reusable kernel queue so Orchestration knows
+            # it has to ``run_optimization`` (not ``report``) until the
+            # gpu_pct >= 3% set is drained. Same source of truth as the
+            # ``_sequence_denial_for_action('report')`` denial.
+            untried_hot = self.shared_state.untried_hot_reusable_kernels()
+            if untried_hot:
+                untried_str = ", ".join(untried_hot)
+                return (
+                    f"TODO 4a/5: kernel_opt required on untried hot "
+                    f"reusable kernels [{untried_str}]. Each kernel with "
+                    "gpu_pct >= 3% (capped at top 5 by gpu_pct) must get "
+                    "at least one full backend ladder (GEAK -> Claude -> "
+                    "Codex). Emit request{target_agent='kernel', "
+                    "kind='run_optimization', params={candidates_path="
+                    "<last_trace_analyze.candidates_path>}} -- batch "
+                    "mode fans out automatically. Failed ladders retire "
+                    "the kernel (max_failures=1), so this list shrinks "
+                    "monotonically. `report` is denied until empty."
+                )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             if self._validate_stack_gate_skipped():
                 return (
@@ -2090,6 +2110,43 @@ class Coordinator:
                         f"{pending_kid!r}}}}} before any further explore"
                     ),
                 )
+            # PR-C: hot-kernel report-gate. Block ``report`` when any
+            # reusable hot kernel with gpu_pct >= 3% has not yet been
+            # tried (and is not rejected / integrated). Prevents the
+            # log1 (164910Z) failure mode where tick=8 -> report_emitted
+            # with k001=24% / k002=37% / k004=9.7% untouched.
+            #
+            # Allowed through the gate:
+            #   - kernel_opt request itself (handled at request layer)
+            #   - integrate / validate_stack (still need to drain prior
+            #     KEEPs; the integrate-pending gate above already
+            #     handles ordering)
+            #   - recover (not in sequence_actions, bypasses entirely)
+            # Blocked:
+            #   - report -- the LLM cannot declare the session done
+            #     while a meaningful kernel lever exists.
+            if action == "report":
+                untried = self.shared_state.untried_hot_reusable_kernels()
+                if untried:
+                    untried_str = ", ".join(untried)
+                    return PolicyDenied(
+                        f"action='report' denied: untried hot reusable "
+                        f"kernels still present ({untried_str})",
+                        rule="hot_kernel_unfinished",
+                        hint=(
+                            "Every reusable hot kernel with gpu_pct >= 3% "
+                            "must get at least one kernel_opt attempt (or "
+                            "be retired via REVERT / max_failures) before "
+                            f"the session may end. Pending: {untried_str}. "
+                            "Emit request{target_agent='kernel', "
+                            "kind='run_optimization', "
+                            "params={candidates_path=<from "
+                            "last_trace_analyze>}} so the batch fans out "
+                            "across the queue. Threshold overrides: "
+                            "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT / "
+                            "HYPERLOOM_KERNEL_OPT_GATE_TOP_N."
+                        ),
+                    )
         # validate_stack precedence — once new KEEPs are stacked we must
         # rebench before any further explore / report. We allow:
         #   - validate_stack itself
