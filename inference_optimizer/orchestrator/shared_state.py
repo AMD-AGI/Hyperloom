@@ -114,6 +114,13 @@ class SharedState:
     framework: str = ""
     gpu_type: str = ""
     kernel_enabled: bool = True
+    # Framework-agent (fa) bandit-arm toggle. When False the
+    # ``framework_pr`` arm is unregistered + stripped from the orchestration
+    # prompt so the bandit can never pull it. Default True (fa is on by
+    # default; mirrors ``kernel_enabled``). Older state.json files lacking
+    # this field decode as True via the dataclass default — see
+    # ``SharedState.load``.
+    framework_enabled: bool = True
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
