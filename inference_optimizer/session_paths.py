@@ -75,7 +75,7 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline", "profile", "pmc_roofline",
     "roofline",
-    "backends", "params", "sweep",
+    "backends", "params", "sweep", "framework_pr",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
     "validate_stack",
