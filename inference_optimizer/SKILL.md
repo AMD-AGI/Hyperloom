@@ -216,6 +216,20 @@ user later passes `--no-kernel` at runtime, the installer still prepares
 kernel-agent / TraceLens / GEAK / OOB / auth-proxy; `--no-kernel` only means
 that this `optimize` run skips the kernel optimization phase.
 
+The kernel agent and the framework agent (fa, surfaced as the `framework_pr`
+arm) are independent and each have a dedicated CLI toggle:
+
+* `--no-kernel`    → strips kernel-owned arms (`kernel_opt`, `integrate`,
+  `deep_kernel_analysis`, `operator_tuning`, `vendor_kernel_config`) plus
+  `profile` / `pmc_roofline`.
+* `--no-framework` → strips the `framework_pr` arm so the bandit never
+  invokes fa.
+
+Combining both yields a pure parameter-search run (baseline + params +
+backends + sweep + validate_stack + report). The toggles are persisted in
+`state.json` (`kernel_enabled`, `framework_enabled`) so resumes honour the
+original session's agent topology.
+
 `install.sh` installs everything in one shot (no `--with-*` flags to
 remember). Direct steps in `inference_optimizer/scripts/install.sh`:
 
@@ -588,6 +602,74 @@ The backend prunes everything older than the latest 50 turn workdirs
 on every tick to avoid unbounded growth.
 
 
+## Framework-Agent as Bandit Arm (`framework_pr` action)
+
+Framework-agent (fa) integration moved from a CLI pre-stage hook to a
+regular bandit arm called `framework_pr` (DESIGN doc:
+`claw-dev/docs-zh/fa-as-io-arm-design.md`). PR discovery and apply
+now happen *inside* the Coordinator tick loop, alongside `baseline` /
+`backends` / `params` / `sweep`, so PR selection participates in
+cooldown + streak penalties + observability exactly like every other
+arm. There is no longer any session-killing irreversible git side
+effect at CLI startup.
+
+What each `framework_pr` tick does (see
+`orchestrator/action_executors/framework_pr.py`):
+
+1. Compose `(gap, keywords)` from SharedState (`framework` /
+   `gpu_type` / `model_class` / `last_profile_kernel_breakdown`) +
+   manifest `precision`. Operator-supplied `proposal.params.gap_override`
+   or `keyword_override` win when present.
+2. Call `fa candidates` (read-only) to enumerate top-K PRs. No git
+   fetch, no worktree.
+3. Filter candidates: drop refs whose head_sha already matches the
+   sglang HEAD (= already KEEP'd this session, or shipped in the
+   base image).
+4. Stash the current `git rev-parse HEAD`; `git fetch` +
+   `git checkout --detach` the PR head.
+5. Run a sub-baseline benchmark against
+   `base_tput = current_best.tput || baseline_tput`, re-using the
+   same materialized YAML (`baseline_config_path`) + server flags
+   (`base_extra_args`) so we measure the PR delta, not a flag
+   regression.
+6. **KEEP** when `delta_pct >= min_gain_pct` (default 1.0): leave
+   the worktree on the PR head, return `status='succeeded'` +
+   `output_throughput=new_tput` so the Coordinator promotes the
+   PR into `current_best` via the normal `_lift_to_current_best`
+   path.
+7. **DISCARD** otherwise: `git checkout --detach <prev_head>` to
+   undo the apply, return `status='succeeded'` + `decision='discarded'`
+   so the bandit records a `no_promote` on the streak counter.
+8. Subprocess / git / sub-baseline failures return `status='failed'`
+   with an `error_class`, triggering the bandit's failure streak
+   penalty. The arm cools down on its own; the session continues.
+
+Operator-tunable `proposal.params`:
+
+| key | default | meaning |
+|---|---|---|
+| `max_candidates` | 5 | top-K returned by `fa candidates` |
+| `min_gain_pct` | 1.0 | KEEP threshold (PR-applied tput vs base_tput) |
+| `gap_override` | "" | bypass the auto-composer (raw gap_description) |
+| `keyword_override` | [] | bypass extract_keywords (verbatim list) |
+| `dry_run` | false | only enumerate + pick, skip apply + bench |
+
+Discover vs Kernel role boundary:
+
+| | framework-agent (`framework_pr` arm) | kernel-agent (in-loop) |
+|---|---|---|
+| When | Many times per session, scheduled by bandit | Many times, inside the optimize loop |
+| Granularity | Whole PR (cross-file change set) | Single kernel function |
+| Effect on session | New `current_best` source baseline | KEEP'd patches per kernel |
+| IO integration | `framework_pr` action executor (bandit arm) | Coordinator Kernel role + REQUEST kinds |
+| Hand-off | git checkout sglang to PR head + auto-rollback on DISCARD | `apply_kernel_patch.py` per-kernel |
+| Cooldown | Bandit streak counter (`consecutive_no_promote`) | Per-kernel `kernel_opt_attempts` |
+
+Gap / keywords for each tick are auto-composed from SharedState
+(`framework`, `gpu_type`, `model_class`, `precision`, optional profile
+bottleneck). Override per tick via `proposal.params.gap_override` /
+`proposal.params.keyword_override` from the Orchestration prompt.
+
 ## Framework Selection
 
 A session is single-framework. Pick `sglang` (default) or `vllm` via
@@ -708,6 +790,19 @@ setsid nohup inference_optimizer --verbose optimize \
   > "$RUN_LOG" 2>&1 < /dev/null &
 echo $! > "$PID_FILE"
 ```
+
+framework-agent PR discovery is now a regular bandit arm (`framework_pr`,
+see [Framework-Agent as Bandit Arm](#framework-agent-as-bandit-arm-framework_pr-action)) —
+no startup flags needed. The Orchestration agent decides per tick when
+to propose the arm; the Coordinator composes the search gap from
+SharedState (`framework` / `gpu_type` / `model_class` / latest
+profile bottleneck). Override the auto-composed gap for an individual
+tick via `proposal.params.gap_override` from the Orchestration prompt.
+The arm self-disables when (a) `framework=vllm` (returns
+`unsupported_framework`), (b) `fa` binary is missing from PATH
+(returns `fa_candidates_failed`), or (c) the candidate set is empty
+(returns `no_applicable_candidate`); in all three cases the bandit
+streak counter cools the arm down and the session keeps running.
 
 `setsid nohup ... &` is required for runs > 5 min — Cursor's background
 shell can die on SSH disconnect.

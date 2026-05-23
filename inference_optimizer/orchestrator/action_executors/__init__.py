@@ -27,6 +27,10 @@ from .baseline import (
     BaselineExecutor,
     baseline_executor,
 )
+from .framework_pr import (
+    FrameworkPRExecutor,
+    framework_pr_executor,
+)
 from .params import (
     DEFAULT_NCCL_GRID,
     DEFAULT_PARAMS_GRID,
@@ -77,6 +81,7 @@ __all__ = [
     "DEFAULT_SGLANG_SERVER_ARGS",
     "DEFAULT_VLLM_ARG_UTILS",
     "DEFAULT_VLLM_BACKENDS_GRID",
+    "FrameworkPRExecutor",
     "PROFILE_DEFAULT_CONFIG",
     "ParamsExecutor",
     "PMCRooflineExecutor",
@@ -98,6 +103,7 @@ __all__ = [
     "discover_backend_flags",
     "discover_param_flags",
     "discover_vllm_backend_flags",
+    "framework_pr_executor",
     "params_executor",
     "pmc_roofline_executor",
     "profile_executor",

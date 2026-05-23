@@ -32,10 +32,14 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "profile":              "analysis",
     "pmc_roofline":         "analysis",
     "roofline":             "analysis",
-    # shallow (5) — report + session_breakdown live here per DESIGN §16.1
+    # shallow (6) — report + session_breakdown live here per DESIGN §16.1;
+    # framework_pr (fa-as-arm migration, plan ``fa-as-io-arm-design``) is
+    # also shallow because each tick is one PR apply + one A/B bench, not
+    # a deep multi-step pipeline.
     "backends":             "shallow",
     "params":               "shallow",
     "sweep":                "shallow",
+    "framework_pr":         "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
     # deep_kernel (5)
