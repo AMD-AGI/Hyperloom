@@ -1555,6 +1555,85 @@ def test_record_trace_analyze_defaults_warnings_to_empty_list(session_dir):
     assert state.last_trace_analyze["trace_health_warnings"] == []
 
 
+def test_record_trace_analyze_persists_task_groups(session_dir):
+    """PR-G: ``task_groups`` must flow from the handler result into
+    ``last_trace_analyze`` so the multi-KEEP queue's
+    ``untried_hot_reusable_kernels`` / ``next_pending_keep_kernel_id``
+    can collapse members of the same AST function into one slot.
+
+    Without this, Qwen3-30B-A3B-Base session 20260523T035235Z saw
+    k001/k003/k005 (non-primary members of moe_op + rmsnorm groups
+    already covered by k002/k004/k009) re-dispatched as a separate
+    second batch, wasting GEAK->Claude->Codex wall-clock on patches
+    that targeted the same source functions as the first batch.
+    """
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    groups = [
+        {"primary_kernel_id": "k004", "kernel_ids": ["k003", "k004"],
+         "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
+        {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"],
+         "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
+    ]
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [
+                {"kernel_id": "k001", "gpu_pct": 8.0, "reusable_native_kernel": True,
+                 "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
+                {"kernel_id": "k002", "gpu_pct": 25.0, "reusable_native_kernel": True,
+                 "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
+                {"kernel_id": "k003", "gpu_pct": 12.0, "reusable_native_kernel": True,
+                 "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
+                {"kernel_id": "k004", "gpu_pct": 38.0, "reusable_native_kernel": True,
+                 "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
+            ],
+            "task_groups": groups,
+        },
+    )
+    assert state.last_trace_analyze.get("task_groups") == groups
+    # After k002 + k004 attempted, group-aware collapse should report
+    # NO untried hot kernels even though k001/k003 have attempts=0.
+    state.record_kernel_opt({
+        "status": "failed", "kernel_id": "k002",
+        "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
+        "error_class": "subtask_exception",
+    })
+    state.record_kernel_opt({
+        "status": "ok", "kernel_id": "k004",
+        "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
+        "proposal": {"decision": "KEEP", "reasons": []},
+        "verification": {"micro_speedup": 1.17,
+                         "compile_passed": True, "correctness_passed": True,
+                         "best_artifact_path": "/tmp/k004.py"},
+    })
+    assert state.untried_hot_reusable_kernels() == [], (
+        "k001/k003 must be filtered out because their groups have an "
+        "attempted member (k002 / k004 respectively)"
+    )
+
+
+def test_record_trace_analyze_defaults_task_groups_to_empty_list(session_dir):
+    """When the handler result has no ``task_groups`` field (legacy
+    TraceLens output), the cached entry must default to an empty
+    list so downstream readers never get a KeyError."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [
+                {"kernel_id": "k1", "reusable_native_kernel": True},
+            ],
+        },
+    )
+    assert state.last_trace_analyze.get("task_groups") == []
+
+
 def test_record_trace_analyze_filters_invalid_warning_entries(session_dir):
     """Defensive: a buggy tool emitting non-dict entries or dicts
     missing the ``code`` field shouldn't poison ``last_trace_analyze``.
