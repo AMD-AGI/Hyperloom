@@ -60,6 +60,21 @@ def _now_iso() -> str:
 # backend) consumes the whole run. Override via the matching env var
 # named in ``record_kernel_opt`` (1 disables the second-chance entirely).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
+# PR-C: a completed backend ladder (GEAK -> Claude -> Codex) that did
+# not produce a KEEP is the operator's definition of "this kernel
+# cannot be optimized". One such failure retires the kernel for the
+# rest of the session; the LLM does not get to re-dispatch the same
+# kernel via a fresh ``run_optimization`` request. Override via
+# ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
+_DEFAULT_KERNEL_OPT_MAX_FAILURES = 1
+# PR-C: hot-kernel report gate threshold. Reusable hot kernels with
+# ``gpu_pct`` >= this value MUST get at least one kernel_opt attempt
+# (or be rejected after one) before ``report`` is allowed to fire.
+_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
+# PR-C: cap how many hot kernels the report-gate will demand. Even on
+# a noisy trace with 15 reusable rows, only the top-N by gpu_pct are
+# enforced -- avoids the LLM stalling on dozens of tiny kernels.
+_DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
 
 # Per-action audit history cap. ``<action>_attempts`` lists keep the most
 # recent N entries (full audit trail — both successes and failures) so
@@ -1905,20 +1920,54 @@ class SharedState:
             or (result.get("candidate") or {}).get("source_file")
             or ""
         )
+        status = str(result.get("status") or "").lower()
+        err_class = str(result.get("error_class") or "")
+        # PR-C: An "infra failure" is a backend ladder that finished
+        # WITHOUT delivering any verdict at all -- subprocess timeout,
+        # batch handler exception, GEAK/OOB rc!=0, missing inputs, etc.
+        # These are distinct from REVERT (which has its own
+        # ``should_reject`` rule) and PARTIAL (which has its own
+        # ``max_partial`` streak gate); we don't double-count them.
+        # The new ``max_failures = 1`` rule covers ONLY this pure
+        # infra-failure case: Qwen3-30B-A3B-Base 164405Z burned 8h
+        # because GEAK -> Claude -> Codex timed out repeatedly on the
+        # same k002/k004 and each ladder showed up as status=failed
+        # with empty decision -- silently bumping attempts but never
+        # tripping a retire gate.
+        is_infra_failure = (
+            decision == ""
+            and (
+                status in {"failed", "error", "timeout"}
+                or err_class in {
+                    "subtask_exception",
+                    "handler_exception",
+                    "subprocess_timeout",
+                    "kernel_agent_root_missing",
+                    "missing_integration_inputs",
+                }
+            )
+        )
         ts = _now_iso()
 
         entry = dict(self.kernel_opt_attempts.get(kernel_id) or {})
         history = list(entry.get("history") or [])
-        history.append({"decision": decision, "micro": micro_float, "ts": ts})
+        history.append({
+            "decision": decision, "micro": micro_float,
+            "status": status, "ts": ts,
+        })
         history = history[-10:]
         entry["attempts"] = int(entry.get("attempts", 0)) + 1
         if decision == "PARTIAL":
             entry["partial_count"] = int(entry.get("partial_count", 0)) + 1
         elif decision == "KEEP":
-            # A successful attempt resets the partial streak; a future
-            # regression should not be auto-retired on stale history.
+            # A successful attempt resets streaks; a future regression
+            # should not be auto-retired on stale history.
             entry["partial_count"] = 0
+            entry["failure_count"] = 0
+        if is_infra_failure:
+            entry["failure_count"] = int(entry.get("failure_count", 0)) + 1
         entry["last_decision"] = decision
+        entry["last_status"] = status
         entry["last_micro_speedup"] = micro_float
         entry["last_artifact_path"] = best_artifact_path
         entry["last_source_file"] = source_file
@@ -1961,9 +2010,23 @@ class SharedState:
                 # (already assigned above) instead of failing.
                 pass
 
+        # PR-C: max_failures defaults to 1 -- a single completed backend
+        # ladder (GEAK -> Claude -> Codex) that did not produce a KEEP
+        # is the operator's definition of "this kernel cannot be
+        # optimized; do not retry". Operators that want to give a
+        # flaky GEAK/OOB a second chance can bump via env.
+        max_failures = _DEFAULT_KERNEL_OPT_MAX_FAILURES
+        env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
+        if env_f:
+            try:
+                max_failures = max(1, int(env_f))
+            except (TypeError, ValueError):
+                pass
+
         should_reject = (
             decision == "REVERT"
             or int(entry.get("partial_count", 0)) >= max_partial
+            or int(entry.get("failure_count", 0)) >= max_failures
         )
         if should_reject:
             if kernel_id not in self.rejected_kernel_ids:
@@ -1971,7 +2034,11 @@ class SharedState:
             entry["rejected_reason"] = (
                 "revert_decision"
                 if decision == "REVERT"
-                else f"max_partial_attempts_{max_partial}_without_keep"
+                else (
+                    f"max_partial_attempts_{max_partial}_without_keep"
+                    if int(entry.get("partial_count", 0)) >= max_partial
+                    else f"max_failures_{max_failures}_without_keep"
+                )
             )
 
         self.kernel_opt_attempts[kernel_id] = entry
@@ -2094,6 +2161,133 @@ class SharedState:
     @property
     def kernel_opt_attempts_count(self) -> int:
         return len(self.kernel_opt_attempts or {})
+
+    # ------------------------------------------------------------------
+    # PR-C: hot-kernel report gate. Drives Coordinator's "report cannot
+    # fire until every meaningful hot reusable kernel has been
+    # attempted" guard, so the LLM cannot prematurely emit `report`
+    # (Qwen3-30B-A3B-Base 164910Z bug: tick=8 -> report_emitted with
+    # k001=24% / k002=37% / k004=9.7% untouched).
+    # ------------------------------------------------------------------
+    def untried_hot_reusable_kernels(
+        self,
+        *,
+        min_gpu_pct: float | None = None,
+        top_n: int | None = None,
+    ) -> list[str]:
+        """Hot kernels still owing at least one ``kernel_opt`` attempt.
+
+        A kernel qualifies when it satisfies ALL of:
+          * ``reusable_native_kernel is True`` in ``last_trace_analyze``
+          * ``gpu_pct >= min_gpu_pct`` (default 3.0; override via
+            ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``)
+          * no member of its ``task_group`` is already on
+            ``optimization_stack`` (i.e. nothing from this AST function
+            has been integrated)
+          * no member of its ``task_group`` appears in
+            ``rejected_kernel_ids`` (the whole group is "live")
+          * no member of its ``task_group`` has any
+            ``kernel_opt_attempts`` entry (zero attempts so far)
+          * its ``source_file`` has not been touched by any prior
+            ``integrate`` on the stack (same-file conflict guard)
+
+        The candidate set is capped to ``top_n`` (default 5; override
+        via ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``) by ``gpu_pct`` desc so
+        the gate cannot demand 15 tiny rmsnorms.
+
+        Each task_group contributes at most one kernel_id (the highest
+        ``gpu_pct`` member that satisfies the filters), matching what
+        ``_batch_kernel_candidates`` would actually dispatch.
+        """
+        info = self.last_trace_analyze or {}
+        hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
+        task_groups = info.get("task_groups") or []
+        if not isinstance(hot, list):
+            return []
+
+        if min_gpu_pct is None:
+            try:
+                min_gpu_pct = float(os.environ.get(
+                    "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
+                    _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+                ))
+            except (TypeError, ValueError):
+                min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+        if top_n is None:
+            try:
+                top_n = int(os.environ.get(
+                    "HYPERLOOM_KERNEL_OPT_GATE_TOP_N",
+                    _DEFAULT_HOT_KERNEL_GATE_TOP_N,
+                ))
+            except (TypeError, ValueError):
+                top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
+        top_n = max(1, int(top_n))
+
+        kid_to_group: dict[str, list[str]] = {}
+        for g in task_groups:
+            if not isinstance(g, dict):
+                continue
+            members = [str(m) for m in (g.get("kernel_ids") or []) if m]
+            for m in members:
+                kid_to_group[m] = members
+
+        integrated_ids = self._kernel_ids_in_optimization_stack()
+        integrated_sources = self._source_files_in_optimization_stack()
+        rejected = set(self.rejected_kernel_ids or [])
+        attempts = self.kernel_opt_attempts or {}
+
+        # Collect every reusable hot row above threshold, then sort by
+        # gpu_pct desc so dedup picks the STRONGEST member of each
+        # task_group (otherwise prompt order would arbitrarily make the
+        # 24% kernel represent a group whose 37% sibling exists -- bad
+        # signal for the LLM).
+        rows: list[tuple[float, str, str, list[str]]] = []
+        for k in hot:
+            if not isinstance(k, dict):
+                continue
+            if k.get("reusable_native_kernel") is not True:
+                continue
+            try:
+                gpu_pct = float(k.get("gpu_pct") or 0.0)
+            except (TypeError, ValueError):
+                gpu_pct = 0.0
+            if gpu_pct < min_gpu_pct:
+                continue
+            kid = str(k.get("kernel_id") or "")
+            if not kid:
+                continue
+            src = str(k.get("source_file") or "")
+            members = sorted(kid_to_group.get(kid, [kid]))
+            rows.append((gpu_pct, kid, src, members))
+        rows.sort(key=lambda x: x[0], reverse=True)
+
+        ranked: list[tuple[float, str, str, list[str]]] = []
+        seen_groups: set[tuple[str, ...]] = set()
+        for row in rows:
+            group_key = tuple(row[3])
+            if group_key in seen_groups:
+                continue
+            seen_groups.add(group_key)
+            ranked.append(row)
+        ranked = ranked[:top_n]
+
+        untried: list[str] = []
+        for _pct, kid, src, members in ranked:
+            # Whole task_group rejected -> skip
+            if members and all(m in rejected for m in members):
+                continue
+            # Any member already integrated -> skip
+            if any(m in integrated_ids for m in members):
+                continue
+            # Source already covered by a stack integrate -> skip
+            if src and src in integrated_sources:
+                continue
+            # Any member has been tried -> skip
+            if any(int((attempts.get(m) or {}).get("attempts", 0)) > 0
+                   for m in members):
+                continue
+            untried.append(kid)
+        return untried
 
     # ------------------------------------------------------------------
     # Per-action audit (kernel parity for non-kernel actions)
