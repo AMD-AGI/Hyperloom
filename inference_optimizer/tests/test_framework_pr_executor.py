@@ -362,7 +362,7 @@ async def test_rollback_failure_surfaces_in_result(fake_executor, session_dir):
 
 @pytest.mark.asyncio
 async def test_keyword_override_replaces_composed_keywords(
-    fake_executor, session_dir,
+    fake_executor, session_dir, monkeypatch,
 ):
     """Operator-supplied keyword_override must reach enumerate_candidates_via_fa."""
     executor, state = fake_executor
@@ -374,8 +374,11 @@ async def test_keyword_override_replaces_composed_keywords(
         captured.update(kwargs)
         return []
 
-    import inference_optimizer.orchestrator.action_executors.framework_pr as fpr_mod
-    fpr_mod.enumerate_candidates_via_fa = _capture  # type: ignore[assignment]
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.action_executors.framework_pr."
+        "enumerate_candidates_via_fa",
+        _capture,
+    )
 
     params = _base_params(keyword_override=["mla", "fp8"])
     result = await executor(_ctx(session_dir, params))
