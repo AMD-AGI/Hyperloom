@@ -12,11 +12,9 @@ from pathlib import Path
 import framework_agent.explorer as ex
 from framework_agent.decision import winner_decision
 from framework_agent.models import (
-    Baseline,
     Candidate,
     ExploreRequest,
     PrFilter,
-    Thresholds,
 )
 
 
