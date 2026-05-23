@@ -1974,25 +1974,27 @@ def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
     """Two reusable kernels in the same task_group must dispatch as ONE
     candidate (the primary), with the full group attached for
     build_prompt to render multi-row benchmark cases."""
+    # PR-I: default min_gpu_pct is 3.0; rows must carry gpu_pct >= 3.0
+    # to pass the dispatcher's hot-kernel gate.
     candidates_path = _write_candidates_json(tmp_path, {
         "hot_kernels": [
             {
                 "kernel_id": "k001", "name": "rms_norm_prefill",
                 "source_file": "/sgl-workspace/aiter/rmsnorm.py",
                 "reusable_native_kernel": True,
-                "duration_us": 100.0,
+                "duration_us": 100.0, "gpu_pct": 12.0,
             },
             {
                 "kernel_id": "k002", "name": "rms_norm_decode",
                 "source_file": "/sgl-workspace/aiter/rmsnorm.py",
                 "reusable_native_kernel": True,
-                "duration_us": 50.0,
+                "duration_us": 50.0, "gpu_pct": 8.0,
             },
             {
                 "kernel_id": "k003", "name": "other_kernel",
                 "source_file": "/sgl-workspace/aiter/other.py",
                 "reusable_native_kernel": True,
-                "duration_us": 30.0,
+                "duration_us": 30.0, "gpu_pct": 4.5,
             },
         ],
         "task_groups": [
@@ -2028,19 +2030,21 @@ def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_pat
     (e.g. vendor BLAS name marker landed on the heaviest row), dispatch
     falls back to the first reusable member instead of dropping the
     whole group."""
+    # PR-I: default min_gpu_pct is 3.0, so rows must carry gpu_pct >= 3.0
+    # to be retained by the dispatcher (matches production fixtures).
     candidates_path = _write_candidates_json(tmp_path, {
         "hot_kernels": [
             {
                 "kernel_id": "k001", "name": "rocblas_sgemm_call",
                 "source_file": "/sgl-workspace/aiter/foo.py",
                 "reusable_native_kernel": False,  # primary rejected
-                "duration_us": 200.0,
+                "duration_us": 200.0, "gpu_pct": 22.0,
             },
             {
                 "kernel_id": "k002", "name": "rms_norm_call",
                 "source_file": "/sgl-workspace/aiter/foo.py",
                 "reusable_native_kernel": True,
-                "duration_us": 50.0,
+                "duration_us": 50.0, "gpu_pct": 5.5,
             },
         ],
         "task_groups": [
@@ -2066,17 +2070,23 @@ def test_batch_kernel_candidates_legacy_path_unchanged_without_task_groups(tmp_p
     """When kernel_candidates.json has no task_groups[] (older runs,
     raw-trace fallback, LLama70B fixture path), the candidate list is
     byte-identical to pre-PR-B behaviour."""
+    # PR-I: default min_gpu_pct is 3.0; legacy fixture now carries
+    # gpu_pct >= 3.0 so the dispatcher's hot-kernel gate doesn't drop
+    # k001. We're testing the *legacy task_groups-absent path*, not the
+    # gpu_pct filter, so this stays orthogonal to PR-I's intent.
     candidates_path = _write_candidates_json(tmp_path, {
         "hot_kernels": [
             {
                 "kernel_id": "k001", "name": "rms_norm",
                 "source_file": "/sgl-workspace/aiter/rmsnorm.py",
                 "reusable_native_kernel": True,
+                "gpu_pct": 11.0,
             },
             {
                 "kernel_id": "k002", "name": "vendor",
                 "source_file": "/sgl-workspace/aiter/vendor.py",
                 "reusable_native_kernel": False,
+                "gpu_pct": 9.0,
             },
         ],
     })
@@ -2978,6 +2988,39 @@ def test_batch_candidates_below_min_gpu_pct_skipped(
     )
     out_ids = sorted(c.get("kernel_id") for c in out)
     assert out_ids == ["k001"]
+
+
+def test_batch_candidates_default_min_gpu_pct_matches_sharedstate_gate(
+    session_dir, _candidates_factory,
+):
+    """PR-I: ``_batch_kernel_candidates`` default must match
+    ``SharedState.untried_hot_reusable_kernels``'s default (3.0).
+
+    Repro: Qwen3-30B-A3B-Base session 20260523T035235Z third batch
+    round dispatched k006 (gpu_pct=1.3%) via task_group fallback even
+    though it was below the SharedState gate's 3.0% threshold; LLM
+    couldn't even see k006 in untried_hot_reusable_kernels yet the
+    batch wasted ~30-90 min on its ladder. The two layers now share
+    the same default so a kernel that's invisible to the gate is also
+    rejected by the batch dispatcher.
+    """
+    cpath = _candidates_factory([
+        {"kernel_id": "k001", "gpu_pct": 38.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k006", "gpu_pct": 1.3, "reusable_native_kernel": True,
+         "source_file": "/p/rmsnorm.py"},
+        {"kernel_id": "k008", "gpu_pct": 3.13, "reusable_native_kernel": True,
+         "source_file": "/p/rmsnorm.py"},
+    ])
+    # No env set -> default 3.0 must filter out k006 (1.3 < 3.0)
+    # but keep k001 (38) and k008 (3.13).
+    out = krh._batch_kernel_candidates(
+        {"candidates_path": cpath}, session_dir=session_dir,
+    )
+    out_ids = sorted(c.get("kernel_id") for c in out)
+    assert "k006" not in out_ids, out_ids
+    assert "k001" in out_ids
+    assert "k008" in out_ids
 
 
 def test_in_flight_kernel_ids_returns_running_only(session_dir):
