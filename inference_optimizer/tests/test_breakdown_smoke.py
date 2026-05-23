@@ -1078,3 +1078,104 @@ def test_framework_args_from_yaml_benchmark_synthesis(tmp_path: Path) -> None:
     assert "model=/path" in s, s
     assert "tp=8" in s, s
     assert "envs=[VLLM_FLASH_ATTN=1]" in s, s
+
+
+def test_framework_args_yaml_fallback_when_workspace_unresolvable(tmp_path: Path) -> None:
+    """R2 regression: state.last_baseline.workspace is a container-style
+    path that doesn't resolve (e.g. ``/workspace/...``) AND state's
+    baseline_config_path doesn't resolve either, but runs/baseline/<hash>/
+    on disk has both a server.log and the materialized yaml. The collector
+    must session-wide disk-walk into runs/baseline/ to recover both files
+    so the invocation surfaces as ``log_args_line`` (preferred) or
+    ``yaml_benchmark``, not ``unknown``.
+    """
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "r2yaml"})
+    # Put artefacts under runs/baseline/<hash>/benchmark_*/, mirroring
+    # the production layout. Note: NO sibling files under sd itself, so
+    # the only way to find them is the runs/baseline/ disk walk.
+    bdir = sd / "runs/baseline/abcd1234/benchmark_sglang_20260101_000000"
+    _write_json(bdir / "benchmark_report.json", {"success": True})
+    cfg = sd / "runs/baseline/abcd1234/baseline_config.with_envs.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(
+        "benchmark:\n"
+        "  framework: sglang\n"
+        "  model: /weka/m\n"
+        "  precision: fp8\n"
+        "  tp: 4\n"
+        "  envs:\n"
+        "    TP: \"4\"\n"
+        "    CONC: \"64\"\n",
+        encoding="utf-8",
+    )
+    _write_json(sd / "state.json", {
+        "session_id": "r2yaml",
+        "baseline_tput": 1000.0,
+        # Workspace is a container-style path that doesn't resolve under
+        # session_dir's standard anchors AND we deliberately do NOT set
+        # baseline_config_path.
+        "last_baseline": {
+            "workspace": "/totally/unresolvable/abcd1234",
+        },
+    })
+    b = build(sd)
+    inv = b["baseline"]["invocation"]
+    assert inv["framework_args_source"] == "yaml_benchmark", inv
+    assert "framework=sglang" in inv["framework_args"]
+    assert "tp=4" in inv["framework_args"]
+    # extra_envs got populated from the recovered yaml.
+    assert inv["extra_envs"].get("TP") == "4"
+    assert inv["extra_envs"].get("CONC") == "64"
+    # And the baseline.invocation specifically recovered to yaml_benchmark
+    # (the framework_args_source above is the authoritative signal; other
+    # collectors that scan profile/* may still warn on their own).
+
+
+def test_framework_args_workspace_is_leaf_benchmark_dir(tmp_path: Path) -> None:
+    """R2 regression: state.last_baseline.workspace points at the leaf
+    ``benchmark_*`` dir (the recent orchestrator behaviour), not at the
+    parent task dir. The collector must read ``workspace/server.log``
+    directly rather than walking down for ``benchmark_*/server.log``.
+    """
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "r2leaf"})
+    bdir = sd / "runs/baseline/leaf1/benchmark_sglang_x"
+    _write_json(bdir / "benchmark_report.json", {"success": True})
+    (bdir / "server.log").write_text(
+        "INFO 05-12 14:21:15 [server.py:50] Server arguments: "
+        "--model /weka/m --tp 4\n",
+        encoding="utf-8",
+    )
+    cfg = sd / "runs/baseline/leaf1/baseline_config.with_envs.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("benchmark:\n  framework: sglang\n  model: /weka/m\n", encoding="utf-8")
+    _write_json(sd / "state.json", {
+        "session_id": "r2leaf",
+        "baseline_tput": 1234.0,
+        "last_baseline": {"workspace": str(bdir)},  # leaf, not the task dir
+    })
+    inv = build(sd)["baseline"]["invocation"]
+    assert inv["framework_args_source"] == "log_args_line", inv
+    assert "--tp 4" in inv["framework_args"]
+
+
+def test_framework_args_still_unknown_when_no_runs_dir(tmp_path: Path) -> None:
+    """R2 boundary: a session with no runs/baseline/ at all (artefacts
+    cleaned up after the run) should still record source=unknown and
+    emit the warning. The new disk-walk fallback must not invent data.
+    """
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "r2none"})
+    _write_json(sd / "state.json", {
+        "session_id": "r2none",
+        "baseline_tput": 500.0,
+        "last_baseline": {"workspace": "/gone/forever"},
+    })
+    b = build(sd)
+    inv = b["baseline"]["invocation"]
+    assert inv["framework_args"] == ""
+    assert inv["framework_args_source"] == "unknown"
+    assert any(
+        "framework_args extraction failed" in w for w in b["warnings"]
+    ), b["warnings"]
