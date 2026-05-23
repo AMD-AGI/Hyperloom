@@ -117,30 +117,14 @@ def _geak_attempt(tmp_path: Path, *, status: str = "complete", speedup: float = 
     }
 
 
-def test_geak_correctness_missing_by_default(tmp_path):
-    """PR-E default OFF: GEAK status=complete + 1.3x still degrades to
-    NEEDS_REVIEW because correctness evidence is missing -- matches
-    the conservative behaviour that hid the 1.3x ck_moe_stage1 patch
-    in the 20260523T035235Z session."""
-    verification = ko.build_verification(
-        _args(),
-        [_geak_attempt(tmp_path, status="complete", speedup=1.3)],
-        benchmark_available=True,
-    )
-    assert verification["micro_speedup"] == 1.3
-    assert verification["correctness_passed"] is False
-    assert verification["correctness_source"] == "missing"
-    proposal = ko.make_proposal(verification)
-    assert proposal["decision"] == "NEEDS_REVIEW"
-
-
-def test_geak_correctness_trusted_when_env_set(tmp_path, monkeypatch):
-    """PR-E opt-in: HYPERLOOM_TRUST_GEAK_CORRECTNESS=1 promotes a
-    GEAK status=complete + measured-speedup attempt to KEEP. The
-    integrate stage's E2E magpie benchmark remains the ground-truth
-    functional check; this flag only short-circuits the missing
-    correctness gate so the patch reaches integrate at all."""
-    monkeypatch.setenv("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "1")
+def test_geak_correctness_trusted_by_default(tmp_path):
+    """PR-E default ON: GEAK status=complete + measured-speedup is
+    auto-promoted to KEEP. The integrate stage's E2E magpie benchmark
+    remains the ground-truth functional check; this default short-
+    circuits the missing correctness gate so GEAK patches actually
+    reach integrate (without this trust default, historical Qwen3-30B-
+    A3B-Base sessions ran GEAK 0/4 KEEP and dropped real 1.3x patches
+    like ck_moe_stage1)."""
     verification = ko.build_verification(
         _args(source_file="/tmp/moe_op.py"),
         [_geak_attempt(tmp_path, status="complete", speedup=1.3)],
@@ -153,11 +137,27 @@ def test_geak_correctness_trusted_when_env_set(tmp_path, monkeypatch):
     assert proposal["decision"] == "KEEP", proposal
 
 
-def test_geak_correctness_trust_requires_nonzero_speedup(tmp_path, monkeypatch):
-    """Trust flag must not promote a 0.0/1.0 'unmeasured' result. The
-    geak_per_task_best_speedup must be > 0 for the trust gate to fire,
-    otherwise we'd silently KEEP a no-op patch."""
-    monkeypatch.setenv("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "1")
+def test_geak_correctness_can_be_disabled_via_env(tmp_path, monkeypatch):
+    """Operators that want human review can opt out via
+    HYPERLOOM_TRUST_GEAK_CORRECTNESS=0 -- restores the pre-PR-E
+    conservative behaviour (NEEDS_REVIEW because correctness missing)."""
+    monkeypatch.setenv("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "0")
+    verification = ko.build_verification(
+        _args(source_file="/tmp/moe_op.py"),
+        [_geak_attempt(tmp_path, status="complete", speedup=1.3)],
+        benchmark_available=True,
+    )
+    assert verification["micro_speedup"] == 1.3
+    assert verification["correctness_passed"] is False
+    assert verification["correctness_source"] == "missing"
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "NEEDS_REVIEW"
+
+
+def test_geak_correctness_trust_requires_nonzero_speedup(tmp_path):
+    """Trust default must not promote a 0.0/1.0 'unmeasured' result.
+    The geak_per_task_best_speedup must be > 0 for the trust gate to
+    fire, otherwise we'd silently KEEP a no-op patch."""
     # speedup=0 simulates GEAK status=complete but no per-task best
     attempt = _geak_attempt(tmp_path, status="complete", speedup=0.0)
     # Wipe the per-task speedup so build_verification's measured branch
@@ -168,16 +168,15 @@ def test_geak_correctness_trust_requires_nonzero_speedup(tmp_path, monkeypatch):
         [attempt],
         benchmark_available=True,
     )
-    # No measured speedup -> trust gate does not fire even with env set.
+    # No measured speedup -> trust gate does not fire even with default trust.
     assert verification["correctness_passed"] is False
     assert verification["correctness_source"] == "missing"
 
 
-def test_geak_correctness_trust_requires_complete_status(tmp_path, monkeypatch):
-    """Trust flag must not promote status=failed / no-patch attempts.
+def test_geak_correctness_trust_requires_complete_status(tmp_path):
+    """Trust default must not promote status=failed / no-patch attempts.
     GEAK reports status='complete_no_patch' when select_patch found
     nothing worth keeping; that must NOT be auto-promoted to KEEP."""
-    monkeypatch.setenv("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "1")
     verification = ko.build_verification(
         _args(),
         [_geak_attempt(tmp_path, status="complete_no_patch", speedup=1.3)],
