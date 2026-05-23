@@ -55,7 +55,7 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # single canonical entry point.
     "roofline", "deep_kernel_analysis",
     # explore
-    "backends", "params", "sweep",
+    "backends", "params", "sweep", "framework_pr",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
     # validate (Phase 3 — closes the loop on accumulated KEEPs)
@@ -85,8 +85,9 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # analysis — roofline is still useful in no-kernel mode for the
     # snapshot it provides (cheap actions consume it via discovered_flags)
     "roofline",
-    # explore
-    "backends", "params", "sweep",
+    # explore — framework_pr is safe to enable even without the kernel
+    # agent: it only mutates sglang source, never proposes per-kernel work.
+    "backends", "params", "sweep", "framework_pr",
     # validate (still useful — bench the stacked backends/params)
     "validate_stack",
     # finalize
@@ -1185,9 +1186,24 @@ def build_orchestration_prompt(
     return "\n\n".join(parts).rstrip() + "\n"
 
 
-def default_enabled_actions(*, no_kernel: bool) -> tuple[str, ...]:
-    """Return the canonical enabled-action set used by the CLI."""
-    return NO_KERNEL_ENABLED_ACTIONS if no_kernel else FULL_ENABLED_ACTIONS
+def default_enabled_actions(
+    *, no_kernel: bool, no_framework: bool = False,
+) -> tuple[str, ...]:
+    """Return the canonical enabled-action set used by the CLI.
+
+    Two independent toggles select among 4 combinations:
+
+    * ``no_kernel=False, no_framework=False`` (default) — full pipeline:
+      kernel-owned arms + ``framework_pr``.
+    * ``no_kernel=False, no_framework=True``  — kernel arms enabled, ``framework_pr`` stripped.
+    * ``no_kernel=True,  no_framework=False`` — kernel arms stripped, ``framework_pr`` kept.
+    * ``no_kernel=True,  no_framework=True``  — pure parameter-search
+      (baseline + params + backends + sweep + validate_stack + report).
+    """
+    base = NO_KERNEL_ENABLED_ACTIONS if no_kernel else FULL_ENABLED_ACTIONS
+    if no_framework:
+        return tuple(a for a in base if a != "framework_pr")
+    return base
 
 
 __all__ = [

@@ -67,8 +67,8 @@ on the next tick.
   only the top-1 row qualifies, propose it. Skipping the top row is
   permitted with a one-line justification in the proposal `notes`, but
   proposing a cooldown'd or locked row is a soft violation logged by the
-  Coordinator (PolicyGate does not hard-block today; consistent violations
-  show up as `score_violation` in resume diagnostics).
+    Coordinator (PolicyGate does not hard-block today; consistent violations
+    show up as `score_violation` in resume diagnostics).
 * **Sandbox shell hygiene:**
   * **Never start `find` at `/`.** WekaFS at `/wekafs` is cluster-shared
     NFS holding other tenants' large dataset dirs; even
@@ -80,6 +80,17 @@ on the next tick.
     `python3 -c "import M; print(M.__file__)"` — NOT filesystem search.
   * For process paths the sandbox has no `ps` / `pgrep`; use
     `pidof <name>` and read `/proc/<pid>/cmdline`.
+* **`framework_pr` first-explore priority** (only when framework-agent is
+  enabled AND `framework_pr` shows `runs=0` in the Action scores block):
+  the FIRST explore action you propose after a successful `baseline`
+  KEEP MUST be `framework_pr`, even if its score is below `params` /
+  `backends`. Use `notes: "framework_pr first-explore priority"` to
+  exempt the skip from `score_violation` logging. The override lifts the
+  moment `framework_pr.runs >= 1` (KEEP, DISCARD, or any terminal failure
+  all count); subsequent ticks return to normal score-driven proposal.
+  Operators who want to suppress this override entirely should launch
+  with `--no-framework`, which unregisters the `framework_pr` arm and
+  lets the bandit run on pure `params` / `backends` / `sweep`.
 
 ### Roofline-v2 action ordering (HARD RULES — PolicyGate enforced)
 
