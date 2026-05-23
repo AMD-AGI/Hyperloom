@@ -47,6 +47,15 @@ def _build_summary_dict(
         "stop_reason":      state.stop_reason,
         "baseline_tput":    state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
+        # IR-7 — steward verdict + history. The final report's section
+        # 9.1 (remaining gaps) reads ``last_remaining_gaps_assessment``
+        # rationale verbatim.
+        "remaining_gaps_assessment": dict(
+            state.last_remaining_gaps_assessment or {}
+        ),
+        "remaining_gaps_assessments_history": list(
+            state.remaining_gaps_assessments or []
+        ),
         "current_best":     state.current_best,
         "cumulative_gain":  state.cumulative_gain,
         # Phase 3 — separate the per-round-sum gain (kept as
@@ -139,11 +148,47 @@ def _format_md(summary: dict[str, Any]) -> str:
             )
     lines.append("")
 
+    # IR-7 — steward verdict transcript.
+    lines.extend(_format_steward_section(summary))
+
     ext = summary.get("external_baseline")
     if ext:
         lines.extend(_format_external_baseline_section(ext))
 
     return "\n".join(lines)
+
+
+def _format_steward_section(summary: dict[str, Any]) -> list[str]:
+    """IR-7 — render the session_steward verdict + history."""
+    assessment = summary.get("remaining_gaps_assessment") or {}
+    history = summary.get("remaining_gaps_assessments_history") or []
+    if not assessment and not history:
+        return []
+    lines: list[str] = ["## Remaining gaps (steward assessment)", ""]
+    if assessment:
+        rec = assessment.get("recommendation", "")
+        ts = assessment.get("ts", "")
+        potential = assessment.get(
+            "remaining_potential_pct_estimate", 0.0
+        ) or 0.0
+        rationale = (
+            assessment.get("rationale", "") or ""
+        ).strip()
+        next_gap = assessment.get("next_gap_canonical_id", "")
+        lines.append(f"- final verdict: `{rec}` at `{ts}`")
+        lines.append(
+            f"- remaining_potential_pct_estimate: `{potential:.2f}%`"
+        )
+        if next_gap:
+            lines.append(f"- next_gap_canonical_id: `{next_gap}`")
+        if rationale:
+            lines.append("")
+            lines.append("> " + rationale.replace("\n", "\n> "))
+            lines.append("")
+    if len(history) > 1:
+        lines.append(f"- prior assessments: {len(history) - 1}")
+    lines.append("")
+    return lines
 
 
 def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
