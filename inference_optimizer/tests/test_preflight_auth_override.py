@@ -65,6 +65,13 @@ def stub_install_steps(monkeypatch):
     InferenceX install paths are exercised elsewhere.
     """
     monkeypatch.setattr(cli, "_load_dotenv_fallback", lambda: None)
+    # N24: _load_kernel_agent_env_fallback now hard-fails (sys.exit 2)
+    # when $USER_DATA_PATH/runtime/kernel-agent.env.sh is missing. The
+    # auth-proxy override block under test runs after that fallback in
+    # _preflight() and is completely orthogonal to kernel-agent env, so
+    # stub it out alongside _load_dotenv_fallback. The real fail-loud
+    # behaviour is exercised by test_n24_kernel_agent_env_hardfail.
+    monkeypatch.setattr(cli, "_load_kernel_agent_env_fallback", lambda: None)
 
     def _fake_which(name: str):
         return f"/usr/bin/{name}"  # pretend ray + python3 are present

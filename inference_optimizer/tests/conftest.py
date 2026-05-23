@@ -50,6 +50,31 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_session_layout_env(monkeypatch):
+    """N17 isolation: drop the in-process session-dir pin between tests.
+
+    ``make_session_dir(model_name=...)`` writes
+    ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` so every subprocess +
+    every downstream ``paths.session_dir()`` call agree on the same
+    location. In a long pytest run with hundreds of tests, that pin
+    persists from test N into test N+1 if N+1 only does
+    ``monkeypatch.setenv("USER_DATA_PATH", tmp_path)`` and never calls
+    ``make_session_dir`` — and test N+1 then resolves session_dir to
+    test N's tmp_path, which is already torn down. This autouse fixture
+    deletes the pin (idempotent; ``raising=False``) at the start of
+    every test so each test sees a fresh layout.
+
+    Tests that *do* call ``make_session_dir`` immediately overwrite the
+    pin with their own tmp_path, which is the production-equivalent
+    behaviour.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_LAYOUT", raising=False)
+
 
 def _bootstrap_kernel_agent_env() -> None:
     """Point HYPERLOOM_KERNEL_AGENT_ROOT at the in-repo kernel-agent checkout."""
