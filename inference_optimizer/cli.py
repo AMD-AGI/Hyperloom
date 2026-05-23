@@ -545,6 +545,24 @@ def _seed_shared_state(
         plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
+    # EXPLORE HARD force-exit thresholds (IR-6). Either condition fires
+    # an ``explore_force_exit_low_budget`` exit (overrides plateau /
+    # steward / LLM proposals).
+    if getattr(args, "explore_force_exit_hours_remaining", None) is not None:
+        plateau_overrides["force_exit_hours_remaining"] = float(
+            args.explore_force_exit_hours_remaining
+        )
+    if getattr(args, "explore_force_exit_budget_pct", None) is not None:
+        plateau_overrides["force_exit_budget_pct"] = float(
+            args.explore_force_exit_budget_pct
+        )
+    # IR-7 steward controls.
+    if getattr(args, "steward_disabled", False):
+        plateau_overrides["steward_disabled"] = True
+    if getattr(args, "steward_continuation_cap", None) is not None:
+        plateau_overrides["steward_continuation_cap"] = int(
+            args.steward_continuation_cap
+        )
 
     # Resolve workload metadata from CLI flags first, then env. The
     # same fields are mirrored into manifest.json by manifest.build_manifest
@@ -3567,6 +3585,55 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="KERNEL plateau: number of trailing integrate attempts the "
              "gain sum is computed over. Default 5.",
+    )
+    # ------------------------------------------------------------------
+    # v0.8 IR-6 — EXPLORE HARD force-exit thresholds (Saturday May 2026)
+    # ------------------------------------------------------------------
+    # Either condition fires an ``explore_force_exit_low_budget`` exit
+    # which routes EXPLORE → KERNEL (or SWEEP when --no-kernel). Iron
+    # Rule IR-6: this gate is non-negotiable — the steward / plateau /
+    # LLM cannot extend EXPLORE past either threshold. Locked at session
+    # start into ``SharedState.plateau_overrides``.
+    opt.add_argument(
+        "--explore-force-exit-hours-remaining",
+        dest="explore_force_exit_hours_remaining",
+        type=float,
+        default=None,
+        help="EXPLORE force-exit: total wall-clock remaining (hours) "
+             "below which EXPLORE exits immediately to the next phase, "
+             "regardless of plateau / steward. Default 3.0 (IR-6).",
+    )
+    opt.add_argument(
+        "--explore-force-exit-budget-pct",
+        dest="explore_force_exit_budget_pct",
+        type=float,
+        default=None,
+        help="EXPLORE force-exit: phase-budget remaining fraction "
+             "(0..1) below which EXPLORE exits immediately. Default "
+             "0.20 (IR-6).",
+    )
+    # ------------------------------------------------------------------
+    # IR-7 — session_steward_specialist controls (Saturday May 2026)
+    # ------------------------------------------------------------------
+    # The steward is the soft gate on plateau (HARD IR-6 still wins on
+    # low budget). Operators can disable it for smoke runs or cap its
+    # continuation-granting power.
+    opt.add_argument(
+        "--steward-disabled",
+        dest="steward_disabled",
+        action="store_true",
+        default=False,
+        help="Disable session_steward_specialist; plateau directly "
+             "exits EXPLORE without the steward gate (IR-7).",
+    )
+    opt.add_argument(
+        "--steward-continuation-cap",
+        dest="steward_continuation_cap",
+        type=int,
+        default=None,
+        help="Max times the steward may return 'continue_explore' in "
+             "this session (default 1). Beyond the cap, "
+             "continue_explore is coerced to advance_to_kernel.",
     )
     # ------------------------------------------------------------------
     # v0.8 M2 — phase budget percentages (KB_design §3.2 §8.5, §3.8 §5.3)

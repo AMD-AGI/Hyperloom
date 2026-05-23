@@ -114,7 +114,12 @@ def _valid_done_payload(
 # 1. specialist_domains catalogue
 # ===========================================================================
 def test_specialist_domains_catalogue_has_six_entries():
-    assert len(SPECIALIST_DOMAINS) == 6
+    """IR-7 (Saturday May 2026) added a 7th domain
+    ``session_steward_specialist`` for the honest self-stop flow.
+    The test name stays for git-blame continuity but the assertion
+    tracks the actual count.
+    """
+    assert len(SPECIALIST_DOMAINS) == 7
     assert SPECIALIST_DOMAIN_KEYS == frozenset(
         d.key for d in SPECIALIST_DOMAINS
     )
