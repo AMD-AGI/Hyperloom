@@ -196,12 +196,15 @@ def test_phase_explore_allowlist_drops_legacy_actions():
 
     PR-A1 (Arbor-into-Hyperloom) added ``integrate_patch`` as the
     EXPLORE-phase serving-lane-locked patch integration step (consumes
-    specialist worktree patches). It is a canonical addition, not a
-    legacy re-emergence; the test below still pins out the v0.6
+    specialist worktree patches). IR-7 (Honest self-stop) added
+    ``assess_remaining_gaps`` as a thin wrapper that dispatches the
+    session_steward_specialist domain. Both are canonical additions,
+    not legacy re-emergences; the test below still pins out the v0.6
     deprecated names via ``test_full_enabled_actions_drops_legacy_grid_actions``.
     """
     assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
-        "explore", "specialist", "integrate_patch", "recover",
+        "explore", "specialist", "integrate_patch",
+        "assess_remaining_gaps", "recover",
     })
 
 

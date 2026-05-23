@@ -199,6 +199,66 @@ effort (see `Agent-deligate-gap.MD` and the `arbor-dispatch-into-hyperloom`
 plan). Cold-start sessions can still proceed via `default_grid`; every
 subsequent round should be specialist-derived for Arbor-grade gains.
 
+### IR-6 — EXPLORE HARD force-exit on low budget
+
+`phase_state.should_force_exit_explore` exits EXPLORE the moment EITHER
+of the following holds:
+
+- total wall-clock remaining (`SharedState.remaining_minutes()`) is below
+  `--explore-force-exit-hours-remaining` (default **3.0 h**), OR
+- EXPLORE's remaining phase budget is below
+  `--explore-force-exit-budget-pct` (default **20%** of its allotted
+  slice).
+
+The gate is non-negotiable — the steward / plateau judge / LLM
+proposals cannot extend EXPLORE past either threshold. Routes
+EXPLORE → KERNEL (or → SWEEP when `--no-kernel`) via the standard
+`compute_next_phase` plumbing; the new exit reason
+`explore_force_exit_low_budget` lands in both `PHASE_EXIT_REASONS`
+and `STOP_REASON_VOCAB` so resume + breakdown collectors see it.
+
+Rationale (report iter 19 lesson): leave at least 3 h of buffer
+for the downstream KERNEL → SWEEP → CLOSE sequence so the session
+can produce a clean report + recipe write-back. EXPLORE that
+consumes the entire budget loses the value of every KEEP because
+the report never lands.
+
+### IR-7 — Honest self-stop via session_steward_specialist
+
+On EXPLORE plateau (the canonical `compute_plateau_explore` judge —
+real plateau, not the legacy m2_proxy), Coordinator enqueues an
+internal `session_steward_specialist` task BEFORE permitting the
+EXPLORE→KERNEL transition. The steward reads the full session state
+(`optimization_stack`, `explore_search.rejected`,
+`specialist_rounds`, `gaps[]`, `policy_denial_history`) and returns
+one of:
+
+- `recommendation='stop_session'` → Coordinator sets
+  `stop_reason='no_more_leverage'`; CLOSE phase runs next.
+- `recommendation='advance_to_kernel'` → Coordinator writes
+  `pending_escalate_hint='skip_to_kernel'`; the next
+  `compute_next_phase` advances to KERNEL (or SWEEP under
+  `--no-kernel`).
+- `recommendation='continue_explore'` → Coordinator injects
+  `next_gap_canonical_id` into `gaps[]`, resets
+  `params_no_promote_streak` + per-domain empty streaks, sets
+  `steward_continuation_used=True`. **Only one continuation per
+  session**: a second `continue_explore` is coerced to
+  `advance_to_kernel`.
+
+The steward is purely advisory at the SOFT layer — IR-6 still wins
+when wall-clock budget drops below the threshold, regardless of
+any steward verdict. Operators can disable the steward entirely
+via `--steward-disabled`; the plateau judge then exits EXPLORE
+directly without consulting it.
+
+LLM-side `propose_action{action_name='assess_remaining_gaps'}` is
+allowed when the LLM thinks plateau is imminent but the
+Coordinator hasn't fired yet. PolicyGate
+`assess_remaining_gaps_throttle` denies back-to-back proposals
+within `INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC`
+(default 1800s).
+
 ## Setup
 
 Two commands: Step 1 implements **IR-2** (install gate), Step 2 launches.
