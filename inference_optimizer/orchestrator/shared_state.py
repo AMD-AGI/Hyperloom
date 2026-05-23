@@ -420,6 +420,17 @@ class SharedState:
     # specialist domain consistently fails to produce ideas
     # (KB_design §3.5 §13 / §3.9).
     specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
+    # IR-7 — session_steward_specialist (honest self-stop). The
+    # Coordinator dispatches this domain on EXPLORE plateau and routes
+    # the recommendation:
+    #   * ``continue_explore``    — inject ``next_gap_canonical_id`` into
+    #                               gaps[], reset plateau counters once;
+    #                               sets ``steward_continuation_used``.
+    #   * ``advance_to_kernel``   — set pending_escalate_hint='skip_to_kernel'.
+    #   * ``stop_session``        — set_stop_reason('no_more_leverage').
+    last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
+    remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
+    steward_continuation_used: bool = False
     # v0.8 M5 — last specialist task snapshot (parity with other
     # ``last_<action>`` mirrors; useful for the orchestration prompt
     # to surface "last round's specialist outcome").
@@ -792,6 +803,11 @@ class SharedState:
                 "baseline_tput", "baseline_accuracy", "current_best",
                 "cumulative_gain", "cumulative_gain_validated",
                 "optimization_stack",
+                # IR-7 additions (steward); safe to lose on v0.6 → v0.8
+                # migration since the LLM treats missing assessment as
+                # "no priors".
+                "last_remaining_gaps_assessment",
+                "remaining_gaps_assessments",
             )
             missing: list[str] = []
             for key in fact_layer_keys:
@@ -1372,6 +1388,52 @@ class SharedState:
         )
         self.stop_reason = "unknown"
         return "unknown"
+
+    # ------------------------------------------------------------------
+    # IR-7 — session steward assessment writer
+    # ------------------------------------------------------------------
+    _STEWARD_ASSESSMENT_HISTORY_CAP = 10
+
+    def record_steward_assessment(
+        self,
+        *,
+        recommendation: str,
+        next_gap_canonical_id: str,
+        remaining_potential_pct_estimate: float,
+        rationale: str,
+        task_id: str,
+        round_at_assessment: int,
+        source_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Stash a session_steward_specialist verdict on SharedState.
+
+        Returns the row that landed in ``last_remaining_gaps_assessment``
+        so the Coordinator can route on it immediately without
+        re-reading state. History capped at
+        :attr:`_STEWARD_ASSESSMENT_HISTORY_CAP` (drops oldest).
+        """
+        row = {
+            "ts": _now_iso(),
+            "recommendation": str(recommendation),
+            "next_gap_canonical_id": str(next_gap_canonical_id or ""),
+            "remaining_potential_pct_estimate": float(
+                remaining_potential_pct_estimate or 0.0
+            ),
+            "rationale": str(rationale or "")[:2000],
+            "task_id": str(task_id or ""),
+            "round_at_assessment": int(round_at_assessment or 0),
+        }
+        if source_payload is not None:
+            # Preserve the full payload (truncated to a manageable size)
+            # so the breakdown collector can dig deeper if needed.
+            row["source_payload_keys"] = sorted(source_payload.keys())
+        self.last_remaining_gaps_assessment = row
+        history = list(self.remaining_gaps_assessments or [])
+        history.append(row)
+        if len(history) > self._STEWARD_ASSESSMENT_HISTORY_CAP:
+            history = history[-self._STEWARD_ASSESSMENT_HISTORY_CAP:]
+        self.remaining_gaps_assessments = history
+        return row
 
     # ------------------------------------------------------------------
     # v0.8 M7 — escalate hint plumbing (KB_design §3.8 §7.3)
@@ -2737,16 +2799,23 @@ class SharedState:
         """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3).
 
         The Coordinator pipes this into every agent's per-tick prompt.
-        Output stays compact (≤ 4 lines) because every reactor reads
+        Output stays compact (≤ 5 lines) because every reactor reads
         it; we keep the human-readable form here and let
         :func:`phase_state.phase_budget_remaining_seconds` carry the
         budget math.
+
+        When in EXPLORE, an extra ``force_exit`` line surfaces how much
+        runway is left before the HARD force-exit gate (IR-6) fires.
         """
         from .phase_state import (
+            DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+            DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+            PHASE_EXPLORE,
             allowed_actions_for,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
             phase_elapsed_seconds,
+            session_remaining_seconds,
         )
 
         phase = (self.phase or "").strip().upper() or "UNSET"
@@ -2771,12 +2840,51 @@ class SharedState:
         allowed_line = (
             f"allowed   : {', '.join(allowed) if allowed else '(none)'}"
         )
-        return (
-            f"phase     : {phase}\n"
-            f"entered   : {self.phase_started_ts or '(unset)'}\n"
-            f"{budget_line}\n"
-            f"{allowed_line}"
-        )
+        lines = [
+            f"phase     : {phase}",
+            f"entered   : {self.phase_started_ts or '(unset)'}",
+            budget_line,
+            allowed_line,
+        ]
+        # EXPLORE-only: show distance to HARD force-exit (IR-6) so the
+        # LLM has a deterministic countdown alongside the soft budget.
+        if phase == PHASE_EXPLORE:
+            overrides = self.plateau_overrides or {}
+            hours_thresh = float(overrides.get(
+                "force_exit_hours_remaining",
+                DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+            ))
+            pct_thresh = float(overrides.get(
+                "force_exit_budget_pct",
+                DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+            ))
+            session_remaining = session_remaining_seconds(
+                self, now_unix=now_unix,
+            )
+            session_buffer = (
+                int(session_remaining - hours_thresh * 3600.0)
+                if session_remaining is not None else None
+            )
+            if remaining is not None and budget_pct_for_phase > 0:
+                mm = float(self.max_minutes or 0)
+                phase_total_sec = mm * 60.0 * budget_pct_for_phase
+                phase_remaining_pct = (
+                    remaining / phase_total_sec if phase_total_sec > 0 else 0.0
+                )
+            else:
+                phase_remaining_pct = None
+            force_line = (
+                f"force_exit: hours_thresh={hours_thresh:.1f}h "
+                f"pct_thresh={pct_thresh:.2f}"
+            )
+            if session_buffer is not None:
+                force_line += f" session_buffer_sec={session_buffer}"
+            if phase_remaining_pct is not None:
+                force_line += (
+                    f" phase_remaining_pct={phase_remaining_pct:.3f}"
+                )
+            lines.append(force_line)
+        return "\n".join(lines)
 
     def to_phase_budget_telemetry(
         self,

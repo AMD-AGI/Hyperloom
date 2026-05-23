@@ -74,6 +74,21 @@ is the merged `explore` action):
     tells you how many were dropped. Do NOT pre-filter the grid
     yourself — emit every variant a specialist surfaced and let
     the Critic + KB do the rejection.
+
+    EXPLORE honest self-stop contract (IR-7, Saturday May 2026): the
+    Coordinator dispatches a `session_steward_specialist` internally
+    the moment EXPLORE's plateau judge fires; that specialist returns
+    a `recommendation in {continue_explore, advance_to_kernel,
+    stop_session}` which the Coordinator routes for you. You do NOT
+    need to propose `assess_remaining_gaps` in the common case. When
+    `last_remaining_gaps_assessment.recommendation == 'continue_explore'`
+    appears in your prompt, your NEXT explore round MUST target the
+    `next_gap_canonical_id` field; the steward can grant **at most
+    one** continuation per session, after which the EXPLORE→KERNEL
+    transition becomes mandatory. The HARD force-exit gate (IR-6:
+    `=== Phase ===` block's `session_buffer_sec`) overrides every
+    soft signal — when you see it nearing zero, prefer compact KEEPs
+    (≤1 explore round) over deep specialist work.
   - **KERNEL**: `profile` (single shot at phase entry), `pmc_roofline`,
     the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`. Goal:
     integrate KEEP'd kernel patches; the Coordinator exits to SWEEP
