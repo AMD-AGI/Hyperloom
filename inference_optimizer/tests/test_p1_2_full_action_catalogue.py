@@ -41,8 +41,11 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "sweep":                "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
-    # creative (1) — PR-A1: specialist LLM sub-agent dispatch.
+    # creative (2) — PR-A1: specialist LLM sub-agent dispatch;
+    # IR-7 (Saturday May 2026): assess_remaining_gaps is a thin
+    # wrapper that dispatches the session_steward_specialist domain.
     "specialist":           "creative",
+    "assess_remaining_gaps": "creative",
     # deep_kernel (5)
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",

@@ -277,7 +277,34 @@ class SpecialistSubprocessDispatcher:
         workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = workspace / "prompt.md"
         process_log = workspace / "process.log"
-        done_file = workspace / "specialist_done.json"
+        # Where to look for ``specialist_done.json``.
+        #
+        # The specialist prompt
+        # (``specialist_prompt_builder._section_output_protocol``) tells
+        # the agent to ``Write {workspace_path}/specialist_done.json``,
+        # and ``SpecialistRunner._prepare`` sets
+        # ``workspace_path = worktree or workspace``. So when a per-task
+        # git worktree was provisioned, the canonical write target is
+        # ``<worktree>/specialist_done.json``; without a worktree it
+        # collapses to ``<workspace>/specialist_done.json``.
+        #
+        # We poll both locations (worktree first when set, workspace as
+        # a fallback) so:
+        #   * production runs with a worktree (the path advertised in
+        #     the prompt) are picked up — the original bug was that
+        #     the dispatcher only polled the parent workspace and timed
+        #     out into a spurious ``empty=true`` synth even though the
+        #     specialist had written a full proposal_set into the
+        #     worktree;
+        #   * legacy / test fakes that still write the done-file at the
+        #     workspace root keep working without changes.
+        done_candidates: list[Path] = []
+        if worktree is not None:
+            done_candidates.append(worktree / "specialist_done.json")
+        done_candidates.append(workspace / "specialist_done.json")
+        # Primary path is what the prompt advertises; the reap loop
+        # falls back to the workspace copy below.
+        done_file = done_candidates[0]
         heartbeat_file = workspace / "heartbeat.json"
 
         # 1. Write the prompt file. We collapse system + user into a
@@ -340,7 +367,7 @@ class SpecialistSubprocessDispatcher:
             outcome = await self._reap_loop(
                 proc=proc,
                 workspace=workspace,
-                done_file=done_file,
+                done_files=tuple(done_candidates),
                 heartbeat_file=heartbeat_file,
                 max_seconds=max_seconds,
                 started=proc_started,
@@ -351,8 +378,17 @@ class SpecialistSubprocessDispatcher:
         # 6. Patches: scan worktree/patches/ (Arbor convention).
         patches = self._collect_patches(worktree, workspace)
 
-        # 7. Parse done.json (best-effort).
-        done_payload = self._read_done(done_file)
+        # 7. Parse done.json (best-effort) — pick the first candidate
+        #    that exists. Agents listening to the prompt write to the
+        #    worktree; legacy fakes / the no-worktree fallback write to
+        #    the workspace root.
+        done_payload = None
+        for cand in done_candidates:
+            if cand.exists():
+                done_payload = self._read_done(cand)
+                if done_payload is not None:
+                    done_file = cand
+                    break
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -417,7 +453,7 @@ class SpecialistSubprocessDispatcher:
         *,
         proc: subprocess.Popen,
         workspace: Path,
-        done_file: Path,
+        done_files: tuple[Path, ...],
         heartbeat_file: Path,
         max_seconds: float,
         started: float,
@@ -438,10 +474,10 @@ class SpecialistSubprocessDispatcher:
             elapsed = now - started
             outcome["elapsed"] = elapsed
 
-            # done.json appeared — graceful exit even if the subprocess
-            # is still cleaning up. Give it a few seconds to terminate
-            # cleanly, then move on.
-            if done_file.exists():
+            # done.json appeared at any candidate path — graceful exit
+            # even if the subprocess is still cleaning up. Give it a
+            # few seconds to terminate cleanly, then move on.
+            if any(p.exists() for p in done_files):
                 # Allow up to 30s grace for the agent to finalise output.
                 grace_until = now + 30.0
                 while time.monotonic() < grace_until and proc.poll() is None:

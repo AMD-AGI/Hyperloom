@@ -63,9 +63,15 @@ def test_every_domain_has_focus_template():
 
 def test_specialist_domains_m5_covers_all_six():
     """PR-A6 widened the M5 active set so SpecialistRunner no longer
-    logs ``generic prompt template`` notes for M6-only domains."""
+    logs ``generic prompt template`` notes for M6-only domains.
+
+    IR-7 (Saturday May 2026) added a 7th domain
+    ``session_steward_specialist`` for the honest self-stop flow. We
+    keep the assertion shape (M5 still covers the full catalogue) but
+    bump the expected count.
+    """
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 6
+    assert len(SPECIALIST_DOMAINS_M5) == 7
 
 
 # ---------------------------------------------------------------------------
