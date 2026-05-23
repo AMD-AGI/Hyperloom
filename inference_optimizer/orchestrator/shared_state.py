@@ -1615,10 +1615,28 @@ class SharedState:
                 # read_artifact intent fetch it on demand.
                 analysis_md_text = ""
 
+        # PR-G: propagate ``task_groups`` from the handler result so the
+        # multi-KEEP integrate queue's source-of-truth lookups stay in
+        # sync with what ``_batch_kernel_candidates`` dispatched.
+        # Without this, ``untried_hot_reusable_kernels()`` and
+        # ``next_pending_keep_kernel_id()`` see ``task_groups=[]`` and
+        # fall through to per-kernel logic -- e.g. for
+        # ``primary=k004 kids=[k003,k004]`` they treat k003 as an
+        # untried independent kernel even though dispatching k004
+        # already covered the same AST function. The LLM then proposes
+        # a second ``run_optimization`` batch for k001/k003/..., wastes
+        # GEAK->Claude->Codex wall-clock on kernels that share patches
+        # with what the prior batch already produced
+        # (Qwen3-30B-A3B-Base session 20260523T035235Z saw this with
+        # k001/k003/k005 spinning up after k002/k004/k009 retired).
+        task_groups = result.get("task_groups") or []
+        if not isinstance(task_groups, list):
+            task_groups = []
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "hot_kernels_top15": summary,
+            "task_groups": task_groups,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,
             "analysis_md_path": str(analysis_md_path),
