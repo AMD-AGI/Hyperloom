@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -99,6 +99,17 @@ _FRAMEWORK_ARGS_NAMESPACE_RE = re.compile(
 _FRAMEWORK_ARGS_LAUNCH_RE = re.compile(
     r"^[^|]*?Launch(?:ing)? server with:\s*(.+)$",
     re.IGNORECASE,
+)
+# sglang ≥0.4 emits a single ``server_args=ServerArgs(model_path=...,
+# attention_backend='aiter', mem_fraction_static=0.68, ...)`` line during
+# startup. The dataclass repr is balanced (``ServerArgs(...)``) but contains
+# nested parens (e.g. ``cuda_graph_bs=[...]``, tuples) — to keep the regex
+# robust we anchor on ``server_args=ServerArgs(`` and lazily capture up to
+# the trailing ``)`` at end-of-line. Captured group is the dataclass body
+# (no surrounding ``ServerArgs(...)``); collectors prepend ``ServerArgs(``
+# back when rendering so the source is unambiguous.
+_FRAMEWORK_ARGS_SERVERARGS_RE = re.compile(
+    r"server_args=ServerArgs\((.+)\)\s*$",
 )
 # Pass-2 ("log_python_cmd"): a literal ``python ... vllm/sglang ...``
 # command somewhere in server.log. We accept it after stripping a
@@ -318,6 +329,13 @@ def _extract_framework_args(
         m = _FRAMEWORK_ARGS_NAMESPACE_RE.match(stripped)
         if m:
             return f"Namespace({m.group(1).strip()})", "log_args_line"
+        # sglang ≥0.4: ``[ts] server_args=ServerArgs(<body>)`` — the only
+        # post-parse arg echo for this framework. We re-wrap the captured
+        # body as ``ServerArgs(<body>)`` so consumers can tell at a glance
+        # which dataclass these kwargs belong to.
+        m = _FRAMEWORK_ARGS_SERVERARGS_RE.search(stripped)
+        if m:
+            return f"ServerArgs({m.group(1).strip()})", "log_args_line"
 
     # Pass 2: a literal python/vllm/sglang command somewhere in the log.
     # Strip the noisy ``(...) INFO 05-12 14:21:14 [utils.py:299]`` prefix
@@ -869,6 +887,7 @@ def collect_baseline(
         if candidate_log.exists():
             server_log_path = candidate_log
     if server_log_path is None and workspace:
+        # Case A: workspace is the task dir → walk down into benchmark_*/.
         bench_dirs = sorted(
             workspace.glob("benchmark_*/server.log"),
             key=lambda p: p.stat().st_mtime,
@@ -876,6 +895,14 @@ def collect_baseline(
         )
         if bench_dirs:
             server_log_path = bench_dirs[0]
+        else:
+            # Case B: state.last_baseline.workspace points at the leaf
+            # ``benchmark_*`` dir itself (recent orchestrator versions do
+            # this). ``workspace/server.log`` is then the direct sibling
+            # of the benchmark_report.json.
+            direct_log = workspace / "server.log"
+            if direct_log.exists():
+                server_log_path = direct_log
 
     # If we disk-walked into a benchmark dir, the matching config yaml
     # usually sits as a sibling (or one level up under <task>/). Prefer
@@ -890,6 +917,41 @@ def collect_baseline(
             if candidate.exists():
                 config_resolved = candidate
                 break
+
+    # Session-wide disk walk fallback. When state.last_baseline.workspace
+    # didn't resolve (or pointed at a clean-up'd location) AND we have no
+    # report_path, we can still find baseline_config.with_envs.yaml and
+    # the most recent server.log directly under runs/baseline/. This
+    # covers two real-world cases observed in v2/:
+    #
+    #   * baseline succeeded but state.last_baseline carries a stale
+    #     ``/workspace/...`` path whose anchors don't match runs/.
+    #   * baseline_report.json's metrics dict is empty (ttft=None), so
+    #     the disk-walk further up didn't get to update report_path.
+    #
+    # We deliberately do NOT touch ttft/e2el here — that path already
+    # ran its own walk against the same tree. We only rescue the
+    # invocation extraction so framework_args_source ends up at
+    # ``yaml_benchmark`` (or ``log_args_line``) instead of ``unknown``.
+    if server_log_path is None or config_resolved is None:
+        baseline_root = session_dir / "runs" / "baseline"
+        if baseline_root.exists():
+            if server_log_path is None:
+                disk_logs = sorted(
+                    baseline_root.glob("*/benchmark_*/server.log"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                if disk_logs:
+                    server_log_path = disk_logs[0]
+            if config_resolved is None:
+                disk_yamls = sorted(
+                    baseline_root.glob("*/baseline_config.with_envs.yaml"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                if disk_yamls:
+                    config_resolved = disk_yamls[0]
 
     args_str, args_source = _extract_framework_args(
         server_log_path, config_yaml=config_resolved,
@@ -1156,10 +1218,90 @@ _AUDIT_ACTIONS = (
 )
 
 
+def _phase_event_duration(
+    session_dir: Path | None,
+    entry: dict[str, Any],
+    warnings: list[str],
+) -> float | None:
+    """Best-effort wall-clock duration for an audit-attempt event.
+
+    Source priority:
+
+    1. ``extras.duration_seconds`` (already recorded by the audit).
+    2. ``benchmark_report.json`` under the entry's workspace.
+    3. None — keep callers honest about unknown durations.
+    """
+    extras = entry.get("extras") if isinstance(entry.get("extras"), dict) else {}
+    cand = _to_float(extras.get("duration_seconds")) if extras else None
+    if cand is not None:
+        return cand
+    if session_dir is None:
+        return None
+    workspace_str = entry.get("workspace")
+    if not workspace_str:
+        return None
+    workspace = _resolve_under_session(session_dir, str(workspace_str))
+    if workspace is None:
+        return None
+    # The latest benchmark_*/benchmark_report.json under workspace —
+    # _find_benchmark_report only matches direct ``benchmark_*`` children,
+    # so we also rglob one level deeper to catch ``variant_*/benchmark_*``
+    # layouts (params/backends round dirs).
+    report = _find_benchmark_report(workspace)
+    if report is None:
+        candidates = sorted(
+            workspace.rglob("benchmark_report.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        report = candidates[0] if candidates else None
+    if report is None:
+        return None
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    cand = data.get("duration_seconds")
+    if cand is None and isinstance(data.get("result"), dict):
+        cand = data["result"].get("duration_seconds")
+    if cand is None:
+        cand = data.get("execution_time")
+    return _to_float(cand)
+
+
+def _add_seconds_iso(ts: str, seconds: float | None) -> str | None:
+    """Compute ``ts + seconds`` in iso8601 UTC; return None if either is missing."""
+    if not ts or seconds is None:
+        return None
+    try:
+        # ``fromisoformat`` accepts the ``+00:00`` suffix that hyperloom
+        # writes; if the ts is malformed we fail closed (None).
+        base = datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+    try:
+        ended = base + timedelta(seconds=float(seconds))
+    except (ValueError, OverflowError):
+        return None
+    if ended.tzinfo is None:
+        ended = ended.replace(tzinfo=timezone.utc)
+    return ended.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 def collect_phase_timeline(
     state: dict[str, Any],
     warnings: list[str],
+    session_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
+    """Chronological per-action event list.
+
+    ``session_dir`` is optional for v1 callers; v1.1 adds it so each
+    event can be enriched with ``duration_seconds`` (read from the
+    workspace's ``benchmark_report.json``) and the derived
+    ``ended_ts_utc``. Pass ``None`` to skip enrichment.
+    """
     events: list[dict[str, Any]] = []
     for action in _AUDIT_ACTIONS:
         attempts = state.get(f"{action}_attempts") or []
@@ -1168,8 +1310,10 @@ def collect_phase_timeline(
         for entry in attempts:
             if not isinstance(entry, dict):
                 continue
+            duration = _phase_event_duration(session_dir, entry, warnings)
+            ts = entry.get("ts") or ""
             events.append({
-                "ts":             entry.get("ts") or "",
+                "ts":             ts,
                 "action":         action,
                 "task_id":        str(entry.get("task_id") or ""),
                 "kernel_id":      None,
@@ -1180,6 +1324,8 @@ def collect_phase_timeline(
                 "workspace":      entry.get("workspace"),
                 "error_class":    entry.get("error_class"),
                 "extras":         dict(entry.get("extras") or {}),
+                "duration_seconds": duration,
+                "ended_ts_utc":   _add_seconds_iso(ts, duration),
             })
 
     # Kernel opt attempts (per-kernel history -> flatten to per-attempt rows)
@@ -1202,6 +1348,8 @@ def collect_phase_timeline(
                     "workspace":   None,
                     "error_class": None,
                     "extras":      {},
+                    "duration_seconds": None,
+                    "ended_ts_utc": None,
                 })
 
     # Integrate attempts (decision history per patch key)
@@ -1226,7 +1374,187 @@ def collect_phase_timeline(
                     "error_class": None,
                     "extras":      {"patch_path": ent.get("patch_path"),
                                     "report_path": a.get("report_path")},
+                    "duration_seconds": None,
+                    "ended_ts_utc": None,
                 })
+
+    # TraceLens analysis runs surface as their own timeline events so
+    # the kernel-profiling phase shows up alongside baseline / params /
+    # backends. The ts comes from the kernel-agent run dir mtime when
+    # there's no recorded session_state.json timestamp; we accept any
+    # is-better-than-nothing source here because TraceLens itself
+    # doesn't write an audit attempt.
+    if session_dir is not None:
+        for run_dir in _kernel_agent_run_dirs(session_dir):
+            status_root = run_dir / "status" / "tracelens_analysis"
+            if not status_root.exists():
+                continue
+            for status_path in sorted(status_root.glob("*.json")):
+                try:
+                    payload = json.loads(status_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    payload = {}
+                ts = ""
+                if isinstance(payload, dict):
+                    ts = str(
+                        payload.get("ended_at")
+                        or payload.get("ts")
+                        or payload.get("started_at")
+                        or ""
+                    )
+                if not ts:
+                    try:
+                        ts = datetime.fromtimestamp(
+                            status_path.stat().st_mtime, tz=timezone.utc,
+                        ).isoformat(timespec="seconds")
+                    except OSError:
+                        ts = ""
+                # P2-3: read started_at / ended_at / duration_seconds
+                # from the status JSON when the kernel-agent writer
+                # populates them; historical sessions won't have these
+                # three keys, so all three stay None and the timeline
+                # event remains zero-duration (which is honest, not a
+                # bug).
+                started_at = ""
+                ended_at = ""
+                duration_seconds: float | None = None
+                if isinstance(payload, dict):
+                    started_at = str(payload.get("started_at") or "")
+                    ended_at = str(payload.get("ended_at") or "")
+                    duration_seconds = _to_float(payload.get("duration_seconds"))
+                evt_ts = started_at or ts
+                events.append({
+                    "ts":          evt_ts,
+                    "action":      "tracelens_analysis",
+                    "task_id":     run_dir.name,
+                    "kernel_id":   None,
+                    "status":      str((payload or {}).get("status") or "") if isinstance(payload, dict) else "",
+                    "decision":    "",
+                    "key_metric":  None,
+                    "key_metric_kind": None,
+                    "workspace":   _rel(run_dir, session_dir),
+                    "error_class": None,
+                    "extras":      {"status_json": _rel(status_path, session_dir)},
+                    "duration_seconds": duration_seconds,
+                    "ended_ts_utc": ended_at or _add_seconds_iso(evt_ts, duration_seconds),
+                })
+
+    # P2-2: closing phase events. Three input shapes — pick whichever
+    # the orchestrator wrote (newer sessions may emit a
+    # ``closing_attempts`` list; historical sessions only set
+    # ``closing_started_unix`` + ``closing_report_task_id``).
+    closing_attempts = state.get("closing_attempts")
+    closing_events_added = 0
+    if isinstance(closing_attempts, list):
+        for entry in closing_attempts:
+            if not isinstance(entry, dict):
+                continue
+            ts = str(entry.get("ts") or "")
+            duration = _phase_event_duration(session_dir, entry, warnings)
+            events.append({
+                "ts":             ts,
+                "action":         "closing",
+                "task_id":        str(entry.get("task_id") or ""),
+                "kernel_id":      None,
+                "status":         str(entry.get("status") or ""),
+                "decision":       str(entry.get("decision") or ""),
+                "key_metric":     _to_float(entry.get("key_metric")),
+                "key_metric_kind": entry.get("key_metric_kind"),
+                "workspace":      entry.get("workspace"),
+                "error_class":    entry.get("error_class"),
+                "extras":         dict(entry.get("extras") or {}),
+                "duration_seconds": duration,
+                "ended_ts_utc":   _add_seconds_iso(ts, duration),
+            })
+            closing_events_added += 1
+    # Synthesize one closing event from final-state breadcrumbs when no
+    # attempts list exists but the orchestrator did enter the closing
+    # phase (``closing_started_unix`` set OR ``closing_report_task_id``
+    # set OR ``final.closing_phase_entered`` true via collect_final
+    # contract — we read state directly so we don't depend on the
+    # invocation order of collectors).
+    final_state = state.get("final") if isinstance(state.get("final"), dict) else {}
+    closing_started_unix = _to_float(
+        state.get("closing_started_unix") or final_state.get("closing_started_unix")
+    )
+    closing_task_id = str(
+        state.get("closing_report_task_id")
+        or final_state.get("closing_report_task_id")
+        or ""
+    )
+    closing_phase_entered_flag = bool(
+        state.get("closing_phase")
+        or final_state.get("closing_phase_entered")
+        or closing_started_unix
+        or closing_task_id
+    )
+    final_entered_at_utc = str(final_state.get("entered_at_utc") or "")
+    if closing_events_added == 0 and closing_phase_entered_flag:
+        # Resolve closing start ts. Priority:
+        # 1) ``final.entered_at_utc`` (explicit string)
+        # 2) ``closing_started_unix`` (epoch float)
+        ts = final_entered_at_utc
+        if not ts and closing_started_unix:
+            try:
+                # Use microsecond precision so the synthesized duration
+                # against the latest audit-attempt ts isn't off by up
+                # to one second (the secs-only iso truncation can
+                # land slightly before the real closing start when the
+                # unix ts has a sub-second tail, which would make
+                # ``latest_attempt - start`` artificially positive).
+                ts = datetime.fromtimestamp(
+                    closing_started_unix, tz=timezone.utc,
+                ).isoformat(timespec="microseconds")
+            except (OSError, OverflowError, ValueError):
+                ts = ""
+        # Best-effort duration: latest *audit-attempt* ts minus closing
+        # start. We only count audit attempts that occurred at or after
+        # the closing start; nothing before counts as part of closing.
+        duration: float | None = None
+        if ts:
+            try:
+                start_dt = datetime.fromisoformat(ts)
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
+                latest_dt = None
+                for action in _AUDIT_ACTIONS:
+                    for entry in state.get(f"{action}_attempts") or []:
+                        if not isinstance(entry, dict):
+                            continue
+                        e_ts = str(entry.get("ts") or "")
+                        if not e_ts:
+                            continue
+                        try:
+                            dt = datetime.fromisoformat(e_ts)
+                        except (ValueError, TypeError):
+                            continue
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        if dt >= start_dt and (latest_dt is None or dt > latest_dt):
+                            latest_dt = dt
+                if latest_dt is not None:
+                    duration = max(0.0, (latest_dt - start_dt).total_seconds())
+            except (ValueError, TypeError):
+                duration = None
+        events.append({
+            "ts":               ts,
+            "action":           "closing",
+            "task_id":          closing_task_id,
+            "kernel_id":        None,
+            "status":           "",
+            "decision":         "entered" if closing_phase_entered_flag else "",
+            "key_metric":       None,
+            "key_metric_kind":  None,
+            "workspace":        None,
+            "error_class":      None,
+            "extras": {
+                "synthesized": True,
+                "closing_started_unix": closing_started_unix,
+                "closing_phase_flag": bool(state.get("closing_phase")),
+            },
+            "duration_seconds": duration,
+            "ended_ts_utc":     _add_seconds_iso(ts, duration),
+        })
 
     events.sort(key=lambda e: e.get("ts") or "")
     return events
@@ -1790,6 +2118,12 @@ def _collect_detected_kernels(
         kid = str(k.get("kernel_id") or k.get("name") or "")
         if not kid:
             continue
+        # P2-4: pass through the structured shape info so the
+        # downstream roofline merge can match by (name, input_dims)
+        # instead of by name alone. ``input_shapes`` is the rich form
+        # (list of {call_num, shape}), ``shapes`` is the flat list —
+        # we keep both since the merge helper normalizes each into
+        # the same canonical tuple.
         by_kid[kid] = {
             "kernel_id":               kid,
             "name":                    str(k.get("name") or ""),
@@ -1806,6 +2140,7 @@ def _collect_detected_kernels(
             "recommended_actions":     list(k.get("recommended_actions") or []),
             "recommended_backends":    list(k.get("recommended_backends") or []),
             "optimization_notes":      str(k.get("optimization_notes") or ""),
+            "input_shapes":            k.get("input_shapes") or k.get("shapes") or None,
         }
 
     # 2) benchmark_report.kernel_summary fallback — pulls in the long
@@ -2106,6 +2441,226 @@ def _collect_rejected_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+_INPUT_DIMS_INT_RE = re.compile(r"\d+")
+
+
+def _extract_parenthesised_ints(text: str) -> tuple[int, ...] | None:
+    """Return the integers from the first parenthesised group in ``text``.
+
+    Used to parse one tensor's shape entry like ``"(15360,6144) bf16"``
+    — we keep only digits inside the outermost ``()`` so a trailing
+    dtype token (``bf16``, ``c10::Half``) doesn't pollute the result.
+    Falls back to ``None`` when no parenthesised group is present.
+    """
+    start = text.find("(")
+    if start == -1:
+        return None
+    depth = 0
+    end = -1
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end == -1:
+        return None
+    inner = text[start + 1:end]
+    nums = _INPUT_DIMS_INT_RE.findall(inner)
+    if not nums:
+        return None
+    return tuple(int(x) for x in nums)
+
+
+def _normalize_input_dims(value: Any) -> tuple[tuple[int, ...], ...] | None:
+    """Reduce a free-form input-dims field to a canonical tuple of tuples.
+
+    Two equivalent encodings hit this collector:
+
+    * TraceLens ``Input Dims`` strings — e.g.
+      ``"((15360, 6144), (6144, 43008))"``. The exact bracketing /
+      spacing varies between TraceLens versions; the only stable
+      signal is the sequence of integers grouped by the inner parens.
+    * kernel_candidates.json ``shapes`` lists — e.g.
+      ``["(15360,21504) bf16", "(21504,6144) bf16"]``. Each entry is
+      one tensor's shape with a trailing dtype token we explicitly
+      strip (otherwise ``bf16``'s digit ``16`` would be captured as a
+      bogus dim).
+
+    We normalize both to ``((15360, 21504), (21504, 6144))`` so that
+    detected kernels and TraceLens rows for the same operation can be
+    matched by ``(name, input_dims)``.
+
+    Returns ``None`` when the input has no recognisable shape data
+    (caller should fall back to name-only matching).
+    """
+    if value is None:
+        return None
+    if isinstance(value, (tuple, list)):
+        groups: list[tuple[int, ...]] = []
+        for item in value:
+            if isinstance(item, (tuple, list)):
+                ints = [int(x) for x in item if isinstance(x, (int, float))]
+                if ints:
+                    groups.append(tuple(ints))
+                continue
+            if isinstance(item, dict):
+                shape_str = str(item.get("shape") or "")
+                ints = _extract_parenthesised_ints(shape_str)
+                if ints is None:
+                    # No parens at all → take all the digits we find.
+                    nums = _INPUT_DIMS_INT_RE.findall(shape_str)
+                    if nums:
+                        ints = tuple(int(x) for x in nums)
+                if ints:
+                    groups.append(tuple(ints))
+                continue
+            if isinstance(item, str):
+                ints = _extract_parenthesised_ints(item)
+                if ints is None:
+                    nums = _INPUT_DIMS_INT_RE.findall(item)
+                    if nums:
+                        ints = tuple(int(x) for x in nums)
+                if ints:
+                    groups.append(tuple(ints))
+                continue
+        return tuple(groups) if groups else None
+    if isinstance(value, str):
+        # Walk the parenthesis structure to recover per-tensor groups.
+        # Fall back to a single flat tuple of all ints when the string
+        # has no nested grouping (e.g. ``"(15360, 6144)"``).
+        groups: list[tuple[int, ...]] = []
+        depth = 0
+        buf: list[str] = []
+        captured_any = False
+        for ch in value:
+            if ch == "(":
+                depth += 1
+                if depth >= 2:
+                    buf.append(ch)
+                continue
+            if ch == ")":
+                if depth >= 2:
+                    buf.append(ch)
+                depth -= 1
+                if depth == 1 and buf:
+                    ints = _INPUT_DIMS_INT_RE.findall("".join(buf))
+                    if ints:
+                        groups.append(tuple(int(x) for x in ints))
+                        captured_any = True
+                    buf = []
+                continue
+            if depth >= 2:
+                buf.append(ch)
+        if captured_any:
+            return tuple(groups)
+        # Single-level fallback: ``"(15360, 6144)"`` → ((15360, 6144),)
+        ints = _extract_parenthesised_ints(value)
+        if ints is None:
+            nums = _INPUT_DIMS_INT_RE.findall(value)
+            if nums:
+                ints = tuple(int(x) for x in nums)
+        if ints:
+            return (tuple(ints),)
+        return None
+    return None
+
+
+def _merge_roofline_into_detected(
+    session_dir: Path,
+    detected: list[dict[str, Any]],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Annotate detected kernels with TraceLens roofline fields when available.
+
+    Match strategy (P2-4) — keyed by ``(name, input_dims_tuple)`` so
+    multi-shape ops (e.g. several ``aten::mm`` rows with different
+    contractions) each pick up their own roofline. When either side
+    is missing ``input_dims`` we fall back to name-only matching, and
+    finally to the legacy prefix-match (detected name is a strict
+    prefix of a TraceLens op name).
+    """
+    if not detected:
+        return detected
+    tl_rows: list[dict[str, Any]] = []
+    for run_dir in _kernel_agent_run_dirs(session_dir):
+        tracelens_dir = run_dir / "tracelens"
+        if not tracelens_dir.exists():
+            continue
+        cat_rows = _read_tracelens_category_data(tracelens_dir, warnings)
+        if cat_rows:
+            tl_rows.extend(cat_rows)
+            continue
+        prio_rows, _summary = _read_tracelens_priority_data(tracelens_dir, warnings)
+        tl_rows.extend(prio_rows)
+    if not tl_rows:
+        return detected
+    by_key: dict[tuple[str, tuple[tuple[int, ...], ...]], dict[str, Any]] = {}
+    by_name_only: dict[str, dict[str, Any]] = {}
+    for row in tl_rows:
+        name = str(row.get("name") or "")
+        if not name:
+            continue
+        dims = _normalize_input_dims(row.get("input_dims"))
+        if dims is not None:
+            by_key.setdefault((name, dims), row)
+        # First row per name wins for the name-only fallback. Category
+        # data is sorted desc by impact so this is the highest-impact
+        # shape — matches the previous v1.1 behaviour.
+        by_name_only.setdefault(name, row)
+    out: list[dict[str, Any]] = []
+    for entry in detected:
+        merged = dict(entry)
+        # P2-4: derive normalized input_dims from whichever shape field
+        # the detected row carries. Surface it under ``extras.input_dims``
+        # so consumers can render per-shape rows. We try multiple
+        # candidate fields because kernel_candidates uses ``input_shapes``
+        # / ``shapes`` while benchmark_report fallback rows often have
+        # nothing structured.
+        dims_raw = (
+            entry.get("input_dims")
+            or entry.get("Input Dims")
+            or entry.get("input_shapes")
+            or entry.get("shapes")
+        )
+        dims = _normalize_input_dims(dims_raw)
+        if dims is not None:
+            extras = dict(merged.get("extras") or {})
+            extras.setdefault("input_dims", [list(g) for g in dims])
+            merged["extras"] = extras
+        name = str(entry.get("name") or "")
+        target: dict[str, Any] | None = None
+        if name and dims is not None:
+            target = by_key.get((name, dims))
+        if target is None and name:
+            target = by_name_only.get(name)
+        if target is None and name:
+            # Legacy prefix match — kept so existing behaviour and
+            # tests covering it (test_kernel_lifecycle_detected_inherits_roofline)
+            # continue to work.
+            for tl_name, tl_row in by_name_only.items():
+                if tl_name.startswith(name):
+                    target = tl_row
+                    break
+        if target is not None:
+            for key in (
+                "efficiency_percent",
+                "bound_type",
+                "tflops_achieved",
+                "flops_per_byte",
+                "library",
+            ):
+                if merged.get(key) in (None, "") and target.get(key) is not None:
+                    merged[key] = target.get(key)
+            if merged.get("arithmetic_intensity") is None and target.get("flops_per_byte") is not None:
+                merged["arithmetic_intensity"] = target.get("flops_per_byte")
+        out.append(merged)
+    return out
+
+
 def collect_kernel_lifecycle(
     session_dir: Path,
     state: dict[str, Any],
@@ -2113,8 +2668,10 @@ def collect_kernel_lifecycle(
     oob: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
+    detected = _collect_detected_kernels(session_dir, state, geak, oob, warnings)
+    detected = _merge_roofline_into_detected(session_dir, detected, warnings)
     return {
-        "detected":    _collect_detected_kernels(session_dir, state, geak, oob, warnings),
+        "detected":    detected,
         "recommended": _collect_recommended_kernels(state),
         "optimized":   _collect_optimized_kernels(geak, oob, state),
         "adopted":     _collect_adopted_kernels(state),
@@ -2770,20 +3327,87 @@ def _variant_benchmark_report_path(
     variant_name: str | None,
     warnings: list[str],
 ) -> str | None:
+    """Locate ``benchmark_report.json`` for a variant.
+
+    The ``workspace_str`` we receive can take any of three on-disk shapes:
+
+    1. ``runs/{params,backends}/<round-task>`` — the round directory, which
+       contains one ``variant_*<name>*`` subdirectory per variant.
+    2. ``runs/{params,backends}/<round-task>/variant_*<name>*/benchmark_*``
+       — the variant's own benchmark dir (the report sits beside it).
+    3. ``runs/{params,backends}/<round-task>/combo`` — combo round root,
+       containing one ``variant_*combo*`` subdirectory.
+
+    We try the cheapest direct match first, then progressively widen the
+    search. The variant_name pattern is tolerant of slight slug renames
+    (``variant_NN_<name>`` is the canonical layout, but ``combo/`` adds a
+    ``combo_`` prefix that wouldn't fit a literal ``f"*{name}*"`` glob).
+    """
     workspace = _resolve_under_session(session_dir, workspace_str) if workspace_str else None
-    if workspace is None or not variant_name:
-        report = _find_benchmark_report(workspace)
-        return _rel(report, session_dir) if report else None
-    for pattern in (
-        f"*{variant_name}*/benchmark_*/benchmark_report.json",
-        f"variant_*{variant_name}*/benchmark_*/benchmark_report.json",
-        "benchmark_*/benchmark_report.json",
-    ):
-        matches = sorted(workspace.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
-        if matches:
-            return _rel(matches[0], session_dir)
+    if workspace is None:
+        return None
+    # Case 2: workspace already IS a benchmark dir.
+    direct = workspace / "benchmark_report.json"
+    if direct.exists():
+        return _rel(direct, session_dir)
+    # Case 1: workspace is the round dir; glob into variant subdirs.
+    if variant_name:
+        # Combo runs nest one level deeper: ``combo/variant_*combo_<name>*/...``.
+        # Try non-combo first (cheaper), then combo, then any variant dir.
+        for pattern in (
+            f"variant_*{variant_name}*/benchmark_*/benchmark_report.json",
+            f"*{variant_name}*/benchmark_*/benchmark_report.json",
+            f"combo/variant_*{variant_name}*/benchmark_*/benchmark_report.json",
+            f"combo/*{variant_name}*/benchmark_*/benchmark_report.json",
+        ):
+            try:
+                matches = sorted(
+                    workspace.glob(pattern),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            except OSError:
+                continue
+            if matches:
+                return _rel(matches[0], session_dir)
+    # Last resort: a single benchmark_*/benchmark_report.json directly under
+    # workspace (covers task-root workspaces with no variant subfolder).
     report = _find_benchmark_report(workspace)
     return _rel(report, session_dir) if report else None
+
+
+def _duration_from_report(report_rel: str | None, session_dir: Path) -> float | None:
+    """Read a wall-clock duration from a benchmark_report.json (relative path).
+
+    Tries (in priority order):
+
+    * ``duration_seconds`` (V2 schema; the workload's serve duration).
+    * ``result.duration_seconds`` (pre-V2 nested form).
+    * ``execution_time`` (older benchmark_runner schema; total runner
+      wall-clock including server bring-up). Recorded as a last resort
+      since it overshoots the pure workload duration by ~minutes, but
+      it's still more useful than None for timeline visualization.
+
+    Returns None when none of the fields are present or the file can't
+    be read.
+    """
+    if not report_rel:
+        return None
+    p = session_dir / report_rel
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    cand = data.get("duration_seconds")
+    if cand is None and isinstance(data.get("result"), dict):
+        cand = data["result"].get("duration_seconds")
+    if cand is None:
+        cand = data.get("execution_time")
+    return _to_float(cand)
 
 
 def _shape_variant_decision(
@@ -2800,8 +3424,18 @@ def _shape_variant_decision(
     reject_reason: str | None,
     workspace_str: str | None,
     warnings: list[str],
+    decision_note: str | None = None,
+    duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     envs = _filter_envs(extra_envs or {})
+    report_rel = _variant_benchmark_report_path(
+        session_dir, workspace_str, name, warnings,
+    )
+    # Fall back to scraping the report when a duration wasn't supplied
+    # by the caller (state-recorded ``result.duration_seconds`` is not
+    # always present, but the report file usually has it).
+    if duration_seconds is None:
+        duration_seconds = _duration_from_report(report_rel, session_dir)
     return {
         "name":                    str(name or ""),
         "fingerprint":             str(fingerprint or ""),
@@ -2813,12 +3447,12 @@ def _shape_variant_decision(
         "gain_pct_vs_current_best": None,
         "outcome":                 outcome,
         "reject_reason":           reject_reason,
-        "benchmark_report_path":   _variant_benchmark_report_path(
-            session_dir, workspace_str, name, warnings,
-        ),
+        "benchmark_report_path":   report_rel,
         "invocation":              _build_invocation_for_workspace(
             session_dir, workspace_str, warnings,
         ),
+        "duration_seconds":        duration_seconds,
+        "decision_note":           decision_note,
     }
 
 
@@ -2831,6 +3465,7 @@ def _variants_from_search_last_round(
     selected_new: set[str],
     round_winners: set[str],
     warnings: list[str],
+    winner_meta_by_fp: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     lr = search.get("last_round") or {}
     if not isinstance(lr, dict) or not lr:
@@ -2847,6 +3482,7 @@ def _variants_from_search_last_round(
     fps = lr.get("tested_fp")
     if not isinstance(fps, list) or not fps:
         fps = list(tested.keys())
+    winner_meta_by_fp = winner_meta_by_fp or {}
     variants: list[dict[str, Any]] = []
     seen_fps: set[str] = set()
     for fp in fps:
@@ -2860,11 +3496,18 @@ def _variants_from_search_last_round(
         gain = _to_float(entry.get("gain_pct"))
         if gain is None:
             gain = _to_float(rejected_by_fp.get(fp, {}).get("gain_pct"))
+        # winners_history sometimes records gain when the search ledger
+        # left it null (the winners mirror is published after the gain
+        # was computed for the round-decision audit).
+        if gain is None and fp in winner_meta_by_fp:
+            gain = _to_float(winner_meta_by_fp[fp].get("gain_pct"))
         tput = _to_float(
             entry.get("output_throughput")
             or result.get("output_throughput")
             or rejected_by_fp.get(fp, {}).get("tput")
         )
+        if tput is None and fp in winner_meta_by_fp:
+            tput = _to_float(winner_meta_by_fp[fp].get("tput"))
         ws = str(result.get("workspace") or workspace_str or "")
         if name in selected_new:
             outcome = "promoted"
@@ -2877,6 +3520,17 @@ def _variants_from_search_last_round(
         reject_reason = None
         if outcome == "rejected":
             reject_reason = str(rejected_by_fp.get(fp, {}).get("reason") or "")
+        # decision_note: prefer winner_meta (matches the round-winners
+        # mirror), then the variant's own ``result.note`` (set by the
+        # grid runner when picking a non-default value), then any
+        # ``note`` recorded against the rejection ledger entry.
+        note = (
+            winner_meta_by_fp.get(fp, {}).get("note")
+            or result.get("note")
+            or entry.get("note")
+            or rejected_by_fp.get(fp, {}).get("note")
+        )
+        duration = _to_float(result.get("duration_seconds"))
         variants.append(_shape_variant_decision(
             session_dir=session_dir,
             name=name,
@@ -2890,10 +3544,13 @@ def _variants_from_search_last_round(
             reject_reason=reject_reason or None,
             workspace_str=ws or workspace_str,
             warnings=warnings,
+            decision_note=str(note) if note else None,
+            duration_seconds=duration,
         ))
     for fp, row in rejected_by_fp.items():
         if fp in seen_fps:
             continue
+        note = row.get("note")
         variants.append(_shape_variant_decision(
             session_dir=session_dir,
             name=str(row.get("name") or ""),
@@ -2907,24 +3564,218 @@ def _variants_from_search_last_round(
             reject_reason=str(row.get("reason") or "") or None,
             workspace_str=workspace_str,
             warnings=warnings,
+            decision_note=str(note) if note else None,
         ))
     return variants
 
 
-def _round_decision_from_attempt(attempt: dict[str, Any] | None) -> dict[str, Any]:
+def _variants_from_disk_walk(
+    session_dir: Path,
+    workspace_str: str | None,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Reconstruct variant rows by globbing ``<workspace>/variant_*/benchmark_*/benchmark_report.json``.
+
+    Used when the search ledger has no record for the round (e.g. an
+    early discarded round whose ``last_round`` was overwritten by the
+    next round). Yields ``status="reconstructed"`` rows so consumers can
+    distinguish them from state-driven entries.
+    """
+    workspace = _resolve_under_session(session_dir, workspace_str) if workspace_str else None
+    if workspace is None or not workspace.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    # Direct ``variant_*/`` children, plus ``combo/variant_*/`` for combo
+    # rounds. Skip anything that doesn't actually have a benchmark report.
+    candidates: list[Path] = []
+    for sub in sorted(workspace.iterdir()):
+        if not sub.is_dir():
+            continue
+        if sub.name.startswith("variant_"):
+            candidates.append(sub)
+        elif sub.name == "combo":
+            for child in sorted(sub.iterdir()):
+                if child.is_dir() and child.name.startswith("variant_"):
+                    candidates.append(child)
+    for variant_dir in candidates:
+        report_path = _find_benchmark_report(variant_dir)
+        if not report_path:
+            continue
+        report = _load_json_safe(report_path, warnings) or {}
+        out_tput, _ttft, _tpot, _e2el = _benchmark_report_metrics(report if isinstance(report, dict) else None)
+        # Strip ``variant_NN_`` prefix so ``name`` matches the search
+        # ledger's name field (used downstream for de-dup / matching).
+        name = re.sub(r"^variant_\d+_", "", variant_dir.name)
+        # Prefer the explicit duration_seconds field; fall back to the
+        # benchmark runner's execution_time so disk-walked rows still
+        # carry a duration.
+        duration = _to_float((report or {}).get("duration_seconds"))
+        if duration is None:
+            duration = _to_float((report or {}).get("execution_time"))
+        out.append(_shape_variant_decision(
+            session_dir=session_dir,
+            name=name,
+            fingerprint="",
+            extra_sglang_args="",
+            extra_envs={},
+            status="reconstructed",
+            output_throughput=out_tput,
+            gain_pct_vs_base=None,
+            outcome="tested",
+            reject_reason=None,
+            workspace_str=str(variant_dir),
+            warnings=warnings,
+            duration_seconds=duration,
+        ))
+    return out
+
+
+# Mirror of the constants the Coordinator uses for one-shot/cross-round
+# promotion (see orchestrator/coordinator.py, near PROMOTE_THRESHOLD_PCT).
+# Used by the collector's promotion_rule inference for pre-Phase-2 state.json
+# files whose extras don't carry the audit fields directly. Kept in sync
+# by visual inspection — coordinator.py is the source of truth.
+_PROMOTE_THRESHOLD_PCT_INFER = 0.2
+_CROSS_ROUND_LOOKBACK_INFER = 3
+_CROSS_ROUND_MIN_APPEARANCES_INFER = 2
+_CROSS_ROUND_MIN_AVG_GAIN_PCT_INFER = 0.1
+
+
+def _infer_promotion_rule(
+    attempt: dict[str, Any],
+    phase_attempts: list[dict[str, Any]] | None,
+    attempt_index: int | None,
+) -> tuple[str | None, str | None]:
+    """Heuristically reconstruct ``(promotion_rule, promotion_rule_detail)``
+    for a {phase}_attempts entry whose ``extras`` dict predates the
+    Coordinator Phase-2 audit wiring (no ``promotion_rule`` field).
+
+    Mirrors the rules in :class:`Coordinator` (see ``PROMOTE_THRESHOLD_PCT``
+    branch). We're deliberately conservative: when the signal is ambiguous
+    (e.g. ``decision=='discarded'`` with a gain that meets the one-shot
+    bar — could be ``accuracy_blocked`` or a stale ledger — we return
+    ``(None, None)`` rather than guessing.
+
+    Returns:
+      * ``("single_shot", detail)``         — promoted, gain_vs_cb ≥ 0.2%
+      * ``("cross_round_consistent", det)`` — promoted, gain_vs_cb < 0.2%
+        AND a real cross-round signal exists in ``phase_attempts``
+      * ``("below_threshold", detail)``     — discarded, gain_vs_cb < 0.2%
+      * ``(None, None)``                    — can't tell
+    """
+    if not isinstance(attempt, dict):
+        return None, None
+    extras = attempt.get("extras") or {}
+    decision = str(attempt.get("decision") or "")
+    gain_vs_cb = _to_float(extras.get("gain_vs_cb"))
+    bv_name = extras.get("best_variant_name")
+    thresh = _PROMOTE_THRESHOLD_PCT_INFER
+
+    if decision == "promoted":
+        if gain_vs_cb is not None and gain_vs_cb >= thresh:
+            return (
+                "single_shot",
+                f"inferred: gain_vs_cb={gain_vs_cb:.2f}% >= "
+                f"single_shot_threshold={thresh}%",
+            )
+        # Promoted but sub-threshold ⇒ likely cross-round. Sanity-check
+        # by looking back over the prior rounds within the same phase
+        # for the same variant_name. Without a confirmed back-window we
+        # leave the rule unset (better honest-null than a wrong label).
+        if (
+            phase_attempts
+            and attempt_index is not None
+            and isinstance(bv_name, str)
+            and bv_name
+        ):
+            window = phase_attempts[
+                max(0, attempt_index - _CROSS_ROUND_LOOKBACK_INFER + 1):
+                attempt_index + 1
+            ]
+            appearances = 0
+            gains: list[float] = []
+            for prev in window:
+                if not isinstance(prev, dict):
+                    continue
+                prev_extras = prev.get("extras") or {}
+                if prev_extras.get("best_variant_name") == bv_name:
+                    appearances += 1
+                    pg = _to_float(prev_extras.get("gain_vs_cb"))
+                    if pg is not None:
+                        gains.append(pg)
+            if (
+                appearances >= _CROSS_ROUND_MIN_APPEARANCES_INFER
+                and gains
+                and (sum(gains) / len(gains)) >= _CROSS_ROUND_MIN_AVG_GAIN_PCT_INFER
+            ):
+                avg = sum(gains) / len(gains)
+                return (
+                    "cross_round_consistent",
+                    f"inferred: variant={bv_name} appeared "
+                    f">={_CROSS_ROUND_MIN_APPEARANCES_INFER} of last "
+                    f"{_CROSS_ROUND_LOOKBACK_INFER} rounds with "
+                    f"avg_gain={avg:.2f}% "
+                    f"(min_avg={_CROSS_ROUND_MIN_AVG_GAIN_PCT_INFER}%)",
+                )
+        return None, None
+
+    if decision == "discarded":
+        if gain_vs_cb is not None and gain_vs_cb < thresh:
+            return (
+                "below_threshold",
+                f"inferred: gain_vs_cb={gain_vs_cb:.2f}% < "
+                f"single_shot_threshold={thresh}% "
+                f"and no cross_round_consistent winner detected",
+            )
+        # discarded but met one-shot bar ⇒ likely accuracy_blocked, but
+        # we can't confirm without the accuracy result. Stay honest.
+        return None, None
+
+    return None, None
+
+
+def _round_decision_from_attempt(
+    attempt: dict[str, Any] | None,
+    *,
+    phase_attempts: list[dict[str, Any]] | None = None,
+    attempt_index: int | None = None,
+) -> dict[str, Any]:
     if not isinstance(attempt, dict):
         return {}
     extras = attempt.get("extras") or {}
+    # Pass-through: the Coordinator (post-Phase-2) already wrote these
+    # five fields into extras. If they're there, use them verbatim.
+    promotion_rule = extras.get("promotion_rule")
+    promotion_rule_detail = extras.get("promotion_rule_detail")
+    keep_threshold_pct = _to_float(extras.get("keep_threshold_pct"))
+    accuracy_gate_passed = extras.get("accuracy_gate_passed")
+    variants_tested_count = _to_int(extras.get("variants_tested_count"))
+    # Inference fallback for pre-Phase-2 state.json files: if the audit
+    # didn't record ``promotion_rule`` (typical of v2/ historical
+    # sessions), reconstruct it from ``decision`` + ``gain_vs_cb`` +
+    # cross-round attempt history. We never overwrite an explicit value.
+    if promotion_rule is None:
+        inferred_rule, inferred_detail = _infer_promotion_rule(
+            attempt, phase_attempts, attempt_index,
+        )
+        if inferred_rule is not None:
+            promotion_rule = inferred_rule
+            if not promotion_rule_detail:
+                promotion_rule_detail = inferred_detail
+            if keep_threshold_pct is None:
+                # Mirror the coordinator default so the JSON consumer
+                # sees the bar the inference was made against.
+                keep_threshold_pct = _PROMOTE_THRESHOLD_PCT_INFER
     return {
         "outcome": str(attempt.get("decision") or ""),
         "best_variant_name": extras.get("best_variant_name"),
         "gain_vs_cb_pct": _to_float(extras.get("gain_vs_cb")),
         "best_gain_pct_vs_base": _to_float(extras.get("best_gain_pct_vs_base")),
-        "promotion_rule": extras.get("promotion_rule"),
-        "promotion_rule_detail": extras.get("promotion_rule_detail"),
-        "keep_threshold_pct": _to_float(extras.get("keep_threshold_pct")),
-        "accuracy_gate_passed": extras.get("accuracy_gate_passed"),
-        "variants_tested_count": _to_int(extras.get("variants_tested_count")),
+        "promotion_rule": promotion_rule,
+        "promotion_rule_detail": promotion_rule_detail,
+        "keep_threshold_pct": keep_threshold_pct,
+        "accuracy_gate_passed": accuracy_gate_passed,
+        "variants_tested_count": variants_tested_count,
     }
 
 
@@ -2960,30 +3811,248 @@ def collect_decision_journal(
     *,
     detail_level: str = "standard",
 ) -> list[dict[str, Any]]:
-    journal: list[dict[str, Any]] = []
-    seen_round_ids: set[str] = set()
+    """Build the per-round decision journal.
 
-    for round_row in state.get("backend_winners_history") or []:
-        if not isinstance(round_row, dict):
+    v1.1 traversal order (vs v1):
+
+    * Walk **every** ``{phase}_attempts`` entry (params + backends), not
+      just ones present in ``backend_winners_history``. Earlier rounds
+      whose audit was recorded but whose winners weren't mirrored to the
+      history list (e.g. a discarded first round when the second round
+      replaced its ``last_round``) still surface here.
+    * Index ``backend_winners_history`` by ``round_id`` so we can backfill
+      per-variant ``decision_note`` / ``gain_pct`` from the published
+      winners mirror onto the search-ledger view.
+    * Dedupe by ``round_id``: an attempt with ``round_id == "<phase>-001"``
+      and a ``last_round`` whose ``round_id`` resolves to the same value
+      (or to ``"<phase>-last"`` when the last_round mirrors the latest
+      attempt) collapse into a single journal row.
+    """
+    journal: list[dict[str, Any]] = []
+
+    # Build a winner-meta index keyed by ``(phase, round_id, fp)`` so the
+    # last-round walker can backfill ``decision_note`` and ``gain_pct``.
+    winners_by_round: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    history_rows_by_round: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in state.get("backend_winners_history") or []:
+        if not isinstance(row, dict):
             continue
-        phase = str(round_row.get("action") or "params")
-        round_id = str(round_row.get("round_id") or "")
-        if round_id:
-            seen_round_ids.add(round_id)
-        attempt = _find_audit_attempt(
-            state, phase, round_id=round_id or None, ts=round_row.get("ts"),
-        )
-        workspace = attempt.get("workspace") if attempt else None
-        variants: list[dict[str, Any]] = []
-        winner_names = set()
-        for w in round_row.get("winners") or []:
+        ph = str(row.get("action") or "params")
+        rid = str(row.get("round_id") or "")
+        if not rid:
+            continue
+        history_rows_by_round[(ph, rid)] = row
+        winners_idx: dict[str, dict[str, Any]] = {}
+        for w in row.get("winners") or []:
             if not isinstance(w, dict):
                 continue
-            name = str(w.get("name") or "")
-            winner_names.add(name)
+            fp = _search_entry_fp(w)
+            if fp:
+                winners_idx[fp] = w
+        winners_by_round[(ph, rid)] = winners_idx
+
+    seen_round_ids: set[tuple[str, str]] = set()
+
+    # baseline tput is the canonical reference for ``gain_pct_vs_base``
+    # backfill. We use it ONLY when no per-variant gain was recorded in
+    # state (the search ledger sometimes omits it).
+    baseline_tput_ref = _to_float(state.get("baseline_tput"))
+
+    def _emit(
+        *,
+        ts: str,
+        phase: str,
+        round_id: str | None,
+        task_id: str,
+        workspace: str | None,
+        baseline_ref_tput: float | None,
+        variants: list[dict[str, Any]],
+        attempt: dict[str, Any] | None,
+        phase_attempts: list[dict[str, Any]] | None = None,
+        attempt_index: int | None = None,
+    ) -> None:
+        journal.append({
+            "ts":                 ts,
+            "phase":              phase,
+            "round_id":           round_id,
+            "task_id":            task_id,
+            "workspace":          workspace,
+            "baseline_ref_tput":  baseline_ref_tput,
+            "current_best_tput":  _to_float((state.get("current_best") or {}).get("tput")),
+            "keep_threshold_pct": None,
+            "variants":           _cap_variants(variants, detail_level=detail_level),
+            "round_decision":     _round_decision_from_attempt(
+                attempt,
+                phase_attempts=phase_attempts,
+                attempt_index=attempt_index,
+            ),
+        })
+
+    # Pass 1: every ``{phase}_attempts`` entry becomes a journal row.
+    # The earliest round (which legitimately has ``round_id is None``
+    # because it predates the audit's round-id assignment) gets a
+    # synthetic ``"<phase>-000"`` so consumers can address it stably.
+    for phase in ("params", "backends"):
+        attempts = state.get(f"{phase}_attempts") or []
+        if not isinstance(attempts, list):
+            continue
+        # Counter for synthesizing round_ids only when the audit didn't
+        # record one. We start at 0 so the first synthesized id is
+        # ``<phase>-000``, distinct from any real ``<phase>-001+``.
+        synth_idx = 0
+        # Filter to dict entries so the cross-round inference indexes
+        # line up with what the inference walks (it slices the same
+        # list with attempt_index). Original behaviour preserved.
+        dict_attempts = [a for a in attempts if isinstance(a, dict)]
+        for attempt_idx, attempt in enumerate(dict_attempts):
+            extras = attempt.get("extras") or {}
+            raw_rid = extras.get("round_id")
+            if raw_rid:
+                round_id = str(raw_rid)
+            else:
+                round_id = f"{phase}-{synth_idx:03d}"
+                synth_idx += 1
+            key = (phase, round_id)
+            if key in seen_round_ids:
+                continue
+            seen_round_ids.add(key)
+            ts = str(attempt.get("ts") or "")
+            workspace = attempt.get("workspace")
+            task_id = str(attempt.get("task_id") or "")
+            history_row = history_rows_by_round.get(key) or {}
+            winners_idx = winners_by_round.get(key) or {}
+            search = state.get(f"{phase}_search") or {}
+            lr = search.get("last_round") if isinstance(search, dict) else {}
+            # ``last_round`` is the ledger's per-round scratchpad — the
+            # search code overwrites it once per round, so we can only
+            # use it for the LATEST attempt of each phase (the most
+            # recent round_id in attempts wins). Older rounds fall back
+            # to the winners_history mirror, which IS preserved across
+            # rounds.
+            is_latest_attempt = attempt is dict_attempts[-1]
+            lr_round_id = str((lr or {}).get("round_id") or "") if isinstance(lr, dict) else ""
+            use_last_round = (
+                isinstance(lr, dict) and bool(lr.get("tested_fp")) and (
+                    lr_round_id == round_id
+                    or (is_latest_attempt and not lr_round_id)
+                )
+            )
+            if use_last_round:
+                variants = _variants_from_search_last_round(
+                    session_dir, phase, search,
+                    workspace_str=workspace,
+                    selected_new=set((lr or {}).get("selected_new") or []),
+                    round_winners=set(
+                        (lr or {}).get("round_winners")
+                        or {str(w.get("name") or "") for w in (history_row.get("winners") or []) if isinstance(w, dict)}
+                    ),
+                    warnings=warnings,
+                    winner_meta_by_fp=winners_idx,
+                )
+            else:
+                # No last_round mirror for this round — fall back to the
+                # winners_history payload (round_winner-only view, but
+                # preserves note + gain_pct for older rounds).
+                variants = []
+                for w in history_row.get("winners") or []:
+                    if not isinstance(w, dict):
+                        continue
+                    name = str(w.get("name") or "")
+                    fp = _search_entry_fp(w)
+                    note = w.get("note")
+                    variants.append(_shape_variant_decision(
+                        session_dir=session_dir,
+                        name=name,
+                        fingerprint=fp,
+                        extra_sglang_args=str(w.get("extra_sglang_args") or ""),
+                        extra_envs=dict(w.get("extra_envs") or {}),
+                        status="succeeded",
+                        output_throughput=_to_float(w.get("tput")),
+                        gain_pct_vs_base=_to_float(w.get("gain_pct")),
+                        outcome="round_winner",
+                        reject_reason=None,
+                        workspace_str=workspace,
+                        warnings=warnings,
+                        decision_note=str(note) if note else None,
+                    ))
+                # Disk-walk fallback: when neither the search ledger
+                # nor the winners mirror covers this round, reconstruct
+                # variants from the benchmark_report.json files left on
+                # disk under the round workspace. This is the only way
+                # to surface a round 0 (round_id=None in extras) whose
+                # last_round was overwritten by the next round.
+                if not variants:
+                    variants = _variants_from_disk_walk(
+                        session_dir, workspace, warnings,
+                    )
+            base_ref = _to_float(history_row.get("base_tput"))
+            if base_ref is None and isinstance(lr, dict):
+                base_ref = _to_float(lr.get("base_tput"))
+            # winners_history.base_tput is sometimes recorded as 0.0 in
+            # older sessions even though baseline_tput is well-known.
+            # Treat <=0 as "not recorded" so gain backfill can use the
+            # real baseline reference instead of dividing by zero.
+            if base_ref is None or base_ref <= 0.0:
+                base_ref = baseline_tput_ref
+            # Backfill ``gain_pct_vs_base`` for variants whose state-side
+            # gain is null but whose throughput is known. Round-decision
+            # consumers expect a numeric gain whenever both throughputs
+            # are available.
+            if base_ref and base_ref > 0.0:
+                for v in variants:
+                    if v.get("gain_pct_vs_base") is None and v.get("output_throughput") is not None:
+                        v["gain_pct_vs_base"] = (
+                            (v["output_throughput"] - base_ref) / base_ref * 100.0
+                        )
+            _emit(
+                ts=ts,
+                phase=phase,
+                round_id=round_id,
+                task_id=task_id,
+                workspace=workspace,
+                baseline_ref_tput=base_ref,
+                variants=variants,
+                attempt=attempt,
+                phase_attempts=dict_attempts,
+                attempt_index=attempt_idx,
+            )
+
+    # Pass 2: a winners_history row whose round_id was NOT covered by
+    # any audit attempt (rare but observed in older sessions where
+    # state.json was rolled back). Skip when we already emitted that
+    # round in Pass 1.
+    for (phase, round_id), row in history_rows_by_round.items():
+        key = (phase, round_id)
+        if key in seen_round_ids:
+            continue
+        seen_round_ids.add(key)
+        attempt = _find_audit_attempt(state, phase, round_id=round_id, ts=row.get("ts"))
+        workspace = attempt.get("workspace") if attempt else None
+        # Pull the same dict-attempts list this phase used in Pass 1 so
+        # the promotion_rule inference can do its lookback walk even on
+        # rows that only surface via the history fallback.
+        ph_attempts_raw = state.get(f"{phase}_attempts") or []
+        ph_attempts_dict = (
+            [a for a in ph_attempts_raw if isinstance(a, dict)]
+            if isinstance(ph_attempts_raw, list) else []
+        )
+        try:
+            attempt_index = (
+                ph_attempts_dict.index(attempt)
+                if isinstance(attempt, dict) and attempt in ph_attempts_dict
+                else None
+            )
+        except ValueError:
+            attempt_index = None
+        winners_idx = winners_by_round.get(key) or {}
+        variants: list[dict[str, Any]] = []
+        for w in row.get("winners") or []:
+            if not isinstance(w, dict):
+                continue
+            note = w.get("note")
             variants.append(_shape_variant_decision(
                 session_dir=session_dir,
-                name=name,
+                name=str(w.get("name") or ""),
                 fingerprint=_search_entry_fp(w),
                 extra_sglang_args=str(w.get("extra_sglang_args") or ""),
                 extra_envs=dict(w.get("extra_envs") or {}),
@@ -2994,81 +4063,20 @@ def collect_decision_journal(
                 reject_reason=None,
                 workspace_str=workspace,
                 warnings=warnings,
+                decision_note=str(note) if note else None,
             ))
-        search = state.get(f"{phase}_search") or {}
-        lr = search.get("last_round") if isinstance(search, dict) else {}
-        history_for_phase = [
-            r for r in (state.get("backend_winners_history") or [])
-            if isinstance(r, dict) and str(r.get("action") or "") == phase
-        ]
-        is_latest_for_phase = (
-            bool(history_for_phase)
-            and str(history_for_phase[-1].get("round_id") or "") == round_id
+        _emit(
+            ts=str(row.get("ts") or ""),
+            phase=phase,
+            round_id=round_id,
+            task_id=str((attempt or {}).get("task_id") or ""),
+            workspace=workspace,
+            baseline_ref_tput=_to_float(row.get("base_tput")),
+            variants=variants,
+            attempt=attempt,
+            phase_attempts=ph_attempts_dict,
+            attempt_index=attempt_index,
         )
-        use_full_last_round = (
-            isinstance(lr, dict)
-            and bool(lr.get("tested_fp"))
-            and (
-                str(lr.get("round_id") or "") == round_id
-                or (is_latest_for_phase and not lr.get("round_id"))
-            )
-        )
-        if use_full_last_round and isinstance(search, dict):
-            variants = _variants_from_search_last_round(
-                session_dir, phase, search,
-                workspace_str=workspace,
-                selected_new=set(lr.get("selected_new") or []),
-                round_winners=set(lr.get("round_winners") or winner_names),
-                warnings=warnings,
-            )
-        elif not variants:
-            pass
-        journal.append({
-            "ts":                 str(round_row.get("ts") or (attempt or {}).get("ts") or ""),
-            "phase":              phase,
-            "round_id":           round_id or None,
-            "task_id":            str((attempt or {}).get("task_id") or ""),
-            "workspace":          workspace,
-            "baseline_ref_tput":  _to_float(round_row.get("base_tput")),
-            "current_best_tput":  _to_float((state.get("current_best") or {}).get("tput")),
-            "keep_threshold_pct": None,
-            "variants":           _cap_variants(variants, detail_level=detail_level),
-            "round_decision":     _round_decision_from_attempt(attempt),
-        })
-
-    for phase in ("params", "backends"):
-        search = state.get(f"{phase}_search") or {}
-        if not isinstance(search, dict):
-            continue
-        lr = search.get("last_round") or {}
-        if not isinstance(lr, dict) or not lr:
-            continue
-        round_id = str(lr.get("round_id") or f"{phase}-last")
-        if round_id in seen_round_ids:
-            continue
-        attempt = _find_audit_attempt(state, phase, round_id=round_id, ts=None)
-        workspace = attempt.get("workspace") if attempt else None
-        variants = _variants_from_search_last_round(
-            session_dir, phase, search,
-            workspace_str=workspace,
-            selected_new=set(lr.get("selected_new") or []),
-            round_winners=set(lr.get("round_winners") or []),
-            warnings=warnings,
-        )
-        if not variants:
-            continue
-        journal.append({
-            "ts":                 str((attempt or {}).get("ts") or ""),
-            "phase":              phase,
-            "round_id":           round_id,
-            "task_id":            str((attempt or {}).get("task_id") or ""),
-            "workspace":          workspace,
-            "baseline_ref_tput":  _to_float(lr.get("base_tput")),
-            "current_best_tput":  _to_float((state.get("current_best") or {}).get("tput")),
-            "keep_threshold_pct": None,
-            "variants":           _cap_variants(variants, detail_level=detail_level),
-            "round_decision":     _round_decision_from_attempt(attempt),
-        })
 
     journal.sort(key=lambda e: e.get("ts") or "")
     return journal
@@ -3101,14 +4109,243 @@ def _parse_tracelens_status(path: Path, warnings: list[str]) -> dict[str, Any]:
     data = _load_json_safe(path, warnings)
     if not isinstance(data, dict):
         return {}
+    # Prefer an explicit ``summary`` / ``analysis_summary`` field. Do NOT
+    # fall back to ``status`` here — a single token like ``"ok"`` is not
+    # informative as a summary, and would crowd out the much richer
+    # ``analysis.md`` text the kernel-profiling collector pulls in as a
+    # secondary fallback. ``status`` is preserved alongside in the
+    # timeline event extras for callers that actually care.
     summary = data.get("summary") or data.get("analysis_summary") or ""
-    if not summary and data.get("status"):
-        summary = str(data.get("status"))
     return {
         "tool": "tracelens_analysis",
         "analysis_summary": str(summary) if summary else None,
         "top_kernels": list(data.get("top_kernels") or data.get("kernels") or [])[:25],
     }
+
+
+# TraceLens roofline category files we know how to parse. Order matters:
+# the resulting top_kernels list is sorted by ``percent_of_total`` so any
+# ordering quirk between categories doesn't affect the output, but we still
+# walk gemm first because it dominates compute on every workload we've
+# touched.
+_TRACELENS_CATEGORY_FILES: tuple[str, ...] = (
+    "gemm_metrics.json",
+    "rmsnorm_metrics.json",
+    "elementwise_metrics.json",
+    "kernel_fusion_metrics.json",
+    "reduce_metrics.json",
+    "other_metrics.json",
+)
+
+
+def _shape_tracelens_op(op: dict[str, Any], category: str) -> dict[str, Any]:
+    """Shape one entry from a TraceLens ``category_data/<cat>_metrics.json``
+    ``operations[]`` list into the v1.1 ``top_kernels`` row.
+
+    The roofline fields live under ``efficiency.{...}`` inside the
+    category JSON; we hoist them flat onto the ``top_kernels`` row so
+    consumers don't need to know the source schema. Missing fields stay
+    None — we never fabricate roofline numbers.
+    """
+    eff = op.get("efficiency") if isinstance(op.get("efficiency"), dict) else {}
+    name = str(op.get("name") or "")
+    time_ms = _to_float(op.get("time_ms"))
+    return {
+        "kernel_id":          name,  # TraceLens has no separate id
+        "name":               name,
+        "category":           category,
+        "operation_count":    int(op.get("count") or 0) or None,
+        "duration_us":        (time_ms * 1000.0) if time_ms is not None else None,
+        "time_ms":            time_ms,
+        "percent_of_total":   _to_float(op.get("percent_of_total")),
+        "percent_of_category": _to_float(op.get("percent_of_category")),
+        "efficiency_percent": _to_float(eff.get("efficiency_percent")),
+        "bound_type":         eff.get("bound_type") or None,
+        "tflops_achieved":    _to_float(eff.get("tflops_achieved")),
+        "flops_per_byte":     _to_float(eff.get("flops_per_byte")),
+        "arithmetic_intensity": _to_float(eff.get("flops_per_byte")),
+        "library":            op.get("library") or None,
+        "input_dims":         op.get("Input Dims") or op.get("input_dims") or None,
+        # gpu_pct mirrors percent_of_total for category-data ops (the
+        # category JSON's "percent_of_total" IS the kernel's GPU-time
+        # share for that op grouping); we keep both keys filled so old
+        # consumers reading ``gpu_pct`` still see a value.
+        "gpu_pct":            _to_float(op.get("percent_of_total")),
+        "bottleneck":         eff.get("bound_type") or "",
+    }
+
+
+def _read_tracelens_category_data(
+    tracelens_dir: Path,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Walk ``<tracelens>/category_data/*_metrics.json`` into top_kernels rows.
+
+    Returns rows from all parseable category files, sorted by
+    ``percent_of_total`` desc. Returns ``[]`` if the directory is missing
+    or every file fails to parse — callers should treat empty as "no
+    roofline data available" and try the next fallback (priority_data).
+    """
+    cat_dir = tracelens_dir / "category_data"
+    if not cat_dir.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    # Walk the canonical category list first, then anything else that
+    # ends in ``_metrics.json`` (forward-compat — TraceLens may add new
+    # categories without us needing a code change).
+    seen_files: set[str] = set()
+    for fname in _TRACELENS_CATEGORY_FILES:
+        path = cat_dir / fname
+        if not path.exists():
+            continue
+        seen_files.add(fname)
+        data = _load_json_safe(path, warnings)
+        if not isinstance(data, dict):
+            continue
+        category = str(data.get("category") or fname.replace("_metrics.json", ""))
+        for op in data.get("operations") or []:
+            if isinstance(op, dict):
+                rows.append(_shape_tracelens_op(op, category))
+    for path in sorted(cat_dir.glob("*_metrics.json")):
+        if path.name in seen_files:
+            continue
+        data = _load_json_safe(path, warnings)
+        if not isinstance(data, dict):
+            continue
+        category = str(data.get("category") or path.stem.replace("_metrics", ""))
+        for op in data.get("operations") or []:
+            if isinstance(op, dict):
+                rows.append(_shape_tracelens_op(op, category))
+    rows.sort(
+        key=lambda r: (r.get("percent_of_total") or 0.0),
+        reverse=True,
+    )
+    return rows
+
+
+def _read_tracelens_priority_data(
+    tracelens_dir: Path,
+    warnings: list[str],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Parse ``<tracelens>/priority_data.json`` into (top_kernels, summary).
+
+    Used as a secondary fallback when ``category_data/`` isn't present
+    or yielded no rows. ``priority_data.json`` only carries the
+    impact-ranked roofline samples (no per-shape breakdown) but it's
+    still richer than nothing.
+    """
+    path = tracelens_dir / "priority_data.json"
+    if not path.exists():
+        return ([], None)
+    data = _load_json_safe(path, warnings)
+    if not isinstance(data, dict):
+        return ([], None)
+    rows: list[dict[str, Any]] = []
+    for src in (data.get("findings") or []):
+        if not isinstance(src, dict):
+            continue
+        for member in src.get("members") or []:
+            if isinstance(member, dict):
+                rows.append({
+                    "kernel_id":          str(member.get("operation") or ""),
+                    "name":               str(member.get("operation") or ""),
+                    "category":           str(member.get("category") or ""),
+                    "operation_count":    None,
+                    "duration_us":        (_to_float(member.get("time_ms")) or 0.0) * 1000.0
+                        if member.get("time_ms") is not None else None,
+                    "time_ms":            _to_float(member.get("time_ms")),
+                    "percent_of_total":   None,
+                    "percent_of_category": None,
+                    "efficiency_percent": _to_float(member.get("efficiency_pct")),
+                    "bound_type":         member.get("bound_type") or None,
+                    "tflops_achieved":    None,
+                    "flops_per_byte":     None,
+                    "arithmetic_intensity": None,
+                    "library":            member.get("library") or None,
+                    "input_dims":         None,
+                    "impact_score":       _to_float(member.get("impact_score")),
+                    "gpu_pct":            None,
+                    "bottleneck":         member.get("bound_type") or "",
+                })
+    if not rows:
+        # ``all_estimates`` is the fallback list of impact estimates that
+        # priority_data emits even when ``findings[].members`` is empty.
+        for op in data.get("all_estimates") or []:
+            if isinstance(op, dict):
+                rows.append({
+                    "kernel_id":          str(op.get("operation") or ""),
+                    "name":               str(op.get("operation") or ""),
+                    "category":           str(op.get("category") or ""),
+                    "operation_count":    None,
+                    "duration_us":        (_to_float(op.get("time_ms")) or 0.0) * 1000.0
+                        if op.get("time_ms") is not None else None,
+                    "time_ms":            _to_float(op.get("time_ms")),
+                    "percent_of_total":   None,
+                    "percent_of_category": None,
+                    "efficiency_percent": _to_float(op.get("efficiency_pct")),
+                    "bound_type":         op.get("bound_type") or None,
+                    "tflops_achieved":    None,
+                    "flops_per_byte":     None,
+                    "arithmetic_intensity": None,
+                    "library":            op.get("library") or None,
+                    "input_dims":         None,
+                    "impact_score":       _to_float(op.get("impact_score")),
+                    "gpu_pct":            None,
+                    "bottleneck":         op.get("bound_type") or "",
+                })
+    # Synthesize a summary line from the priorities list when it's
+    # non-empty (analysis.md is the preferred source — we only land
+    # here when analysis.md was unreadable).
+    summary: str | None = None
+    priorities = data.get("priorities")
+    if isinstance(priorities, list) and priorities:
+        head = priorities[0]
+        if isinstance(head, dict):
+            summary = (
+                f"Top priority: {head.get('display_name') or head.get('category') or '?'} "
+                f"impact_score={head.get('impact_score')!r}"
+            )
+    return (rows, summary)
+
+
+def _read_tracelens_analysis_md(
+    tracelens_dir: Path,
+    warnings: list[str],
+) -> str | None:
+    """Read the first paragraph (≤600 chars) of ``analysis.md``.
+
+    The file is human-authored markdown summarizing the run's findings.
+    We surface the lead so dashboards can render a concise headline
+    without pulling the whole document.
+    """
+    path = tracelens_dir / "analysis.md"
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        warnings.append(f"failed to read {path}: {exc!r}")
+        return None
+    # First non-empty paragraph, capped at 600 chars. We stop at the
+    # first blank-line break so multi-paragraph analyses don't bloat
+    # the JSON.
+    lines: list[str] = []
+    for raw in text.splitlines():
+        if not raw.strip() and lines:
+            break
+        if raw.strip().startswith("#"):
+            # Skip leading headings — they're rarely informative on
+            # their own.
+            if not lines:
+                continue
+        if raw.strip():
+            lines.append(raw.strip())
+        elif not lines:
+            continue
+    summary = " ".join(lines).strip()
+    if not summary:
+        return None
+    return summary[:600] + ("…" if len(summary) > 600 else "")
 
 
 def collect_kernel_profiling(
@@ -3192,7 +4429,18 @@ def collect_kernel_profiling(
                 "outputs": {
                     "tool": "magpie_torch_profiler",
                     "top_kernels": top_kernels[:25],
-                    "analysis_summary": None,
+                    # Surface tracelens_analysis.summary if the profile
+                    # report happens to embed one (newer benchmark
+                    # runners synthesize a 1–2 sentence headline).
+                    "analysis_summary": (
+                        (
+                            str(report_data.get("tracelens_analysis", {}).get("summary"))
+                            or str(report_data.get("tracelens_analysis", {}).get("analysis_summary"))
+                        )
+                        if isinstance(report_data, dict)
+                        and isinstance(report_data.get("tracelens_analysis"), dict)
+                        else None
+                    ) or None,
                 },
             })
 
@@ -3200,12 +4448,60 @@ def collect_kernel_profiling(
         status_root = run_dir / "status" / "tracelens_analysis"
         if not status_root.exists():
             continue
+        # The TraceLens artifact tree (priority_data.json, category_data/,
+        # analysis.md) is shared across every status file in this run dir.
+        # Compute its fallback rows / summary once so multi-status runs
+        # don't redo the disk walk per status file.
+        tracelens_dir = run_dir / "tracelens"
+        cat_rows = (
+            _read_tracelens_category_data(tracelens_dir, warnings)
+            if tracelens_dir.exists() else []
+        )
+        priority_rows: list[dict[str, Any]] = []
+        priority_summary: str | None = None
+        if tracelens_dir.exists():
+            priority_rows, priority_summary = _read_tracelens_priority_data(
+                tracelens_dir, warnings,
+            )
+        analysis_md_summary = (
+            _read_tracelens_analysis_md(tracelens_dir, warnings)
+            if tracelens_dir.exists() else None
+        )
         for status_path in sorted(status_root.glob("*.json")):
             parsed = _parse_tracelens_status(status_path, warnings)
+            # Merge the fallbacks: status.json wins when it has data,
+            # category_data fills in next, priority_data last.
+            top_kernels = list(parsed.get("top_kernels") or [])
+            if not top_kernels and cat_rows:
+                top_kernels = list(cat_rows)
+            if not top_kernels and priority_rows:
+                top_kernels = list(priority_rows)
+            summary = (
+                parsed.get("analysis_summary")
+                or analysis_md_summary
+                or priority_summary
+            )
             log_path = run_dir / "logs" / "tracelens_analysis" / f"{status_path.stem}.log"
+            # P2-3: surface started_at/ended_at/duration_seconds when
+            # the kernel-agent writer recorded them (terminal states
+            # only). Historical sessions have only ``started_at`` /
+            # ``updated_at`` — leave the new fields None.
+            raw_status = _load_json_safe(status_path, warnings) or {}
+            ts_started = (
+                str(raw_status.get("started_at") or "")
+                if isinstance(raw_status, dict) else ""
+            )
+            ts_ended = (
+                str(raw_status.get("ended_at") or "")
+                if isinstance(raw_status, dict) else ""
+            )
+            duration = (
+                _to_float(raw_status.get("duration_seconds"))
+                if isinstance(raw_status, dict) else None
+            )
             runs.append({
                 "run_id":              status_path.stem,
-                "ts":                  "",
+                "ts":                  ts_started,
                 "task_id":             run_dir.name,
                 "framework":           str(state.get("framework") or ""),
                 "profile_config_path": None,
@@ -3219,15 +4515,365 @@ def collect_kernel_profiling(
                     "tracelens_log":         _rel(log_path, session_dir)
                         if log_path.exists() else None,
                 },
-                "outputs": parsed or {
+                "outputs": {
                     "tool": "tracelens_analysis",
-                    "top_kernels": [],
-                    "analysis_summary": None,
+                    "top_kernels": top_kernels[:25],
+                    "analysis_summary": summary,
                 },
+                "duration_seconds":    duration,
+                "ended_ts_utc":        ts_ended or _add_seconds_iso(ts_started, duration),
             })
 
     runs.sort(key=lambda r: r.get("ts") or r.get("run_id") or "")
     return runs
+
+
+def _kernel_name_index(
+    state: dict[str, Any],
+    session_dir: Path | None,
+    warnings: list[str],
+) -> dict[str, str]:
+    """Build a ``kid -> human readable kernel name`` lookup.
+
+    Sources (priority order — first non-empty wins):
+
+    1. ``state.last_select_kernels.hot_kernels_top15[].{kernel_id,name}``
+    2. ``state.kernel_integrate_attempts[*].{kernel_id, target_file}``
+       (target_file basename is the fallback name when the integrate
+       entry doesn't carry one explicitly).
+    3. ``kernel-agent/runs/<sid>/kernel_candidates.json`` files
+       (``kernel_id`` / ``name`` rows produced by the kernel agent).
+    """
+    by_kid: dict[str, str] = {}
+    sk = state.get("last_select_kernels") or {}
+    if isinstance(sk, dict):
+        for entry in sk.get("hot_kernels_top15") or []:
+            if not isinstance(entry, dict):
+                continue
+            kid = str(entry.get("kernel_id") or "")
+            name = str(entry.get("name") or "")
+            if kid and name and kid not in by_kid:
+                by_kid[kid] = name
+    integ = state.get("kernel_integrate_attempts") or {}
+    if isinstance(integ, dict):
+        for ent in integ.values():
+            if not isinstance(ent, dict):
+                continue
+            kid = str(ent.get("kernel_id") or "")
+            if not kid or kid in by_kid:
+                continue
+            name = str(ent.get("kernel_name") or ent.get("target_file") or "")
+            if name:
+                # target_file is usually a path — take its basename so the
+                # column stays narrow.
+                by_kid[kid] = name.rsplit("/", 1)[-1]
+    if session_dir is not None:
+        for run_dir in _kernel_agent_run_dirs(session_dir):
+            for cand_path in run_dir.glob("kernel_candidates.json"):
+                data = _load_json_safe(cand_path, warnings)
+                if not isinstance(data, list):
+                    if isinstance(data, dict):
+                        data = data.get("kernels") or data.get("candidates") or []
+                    else:
+                        continue
+                for k in data:
+                    if not isinstance(k, dict):
+                        continue
+                    kid = str(k.get("kernel_id") or "")
+                    name = str(k.get("name") or "")
+                    if kid and name and kid not in by_kid:
+                        by_kid[kid] = name
+    return by_kid
+
+
+def collect_kernel_decision_path(
+    state: dict[str, Any],
+    warnings: list[str],
+    session_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Per-kernel causal chain across select → kernel_opt → integrate → validate.
+
+    Groups every step by the kernel id the orchestrator assigned
+    (``k001`` / ``k002`` / …) and orders steps within a group by ``ts``.
+    Each step carries the same ``duration_seconds`` enrichment used by
+    :func:`collect_phase_timeline`, plus the outcome / decision_note /
+    gain_pct / speedup pulled from whichever record best describes that
+    step:
+
+    * ``select`` — one event per kid from
+      ``last_select_kernels.hot_kernels_top15`` (the orchestrator's
+      single-shot select snapshot; there's no per-kid select_attempt
+      list in the current shared_state). ``ts`` is the snapshot ts.
+    * ``kernel_opt`` — flattened ``state.kernel_opt_attempts[kid].history[]``
+      rows, plus the entry's terminal ``last_decision`` when the
+      history doesn't already include it. ``backend`` is recovered
+      from history extras when present; otherwise None.
+    * ``integrate`` — flattened
+      ``state.kernel_integrate_attempts[*].attempts[]`` rows, keyed by
+      ``ent.kernel_id``.
+    * ``validate`` — a kernel-owned validate_stack event (rare); we
+      surface it when ``validate_stack_attempts[].extras.kernel_id``
+      matches a kid we've already tracked.
+
+    Returns ``[]`` (without emitting a warning) when none of the
+    upstream sources have any rows for this session.
+    """
+    name_by_kid = _kernel_name_index(state, session_dir, warnings)
+    steps_by_kid: dict[str, list[dict[str, Any]]] = {}
+
+    def _push(kid: str, step: dict[str, Any]) -> None:
+        if not kid:
+            return
+        bucket = steps_by_kid.setdefault(kid, [])
+        bucket.append(step)
+
+    # 1) select_kernels — snapshot from ``last_select_kernels``. We do
+    #    NOT emit a step per missing entry; only kids that the
+    #    orchestrator actually surfaced as a hot kernel get a "select"
+    #    step.
+    sk = state.get("last_select_kernels") or {}
+    sk_ts = str(sk.get("ts") or "") if isinstance(sk, dict) else ""
+    if isinstance(sk, dict):
+        hot = sk.get("hot_kernels_top15") or []
+        if isinstance(hot, list):
+            for entry in hot:
+                if not isinstance(entry, dict):
+                    continue
+                kid = str(entry.get("kernel_id") or "")
+                if not kid:
+                    continue
+                _push(kid, {
+                    "kid":              kid,
+                    "kernel_name":      name_by_kid.get(kid) or str(entry.get("name") or ""),
+                    "step":             "select",
+                    "backend":          None,
+                    "ts":               sk_ts,
+                    "duration_seconds": None,
+                    "ended_ts_utc":     None,
+                    "task_id":          "",
+                    "workspace":        None,
+                    "outcome":          "selected",
+                    "decision_note":    str(entry.get("bottleneck") or ""),
+                    "gain_pct":         None,
+                    "speedup":          None,
+                    "extras": {
+                        "gpu_pct":               _to_float(entry.get("gpu_pct")),
+                        "bottleneck":            str(entry.get("bottleneck") or ""),
+                        "recommended_backends":  list(entry.get("recommended_backends") or []),
+                        "recommended_actions":   list(entry.get("recommended_actions") or []),
+                        "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
+                    },
+                })
+
+    # 2) select_kernels_attempts — when an audit-list form exists,
+    #    treat each entry as one "select" step (one per task_id). The
+    #    current orchestrator doesn't write this list, but other
+    #    pipelines might; we keep the path forward-compatible.
+    sk_attempts = state.get("select_kernels_attempts")
+    if isinstance(sk_attempts, list):
+        for entry in sk_attempts:
+            if not isinstance(entry, dict):
+                continue
+            extras = entry.get("extras") if isinstance(entry.get("extras"), dict) else {}
+            kids = []
+            single = entry.get("kernel_id") or extras.get("kernel_id")
+            if single:
+                kids = [str(single)]
+            else:
+                hot = extras.get("hot_kernels") or extras.get("hot_kernels_top15") or []
+                if isinstance(hot, list):
+                    kids = [str(h.get("kernel_id") or "")
+                            for h in hot if isinstance(h, dict) and h.get("kernel_id")]
+            duration = _phase_event_duration(session_dir, entry, warnings)
+            ts = str(entry.get("ts") or "")
+            for kid in kids:
+                if not kid:
+                    continue
+                _push(kid, {
+                    "kid":              kid,
+                    "kernel_name":      name_by_kid.get(kid, ""),
+                    "step":             "select",
+                    "backend":          None,
+                    "ts":               ts,
+                    "duration_seconds": duration,
+                    "ended_ts_utc":     _add_seconds_iso(ts, duration),
+                    "task_id":          str(entry.get("task_id") or ""),
+                    "workspace":        entry.get("workspace"),
+                    "outcome":          str(entry.get("decision") or "selected"),
+                    "decision_note":    str(entry.get("decision_note") or ""),
+                    "gain_pct":         None,
+                    "speedup":          None,
+                    "extras":           dict(extras),
+                })
+
+    # 3) kernel_opt_attempts → one step per history entry.
+    kernel_opt = state.get("kernel_opt_attempts") or {}
+    if isinstance(kernel_opt, dict):
+        for kid, ent in kernel_opt.items():
+            if not isinstance(ent, dict):
+                continue
+            kid_s = str(kid)
+            history = ent.get("history") or []
+            history_list = history if isinstance(history, list) else []
+            for h in history_list:
+                if not isinstance(h, dict):
+                    continue
+                ts = str(h.get("ts") or "")
+                extras = h.get("extras") if isinstance(h.get("extras"), dict) else {}
+                duration = _to_float(extras.get("duration_seconds")) if extras else None
+                backend = (
+                    extras.get("backend")
+                    or h.get("backend")
+                    or ent.get("backend")
+                    or None
+                )
+                _push(kid_s, {
+                    "kid":              kid_s,
+                    "kernel_name":      name_by_kid.get(kid_s, ""),
+                    "step":             "kernel_opt",
+                    "backend":          str(backend) if backend else None,
+                    "ts":               ts,
+                    "duration_seconds": duration,
+                    "ended_ts_utc":     _add_seconds_iso(ts, duration),
+                    "task_id":          str(h.get("task_id") or extras.get("task_id") or ""),
+                    "workspace":        h.get("workspace") or extras.get("workspace"),
+                    "outcome":          str(h.get("decision") or ""),
+                    "decision_note":    str(h.get("note") or extras.get("note") or ""),
+                    "gain_pct":         _to_float(h.get("gain_pct") or extras.get("gain_pct")),
+                    "speedup":          _to_float(h.get("micro_speedup") or h.get("speedup")
+                                                  or extras.get("micro_speedup")
+                                                  or extras.get("speedup")),
+                    "extras":           dict(extras) if extras else {},
+                })
+            # If the per-attempt history is empty but we still have a
+            # terminal ``last_decision``, surface a single synthetic
+            # step so the chain isn't completely silent.
+            if not history_list and (ent.get("last_decision") or ent.get("rejected_reason")):
+                ts = str(ent.get("last_ts") or "")
+                _push(kid_s, {
+                    "kid":              kid_s,
+                    "kernel_name":      name_by_kid.get(kid_s, ""),
+                    "step":             "kernel_opt",
+                    "backend":          str(ent.get("backend") or "") or None,
+                    "ts":               ts,
+                    "duration_seconds": None,
+                    "ended_ts_utc":     None,
+                    "task_id":          "",
+                    "workspace":        None,
+                    "outcome":          str(ent.get("last_decision") or ent.get("rejected_reason") or ""),
+                    "decision_note":    str(ent.get("rejected_reason") or ""),
+                    "gain_pct":         None,
+                    "speedup":          None,
+                    "extras":           {"attempts": int(ent.get("attempts") or 0)},
+                })
+
+    # 4) kernel_integrate_attempts → one step per attempt entry.
+    integ = state.get("kernel_integrate_attempts") or {}
+    if isinstance(integ, dict):
+        for ent in integ.values():
+            if not isinstance(ent, dict):
+                continue
+            kid = str(ent.get("kernel_id") or "")
+            if not kid:
+                continue
+            attempts = ent.get("attempts") or []
+            if not isinstance(attempts, list):
+                continue
+            for a in attempts:
+                if not isinstance(a, dict):
+                    continue
+                ts = str(a.get("ts") or "")
+                a_extras = a.get("extras") if isinstance(a.get("extras"), dict) else {}
+                duration = _to_float(a_extras.get("duration_seconds")) if a_extras else None
+                if duration is None and a.get("workspace"):
+                    duration = _phase_event_duration(session_dir, a, warnings)
+                _push(kid, {
+                    "kid":              kid,
+                    "kernel_name":      name_by_kid.get(kid, ""),
+                    "step":             "integrate",
+                    "backend":          None,
+                    "ts":               ts,
+                    "duration_seconds": duration,
+                    "ended_ts_utc":     _add_seconds_iso(ts, duration),
+                    "task_id":          str(a.get("task_id") or ""),
+                    "workspace":        a.get("workspace"),
+                    "outcome":          str(a.get("decision") or a.get("status") or ""),
+                    "decision_note":    str(a.get("note") or ""),
+                    "gain_pct":         _to_float(a.get("gain_pct")),
+                    "speedup":          None,
+                    "extras": {
+                        "patch_path":  ent.get("patch_path"),
+                        "target_file": ent.get("target_file"),
+                        "report_path": a.get("report_path"),
+                        "new_tput":    _to_float(a.get("new_tput")),
+                    },
+                })
+
+    # 5) validate_stack_attempts — surface ones tagged with a kernel_id
+    #    (rare but explicit). We do NOT pull every validate_stack into
+    #    every kid's chain because validate_stack is action-level, not
+    #    kernel-level.
+    for entry in state.get("validate_stack_attempts") or []:
+        if not isinstance(entry, dict):
+            continue
+        extras = entry.get("extras") if isinstance(entry.get("extras"), dict) else {}
+        kid = str(entry.get("kernel_id") or extras.get("kernel_id") or "")
+        if not kid:
+            continue
+        ts = str(entry.get("ts") or "")
+        duration = _phase_event_duration(session_dir, entry, warnings)
+        _push(kid, {
+            "kid":              kid,
+            "kernel_name":      name_by_kid.get(kid, ""),
+            "step":             "validate",
+            "backend":          None,
+            "ts":               ts,
+            "duration_seconds": duration,
+            "ended_ts_utc":     _add_seconds_iso(ts, duration),
+            "task_id":          str(entry.get("task_id") or ""),
+            "workspace":        entry.get("workspace"),
+            "outcome":          str(entry.get("decision") or entry.get("status") or ""),
+            "decision_note":    str(extras.get("note") or ""),
+            "gain_pct":         _to_float(entry.get("key_metric")),
+            "speedup":          None,
+            "extras":           dict(extras),
+        })
+
+    # Order steps within each group by ts (lexicographic ISO8601 sort
+    # is chronological for these strings). Empty-ts steps land first
+    # so they don't shadow the dated history.
+    out: list[dict[str, Any]] = []
+    step_order = {"select": 0, "kernel_opt": 1, "integrate": 2, "validate": 3}
+    for kid in sorted(steps_by_kid.keys()):
+        bucket = steps_by_kid[kid]
+        bucket.sort(key=lambda s: (s.get("ts") or "", step_order.get(s.get("step") or "", 9)))
+        # backends_attempted = ordered set of distinct backends across
+        # kernel_opt steps in this chain.
+        backends_seen: list[str] = []
+        for s in bucket:
+            b = s.get("backend")
+            if b and b not in backends_seen:
+                backends_seen.append(b)
+        durations = [s.get("duration_seconds") for s in bucket
+                     if isinstance(s.get("duration_seconds"), (int, float))]
+        total_dur = sum(durations) if durations else None
+        final_outcome = ""
+        for s in reversed(bucket):
+            if s.get("outcome"):
+                final_outcome = str(s["outcome"])
+                break
+        out.append({
+            "kid":         kid,
+            "kernel_name": name_by_kid.get(kid, "") or (bucket[0].get("kernel_name") or "" if bucket else ""),
+            "steps":       bucket,
+            "summary": {
+                "total_steps":           len(bucket),
+                "backends_attempted":    backends_seen,
+                "final_outcome":         final_outcome,
+                "total_duration_seconds": total_dur,
+            },
+        })
+    return out
 
 
 __all__ = [
@@ -3237,6 +4883,7 @@ __all__ = [
     "collect_critic_robustness",
     "collect_decision_journal",
     "collect_final",
+    "collect_kernel_decision_path",
     "collect_kernel_invocations",
     "collect_kernel_lifecycle",
     "collect_kernel_profiling",

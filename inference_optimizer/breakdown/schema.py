@@ -151,7 +151,7 @@ class Final(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 class PhaseEvent(TypedDict, total=False):
     ts: str
-    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / select_kernels / integrate
+    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / select_kernels / integrate / tracelens_analysis / closing
     task_id: str
     kernel_id: str | None         # only for kernel-owned actions
     status: str                   # succeeded / failed
@@ -161,6 +161,11 @@ class PhaseEvent(TypedDict, total=False):
     workspace: str | None
     error_class: str | None
     extras: dict[str, Any]
+    # v1.1 additions — per-event timing so the timeline conveys total
+    # wall-clock cost without consumers having to walk benchmark_report.json
+    # on disk. Both fields are optional and default to None when unknown.
+    duration_seconds: float | None  # workload wall-clock seconds
+    ended_ts_utc: str | None        # ts + duration_seconds (iso8601, UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +249,14 @@ class DetectedKernel(TypedDict, total=False):
     source_file: str | None
     detected_from_task: str       # which profile task_id surfaced it
     benchmark_report_path: str
+    # v1.1 additions — TraceLens roofline merge (set when category_data
+    # operations can be matched by name; left absent when no roofline
+    # signal is available for this kernel).
+    efficiency_percent: float | None
+    bound_type: str | None
+    tflops_achieved: float | None
+    flops_per_byte: float | None
+    library: str | None
 
 
 class RecommendedKernel(TypedDict, total=False):
@@ -466,6 +479,11 @@ class VariantDecision(TypedDict, total=False):
     reject_reason: str | None     # not_keep / combo_conflict / ...
     benchmark_report_path: str | None
     invocation: BenchmarkInvocation
+    # v1.1 additions — per-variant duration (from the variant's own
+    # benchmark_report.json) and the human-readable note recorded by
+    # the round winner (e.g. "retry_alt_value_larger", "new_family_…").
+    duration_seconds: float | None
+    decision_note: str | None
 
 
 class RoundDecision(TypedDict, total=False):
@@ -511,6 +529,15 @@ class KernelProfilingArtifacts(TypedDict, total=False):
 
 class KernelProfilingOutputs(TypedDict, total=False):
     tool: str                       # tracelens_analysis / magpie_torch_profiler
+    # Each ``top_kernels`` entry is a free-form ``dict[str, Any]`` (deliberately
+    # unconstrained so the schema doesn't force every collector branch into a
+    # uniform shape). v1.1 collectors emit at minimum:
+    #   ``kernel_id``, ``name``, ``gpu_pct``, ``duration_us``, ``bottleneck``,
+    # plus when TraceLens roofline data is available:
+    #   ``efficiency_percent``, ``bound_type``, ``flops_per_byte``,
+    #   ``tflops_achieved``, ``percent_of_total``, ``arithmetic_intensity``,
+    #   ``library``, ``operation_count``.
+    # Consumers MUST treat any subset of these keys as optional.
     top_kernels: list[dict[str, Any]]
     analysis_summary: str | None
 
@@ -524,6 +551,50 @@ class KernelProfilingRun(TypedDict, total=False):
     launch: KernelProfilingLaunch
     artifacts: KernelProfilingArtifacts
     outputs: KernelProfilingOutputs
+    # v1.1 P2-3 addition — derived end-of-run wall-clock (ISO8601 UTC)
+    # and total seconds. Populated when the underlying status JSON
+    # carries ``ended_at`` / ``duration_seconds`` (new kernel-agent
+    # runs). Left absent on historical sessions.
+    ended_ts_utc: str | None
+    duration_seconds: float | None
+
+
+# ---------------------------------------------------------------------------
+# v1.1 P2-1 — kernel decision path (per-kid causal chain across
+#             select_kernels → kernel_opt → integrate → validate_stack)
+# ---------------------------------------------------------------------------
+class KernelDecisionStep(TypedDict, total=False):
+    kid: str                       # kernel id (orchestrator alias, e.g. k001)
+    kernel_name: str               # human-readable name when known
+    step: str                      # "select" | "kernel_opt" | "integrate" | "validate"
+    backend: str | None            # geak / oob — only meaningful for kernel_opt
+    ts: str                        # ISO8601 UTC, "" if unknown
+    duration_seconds: float | None
+    ended_ts_utc: str | None
+    task_id: str
+    workspace: str | None
+    # Free-form decision label coming straight from the underlying
+    # audit entry: ``promoted`` / ``discarded`` / ``rejected`` /
+    # ``skipped`` / ``KEEP`` / ``PARTIAL`` / ``REVERT`` / …
+    outcome: str
+    decision_note: str
+    gain_pct: float | None
+    speedup: float | None
+    extras: dict[str, Any]
+
+
+class KernelDecisionPathSummary(TypedDict, total=False):
+    total_steps: int
+    backends_attempted: list[str]   # e.g. ["geak", "oob"]
+    final_outcome: str              # last step's outcome
+    total_duration_seconds: float | None
+
+
+class KernelDecisionPathEntry(TypedDict, total=False):
+    kid: str
+    kernel_name: str
+    steps: list[KernelDecisionStep]
+    summary: KernelDecisionPathSummary
 
 
 class SessionBreakdown(TypedDict, total=False):
@@ -531,6 +602,19 @@ class SessionBreakdown(TypedDict, total=False):
     exported_at_utc: str
     exporter_version: str
     detail_level: str               # standard / verbose
+    # ``coverage`` records which of the two canonical input files
+    # (``state.json`` + ``manifest.json``) were available when the
+    # breakdown was built. Consumers can use this to distinguish a real
+    # session run (``full``) from a post-orchestrator output directory
+    # that lacks the in-flight session state (``shell_only``):
+    #   ``full``        — both state.json and manifest.json present
+    #   ``partial``     — exactly one of the two was present
+    #   ``shell_only``  — neither present; emitted payload is best-effort
+    #                     file-system walk only (no kernel lifecycle,
+    #                     no decision journal, no attribution, ...).
+    # Field is optional for backwards compatibility — older breakdowns
+    # produced by exporters < this revision will simply not carry it.
+    coverage: str
 
     session: SessionMeta
     workload: Workload
@@ -549,6 +633,9 @@ class SessionBreakdown(TypedDict, total=False):
 
     decision_journal: list[DecisionJournalEntry]
     kernel_profiling: list[KernelProfilingRun]
+    # v1.1 P2-1 addition — per-kid causal chain. Empty list when the
+    # session ran no kernel selection / optimization / integration.
+    kernel_decision_path: list[KernelDecisionPathEntry]
 
     warnings: list[str]
     source_files: SourceFiles
@@ -571,6 +658,9 @@ __all__ = [
     "GpuMonitorAggregate",
     "Invocation",
     "KernelLifecycle",
+    "KernelDecisionPathEntry",
+    "KernelDecisionPathSummary",
+    "KernelDecisionStep",
     "KernelProfilingArtifacts",
     "KernelProfilingLaunch",
     "KernelProfilingOutputs",
