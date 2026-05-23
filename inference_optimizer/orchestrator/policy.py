@@ -176,6 +176,21 @@ ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset({
 })
 ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 
+# Roofline-v2 C3: per-intent source allowlist override. PRUNE_BRANCH widens
+# to ``orchestration`` as well, because the ``roofline`` action (C4) produces
+# structured prune suggestions that the main Orchestration LLM consumes via
+# the rendered prompt (C5) and then forwards to the Coordinator. The other
+# two scheduling-police intents (FORCE_DISPATCH, ESCALATE_STRATEGY_CHANGE)
+# stay robustness-only — they are recovery-shaped intents that bypass normal
+# task accounting and shouldn't be reachable from optimisation-flow LLMs.
+#
+# Lookups fall through to ROBUSTNESS_ONLY_SOURCE_ALLOWLIST when an intent is
+# not listed here, so adding a new ROBUSTNESS_ONLY_INTENTS entry remains
+# robustness-only by default.
+_ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
+    IntentType.PRUNE_BRANCH: frozenset({"robustness", "orchestration"}),
+}
+
 
 # ---------------------------------------------------------------------------
 # SESSION_DIR path containment (DESIGN v0.6.1 §23 / §14.5).
@@ -681,10 +696,16 @@ class PolicyGate:
     def _validate_robustness_only(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any]
     ) -> None:
-        if role.name not in ROBUSTNESS_ONLY_SOURCE_ALLOWLIST:
+        # Roofline-v2 C3: per-intent source allowlist takes precedence; the
+        # generic ROBUSTNESS_ONLY_SOURCE_ALLOWLIST remains the default so
+        # FORCE_DISPATCH / ESCALATE_STRATEGY_CHANGE stay robustness-only.
+        allowed_sources = _ROBUSTNESS_ONLY_INTENT_SOURCES.get(
+            intent_type, ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
+        )
+        if role.name not in allowed_sources:
             raise PolicyDenied(
                 f"role={role.name!r} cannot emit {intent_type.value} "
-                f"(allowed: {sorted(ROBUSTNESS_ONLY_SOURCE_ALLOWLIST)!r})",
+                f"(allowed: {sorted(allowed_sources)!r})",
                 rule="robustness_only_source",
             )
         if intent_type == IntentType.PRUNE_BRANCH:

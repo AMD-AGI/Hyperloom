@@ -22,9 +22,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
+import logging
+
 from ..session_paths import _runs_actions, runs_dir
 from .resource_lock import Lease, ResourceLockManager
-from .task_registry import Task, TaskRegistry
+from .task_registry import Task, TaskNotFound, TaskRegistry
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -87,6 +91,52 @@ class SubAgentRunner:
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
+    async def _transition_resilient(
+        self,
+        task_id: str,
+        new_state: str,
+        *,
+        evidence: dict | None = None,
+        context: str,
+    ) -> bool:
+        """Transition a task to ``new_state`` but tolerate ``TaskNotFound``.
+
+        Bug-fix (N34, May 2026): empirically the ``tasks`` row for a
+        long-running grid task (e.g. the params combo step, ~30 min
+        wall-clock) can disappear from the SQLite registry between the
+        moment the dispatcher pulls it out of ``tasks.queued()`` and the
+        moment the executor's terminal transition runs. The transition
+        then raises ``TaskNotFound``, the dispatcher's
+        ``except Exception ... continue`` drops the executor's result on
+        the floor (e.g. the params_search ledger never gets updated),
+        and the downstream N19c gate that unlocks ``kernel_opt`` never
+        fires because ``last_cheap_delta_gain`` stays ``None`` -- the
+        whole optimization loop silently stalls. We have NOT yet root-
+        caused the disappearing row (none of the in-tree paths DELETE
+        from the tasks table); the most likely culprit is a sqlite WAL
+        transaction edge-race during high-contention writes.
+
+        Until the deeper fix lands we treat ``TaskNotFound`` on a
+        terminal transition as a warning rather than a hard error so
+        the rest of the dispatcher pipeline (bus event + promotion to
+        SharedState) still runs. Returns ``True`` on a successful
+        transition, ``False`` on the swallowed-TaskNotFound branch (the
+        caller may want to stamp the SubAgentResult so downstream code
+        knows the audit-trail row is missing).
+        """
+        try:
+            await self.tasks.transition(task_id, new_state, evidence=evidence or {})
+            return True
+        except TaskNotFound:
+            log.warning(
+                "sub_agent_runner: tasks row for task_id=%s vanished before "
+                "transition→%s (context=%s); continuing so the executor "
+                "result is not lost. See sub_agent_runner._transition_"
+                "resilient docstring for the disappearing-row hypothesis.",
+                task_id, new_state, context,
+            )
+            return False
+
     async def run_task(self, task: Task) -> SubAgentResult:
         """Acquire required lanes, transition queued→running, execute, transition out.
 
@@ -95,14 +145,20 @@ class SubAgentRunner:
         ``running`` first — even on the "no runner" failure path —
         otherwise IllegalTransition fires.
         """
-        # queued → running first (state machine constraint)
-        await self.tasks.transition(task.task_id, "running")
+        # queued → running first (state machine constraint). Use the
+        # resilient variant so a missing row doesn't kill the runner
+        # before the executor has even started -- see
+        # _transition_resilient for the rationale (Bug N34 #1/#2).
+        await self._transition_resilient(
+            task.task_id, "running", context="enter_running",
+        )
 
         runner = self.executor_registry.get(task.kind)
         if runner is None:
-            await self.tasks.transition(
+            await self._transition_resilient(
                 task.task_id, "failed",
                 evidence={"reason": "no_executor", "kind": task.kind},
+                context="no_executor",
             )
             return SubAgentResult(
                 task_id=task.task_id, state="failed",
@@ -129,15 +185,19 @@ class SubAgentRunner:
             try:
                 result_payload = await runner(ctx)
             except Exception as exc:  # noqa: BLE001 — surface to task.history
-                await self.tasks.transition(
-                    task.task_id, "failed", evidence={"error": repr(exc)},
+                await self._transition_resilient(
+                    task.task_id, "failed",
+                    evidence={"error": repr(exc)},
+                    context="executor_exception",
                 )
                 return SubAgentResult(
                     task_id=task.task_id, state="failed",
                     result={}, error=repr(exc),
                 )
-            await self.tasks.transition(
-                task.task_id, "succeeded", evidence={"result_keys": sorted(result_payload.keys())},
+            await self._transition_resilient(
+                task.task_id, "succeeded",
+                evidence={"result_keys": sorted(result_payload.keys())},
+                context="executor_success",
             )
             return SubAgentResult(
                 task_id=task.task_id, state="succeeded", result=result_payload,

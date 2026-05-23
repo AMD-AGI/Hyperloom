@@ -49,7 +49,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     # running pytest. ``krh`` is already imported at module top — no
     # inline reimport. Same convention as test_p2_2_profile_and_handlers.py.
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
-    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
+    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Skip the ``python3 -c "import Magpie"`` probe inside
     # _resolve_magpie_python so subprocess.run mocks only see the actual
     # Magpie launch command (origin/main behaviour).
@@ -274,7 +274,7 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
             "kernel_id": "k006",
             "best_artifact_path": str(patch_file),
         },
-        last_select_kernels={
+        last_trace_analyze={
             "hot_kernels_top15": [{
                 "kernel_id": "k006",
                 "source_file": str(target),
@@ -499,7 +499,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
             "reusable_native_kernel_ids": ["k1"],
         }
@@ -566,7 +566,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
             "reusable_native_kernel_ids": ["k_repeat"],
         }

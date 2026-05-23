@@ -1,0 +1,394 @@
+"""N31 — finalize-time roofline + report Roofline Comparison section.
+
+Three orthogonal pieces pinned here:
+
+1. **SharedState baseline freeze**: ``last_trace_analyze_baseline``
+   captures snapshot #1 once and never overwrites. Subsequent
+   rooflines only update ``last_trace_analyze`` (current).
+
+2. **N21 gate exception**: when ``cumulative_gain_validated > 0`` AND
+   ``optimization_stack`` non-empty AND ``snapshot_id == 1``, a
+   re-roofline is allowed even when ``discovered_flags`` are
+   unchanged -- the validated gain itself is the signal that the
+   hot-kernel distribution has shifted.
+
+3. **Report Roofline Comparison section**: ``report.py``
+   ``_format_roofline_comparison_section`` extracts the Executive
+   Summary out of both snapshots' analysis.md and renders a
+   before/after pair. When only one snapshot exists (no
+   re-roofline was triggered), it renders a single Executive
+   Summary block with a clear explanation.
+
+The closing_phase auto-inject of a final roofline (part of N31) is
+tested separately in test_p1_4_resume.py-style integration tests --
+this file focuses on the pure-function contracts.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from inference_optimizer.orchestrator.action_executors.report import (
+    _extract_executive_summary,
+    _format_roofline_comparison_section,
+)
+from inference_optimizer.orchestrator.coordinator import Coordinator
+from inference_optimizer.orchestrator.shared_state import SharedState
+
+
+# ---------------------------------------------------------------------------
+# SharedState baseline freeze field
+# ---------------------------------------------------------------------------
+
+
+def test_baseline_field_defaults_empty():
+    s = SharedState()
+    assert s.last_trace_analyze_baseline == {}
+
+
+def test_baseline_field_persists_across_save_load(tmp_path):
+    s = SharedState()
+    s.last_trace_analyze_baseline = {
+        "roofline_snapshot_id": 1,
+        "analysis_md_path": "/tmp/analysis-baseline.md",
+        "trace_input": "/tmp/profile.tar.gz",
+        "ts": "2026-05-21T07:50:00+00:00",
+    }
+    s.save(tmp_path)
+    s2 = SharedState.load_or_init(tmp_path)
+    assert s2.last_trace_analyze_baseline["roofline_snapshot_id"] == 1
+    assert s2.last_trace_analyze_baseline["analysis_md_path"] == "/tmp/analysis-baseline.md"
+
+
+# ---------------------------------------------------------------------------
+# N21 gate exception (cumulative_gain_validated > 0 + snapshot_id == 1)
+# ---------------------------------------------------------------------------
+
+
+def _make_coord_with_snapshot_1():
+    coord = Coordinator.__new__(Coordinator)
+    coord.shared_state = SharedState()
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.last_trace_analyze = {
+        "roofline_snapshot_id": 1,
+        "analysis_md_path": "/tmp/baseline-analysis.md",
+        "analysis_md_text": "# Stub\n## Executive Summary\nCompute 60%\n",
+    }
+    coord.shared_state.discovered_flags = {"sglang": {"backend_flags": ["--foo"]}}
+    coord.shared_state.discovered_flags_at_last_snapshot = {
+        "sglang": {"backend_flags": ["--foo"]},
+    }
+    return coord
+
+
+def test_n21_blocks_when_no_validated_gain():
+    """N31 exception should NOT fire when validated_gain == 0 (no real
+    improvement; running an expensive 20min roofline for the report
+    would be wasted)."""
+    coord = _make_coord_with_snapshot_1()
+    coord.shared_state.cumulative_gain_validated = 0.0
+    coord.shared_state.optimization_stack = []
+    # Flags unchanged + no validated gain -> N21 still blocks.
+    denied = coord._proposal_denial_for_roofline()
+    assert denied is not None
+    assert denied.rule == "execution_order"
+
+
+def test_n21_blocks_when_no_stack_entries():
+    """N31 exception requires AT LEAST ONE optimization_stack entry
+    so a real before/after comparison makes sense."""
+    coord = _make_coord_with_snapshot_1()
+    coord.shared_state.cumulative_gain_validated = 1.5
+    coord.shared_state.optimization_stack = []  # empty -> N31 doesn't fire
+    denied = coord._proposal_denial_for_roofline()
+    assert denied is not None
+
+
+def test_n31_exception_unlocks_when_validated_gain_and_stack():
+    """The SOLAR-shaped happy path: cumulative_gain_validated > 0 +
+    stack has KEEP entries + snapshot_id == 1 -> N31 allows the
+    re-roofline so the final snapshot can be captured for the
+    Comparison section."""
+    coord = _make_coord_with_snapshot_1()
+    coord.shared_state.cumulative_gain_validated = 1.5
+    coord.shared_state.optimization_stack = [
+        {"action": "params", "variant_name": "decode_steps_16", "tput": 3199.4},
+    ]
+    denied = coord._proposal_denial_for_roofline()
+    assert denied is None
+
+
+def test_n31_exception_only_fires_once():
+    """When snapshot_id has already advanced to 2 (post-N31), the
+    exception no longer applies -- subsequent rerolls go back to the
+    regular flags-changed check."""
+    coord = _make_coord_with_snapshot_1()
+    coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 2
+    coord.shared_state.cumulative_gain_validated = 1.5
+    coord.shared_state.optimization_stack = [
+        {"action": "params", "variant_name": "decode_steps_16", "tput": 3199.4},
+    ]
+    # Flags unchanged + snapshot_id == 2 -> back to standard N21 deny.
+    denied = coord._proposal_denial_for_roofline()
+    assert denied is not None
+
+
+# ---------------------------------------------------------------------------
+# N31 baseline backfill on --resume (A in the N31 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_inputs_match_resume_path_contract(tmp_path):
+    """Smoke-test the precise condition cli.py --resume backfill checks:
+
+    * baseline freeze empty
+    * last_trace_analyze.snapshot_id >= 1
+    * latest snapshot's analysis_md_path / trace_input get copied
+      into the freeze dict
+    * a "source=n31_resume_backfill" tag distinguishes backfills from
+      authoritative first-promote freezes
+    """
+    # We replay the cli.py backfill block here as a pure unit so we
+    # don't have to spin up the whole cli entrypoint for the test.
+    from datetime import datetime, timezone
+
+    state = SharedState()
+    state.last_trace_analyze = {
+        "roofline_snapshot_id": 1,
+        "analysis_md_path": "/sessions/x/kernel-agent/.../analysis.md",
+        "trace_input": "/sessions/x/runs/roofline/trace.tar.gz",
+    }
+    # Replay backfill logic (must match cli.py exactly).
+    cached = state.last_trace_analyze or {}
+    cur_snap_id = cached.get("roofline_snapshot_id", 0)
+    if (
+        not state.last_trace_analyze_baseline
+        and isinstance(cur_snap_id, int)
+        and cur_snap_id >= 1
+    ):
+        state.last_trace_analyze_baseline = {
+            "roofline_snapshot_id": cur_snap_id,
+            "analysis_md_path": str(cached.get("analysis_md_path") or ""),
+            "trace_input": str(cached.get("trace_input") or ""),
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source": "n31_resume_backfill",
+        }
+    assert state.last_trace_analyze_baseline["roofline_snapshot_id"] == 1
+    assert state.last_trace_analyze_baseline["analysis_md_path"].endswith(
+        "/analysis.md"
+    )
+    assert state.last_trace_analyze_baseline["source"] == "n31_resume_backfill"
+
+
+def test_backfill_skips_when_baseline_already_frozen():
+    """The backfill must NOT overwrite an existing freeze (the freeze
+    from first-promote is authoritative)."""
+    state = SharedState()
+    state.last_trace_analyze = {
+        "roofline_snapshot_id": 2,
+        "analysis_md_path": "/sessions/x/...latest.md",
+    }
+    state.last_trace_analyze_baseline = {
+        "roofline_snapshot_id": 1,
+        "analysis_md_path": "/sessions/x/...baseline.md",
+        "source": "post_promote",
+    }
+    cached = state.last_trace_analyze or {}
+    cur_snap_id = cached.get("roofline_snapshot_id", 0)
+    # The cli.py guard MUST not overwrite a populated freeze.
+    if (
+        not state.last_trace_analyze_baseline
+        and isinstance(cur_snap_id, int)
+        and cur_snap_id >= 1
+    ):
+        pytest.fail("backfill triggered when freeze was already populated")
+    # Verify the original freeze is intact.
+    assert state.last_trace_analyze_baseline["source"] == "post_promote"
+    assert state.last_trace_analyze_baseline["roofline_snapshot_id"] == 1
+
+
+def test_backfill_skips_when_no_snapshot_yet():
+    """When resuming a session that never ran roofline successfully
+    (snapshot_id < 1), the backfill must NOT synthesise a fake
+    baseline -- there's nothing useful to freeze."""
+    state = SharedState()
+    state.last_trace_analyze = {}  # no snapshot
+    cached = state.last_trace_analyze or {}
+    cur_snap_id = cached.get("roofline_snapshot_id", 0)
+    if (
+        not state.last_trace_analyze_baseline
+        and isinstance(cur_snap_id, int)
+        and cur_snap_id >= 1
+    ):
+        pytest.fail("backfill triggered without a snapshot to freeze")
+    assert state.last_trace_analyze_baseline == {}
+
+
+# ---------------------------------------------------------------------------
+# Report renderer
+# ---------------------------------------------------------------------------
+
+
+def test_extract_executive_summary_normal(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "# Qwen1.5-7B - MI300X Analysis\n\n"
+        "## Executive Summary\n\n"
+        "Compute time 77.83%, idle 22%.\n\n"
+        "| Metric | Value |\n"
+        "|--------|-------|\n"
+        "| Total Time | 880 ms |\n\n"
+        "## Compute Kernel Optimizations\n\n"
+        "...details elided...\n",
+        encoding="utf-8",
+    )
+    out = _extract_executive_summary(str(md))
+    assert "Executive Summary" in out
+    assert "Compute time 77.83%" in out
+    # Must stop at the next ## heading.
+    assert "Compute Kernel Optimizations" not in out
+    assert "details elided" not in out
+
+
+def test_extract_executive_summary_missing_file():
+    out = _extract_executive_summary("/tmp/does-not-exist.md")
+    assert "could not read" in out
+
+
+def test_extract_executive_summary_empty_path():
+    out = _extract_executive_summary("")
+    assert "no analysis.md path" in out
+
+
+def test_extract_executive_summary_no_section(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text("# Title\n\n## Other\ncontent\n", encoding="utf-8")
+    out = _extract_executive_summary(str(md))
+    assert "does not contain" in out
+
+
+def test_extract_executive_summary_strips_base64_images(tmp_path):
+    md = tmp_path / "analysis.md"
+    big_b64 = "X" * 50000  # mock huge inline image
+    md.write_text(
+        "## Executive Summary\n\n"
+        f"![chart](data:image/png;base64,{big_b64})\n\n"
+        "Real text after image.\n",
+        encoding="utf-8",
+    )
+    out = _extract_executive_summary(str(md))
+    # ``strip_base64_data_urls`` (shared helper) rewrites the data URL to
+    # ``![<alt>](<<stripped: base64 image — <alt>>>)`` so downstream agents
+    # see that a chart was present without the binary payload. Assert on
+    # the structural marker rather than a free-text string so future
+    # marker tweaks only need the helper + this one test updated together.
+    assert "stripped: base64 image" in out
+    assert "chart" in out  # alt-text preserved
+    assert big_b64[:100] not in out
+    assert "Real text after image" in out
+
+
+def test_extract_executive_summary_caps_at_2kb(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "## Executive Summary\n\n"
+        + "A" * 5000
+        + "\n",
+        encoding="utf-8",
+    )
+    out = _extract_executive_summary(str(md))
+    assert len(out) <= 2050
+    assert out.endswith("...")
+
+
+def test_format_comparison_section_single_snapshot(tmp_path):
+    """No re-roofline triggered -> render single snapshot table."""
+    cmp = {
+        "mode": "single_snapshot",
+        "baseline": {
+            "snapshot_id": 1,
+            "ts": "2026-05-21T07:50:00+00:00",
+            "compute_pct": 80.0,
+            "idle_pct": 20.0,
+            "comm_pct": 0.0,
+            "top_bottleneck": "GEMM",
+            "top_kernel": {
+                "name": "gemm_kernel",
+                "gpu_pct": 50.0,
+                "efficiency_pct": 29.7,
+                "bound_type": "compute",
+            },
+        },
+        "latest": {
+            "snapshot_id": 1,
+            "ts": "2026-05-21T07:50:00+00:00",
+            "compute_pct": 80.0,
+            "idle_pct": 20.0,
+            "comm_pct": 0.0,
+            "top_bottleneck": "GEMM",
+        },
+    }
+    lines = _format_roofline_comparison_section(cmp)
+    text = "\n".join(lines)
+    assert "## Roofline Comparison" in text
+    assert "Only one roofline snapshot was captured" in text
+    assert "| Compute % | 80.0% |" in text
+
+
+def test_format_comparison_section_before_after(tmp_path):
+    """Two distinct snapshots -> render Base / Opt / Δ table."""
+    cmp = {
+        "mode": "before_after",
+        "baseline": {
+            "snapshot_id": 1,
+            "ts": "2026-05-21T07:50:00+00:00",
+            "compute_pct": 60.0,
+            "idle_pct": 10.0,
+            "comm_pct": 5.0,
+            "top_bottleneck": "GEMM",
+            "top_kernel": {
+                "name": "gemm_kernel",
+                "efficiency_pct": 29.7,
+                "bound_type": "compute",
+            },
+        },
+        "latest": {
+            "snapshot_id": 2,
+            "ts": "2026-05-21T08:30:00+00:00",
+            "compute_pct": 75.0,
+            "idle_pct": 8.0,
+            "comm_pct": 4.0,
+            "top_bottleneck": "GEMM",
+            "top_kernel": {
+                "name": "gemm_kernel",
+                "efficiency_pct": 34.9,
+                "bound_type": "compute",
+            },
+        },
+        "delta": {
+            "compute_pct": 15.0,
+            "idle_pct": -2.0,
+            "comm_pct": -1.0,
+            "top_kernel_efficiency_pct": 5.2,
+        },
+    }
+    lines = _format_roofline_comparison_section(cmp)
+    text = "\n".join(lines)
+    assert "## Roofline Comparison" in text
+    assert "| Metric | Base | Opt | Δ |" in text
+    assert "Baseline snapshot #1" in text
+    assert "Optimized snapshot #2" in text
+    assert "60.0%" in text
+    assert "75.0%" in text
+
+
+def test_format_comparison_section_no_snapshot_at_all():
+    """When roofline never ran successfully (baseline empty) the
+    section explains the gap rather than throwing."""
+    cmp = {"baseline": {}, "latest": {"snapshot_id": None, "analysis_md_path": ""}}
+    lines = _format_roofline_comparison_section(cmp)
+    text = "\n".join(lines)
+    assert "## Roofline Comparison" in text
+    assert "No roofline snapshot was captured" in text
