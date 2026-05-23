@@ -314,10 +314,33 @@ class ValidateStackExecutor(BaselineExecutor):
         forwarded_params = dict(params)
         forwarded_params["config_path"] = str(materialised)
         forwarded_params["output_dir"] = str(output_dir)
-        # Do NOT re-pass extra_sglang_args/extra_envs — they're already
-        # baked into the materialised YAML.
-        forwarded_params.pop("extra_sglang_args", None)
-        forwarded_params.pop("extra_envs", None)
+        # Single-node: pop merged args/envs. They're already baked into
+        # the materialised YAML above; BaselineExecutor will call
+        # ``materialize_config_with_envs`` again but its idempotent
+        # "non-empty-or-skip" guard preserves the EXTRA_*_ARGS we just
+        # wrote, so the launched Magpie subprocess sees the full stack.
+        #
+        # Multi-node: KEEP merged args/envs in ``task.params``. The
+        # BaselineExecutor multi-node path forwards
+        # ``params["extra_sglang_args"]`` straight into
+        # ``restart_server_for_round`` -> ``cmd_restart_server`` which
+        # boots sglang via the multi_node CLI **without** ever reading
+        # the materialised YAML. Popping there silently launches sglang
+        # with default args and drops the entire ``optimization_stack``,
+        # making ``cumulative_gain_validated`` collapse to ~0% no matter
+        # how many variants were KEPT (validate_stack would
+        # re-baseline against a vanilla server). Forward merged values
+        # so the restarted multi-node sglang sees every KEEP'd flag.
+        from ._multi_node_env import is_multi_node
+        if is_multi_node():
+            forwarded_params["extra_sglang_args"] = merged_args
+            if merged_envs:
+                forwarded_params["extra_envs"] = merged_envs
+            else:
+                forwarded_params.pop("extra_envs", None)
+        else:
+            forwarded_params.pop("extra_sglang_args", None)
+            forwarded_params.pop("extra_envs", None)
         ctx.task.params = forwarded_params  # type: ignore[assignment]
         result = await super().__call__(ctx)
 

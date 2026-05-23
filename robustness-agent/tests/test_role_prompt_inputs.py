@@ -283,3 +283,79 @@ def test_optimization_stack_size_zero_when_none():
     )
     ctx = from_coordinator_prompt(prompt)
     assert ctx.shared_state.optimization_stack_size == 0
+
+
+# ---------------------------------------------------------------------------
+# explore_started — flips True iff at least one of the four explore
+# family ``last_*`` lines is non-``(none)``. Used by the
+# ``no_levers_found`` signal to defer until exploration has actually
+# been attempted (cold-start guard).
+# ---------------------------------------------------------------------------
+
+def test_explore_started_false_when_all_last_explore_keys_are_none():
+    """Coordinator default rendering: pre-backends/params/sweep/
+    validate_stack the four lines are all ``(none)``. The flag must
+    stay False so ``no_levers_found`` defers."""
+    prompt = _prompt(
+        "session_id=s\n"
+        "last_backends=(none)\n"
+        "last_params=(none)\n"
+        "last_sweep=(none)\n"
+        "last_validate_stack=(none)\n"
+        "crash_count=0\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.shared_state.explore_started is False
+
+
+def test_explore_started_true_when_any_last_explore_key_is_set():
+    """First successful backends round renders e.g.
+    ``last_backends=status=succeeded decision=promoted ...``. That
+    flips ``explore_started`` to True even if last_params/sweep/
+    validate_stack are still ``(none)``."""
+    prompt = _prompt(
+        "session_id=s\n"
+        "last_backends=status=succeeded decision=promoted "
+        "tput=600.50 err=- ws=/runs/backends/abc ts=2026-05-22T05:00:00Z\n"
+        "last_params=(none)\n"
+        "last_sweep=(none)\n"
+        "last_validate_stack=(none)\n"
+        "crash_count=0\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.shared_state.explore_started is True
+
+
+def test_explore_started_true_for_each_individual_explore_family():
+    """Sanity: each of the four explore family keys flips the flag
+    independently. Iterate so a future schema rename in shared_state.py
+    fails one assertion rather than silently downgrading the gate."""
+    for key in (
+        "last_backends",
+        "last_params",
+        "last_sweep",
+        "last_validate_stack",
+    ):
+        prompt = _prompt(
+            f"session_id=s\n{key}=status=succeeded decision=promoted\n"
+            "crash_count=0\n",
+            "=== Inbox for robustness ===\n(no new messages)\n",
+        )
+        ctx = from_coordinator_prompt(prompt)
+        assert ctx.shared_state.explore_started is True, (
+            f"{key} should flip explore_started"
+        )
+
+
+def test_explore_started_default_false_when_keys_absent():
+    """Legacy / partial prompts (e.g. tests that omit the explore
+    family lines entirely) must default to False so the cold-start
+    guard stays conservative."""
+    prompt = _prompt(
+        "session_id=s\ncrash_count=0\n",
+        "=== Inbox for robustness ===\n(no new messages)\n",
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.shared_state.explore_started is False
