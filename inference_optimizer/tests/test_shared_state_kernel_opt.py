@@ -287,3 +287,201 @@ def test_kernel_opt_attempts_count_property(state: SharedState):
     state.record_kernel_opt(_ok_result("k001", "REVERT", 0.9))  # same kid
     state.record_kernel_opt(_ok_result("k002", "PARTIAL", 1.0))
     assert state.kernel_opt_attempts_count == 2  # unique kernels
+
+
+# ---------------------------------------------------------------------------
+# PR-C: failure_count + max_failures = 1 retirement
+# ---------------------------------------------------------------------------
+def _failed_result(kernel_id: str, *, status: str = "failed",
+                   error_class: str = "subtask_exception",
+                   source_file: str = "") -> dict:
+    return {
+        "status": status,
+        "kernel_id": kernel_id,
+        "source_file": source_file,
+        "error_class": error_class,
+        "error": "simulated",
+    }
+
+
+def test_record_kernel_opt_failure_count_increments_on_status_failed(state: SharedState):
+    state.record_kernel_opt(_failed_result(
+        "k001", status="failed", source_file="/p/a.py",
+    ))
+    e = state.kernel_opt_attempts["k001"]
+    assert e["failure_count"] == 1
+    assert e["last_status"] == "failed"
+
+
+def test_record_kernel_opt_one_failure_retires_kernel(state: SharedState):
+    """PR-C max_failures=1: one completed-ladder-without-KEEP retires.
+
+    Operator decision: GEAK->Claude->Codex runs once; if every backend
+    fails to produce a KEEP, the kernel "cannot be optimized" and must
+    not be re-dispatched. Without this, Qwen3-30B-A3B-Base 164405Z
+    burned 8h re-running the same k002/k004 GEAK->Claude->Codex chain
+    every time the LLM proposed a fresh run_optimization batch.
+    """
+    state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
+    assert "k001" in state.rejected_kernel_ids
+    assert state.kernel_opt_attempts["k001"]["rejected_reason"].startswith(
+        "max_failures_"
+    )
+
+
+def test_record_kernel_opt_revert_retires_immediately(state: SharedState):
+    state.record_kernel_opt(_ok_result("k001", "REVERT", 0.9,
+                                       source_file="/p/a.py"))
+    assert "k001" in state.rejected_kernel_ids
+    assert state.kernel_opt_attempts["k001"]["rejected_reason"] == "revert_decision"
+
+
+def test_record_kernel_opt_keep_resets_failure_count(state: SharedState):
+    """An earlier failure must not retire a kernel once a later KEEP
+    arrives -- e.g. GEAK timeout that streamed first, then Claude KEEP
+    that streamed second within the same _run_kernel_backend_sequence
+    aggregation."""
+    state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
+    # failed once, retired
+    assert "k001" in state.rejected_kernel_ids
+    # but a subsequent KEEP (e.g. operator resumed, re-dispatched
+    # explicitly) clears the streak so the kernel is usable again from
+    # the queue's perspective.
+    state.rejected_kernel_ids.remove("k001")
+    state.record_kernel_opt(_ok_result("k001", "KEEP", 4.0,
+                                       source_file="/p/a.py"))
+    e = state.kernel_opt_attempts["k001"]
+    assert e["failure_count"] == 0
+    assert e["last_decision"] == "KEEP"
+
+
+def test_record_kernel_opt_max_failures_env_override(state: SharedState, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "2")
+    state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
+    # First failure -> not yet retired with env=2
+    assert "k001" not in state.rejected_kernel_ids
+    state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
+    assert "k001" in state.rejected_kernel_ids
+
+
+# ---------------------------------------------------------------------------
+# PR-C: untried_hot_reusable_kernels report gate
+# ---------------------------------------------------------------------------
+def _set_trace(state: SharedState, *, hot_kernels, task_groups=None):
+    state.last_trace_analyze = {
+        "hot_kernels": hot_kernels,
+        "task_groups": task_groups or [],
+    }
+
+
+def test_untried_hot_kernels_returns_only_reusable_above_threshold(state: SharedState):
+    _set_trace(state, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k003", "gpu_pct": 1.2, "reusable_native_kernel": True,
+         "source_file": "/p/rmsnorm.py"},  # below 3% threshold
+        {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True,
+         "source_file": "/p/rmsnorm.py"},
+        {"kernel_id": "k006", "gpu_pct": 15.0, "reusable_native_kernel": False,
+         "source_file": "/aten/mm.py"},  # aten not reusable
+    ])
+    untried = state.untried_hot_reusable_kernels()
+    assert set(untried) == {"k001", "k002", "k004"}
+    assert "k003" not in untried  # below 3% threshold
+    assert "k006" not in untried  # non-reusable
+
+
+def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState):
+    """Real numbers from /wekafs/users/.../20260522T164910Z/.../kernel_candidates.json.
+
+    That session emitted ``report`` at tick=8 with zero kernel_opt
+    attempts despite k001=23.7%, k002=37.3%, k004=9.7% all reusable.
+    The new gate should report 3 untried hot kernels and block report.
+    """
+    _set_trace(state, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 23.7, "reusable_native_kernel": True,
+         "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
+        {"kernel_id": "k002", "gpu_pct": 37.3, "reusable_native_kernel": True,
+         "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
+        {"kernel_id": "k003", "gpu_pct": 1.3, "reusable_native_kernel": True,
+         "source_file": "/sgl-workspace/aiter/aiter/ops/rmsnorm.py"},
+        {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True,
+         "source_file": "/sgl-workspace/aiter/aiter/ops/rmsnorm.py"},
+        {"kernel_id": "k005", "gpu_pct": 2.8, "reusable_native_kernel": True,
+         "source_file": "/sgl-workspace/aiter/aiter/ops/rmsnorm.py"},
+        {"kernel_id": "k006", "gpu_pct": 15.6, "reusable_native_kernel": False,
+         "source_file": ""},
+        {"kernel_id": "k007", "gpu_pct": 9.7, "reusable_native_kernel": False,
+         "source_file": ""},
+    ])
+    untried = state.untried_hot_reusable_kernels()
+    # k001/k002/k004 must all be flagged untried -- log1 dropped these
+    assert set(untried) >= {"k001", "k002", "k004"}
+    # Sorted strongest-first (k002 37% > k001 24% > k004 9.7%)
+    assert untried[0] == "k002"
+
+
+def test_untried_hot_kernels_collapses_by_task_group(state: SharedState):
+    """task_group dedup: same AST function -> one slot."""
+    _set_trace(state, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+    ], task_groups=[
+        {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
+    ])
+    untried = state.untried_hot_reusable_kernels()
+    # Both kernels share a task_group -> only one slot reported
+    assert len(untried) == 1
+    # And it picks the highest-gpu_pct member (k002)
+    assert untried[0] == "k002"
+
+
+def test_untried_hot_kernels_skips_when_any_group_member_attempted(state: SharedState):
+    """If k002 of group [k001,k002] has been attempted, k001 is also
+    considered tried (same AST function -> same patch target)."""
+    _set_trace(state, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+    ], task_groups=[
+        {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
+    ])
+    # Mark k002 as attempted
+    state.record_kernel_opt(_failed_result("k002", source_file="/p/moe_op.py"))
+    untried = state.untried_hot_reusable_kernels()
+    assert untried == []
+
+
+def test_untried_hot_kernels_skips_when_source_file_integrated(state: SharedState):
+    """Whole-file overwrite: once an integrate touches a source file,
+    no further KEEP on the same file is meaningful."""
+    _set_trace(state, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k009", "gpu_pct": 4.5, "reusable_native_kernel": True,
+         "source_file": "/p/rmsnorm.py"},
+    ])
+    state.optimization_stack.append({
+        "action": "integrate", "kernel_id": "k001",
+        "target_file": "/p/moe_op.py", "tput": 4500.0,
+    })
+    untried = state.untried_hot_reusable_kernels()
+    assert untried == ["k009"]  # k001's whole file is integrated
+
+
+def test_untried_hot_kernels_caps_at_top_n(state: SharedState, monkeypatch):
+    """Even with 15 reusable hot kernels, the gate only demands top-N."""
+    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", "3")
+    hot = [
+        {"kernel_id": f"k{i:03d}", "gpu_pct": 30.0 - i * 1.5,
+         "reusable_native_kernel": True, "source_file": f"/p/f{i}.py"}
+        for i in range(15)
+    ]
+    _set_trace(state, hot_kernels=hot)
+    untried = state.untried_hot_reusable_kernels()
+    assert len(untried) == 3
