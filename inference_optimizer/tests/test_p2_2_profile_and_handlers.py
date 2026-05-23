@@ -2291,6 +2291,162 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
 
 
 @pytest.mark.asyncio
+async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
+    session_dir,
+):
+    """PR-F bug repro: the GEAK→Claude→Codex ladder used to pick the
+    backend with the highest ``micro_speedup``, ignoring whether that
+    attempt was a real KEEP or just a NEEDS_REVIEW with a paper claim.
+
+    Qwen3-30B-A3B-Base session 20260523T035235Z k004 trace:
+      * GEAK         micro=1.30  decision=NEEDS_REVIEW (correctness missing)
+      * Claude       micro=??    decision=??
+      * Codex        micro=1.17  decision=KEEP (correctness PASS)
+
+    Before PR-F: best=GEAK (1.30 > 1.17), KEEP signal silently
+    discarded, integrate gate never fires, k004 patch ends up in
+    rejected with attempts=1 and the actual production-quality 1.17x
+    KEEP is wasted.
+
+    Fix: ladder must prefer KEEP over non-KEEP regardless of micro.
+    Mirror the batch handler's tuple key.
+    """
+    calls: list[str] = []
+
+    async def fake_single(child, *, session_dir):
+        backend = child["backends"]
+        calls.append(backend)
+        if backend == "geak":
+            return {
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "NEEDS_REVIEW",
+                             "reasons": ["correctness missing"]},
+                "verification": {"micro_speedup": 1.30,
+                                 "correctness_passed": False,
+                                 "best_artifact_path": "/tmp/geak.py"},
+            }
+        if backend == "claude":
+            return {
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "REVERT",
+                             "reasons": ["micro 0.9 regression"]},
+                "verification": {"micro_speedup": 0.9,
+                                 "correctness_passed": True,
+                                 "best_artifact_path": "/tmp/claude.py"},
+            }
+        if backend == "codex":
+            return {
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP",
+                             "reasons": ["ready for integrate"]},
+                "verification": {"micro_speedup": 1.17,
+                                 "correctness_passed": True,
+                                 "best_artifact_path": "/tmp/codex.py"},
+            }
+        raise AssertionError(f"unexpected backend {backend!r}")
+
+    candidate = {
+        "kernel_id": "k004",
+        "source_file": "/p/moe_op.py",
+        "reusable_native_kernel": True,
+    }
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy"},
+            candidate,
+            session_dir=session_dir,
+        )
+
+    # Ladder MUST keep walking past GEAK NEEDS_REVIEW and Claude REVERT,
+    # then break on Codex KEEP.
+    assert calls == ["geak", "claude", "codex"], calls
+    assert (best.get("proposal") or {}).get("decision") == "KEEP", best
+    assert (best.get("verification") or {}).get("micro_speedup") == 1.17
+    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/codex.py"
+
+
+@pytest.mark.asyncio
+async def test_backend_ladder_breaks_on_first_keep(session_dir):
+    """When GEAK already KEEPs, ladder must short-circuit (not waste
+    Claude/Codex wall-clock chasing a higher number)."""
+    calls: list[str] = []
+
+    async def fake_single(child, *, session_dir):
+        backend = child["backends"]
+        calls.append(backend)
+        if backend == "geak":
+            return {
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP", "reasons": []},
+                "verification": {"micro_speedup": 1.50,
+                                 "correctness_passed": True,
+                                 "best_artifact_path": "/tmp/geak.py"},
+            }
+        raise AssertionError(f"ladder must NOT run {backend!r} after GEAK KEEP")
+
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
+             "reusable_native_kernel": True},
+            session_dir=session_dir,
+        )
+
+    assert calls == ["geak"]
+    assert (best.get("proposal") or {}).get("decision") == "KEEP"
+    assert (best.get("verification") or {}).get("micro_speedup") == 1.50
+
+
+@pytest.mark.asyncio
+async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
+    session_dir,
+):
+    """If NO backend KEEPs, ladder picks the highest-micro non-KEEP
+    so the per-kernel ledger at least records the strongest signal
+    (the prior behaviour, kept under the new tuple-key)."""
+    async def fake_single(child, *, session_dir):
+        backend = child["backends"]
+        if backend == "geak":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
+                "verification": {"micro_speedup": 1.30,
+                                 "best_artifact_path": "/tmp/geak.py"},
+            }
+        if backend == "claude":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
+                "verification": {"micro_speedup": 1.45,
+                                 "best_artifact_path": "/tmp/claude.py"},
+            }
+        if backend == "codex":
+            return {
+                "status": "ok", "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "REVERT", "reasons": []},
+                "verification": {"micro_speedup": 0.8,
+                                 "best_artifact_path": "/tmp/codex.py"},
+            }
+        raise AssertionError(backend)
+
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
+             "reusable_native_kernel": True},
+            session_dir=session_dir,
+        )
+
+    # All non-KEEP -> pick highest micro (Claude 1.45)
+    assert (best.get("verification") or {}).get("micro_speedup") == 1.45
+    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/claude.py"
+
+
+@pytest.mark.asyncio
 async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
     session_dir,
 ):
