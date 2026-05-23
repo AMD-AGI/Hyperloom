@@ -8,11 +8,7 @@ from __future__ import annotations
 import pytest
 
 import framework_agent.sources as src
-from framework_agent.models import (
-    Baseline,
-    ExploreRequest,
-    PrimusCortexConfig,
-)
+from framework_agent.models import ExploreRequest
 from framework_agent.sources._shared import GitHubPr
 
 
