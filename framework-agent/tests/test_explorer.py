@@ -7,10 +7,7 @@ writer so it exercises explore() control flow without I/O to primus.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-
-import pytest
 
 import framework_agent.explorer as ex
 from framework_agent.decision import winner_decision

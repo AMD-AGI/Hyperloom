@@ -11,10 +11,7 @@ in explorer.py; only the module boundary moved.
 
 from __future__ import annotations
 
-from .logging_setup import get_logger
 from .models import ExploreRequest
-
-log = get_logger(__name__)
 
 
 def winner_decision(
