@@ -1713,26 +1713,33 @@ def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
 
 
 def _trust_geak_correctness() -> bool:
-    """PR-E opt-in: treat GEAK ``status=complete`` + measured speedup as
-    sufficient correctness evidence.
+    """Treat GEAK ``status=complete`` + measured speedup as sufficient
+    correctness evidence by default.
 
     GEAK's ``save_and_test`` only verifies that the patch compiles and
     that ``import aiter`` succeeds; it does NOT exercise the kernel's
     numerical output (e.g. ck_moe_stage1 with a a8w8 blockscale harness
-    only prints the aiter import banner). Without this flag, every GEAK
-    KEEP candidate degrades to NEEDS_REVIEW because
-    ``correctness_source == 'missing'``.
+    only prints the aiter import banner). Without trusting GEAK, every
+    GEAK KEEP candidate degrades to NEEDS_REVIEW because
+    ``correctness_source == 'missing'`` and the patch never reaches
+    integrate.
 
-    Operators that want GEAK candidates to proceed to integrate (where
-    the E2E magpie benchmark is the ground-truth functional check, and
-    ``RUN_EVAL=true`` is the optional accuracy gate) set
-    ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=1``. Default OFF preserves the
-    conservative behaviour for operators that prefer human review of
-    GEAK kernels before integrate.
+    Default ON: the integrate stage's E2E magpie benchmark is the
+    ground-truth functional check, and operators can layer
+    ``RUN_EVAL=true`` for an accuracy gate on top. Historical data
+    (5 Qwen3-30B-A3B-Base sessions) shows GEAK 0/4 KEEP without this
+    trust gate; with it, real shape-specific kernels like
+    ck_moe_stage1's 1.30x patch reach the integrate REVERT/KEEP
+    decision instead of being silently dropped.
+
+    Set ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=0`` to restore the
+    conservative behaviour (every GEAK KEEP -> NEEDS_REVIEW) for
+    operators that want human review before integrate.
     """
-    return os.environ.get(
-        "HYPERLOOM_TRUST_GEAK_CORRECTNESS", "",
-    ).strip().lower() in {"1", "true", "yes", "on"}
+    raw = os.environ.get("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
 
 
 def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None:
@@ -2101,16 +2108,16 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
         )
         if correctness_signal is not None:
             correctness_source = "geak_report"
-    # PR-E (opt-in): trust GEAK's status=complete + measured speedup as
-    # correctness=True even when the harness was an import-only test
+    # PR-E (default ON): trust GEAK's status=complete + measured speedup
+    # as correctness=True even when the harness was an import-only test
     # (e.g. test_moe_gemm_a8w8_blockscale.py for an aiter ck_moe_stage1
     # kernel -- the harness loads aiter but does not exercise the kernel,
     # so patch_*_test.txt is empty and the standard extractors return
     # missing). GEAK's per-task save_and_test still confirms compile +
     # import succeed; the integrate stage's E2E magpie benchmark is the
     # ground-truth functional check (and operators can layer RUN_EVAL=true
-    # for an accuracy gate on top). Default OFF -- enable via
-    # ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=1`` per operator decision.
+    # for an accuracy gate on top). Set
+    # ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=0`` to disable.
     if (
         correctness_signal is None
         and best is not None
