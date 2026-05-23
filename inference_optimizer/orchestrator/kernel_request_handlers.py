@@ -803,7 +803,7 @@ async def run_optimization_handler(
     """
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
-    candidates = _batch_kernel_candidates(payload)
+    candidates = _batch_kernel_candidates(payload, session_dir=session_dir)
     if len(candidates) <= 1:
         single_payload = dict(payload)
         if candidates and not single_payload.get("kernel_id"):
@@ -869,7 +869,45 @@ def _backend_order(payload: dict) -> list[str]:
     return selected
 
 
-def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
+def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
+    """Scan the kernel-agent run dir for status files in ``state=running``.
+
+    Used by :func:`_batch_kernel_candidates` to skip kernels that are
+    still being optimized by a prior batch's subprocess (Qwen3-30B-
+    A3B-Base 164405Z saw five concurrent ``kernel_optimization.py``
+    processes for the same k002/k004 because the LLM kept proposing
+    fresh ``run_optimization`` requests while subprocesses from
+    earlier batches were still alive).
+    """
+    in_flight: set[str] = set()
+    sid = session_dir.name
+    status_dir = session_dir / "kernel-agent" / "runs" / sid / "status" / "kernel_optimization"
+    if not status_dir.is_dir():
+        return in_flight
+    for p in status_dir.glob("ko-*.json"):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(d.get("state") or "").lower() != "running":
+            continue
+        kid = ""
+        for line in d.get("last_lines") or []:
+            if isinstance(line, str) and line.startswith("kernel_id="):
+                kid = line.split("=", 1)[1].strip()
+                break
+        if not kid:
+            kid = str(d.get("kernel_id") or "")
+        if kid:
+            in_flight.add(kid)
+    return in_flight
+
+
+def _batch_kernel_candidates(
+    payload: dict,
+    *,
+    session_dir: Path | None = None,
+) -> list[dict[str, Any]]:
     candidates_path = payload.get("candidates_path")
     if not candidates_path:
         return []
@@ -882,6 +920,55 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
         return []
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
+
+    # PR-C filters: build the "live" exclusion sets up front so both
+    # the task_group fallback and the legacy per-kernel pass can honor
+    # them. Without session_dir (legacy tests / dry-run paths) the
+    # filters degrade to empty sets and behaviour matches PR-A/B.
+    rejected_kernel_ids: set[str] = set()
+    attempts_by_kid: dict[str, dict] = {}
+    in_flight: set[str] = set()
+    max_attempts = 1
+    min_gpu_pct = 0.0
+    try:
+        max_attempts = max(1, int(os.environ.get(
+            "INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_ATTEMPTS", "1",
+        )))
+    except (TypeError, ValueError):
+        max_attempts = 1
+    try:
+        min_gpu_pct = float(os.environ.get(
+            "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0",
+        ))
+    except (TypeError, ValueError):
+        min_gpu_pct = 0.0
+    if session_dir is not None:
+        try:
+            from .shared_state import SharedState
+            state = SharedState.load_or_init(session_dir)
+            rejected_kernel_ids = set(state.rejected_kernel_ids or [])
+            attempts_by_kid = dict(state.kernel_opt_attempts or {})
+            in_flight = _in_flight_kernel_ids(session_dir)
+        except Exception:
+            log.exception(
+                "_batch_kernel_candidates: failed to load SharedState "
+                "from %s; PR-C filters disabled this dispatch",
+                session_dir,
+            )
+
+    def _is_live(kid: str) -> bool:
+        """A kernel_id is live (eligible for batch) iff it is NOT
+        rejected, NOT in-flight, and has fewer than max_attempts
+        recorded attempts. ``max_attempts = 1`` (default) means: any
+        prior attempt at all -> not live."""
+        if kid in rejected_kernel_ids:
+            return False
+        if kid in in_flight:
+            return False
+        entry = attempts_by_kid.get(kid) or {}
+        if int(entry.get("attempts", 0)) >= max_attempts:
+            return False
+        return True
 
     # PR-B §1: collapse kernels that share a source function into a
     # single dispatch via ``task_groups[]``. Each group emits exactly
@@ -902,26 +989,33 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
     }
     grouped_kernel_ids: set[str] = set()
     selected: list[dict[str, Any]] = []
+    skipped: dict[str, str] = {}  # kid -> reason, for debug logging
     for group in task_groups:
         if not isinstance(group, dict):
             continue
         member_ids = [str(k) for k in (group.get("kernel_ids") or []) if k]
         if not member_ids:
             continue
+        # All members marked across the group so the legacy loop never
+        # picks them up regardless of which member we end up dispatching
+        # (or whether we skip the group entirely).
+        grouped_kernel_ids.update(member_ids)
         # Only members marked reusable_native_kernel survive (vendor /
         # aten:: / runtime-generated were filtered upstream by
         # ``classify_patchability``); the group's primary may itself
-        # have been rejected, in which case we fall through to the
-        # legacy path for the surviving non-primary reusable members
-        # (no special-casing needed — they just won't be in
-        # ``grouped_kernel_ids`` and the loop below picks them up).
+        # have been rejected, in which case we fall back to the next
+        # live reusable member of the same AST function (same source,
+        # equivalent leverage). When EVERY member is rejected /
+        # in-flight / exhausted, the whole group skips.
         primary = str(group.get("primary_kernel_id") or "")
         primary_cand = kernel_by_id.get(primary)
-        if primary_cand is None or primary_cand.get("reusable_native_kernel") is not True:
-            # Fall back to the first reusable member in priority order.
-            # ``primary`` itself is only read on the line above to look
-            # up ``primary_cand``; downstream code reads ``primary_cand``
-            # directly so we don't need to refresh ``primary`` here.
+        primary_live = (
+            primary_cand is not None
+            and primary_cand.get("reusable_native_kernel") is True
+            and bool(primary_cand.get("source_file"))
+            and _is_live(primary)
+        )
+        if not primary_live:
             primary_cand = next(
                 (
                     kernel_by_id[m]
@@ -929,21 +1023,32 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
                     if m in kernel_by_id
                     and kernel_by_id[m].get("reusable_native_kernel") is True
                     and kernel_by_id[m].get("source_file")
+                    and _is_live(m)
                 ),
                 None,
             )
             if primary_cand is None:
+                # Every reusable member exhausted -> nothing to dispatch
+                # for this group this round.
+                for m in member_ids:
+                    skipped.setdefault(m, "group_exhausted")
                 continue
         if not primary_cand.get("source_file"):
             continue
+        try:
+            picked_pct = float(primary_cand.get("gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            picked_pct = 0.0
+        if picked_pct < min_gpu_pct:
+            for m in member_ids:
+                skipped.setdefault(m, f"below_min_gpu_pct={min_gpu_pct}")
+            continue
         # Shallow copy + attach group so the kernel_optimization.py
         # subprocess sees ``candidate["task_group"]`` and can render
-        # benchmark cases. The non-primary member kernel_ids are
-        # marked seen so the legacy loop skips them.
+        # benchmark cases.
         item = dict(primary_cand)
         item["task_group"] = group
         selected.append(item)
-        grouped_kernel_ids.update(member_ids)
 
     # Legacy per-kernel pass for any reusable kernel that wasn't
     # absorbed into a task_group above (no parseable launcher path).
@@ -961,7 +1066,23 @@ def _batch_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
             continue
         if not item.get("source_file"):
             continue
+        if not _is_live(kernel_id):
+            skipped[kernel_id] = "not_live"
+            continue
+        try:
+            row_pct = float(item.get("gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            row_pct = 0.0
+        if row_pct < min_gpu_pct:
+            skipped[kernel_id] = f"below_min_gpu_pct={min_gpu_pct}"
+            continue
         selected.append(item)
+
+    if skipped:
+        log.info(
+            "batch candidates filtered: %d selected, skipped=%s",
+            len(selected), skipped,
+        )
     return selected
 
 
