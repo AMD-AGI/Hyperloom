@@ -94,8 +94,12 @@ def test_stage_log_emits_failed_on_exception(tmp_path: Path) -> None:
     log_path = tmp_path / "fa.log"
     configure_logging(level="DEBUG", log_file=log_path)
     log = get_logger("test")
-    with pytest.raises(RuntimeError):
+
+    def _raise_inside_stage_log() -> None:
         with stage_log(log, "bench"):
             raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        _raise_inside_stage_log()
     body = log_path.read_text(encoding="utf-8")
     assert "stage.failed bench" in body

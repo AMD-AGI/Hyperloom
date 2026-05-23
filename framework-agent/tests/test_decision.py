@@ -7,7 +7,7 @@ import pytest
 from dataclasses import replace
 
 from framework_agent.decision import candidate_score, winner_decision
-from framework_agent.models import Baseline, ExploreRequest
+from framework_agent.models import ExploreRequest
 
 
 def _req(min_ratio: float = 1.05, max_drop: float = 0.05) -> ExploreRequest:

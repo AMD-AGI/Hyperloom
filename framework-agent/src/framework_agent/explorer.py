@@ -29,7 +29,6 @@ from typing import Any
 
 from .decision import candidate_score, winner_decision
 from .isolation import (
-    DiskPreflightError,
     WorkspacePaths,
     cleanup_workspace,
     disk_preflight,
