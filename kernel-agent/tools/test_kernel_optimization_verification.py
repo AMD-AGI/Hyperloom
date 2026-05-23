@@ -91,6 +91,102 @@ def test_report_correctness_passes_with_machine_marker(tmp_path):
     assert verification["micro_speedup"] == 1.28
 
 
+def _geak_attempt(tmp_path: Path, *, status: str = "complete", speedup: float = 1.3):
+    """Build a GEAK-shaped attempt with a final_report.json on disk."""
+    final = tmp_path / "geak_final_report.json"
+    final.write_text(json.dumps({
+        "status": status,
+        "best_patch": str(tmp_path / "patch_1.patch"),
+        "best_speedup": speedup,
+        "summary": "import-only harness, no kernel exercised",
+    }), encoding="utf-8")
+    artifact = tmp_path / "worktree" / "moe_op.py"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("import torch\ndef ck_moe_stage1_fwd(*a, **k): pass\n", encoding="utf-8")
+    return {
+        "status": "completed",
+        "attempt_id": "geak-aaa",
+        "backend": "geak",
+        "optimized_path": str(artifact),
+        "backend_paths": {
+            "geak_final_report": str(final),
+            "geak_per_task_best_speedup": str(speedup),
+            "geak_per_task_best_patch": str(tmp_path / "patch_1.patch"),
+            "geak_per_task_best_worktree": str(artifact.parent.parent),
+        },
+    }
+
+
+def test_geak_correctness_missing_by_default(tmp_path):
+    """PR-E default OFF: GEAK status=complete + 1.3x still degrades to
+    NEEDS_REVIEW because correctness evidence is missing -- matches
+    the conservative behaviour that hid the 1.3x ck_moe_stage1 patch
+    in the 20260523T035235Z session."""
+    verification = ko.build_verification(
+        _args(),
+        [_geak_attempt(tmp_path, status="complete", speedup=1.3)],
+        benchmark_available=True,
+    )
+    assert verification["micro_speedup"] == 1.3
+    assert verification["correctness_passed"] is False
+    assert verification["correctness_source"] == "missing"
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "NEEDS_REVIEW"
+
+
+def test_geak_correctness_trusted_when_env_set(tmp_path, monkeypatch):
+    """PR-E opt-in: HYPERLOOM_TRUST_GEAK_CORRECTNESS=1 promotes a
+    GEAK status=complete + measured-speedup attempt to KEEP. The
+    integrate stage's E2E magpie benchmark remains the ground-truth
+    functional check; this flag only short-circuits the missing
+    correctness gate so the patch reaches integrate at all."""
+    monkeypatch.setenv("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "1")
+    verification = ko.build_verification(
+        _args(source_file="/tmp/moe_op.py"),
+        [_geak_attempt(tmp_path, status="complete", speedup=1.3)],
+        benchmark_available=True,
+    )
+    assert verification["micro_speedup"] == 1.3
+    assert verification["correctness_passed"] is True
+    assert verification["correctness_source"] == "geak_assumed_pass"
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "KEEP", proposal
+
+
+def test_geak_correctness_trust_requires_nonzero_speedup(tmp_path, monkeypatch):
+    """Trust flag must not promote a 0.0/1.0 'unmeasured' result. The
+    geak_per_task_best_speedup must be > 0 for the trust gate to fire,
+    otherwise we'd silently KEEP a no-op patch."""
+    monkeypatch.setenv("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "1")
+    # speedup=0 simulates GEAK status=complete but no per-task best
+    attempt = _geak_attempt(tmp_path, status="complete", speedup=0.0)
+    # Wipe the per-task speedup so build_verification's measured branch
+    # cannot rescue it.
+    attempt["backend_paths"]["geak_per_task_best_speedup"] = "0"
+    verification = ko.build_verification(
+        _args(),
+        [attempt],
+        benchmark_available=True,
+    )
+    # No measured speedup -> trust gate does not fire even with env set.
+    assert verification["correctness_passed"] is False
+    assert verification["correctness_source"] == "missing"
+
+
+def test_geak_correctness_trust_requires_complete_status(tmp_path, monkeypatch):
+    """Trust flag must not promote status=failed / no-patch attempts.
+    GEAK reports status='complete_no_patch' when select_patch found
+    nothing worth keeping; that must NOT be auto-promoted to KEEP."""
+    monkeypatch.setenv("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "1")
+    verification = ko.build_verification(
+        _args(),
+        [_geak_attempt(tmp_path, status="complete_no_patch", speedup=1.3)],
+        benchmark_available=True,
+    )
+    assert verification["correctness_passed"] is False
+    assert verification["correctness_source"] == "missing"
+
+
 def test_report_correctness_passes_with_reference_language(tmp_path):
     report = tmp_path / "optimization_report.md"
     report.write_text(
