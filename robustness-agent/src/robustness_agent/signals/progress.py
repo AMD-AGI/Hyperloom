@@ -41,7 +41,12 @@ class ProgressConfig:
     "unchanged" (matches the upstream ``min_keep_gain_pct`` convention).
     ``no_levers_min_minutes`` is the elapsed-time floor: below it we
     refuse to call the session "empty" because cold-start alone could
-    push past 30-40 min on a 671B FP8 model.
+    push past 30-40 min on a 671B FP8 model. The default 45.0 covers
+    typical single-node scenarios; multi-node + large-model setups
+    consume more wall-clock time for sglang cold start (10-15 min) +
+    baseline + profile + turnaround alone, so they should override
+    this via host-side config (e.g. inference_optimizer's
+    ``_build_robustness_options`` passes 60.0 when ``args.nodes >= 2``).
     """
 
     gain_window_ticks: int = 6
@@ -133,6 +138,15 @@ class ProgressDetector:
         cfg = self._config
         if len(self._gain_history) < cfg.gain_window_ticks:
             return None
+        # Plateau semantics require "explored but stalled". Before any
+        # candidate has been promoted onto the optimization_stack,
+        # cumulative_gain_validated is 0 by construction (baseline +
+        # profile alone fill the 6-tick window with zeros on multi-node
+        # cold start). Defer to ``no_levers_found`` which has the right
+        # elapsed/tick floors for the empty-stack case so the two
+        # B-family rules don't fire HIGH twice on the same condition.
+        if snap.optimization_stack_size == 0:
+            return None
         window = self._gain_history[-cfg.gain_window_ticks:]
         delta = max(window) - min(window)
         if delta > cfg.gain_epsilon_pct:
@@ -181,29 +195,19 @@ class ProgressDetector:
             # Validated gain exists even though stack count is 0 — odd
             # but not our problem; let it be.
             return None
-        # PR-B Fix 2: do not claim "no lever" while kernel_opt is in
-        # flight or its KEEP queue is waiting to integrate.
-        #
-        # The Qwen3-30B-A3B-Base session (20260522T093903Z) burned a
-        # 4.13x KEEP because the previous version of this signal only
-        # looked at optimization_stack_size + cumulative_gain. While a
-        # long GEAK batch was running (90min wall clock), stack_size=0
-        # and cumulative_gain=0 were both true, and the signal pushed
-        # Orch toward early ``report`` despite a valid lever sitting on
-        # disk waiting for integrate.
-        if snap.kernel_opt_attempts_count > 0:
-            # At least one kernel_opt run has landed on disk this
-            # session. Even if it didn't (yet) move the stack, that's
-            # not "no lever found" -- it's "lever in flight" or
-            # "lever rejected by integrate", both of which have their
-            # own dedicated signals (kernel_opt_no_progress, etc).
-            return None
-        if snap.has_keep_pending_integrate:
-            # Multi-KEEP queue is non-empty. Coordinator's integrate
-            # gate will drive the next tick into ``integrate``, which
-            # will either grow optimization_stack (KEEP path) or fire
-            # its own REVERT signal. Either way, ``no_levers`` is
-            # the wrong call here.
+        # ``no_levers_found`` means "exploration ran but found nothing
+        # worth keeping". On multi-node large-model runs sglang cold
+        # start (10-15 min) + baseline + profile + turnaround can eat
+        # 35-50 min before any explore action even starts, during
+        # which stack_size==0 + cumulative_gain==0 are both
+        # by-construction rather than diagnostic. Defer until at
+        # least one explore family (backends / params / sweep /
+        # validate_stack) has been attempted; before that the
+        # session is mid-cold-start and there are no levers to find
+        # *yet*. Repro: sandbox primus-claw-20260522034541-xkk9f
+        # turn=7 (elapsed=47.6min, tick=8) fired HIGH 12 minutes
+        # before backends phase 1 actually started.
+        if not snap.explore_started:
             return None
         if snap.elapsed_minutes < cfg.no_levers_min_minutes:
             return None
@@ -222,8 +226,6 @@ class ProgressDetector:
                 "tick": snap.tick,
                 "optimization_stack_size": 0,
                 "cumulative_gain_validated": snap.cumulative_gain_validated,
-                "kernel_opt_attempts_count": snap.kernel_opt_attempts_count,
-                "has_keep_pending_integrate": snap.has_keep_pending_integrate,
                 "min_observation_minutes": cfg.no_levers_min_minutes,
                 "min_observation_ticks": cfg.no_levers_min_ticks,
             },
