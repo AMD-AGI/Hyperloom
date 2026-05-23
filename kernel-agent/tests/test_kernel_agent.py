@@ -88,6 +88,98 @@ def write_vendor_trace(path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+class UpdateStatusTimingTests(unittest.TestCase):
+    """Hyperloom P2-3: ``update_status`` writes ``ended_at`` +
+    ``duration_seconds`` once the run reaches a terminal state, so
+    downstream session-breakdown collectors can fill the timeline
+    event with a real wall-clock duration.
+    """
+
+    def _import_module(self):
+        # The tracelens_analysis module imports ``tracelens_skill_runner``
+        # as a sibling module, so we need the tools directory on
+        # ``sys.path`` for the import to resolve.
+        tools_dir = str(TRACE_TOOL.parent)
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "tracelens_analysis_under_test", TRACE_TOOL,
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+
+    def test_running_state_omits_ended_at_and_duration(self) -> None:
+        mod = self._import_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpd = Path(tmp)
+            log_path = tmpd / "log.txt"
+            log_path.write_text("hello\n", encoding="utf-8")
+            status_path = tmpd / "status.json"
+            mod.update_status(
+                status_path,
+                state="running",
+                current_step="discover",
+                log_path=log_path,
+                artifact_paths={},
+                run_id="tl-run-test",
+                started_at="2026-05-22T01:00:00+00:00",
+            )
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["state"], "running")
+            self.assertNotIn("ended_at", data)
+            self.assertNotIn("duration_seconds", data)
+            self.assertEqual(data["started_at"], "2026-05-22T01:00:00+00:00")
+
+    def test_succeeded_state_writes_ended_at_and_duration(self) -> None:
+        mod = self._import_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpd = Path(tmp)
+            log_path = tmpd / "log.txt"
+            log_path.write_text("done\n", encoding="utf-8")
+            status_path = tmpd / "status.json"
+            mod.update_status(
+                status_path,
+                state="succeeded",
+                current_step="done",
+                log_path=log_path,
+                artifact_paths={},
+                run_id="tl-run-test",
+                started_at="2026-05-22T01:00:00+00:00",
+            )
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["state"], "succeeded")
+            self.assertIn("ended_at", data)
+            self.assertIn("duration_seconds", data)
+            self.assertEqual(data["ended_at"], data["updated_at"])
+            self.assertIsNotNone(data["duration_seconds"])
+            self.assertGreaterEqual(data["duration_seconds"], 0.0)
+
+    def test_failed_state_writes_ended_at_and_duration(self) -> None:
+        mod = self._import_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpd = Path(tmp)
+            log_path = tmpd / "log.txt"
+            log_path.write_text("err\n", encoding="utf-8")
+            status_path = tmpd / "status.json"
+            mod.update_status(
+                status_path,
+                state="failed",
+                current_step="failed",
+                log_path=log_path,
+                artifact_paths={},
+                run_id="tl-run-test",
+                started_at="2026-05-22T01:00:00+00:00",
+                error="RuntimeError: boom",
+            )
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["state"], "failed")
+            self.assertEqual(data["error"], "RuntimeError: boom")
+            self.assertIn("ended_at", data)
+            self.assertIn("duration_seconds", data)
+
+
 class KernelAgentToolTests(unittest.TestCase):
     def test_install_help_and_dry_run_backend_flags(self) -> None:
         help_proc = subprocess.run(
