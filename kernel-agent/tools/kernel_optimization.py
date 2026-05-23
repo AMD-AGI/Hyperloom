@@ -1914,6 +1914,29 @@ def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
     return None
 
 
+def _trust_geak_correctness() -> bool:
+    """PR-E opt-in: treat GEAK ``status=complete`` + measured speedup as
+    sufficient correctness evidence.
+
+    GEAK's ``save_and_test`` only verifies that the patch compiles and
+    that ``import aiter`` succeeds; it does NOT exercise the kernel's
+    numerical output (e.g. ck_moe_stage1 with a a8w8 blockscale harness
+    only prints the aiter import banner). Without this flag, every GEAK
+    KEEP candidate degrades to NEEDS_REVIEW because
+    ``correctness_source == 'missing'``.
+
+    Operators that want GEAK candidates to proceed to integrate (where
+    the E2E magpie benchmark is the ground-truth functional check, and
+    ``RUN_EVAL=true`` is the optional accuracy gate) set
+    ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=1``. Default OFF preserves the
+    conservative behaviour for operators that prefer human review of
+    GEAK kernels before integrate.
+    """
+    return os.environ.get(
+        "HYPERLOOM_TRUST_GEAK_CORRECTNESS", "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None:
     """Read correctness from GEAK-style JSON reports when present."""
     if not final_report_path:
@@ -2280,6 +2303,37 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
         )
         if correctness_signal is not None:
             correctness_source = "geak_report"
+    # PR-E (opt-in): trust GEAK's status=complete + measured speedup as
+    # correctness=True even when the harness was an import-only test
+    # (e.g. test_moe_gemm_a8w8_blockscale.py for an aiter ck_moe_stage1
+    # kernel -- the harness loads aiter but does not exercise the kernel,
+    # so patch_*_test.txt is empty and the standard extractors return
+    # missing). GEAK's per-task save_and_test still confirms compile +
+    # import succeed; the integrate stage's E2E magpie benchmark is the
+    # ground-truth functional check (and operators can layer RUN_EVAL=true
+    # for an accuracy gate on top). Default OFF -- enable via
+    # ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=1`` per operator decision.
+    if (
+        correctness_signal is None
+        and best is not None
+        and best.get("backend") == "geak"
+        and measured
+        and best_speedup >= 1.0
+        and _trust_geak_correctness()
+    ):
+        bp_geak = (best.get("backend_paths") or {}).get("geak_final_report", "")
+        geak_status = ""
+        if bp_geak and Path(bp_geak).is_file():
+            try:
+                geak_status = str(
+                    json.loads(Path(bp_geak).read_text(encoding="utf-8"))
+                    .get("status") or ""
+                ).lower()
+            except Exception:  # noqa: BLE001
+                geak_status = ""
+        if geak_status in {"complete", "succeeded", "ok"}:
+            correctness_signal = True
+            correctness_source = "geak_assumed_pass"
     if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
         correctness_signal = True
         correctness_source = "accuracy_override"
