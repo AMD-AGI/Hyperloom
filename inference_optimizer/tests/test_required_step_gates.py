@@ -369,11 +369,121 @@ def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
         assert denied.rule == "execution_order"
         assert "integrate must run first" in str(denied)
         assert "k-rmsnorm" in (denied.hint or "")
-    # integrate / report bypass the gate; legacy ``validate_stack`` no
-    # longer appears in ``sequence_actions`` and short-circuits early.
+    # integrate / report bypass the integrate gate; legacy
+    # ``validate_stack`` no longer appears in ``sequence_actions`` and
+    # short-circuits early. ``report``'s own PR-C hot-kernel gate is
+    # separately covered below.
     assert coord._sequence_denial_for_action("integrate") is None
     assert coord._sequence_denial_for_action("report") is None
     assert coord._sequence_denial_for_action("validate_stack") is None
+
+
+# ---------------------------------------------------------------------------
+# PR-C: hot-kernel report gate (reproduces log1 session 164910Z bug)
+# ---------------------------------------------------------------------------
+def _seed_trace_analyze(coord, *, hot_kernels, task_groups=None):
+    coord.shared_state.last_trace_analyze = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "hot_kernels": hot_kernels,
+        "task_groups": task_groups or [],
+    }
+
+
+def test_report_denied_when_hot_reusable_kernels_untried(session_dir):
+    """Repro of session 20260522T164910Z (log1): the LLM jumped
+    straight to ``report`` despite k001=23.7% / k002=37.3% / k004=9.7%
+    being reusable hot kernels with zero attempts. The new gate must
+    deny report and surface the untried set in the hint.
+    """
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    _seed_trace_analyze(coord, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 23.7, "reusable_native_kernel": True,
+         "source_file": "/sgl/aiter/ops/moe_op.py"},
+        {"kernel_id": "k002", "gpu_pct": 37.3, "reusable_native_kernel": True,
+         "source_file": "/sgl/aiter/ops/moe_op.py"},
+        {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True,
+         "source_file": "/sgl/aiter/ops/rmsnorm.py"},
+    ])
+
+    denied = coord._sequence_denial_for_action("report")
+    assert isinstance(denied, PolicyDenied)
+    assert denied.rule == "hot_kernel_unfinished"
+    # Hint must name the untried kernels so the LLM can act.
+    assert "k001" in (denied.hint or "")
+    assert "k002" in (denied.hint or "")
+    assert "k004" in (denied.hint or "")
+
+
+def test_report_allowed_after_every_hot_kernel_tried(session_dir):
+    """Once every reusable hot kernel has either KEEP/REVERT/PARTIAL
+    or has been retired via max_failures, the gate opens. Mix of
+    integrate-stack + rejected_kernel_ids should both count as 'tried'.
+    """
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    _seed_trace_analyze(coord, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
+         "source_file": "/p/rmsnorm.py"},
+    ])
+    # k001 retired via max_failures.
+    coord.shared_state.rejected_kernel_ids = ["k001"]
+    coord.shared_state.kernel_opt_attempts = {
+        "k001": {
+            "attempts": 1, "failure_count": 1,
+            "last_decision": "", "last_status": "failed",
+        },
+    }
+    # k002 was integrated and validated (so the unvalidated-KEEPs
+    # gate doesn't independently block report).
+    coord.shared_state.optimization_stack.append({
+        "action": "integrate", "kernel_id": "k002",
+        "target_file": "/p/rmsnorm.py", "tput": 4500.0,
+    })
+    coord.shared_state.cumulative_gain_validated_stack_len = len(
+        coord.shared_state.optimization_stack
+    )
+
+    # Hot-kernel gate must NOT fire (everything tried). Other gates
+    # may still apply -- assert specifically on the rule we care about.
+    denied = coord._sequence_denial_for_action("report")
+    if denied is not None:
+        assert denied.rule != "hot_kernel_unfinished", denied
+
+
+def test_required_next_step_surfaces_untried_hot_kernels(session_dir):
+    """``_required_next_step`` should also surface the TODO 4a line so
+    Orchestration sees the explicit list when no KEEP is pending."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    _seed_trace_analyze(coord, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
+         "source_file": "/p/rmsnorm.py"},
+    ])
+    todo = coord._required_next_step()
+    assert "TODO 4a/5" in todo
+    # Highest gpu_pct first
+    assert todo.find("k002") < todo.find("k001"), todo
+
+
+def test_report_gate_inactive_when_no_reusable_hot_kernel_above_threshold(
+    session_dir,
+):
+    """If the trace only has aten::mm or sub-3% rmsnorms, the gate
+    correctly allows report -- nothing more for kernel_opt to do."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    _seed_trace_analyze(coord, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 15.0, "reusable_native_kernel": False,
+         "source_file": "/aten/mm.py"},  # aten not reusable
+        {"kernel_id": "k002", "gpu_pct": 2.5, "reusable_native_kernel": True,
+         "source_file": "/p/rmsnorm.py"},  # below 3% threshold
+    ])
+    assert coord._sequence_denial_for_action("report") is None
 
 
 # ===========================================================================

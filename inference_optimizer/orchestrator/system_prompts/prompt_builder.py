@@ -731,6 +731,18 @@ HARD RULES (applied at REQUEST build time, NOT at action-selection time):
   - If `reusable_native_kernel_ids` is empty, do NOT propose
     `kernel_opt` (its `applicable_when` is implicitly violated).
     Heartbeat instead and consider re-profiling.
+  - DO NOT pass `backends` in `params`. The Coordinator + kernel
+    handler use a fixed ladder `GEAK -> Claude -> Codex -> Cursor`
+    (Cursor only when `CURSOR_API_KEY` is set). Pinning `backends`
+    bypasses the ladder, e.g. forcing every kernel through Claude
+    even on hip_cpp kernels where GEAK is the only backend that
+    can KEEP. Failed ladders are retired after ONE pass per
+    `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES=1` -- so the LLM
+    cannot re-dispatch the same kernel by re-emitting
+    `run_optimization`. Read `kernel_opt_attempts` + `pending_keep_kernels`
+    in the shared-state summary to decide what's still queueable;
+    the batch handler filters rejected/in-flight/exhausted candidates
+    automatically.
 
   request{target_agent: 'kernel', kind: 'run_optimization',
           params: {kernel_id: <picked kernel_id>,
@@ -814,6 +826,36 @@ the rebench inside ``explore``; there is no standalone
 ``validate_stack`` gate to obey any more — the next ``explore``
 round automatically reads the new stack and reruns the per-variant
 bench against it.
+
+#### Hot-kernel must-try gate (PR-C)
+
+The Coordinator denies `action='report'` while
+`untried_hot_reusable_kernels` is non-empty -- i.e. while ANY reusable
+hot kernel with `gpu_pct >= 3.0%` (capped at top-5 by gpu_pct,
+deduplicated by `task_group`) has zero recorded `kernel_opt_attempts`.
+
+This prevents the failure mode where the LLM looks at an idle-bound
+roofline (e.g. compute=31%, idle=69%) and concludes "no kernel lever
+left", emitting `report` while a 37% gpu_pct ck_moe_stage1 has never
+been tried (Qwen3-30B-A3B-Base session 164910Z: report at tick=8 with
+k001=24%, k002=37%, k004=9.7% all untouched).
+
+Read these two state fields each tick:
+
+  * `pending_keep_kernels`              -- queued integrate work
+  * `kernel_opt_attempts_count`         -- how many unique kernels
+                                           the session has touched
+  * the TODO line `TODO 4a/5: kernel_opt required on untried hot
+    reusable kernels [...]` -- the explicit list the gate consults.
+
+Drain by emitting:
+
+    request{target_agent: 'kernel', kind: 'run_optimization',
+            params: {candidates_path: <from last_trace_analyze>}}
+
+The batch handler fans out across every live candidate automatically
+and filters rejected / in-flight / exhausted kernels, so re-emitting
+the same payload does not re-attempt retired kernels.
 
 ### KERNEL TARGETING (native vs torch.compile)
 
