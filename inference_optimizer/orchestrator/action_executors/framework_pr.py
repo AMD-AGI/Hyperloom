@@ -354,7 +354,6 @@ class FrameworkPRExecutor:
             }
 
         apply_started_unix = time.time()
-        applied = False
         try:
             apply_to_sglang(
                 winner_head_sha,
@@ -363,7 +362,6 @@ class FrameworkPRExecutor:
                 pip_reinstall=False,
                 auto_stash=True,
             )
-            applied = True
         except FrameworkPRError as exc:
             log.warning(
                 "framework_pr_executor: apply_to_sglang failed for %s: %s",
