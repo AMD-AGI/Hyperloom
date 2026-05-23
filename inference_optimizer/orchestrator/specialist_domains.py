@@ -121,6 +121,21 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "other specialists. Dispatch sparingly (one every K rounds)."
         ),
     ),
+    SpecialistDomain(
+        key="session_steward_specialist",
+        layer="session strategy / remaining-leverage assessment",
+        kb_anchor="pr_intelligence",
+        pr_repos=(),
+        available_in="M5",
+        description=(
+            "Honest end-of-EXPLORE assessor. Reads optimization_stack, "
+            "explore_search.rejected, gaps[], policy_denial_history; "
+            "recommends continue_explore / advance_to_kernel / stop_session. "
+            "Dispatched by the Coordinator on plateau (not by the LLM); "
+            "constrained to one continuation per session before the "
+            "EXPLORE→KERNEL transition becomes mandatory."
+        ),
+    ),
 )
 
 

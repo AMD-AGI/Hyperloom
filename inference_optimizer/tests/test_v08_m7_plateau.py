@@ -227,6 +227,9 @@ def test_plateau_kernel_zero_lookback_returns_false():
 # 4. exit_normal_explore / exit_normal_kernel — wired to real plateau
 # ===========================================================================
 def test_exit_normal_explore_triggers_via_real_plateau():
+    # IR-7 (Saturday May 2026): plateau now consults the
+    # session_steward_specialist; disable steward via overrides so
+    # this test isolates the plateau judgment itself.
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -240,12 +243,16 @@ def test_exit_normal_explore_triggers_via_real_plateau():
         ],
         pending_escalate_hint="",
         stop_reason="",
+        plateau_overrides={"steward_disabled": True},
+        last_remaining_gaps_assessment={},
+        steward_continuation_used=False,
     )
     out = exit_normal_explore(state)
     assert out is not None
     reason, evidence = out
     assert reason == "plateau_explore"
     assert evidence["evidence"] == "plateau_judgment"
+    assert evidence.get("steward_disabled") is True
 
 
 def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
@@ -532,7 +539,12 @@ def test_stop_reason_vocab_has_v08_additions():
 # ===========================================================================
 def test_compute_next_phase_honors_plateau_overrides():
     """With aggressive override (keep_gain threshold = 10%) the same
-    state that wouldn't normally trigger plateau still triggers."""
+    state that wouldn't normally trigger plateau still triggers.
+
+    IR-7 (Saturday May 2026): plateau routes through the steward gate
+    by default. We disable steward here so the test isolates the
+    plateau-judgment override pathway.
+    """
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -549,8 +561,15 @@ def test_compute_next_phase_honors_plateau_overrides():
         optimization_stack=[],
         pending_escalate_hint="",
         stop_reason="",
-        # Override: even a 2% gain counts as plateau when threshold=10%
-        plateau_overrides={"explore_keep_gain_pct": 10.0},
+        last_remaining_gaps_assessment={},
+        steward_continuation_used=False,
+        # Override: even a 2% gain counts as plateau when threshold=10%;
+        # steward gate disabled for this test (covered separately by
+        # test_assess_remaining_gaps).
+        plateau_overrides={
+            "explore_keep_gain_pct": 10.0,
+            "steward_disabled": True,
+        },
     )
     out = compute_next_phase(state, kernel_enabled=True)
     assert out is not None
