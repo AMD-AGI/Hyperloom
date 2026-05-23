@@ -2578,6 +2578,207 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
         "Explicit base_tput must take precedence over current_best.tput"
 
 
+@pytest.fixture
+def _candidates_factory(tmp_path):
+    """Write a kernel_candidates.json fixture and return its path."""
+    def _make(hot_kernels, task_groups=None):
+        path = tmp_path / "kernel_candidates.json"
+        path.write_text(json.dumps({
+            "hot_kernels": hot_kernels,
+            "task_groups": task_groups or [],
+            "reusable_native_kernel_ids": [],
+        }))
+        return str(path)
+    return _make
+
+
+def test_batch_candidates_filters_rejected_kernel_ids(
+    session_dir, _candidates_factory,
+):
+    """PR-C: a kernel that's already on rejected_kernel_ids must not
+    show up in the next batch's candidate list, even though it's still
+    in kernel_candidates.json.
+    """
+    from inference_optimizer.orchestrator.shared_state import SharedState
+    cpath = _candidates_factory([
+        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+    ])
+    state = SharedState.load_or_init(session_dir)
+    state.rejected_kernel_ids = ["k001"]
+    state.save(session_dir)
+
+    out = krh._batch_kernel_candidates(
+        {"candidates_path": cpath}, session_dir=session_dir,
+    )
+    out_ids = sorted(c.get("kernel_id") for c in out)
+    assert out_ids == ["k002"]
+
+
+def test_batch_candidates_filters_kernels_with_recorded_attempts(
+    session_dir, _candidates_factory,
+):
+    """PR-C max_attempts=1 default: any prior attempt -> kernel skipped
+    in the next batch. Defends against the LLM re-proposing the same
+    run_optimization batch after a previous one returned all failures.
+    """
+    from inference_optimizer.orchestrator.shared_state import SharedState
+    cpath = _candidates_factory([
+        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+    ])
+    state = SharedState.load_or_init(session_dir)
+    # k001 has an attempt recorded but is not (yet) on rejected list
+    # (e.g. PARTIAL that hasn't yet hit max_partial).
+    state.kernel_opt_attempts = {
+        "k001": {"attempts": 1, "partial_count": 1, "last_decision": "PARTIAL"},
+    }
+    state.save(session_dir)
+
+    out = krh._batch_kernel_candidates(
+        {"candidates_path": cpath}, session_dir=session_dir,
+    )
+    assert [c.get("kernel_id") for c in out] == ["k002"]
+
+
+def test_batch_candidates_task_group_falls_back_to_live_member(
+    session_dir, _candidates_factory,
+):
+    """When primary (k002) is rejected, the task_group should still
+    dispatch via the next live member (k001), because k001 patches the
+    same AST function -- not falling back here is how the 12h session
+    silently lost half its kernel leverage.
+    """
+    from inference_optimizer.orchestrator.shared_state import SharedState
+    cpath = _candidates_factory(
+        hot_kernels=[
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+             "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
+             "source_file": "/p/moe_op.py"},
+        ],
+        task_groups=[
+            {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
+        ],
+    )
+    state = SharedState.load_or_init(session_dir)
+    state.rejected_kernel_ids = ["k002"]
+    state.save(session_dir)
+
+    out = krh._batch_kernel_candidates(
+        {"candidates_path": cpath}, session_dir=session_dir,
+    )
+    # Group dispatches as k001 with the original task_group attached.
+    assert len(out) == 1
+    assert out[0]["kernel_id"] == "k001"
+    assert out[0].get("task_group", {}).get("primary_kernel_id") == "k002"
+
+
+def test_batch_candidates_skips_group_when_all_members_rejected(
+    session_dir, _candidates_factory,
+):
+    """If every member of a task_group is unusable, the group must
+    skip cleanly -- legacy code would have errored out trying to
+    dispatch a rejected primary."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+    cpath = _candidates_factory(
+        hot_kernels=[
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+             "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
+             "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k009", "gpu_pct": 10.0, "reusable_native_kernel": True,
+             "source_file": "/p/rmsnorm.py"},
+        ],
+        task_groups=[
+            {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
+        ],
+    )
+    state = SharedState.load_or_init(session_dir)
+    state.rejected_kernel_ids = ["k001", "k002"]
+    state.save(session_dir)
+
+    out = krh._batch_kernel_candidates(
+        {"candidates_path": cpath}, session_dir=session_dir,
+    )
+    out_ids = sorted(c.get("kernel_id") for c in out)
+    # moe_op.py group fully retired; only k009 remains.
+    assert out_ids == ["k009"]
+
+
+def test_batch_candidates_skips_in_flight_kernels(
+    session_dir, _candidates_factory,
+):
+    """In-flight defense: a status/ko-*.json with state=running for k004
+    must keep k004 out of the next batch -- prevents the 5-concurrent-
+    Claude-process pile-up the 12h session hit.
+    """
+    cpath = _candidates_factory([
+        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True,
+         "source_file": "/p/rmsnorm.py"},
+    ])
+    # Plant a running status file for k004.
+    status_dir = (
+        session_dir / "kernel-agent" / "runs" / session_dir.name
+        / "status" / "kernel_optimization"
+    )
+    status_dir.mkdir(parents=True, exist_ok=True)
+    (status_dir / "ko-deadbeef.json").write_text(json.dumps({
+        "state": "running",
+        "current_step": "run_backends",
+        "pid": 123456,
+        "last_lines": ["kernel_id=k004", "selected_backends=geak"],
+    }))
+
+    out = krh._batch_kernel_candidates(
+        {"candidates_path": cpath}, session_dir=session_dir,
+    )
+    out_ids = sorted(c.get("kernel_id") for c in out)
+    assert out_ids == ["k001"]
+
+
+def test_batch_candidates_below_min_gpu_pct_skipped(
+    session_dir, _candidates_factory, monkeypatch,
+):
+    """min_gpu_pct env=5.0 keeps tiny rmsnorm kernels out of the batch."""
+    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "5.0")
+    cpath = _candidates_factory([
+        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
+         "source_file": "/p/moe_op.py"},
+        {"kernel_id": "k005", "gpu_pct": 2.8, "reusable_native_kernel": True,
+         "source_file": "/p/rmsnorm.py"},
+    ])
+    out = krh._batch_kernel_candidates(
+        {"candidates_path": cpath}, session_dir=session_dir,
+    )
+    out_ids = sorted(c.get("kernel_id") for c in out)
+    assert out_ids == ["k001"]
+
+
+def test_in_flight_kernel_ids_returns_running_only(session_dir):
+    status_dir = (
+        session_dir / "kernel-agent" / "runs" / session_dir.name
+        / "status" / "kernel_optimization"
+    )
+    status_dir.mkdir(parents=True, exist_ok=True)
+    (status_dir / "ko-aaa.json").write_text(json.dumps({
+        "state": "running",
+        "last_lines": ["kernel_id=k001"],
+    }))
+    (status_dir / "ko-bbb.json").write_text(json.dumps({
+        "state": "succeeded",
+        "last_lines": ["kernel_id=k002"],
+    }))
+    out = krh._in_flight_kernel_ids(session_dir)
+    assert out == {"k001"}
+
+
 def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
     session_dir,
 ):
