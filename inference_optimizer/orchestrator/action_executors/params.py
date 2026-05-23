@@ -203,6 +203,18 @@ DEFAULT_PARAMS_GRID: list[GridVariant] = [
     GridVariant("sglang_tilelang_indexer",
                  extra_envs={"SGLANG_OPT_USE_TILELANG_INDEXER": "true"},
                  note="indexer"),
+    # N22 (May 2026): explicitly register torch_compile_on so the
+    # catalogue lists it + the keyword map can reference it. Previously
+    # this lever was only surfaced via AST auto-discovery
+    # (`_augment_grid_with_discovered_flags`), which means it appeared
+    # in the LLM-visible grid AT RUNTIME but never showed up in the
+    # static prompt catalogue. Result: LLM that didn't read auto-
+    # discovery output (e.g. Qwen3-30B-A3B N20c session) skipped it
+    # even when analysis.md explicitly mentioned `torch.compile`. Now
+    # it's a first-class entry — both prompt catalogue and N22 keyword
+    # advisory point at the same name.
+    GridVariant("torch_compile_on", "--enable-torch-compile",
+                 note="compile"),
 ]
 
 
@@ -476,6 +488,22 @@ class ParamsExecutor:
         # Compose grid: flags first, then optional NCCL.
         grid_override = params.get("grid")
         framework = _config_framework(config_path)
+        # N20-A: roofline-driven variant subset selection (mirrors the
+        # backends.py contract added in the same N20-A commit). Three
+        # LLM-controlled surfaces:
+        #   * `grid`     — list[{name, extra_sglang_args, extra_envs,
+        #                    note}]: full custom variants (Option B,
+        #                    pre-N20). LLM owns the entire search space.
+        #   * `variants` — list[str]: subset of registered grid variant
+        #                    names (Option A, N20). Safer surface; LLM
+        #                    cannot hallucinate flag VALUES (params
+        #                    flags need values, not just presence).
+        # `grid` takes precedence over `variants` when both are passed.
+        variants_subset_raw = params.get("variants") or []
+        variants_subset: list[str] = [
+            str(v).strip() for v in variants_subset_raw
+            if isinstance(v, str) and str(v).strip()
+        ] if isinstance(variants_subset_raw, list) else []
         if grid_override:
             grid = [
                 GridVariant(name=v["name"],
@@ -492,6 +520,35 @@ class ParamsExecutor:
             )
             if self.include_nccl or params.get("include_nccl"):
                 grid += list(self.default_nccl_grid)
+            # N20-A subset filter applied AFTER NCCL augmentation but
+            # BEFORE the params_search ledger filtering — so the subset
+            # is the set the LLM actually wants, and the ledger then
+            # drops any already-tested fingerprints from that set.
+            if variants_subset:
+                requested = set(variants_subset)
+                grid_by_name = {v.name: v for v in grid}
+                missing = sorted(requested - set(grid_by_name))
+                resolved = [grid_by_name[n] for n in variants_subset
+                            if n in grid_by_name]
+                if not resolved:
+                    return {
+                        "status": "failed",
+                        "error_class": "bad_param",
+                        "error": (
+                            f"none of variants={variants_subset!r} matched "
+                            f"the registered "
+                            f"{'vllm' if 'vllm' in framework else 'sglang'} "
+                            f"params grid; "
+                            f"available names: {sorted(grid_by_name)}"
+                        ),
+                    }
+                log.info(
+                    "params: LLM requested %d variants from registered "
+                    "grid of %d (resolved=%d, missing=%s)",
+                    len(requested), len(grid_by_name), len(resolved),
+                    missing or "none",
+                )
+                grid = resolved
 
         # T1 — AST-discover parameter flag names from the live framework
         # so the Orchestration prompt sees the full namespace and can
