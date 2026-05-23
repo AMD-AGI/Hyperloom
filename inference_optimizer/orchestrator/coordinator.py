@@ -1709,21 +1709,33 @@ class Coordinator:
             # it has to ``run_optimization`` (not ``report``) until the
             # gpu_pct >= 3% set is drained. Same source of truth as the
             # ``_sequence_denial_for_action('report')`` denial.
-            untried_hot = self.shared_state.untried_hot_reusable_kernels()
-            if untried_hot:
-                untried_str = ", ".join(untried_hot)
-                return (
-                    f"TODO 4a/5: kernel_opt required on untried hot "
-                    f"reusable kernels [{untried_str}]. Each kernel with "
-                    "gpu_pct >= 3% (capped at top 5 by gpu_pct) must get "
-                    "at least one full backend ladder (GEAK -> Claude -> "
-                    "Codex). Emit request{target_agent='kernel', "
-                    "kind='run_optimization', params={candidates_path="
-                    "<last_trace_analyze.candidates_path>}} -- batch "
-                    "mode fans out automatically. Failed ladders retire "
-                    "the kernel (max_failures=1), so this list shrinks "
-                    "monotonically. `report` is denied until empty."
-                )
+            #
+            # Only fires when N19c (cheap-exhausted) gate has opened --
+            # otherwise the LLM would propose ``run_optimization``,
+            # bounce off ``execution_order`` repeatedly, and hit the
+            # policy_loop auto-stop (Qwen3-30B-A3B-Base 20260523T014653Z
+            # died at tick=14 this way). When cheap is still earning
+            # marginal gain (last_cheap_delta_gain >= EPSILON), let the
+            # LLM keep exploring; PR-C re-activates the instant N19c
+            # unlocks.
+            if self._kernel_opt_unlocked():
+                untried_hot = self.shared_state.untried_hot_reusable_kernels()
+                if untried_hot:
+                    untried_str = ", ".join(untried_hot)
+                    return (
+                        f"TODO 4a/5: kernel_opt required on untried hot "
+                        f"reusable kernels [{untried_str}]. Each kernel "
+                        "with gpu_pct >= 3% (capped at top 5 by gpu_pct) "
+                        "must get at least one full backend ladder "
+                        "(GEAK -> Claude -> Codex). Emit request"
+                        "{target_agent='kernel', kind='run_optimization', "
+                        "params={candidates_path="
+                        "<last_trace_analyze.candidates_path>}} -- batch "
+                        "mode fans out automatically. Failed ladders "
+                        "retire the kernel (max_failures=1), so this list "
+                        "shrinks monotonically. `report` is denied until "
+                        "empty."
+                    )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             if self._validate_stack_gate_skipped():
                 return (
@@ -2125,7 +2137,12 @@ class Coordinator:
             # Blocked:
             #   - report -- the LLM cannot declare the session done
             #     while a meaningful kernel lever exists.
-            if action == "report":
+            # The hot_kernel_unfinished rule only fires when
+            # ``run_optimization`` is actually dispatchable -- otherwise
+            # N19c will reject the LLM's resulting request and we'd
+            # deadlock the LLM between two opposing gates (death-spiral
+            # observed on 20260523T014653Z).
+            if action == "report" and self._kernel_opt_unlocked():
                 untried = self.shared_state.untried_hot_reusable_kernels()
                 if untried:
                     untried_str = ", ".join(untried)
@@ -2439,6 +2456,52 @@ class Coordinator:
         return os.environ.get(
             "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "",
         ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _kernel_opt_unlocked(self) -> bool:
+        """Return True when ``run_optimization`` can actually be
+        dispatched right now -- i.e. N19c's cheap-exhausted gate is
+        either satisfied or explicitly bypassed via the escape hatch.
+
+        PR-C TODO 4a / hot_kernel_unfinished gate uses this to avoid
+        a death-spiral with N19c: if N19c is still demanding more
+        cheap exploration (last_cheap_delta_gain >= EPSILON), forcing
+        the LLM to propose ``run_optimization`` only racks up
+        ``execution_order`` PolicyDenied counters until policy_loop
+        kills the session (Qwen3-30B-A3B-Base 20260523T014653Z died
+        at tick=14 this way: TODO 4a said "must kernel_opt", N19c
+        said "must finish cheap first", LLM oscillated for 10 ticks
+        and hit the auto-stop streak).
+
+        The gate is open in any of:
+          * escape hatch env set
+          * ``snapshot_id >= 1`` AND at least one cheap attempt has
+            been recorded AND ``last_cheap_delta_gain`` is set AND
+            below ``_cheap_exhausted_epsilon()``
+
+        When closed, callers should:
+          * NOT surface TODO 4a (don't push LLM to propose kernel_opt)
+          * NOT deny `report` on the hot_kernel_unfinished rule
+        Both behaviours let the LLM keep exploring cheap actions, and
+        once cheap exhausts, the gate reopens and PR-C re-activates.
+        """
+        if self._allow_early_kernel_opt():
+            return True
+        ta = self.shared_state.last_trace_analyze or {}
+        snapshot_id = ta.get("roofline_snapshot_id", 0)
+        if not isinstance(snapshot_id, int) or snapshot_id < 1:
+            return False
+        backends_attempts = len(self.shared_state.backends_attempts or [])
+        params_attempts = len(self.shared_state.params_attempts or [])
+        if backends_attempts + params_attempts < 1:
+            return False
+        last_delta = self.shared_state.last_cheap_delta_gain
+        if last_delta is None:
+            return False
+        try:
+            eps = _cheap_exhausted_epsilon()
+        except Exception:  # noqa: BLE001
+            eps = 0.3
+        return float(last_delta) < float(eps)
 
     def _record_keyword_implied_advice(
         self,
