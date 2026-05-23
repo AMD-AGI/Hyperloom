@@ -50,15 +50,16 @@ from .orchestrator.action_executors import (
     backends_executor,
     baseline_executor,
     framework_pr_executor,
+    make_roofline_executor,
     params_executor,
     pmc_roofline_executor,
     profile_executor,
+    recover_executor,
     report_executor,
     session_breakdown_executor,
     sweep_executor,
     validate_stack_executor,
 )
-from .orchestrator.action_executors.recover import recover_executor
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
@@ -73,18 +74,19 @@ from .orchestrator.coordinator import Coordinator
 from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
-from .orchestrator.system_prompts.critic_prompt_builder import build_critic_prompt
 from .orchestrator.system_prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
 from .paths import (
     DEFAULT_SESSION_DIR,
+    ENV_CURRENT_SESSION_DIR,
     ENV_USER_DATA_PATH,
     _SESSION_SKELETON,
     asset_system_prompts_dir,
     make_session_dir,
     session_dir as _session_dir_resolve,
+    workspace_root,
 )
 from .session_paths import (
     agent_prompt_snapshot,
@@ -159,34 +161,9 @@ def _build_orchestration_prompt(
     )
 
 
-def _critic_rules_fragment_path() -> Path:
-    """Path to the critic rules-only fragment (section 6 of the built prompt)."""
-    return asset_system_prompts_dir() / "critic.md"
-
-
-def _build_critic_prompt(
-    *,
-    no_kernel: bool,
-    framework: str,
-    max_minutes: int,
-    action_registry: ActionRegistry | None = None,
-) -> str:
-    """Compose the Critic system prompt for this run.
-
-    Replaces the legacy hand-maintained whitelist in ``critic.md`` with a
-    registry-driven catalogue so new actions (e.g. ``validate_stack``) cannot
-    drift out of the critic's known-action list.
-    """
-    registry = action_registry or ActionRegistry().load()
-    enabled = default_enabled_actions(no_kernel=no_kernel)
-    return build_critic_prompt(
-        action_registry=registry,
-        enabled_actions=enabled,
-        framework=framework,
-        kernel_enabled=not no_kernel,
-        max_minutes=int(max_minutes),
-        rules_fragment_path=_critic_rules_fragment_path(),
-    )
+def _load_critic_prompt() -> str:
+    """Return the Critic system prompt sourced from ``system_prompts/critic.md``."""
+    return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
 
 
 _DEFAULT_KERNEL_PROMPT = (
@@ -470,12 +447,27 @@ def _build_backends(
             raise ValueError(
                 "_build_backends: critic_choice='agent' requires critic_agent_root"
             )
+        # N38 (May 2026) — feed the registry-derived per-action
+        # verdict policy so the critic-agent runtime sees
+        # ``review_constraints.action_verdict_policy[<action_name>]``
+        # and approves exploration / archival actions without
+        # demanding the before/after evidence they themselves produce.
+        # Replaces the prompt-hardcoded carve-out lists N33/N35/N37
+        # had to patch one action at a time.
+        try:
+            from inference_optimizer.orchestrator.action_registry import (
+                ActionRegistry,
+            )
+            _reg = ActionRegistry().load()
+            _policy = {a.name: a.verdict_class for a in _reg.all()}
+        except Exception:  # noqa: BLE001 — degrade to empty policy
+            _policy = {}
         critic_backend = CriticAgentBackend(
             critic_agent_root=critic_agent_root,
             session_dir=session_dir,
             codex_model=codex_model,
             kb_mode=critic_kb_mode,
-            known_actions=default_enabled_actions(no_kernel=no_kernel),
+            action_verdict_policy=_policy,
         )
 
     if robustness_choice not in ("mock", "agent"):
@@ -506,7 +498,7 @@ def _build_backends(
         if kernel_codex:
             backends["kernel"] = CodexBackend(model=codex_model)
         else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=20)
+            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=4)
     return backends
 
 
@@ -595,12 +587,6 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "report":            report_executor,
     "session_breakdown": session_breakdown_executor,
     "validate_stack":    validate_stack_executor,
-    # ``recover`` re-enabled in 2026-05 alongside the robustness-agent
-    # ``gpu_memory_leaked`` signal (Change A/B): a real executor now
-    # cleans up leaked VRAM owners and, behind
-    # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, optionally shells out to
-    # ``rocm-smi --gpureset``. See
-    # ``orchestrator/action_executors/recover.py``.
     "recover":           recover_executor,
 }
 
@@ -617,21 +603,14 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
 # agent's request handlers). Kept as a tuple so SubAgentRunner doesn't
 # fail with "no_executor" when these names appear in stale tasks.
 #
-# `dream` / `re_explore` / `comm_optimization` / `compiler_tuning` were
-# removed from this list alongside the corresponding entries in
-# `prompt_builder.{FULL,NO_KERNEL}_ENABLED_ACTIONS`. Their executors
-# were `_noop_prep` (silent success) which produced misleading
-# "succeeded" outcomes; with them gone, any stale state.json resume
-# that still references one of these kinds will surface as
+# `dream` / `re_explore` / `recover` / `comm_optimization` /
+# `compiler_tuning` were removed from this list alongside the
+# corresponding entries in `prompt_builder.{FULL,NO_KERNEL}_ENABLED_ACTIONS`.
+# Their executors were `_noop_prep` (silent success) which produced
+# misleading "succeeded" outcomes; with them gone, any stale state.json
+# resume that still references one of these kinds will surface as
 # `no_executor` instead of a fake KEEP. Re-add only when real
 # executors land (see remain_todo.md sections C, I, M).
-#
-# `recover` was originally in that removed-stub list, but is now bound
-# above to :data:`recover_executor` (a real implementation that frees
-# leaked GPU VRAM). See the Change A/B/C plan
-# (``gpu-leak-robustness-fix``) for the design notes; the executor is
-# the SubAgentRunner-side counterpart of the robustness-agent
-# ``gpu_memory_leaked`` signal.
 #
 # `target_analysis` used to be a noop-when-unset stub here; it is now
 # wired unconditionally to the real :class:`TargetAnalysisExecutor`
@@ -685,6 +664,19 @@ def _register_executors(
             compare_against_gpu=(compare_against_gpu or "").strip(),
             session_dir=session_dir,
         ),
+    )
+
+    # Roofline-v2 N2b: wire the `roofline` composite action with the real
+    # `RooflineExecutor` that orchestrates profile + trace_analyze
+    # sub-steps in-process and promotes SharedState inline. The
+    # `RooflineStubExecutor` (kept exported in action_executors) is
+    # available as a §11 fallback wiring path: swap to
+    # `make_roofline_stub_executor` here to temporarily disable real
+    # execution without removing the action entry. See design/roofline-v2.md
+    # §8.4 for the orchestration algorithm.
+    coordinator.sub.register_executor(
+        "roofline",
+        make_roofline_executor(shared_state=coordinator.shared_state),
     )
 
     if no_kernel:
@@ -929,6 +921,116 @@ def _load_dotenv_fallback() -> None:
             loaded += 1
     if loaded:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
+
+
+def _load_kernel_agent_env_fallback() -> None:
+    """If ``HYPERLOOM_KERNEL_AGENT_ROOT`` is unset, auto-source the
+    kernel-agent env file produced by ``inference_optimizer/scripts/
+    install.sh`` at ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``
+    (overridable via ``$KERNEL_AGENT_ENV``).
+
+    Background: the May 2026 R1 N14 run stalled for 1h 12min because
+    the launcher only sourced the user's basic ``.env`` (3 vars) and
+    missed kernel-agent.env.sh. ``RooflineExecutor``'s trace_analyze
+    sub-step imports ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT``
+    at module load — that read happens before any user code can fix the
+    env, so the only way to recover without a restart is to source the
+    file here, before any orchestrator import. Setting the env in this
+    process also propagates to all subprocesses launched by Magpie /
+    TraceLens / GEAK runners.
+
+    Hard-fail contract (revised after the May 2026 Qwen1.5-7B 10h
+    silent-stall: env file at the wrong path -> silent WARN-only ->
+    5 rooflines all profile-success / trace_analyze-fail / snapshot
+    stays None / LLM heartbeat-only 7.5h). The function now:
+
+    * Looks ONLY at ``$KERNEL_AGENT_ENV`` (if set) or
+      ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``. USER_DATA_PATH
+      MUST be the workspace root (per N17 split: ``runtime/`` is
+      workspace-shared, not per-session). No parent-dir fallback.
+    * If the file is missing OR parses 0 vars OR
+      HYPERLOOM_KERNEL_AGENT_ROOT is still unset after sourcing,
+      ``sys.exit(2)`` with a clear actionable message instead of
+      silently warning and letting trace_analyze fail later. Fail
+      early, fail loud: the operator sees the problem in the first
+      30 seconds, not 10 hours in.
+    * Skip entirely when HYPERLOOM_KERNEL_AGENT_ROOT is already set
+      (operator pre-sourced manually, or running from a sandbox that
+      injected it — both fine).
+    """
+    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
+        return
+    candidate = os.environ.get("KERNEL_AGENT_ENV")
+    if not candidate:
+        user_data = os.environ.get("USER_DATA_PATH")
+        if not user_data:
+            print(
+                "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
+                "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+                "resolve kernel-agent.env.sh. Run "
+                "inference_optimizer/scripts/install.sh and export "
+                "USER_DATA_PATH=/path/to/sessions first.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
+    env_path = Path(candidate)
+    if not env_path.is_file():
+        print(
+            f"Preflight: ERROR — kernel-agent env file not found at "
+            f"{env_path}. USER_DATA_PATH must be the workspace root "
+            f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
+            f"is workspace-shared, not per-session. Either "
+            f"(a) re-run inference_optimizer/scripts/install.sh under "
+            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH','?')}, "
+            f"(b) set $KERNEL_AGENT_ENV to point at an existing file, or "
+            f"(c) set $HYPERLOOM_KERNEL_AGENT_ROOT directly to skip this "
+            f"fallback entirely. Aborting now (was: silently warning and "
+            f"letting trace_analyze fail 10h in).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    loaded = 0
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(
+            f"Preflight: ERROR — failed to read {env_path}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
+        print(
+            f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
+            f"HYPERLOOM_KERNEL_AGENT_ROOT is still unset. The env file is "
+            f"malformed or stale. Re-run inference_optimizer/scripts/"
+            f"install.sh to regenerate it.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    print(
+        f"Preflight: loaded {loaded} kernel-agent var(s) from "
+        f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
+        f"{os.environ['HYPERLOOM_KERNEL_AGENT_ROOT']})"
+    )
 
 
 def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
@@ -1258,9 +1360,14 @@ def _emit_preflight_diagnostics(
     print("Preflight diagnostics:")
     print(f"  asset_root          = {asset_root()}")
     print(
-        f"  session_dir         = {_session_dir_resolve()}  "
+        f"  workspace_root      = {workspace_root()}  "
         f"({ENV_USER_DATA_PATH}="
-        f"{os.environ.get(ENV_USER_DATA_PATH, '<unset>')}, "
+        f"{os.environ.get(ENV_USER_DATA_PATH, '<unset>')})"
+    )
+    print(
+        f"  session_dir         = {_session_dir_resolve()}  "
+        f"({ENV_CURRENT_SESSION_DIR}="
+        f"{os.environ.get(ENV_CURRENT_SESSION_DIR, '<unset>')}, "
         f"default={DEFAULT_SESSION_DIR})"
     )
     print(f"  magpie_python       = {magpie_python}")
@@ -1506,6 +1613,7 @@ def _preflight() -> tuple[str, str] | None:
     (``_run_optimize``) can route the catalog probe through the proxy.
     """
     _load_dotenv_fallback()
+    _load_kernel_agent_env_fallback()
 
     # --- Auth alias export ---
     safe_key = os.environ.get("SAFE_API_KEY", "")
@@ -2269,12 +2377,77 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     catalog_ids = _validate_and_resolve_claude_model(args, proxy_urls)
     _smoke_test_codex_model(args, catalog_ids)
 
+    # `--resume-from <path>` implies `--resume` (operator convenience).
+    if args.resume_from and not args.resume:
+        args.resume = True
+
     if args.resume:
-        # Resume mode: session_dir is fixed at /workspace/hyperloom (or
-        # $USER_DATA_PATH). We re-mkdir the skeleton (idempotent) so a
-        # partially-initialised previous run is healed before we touch
-        # state.
-        session_dir = make_session_dir()
+        # Resume mode (N17-aware): USER_DATA_PATH stays at workspace
+        # level so runtime/ + logs/ resolution doesn't break (N15
+        # `_load_kernel_agent_env_fallback` looks at $USER_DATA_PATH/
+        # runtime/kernel-agent.env.sh, which only exists at workspace
+        # level after install.sh ran). We then pick the per-session
+        # subdir to resume from via either:
+        #
+        # * --resume-from <path>  : explicit operator choice
+        # * --resume alone        : auto-pick LATEST per-session subdir
+        #                            under workspace_root/<model>/<ts>/.
+        #                            Falls back to workspace_root itself
+        #                            (legacy flat layout) when no
+        #                            per-session subdir exists.
+        #
+        # We pin INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR to the picked
+        # subdir so every paths.session_dir() call later (and every
+        # subprocess that inherits env) resolves consistently.
+        from .paths import (
+            ENV_CURRENT_SESSION_DIR, find_latest_per_session_dir,
+            workspace_root,
+        )
+        ws = workspace_root()
+        if args.resume_from:
+            session_dir = Path(args.resume_from).expanduser().resolve()
+            try:
+                session_dir.relative_to(ws.resolve())
+            except ValueError:
+                print(
+                    f"ERROR: --resume-from {session_dir!r} is not under "
+                    f"$USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
+                    f"workspace root (the parent of the per-session subdirs) "
+                    f"and pass the per-session subdir via --resume-from.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if not session_dir.is_dir():
+                print(
+                    f"ERROR: --resume-from {session_dir!r} does not exist.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        else:
+            picked = find_latest_per_session_dir()
+            if picked is not None:
+                session_dir = picked
+                print(f"  --resume: auto-picked latest per-session subdir")
+            else:
+                # Legacy flat layout — workspace_root itself is the
+                # session_dir. Validate it has manifest.json + state.json
+                # the same way the per-session branch does below.
+                session_dir = ws
+                print(
+                    f"  --resume: no per-session subdir found under "
+                    f"{ws}/<model>/<ts>/; falling back to flat layout "
+                    f"({ws})"
+                )
+        # Pin so every paths.session_dir() / subprocess inherits the
+        # resolved location BEFORE Coordinator/SharedState load.
+        os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
+        # Make sure per-session skeleton exists (mkdir -p semantics,
+        # idempotent; doesn't disturb existing files).
+        for sub in __import__(
+            "inference_optimizer.paths", fromlist=["_SESSION_SKELETON"]
+        )._SESSION_SKELETON:
+            (session_dir / sub).mkdir(parents=True, exist_ok=True)
+
         try:
             manifest = load_manifest(session_dir)
         except FileNotFoundError as exc:
@@ -2357,6 +2530,49 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"(was {prior_crash}) for fresh resume"
             )
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
+        # N31 backfill: when resuming a session that already ran roofline
+        # under pre-N31 code (or any session where the baseline freeze
+        # never got populated), copy the current last_trace_analyze
+        # metadata into last_trace_analyze_baseline so the eventual
+        # closing-phase report's ``## Roofline Comparison`` section
+        # still has a "before" snapshot to render. Without this backfill,
+        # resumed sessions would always render single-snapshot fallback
+        # even when the original session had a perfectly good snapshot 1.
+        #
+        # Backfill ONLY when:
+        # * baseline freeze is still empty (no overwriting existing
+        #   freezes -- the post-promote freeze path is authoritative for
+        #   sessions that ran end-to-end on N31+ code), AND
+        # * current last_trace_analyze has snapshot_id >= 1 (we have
+        #   something to freeze; an empty cache means roofline never ran
+        #   successfully and there's nothing useful to backfill).
+        cached_for_backfill = state.last_trace_analyze or {}
+        cur_snap_id = cached_for_backfill.get("roofline_snapshot_id", 0)
+        if (
+            not state.last_trace_analyze_baseline
+            and isinstance(cur_snap_id, int)
+            and cur_snap_id >= 1
+        ):
+            from datetime import datetime as _dt, timezone as _tz
+            state.last_trace_analyze_baseline = {
+                "roofline_snapshot_id": cur_snap_id,
+                "analysis_md_path": str(
+                    cached_for_backfill.get("analysis_md_path") or ""
+                ),
+                "trace_input": str(
+                    cached_for_backfill.get("trace_input") or ""
+                ),
+                "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+                "source": "n31_resume_backfill",
+            }
+            state.save(session_dir)
+            print(
+                f"  → N31 backfill: froze current snapshot "
+                f"#{cur_snap_id} into last_trace_analyze_baseline "
+                "(session pre-dates N31 baseline freeze; the final "
+                "report's Roofline Comparison section can now render "
+                "a baseline view)"
+            )
     else:
         # Resolve model path from --model first, then $MODEL_PATH env. Without
         # either, fail fast: silently falling back to the YAML's hardcoded
@@ -2429,10 +2645,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Workload        : ISL={args.isl} OSL={args.osl} "
               f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
 
-        # session_dir is fixed at /workspace/hyperloom (override:
-        # $USER_DATA_PATH). Each sandbox is single-use, so collision
-        # detection is unnecessary; mkdir -p is enough.
-        session_dir = make_session_dir()
+        # N17: session_dir is now <workspace_root>/<model>/<UTC ts>/
+        # by default (per-model + per-launch). Workspace_root is
+        # $USER_DATA_PATH (fallback /workspace/hyperloom). To restore
+        # the legacy flat layout, set INFERENCE_OPTIMIZER_SESSION_LAYOUT=
+        # flat. `make_session_dir(model_name=...)` does the layout
+        # decision + pins the result via $INFERENCE_OPTIMIZER_CURRENT_
+        # SESSION_DIR for every subprocess.
+        session_dir = make_session_dir(model_name=args.model)
         manifest = write_manifest(session_dir, args=args)
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
@@ -2530,10 +2750,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_options=robustness_options,
         no_kernel=no_kernel,
     )
-    # Bug A fix: expose the active session_dir to in-process executors
-    # (e.g. ReportExecutor) that don't get session_dir threaded through
-    # task.params. This is read in report.py::_resolve_session_dir.
-    os.environ["USER_DATA_PATH"] = str(session_dir)
+    # Session dir is already pinned via $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR
+    # (make_session_dir / --resume). Do NOT overwrite $USER_DATA_PATH here —
+    # workspace_root() must keep pointing at the launcher-provided workspace
+    # so runtime/ + kernel-agent.env.sh resolution stays correct (N17).
+    # ReportExecutor resolves session_dir via paths.session_dir() → pin.
     # Production: enable strict path-containment checks in PolicyGate so
     # any LLM-emitted intent whose path field escapes session_dir lands
     # as `policy_denied` in its inbox. Tests omit this and keep the
@@ -2571,11 +2792,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             objective=objective,
             max_minutes=max_minutes_for_prompt,
         ),
-        "critic":        _build_critic_prompt(
-            no_kernel=no_kernel,
-            framework=framework_for_prompt,
-            max_minutes=max_minutes_for_prompt,
-        ),
+        "critic":        args.critic_prompt or _load_critic_prompt(),
     }
     if not no_kernel:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
@@ -2842,13 +3059,21 @@ def _build_parser() -> argparse.ArgumentParser:
     grp.add_argument("--target-baseline-dir", type=str, default=None,
                       help="Stop when current best matches the baseline in DIR")
     opt.add_argument("--resume", action="store_true", default=False,
-                      help="Resume the session at the canonical session_dir "
-                           "(/workspace/hyperloom by default, or "
-                           "$USER_DATA_PATH). "
-                           "Skips the SharedState seed and lets the "
-                           "Coordinator replay the prior event log + "
-                           "state.json. Refuses to start if manifest.json or "
-                           "state.json is missing.")
+                      help="Resume an existing session. Without --resume-from, "
+                           "auto-picks the latest per-session subdir under "
+                           "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
+                           "falls back to $USER_DATA_PATH (legacy flat layout). "
+                           "USER_DATA_PATH MUST stay at workspace level "
+                           "(/wekafs/.../sessions/, not the per-session subdir) "
+                           "so runtime/ resolution works. Skips the SharedState "
+                           "seed and lets the Coordinator replay the prior "
+                           "event log + state.json.")
+    opt.add_argument("--resume-from", type=str, default=None,
+                      help="Explicit per-session subdir to resume from. Use "
+                           "when multiple per-launch ts dirs exist under the "
+                           "same model and the latest is not what you want. "
+                           "Must be an absolute path under $USER_DATA_PATH "
+                           "(workspace_root). Implies --resume.")
     opt.add_argument(
         "--model-class", type=str,
         default=os.environ.get("MODEL_CLASS", None),
@@ -3001,6 +3226,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")
+    opt.add_argument("--critic-prompt", type=str, default=None,
+                      help="Override Critic system prompt")
     opt.add_argument("--kernel-prompt", type=str, default=None,
                       help="Override Kernel system prompt")
 
@@ -3017,7 +3244,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.command == "optimize":
         # Resolve any --*-prompt that point at a file.
-        for attr in ("orch_prompt", "kernel_prompt"):
+        for attr in ("orch_prompt", "critic_prompt", "kernel_prompt"):
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))

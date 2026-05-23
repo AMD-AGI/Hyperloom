@@ -25,6 +25,7 @@ from typing import Any
 
 from ..message_bus import MessageBus
 from ..shared_state import SharedState
+from ..roofline_snapshot import build_roofline_comparison, format_roofline_metrics_table
 from ...paths import db_path_for
 from ...storage.connection import SqliteConnection
 
@@ -65,6 +66,22 @@ def _build_summary_dict(
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
+    # N31: Roofline Comparison section data. We always emit it
+    # (even when only one snapshot was captured) so the report
+    # renderer can either show the before/after pair OR a single
+    # snapshot's Executive Summary with a note explaining why.
+    baseline_snap = dict(getattr(state, "last_trace_analyze_baseline", {}) or {})
+    latest_snap_raw = state.last_trace_analyze or {}
+    latest_meta = {
+        "snapshot_id": latest_snap_raw.get("roofline_snapshot_id"),
+        "roofline_snapshot_id": latest_snap_raw.get("roofline_snapshot_id"),
+        "analysis_md_path": str(latest_snap_raw.get("analysis_md_path") or ""),
+        "trace_input": str(latest_snap_raw.get("trace_input") or ""),
+        "ts": str(latest_snap_raw.get("ts") or ""),
+    }
+    roofline_cmp = build_roofline_comparison(baseline_snap, latest_meta)
+    if roofline_cmp:
+        summary["roofline_comparison"] = roofline_cmp
     return summary
 
 
@@ -139,11 +156,118 @@ def _format_md(summary: dict[str, Any]) -> str:
             )
     lines.append("")
 
+    roofline_cmp = summary.get("roofline_comparison")
+    if roofline_cmp:
+        lines.extend(_format_roofline_comparison_section(roofline_cmp))
+
     ext = summary.get("external_baseline")
     if ext:
         lines.extend(_format_external_baseline_section(ext))
 
     return "\n".join(lines)
+
+
+def _extract_executive_summary(analysis_md_path: str) -> str:
+    """Pull the ``## Executive Summary`` block out of analysis.md.
+
+    TraceLens's analysis.md always starts with a level-1 title then a
+    ``## Executive Summary`` section -- we extract from that heading
+    up to the next level-2 heading (typically ``## Compute Kernel
+    Optimizations`` or the metrics table). Best-effort: returns a
+    short marker string if the file is missing / unparseable rather
+    than crashing the report.
+    """
+    if not analysis_md_path:
+        return "(no analysis.md path recorded)"
+    try:
+        text = Path(analysis_md_path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"(could not read {analysis_md_path}: {exc})"
+    # Strip N11 base64 image data URLs upfront so the report stays
+    # compact even if TraceLens regressed on inline images.
+    from inference_optimizer.tracelens_md import strip_base64_data_urls
+
+    text = strip_base64_data_urls(text)
+    lines = text.splitlines()
+    start = None
+    end = len(lines)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if start is None and stripped.startswith("## Executive Summary"):
+            start = i
+            continue
+        if start is not None and stripped.startswith("## ") and i > start:
+            end = i
+            break
+    if start is None:
+        return "(analysis.md does not contain a `## Executive Summary` block)"
+    block = "\n".join(lines[start:end]).strip()
+    # Cap the block at ~2KB so a single report doesn't bloat to MBs
+    # if Executive Summary ever grows. The full analysis.md is still
+    # on disk via ``analysis_md_path`` for anyone who wants details.
+    if len(block) > 2048:
+        block = block[:2045] + "..."
+    return block
+
+
+def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
+    """Render the N31 ``## Roofline Comparison`` section.
+
+    ``cmp`` is the dict materialised by the report executor from
+    ``shared_state.last_trace_analyze_baseline`` (snapshot #1, frozen
+    at first promotion) plus ``shared_state.last_trace_analyze``
+    (latest snapshot). When the two snapshot_ids are identical we
+    only had one snapshot for the whole session (no
+    post-optimization re-roofline was triggered, e.g. cumulative_gain
+    stayed at 0 -- per the N31 design intent of "no improvement ->
+    don't waste 20min on a second snapshot just for the report").
+    Render both views regardless; the operator sees a clear note when
+    they are the same.
+    """
+    lines: list[str] = ["## Roofline Comparison", ""]
+    baseline = cmp.get("baseline") or {}
+    latest = cmp.get("latest") or {}
+    base_id = baseline.get("snapshot_id")
+    latest_id = latest.get("snapshot_id")
+    if not baseline.get("snapshot_id") and not latest.get("snapshot_id"):
+        lines.append(
+            "_No roofline snapshot was captured during this session — "
+            "the `roofline` composite action never completed successfully._"
+        )
+        lines.append("")
+        return lines
+
+    mode = cmp.get("mode") or "single_snapshot"
+    if mode == "single_snapshot":
+        lines.append(
+            f"_Only one roofline snapshot was captured this session "
+            f"(snapshot #{base_id}) — no post-optimization re-snapshot "
+            "was triggered. Per N31 design: a final roofline runs before "
+            "the report only when `cumulative_gain_validated > 0` AND "
+            "`optimization_stack` is non-empty._"
+        )
+        lines.append("")
+    else:
+        lines.append(
+            "Structured before/after comparison — baseline snapshot was "
+            "captured after the first successful roofline; latest after "
+            "optimization was validated."
+        )
+        lines.append("")
+
+    lines.extend(format_roofline_metrics_table(cmp))
+
+    if mode == "single_snapshot":
+        return lines
+
+    lines.append(f"_Baseline snapshot #{base_id}_")
+    if baseline.get("ts"):
+        lines.append(f"_captured: {baseline.get('ts')}_")
+    lines.append(f"_Optimized snapshot #{latest_id}_")
+    if latest.get("ts"):
+        lines.append(f"_captured: {latest.get('ts')}_")
+    lines.append("")
+    return lines
 
 
 def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
@@ -393,9 +517,10 @@ class ReportExecutor:
         Strategy (in order):
         1. ``ctx.extra['session_dir']``     — Coordinator injects this for in-process runs
         2. ``task.params['session_dir']``   — explicit wins (e.g. tests)
-        3. :func:`paths.session_dir`        — honours ``$USER_DATA_PATH``
-           and otherwise returns ``/workspace/hyperloom``. Returns the
-           path only if it exists and contains ``state.json``.
+        3. :func:`paths.session_dir`        — honours
+           ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` (pin from
+           ``make_session_dir`` / ``--resume``), then ``$USER_DATA_PATH``.
+           Returns the path only if it exists and contains ``state.json``.
         4. None → runner returns failed status with an error
         """
         extra = getattr(ctx, "extra", None) or {}
