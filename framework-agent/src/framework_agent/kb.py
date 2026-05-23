@@ -139,7 +139,6 @@ def select_kb(
     keyword match; if keywords don't hit anything, fall back to a
     full-text scan across all domains' priority files.
     """
-    root = _resolve_kb_root()
     if domains is None:
         domains = _match_domains(task_description)
         if not domains:
