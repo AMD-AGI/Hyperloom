@@ -2662,10 +2662,31 @@ class SharedState:
                 if isinstance(entry, dict) and entry.get("code"):
                     warnings_cleaned.append(dict(entry))
 
+        # 893bc6f: propagate ``task_groups`` from the handler result so
+        # the multi-KEEP integrate queue's source-of-truth lookups stay
+        # in sync with what ``_batch_kernel_candidates`` dispatched.
+        # Without this, ``untried_hot_reusable_kernels()`` and
+        # ``next_pending_keep_kernel_id()`` see ``task_groups=[]`` and
+        # fall through to per-kernel logic — e.g. for
+        # ``primary=k004 kids=[k003, k004]`` they treat k003 as an
+        # untried independent kernel even though dispatching k004
+        # already covered the same AST function.
+        task_groups = result.get("task_groups") or []
+        if not isinstance(task_groups, list):
+            task_groups = []
+        # F1-1: ``record_trace_analyze`` is the canonical writer for
+        # the 11-field ``last_trace_analyze`` (snapshot_id /
+        # analysis_md_text / baseline_gain_at_snapshot / …). This
+        # legacy ``record_select_kernels`` writer stays in place for
+        # backwards-compatible callers and only mirrors the slim
+        # ``last_select_kernels`` schema; task_groups is added so the
+        # downstream lookups behave identically regardless of which
+        # path populated SharedState.
         self.last_select_kernels = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "hot_kernels_top15": summary,
+            "task_groups": task_groups,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,
             "ts": _now_iso(),
