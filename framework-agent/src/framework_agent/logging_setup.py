@@ -141,8 +141,16 @@ def configure_logging(
         file_path = Path(str(resolved_file)).expanduser()
         try:
             file_path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            # Best-effort: read-only mount / permission denied / non-dir
+            # parent should not abort logging setup. The FileHandler call
+            # below will raise a more specific OSError if the parent is
+            # still unwritable, so report and continue rather than swallow.
+            print(
+                f"[framework-agent logging_setup] WARN: mkdir({file_path.parent}) "
+                f"failed: {exc!r}; FileHandler may also fail",
+                file=sys.stderr,
+            )
         file_handler = logging.FileHandler(file_path, encoding="utf-8")
         file_handler.setLevel(effective_level)
         file_handler.setFormatter(formatter)
