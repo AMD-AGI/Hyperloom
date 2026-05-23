@@ -984,12 +984,23 @@ def _batch_kernel_candidates(
         )))
     except (TypeError, ValueError):
         max_attempts = 1
+    # PR-I: default min_gpu_pct must match SharedState.untried_hot_
+    # reusable_kernels' default (3.0). Earlier code defaulted to 0.0
+    # here, so the LLM saw an empty "untried" queue (gate >=3%) but
+    # _batch_kernel_candidates would still dispatch <3% candidates
+    # picked up via task_group fallback (e.g. rmsnorm group's k006 at
+    # gpu_pct=1.3% in Qwen3-30B-A3B-Base session 20260523T035235Z's
+    # third batch round). Mirroring the SharedState default keeps the
+    # two layers in sync and avoids tiny kernels eating 30-90 min of
+    # ladder wall-clock for no E2E gain.
+    from .shared_state import _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
     try:
         min_gpu_pct = float(os.environ.get(
-            "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0",
+            "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
+            _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
         ))
     except (TypeError, ValueError):
-        min_gpu_pct = 0.0
+        min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
     if session_dir is not None:
         try:
             from .shared_state import SharedState
