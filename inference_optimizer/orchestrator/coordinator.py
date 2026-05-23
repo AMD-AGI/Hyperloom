@@ -3065,21 +3065,33 @@ class Coordinator:
             # it has to ``run_optimization`` (not ``report``) until the
             # gpu_pct >= 3% set is drained. Same source of truth as the
             # ``_sequence_denial_for_action('report')`` denial.
-            untried_hot = self.shared_state.untried_hot_reusable_kernels()
-            if untried_hot:
-                untried_str = ", ".join(untried_hot)
-                return (
-                    f"TODO 4a/5: kernel_opt required on untried hot "
-                    f"reusable kernels [{untried_str}]. Each kernel with "
-                    "gpu_pct >= 3% (capped at top 5 by gpu_pct) must get "
-                    "at least one full backend ladder (GEAK -> Claude -> "
-                    "Codex). Emit request{target_agent='kernel', "
-                    "kind='run_optimization', params={candidates_path="
-                    "<last_trace_analyze.candidates_path>}} -- batch "
-                    "mode fans out automatically. Failed ladders retire "
-                    "the kernel (max_failures=1), so this list shrinks "
-                    "monotonically. `report` is denied until empty."
-                )
+            #
+            # Only fires when N19c (cheap-exhausted) gate has opened --
+            # otherwise the LLM would propose ``run_optimization``,
+            # bounce off ``execution_order`` repeatedly, and hit the
+            # policy_loop auto-stop (Qwen3-30B-A3B-Base 20260523T014653Z
+            # died at tick=14 this way). When cheap is still earning
+            # marginal gain (last_cheap_delta_gain >= EPSILON), let the
+            # LLM keep exploring; PR-C re-activates the instant N19c
+            # unlocks.
+            if self._kernel_opt_unlocked():
+                untried_hot = self.shared_state.untried_hot_reusable_kernels()
+                if untried_hot:
+                    untried_str = ", ".join(untried_hot)
+                    return (
+                        f"TODO 4a/5: kernel_opt required on untried hot "
+                        f"reusable kernels [{untried_str}]. Each kernel "
+                        "with gpu_pct >= 3% (capped at top 5 by gpu_pct) "
+                        "must get at least one full backend ladder "
+                        "(GEAK -> Claude -> Codex). Emit request"
+                        "{target_agent='kernel', kind='run_optimization', "
+                        "params={candidates_path="
+                        "<last_trace_analyze.candidates_path>}} -- batch "
+                        "mode fans out automatically. Failed ladders "
+                        "retire the kernel (max_failures=1), so this list "
+                        "shrinks monotonically. `report` is denied until "
+                        "empty."
+                    )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             return (
                 "TODO 4/4: stack rebench required. New KEEP'd entries have "
@@ -3408,11 +3420,11 @@ class Coordinator:
                         f"{pending_kid!r}}}}} before any further explore"
                     ),
                 )
-        # PR-C (0270b67): hot-kernel report-gate. Block ``report`` when
-        # any reusable hot kernel with gpu_pct >= 3% has not yet been
-        # tried (and is not rejected / integrated). Prevents the
-        # log1 (164910Z) failure mode where tick=8 -> report_emitted
-        # with k001=24% / k002=37% / k004=9.7% untouched.
+        # PR-C (0270b67) + c900791 yield-to-N19c: hot-kernel report-gate.
+        # Block ``report`` when any reusable hot kernel with gpu_pct >=
+        # 3% has not yet been tried (and is not rejected / integrated).
+        # Prevents the log1 (164910Z) failure mode where tick=8 ->
+        # report_emitted with k001=24% / k002=37% / k004=9.7% untouched.
         #
         # Allowed through the gate:
         #   - kernel_opt request itself (handled at request layer)
@@ -3422,7 +3434,13 @@ class Coordinator:
         # Blocked:
         #   - report -- the LLM cannot declare the session done
         #     while a meaningful kernel lever exists.
-        if action == "report":
+        #
+        # The hot_kernel_unfinished rule only fires when
+        # ``run_optimization`` is actually dispatchable; otherwise N19c
+        # would reject the LLM's resulting request and we'd deadlock
+        # the LLM between two opposing gates (death-spiral observed on
+        # 20260523T014653Z — see c900791).
+        if action == "report" and self._kernel_opt_unlocked():
             untried = self.shared_state.untried_hot_reusable_kernels()
             if untried:
                 untried_str = ", ".join(untried)
@@ -3505,7 +3523,88 @@ class Coordinator:
                 rule="execution_order",
                 hint="emit request kind='select_kernels' for last_profile_trace",
             )
+        # Note (c900791): main also gates ``run_optimization`` here on a
+        # gain-driven N19c rule (snapshot_id >= 1 + cheap-attempt
+        # recorded + last_cheap_delta_gain < EPSILON). On this branch
+        # the equivalent lives in PolicyGate as
+        # ``_validate_gain_driven_kernel_opt`` (F3-5 N19c, reads
+        # ``gain_per_stack_entry`` instead of v0.6
+        # backends_attempts/params_attempts/last_cheap_delta_gain), so
+        # the Coordinator-side gate is intentionally omitted here.
         return None
+
+    @staticmethod
+    def _allow_early_kernel_opt() -> bool:
+        """Escape hatch — ``INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1``
+        opens the kernel_opt request gate unconditionally (skips both
+        the snapshot check and the gain-driven N19c check). Used by
+        v0-baseline-comparison flows and unit tests."""
+        return os.environ.get(
+            "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _kernel_opt_unlocked(self) -> bool:
+        """Return True when ``run_optimization`` is actually dispatchable
+        right now — i.e. when the hot-kernel report-gate (PR-C) should
+        fire and the LLM should be pushed toward kernel_opt.
+
+        Mirrors PolicyGate's F3-5 N19c ``_validate_gain_driven_kernel_opt``
+        check so the two gates never disagree. Without this yield-to-N19c
+        on the Coordinator side the LLM oscillates between
+        ``hot_kernel_unfinished`` (PR-C, deny report) and
+        ``n19c_gain_driven_kernel_opt`` (PolicyGate, deny kernel_opt
+        proposal) until ``policy_loop`` auto-stops the session
+        (Qwen3-30B-A3B-Base 20260523T014653Z died this way at tick=14).
+
+        The gate is open when ANY of the following hold:
+          * escape hatch env set;
+          * the gain-driven N19c toggle is off (legacy F3 default);
+          * the last ``_N19C_HISTORY_WINDOW`` cheap-round deltas in
+            ``gain_per_stack_entry`` average below the F3-5 epsilon
+            (i.e. cheap exploration has actually plateaued).
+        """
+        if self._allow_early_kernel_opt():
+            return True
+        ss = self.shared_state
+        ta = ss.last_trace_analyze or {}
+        snapshot_id = ta.get("roofline_snapshot_id", 0)
+        if not isinstance(snapshot_id, int) or snapshot_id < 1:
+            return False
+        if not bool(getattr(ss, "gain_driven_kernel_opt", False)):
+            # F3-5 toggle off → mirror PolicyGate's early-return; gate
+            # is considered open once a roofline snapshot exists.
+            return True
+        try:
+            from .policy import PolicyGate as _PolicyGate
+            window = _PolicyGate._N19C_HISTORY_WINDOW
+            epsilon = _PolicyGate._N19C_EPSILON_PCT
+        except Exception:  # noqa: BLE001 — defensive, fall back to F3-5 defaults
+            window, epsilon = 3, 0.5
+        history = list(getattr(ss, "gain_per_stack_entry", []) or [])
+        deltas: list[float] = []
+        for entry in reversed(history):
+            if isinstance(entry, dict):
+                d = entry.get("delta_pct")
+                if isinstance(d, (int, float)):
+                    deltas.append(float(d))
+            if len(deltas) >= window:
+                break
+        if len(deltas) < window:
+            return False
+        return (sum(deltas) / float(len(deltas))) < float(epsilon)
+
+    # Note: main commit c900791 also ports the N22 keyword-implied
+    # advice (``_record_keyword_implied_advice``,
+    # ``_registered_variants_for``) and N21 roofline-rerun denial
+    # (``_proposal_denial_for_roofline``). On this branch the
+    # equivalent functionality lives in:
+    #   * orchestrator/_analysis_keyword_map.py + PolicyGate's
+    #     ``analysis_keyword_advisory`` rule (F3-4 N22), and
+    #   * PolicyGate's ``roofline_saturation_advisory`` (F3-4 N21).
+    # The Coordinator-side helpers from main are therefore omitted
+    # here (they would also re-import the dropped backends.py /
+    # params.py grids — see docs/integration/MAIN_FEATURES_DROPPED.md
+    # §1).
 
     # ==================================================================
     # Intent handling
