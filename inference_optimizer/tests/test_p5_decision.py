@@ -445,13 +445,15 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
               "kernel_id": "k003",
               "name": "native_moe_gemm",
               "source_file": "/sgl-workspace/aiter/csrc/kernels/moe.cu",
-              "reusable_native_kernel": true
+              "reusable_native_kernel": true,
+              "gpu_pct": 24.5
             },
             {
               "kernel_id": "k006",
               "name": "native_quant",
               "source_file": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
-              "reusable_native_kernel": true
+              "reusable_native_kernel": true,
+              "gpu_pct": 11.2
             }
           ],
           "reusable_native_kernel_ids": ["k003", "k006"]
