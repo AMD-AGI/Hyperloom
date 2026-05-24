@@ -1,5 +1,52 @@
-Use the skill at /wekafs/HyperloomV2/inference_optimizer/SKILL.md to optimize this model.
-Working directory: cd /wekafs/HyperloomV2 before running any skill commands.
+Use the inference-optimization skill from a fresh Hyperloom checkout for this model.
+
+CRITICAL — Fresh Source Checkout:
+Do NOT run the optimizer from the shared /wekafs/HyperloomV2 tree except as a
+last-resort fallback. Before running any skill commands, clone Hyperloom into
+the sandbox-local RESULT_DIR so the exact source tree is persisted with the
+run and cleaned up with the sandbox:
+
+  export RESULT_DIR="${RESULT_DIR:-/workspace/hyperloom/}"
+  export HYPERLOOM_SOURCE_REPO="${HYPERLOOM_SOURCE_REPO:-https://github.com/AMD-AGI/Hyperloom.git}"
+  export HYPERLOOM_SOURCE_REF="${HYPERLOOM_SOURCE_REF:-main}"
+  export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-$RESULT_DIR/runtime/Hyperloom-main}"
+  mkdir -p "$RESULT_DIR/runtime"
+  rm -rf "$HYPERLOOM_SOURCE_DIR"
+  git clone --depth 1 --branch main "$HYPERLOOM_SOURCE_REPO" "$HYPERLOOM_SOURCE_DIR"
+  cd "$HYPERLOOM_SOURCE_DIR"
+  if [ "$HYPERLOOM_SOURCE_REF" != "main" ]; then
+    git fetch --depth 1 origin "$HYPERLOOM_SOURCE_REF" && git checkout --detach FETCH_HEAD
+  fi
+  HYPERLOOM_SOURCE_COMMIT=$(git rev-parse HEAD)
+  printf '%s\n' "$HYPERLOOM_SOURCE_COMMIT" > "$RESULT_DIR/hyperloom_source_commit.txt"
+  python3 - <<'PY'
+import json, os, subprocess
+def git_out(args):
+    try:
+        return subprocess.check_output(args, text=True).strip()
+    except Exception:
+        return ""
+source_dir = os.environ.get("HYPERLOOM_SOURCE_DIR", "")
+result_dir = os.environ.get("RESULT_DIR", "/workspace/hyperloom/")
+payload = {
+    "hyperloom": {
+        "repo": os.environ.get("HYPERLOOM_SOURCE_REPO", ""),
+        "ref": os.environ.get("HYPERLOOM_SOURCE_REF", ""),
+        "path": source_dir,
+        "commit": git_out(["git", "-C", source_dir, "rev-parse", "HEAD"]) if source_dir else "",
+        "remote": git_out(["git", "-C", source_dir, "config", "--get", "remote.origin.url"]) if source_dir else "",
+    }
+}
+os.makedirs(result_dir, exist_ok=True)
+with open(os.path.join(result_dir, "source_commits.json"), "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2)
+PY
+
+Then use the skill at:
+  $HYPERLOOM_SOURCE_DIR/inference_optimizer/SKILL.md
+
+Working directory:
+  cd "$HYPERLOOM_SOURCE_DIR"
 
 CRITICAL — Required Artifacts (the canonical SaFE success contract):
 At the end of the run, ALWAYS write both files to $RESULT_DIR (defaults to /workspace/hyperloom/).
@@ -59,7 +106,7 @@ when SaFE marks the task Succeeded it only collects /workspace
 for a short window before deletion, and the CI side has no
 kubectl-exec access to read it back.
 
-To survive any of this you MUST copy the two artifacts to a
+To survive any of this you MUST copy the full result tree to a
 persistent location under /hyperloom/users/<your-safe-uuid>/
 (which is the wekafs RW mount inside the sandbox — the
 CI / NFS Stage B fallback scans this path). Run this AFTER
@@ -77,9 +124,13 @@ you have written the final ci_metrics.json + optimization_report.md:
     TASK_TAG="${SAFE_TASK_ID:-$(date +%Y%m%d%H%M%S)}"
     PERSIST_DIR="/hyperloom/users/$UID_HEX/${MODEL_TAG}-${TASK_TAG##*-}-opt"
     mkdir -p "$PERSIST_DIR"
-    cp -f "$RESULT_DIR/ci_metrics.json"          "$PERSIST_DIR/ci_metrics.json"         2>/dev/null && echo "[PERSIST] $PERSIST_DIR/ci_metrics.json"
-    cp -f "$RESULT_DIR/optimization_report.md"  "$PERSIST_DIR/optimization_report.md"  2>/dev/null && echo "[PERSIST] $PERSIST_DIR/optimization_report.md"
-    cp -f "$RESULT_DIR/session_breakdown.json"  "$PERSIST_DIR/session_breakdown.json"  2>/dev/null && echo "[PERSIST] $PERSIST_DIR/session_breakdown.json"
+    # Copy the full result tree, not just the three key artifacts. This keeps
+    # logs, kernel candidates/results, sweep outputs, traces, and any future
+    # audit files available for CI/NFS rescue after sandbox cleanup.
+    cp -a "$RESULT_DIR/." "$PERSIST_DIR/" 2>/dev/null && echo "[PERSIST] copied full $RESULT_DIR -> $PERSIST_DIR/"
+    test -s "$PERSIST_DIR/ci_metrics.json"         && echo "[PERSIST] $PERSIST_DIR/ci_metrics.json"
+    test -s "$PERSIST_DIR/optimization_report.md" && echo "[PERSIST] $PERSIST_DIR/optimization_report.md"
+    test -s "$PERSIST_DIR/session_breakdown.json" && echo "[PERSIST] $PERSIST_DIR/session_breakdown.json"
     ls -la "$PERSIST_DIR/"
   else
     echo "[ERR] /hyperloom/users/<uid>/ not mounted — cannot persist to wekafs"
