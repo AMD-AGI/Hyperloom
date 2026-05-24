@@ -76,6 +76,131 @@ def _now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Per-action review-constraints taxonomy.
+#
+# The original ``_review_constraints`` returned a single approve_requires
+# checklist that demanded a comparable before/after benchmark + accuracy
+# gate for *every* proposal. That works for kernel-patch landing
+# (``integrate`` / ``integrate_patch`` / ``apply_patch``) where Critic is
+# the last gate before mutating ``optimization_stack`` or
+# ``framework_source_roots``, but it deadlocks the explore loop:
+# ``explore`` / ``specialist`` / ``profile`` / ``kernel_opt`` proposals
+# exist precisely to *produce* those benchmarks, so requiring them
+# upfront makes Critic permanently emit ``needs_review`` and the
+# explore family eventually gets pruned.
+#
+# Three classes:
+#   * ``patch_landing``       — strict; the original 4-item checklist.
+#   * ``evidence_producer``   — structural-only; approves so the action
+#                               can produce the missing evidence.
+#   * ``framework_op``        — empty checklist; Critic is not a useful
+#                               gatekeeper for these (baseline /
+#                               target_analysis / recover / report).
+#   * unknown action_name     → falls back to ``evidence_producer``
+#                               (cold-start safe; unknown actions are
+#                               treated as exploratory by default).
+#
+# The bundle-level ``approve_requires`` collapses the batch to the
+# *most conservative* class present (so a mixed batch with both
+# ``integrate`` and ``explore`` still gets the strict checklist as the
+# bundle default). The per-proposal classification is also exposed via
+# ``proposal_action_classes`` so the SKILL prompt can apply the right
+# bar per proposal in a heterogeneous batch.
+ACTION_CLASS_PATCH_LANDING = "patch_landing"
+ACTION_CLASS_EVIDENCE_PRODUCER = "evidence_producer"
+ACTION_CLASS_FRAMEWORK_OP = "framework_op"
+
+_PATCH_LANDING_ACTIONS: frozenset[str] = frozenset({
+    "integrate",
+    "integrate_patch",
+    "apply_patch",
+})
+
+# Actions whose entire purpose is to produce the evidence patch_landing
+# expects. Keeping this set explicit (rather than "everything not in the
+# other two sets") makes it clear what the Critic is actively choosing
+# to default-approve when KB priors are silent.
+_EVIDENCE_PRODUCER_ACTIONS: frozenset[str] = frozenset({
+    "explore",
+    "specialist",
+    "sweep",
+    "profile",
+    "pmc_roofline",
+    "kernel_opt",
+    "deep_kernel_analysis",
+    "operator_tuning",
+    "vendor_kernel_config",
+    "assess_remaining_gaps",
+})
+
+_FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset({
+    "baseline",
+    "target_analysis",
+    "recover",
+    "report",
+    "session_breakdown",
+})
+
+_APPROVE_REQUIRES_PATCH_LANDING: tuple[str, ...] = (
+    "comparable_before_after_benchmark",
+    "accuracy_gate_or_waiver",
+    "active_path_proof_when_relevant",
+    "rollback_plan",
+)
+
+_APPROVE_REQUIRES_EVIDENCE_PRODUCER: tuple[str, ...] = (
+    # Variant must trace back to a specialist proposal_set or carry
+    # provenance='default_grid' (cold-start escape hatch).
+    "specialist_or_default_grid_provenance",
+    # Action must be in the current phase's allowed_actions set
+    # (PolicyGate enforces this too; Critic mirrors it as a soft check).
+    "in_phase_allowed_action",
+    # If KB has a contradicting prior (e.g. variant tried 3x and failed),
+    # Critic should reject. Absence of priors is NOT a blocker.
+    "no_contradicting_kb_prior",
+)
+
+_APPROVE_REQUIRES_FRAMEWORK_OP: tuple[str, ...] = ()
+
+# Class precedence used to collapse a heterogeneous batch into a single
+# bundle-level ``approve_requires`` payload — strictest class wins.
+_CLASS_RANK: dict[str, int] = {
+    ACTION_CLASS_FRAMEWORK_OP: 0,
+    ACTION_CLASS_EVIDENCE_PRODUCER: 1,
+    ACTION_CLASS_PATCH_LANDING: 2,
+}
+
+_APPROVE_REQUIRES_BY_CLASS: dict[str, tuple[str, ...]] = {
+    ACTION_CLASS_PATCH_LANDING: _APPROVE_REQUIRES_PATCH_LANDING,
+    ACTION_CLASS_EVIDENCE_PRODUCER: _APPROVE_REQUIRES_EVIDENCE_PRODUCER,
+    ACTION_CLASS_FRAMEWORK_OP: _APPROVE_REQUIRES_FRAMEWORK_OP,
+}
+
+
+def classify_proposal_action(action_name: str | None) -> str:
+    """Map a proposal's ``action_name`` to one of the three review classes.
+
+    Unknown / missing action names fall through to
+    ``ACTION_CLASS_EVIDENCE_PRODUCER`` rather than ``patch_landing`` —
+    this is the cold-start-safe default. A genuinely unrecognised action
+    is more likely to be a new exploratory proposal than a new patch
+    landing path; if it is the latter, the Coordinator's PolicyGate
+    will reject it long before the patch reaches a real apply step.
+    """
+    if not isinstance(action_name, str):
+        return ACTION_CLASS_EVIDENCE_PRODUCER
+    name = action_name.strip()
+    if not name:
+        return ACTION_CLASS_EVIDENCE_PRODUCER
+    if name in _PATCH_LANDING_ACTIONS:
+        return ACTION_CLASS_PATCH_LANDING
+    if name in _FRAMEWORK_OP_ACTIONS:
+        return ACTION_CLASS_FRAMEWORK_OP
+    # Explicit evidence_producer set OR unknown → evidence_producer.
+    return ACTION_CLASS_EVIDENCE_PRODUCER
+
+
+# ---------------------------------------------------------------------------
 # L4 helpers — Robustness finding discovery / load
 # ---------------------------------------------------------------------------
 
@@ -351,7 +476,7 @@ class DecisionReviewer:
         bundle.proposals = [p.to_dict() for p in req.proposals]
         bundle.messages = list(req.messages)
         bundle.decision = dict(req.decision)
-        bundle.review_constraints = self._review_constraints()
+        bundle.review_constraints = self._review_constraints(req.proposals)
         known = req.options.get("known_actions")
         if isinstance(known, list) and known:
             bundle.review_constraints["known_actions"] = sorted(
@@ -578,17 +703,53 @@ class DecisionReviewer:
         keep = set(new_msg_ids)
         req.proposals = [p for p in parsed.proposals if p.msg_id in keep]
 
-    def _review_constraints(self) -> dict[str, Any]:
-        return {
+    def _review_constraints(
+        self, proposals: list[Proposal] | None = None,
+    ) -> dict[str, Any]:
+        """Return the per-bundle review constraints payload.
+
+        When ``proposals`` is supplied, the bundle-level
+        ``approve_requires`` is the checklist of the *strictest* action
+        class present in the batch (so a mixed ``integrate`` + ``explore``
+        batch still defaults to the strict patch-landing checklist). The
+        bundle additionally exposes ``proposal_action_classes`` —
+        ``{msg_id: class_name}`` — so the SKILL prompt can apply the
+        right per-proposal bar when the batch is heterogeneous.
+
+        When ``proposals`` is empty / None (e.g. a ``decision_request``
+        with no inbox proposals), we emit the strict ``patch_landing``
+        checklist as the default — historically the only consumer of
+        this branch was kernel-patch landing review.
+        """
+        constraints: dict[str, Any] = {
             "allowed_verdicts": sorted(ALLOWED_VERDICTS),
-            "approve_requires": [
-                "comparable_before_after_benchmark",
-                "accuracy_gate_or_waiver",
-                "active_path_proof_when_relevant",
-                "rollback_plan",
-            ],
             "ceiling_importance": 0.84,
         }
+        if not proposals:
+            constraints["approve_requires"] = list(
+                _APPROVE_REQUIRES_PATCH_LANDING
+            )
+            return constraints
+        per_proposal: dict[str, str] = {}
+        max_rank = -1
+        max_class = ACTION_CLASS_EVIDENCE_PRODUCER
+        for p in proposals:
+            cls = classify_proposal_action(p.action_name)
+            per_proposal[p.msg_id] = cls
+            rank = _CLASS_RANK.get(cls, _CLASS_RANK[ACTION_CLASS_EVIDENCE_PRODUCER])
+            if rank > max_rank:
+                max_rank = rank
+                max_class = cls
+        constraints["approve_requires"] = list(
+            _APPROVE_REQUIRES_BY_CLASS[max_class]
+        )
+        constraints["bundle_action_class"] = max_class
+        constraints["proposal_action_classes"] = per_proposal
+        constraints["approve_requires_by_class"] = {
+            cls: list(reqs)
+            for cls, reqs in _APPROVE_REQUIRES_BY_CLASS.items()
+        }
+        return constraints
 
     def _topic_for_proposal(self, proposal: Proposal) -> str:
         if proposal.action_name:
