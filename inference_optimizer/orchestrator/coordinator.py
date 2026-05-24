@@ -92,6 +92,8 @@ log = logging.getLogger(__name__)
 # (record_kernel_opt / record_kernel_integrate_result).
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "sweep", "explore",
+    # F1-3: see shared_state._AUDIT_ACTIONS for rationale.
+    "roofline",
 })
 
 # ---------------------------------------------------------------------------
@@ -6632,6 +6634,36 @@ class Coordinator:
             if result.get("kernel_breakdown_path"):
                 self.shared_state.last_profile_kernel_breakdown = str(result["kernel_breakdown_path"])
                 changed = True
+        elif task_kind == "roofline":
+            # F1-3 (Roofline-v2 / plan_roofline_framework): the
+            # composite ``roofline`` action runs profile +
+            # trace_analyze atomically. Its executor already writes
+            # ``last_profile_trace`` / ``last_profile_status`` /
+            # ``last_profile_args`` and calls ``record_trace_analyze``
+            # to populate ``last_trace_analyze`` (plus the top-level
+            # ``roofline_snapshot_id`` mirror). Coordinator's job here
+            # is therefore narrow: surface audit fields so the action
+            # attempt ledger records a ``promoted`` / ``discarded``
+            # decision, and bump ``changed`` so the post-promote
+            # save() path persists the executor's mutations to disk.
+            status = str(result.get("status") or "")
+            if status == "succeeded":
+                audit_decision = "promoted"
+                audit_extras = {
+                    "snapshot_id": result.get("snapshot_id"),
+                    "last_profile_trace": result.get("last_profile_trace"),
+                    "analysis_md_path": result.get("analysis_md_path"),
+                    "profile_workspace": result.get("profile_workspace"),
+                    "degraded": bool(result.get("degraded", False)),
+                }
+                changed = True
+            else:
+                audit_decision = "discarded"
+                audit_extras = {
+                    "phase": result.get("phase"),
+                    "error_class": result.get("error_class"),
+                    "error": result.get("error"),
+                }
         elif task_kind == "explore":
             # v0.8 M3 + KB_gaps/Dead-A.5 (prerequisite to Gap-10) —
             # ``explore`` is the merged grid runner (KB_design §3.4).
