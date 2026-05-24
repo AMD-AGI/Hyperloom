@@ -766,6 +766,15 @@ class PolicyGate:
         # vllm engines on init; see _validate_sweep_singleton.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
+        # F3-1 / F3-2 / F3-5 (plan_roofline_framework): same Roofline-v2
+        # propose_action gates also apply at the delegate channel so a
+        # task is never created on the legacy ``profile`` / ``pmc_roofline``
+        # path while the operator has the Roofline composite + deny
+        # toggles on, and so kernel_opt cannot bypass the gain-driven
+        # / explore-minimum gates by skipping propose_action entirely.
+        self._validate_roofline_composite_supersedes_profile(action_name)
+        self._validate_gain_driven_kernel_opt(action_name)
+        self._validate_explore_minimum_before_kernel_opt(action_name)
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
         # No registry → fall through (P0 / dev-mode where registry isn't loaded).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -852,6 +861,23 @@ class PolicyGate:
             self._validate_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
+        # F3-1 (Roofline-v2 N9): deny direct profile / pmc_roofline when
+        # the operator has flipped --use-roofline-composite + --deny-direct-profile
+        # on. Forces atomic ``roofline`` use so the snapshot_id counter
+        # stays monotonic and ``last_trace_analyze.analysis_md_text`` stays
+        # aligned with the trace path it was derived from. See
+        # ``action_executors/roofline.py`` §5/§8.5 stale-cache invariant.
+        self._validate_roofline_composite_supersedes_profile(action_name)
+        # F3-2 (Roofline-v2 N19c): gain-driven kernel_opt lock — until
+        # cheap rounds have plateaued, kernel_opt is denied so we don't
+        # spend a 30 min GPU lane on a cheap-still-earning frontier.
+        self._validate_gain_driven_kernel_opt(action_name)
+        # F3-5: explore-attempt minimum guard — kernel_opt requires at
+        # least one successful explore round on record (replaces the
+        # legacy v0.6 backends_attempts / params_attempts sequence
+        # denials, which had no writers in v0.8 and would have
+        # permanently locked kernel_opt).
+        self._validate_explore_minimum_before_kernel_opt(action_name)
         # v0.8 M2 — R1 phase_incompatible (KB_design §3.11 §4.1).
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
         # v0.8 §3.11 R4 / R5 — defense in depth on propose_action.
@@ -860,6 +886,185 @@ class PolicyGate:
         )
         self._validate_tool_whitelist_collision(
             role.name, action_name, intent_kind="propose_action",
+        )
+
+    # ------------------------------------------------------------------
+    # F3-1 / F3-2 / F3-5 — Roofline-v2 propose_action gates
+    # (plan_roofline_framework/F3_policygate_advisory.MD)
+    #
+    # These three sub-rules are validated together inside
+    # :meth:`_validate_propose_action` so an out-of-the-box session
+    # (every Roofline-v2 toggle off) sees zero behavioural change. Only
+    # an operator who explicitly opts into one of the toggles trips the
+    # corresponding rule. Each helper is a no-op when its toggle is off.
+    #
+    # Reading order in the dispatch path:
+    #   1. _validate_roofline_composite_supersedes_profile (N9)
+    #   2. _validate_gain_driven_kernel_opt                 (N19c)
+    #   3. _validate_explore_minimum_before_kernel_opt      (F3-5)
+    #
+    # Independent toggles let operators A/B test each rule in isolation
+    # before committing to the next; this is the design rationale in
+    # plan_roofline_framework/README.md §3 and the reason none of the
+    # rules is hard-coded "always on".
+    # ------------------------------------------------------------------
+    _N9_BLOCKED_ACTIONS: frozenset[str] = frozenset({"profile", "pmc_roofline"})
+
+    def _validate_roofline_composite_supersedes_profile(
+        self, action_name: str,
+    ) -> None:
+        """F3-1 (N9): deny ``profile`` / ``pmc_roofline`` propose_action
+        when composite is on.
+
+        Two-toggle gate: both ``use_roofline_composite`` AND
+        ``deny_direct_profile`` must be on. The second toggle is the
+        operator escape hatch — flipping ``use_roofline_composite`` on
+        first lets the LLM exercise both paths in parallel, then
+        flipping ``deny_direct_profile`` on closes the legacy path.
+        """
+        if action_name not in self._N9_BLOCKED_ACTIONS:
+            return
+        ss = getattr(self, "shared_state", None)
+        if ss is None:
+            return
+        if not bool(getattr(ss, "use_roofline_composite", False)):
+            return
+        if not bool(getattr(ss, "deny_direct_profile", False)):
+            return
+        raise PolicyDenied(
+            f"propose_action: action_name={action_name!r} is denied "
+            f"while --use-roofline-composite + --deny-direct-profile "
+            f"are both on; use action_name='roofline' for an atomic "
+            f"profile + trace_analyze + analysis.md snapshot.",
+            rule="n9_deny_direct_profile_when_composite_on",
+            hint=(
+                "Re-emit propose_action{action_name='roofline'} (the "
+                "composite action runs profile + trace_analyze "
+                "atomically and produces last_trace_analyze."
+                "analysis_md_text + a fresh roofline_snapshot_id)."
+            ),
+        )
+
+    _N19C_HISTORY_WINDOW: int = 3
+    _N19C_EPSILON_PCT: float = 0.5
+
+    def _validate_gain_driven_kernel_opt(self, action_name: str) -> None:
+        """F3-2 (N19c): lock ``kernel_opt`` until cheap exploration
+        plateaus.
+
+        Reads the last ``_N19C_HISTORY_WINDOW`` entries of
+        :attr:`SharedState.gain_per_stack_entry` (the canonical
+        per-KEEP delta_pct ledger this branch already maintains; v0.8
+        replacement for v0.6's ``last_cheap_explore_gain_pct``).
+        Denies if the moving-average ``delta_pct`` is still
+        ``>= _N19C_EPSILON_PCT``: cheap rounds are still earning,
+        burning a kernel-opt lane is premature.
+
+        Toggle: :attr:`SharedState.gain_driven_kernel_opt` (F0-10,
+        default off).
+        """
+        if action_name != "kernel_opt":
+            return
+        ss = getattr(self, "shared_state", None)
+        if ss is None:
+            return
+        if not bool(getattr(ss, "gain_driven_kernel_opt", False)):
+            return
+        # Defer to the phase allowlist when kernel_opt is proposed
+        # outside the KERNEL phase — the phase_incompatible rule's
+        # message is more actionable there. N19c is a within-KERNEL
+        # gate, not a phase gate.
+        if str(getattr(ss, "phase", "") or "") != "KERNEL":
+            return
+        history = list(getattr(ss, "gain_per_stack_entry", []) or [])
+        # Keep only entries with a real per-round delta on record
+        # (resumed / seeded entries use ``delta_pct=None``).
+        deltas: list[float] = []
+        for entry in reversed(history):
+            if not isinstance(entry, dict):
+                continue
+            d = entry.get("delta_pct")
+            if isinstance(d, (int, float)):
+                deltas.append(float(d))
+            if len(deltas) >= self._N19C_HISTORY_WINDOW:
+                break
+        if len(deltas) < self._N19C_HISTORY_WINDOW:
+            raise PolicyDenied(
+                f"propose_action: kernel_opt is locked: only "
+                f"{len(deltas)} cheap-round delta(s) on record "
+                f"(need {self._N19C_HISTORY_WINDOW} for the gain-trend "
+                f"window). Run more explore / specialist rounds first.",
+                rule="n19c_gain_driven_kernel_opt",
+                hint=(
+                    "propose_action{action_name='explore'} or "
+                    "delegate{action_name='specialist', ...} until the "
+                    "ledger has at least "
+                    f"{self._N19C_HISTORY_WINDOW} integrated rounds."
+                ),
+            )
+        avg = sum(deltas) / float(len(deltas))
+        if avg >= self._N19C_EPSILON_PCT:
+            raise PolicyDenied(
+                f"propose_action: kernel_opt is locked: cheap rounds "
+                f"still earning (last {len(deltas)} avg "
+                f"{avg:+.2f}% >= {self._N19C_EPSILON_PCT:.2f}%). "
+                f"Continue cheap rounds until the average drops below "
+                f"the threshold.",
+                rule="n19c_gain_driven_kernel_opt",
+                hint=(
+                    "propose_action{action_name='explore'} or "
+                    "delegate{action_name='specialist', ...}"
+                ),
+            )
+
+    def _validate_explore_minimum_before_kernel_opt(
+        self, action_name: str,
+    ) -> None:
+        """F3-5: ``kernel_opt`` requires at least one successful explore
+        round on record.
+
+        Replaces v0.6's ``backends_attempts < 1`` / ``params_attempts
+        < 1`` sequence denials, which would lock kernel_opt forever on
+        this branch (no writers exist for those v0.6 fields — see
+        docs/integration/MAIN_FEATURES_DROPPED.md §1.3).
+
+        Successful = at least one entry in ``gain_per_stack_entry``,
+        which is appended only when ``optimization_stack`` accepts a
+        variant. This is also the same signal Coordinator uses to
+        compute ``cumulative_gain_validated``.
+
+        Always-on (no toggle) — this is a baseline correctness rule;
+        without it the LLM could enter KERNEL phase and burn a
+        kernel-opt lane before it knows whether cheap rounds would
+        have closed the gap.
+        """
+        if action_name != "kernel_opt":
+            return
+        ss = getattr(self, "shared_state", None)
+        if ss is None:
+            return
+        # Phase allowlist owns the "kernel_opt outside KERNEL" denial;
+        # F3-5 is a within-KERNEL correctness rule. Skipping here keeps
+        # the legacy ``phase_incompatible`` message fired by
+        # _validate_phase_action when an LLM proposes kernel_opt in
+        # PRELUDE / EXPLORE.
+        if str(getattr(ss, "phase", "") or "") != "KERNEL":
+            return
+        history = list(getattr(ss, "gain_per_stack_entry", []) or [])
+        accepted = sum(1 for e in history if isinstance(e, dict))
+        if accepted >= 1:
+            return
+        raise PolicyDenied(
+            f"propose_action: kernel_opt requires at least one "
+            f"successful explore round first (gain_per_stack_entry "
+            f"length = {accepted}). Run explore + integrate_patch "
+            f"before invoking kernel_opt.",
+            rule="explore_attempts_minimum_before_kernel_opt",
+            hint=(
+                "propose_action{action_name='explore'} (explore is the "
+                "v0.8 successor to v0.6 backends / params / "
+                "validate_stack — see KB_design §3.4 / KB_gaps Dead-A)."
+            ),
         )
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
