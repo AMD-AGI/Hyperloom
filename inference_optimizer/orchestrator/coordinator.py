@@ -2970,7 +2970,49 @@ class Coordinator:
         when it believes plateau is near, but back-to-back proposals
         within ``INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC``
         (default 1800) are denied to keep the dispatch budget bounded.
+
+        Issue-A guard (KB cold-start regression): the action's
+        ``actions/assess_remaining_gaps.md`` md preconditions
+        (``phase == 'EXPLORE'`` AND ``len(optimization_stack) >= 3``)
+        were previously documented but not enforced — letting the LLM
+        propose steward as the very first action after baseline (when
+        KB priors are missing) and route the session into
+        ``no_more_leverage`` before any real exploration. We now deny
+        the proposal until at least three stack entries have landed,
+        so the steward can only fire on a real plateau judgment (which
+        Coordinator-internal dispatch already gates on v0.8 signals).
         """
+        phase = (
+            getattr(self.shared_state, "phase", "") or ""
+        ).strip().upper()
+        if phase != "EXPLORE":
+            return PolicyDenied(
+                f"action='assess_remaining_gaps' denied: phase={phase!r} "
+                f"(steward is EXPLORE-only; see actions/"
+                f"assess_remaining_gaps.md preconditions)",
+                rule="assess_remaining_gaps_phase",
+                hint=(
+                    "Steward dispatch is gated to EXPLORE. Continue "
+                    "the current phase or wait for the Coordinator's "
+                    "internal plateau judge to fire on EXPLORE entry."
+                ),
+            )
+        stack_len = len(getattr(self.shared_state, "optimization_stack", []) or [])
+        if stack_len < 3:
+            return PolicyDenied(
+                f"action='assess_remaining_gaps' denied: "
+                f"len(optimization_stack)={stack_len} < 3 "
+                f"(steward needs material to assess; see actions/"
+                f"assess_remaining_gaps.md preconditions)",
+                rule="assess_remaining_gaps_min_stack",
+                hint=(
+                    "Run more EXPLORE rounds (specialist / params / "
+                    "backends) until at least 3 stack entries have "
+                    "promoted; the Coordinator's internal plateau "
+                    "judge will enqueue the steward on its own when "
+                    "v0.8 signals indicate exhaustion."
+                ),
+            )
         last = self.shared_state.last_remaining_gaps_assessment or {}
         if not isinstance(last, dict):
             return None
@@ -6734,7 +6776,15 @@ class Coordinator:
                 },
             )
             self.shared_state.record_sweep(result)
-            self.shared_state.params_no_promote_streak += 1
+            # Issue-E (Saturday May 2026): sweep is a discovery-only
+            # action that NEVER promotes (the branch above hard-codes
+            # ``decision='discarded'``). Previously this branch also
+            # bumped ``params_no_promote_streak``, which fed the
+            # plateau-judgment legacy proxy and caused a single SWEEP
+            # round to push the next EXPLORE phase one step closer to
+            # ``plateau_explore`` for no good reason. The streak field
+            # is owned by the ``params`` action lifecycle; sweep MUST
+            # NOT mutate it.
             self.shared_state.save(self.session_dir)
             return
         # Audit trail (kernel-parity) for the 6 non-kernel actions: one

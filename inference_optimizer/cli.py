@@ -1479,6 +1479,63 @@ def _emit_preflight_diagnostics(
         print(f"  kb_degraded_reason  = {kb_reason}")
         print(f"  pr_degraded_reason  = {pr_reason}")
 
+    # Issue-H (Saturday May 2026): surface Cortex KB offline-queue
+    # state. The flusher daemon already drains ``.kb_pending.ndjson``
+    # in the background, but a dead-letter pile-up is the canonical
+    # signal for "the prior session's KB writes were rejected (HTTP
+    # 4xx schema), this session is starting cold." Operators have no
+    # in-band way to see this today — they discover it only when
+    # specialists return empty proposal_set.
+    try:
+        _print_cortex_kb_queue_status()
+    except Exception as exc:  # noqa: BLE001 — defensive
+        print(f"  cortex_kb_queue     = <probe_failed: {exc!r}>")
+
+
+def _print_cortex_kb_queue_status() -> None:
+    """Emit a one-line summary of the Cortex KB offline NDJSON queue.
+
+    Pure visibility helper. The flusher daemon does the actual draining;
+    we only count rows so the operator sees ``pending=N dead=M`` next
+    to the rest of the preflight diagnostics. When ``pending > 0`` the
+    operator can verify the flusher is alive via
+    ``runtime/cortex/.kb_flusher.pid``; the dead-letter count is the
+    422-style permanent-reject signal that telegraphs an upcoming
+    cold-start session for new models.
+    """
+    from .session_paths import (
+        cortex_dead_letter_ndjson,
+        cortex_flushed_ndjson,
+        cortex_pending_ndjson,
+    )
+
+    sd = _session_dir_resolve()
+    pending = cortex_pending_ndjson(sd)
+    dead = cortex_dead_letter_ndjson(sd)
+    flushed = cortex_flushed_ndjson(sd)
+
+    def _count(p: Path) -> int:
+        if not p.exists():
+            return 0
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                return sum(1 for line in f if line.strip())
+        except OSError:
+            return 0
+
+    p_n, d_n, f_n = _count(pending), _count(dead), _count(flushed)
+    print(
+        f"  cortex_kb_queue     = pending={p_n} dead_letter={d_n} "
+        f"flushed={f_n} (root={pending.parent})"
+    )
+    if d_n > 0:
+        print(
+            f"                        ⚠ {d_n} dead-letter row(s) — "
+            f"prior KB writes permanently rejected (4xx schema). "
+            f"Specialists for affected anchors will start cold "
+            f"(no priors). See {dead}."
+        )
+
 
 def _probe_llm_catalog(
     *,
@@ -2521,6 +2578,46 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # run has a clean signal. The Coordinator's run() always re-sets
         # stop_reason at exit anyway.
         prior_crash = state.crash_count
+
+        # Issue-G (Saturday May 2026): the SKILL.md "Run-time signals"
+        # section says ``no_more_leverage`` and ``target_reached`` are
+        # intentional terminal states — "only resume if the user
+        # changes workload / search space / model / strategy." The
+        # original auto-clear silently nuked both, which is how an
+        # over-eager monitor or a habitual ``--resume`` would push a
+        # session past a steward verdict the operator never reviewed.
+        # We now require ``--force-resume`` to push past those two
+        # vocab terms; everything else (time_exhausted, max_ticks,
+        # crash recovery) auto-clears as before.
+        force_resume = bool(getattr(args, "force_resume", False))
+        gated_terminal = {"no_more_leverage", "target_reached"}
+        if prior_stop in gated_terminal and not force_resume:
+            print(
+                f"\nERROR: --resume blocked by terminal stop_reason="
+                f"{prior_stop!r}.\n"
+                f"\n"
+                f"  SKILL.md (Run-time signals): {prior_stop!r} is a "
+                f"deliberate terminal state.\n"
+                f"  The optimizer will not auto-resume past it because "
+                f"the prior run\n"
+                f"  declared exhaustion — picking up where it left off "
+                f"only repeats\n"
+                f"  the same exhaustion verdict.\n"
+                f"\n"
+                f"  Override paths:\n"
+                f"  1. Pass ``--force-resume`` if you have changed the "
+                f"workload /\n"
+                f"     search space / model / strategy and want to "
+                f"continue regardless.\n"
+                f"  2. Start a fresh session (different "
+                f"$USER_DATA_PATH) for a clean run.\n"
+                f"\n"
+                f"  Reports for the prior run live under "
+                f"{session_dir}/reports/.\n",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
         if prior_stop or prior_crash >= 3:
             state.stop_reason = ""
             state.closing_phase = False
@@ -2539,9 +2636,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             from datetime import datetime, timezone
             state.start_ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
             state.save(session_dir)
+            override_note = (
+                " (--force-resume override)"
+                if force_resume and prior_stop in gated_terminal
+                else ""
+            )
             print(
                 f"  → cleared stop_reason and reset crash_count "
-                f"(was {prior_crash}) for fresh resume"
+                f"(was {prior_crash}) for fresh resume{override_note}"
             )
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
         # v0.8 M1 — re-bootstrap (or pick up existing) Cortex KB session.
@@ -2994,6 +3096,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 log.exception(
                     "session_breakdown finalize failed (non-fatal)"
                 )
+            # Issue-I (Saturday May 2026): mirror the same safety-net
+            # for ``reports/final.md``. The full ReportExecutor walks
+            # the message bus (rich highlights), but if the close
+            # sequencer never reached step 1 the operator is left
+            # with an empty ``reports/`` directory and has to manually
+            # piece together stop_reason / current_best from
+            # state.json. ``write_minimal_final_report`` is no-op when
+            # the sequencer's final.md already exists.
+            try:
+                from .breakdown import write_minimal_final_report
+                final_md = write_minimal_final_report(session_dir)
+                print(f"Final report      : {final_md}")
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "emergency final report write failed (non-fatal)"
+                )
 
     _print_final_summary(coordinator.shared_state, stop_reason)
     return 0 if stop_reason in (
@@ -3067,6 +3185,17 @@ def _build_parser() -> argparse.ArgumentParser:
                            "Coordinator replay the prior event log + "
                            "state.json. Refuses to start if manifest.json or "
                            "state.json is missing.")
+    opt.add_argument(
+        "--force-resume", action="store_true", default=False,
+        help=(
+            "Allow ``--resume`` to push past a terminal "
+            "``stop_reason='no_more_leverage'`` or ``'target_reached'``. "
+            "Without this flag the resume aborts (Issue-G guard, per "
+            "SKILL.md 'Run-time signals': those terminals require an "
+            "operator-side workload / strategy change before resuming). "
+            "No-op outside ``--resume``."
+        ),
+    )
     opt.add_argument(
         "--model-class", type=str,
         default=os.environ.get("MODEL_CLASS", None),
