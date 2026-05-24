@@ -75,7 +75,7 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
     "prep",        # setup / classify / target_analysis / baseline
     "measure",     # baseline (gates explore)
     "explore",     # backends / params / sweep
-    "analysis",    # profile / pmc_roofline / deep_kernel_analysis
+    "analysis",    # profile / roofline / deep_kernel_analysis
     "deep",        # kernel_opt / integrate / operator_tuning / vendor_kernel_config
     "validate",    # validate_stack — apply optimization_stack + rebench
     "finalize",    # report
