@@ -374,6 +374,12 @@ class IntegratePatchExecutor:
             # Apply failed somewhere in the middle — reverse the partial
             # set so the source tree returns to clean.
             reverted = self._revert_patches(framework_root, applied)
+            await self._maybe_write_framework_pr_kb_record(
+                done_payload=done_payload,
+                outcome="rejected_apply_fail",
+                tps_delta_pct=0.0,
+                extra=extra,
+            )
             return {
                 "status": "apply_failed",
                 "error_class": "git_apply_failed",
@@ -494,6 +500,12 @@ class IntegratePatchExecutor:
                 )
             if accuracy_pass is False:
                 reasons.append("accuracy regression detected")
+            await self._maybe_write_framework_pr_kb_record(
+                done_payload=done_payload,
+                outcome="reverted_smoke_fail",
+                tps_delta_pct=float(delta_pct or 0.0),
+                extra=extra,
+            )
             return {
                 "status": "reverted",
                 "specialist_task_id": specialist_task_id,
@@ -510,6 +522,12 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             }
 
+        await self._maybe_write_framework_pr_kb_record(
+            done_payload=done_payload,
+            outcome="integrated",
+            tps_delta_pct=float(delta_pct or 0.0),
+            extra=extra,
+        )
         return {
             "status": "kept",
             "specialist_task_id": specialist_task_id,
@@ -532,6 +550,93 @@ class IntegratePatchExecutor:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _find_framework_pr_proposal(
+        done_payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Return the first proposal whose provenance starts with
+        ``specialist:serving:framework_pr``.
+
+        F2-5: framework-PR proposals are flagged via the canonical
+        provenance string. Returns ``None`` for legacy / kernel
+        specialist outputs so the KB writeback hook is a strict
+        no-op for them.
+        """
+        if not isinstance(done_payload, dict):
+            return None
+        proposal_set = done_payload.get("proposal_set") or []
+        if not isinstance(proposal_set, list):
+            return None
+        for proposal in proposal_set:
+            if not isinstance(proposal, dict):
+                continue
+            provenance = str(proposal.get("provenance") or "")
+            if provenance.startswith("specialist:serving:framework_pr"):
+                return proposal
+        return None
+
+    async def _maybe_write_framework_pr_kb_record(
+        self,
+        *,
+        done_payload: dict[str, Any] | None,
+        outcome: str,
+        tps_delta_pct: float,
+        extra: dict[str, Any],
+    ) -> None:
+        """F2-5: append a JSONL record to
+        ``framework-agent/kb/framework_optimization/lessons.jsonl``
+        when the integrated patch came from the framework_pr_scout
+        sub-kind.
+
+        Strict no-op when the proposal carries any other provenance,
+        or when the proposal is missing both ``fa_pr_url`` and
+        ``fa_pr_sha`` (the dedup keys; without them the record is
+        useless to future ``fa candidates`` runs). Errors during
+        the write are logged + swallowed so a flaky shared filesystem
+        cannot fail an otherwise-successful integrate.
+        """
+        proposal = self._find_framework_pr_proposal(done_payload)
+        if proposal is None:
+            return
+        pr_url = str(proposal.get("fa_pr_url") or "").strip()
+        pr_sha = str(proposal.get("fa_pr_sha") or "").strip()
+        if not pr_url and not pr_sha:
+            log.warning(
+                "integrate_patch: framework_pr proposal lacks both "
+                "fa_pr_url and fa_pr_sha; KB writeback skipped",
+            )
+            return
+        patches_written = proposal.get("patches_written") or []
+        patch_path = ""
+        if isinstance(patches_written, list) and patches_written:
+            patch_path = str(patches_written[0])
+        session_id = ""
+        shared_state = extra.get("shared_state") or extra.get("state")
+        if shared_state is not None:
+            session_id = str(
+                getattr(shared_state, "cortex_session_id", "") or ""
+            )
+        try:
+            from ..kb_writeback import write_framework_pr_record
+            written = await write_framework_pr_record(
+                pr_url=pr_url,
+                pr_sha=pr_sha,
+                patch_path=patch_path,
+                outcome=outcome,
+                tps_delta_pct=float(tps_delta_pct),
+                session_id=session_id,
+            )
+            log.info(
+                "integrate_patch: wrote framework_pr KB record to %s "
+                "(outcome=%s pr_url=%s tps_delta=%+.2f%%)",
+                written, outcome, pr_url, float(tps_delta_pct),
+            )
+        except Exception as exc:  # noqa: BLE001 — KB write is best-effort
+            log.warning(
+                "integrate_patch: framework_pr KB writeback failed: %r",
+                exc,
+            )
+
     def _revert_patches(
         self, framework_root: Path | None, applied: list[Path],
     ) -> list[Path]:
