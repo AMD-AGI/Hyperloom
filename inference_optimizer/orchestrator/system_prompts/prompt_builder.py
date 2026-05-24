@@ -45,7 +45,7 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
     # analysis
-    "profile", "pmc_roofline", "deep_kernel_analysis",
+    "profile", "roofline", "deep_kernel_analysis",
     # explore
     #
     # v0.8 M3 + KB_gaps/Gap-10: the merged ``explore`` action is the
@@ -658,27 +658,6 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "",
         "An explore round that produces zero new ideas is a bug — heartbeat",
         "with body_md='idea-pipeline-empty' so Robustness can intervene.",
-        "",
-        "### PMC roofline (dual mode)",
-        "",
-        "Use `pmc_roofline` after `profile` when you need hardware counters /",
-        "roofline charts. Two deployment modes:",
-        "",
-        "**RayJob mode (production)** — omit `server_cmd`; Coordinator derives",
-        "it from `baseline_config_path` / materialized Magpie YAML. Set",
-        "`params.ray_worker=true` inside the Ray job so GPU allocation is",
-        "owned by Ray.",
-        "",
-        "    delegate{action_name='pmc_roofline',",
-        "        params={ray_worker: true,",
-        "                config_path: <SharedState.baseline_config_path>,",
-        "                output_dir: '<SESSION_DIR>/runs/pmc_roofline/<round>'},",
-        "        predicted_gain_pct: 0,",
-        "        notes: 'PMC roofline via Ray — server_cmd auto-derived'}",
-        "",
-        "**Local debug mode** — set `allow_direct_gpu=true` (or export",
-        "`HYPERLOOM_ALLOW_DIRECT_PMC_ROOFLINE=1`) and pass explicit",
-        "`server_cmd` + `health_url` when no Ray worker is available.",
     ])
     return lines
 
