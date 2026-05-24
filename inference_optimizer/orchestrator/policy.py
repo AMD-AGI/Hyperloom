@@ -1593,6 +1593,56 @@ class PolicyGate:
                     f"(KB_design §3.5 §5)"
                 ),
             )
+
+        # F2-2 (Roofline-v2 / framework-agent): per-domain sub_kind
+        # validation. Default sub_kind (None / "") is always allowed —
+        # the specialist runs the canonical per-domain prompt. Non-
+        # empty sub_kind must appear in the domain's ``sub_kinds``
+        # tuple; framework-agent-gated sub_kinds additionally require
+        # ``SharedState.framework_agent_enabled=True`` (defense in
+        # depth — the SpecialistRunner subprocess sandbox in F2-3
+        # also enforces this, but failing fast at the dispatch
+        # boundary keeps the no_executor / network-deny paths cleaner).
+        sub_kind = str(params.get("sub_kind") or "").strip()
+        if sub_kind:
+            from .specialist_domains import (
+                FRAMEWORK_AGENT_GATED_SUB_KINDS,
+                get_domain,
+            )
+            domain_obj = get_domain(domain)
+            allowed = tuple(domain_obj.sub_kinds) if domain_obj else ()
+            if sub_kind not in allowed:
+                raise PolicyDenied(
+                    f"delegate{{action='specialist'}}: domain={domain!r} "
+                    f"does not support sub_kind={sub_kind!r}",
+                    rule="specialist_dispatch_source",
+                    hint=(
+                        f"params.sub_kind must be empty (= default "
+                        f"per-domain prompt) or one of "
+                        f"{sorted(allowed)!r} for domain={domain!r}."
+                    ),
+                )
+            if sub_kind in FRAMEWORK_AGENT_GATED_SUB_KINDS:
+                ss = getattr(self, "shared_state", None)
+                fa_enabled = bool(
+                    getattr(ss, "framework_agent_enabled", False)
+                ) if ss is not None else False
+                if not fa_enabled:
+                    raise PolicyDenied(
+                        f"delegate{{action='specialist'}}: "
+                        f"sub_kind={sub_kind!r} requires "
+                        f"--framework-agent-enabled (currently off)",
+                        rule="specialist_dispatch_source",
+                        hint=(
+                            "Pass --framework-agent-enabled (or set env "
+                            "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=1) "
+                            "to authorise the framework-agent subprocess "
+                            "tooling, or omit params.sub_kind to fall "
+                            "back to the default serving_specialist "
+                            "prompt."
+                        ),
+                    )
+
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         if not gap:
             raise PolicyDenied(
