@@ -3300,6 +3300,16 @@ class SharedState:
                 if getattr(self, "use_roofline_composite", False)
                 else []
             ),
+            # F3-4 — Roofline saturation soft advisory. The helper
+            # returns "" when the toggle is off, when no roofline has
+            # run yet, or when no direction crossed the saturation
+            # threshold — so the prompt section is entirely absent in
+            # the common case.
+            *(
+                [_advisory]
+                if (_advisory := self._format_roofline_saturation_advisory())
+                else []
+            ),
             # v0.8 §3.9 — the streak counter is a *fact* the LLM may
             # read (KEEP/REVERT counts are explicitly allowed per
             # Inv-9.1); only system-side *priorities* (action_scores)
@@ -3661,6 +3671,65 @@ class SharedState:
             f"gain at snapshot = {gain_str}%) ===\n"
             f"{md_text}\n"
             f"=== End TraceLens Analysis ===\n"
+        )
+
+    def _format_roofline_saturation_advisory(self) -> str:
+        """F3-4 (Roofline-v2 / plan_roofline_framework F3): render a
+        soft 'diminishing returns' advisory for directions whose
+        saturation in the latest snapshot is at or above the threshold.
+
+        Returns the empty string when:
+
+        * the toggle ``roofline_saturation_advisory`` is off, or
+        * ``roofline_saturation_history`` is empty (no roofline run
+          yet), or
+        * no direction in the latest snapshot crossed the threshold.
+
+        This is **soft**: the advisory only flags the cost-vs-reward
+        trade-off; it never tells the LLM to stop dispatching toward
+        that direction. PolicyGate has no companion hard-gating rule
+        (deliberate decision per
+        ``plan_roofline_framework/F3_policygate_advisory.MD`` §2 — a
+        single noisy trace must not permanently close a direction).
+
+        Threshold + per-direction labels are pulled from
+        ``inference_optimizer.orchestrator.roofline_snapshot`` so the
+        producer (RooflineExecutor) and consumer (this renderer) share
+        one source of truth.
+        """
+        if not getattr(self, "roofline_saturation_advisory", False):
+            return ""
+        history = list(getattr(self, "roofline_saturation_history", []) or [])
+        if not history:
+            return ""
+        last = history[-1]
+        if not isinstance(last, dict):
+            return ""
+        from inference_optimizer.orchestrator.roofline_snapshot import (
+            SATURATION_ADVISORY_THRESHOLD_PCT,
+            _SATURATION_LABEL_MAP,
+        )
+        sat_lines: list[str] = []
+        for direction in _SATURATION_LABEL_MAP:
+            try:
+                pct = float(last.get(direction, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if pct >= SATURATION_ADVISORY_THRESHOLD_PCT:
+                sat_lines.append(f"  - {direction}: {pct:.1f}% saturated")
+        if not sat_lines:
+            return ""
+        snap_id = last.get("snapshot_id", "?")
+        return (
+            f"=== Roofline Saturation Advisory (snapshot #{snap_id}) ===\n"
+            f"The following directions are at or above "
+            f"{SATURATION_ADVISORY_THRESHOLD_PCT:.0f}% saturation; further\n"
+            "work in these areas typically yields diminishing returns. You\n"
+            "MAY still dispatch into them when you have a specific hypothesis\n"
+            "(e.g. an upstream PR or a known refactor) — this is a soft hint,\n"
+            "not a hard rule.\n"
+            + "\n".join(sat_lines) + "\n"
+            "=== End Saturation Advisory ==="
         )
 
     def _format_last_select_kernels(self) -> str:
