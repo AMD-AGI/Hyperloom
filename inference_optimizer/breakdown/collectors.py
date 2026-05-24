@@ -416,7 +416,16 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
     manifests (no ``image`` field) still surface a value when one of
     the envs is set. Mirrors :func:`manifest._detect_image` but kept as
     a separate function to avoid an import cycle.
+
+    NOTE: kept for backwards compatibility with internal callers. The
+    richer multi-source probe used by :func:`collect_session` lives in
+    :func:`_extract_image_info`; this helper now delegates to that
+    function with ``state={}`` and ``session_dir=None`` so the two
+    code paths can't drift.
     """
+    info = _extract_image_info({}, manifest, None)
+    if info.get("image"):
+        return info["image"]
     manifest_image = manifest.get("image") if isinstance(manifest, dict) else None
     if isinstance(manifest_image, str) and manifest_image.strip():
         return manifest_image.strip()
@@ -647,6 +656,329 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# §1 Session metadata — helper: image / id / digest extraction
+# ---------------------------------------------------------------------------
+# Multi-source probe for the container image fingerprint. Real sessions
+# almost never expose a populated ``image`` field today (manifest writes
+# ``None`` because the spawning runtime hasn't been wired to surface
+# rocm/sglang:<tag>), and the historical env-var fallback only fires
+# inside the running pod — never at sbd-export time on a separate host.
+# We widen the probe to also look at the materialized baseline yaml
+# (``runs/baseline/*/baseline_config.with_envs.yaml`` carries the same
+# image when set) and the magpie benchmark config (``docker_image``
+# field). When every source comes back empty we record None — consumers
+# fall back to the ``data_provenance`` source list to see exactly which
+# candidate paths were probed.
+_IMAGE_ENV_VARS: tuple[str, ...] = (
+    "HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE",
+)
+
+
+def _coerce_image_str(value: Any) -> str | None:
+    if isinstance(value, str):
+        s = value.strip()
+        if s and s.lower() not in {"null", "none"}:
+            return s
+    return None
+
+
+def _scan_yaml_for_image(path: Path) -> dict[str, str | None]:
+    """Grep-style scan of a YAML file for image / image_id / image_digest.
+
+    Avoids a PyYAML dependency (the rest of breakdown is yaml-free) and
+    is robust to nesting since we only need top-level key:value matches
+    of the form ``<key>: <value>``. Returns up to three keys; missing
+    fields are None.
+    """
+    out: dict[str, str | None] = {"image": None, "image_id": None, "image_digest": None}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    # Match exactly the field names we care about. ``docker_image`` is
+    # the magpie benchmark config alias for the container image.
+    patterns = {
+        "image":        re.compile(r"^\s*(?:docker_image|image)\s*:\s*(?P<v>.+)\s*$", re.MULTILINE),
+        "image_id":     re.compile(r"^\s*image_id\s*:\s*(?P<v>.+)\s*$", re.MULTILINE),
+        "image_digest": re.compile(r"^\s*image_digest\s*:\s*(?P<v>.+)\s*$", re.MULTILINE),
+    }
+    for key, regex in patterns.items():
+        m = regex.search(text)
+        if not m:
+            continue
+        raw = m.group("v").strip().strip('"').strip("'")
+        coerced = _coerce_image_str(raw)
+        if coerced and out[key] is None:
+            out[key] = coerced
+    return out
+
+
+def _extract_image_info(
+    state: dict[str, Any],
+    manifest: dict[str, Any],
+    session_dir: Path | None,
+) -> dict[str, str | None]:
+    """Multi-source resolver for image / image_id / image_digest.
+
+    Priority (highest to lowest):
+
+    1. ``state.json`` top-level (``image`` / ``container_image`` / ``image_id`` /
+       ``image_digest``)
+    2. ``manifest.json`` top-level (same field names; manifest also
+       supports ``metadata.image`` for nested-shape sessions)
+    3. ``runs/baseline/*/baseline_config.with_envs.yaml`` (magpie
+       baseline config; carries ``docker_image`` and/or ``image``)
+    4. ``runs/baseline/*/benchmark_*/config.yaml`` (magpie nested
+       benchmark config, same field shape)
+    5. Env vars ``HYPERLOOM_IMAGE`` / ``CONTAINER_IMAGE`` / ``IMAGE``
+       (final fallback — only fires inside the running pod)
+
+    Each field can be sourced independently — e.g. image comes from
+    state but the digest only from manifest. None is returned for any
+    field we never observed.
+    """
+    image: str | None = None
+    image_id: str | None = None
+    image_digest: str | None = None
+
+    def _take_from(d: dict[str, Any], *, image_keys: Iterable[str], id_keys: Iterable[str], digest_keys: Iterable[str]) -> None:
+        nonlocal image, image_id, image_digest
+        if not isinstance(d, dict):
+            return
+        if image is None:
+            for k in image_keys:
+                v = _coerce_image_str(d.get(k))
+                if v:
+                    image = v
+                    break
+        if image_id is None:
+            for k in id_keys:
+                v = _coerce_image_str(d.get(k))
+                if v:
+                    image_id = v
+                    break
+        if image_digest is None:
+            for k in digest_keys:
+                v = _coerce_image_str(d.get(k))
+                if v:
+                    image_digest = v
+                    break
+
+    # Source 1: state.json top-level.
+    _take_from(
+        state if isinstance(state, dict) else {},
+        image_keys=("image", "container_image"),
+        id_keys=("image_id",),
+        digest_keys=("image_digest",),
+    )
+    # Source 2: manifest.json top-level + manifest.metadata.image (nested
+    # shape used by some older runners).
+    _take_from(
+        manifest if isinstance(manifest, dict) else {},
+        image_keys=("image", "container_image"),
+        id_keys=("image_id",),
+        digest_keys=("image_digest",),
+    )
+    if image is None and isinstance(manifest, dict):
+        meta = manifest.get("metadata")
+        if isinstance(meta, dict):
+            _take_from(
+                meta,
+                image_keys=("image", "container_image"),
+                id_keys=("image_id",),
+                digest_keys=("image_digest",),
+            )
+
+    # Sources 3 + 4: materialized baseline yamls. We only need to read
+    # files when we're still missing one of the three fields — the
+    # ``runs/baseline`` tree can be large and we should not pay the
+    # disk cost gratuitously.
+    needs_more = image is None or image_id is None or image_digest is None
+    if needs_more and session_dir is not None and session_dir.exists():
+        for pattern in (
+            "runs/baseline/*/baseline_config.with_envs.yaml",
+            "runs/baseline/*/benchmark_*/config.yaml",
+        ):
+            if not (image is None or image_id is None or image_digest is None):
+                break
+            try:
+                for path in session_dir.glob(pattern):
+                    found = _scan_yaml_for_image(path)
+                    if image is None and found["image"]:
+                        image = found["image"]
+                    if image_id is None and found["image_id"]:
+                        image_id = found["image_id"]
+                    if image_digest is None and found["image_digest"]:
+                        image_digest = found["image_digest"]
+                    if image and image_id and image_digest:
+                        break
+            except OSError:
+                continue
+
+    # Source 5: env vars (last resort, only meaningful in-pod).
+    if image is None:
+        for var in _IMAGE_ENV_VARS:
+            val = _coerce_image_str(os.environ.get(var))
+            if val:
+                image = val
+                break
+
+    return {"image": image, "image_id": image_id, "image_digest": image_digest}
+
+
+# ---------------------------------------------------------------------------
+# §1 Session metadata — helper: session lifecycle timestamps
+# ---------------------------------------------------------------------------
+def _parse_iso(ts: str | None) -> datetime | None:
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _unix_to_iso(unix_ts: float | None) -> str | None:
+    if unix_ts is None:
+        return None
+    try:
+        f = float(unix_ts)
+    except (TypeError, ValueError):
+        return None
+    if not f or f != f:  # zero or NaN
+        return None
+    try:
+        return datetime.fromtimestamp(f, tz=timezone.utc).isoformat(timespec="seconds")
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _extract_session_timing(
+    state: dict[str, Any],
+    manifest: dict[str, Any],
+    phase_timeline: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Resolve the real session start / end timestamps + duration.
+
+    started_at_utc preference:
+      1. ``state.started_at`` (explicit field)
+      2. ``state.start_ts`` (the conventional field today; ISO string)
+      3. ``state.startup_ts``
+      4. ``manifest.created_at_utc`` (proxy — captures spawn time, may
+         predate the orchestrator's actual ``run`` entry by a few seconds)
+      5. ``phase_timeline[0].ts`` (derived; only used when no real
+         lifecycle timestamp exists in state)
+
+    ended_at_utc preference:
+      1. ``state.stopped_at`` (explicit shutdown timestamp)
+      2. ``state.last_tick_ts``
+      3. ``state.closing_started_unix`` (epoch float; recorded the
+         moment the orchestrator transitioned into closing)
+      4. ``max(phase_timeline[i].ended_ts_utc or ts)`` (derived; only
+         used when no real shutdown timestamp exists)
+
+    duration_seconds is the arithmetic difference when both timestamps
+    are resolvable; it is rounded to 1s and is None when either is
+    missing. The function does NOT raise — every source is best-effort
+    and any unparseable input is silently skipped.
+    """
+    # Started.
+    started_dt: datetime | None = None
+    started_source: str | None = None
+    for src, val in (
+        ("state.started_at", state.get("started_at") if isinstance(state, dict) else None),
+        ("state.start_ts",   state.get("start_ts")   if isinstance(state, dict) else None),
+        ("state.startup_ts", state.get("startup_ts") if isinstance(state, dict) else None),
+    ):
+        dt = _parse_iso(val if isinstance(val, str) else None)
+        if dt is not None:
+            started_dt, started_source = dt, src
+            break
+    if started_dt is None and isinstance(manifest, dict):
+        dt = _parse_iso(manifest.get("created_at_utc") if isinstance(manifest.get("created_at_utc"), str) else None)
+        if dt is not None:
+            started_dt, started_source = dt, "manifest.created_at_utc"
+    if started_dt is None and phase_timeline:
+        for evt in phase_timeline:
+            if not isinstance(evt, dict):
+                continue
+            dt = _parse_iso(evt.get("ts") if isinstance(evt.get("ts"), str) else None)
+            if dt is not None:
+                started_dt, started_source = dt, "phase_timeline[0].ts (derived)"
+                break
+
+    # Ended.
+    ended_dt: datetime | None = None
+    ended_source: str | None = None
+    for src, val in (
+        ("state.stopped_at",   state.get("stopped_at")   if isinstance(state, dict) else None),
+        ("state.last_tick_ts", state.get("last_tick_ts") if isinstance(state, dict) else None),
+    ):
+        dt = _parse_iso(val if isinstance(val, str) else None)
+        if dt is not None:
+            ended_dt, ended_source = dt, src
+            break
+    if ended_dt is None:
+        unix = state.get("closing_started_unix") if isinstance(state, dict) else None
+        try:
+            unix_f = float(unix) if unix is not None else 0.0
+        except (TypeError, ValueError):
+            unix_f = 0.0
+        if unix_f:
+            try:
+                ended_dt = datetime.fromtimestamp(unix_f, tz=timezone.utc)
+                ended_source = "state.closing_started_unix"
+            except (OSError, OverflowError, ValueError):
+                ended_dt = None
+    if ended_dt is None and phase_timeline:
+        latest: datetime | None = None
+        for evt in phase_timeline:
+            if not isinstance(evt, dict):
+                continue
+            for key in ("ended_ts_utc", "ts"):
+                dt = _parse_iso(evt.get(key) if isinstance(evt.get(key), str) else None)
+                if dt is not None and (latest is None or dt > latest):
+                    latest = dt
+        if latest is not None:
+            ended_dt, ended_source = latest, "phase_timeline.max(ended_ts_utc|ts) (derived)"
+
+    # Use microsecond precision when the underlying source carries
+    # sub-second detail (closing_started_unix typically does). This
+    # keeps session_ended_at_utc >= the closing event's ts (which is
+    # also serialized at microsecond precision), so the closing-event
+    # duration back-fill in :func:`enrich_session_and_timeline` won't
+    # be defeated by a 0.x-second truncation.
+    started_iso = (
+        started_dt.isoformat(timespec="microseconds")
+        if started_dt and started_dt.microsecond
+        else (started_dt.isoformat(timespec="seconds") if started_dt else None)
+    )
+    ended_iso = (
+        ended_dt.isoformat(timespec="microseconds")
+        if ended_dt and ended_dt.microsecond
+        else (ended_dt.isoformat(timespec="seconds") if ended_dt else None)
+    )
+    duration: float | None = None
+    if started_dt is not None and ended_dt is not None:
+        diff = (ended_dt - started_dt).total_seconds()
+        # Never emit a negative duration — would indicate clock skew or
+        # a misparsed timestamp; surface as None so consumers don't
+        # render nonsense.
+        if diff >= 0:
+            duration = round(diff, 1)
+    return {
+        "session_started_at_utc":   started_iso,
+        "session_ended_at_utc":     ended_iso,
+        "session_duration_seconds": duration,
+        "_started_source":          started_source,
+        "_ended_source":            ended_source,
+    }
+
+
+# ---------------------------------------------------------------------------
 # §1 Session metadata
 # ---------------------------------------------------------------------------
 def collect_session(
@@ -658,29 +990,69 @@ def collect_session(
     """Top-level session identification + lifecycle."""
     start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
     stop_reason = str(state.get("stop_reason") or "")
-    elapsed_min: float | None = None
+    elapsed_min_from_now: float | None = None
     if start_ts:
         try:
             start = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
-            elapsed_min = (datetime.now(timezone.utc) - start).total_seconds() / 60.0
+            elapsed_min_from_now = (datetime.now(timezone.utc) - start).total_seconds() / 60.0
         except (ValueError, TypeError):
             pass
-    image = _detect_image_for_session(manifest)
+    image_info = _extract_image_info(state, manifest, session_dir)
+    image = image_info["image"]
     if image is None:
+        # Keep the legacy "image: not configured" prefix for backwards
+        # compat with consumers (and tests) that grep on it. Append a
+        # richer enumeration of the candidate sources we tried so an
+        # operator can see at a glance that we DID probe state.json /
+        # manifest.json / baseline yamls / env before giving up.
         warnings.append(
-            "image: not configured (set HYPERLOOM_IMAGE env var)"
+            "image: not configured — no image metadata in state.json / "
+            "manifest.json / runs/baseline yamls / env "
+            "(HYPERLOOM_IMAGE|CONTAINER_IMAGE|IMAGE)"
         )
+
+    # Real session timing. We do NOT have phase_timeline at this point
+    # in the exporter flow (it's collected after session_meta) — so we
+    # rely on state.json + manifest.created_at_utc + closing_started_unix
+    # here, and let the exporter back-fill the derived ``ended_ts_utc``
+    # variant if it later wants to (today it doesn't; the state-based
+    # ``closing_started_unix`` covers every real session we've observed
+    # in /home/chenluo/sbd/v2).
+    timing = _extract_session_timing(state, manifest, phase_timeline=None)
+    session_started_at_utc = timing["session_started_at_utc"]
+    session_ended_at_utc = timing["session_ended_at_utc"]
+    session_duration_seconds = timing["session_duration_seconds"]
+
+    # Prefer the derived elapsed_minutes when we have a real start+end
+    # pair; otherwise fall back to ``now - start_ts`` (legacy behaviour).
+    elapsed_min: float
+    if session_duration_seconds is not None:
+        elapsed_min = round(session_duration_seconds / 60.0, 2)
+    elif elapsed_min_from_now is not None:
+        elapsed_min = round(elapsed_min_from_now, 2)
+    else:
+        elapsed_min = 0.0
+
     return {
         "session_id":       str(state.get("session_id") or manifest.get("session_id") or ""),
         "claw_session_id":  manifest.get("claw_session_id") or state.get("claw_session_id"),
         "sandbox_user_id":  manifest.get("sandbox_user_id") or state.get("sandbox_user_id"),
         "created_at_utc":   manifest.get("created_at_utc") or start_ts,
+        # Legacy ``ended_at_utc`` (= dump time when stop_reason is set)
+        # is preserved verbatim for backwards compatibility. Consumers
+        # that want the real session end should read
+        # ``session_ended_at_utc`` instead.
         "ended_at_utc":     _utc_now_iso() if stop_reason else "",
         "stop_reason":      stop_reason,
         "max_minutes":      int(state.get("max_minutes") or manifest.get("max_minutes") or 0),
-        "elapsed_minutes":  round(elapsed_min, 2) if elapsed_min is not None else 0.0,
+        "elapsed_minutes":  elapsed_min,
         "host":             str(manifest.get("host") or ""),
         "image":            image,
+        "image_id":         image_info["image_id"],
+        "image_digest":     image_info["image_digest"],
+        "session_started_at_utc":   session_started_at_utc,
+        "session_ended_at_utc":     session_ended_at_utc,
+        "session_duration_seconds": session_duration_seconds,
         "code_revision":    str(manifest.get("code_revision") or ""),
         "pid":              int(manifest.get("pid") or 0),
         "session_dir":      str(session_dir),
@@ -4586,6 +4958,139 @@ def _kernel_name_index(
     return by_kid
 
 
+# Backends we recognise in path-based inference. ``oob`` is the umbrella
+# kernel-agent harness that hosts ``claude`` / ``codex`` / ``cursor``
+# task workspaces; ``geak`` is the standalone GEAK runner. Paths under
+# ``/kernel-agent/oob/`` are mapped to ``oob`` here because that's the
+# only information the on-disk path carries — the specific tool can be
+# recovered from ``kernel-agent/runs/<sid>/results/<kid>.json``.
+_BACKEND_TOKENS_IN_ORDER: tuple[str, ...] = (
+    "geak", "oob", "claude", "codex", "cursor",
+)
+
+
+def _infer_backend_from_paths(*candidates: Any) -> str | None:
+    """Scan one or more string candidates (paths / URIs) for a known
+    backend token. Returns the first match in order of ``candidates``;
+    within a single candidate, GEAK / OOB win because those segments
+    appear in canonical kernel-agent paths like
+    ``/kernel-agent/geak/<sid>/...`` and ``/kernel-agent/oob/<sid>/...``.
+    Returns None if no token matches or candidates are empty/non-strings.
+    """
+    for cand in candidates:
+        if not cand:
+            continue
+        text = str(cand)
+        if "/kernel-agent/" not in text and not any(
+            f"/{tok}/" in text or f"/{tok}-" in text for tok in _BACKEND_TOKENS_IN_ORDER
+        ):
+            # cheap reject when nothing backend-shaped is in the string
+            continue
+        # Look for ``/kernel-agent/<backend>/`` first — the most reliable form.
+        for tok in ("geak", "oob"):
+            if f"/kernel-agent/{tok}/" in text:
+                return tok
+        # Then fall back to bare ``/<backend>/`` (e.g. tooling layouts).
+        for tok in _BACKEND_TOKENS_IN_ORDER:
+            if f"/{tok}/" in text or f"/{tok}-" in text:
+                return tok
+    return None
+
+
+def _load_kernel_agent_kernel_index(
+    session_dir: Path | None,
+    warnings: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Build a per-kernel index from ``kernel-agent/runs/<sid>/results/<kid>.json``.
+
+    Each entry surfaces just the fields the KDP collector needs to fill
+    ``step.backend`` and ``step.speedup`` when the per-attempt records
+    in ``state.json`` don't carry them directly:
+
+    * ``best_backend``      — ``verification.best_backend``
+    * ``selected_backends`` — list (orchestrator's chosen backend set)
+    * ``attempt_backends``  — list of every attempt's backend (ordered)
+    * ``micro_speedup``     — kernel-level micro_speedup from
+      verification (also looks at top-level ``verification/<kid>.json``)
+    * ``best_artifact_path`` — useful for path-based inference fallback
+
+    Multiple run dirs for one kid are merged (later runs override
+    earlier ones for fields they actually populate). Returns ``{}`` when
+    ``session_dir`` is None or no kernel-agent runs exist.
+    """
+    if session_dir is None:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for run_dir in _kernel_agent_run_dirs(session_dir):
+        results_dir = run_dir / "results"
+        verify_dir = run_dir / "verification"
+        if not results_dir.is_dir():
+            continue
+        for result_path in sorted(results_dir.glob("*.json")):
+            kid = result_path.stem
+            data = _load_json_safe(result_path, warnings)
+            if not isinstance(data, dict):
+                continue
+            verification = data.get("verification")
+            if not isinstance(verification, dict):
+                # also try the standalone per-kid verification file
+                vp = verify_dir / f"{kid}.json"
+                v_data = _load_json_safe(vp if vp.exists() else None, warnings)
+                verification = v_data if isinstance(v_data, dict) else {}
+            attempts = data.get("attempts") if isinstance(data.get("attempts"), list) else []
+            attempt_backends = [
+                str(a.get("backend") or "").lower()
+                for a in attempts
+                if isinstance(a, dict) and a.get("backend")
+            ]
+            selected = data.get("selected_backends")
+            selected_list = [str(b).lower() for b in selected] if isinstance(selected, list) else []
+            entry = {
+                "best_backend":      (str(verification.get("best_backend") or "").lower() or None),
+                "selected_backends": selected_list,
+                "attempt_backends":  attempt_backends,
+                "micro_speedup":     _to_float(verification.get("micro_speedup")),
+                "best_artifact_path": (
+                    verification.get("best_artifact_path")
+                    or data.get("best_artifact_path")
+                ),
+            }
+            prev = out.get(kid)
+            if prev is None:
+                out[kid] = entry
+            else:
+                # Merge — prefer non-empty / non-None values from the new entry.
+                for k, v in entry.items():
+                    if v:
+                        prev[k] = v
+    return out
+
+
+def _extras_kernel_speedup(extras: dict[str, Any] | None) -> float | None:
+    """Pull a kernel-level speedup out of an ``extras`` dict.
+
+    Looks at the keys the orchestrator / kernel-agent has historically
+    used: ``kernel_speedup``, ``speedup_x``, ``geak_speedup``,
+    ``kernel_speedup_x``, ``micro_speedup``, and nested
+    ``benchmark.speedup``. Returns the first non-None float, or None.
+    """
+    if not isinstance(extras, dict) or not extras:
+        return None
+    for key in (
+        "kernel_speedup", "speedup_x", "geak_speedup",
+        "kernel_speedup_x", "micro_speedup", "speedup",
+    ):
+        v = _to_float(extras.get(key))
+        if v is not None:
+            return v
+    bench = extras.get("benchmark")
+    if isinstance(bench, dict):
+        v = _to_float(bench.get("speedup") or bench.get("micro_speedup"))
+        if v is not None:
+            return v
+    return None
+
+
 def collect_kernel_decision_path(
     state: dict[str, Any],
     warnings: list[str],
@@ -4619,6 +5124,10 @@ def collect_kernel_decision_path(
     upstream sources have any rows for this session.
     """
     name_by_kid = _kernel_name_index(state, session_dir, warnings)
+    # Per-kid index built from ``kernel-agent/runs/<sid>/results/<kid>.json``
+    # — best source of truth for backend / kernel_speedup when the
+    # per-attempt history in ``state.json`` doesn't carry them.
+    ka_index = _load_kernel_agent_kernel_index(session_dir, warnings)
     steps_by_kid: dict[str, list[dict[str, Any]]] = {}
 
     def _push(kid: str, step: dict[str, Any]) -> None:
@@ -4713,6 +5222,26 @@ def collect_kernel_decision_path(
             if not isinstance(ent, dict):
                 continue
             kid_s = str(kid)
+            kid_idx = ka_index.get(kid_s) or {}
+            # Best backend for this kid — used when neither the per-history
+            # entry nor ent itself names one. We prefer the verification's
+            # ``best_backend`` (what was actually selected), then any
+            # ``selected_backends`` list, then attempt_backends, then a
+            # path-based inference from ``last_artifact_path``.
+            kid_best_backend = (
+                kid_idx.get("best_backend")
+                or (kid_idx.get("selected_backends") or [None])[0]
+                or (kid_idx.get("attempt_backends") or [None])[0]
+                or _infer_backend_from_paths(
+                    kid_idx.get("best_artifact_path"),
+                    ent.get("last_artifact_path"),
+                )
+            )
+            kid_micro_speedup = (
+                kid_idx.get("micro_speedup")
+                if kid_idx.get("micro_speedup") is not None
+                else _to_float(ent.get("last_micro_speedup"))
+            )
             history = ent.get("history") or []
             history_list = history if isinstance(history, list) else []
             for h in history_list:
@@ -4721,17 +5250,33 @@ def collect_kernel_decision_path(
                 ts = str(h.get("ts") or "")
                 extras = h.get("extras") if isinstance(h.get("extras"), dict) else {}
                 duration = _to_float(extras.get("duration_seconds")) if extras else None
+                # Backend resolution: explicit per-attempt first, then ent,
+                # then kernel-agent results.json, then path-based.
                 backend = (
-                    extras.get("backend")
+                    (extras.get("backend") if extras else None)
                     or h.get("backend")
                     or ent.get("backend")
-                    or None
+                    or kid_best_backend
+                    or _infer_backend_from_paths(
+                        h.get("workspace") or (extras.get("workspace") if extras else None),
+                        h.get("artifact_path") or (extras.get("artifact_path") if extras else None),
+                    )
                 )
+                # Speedup: per-attempt fields first (orchestrator writes
+                # ``micro`` in history rows), then extras, then carry the
+                # kernel-level micro_speedup onto the terminal history row.
+                step_speedup = _to_float(
+                    h.get("micro_speedup")
+                    or h.get("speedup")
+                    or h.get("micro")
+                )
+                if step_speedup is None:
+                    step_speedup = _extras_kernel_speedup(extras)
                 _push(kid_s, {
                     "kid":              kid_s,
                     "kernel_name":      name_by_kid.get(kid_s, ""),
                     "step":             "kernel_opt",
-                    "backend":          str(backend) if backend else None,
+                    "backend":          str(backend).lower() if backend else None,
                     "ts":               ts,
                     "duration_seconds": duration,
                     "ended_ts_utc":     _add_seconds_iso(ts, duration),
@@ -4740,21 +5285,39 @@ def collect_kernel_decision_path(
                     "outcome":          str(h.get("decision") or ""),
                     "decision_note":    str(h.get("note") or extras.get("note") or ""),
                     "gain_pct":         _to_float(h.get("gain_pct") or extras.get("gain_pct")),
-                    "speedup":          _to_float(h.get("micro_speedup") or h.get("speedup")
-                                                  or extras.get("micro_speedup")
-                                                  or extras.get("speedup")),
+                    "speedup":          step_speedup,
                     "extras":           dict(extras) if extras else {},
                 })
+            # The terminal history row didn't always carry a kernel-level
+            # speedup — patch it in from ``ent.last_micro_speedup`` /
+            # ``ka_index.micro_speedup`` so the final attempt reflects the
+            # benchmark-measured kernel_speedup. We only patch when the
+            # row's existing speedup is None (don't overwrite real data).
+            if history_list and kid_micro_speedup is not None:
+                # Find the latest kernel_opt step we just emitted for this
+                # kid (history is in chronological order, and _push appends).
+                terminal_step = None
+                for s in reversed(steps_by_kid.get(kid_s, [])):
+                    if s.get("step") == "kernel_opt":
+                        terminal_step = s
+                        break
+                if terminal_step is not None and terminal_step.get("speedup") is None:
+                    terminal_step["speedup"] = kid_micro_speedup
             # If the per-attempt history is empty but we still have a
             # terminal ``last_decision``, surface a single synthetic
             # step so the chain isn't completely silent.
             if not history_list and (ent.get("last_decision") or ent.get("rejected_reason")):
                 ts = str(ent.get("last_ts") or "")
+                fallback_backend = (
+                    ent.get("backend")
+                    or kid_best_backend
+                    or _infer_backend_from_paths(ent.get("last_artifact_path"))
+                )
                 _push(kid_s, {
                     "kid":              kid_s,
                     "kernel_name":      name_by_kid.get(kid_s, ""),
                     "step":             "kernel_opt",
-                    "backend":          str(ent.get("backend") or "") or None,
+                    "backend":          str(fallback_backend).lower() if fallback_backend else None,
                     "ts":               ts,
                     "duration_seconds": None,
                     "ended_ts_utc":     None,
@@ -4763,7 +5326,7 @@ def collect_kernel_decision_path(
                     "outcome":          str(ent.get("last_decision") or ent.get("rejected_reason") or ""),
                     "decision_note":    str(ent.get("rejected_reason") or ""),
                     "gain_pct":         None,
-                    "speedup":          None,
+                    "speedup":          kid_micro_speedup,
                     "extras":           {"attempts": int(ent.get("attempts") or 0)},
                 })
 
@@ -4776,6 +5339,27 @@ def collect_kernel_decision_path(
             kid = str(ent.get("kernel_id") or "")
             if not kid:
                 continue
+            kid_idx = ka_index.get(kid) or {}
+            # The integrate run consumes the kernel-agent's chosen patch;
+            # ``ent.patch_path`` points into ``/kernel-agent/<backend>/``
+            # so it's the authoritative source for the backend label.
+            integ_backend_default = (
+                ent.get("backend")
+                or _infer_backend_from_paths(
+                    ent.get("patch_path"),
+                    ent.get("target_file"),
+                    kid_idx.get("best_artifact_path"),
+                )
+                or kid_idx.get("best_backend")
+            )
+            # Carry the kernel-level micro_speedup onto integrate steps
+            # so the kernel_speedup signal isn't lost just because the
+            # integrate row itself only carries an e2e ``gain_pct``.
+            integ_speedup_default = (
+                kid_idx.get("micro_speedup")
+                if kid_idx.get("micro_speedup") is not None
+                else None
+            )
             attempts = ent.get("attempts") or []
             if not isinstance(attempts, list):
                 continue
@@ -4787,11 +5371,29 @@ def collect_kernel_decision_path(
                 duration = _to_float(a_extras.get("duration_seconds")) if a_extras else None
                 if duration is None and a.get("workspace"):
                     duration = _phase_event_duration(session_dir, a, warnings)
+                attempt_backend = (
+                    a.get("backend")
+                    or (a_extras.get("backend") if a_extras else None)
+                    or integ_backend_default
+                )
+                # Per-attempt speedup if recorded; otherwise the
+                # kernel-level micro_speedup carried over from
+                # results/<kid>.json. We do NOT promote ``gain_pct``
+                # (e2e) into ``speedup`` — those are different units.
+                attempt_speedup = _extras_kernel_speedup(a_extras)
+                if attempt_speedup is None:
+                    attempt_speedup = _to_float(
+                        a.get("kernel_speedup")
+                        or a.get("micro_speedup")
+                        or a.get("speedup")
+                    )
+                if attempt_speedup is None:
+                    attempt_speedup = integ_speedup_default
                 _push(kid, {
                     "kid":              kid,
                     "kernel_name":      name_by_kid.get(kid, ""),
                     "step":             "integrate",
-                    "backend":          None,
+                    "backend":          str(attempt_backend).lower() if attempt_backend else None,
                     "ts":               ts,
                     "duration_seconds": duration,
                     "ended_ts_utc":     _add_seconds_iso(ts, duration),
@@ -4800,7 +5402,7 @@ def collect_kernel_decision_path(
                     "outcome":          str(a.get("decision") or a.get("status") or ""),
                     "decision_note":    str(a.get("note") or ""),
                     "gain_pct":         _to_float(a.get("gain_pct")),
-                    "speedup":          None,
+                    "speedup":          attempt_speedup,
                     "extras": {
                         "patch_path":  ent.get("patch_path"),
                         "target_file": ent.get("target_file"),
@@ -4876,11 +5478,709 @@ def collect_kernel_decision_path(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Post-processing: cross-section reconciliation for session timing
+# ---------------------------------------------------------------------------
+def enrich_session_and_timeline(
+    session_meta: dict[str, Any],
+    phase_timeline: list[dict[str, Any]] | None,
+    state: dict[str, Any],
+) -> None:
+    """Cross-fill session timing + closing-event duration in place.
+
+    Called from the exporter once both ``session_meta`` and
+    ``phase_timeline`` are collected (the latter wasn't available when
+    ``collect_session`` ran, since collectors execute sequentially).
+    Two reconciliations happen here:
+
+    1. If ``session_meta.session_started_at_utc`` or
+       ``session_ended_at_utc`` is None we re-run
+       :func:`_extract_session_timing` with the now-available
+       phase_timeline as the derived-fallback source. Any newly
+       resolved field is written into the session dict; values
+       already set are preserved (state-sourced timestamps beat
+       derived ones).
+    2. For any closing event whose ``duration_seconds`` is None we
+       compute it as ``session_ended_at_utc - closing.ts`` (when both
+       are resolvable). This gives consumers a real wall-clock cost
+       for the closing phase instead of an unknowable None.
+    """
+    if not isinstance(session_meta, dict):
+        return
+
+    # 1) Top-up session timing via phase_timeline-derived fallbacks.
+    if session_meta.get("session_started_at_utc") in (None, "") \
+            or session_meta.get("session_ended_at_utc") in (None, ""):
+        derived = _extract_session_timing(
+            state if isinstance(state, dict) else {},
+            {},
+            phase_timeline if isinstance(phase_timeline, list) else None,
+        )
+        if session_meta.get("session_started_at_utc") in (None, ""):
+            session_meta["session_started_at_utc"] = derived.get("session_started_at_utc")
+        if session_meta.get("session_ended_at_utc") in (None, ""):
+            session_meta["session_ended_at_utc"] = derived.get("session_ended_at_utc")
+        # Recompute duration if we now have both endpoints and didn't before.
+        if session_meta.get("session_duration_seconds") is None:
+            s_dt = _parse_iso(session_meta.get("session_started_at_utc"))
+            e_dt = _parse_iso(session_meta.get("session_ended_at_utc"))
+            if s_dt is not None and e_dt is not None:
+                diff = (e_dt - s_dt).total_seconds()
+                if diff >= 0:
+                    session_meta["session_duration_seconds"] = round(diff, 1)
+        # Mirror duration into elapsed_minutes when we now have one and
+        # the legacy field was 0.0 / None (the wall-clock-from-now
+        # fallback is less accurate than a real measured duration).
+        if session_meta.get("session_duration_seconds") is not None:
+            session_meta["elapsed_minutes"] = round(
+                session_meta["session_duration_seconds"] / 60.0, 2,
+            )
+
+    # 2) Fill closing-event durations against session_ended_at_utc.
+    if not isinstance(phase_timeline, list):
+        return
+    sess_end_dt = _parse_iso(session_meta.get("session_ended_at_utc"))
+    if sess_end_dt is None:
+        return
+    for evt in phase_timeline:
+        if not isinstance(evt, dict):
+            continue
+        if evt.get("action") != "closing":
+            continue
+        if evt.get("duration_seconds") is not None:
+            continue
+        evt_ts_dt = _parse_iso(evt.get("ts"))
+        if evt_ts_dt is None:
+            continue
+        diff = (sess_end_dt - evt_ts_dt).total_seconds()
+        if diff < -1.0:
+            # session_ended_at_utc landed materially before this closing
+            # event — the timeline isn't internally consistent (clock
+            # skew or ts metadata inversion). Leave duration None and
+            # don't synthesize an end ts that contradicts the timeline.
+            continue
+        # Sub-second skew (closing.ts has microsecond precision while
+        # session_ended_at_utc was truncated to seconds, or vice versa)
+        # is treated as a flat-zero duration rather than skipped — the
+        # closing-phase essentially completed at the same instant the
+        # session ended, which is the correct semantic.
+        if diff < 0:
+            diff = 0.0
+        evt["duration_seconds"] = round(diff, 1)
+        if evt.get("ended_ts_utc") in (None, ""):
+            evt["ended_ts_utc"] = _add_seconds_iso(evt.get("ts") or "", evt["duration_seconds"])
+
+
+# ---------------------------------------------------------------------------
+# §15 roofline collector
+# ---------------------------------------------------------------------------
+# Discover roofline ``final.json`` files in the well-known locations
+# (orchestrator output, standalone roofline tool, kernel-agent
+# roofline). Each file may have one of two shapes:
+#
+#   1. top-level ``mode`` / ``baseline`` / ``latest`` / ``delta``
+#      (the standalone roofline tool's wire shape)
+#   2. wrapped under ``roofline_comparison`` (the orchestrator's
+#      ``reports/final.json`` shape — see test fixture)
+#
+# Each discovered file becomes one entry whose ``source_path`` is the
+# session-relative file path. Files are returned in mtime order
+# (oldest first) so the list itself conveys a timeline. Invalid JSON
+# is a warning, not a crash; an unrecognised top-level shape is a
+# warning (so an operator notices we found a final.json that doesn't
+# match either expected schema) but is silently dropped from the
+# output.
+_ROOFLINE_FINAL_PATTERNS: tuple[str, ...] = (
+    "reports/final.json",
+    "reports/**/final.json",
+    "runs/roofline/**/final.json",
+    "kernel-agent/runs/*/roofline/**/final.json",
+)
+
+
+def _roofline_extract_payload(blob: Any) -> dict[str, Any] | None:
+    """Lift the roofline payload from either of the two shapes we accept.
+
+    Returns the dict that carries ``mode`` / ``baseline`` / ``latest``
+    / ``delta`` keys, or None if the blob doesn't match either layout.
+    """
+    if not isinstance(blob, dict):
+        return None
+    # Shape 1: top-level. Accept it if at least one of the marker
+    # keys is present (``mode`` alone is enough — minimum shape used
+    # by the standalone tool).
+    if any(k in blob for k in ("mode", "baseline", "latest", "delta", "roofline")):
+        # If the blob has ``roofline_comparison`` *as well* we still
+        # prefer the wrapped sub-dict (orchestrator shape carries both
+        # an outer ``mode``/``ts`` and a nested comparison; the inner
+        # dict is the truthful one).
+        if isinstance(blob.get("roofline_comparison"), dict):
+            return blob["roofline_comparison"]
+        if isinstance(blob.get("roofline"), dict):
+            return blob["roofline"]
+        # Direct top-level — must carry at least ``mode`` or ``baseline``
+        # to qualify; an isolated ``delta`` doesn't.
+        if "mode" in blob or "baseline" in blob or "latest" in blob:
+            return blob
+    # Shape 2: wrapped under ``roofline_comparison``.
+    rc = blob.get("roofline_comparison")
+    if isinstance(rc, dict):
+        return rc
+    return None
+
+
+def _roofline_normalize_snapshot(snap: Any) -> dict[str, Any] | None:
+    """Coerce a snapshot to the schema shape with explicit None fields.
+
+    Returns None when ``snap`` is missing entirely (preserves the
+    "snapshot absent" signal — the schema's ``RooflineEntry.latest``
+    is ``Optional`` and the renderer skips None blocks).
+    """
+    if snap is None:
+        return None
+    if not isinstance(snap, dict):
+        return None
+    tk = snap.get("top_kernel")
+    norm_tk: dict[str, Any] | None
+    if isinstance(tk, dict) and tk:
+        norm_tk = {
+            "name":           tk.get("name"),
+            "gpu_pct":        _to_float(tk.get("gpu_pct")),
+            "efficiency_pct": _to_float(tk.get("efficiency_pct")),
+            "bound_type":     tk.get("bound_type"),
+        }
+    else:
+        norm_tk = None
+    return {
+        "snapshot_id":    snap.get("snapshot_id"),
+        "ts":             snap.get("ts"),
+        "compute_pct":    _to_float(snap.get("compute_pct")),
+        "idle_pct":       _to_float(snap.get("idle_pct")),
+        "comm_pct":       _to_float(snap.get("comm_pct")),
+        "top_bottleneck": snap.get("top_bottleneck"),
+        "top_kernel":     norm_tk,
+    }
+
+
+def _roofline_normalize_delta(delta: Any) -> dict[str, Any] | None:
+    """Pass deltas through verbatim when dict, None otherwise."""
+    if delta is None:
+        return None
+    if not isinstance(delta, dict) or not delta:
+        return None
+    return dict(delta)
+
+
+def collect_roofline(
+    session_dir: Path,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Discover roofline final.json files; emit one entry per file.
+
+    Files are de-duplicated by resolved path (so the broader globs
+    don't surface the same orchestrator report twice) and sorted by
+    mtime ascending — the oldest snapshot first, matching the
+    "timeline" semantics tests assert.
+    """
+    out: list[dict[str, Any]] = []
+    if not session_dir.exists():
+        return out
+
+    discovered: dict[Path, float] = {}
+    for pattern in _ROOFLINE_FINAL_PATTERNS:
+        try:
+            for hit in session_dir.glob(pattern):
+                try:
+                    if not hit.is_file():
+                        continue
+                    mtime = hit.stat().st_mtime
+                except OSError:
+                    continue
+                discovered.setdefault(hit, mtime)
+        except OSError:
+            continue
+
+    for path in sorted(discovered.keys(), key=lambda p: discovered[p]):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            warnings.append(f"collect_roofline: failed to read {path}: {exc!r}")
+            continue
+        try:
+            blob = json.loads(text)
+        except json.JSONDecodeError as exc:
+            warnings.append(f"collect_roofline: invalid JSON at {path}: {exc!r}")
+            continue
+        payload = _roofline_extract_payload(blob)
+        if payload is None:
+            warnings.append(
+                f"collect_roofline: {path} has no recognisable roofline shape "
+                "(missing mode / baseline / latest / roofline_comparison)"
+            )
+            continue
+        try:
+            rel = str(path.relative_to(session_dir))
+        except ValueError:
+            rel = str(path)
+        mode_raw = payload.get("mode")
+        out.append({
+            "source_path": rel,
+            "mode":        mode_raw if isinstance(mode_raw, str) else None,
+            "baseline":    _roofline_normalize_snapshot(payload.get("baseline")),
+            "latest":      _roofline_normalize_snapshot(payload.get("latest")),
+            "delta":       _roofline_normalize_delta(payload.get("delta")),
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# data_provenance — per-section source artifact probes
+# ---------------------------------------------------------------------------
+# Glob expansion under ``session_dir`` is capped so a pathological tree
+# (e.g. tens of thousands of variant directories) can't slow the export
+# to a crawl. We don't need an exact count for provenance — just enough
+# to distinguish "found" from "missing".
+_PROVENANCE_GLOB_MAX_HITS = 50
+
+_PROVENANCE_IMAGE_ENV_VARS: tuple[str, ...] = (
+    "HYPERLOOM_IMAGE",
+    "CONTAINER_IMAGE",
+    "IMAGE",
+)
+
+
+def _probe_file(
+    session_dir: Path,
+    relative_glob: str,
+    role: str,
+    *,
+    required: bool,
+) -> dict[str, Any]:
+    """Stat-only existence probe for ``session_dir / relative_glob``."""
+    probe: dict[str, Any] = {
+        "path":     relative_glob,
+        "role":     role,
+        "required": bool(required),
+        "found":    False,
+        "found_count": 0,
+        "representative_path": None,
+    }
+    if not session_dir.exists():
+        probe["note"] = "session_dir does not exist"
+        return probe
+
+    rep: str | None = None
+    count = 0
+    try:
+        if any(ch in relative_glob for ch in "*?["):
+            iterator = session_dir.glob(relative_glob)
+        else:
+            candidate = session_dir / relative_glob
+            iterator = iter([candidate]) if candidate.exists() else iter([])
+        for hit in iterator:
+            try:
+                if not hit.exists():
+                    continue
+            except OSError as exc:
+                probe["note"] = f"{type(exc).__name__}: {exc}"
+                continue
+            count += 1
+            if rep is None:
+                try:
+                    rep = str(hit.relative_to(session_dir))
+                except ValueError:
+                    rep = str(hit)
+            if count >= _PROVENANCE_GLOB_MAX_HITS:
+                break
+    except (OSError, ValueError) as exc:
+        probe["note"] = f"glob failed: {type(exc).__name__}: {exc}"
+        return probe
+
+    if count:
+        probe["found"] = True
+        probe["found_count"] = count
+        probe["representative_path"] = rep
+    return probe
+
+
+def _probe_env(
+    name: str,
+    role: str,
+    *,
+    required: bool,
+) -> dict[str, Any]:
+    raw = os.environ.get(name)
+    found = bool(raw)
+    probe: dict[str, Any] = {
+        "path":     f"env:{name}",
+        "role":     role,
+        "required": bool(required),
+        "found":    found,
+        "found_count": 1 if found else 0,
+        "representative_path": raw if found else None,
+    }
+    return probe
+
+
+def _make_or_probe(
+    candidates: list[dict[str, Any]],
+    *,
+    path: str,
+    role: str,
+) -> dict[str, Any]:
+    found_any = any(c.get("found") for c in candidates)
+    return {
+        "path":     path,
+        "role":     role,
+        "required": True,
+        "found":    found_any,
+        "found_count": sum(c.get("found_count") or 0 for c in candidates),
+        "representative_path": next(
+            (c.get("representative_path") for c in candidates if c.get("found")),
+            None,
+        ),
+    }
+
+
+def _provenance_populated(value: Any, *, section: str | None = None) -> bool:
+    """Return True iff a built section carries non-trivial data."""
+    if section == "attribution" and isinstance(value, dict):
+        gpse = value.get("gain_per_stack_entry") or []
+        return bool(gpse) and value.get("method") != "missing"
+    if section == "param_search" and isinstance(value, dict):
+        for sub in ("params", "backends"):
+            ledger = value.get(sub) or {}
+            if (ledger.get("tested_count") or 0) > 0:
+                return True
+            if ledger.get("accepted") or ledger.get("rejected"):
+                return True
+        return False
+    if section == "baseline" and isinstance(value, dict):
+        return bool(
+            (value.get("throughput_tok_s_per_gpu") or 0) > 0
+            or value.get("attempts_history")
+            or value.get("benchmark_report_path")
+        )
+    if section == "final" and isinstance(value, dict):
+        return bool(
+            value.get("throughput_tok_s_per_gpu") is not None
+            or value.get("cumulative_gain_pct_validated") is not None
+            or value.get("action_path")
+        )
+    if section == "critic_robustness" and isinstance(value, dict):
+        return bool(value.get("critic_iterations") or value.get("robustness_signals"))
+    if section == "kernel_lifecycle" and isinstance(value, dict):
+        return any(
+            bool(value.get(k))
+            for k in ("detected", "recommended", "optimized", "adopted", "rejected")
+        )
+    if section == "capability_summary" and isinstance(value, dict):
+        for cap in value.values():
+            if not isinstance(cap, dict):
+                continue
+            if (cap.get("attempts") or 0) > 0 or (cap.get("keeps") or 0) > 0:
+                return True
+            if (cap.get("tested") or 0) > 0:
+                return True
+        return False
+
+    if value is None:
+        return False
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, (list, dict)):
+                if _provenance_populated(item):
+                    return True
+            elif item not in (None, "", 0, 0.0, False):
+                return True
+        return False
+    if isinstance(value, dict):
+        for v in value.values():
+            if isinstance(v, (list, dict)):
+                if _provenance_populated(v):
+                    return True
+            elif v not in (None, "", 0, 0.0, False, []):
+                return True
+        return False
+    return value not in ("", 0, 0.0, False)
+
+
+def _provenance_status(
+    sources: list[dict[str, Any]],
+    *,
+    populated: bool,
+) -> tuple[str, list[str]]:
+    missing: list[str] = []
+    for p in sources:
+        if not p.get("required"):
+            continue
+        if not p.get("found"):
+            missing.append(str(p.get("role") or p.get("path") or "(unknown)"))
+    if not missing:
+        return "complete", []
+    return ("partial" if populated else "empty"), missing
+
+
+def collect_data_provenance(
+    session_dir: Path,
+    breakdown: dict[str, Any],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Probe the on-disk artifacts that feed every breakdown section."""
+    sd = session_dir
+    out: list[dict[str, Any]] = []
+
+    def _emit(section: str,
+              sources: list[dict[str, Any]],
+              populated_value: Any,
+              *,
+              notes: list[str] | None = None) -> None:
+        populated = _provenance_populated(populated_value, section=section)
+        status, missing = _provenance_status(sources, populated=populated)
+        out.append({
+            "section":          section,
+            "status":           status,
+            "populated":        populated,
+            "sources":          sources,
+            "missing_required": missing,
+            "notes":            list(notes or []),
+        })
+
+    # ---- session ----
+    # Manifest + state are the two canonical inputs. Image / timing
+    # source enumeration is best-effort metadata so consumers see
+    # exactly which candidates were probed when ``session.image`` /
+    # ``session_started_at_utc`` end up None.
+    session_sources = [
+        _probe_file(sd, "manifest.json", "session manifest", required=True),
+        _probe_file(sd, "state.json",    "session state",    required=True),
+    ]
+    # Image OR-probe (all optional — sessions in /home/chenluo/sbd/v2
+    # legitimately have image=null everywhere).
+    img_state    = _probe_file(sd, "state.json",
+                               "container image (state.json: image/container_image)", required=False)
+    img_manifest = _probe_file(sd, "manifest.json",
+                               "container image (manifest.json: image/container_image)", required=False)
+    img_baseline = _probe_file(sd, "runs/baseline/*/baseline_config.with_envs.yaml",
+                               "container image (baseline_config.with_envs.yaml: docker_image/image)",
+                               required=False)
+    img_bench    = _probe_file(sd, "runs/baseline/*/benchmark_*/config.yaml",
+                               "container image (benchmark config.yaml: docker_image)", required=False)
+    session_sources.extend([img_state, img_manifest, img_baseline, img_bench])
+    for env_name in _PROVENANCE_IMAGE_ENV_VARS:
+        session_sources.append(
+            _probe_env(env_name, f"container image env ({env_name})", required=False)
+        )
+
+    # Per-session notes about what (if anything) populated the image
+    # and timing fields. Derived strictly from the already-built
+    # ``session`` payload so this collector doesn't redo any work.
+    notes: list[str] = []
+    sess_block = breakdown.get("session") if isinstance(breakdown.get("session"), dict) else {}
+    if sess_block.get("image") in (None, ""):
+        notes.append(
+            "image: no image metadata found in any candidate source "
+            "(state.json / manifest.json / baseline yamls / env)"
+        )
+    started_missing = sess_block.get("session_started_at_utc") in (None, "")
+    ended_missing   = sess_block.get("session_ended_at_utc")   in (None, "")
+    if started_missing and ended_missing:
+        notes.append(
+            "session timing: no startup/shutdown timestamps in state.json "
+            "(state.start_ts / state.closing_started_unix both absent); "
+            "consider checking *_attempts ts events for a derived bound"
+        )
+    elif started_missing:
+        notes.append(
+            "session timing: started_at missing in state.json; ended_at present"
+        )
+    elif ended_missing:
+        notes.append(
+            "session timing: ended_at missing in state.json "
+            "(state.stopped_at / last_tick_ts / closing_started_unix all absent)"
+        )
+
+    _emit("session", session_sources, breakdown.get("session"), notes=notes or None)
+
+    # ---- workload ----
+    _emit("workload",
+          [_probe_file(sd, "manifest.json", "session manifest", required=True),
+           _probe_file(sd, "state.json",    "session state (optional fallback)", required=False)],
+          breakdown.get("workload"))
+
+    # ---- baseline ----
+    bp_flat   = _probe_file(sd, "runs/baseline/*/benchmark_report.json",
+                            "baseline benchmark_report (flat)", required=False)
+    bp_nested = _probe_file(sd, "runs/baseline/*/*/benchmark_report.json",
+                            "baseline benchmark_report (nested)", required=False)
+    baseline_or_probe = _make_or_probe(
+        [bp_flat, bp_nested],
+        path="(runs/baseline/*[/**]/benchmark_report.json)",
+        role="baseline benchmark_report",
+    )
+    _emit("baseline",
+          [bp_flat, bp_nested, baseline_or_probe,
+           _probe_file(sd, "runs/baseline/*/baseline_config.with_envs.yaml",
+                       "Magpie baseline yaml", required=False),
+           _probe_file(sd, "runs/baseline/*/server.log",
+                       "baseline server.log (ServerArgs)", required=False),
+           _probe_file(sd, "state.json", "session state (baseline_attempts)", required=False)],
+          breakdown.get("baseline"))
+
+    # ---- final ----
+    _emit("final",
+          [_probe_file(sd, "state.json",
+                       "session state (final / current_best / validated)", required=True),
+           _probe_file(sd, "runs/*/*/benchmark_report.json",
+                       "any benchmark_report (ttft/e2el fallback)", required=False)],
+          breakdown.get("final"))
+
+    # ---- decision_journal ----
+    _emit("decision_journal",
+          [_probe_file(sd, "state.json",
+                       "session state (params/backends_attempts)", required=True),
+           _probe_file(sd, "runs/params/*/variant_*/benchmark_*/benchmark_report.json",
+                       "params variant benchmark_report", required=False),
+           _probe_file(sd, "runs/backends/*/variant_*/benchmark_*/benchmark_report.json",
+                       "backends variant benchmark_report", required=False)],
+          breakdown.get("decision_journal"))
+
+    # ---- sweep ----
+    sweep_sources = [
+        _probe_file(sd, "runs/sweep/*/variant_*/benchmark_*/benchmark_report.json",
+                    "sweep variant benchmark_report", required=False),
+        _probe_file(sd, "runs/sweep/*/*/benchmark_report.json",
+                    "sweep variant benchmark_report (flat)", required=False),
+        _probe_file(sd, "state.json", "session state (last_sweep)", required=False),
+    ]
+    _emit("sweep", sweep_sources, breakdown.get("sweep"),
+          notes=(["sweep was not exercised this session"]
+                 if not _provenance_populated(breakdown.get("sweep"), section="sweep") else None))
+
+    # ---- phase_timeline ----
+    _emit("phase_timeline",
+          [_probe_file(sd, "state.json",
+                       "session state (*_attempts)", required=True),
+           _probe_file(sd, "runs/*/*/benchmark_report.json",
+                       "any benchmark_report (duration)", required=False)],
+          breakdown.get("phase_timeline"))
+
+    # ---- kernel_profiling ----
+    pp_flat   = _probe_file(sd, "runs/profile/*/benchmark_report.json",
+                            "profile benchmark_report (flat)", required=False)
+    pp_nested = _probe_file(sd, "runs/profile/*/*/benchmark_report.json",
+                            "profile benchmark_report (nested)", required=False)
+    profile_or_probe = _make_or_probe(
+        [pp_flat, pp_nested],
+        path="(runs/profile/*[/**]/benchmark_report.json)",
+        role="profile benchmark_report",
+    )
+    tl_canonical = _probe_file(sd, "kernel-agent/runs/*/status/tracelens_analysis/*.json",
+                               "TraceLens status JSON (canonical)", required=False)
+    tl_legacy = _probe_file(sd, "kernel-agent-workspace/**/status/tracelens_analysis/*.json",
+                            "TraceLens status JSON (legacy workspace)", required=False)
+    tl_or_probe = _make_or_probe(
+        [tl_canonical, tl_legacy],
+        path="(**/status/tracelens_analysis/*.json)",
+        role="TraceLens status JSON",
+    )
+    _emit("kernel_profiling",
+          [pp_flat, pp_nested, profile_or_probe,
+           tl_canonical, tl_legacy, tl_or_probe,
+           _probe_file(sd, "kernel-agent/runs/*/tracelens/priority_data.json",
+                       "TraceLens priority_data", required=False),
+           _probe_file(sd, "kernel-agent/runs/*/tracelens/category_data/*_metrics.json",
+                       "TraceLens category metrics", required=False),
+           _probe_file(sd, "kernel-agent/runs/*/tracelens/analysis.md",
+                       "TraceLens analysis.md", required=False),
+           _probe_file(sd, "runs/profile/*/torch_trace/*.trace.json.gz",
+                       "torch trace files", required=False),
+           _probe_file(sd, "runs/profile/*/*/torch_trace/*.trace.json.gz",
+                       "torch trace files (nested)", required=False),
+           _probe_file(sd, "runs/profile/*/kernel_summary.csv",
+                       "magpie kernel_summary.csv", required=False),
+           _probe_file(sd, "runs/profile/*/*/kernel_summary.csv",
+                       "magpie kernel_summary.csv (nested)", required=False)],
+          breakdown.get("kernel_profiling"))
+
+    # ---- kernel_decision_path ----
+    _emit("kernel_decision_path",
+          [_probe_file(sd, "state.json",
+                       "session state (select_kernels/kernel_opt/kernel_integrate_attempts)",
+                       required=True),
+           _probe_file(sd, "kernel-agent/runs/*/results/*.json",
+                       "kernel-agent per-attempt results", required=False)],
+          breakdown.get("kernel_decision_path"))
+
+    # ---- kernel_lifecycle ----
+    _emit("kernel_lifecycle",
+          [_probe_file(sd, "state.json",
+                       "session state (recommended/optimized/adopted/rejected_kernels)",
+                       required=True),
+           _probe_file(sd, "kernel-agent/runs/*/tracelens/category_data/*_metrics.json",
+                       "TraceLens category metrics (roofline)", required=False)],
+          breakdown.get("kernel_lifecycle"))
+
+    # ---- geak / oob invocations ----
+    def _geak_oob_sources() -> list[dict[str, Any]]:
+        return [
+            _probe_file(sd, "kernel-agent/runs/*/optimization_attempts.jsonl",
+                        "kernel-agent optimization_attempts.jsonl", required=False),
+            _probe_file(sd, "kernel-agent-workspace/**/optimization_attempts.jsonl",
+                        "legacy kernel-agent-workspace attempts", required=False),
+        ]
+    _emit("geak_invocations", _geak_oob_sources(), breakdown.get("geak_invocations"))
+    _emit("oob_invocations",  _geak_oob_sources(), breakdown.get("oob_invocations"))
+
+    # ---- critic / robustness ----
+    _emit("critic_robustness",
+          [_probe_file(sd, "critic-workdir",     "critic-agent workdir",     required=False),
+           _probe_file(sd, "robustness-workdir", "robustness-agent workdir", required=False)],
+          breakdown.get("critic_robustness"))
+
+    # ---- roofline ----
+    rp_orchestrator = _probe_file(sd, "reports/final.json",
+                                  "orchestrator final report", required=False)
+    rp_orchestrator_nested = _probe_file(sd, "reports/**/final.json",
+                                         "orchestrator final report (nested)",
+                                         required=False)
+    rp_standalone = _probe_file(sd, "runs/roofline/**/final.json",
+                                "standalone roofline tool output", required=False)
+    rp_kernel_agent = _probe_file(sd, "kernel-agent/runs/*/roofline/**/final.json",
+                                  "kernel-agent roofline output", required=False)
+    roofline_or_probe = _make_or_probe(
+        [rp_orchestrator, rp_orchestrator_nested, rp_standalone, rp_kernel_agent],
+        path="(any of the roofline final.json locations above)",
+        role="roofline final.json (any location)",
+    )
+    _emit("roofline",
+          [rp_orchestrator, rp_orchestrator_nested, rp_standalone,
+           rp_kernel_agent, roofline_or_probe],
+          breakdown.get("roofline"))
+
+    # ---- attribution ----
+    _emit("attribution",
+          [_probe_file(sd, "state.json",
+                       "session state (gain_per_stack_entry / optimization_stack)",
+                       required=True)],
+          breakdown.get("attribution"))
+
+    # ---- param_search ----
+    _emit("param_search",
+          [_probe_file(sd, "state.json",
+                       "session state (params_search / backends_search)",
+                       required=True)],
+          breakdown.get("param_search"))
+
+    return out
+
+
 __all__ = [
     "collect_attribution",
     "collect_baseline",
     "collect_capability_summary",
     "collect_critic_robustness",
+    "collect_data_provenance",
     "collect_decision_journal",
     "collect_final",
     "collect_kernel_decision_path",
@@ -4889,6 +6189,7 @@ __all__ = [
     "collect_kernel_profiling",
     "collect_param_search",
     "collect_phase_timeline",
+    "collect_roofline",
     "collect_session",
     "collect_source_files",
     "collect_sweep",
