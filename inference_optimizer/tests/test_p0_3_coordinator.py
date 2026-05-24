@@ -587,7 +587,6 @@ async def test_execution_order_does_not_deny_backends_when_select_kernels_stale(
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = "/tmp/trace-a.json.gz"
-        c.shared_state.last_profile_pmc_summary = "/tmp/pmc-a.json"
         c.shared_state.last_select_kernels = {}
         c.shared_state.save(session_dir)
 

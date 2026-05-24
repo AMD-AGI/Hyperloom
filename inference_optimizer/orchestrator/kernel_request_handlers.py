@@ -556,7 +556,11 @@ async def select_kernels_handler(
         model_name:      default ''
         framework:       default 'sglang'
         target_platform: defaults to payload target_platform, then SharedState.gpu_type
-        roofline_json:   optional path from a separate pmc_roofline action
+        roofline_json:   optional pre-computed roofline JSON path; the
+                         orchestrator no longer auto-produces this (the
+                         retired ``pmc_roofline`` action), but operators
+                         can still inject one manually when an external
+                         tool generated it
         dry_run:         default False (testing)
         budget_minutes:  default 60
 
