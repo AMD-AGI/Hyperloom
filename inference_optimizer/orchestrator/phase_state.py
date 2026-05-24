@@ -115,31 +115,26 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # this internally on plateau (bypasses PolicyGate); LLM-side
         # proposes are throttled by ``assess_remaining_gaps_throttle``.
         "assess_remaining_gaps",
-        # Local hotfix (skill-launcher): Coordinator's sequence-gate
-        # requires ``last_profile_trace`` to be non-empty before any
-        # action in ``sequence_actions`` (which includes ``explore``)
-        # is allowed when the kernel agent is in role_registry. With
-        # the original allow-list, EXPLORE cannot run an analysis
-        # action to satisfy that prereq, so the ``explore`` family is
-        # auto-pruned at streak=5 of ``execution_order`` denials.
-        # Allow ``profile`` (and the composite ``roofline`` that
-        # superseded ``pmc_roofline``) in EXPLORE so the orchestrator
-        # can break the deadlock — KERNEL phase will still run its
-        # once-per-phase profile via the §3.2 contract.
+        # Local hotfix: ``profile`` stays in the EXPLORE allowlist so
+        # the sequence-gate (which requires non-empty
+        # ``last_profile_trace`` before any ``sequence_actions`` entry
+        # like ``explore`` can run) has an LLM-proposable escape
+        # hatch when ``use_roofline_composite`` is off. With composite
+        # on, the Coordinator's ``_on_enter_explore`` auto-roofline
+        # hook satisfies the same prereq.
+        # NOTE: ``roofline`` is intentionally NOT here — see the
+        # post-dict comment below.
         "profile",
-        "roofline",
         "recover",
     }),
     PHASE_KERNEL: frozenset({
-        # Profile is allowed but the §3.2 contract says it fires
-        # at most **once per phase**, at KERNEL entry; the per-phase
-        # call counter lives in SharedState.phase_history evidence.
-        # ``roofline`` is the v0.8 composite that runs profile +
-        # trace_analyze atomically (PolicyGate's N9 rule denies the
-        # legacy direct ``profile`` propose when
-        # ``--deny-direct-profile`` is on, which is the default).
-        "profile",
-        "roofline",
+        # ``profile`` stays LLM-proposable so the operator can fall
+        # back to it when ``--use-roofline-composite=False`` (PolicyGate
+        # N9 denies direct ``profile`` only when the composite toggle
+        # AND ``--deny-direct-profile`` are both on; the auto-profile
+        # hook in :meth:`Coordinator._on_enter_kernel` already runs it
+        # automatically in that fallback configuration).
+        "profile", "pmc_roofline",
         # KERNEL_OWNED_ACTIONS from policy.py.
         "kernel_opt", "integrate", "deep_kernel_analysis",
         "operator_tuning", "vendor_kernel_config",
@@ -150,13 +145,20 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     }),
     PHASE_CLOSE: frozenset({
         "report", "session_breakdown",
-        # F0-9 placeholder. F3-3 N31 auto-enqueues a final ``roofline``
-        # task on CLOSE entry when ``--use-roofline-composite`` is on,
-        # so the action must be allowed in this phase.
-        "roofline",
         "recover",
     }),
 }
+
+# v0.8 (post-N31 retirement): ``roofline`` is intentionally NOT in any
+# phase allowlist. The composite action is no longer LLM-proposable —
+# the Coordinator auto-enqueues it on EXPLORE entry and KERNEL entry
+# via ``_on_enter_explore`` / ``_on_enter_kernel`` (gated by the
+# ``use_roofline_composite`` toggle + the gain-only freshness gate in
+# :meth:`Coordinator._needs_fresh_roofline`). PolicyGate R1
+# ``phase_incompatible`` therefore denies any LLM
+# ``propose_action{action_name='roofline'}`` /
+# ``delegate{action_name='roofline'}``; internal Coordinator enqueues
+# bypass PolicyGate so they continue to work.
 
 
 def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:

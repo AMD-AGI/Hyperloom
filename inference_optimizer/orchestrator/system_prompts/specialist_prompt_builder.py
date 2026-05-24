@@ -312,6 +312,15 @@ class SpecialistPromptInputs:
     # Cortex KB sub-graph (§3.5 §6 part 4)
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
 
+    # Roofline / TraceLens evidence (§3.5 §6 part 4a — post-N31).
+    # Filled by ``Coordinator._warm_specialist_params`` from
+    # :attr:`SharedState.last_trace_analyze`. Expected keys:
+    # ``analysis_md_path``, ``roofline_snapshot_id``,
+    # ``executive_summary`` (compute/idle/comm/top_bottleneck percentages),
+    # ``hot_kernels_top15`` (capped at top 8 by the warmer to bound
+    # token cost). Empty dict → section renders empty / placeholder.
+    roofline_evidence: dict[str, Any] = field(default_factory=dict)
+
     # Recipe summary from T0 ``find-recipe`` (§3.5 §6 part 5)
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
@@ -319,6 +328,17 @@ class SpecialistPromptInputs:
     # PR feed (§3.5 §6 part 6)
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
+
+    # F2-3 framework_pr_scout sub_kind: Coordinator pre-fetched PR
+    # candidates from ``fa candidates`` (metadata only — diff bodies
+    # the specialist fetches itself via the curl template in the
+    # rendered FRAMEWORK PR CANDIDATES section). Empty list → section
+    # renders empty / placeholder. ``sub_kind`` mirrors the dispatch
+    # ``params.sub_kind`` so the section can short-circuit when the
+    # specialist is NOT a framework_pr_scout (avoid leaking PR feed
+    # noise into other domains).
+    sub_kind: str = ""
+    pr_candidates: list[dict[str, Any]] = field(default_factory=list)
 
     # Local source navigation hint (§3.5 §6 part 7)
     framework_source_roots: tuple[str, ...] = ()
@@ -524,6 +544,106 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Section 4a — Roofline / TraceLens evidence (post-N31)
+# ---------------------------------------------------------------------------
+def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the ROOFLINE EVIDENCE section.
+
+    Sourced from ``Coordinator._warm_specialist_params`` which mirrors
+    :attr:`SharedState.last_trace_analyze`. Expected keys on
+    ``inp.roofline_evidence``:
+
+    * ``analysis_md_path``: absolute path to the TraceLens
+      ``analysis.md`` (specialist Read tool can pull the full report on
+      demand).
+    * ``roofline_snapshot_id``: monotonic counter the orchestration
+      prompt also surfaces.
+    * ``executive_summary``: structured dict with
+      ``compute_pct / idle_pct / comm_pct / top_bottleneck``
+      (extracted via :func:`roofline_snapshot.extract_workload_summary`).
+    * ``hot_kernels_top15``: list of hot-kernel dicts (top 8 already
+      sliced by the warmer to bound token cost).
+
+    Returns an empty section (just the heading + ``(none)`` placeholder)
+    when ``roofline_evidence`` is empty so the specialist still sees the
+    structural slot.
+    """
+    rows = ["## 4a. ROOFLINE EVIDENCE", ""]
+    ev = inp.roofline_evidence or {}
+    if not isinstance(ev, dict) or not ev:
+        rows.append(
+            "(none — no fresh roofline snapshot has been recorded yet. "
+            "The Coordinator auto-enqueues `roofline` on EXPLORE / "
+            "KERNEL entry when `--use-roofline-composite=true`; if you "
+            "are seeing this, either the toggle is off OR the snapshot "
+            "is still in-flight.)"
+        )
+        return rows
+
+    snap_id = ev.get("roofline_snapshot_id")
+    if snap_id is not None:
+        rows.append(f"**TraceLens snapshot #{snap_id}**")
+        rows.append("")
+
+    summary = ev.get("executive_summary") or {}
+    if isinstance(summary, dict) and summary:
+        rows.append("**Executive Summary:**")
+        for label, key in (
+            ("Compute %",        "compute_pct"),
+            ("Idle %",           "idle_pct"),
+            ("Exposed Comm %",   "comm_pct"),
+            ("Top bottleneck",   "top_bottleneck"),
+        ):
+            val = summary.get(key)
+            if val is None or val == "":
+                continue
+            if isinstance(val, (int, float)):
+                rows.append(f"- {label}: {float(val):.1f}%")
+            else:
+                rows.append(f"- {label}: {val}")
+        rows.append("")
+
+    hot = ev.get("hot_kernels_top15") or []
+    if isinstance(hot, list) and hot:
+        rows.append("**Top hot kernels (kernel_id | name | gpu_pct | bottleneck | source_file):**")
+        rows.append("")
+        rows.append("| kernel_id | name | gpu_pct | bottleneck | source_file |")
+        rows.append("|---|---|---:|---|---|")
+        for k in hot:
+            if not isinstance(k, dict):
+                continue
+            kid = str(k.get("kernel_id") or "")
+            name = str(k.get("name") or "")
+            gpu_pct = k.get("gpu_pct")
+            gpu_pct_str = (
+                f"{float(gpu_pct):.2f}%" if isinstance(gpu_pct, (int, float))
+                else "—"
+            )
+            bottleneck = str(k.get("bottleneck") or "")
+            src = str(k.get("source_file") or "")
+            rows.append(
+                f"| `{kid}` | {name} | {gpu_pct_str} | {bottleneck} | {src} |"
+            )
+        rows.append("")
+
+    analysis_path = str(ev.get("analysis_md_path") or "")
+    if analysis_path:
+        rows.append(
+            f"**Full analysis.md path:** `{analysis_path}`"
+        )
+        rows.append("")
+        rows.append(
+            "Use the `Read` tool on this path for the full TraceLens "
+            "report (~10-20 KB). All section headings are stable: "
+            "`## Executive Summary` / `## Top Operations` / "
+            "`## Compute Kernel Optimizations` / "
+            "`## Kernel Fusion Opportunities` / "
+            "`## System-Level Optimizations` / `## Recommendations`."
+        )
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Section 5 — Recipe summary
 # ---------------------------------------------------------------------------
 def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
@@ -566,6 +686,89 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
             if isinstance(labels, list) and labels else ""
         )
         rows.append(f"- {title} — <{url}>{labels_text}")
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Section 6b — Framework PR candidates (F2-3 framework_pr_scout sub_kind)
+# ---------------------------------------------------------------------------
+def _section_framework_pr_candidates(
+    inp: SpecialistPromptInputs,
+) -> list[str]:
+    """Render the FRAMEWORK PR CANDIDATES section for serving_specialist
+    runs with ``sub_kind='framework_pr_scout'``.
+
+    Coordinator pre-fetches the PR list via the ``fa candidates`` CLI
+    (see :mod:`framework_agent_client`); the section instructs the
+    specialist how to pull each PR's diff body via ``curl`` inside the
+    subprocess sandbox (the diff itself is too large to inline here).
+
+    Returns an empty list (section omitted) when the specialist is not
+    a framework_pr_scout OR when no candidates landed (graceful
+    degrade for offline / fa-binary-missing scenarios).
+    """
+    if (inp.sub_kind or "").strip() != "framework_pr_scout":
+        return []
+    candidates = inp.pr_candidates or []
+    if not isinstance(candidates, list) or not candidates:
+        return []
+    rows = ["## 6b. FRAMEWORK PR CANDIDATES", ""]
+    rows.append(
+        f"Coordinator pre-fetched these **{len(candidates)}** PR "
+        "candidates from `fa candidates`. Diff bodies are NOT included; "
+        "fetch them yourself before authoring patches."
+    )
+    rows.append("")
+    rows.append("| # | repo | pr_number | ref | title | summary | score | diff_url |")
+    rows.append("|---|---|---:|---|---|---|---:|---|")
+    for i, c in enumerate(candidates[:20], start=1):
+        if not isinstance(c, dict):
+            continue
+        repo = str(c.get("repo") or "")
+        pr_number = c.get("pr_number") or c.get("number") or ""
+        ref = str(c.get("ref") or "")
+        title = str(c.get("title") or "").replace("|", "/")
+        summary = str(c.get("summary") or "").replace("|", "/")
+        if len(summary) > 140:
+            summary = summary[:137] + "..."
+        score = c.get("score")
+        score_str = (
+            f"{float(score):.2f}" if isinstance(score, (int, float))
+            else "—"
+        )
+        diff_url = str(c.get("diff_url") or c.get("source_url") or "")
+        rows.append(
+            f"| {i} | {repo} | {pr_number} | {ref} | {title} | "
+            f"{summary} | {score_str} | {diff_url} |"
+        )
+    rows.append("")
+    rows.append("### How to fetch a PR diff")
+    rows.append("")
+    rows.append(
+        "```bash"
+    )
+    rows.append(
+        "mkdir -p $WORKTREE/incoming"
+    )
+    rows.append(
+        "curl -fsSL -o $WORKTREE/incoming/<pr_number>.diff '<diff_url>'"
+    )
+    rows.append(
+        "git -C $FRAMEWORK_ROOT apply --check "
+        "$WORKTREE/incoming/<pr_number>.diff"
+    )
+    rows.append(
+        "# Then re-author into worktree/patches/NNN_<slug>.patch via Edit"
+    )
+    rows.append("```")
+    rows.append("")
+    rows.append(
+        "**Iron rule:** do NOT commit a raw GitHub diff into "
+        "`worktree/patches/` — always Edit your own `.patch` so "
+        "`integrate_patch` can attribute provenance correctly. The "
+        "incoming GitHub diff is reference material; the patches/ "
+        "entry is your own work product."
+    )
     return rows
 
 
@@ -753,10 +956,20 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_hardware(inp),
         _section_gap(inp),
         _section_kb_subgraph(inp),
+        _section_roofline_evidence(inp),
         _section_recipe(inp),
         _section_pr_feed(inp),
         _section_source_hint(inp),
     ]
+    # F2-3: framework_pr_scout candidates ride right after PR feed so
+    # the specialist sees PR Monitor warm cache + the fa-fetched
+    # candidates in adjacent sections. Returns an empty list for any
+    # other sub_kind / empty candidate list, so non-framework_pr_scout
+    # specialists never see this section.
+    fa_candidates_section = _section_framework_pr_candidates(inp)
+    if fa_candidates_section:
+        # Insert after the PR feed section (index 5 in the list above).
+        user_sections.insert(6, fa_candidates_section)
     if inp.notes:
         user_sections.append([
             "## 10. NOTES FROM ORCHESTRATION",

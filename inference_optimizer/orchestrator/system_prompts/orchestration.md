@@ -166,15 +166,28 @@ on the next tick.
   `policy_denied`. No score / cooldown gating beyond that — v0.8 §3.9
   retired the scoreboard.
 
-### Roofline composite action (HARD RULES — when `--use-roofline-composite` is on)
+### Roofline composite action (auto-managed — you cannot propose it)
 
 When the operator runs with `--use-roofline-composite=true` the
-`SharedState.use_roofline_composite` toggle is on, the `roofline`
-composite action is registered, and the SharedState dump grows an
-`analysis_md=...` line carrying the **full TraceLens `analysis.md`**
-between `=== TraceLens Analysis (snapshot #N, gain at snapshot = X.XX%) ===`
-bookends. The toggle stays default-off through F1; F1-6 flips it once
-GPU smoke clears.
+`SharedState.use_roofline_composite` toggle is on and the Coordinator
+**automatically** runs the `roofline` action (profile + trace_analyze
++ analysis.md snapshot) on **EXPLORE entry** and on **KERNEL entry**.
+You can NOT propose / delegate `roofline` yourself — it is not in
+any phase's `allowed_actions` set and PolicyGate R1 will deny any
+attempt with `rule='phase_incompatible'`.
+
+A fresh roofline only re-fires when the snapshot drifts (no snapshot
+yet, or `|cumulative_gain_validated - roofline_baseline_gain_at_snapshot|
+> 10%`); otherwise the existing snapshot is reused. On the first
+EXPLORE round, specialist dispatches are held by PolicyGate until the
+auto-roofline lands (denial `rule='specialist_wait_for_auto_roofline'`)
+— just retry the same delegate next tick.
+
+The SharedState dump grows an `analysis_md=...` line carrying the
+**full TraceLens `analysis.md`** between `=== TraceLens Analysis
+(snapshot #N, gain at snapshot = X.XX%) ===` bookends. With composite
+off, this line is absent and EXPLORE runs no analysis at all (KERNEL
+falls back to the legacy auto-profile path).
 
 The report uses `🔴` (P1 — critical) / `🟡` (P2 — secondary) / `🟢`
 (P1/P2 — opportunity) priority markers. **You MUST follow them**:
@@ -209,25 +222,6 @@ sections dictate which specialist to dispatch first via
 * **register pressure, inductor advice** → `compiler_specialist`
 * **launch latency, dispatch overhead** → `system_specialist`
 * **uncertain / cross-cutting** → `pr_intel_specialist` (sparingly)
-
-### When to (re-)propose `roofline`
-
-Propose `roofline` (after `baseline` succeeded):
-
-* whenever `last_trace_analyze.analysis_md_text` is empty (the prompt
-  shows `analysis_md=(no TraceLens snapshot yet …)`),
-* whenever `cumulative_gain_validated` has moved by **≥ 3%** since the
-  snapshot's `roofline_baseline_gain_at_snapshot` (the bookend header
-  shows you the delta) — the bottleneck distribution has likely shifted
-  and the LLM's previous priorities may be stale.
-
-Do **NOT** propose `roofline`:
-
-* in PRELUDE (phase allowlist disallows it),
-* when remaining phase budget < 15 minutes (the ~10 min cost would eat
-  the closing window),
-* as the immediate next tick after a successful `roofline` (idempotency
-  dedup will reject it; nothing has changed yet).
 
 ### How to consume the TraceLens analysis section
 

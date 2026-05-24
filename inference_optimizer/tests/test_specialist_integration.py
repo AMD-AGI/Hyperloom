@@ -226,7 +226,8 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
 # ===========================================================================
 # 3. Coordinator._warm_specialist_params populates task params
 # ===========================================================================
-def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
     """Coordinator pre-dispatch warmup mutates a fresh ``params`` dict
     and inserts PR feed (flattened to dicts), pr_monitor_available,
     warm_start_recipe / pitfalls, and framework_source_roots."""
@@ -252,7 +253,7 @@ def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
     coord.shared_state = state
 
     params: dict = {"domain": "serving_specialist"}
-    coord._warm_specialist_params(params)
+    await coord._warm_specialist_params(params)
 
     # PR feed surfaced + flattened.
     assert "pr_feed" in params
@@ -274,7 +275,8 @@ def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
     assert params["gpu_type"] == "MI300X"
 
 
-def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path):
     """``--degraded-kb`` path: knowledge_plane is None. The helper must
     still leave a valid ``pr_feed`` list (empty) so the prompt builder
     can render the section without crashing."""
@@ -291,12 +293,13 @@ def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path):
     coord.shared_state = _State()
 
     params: dict = {"domain": "serving_specialist"}
-    coord._warm_specialist_params(params)
+    await coord._warm_specialist_params(params)
     assert params["pr_feed"] == []
     assert params["pr_monitor_available"] is False
 
 
-def test_warm_specialist_params_respects_explicit_pr_feed(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_warm_specialist_params_respects_explicit_pr_feed(tmp_path: Path):
     """If the Orchestration LLM (or a future Coordinator pre-stage)
     pre-populated ``params['pr_feed']``, the warmup must NOT clobber it
     — the explicit value wins."""
@@ -317,7 +320,7 @@ def test_warm_specialist_params_respects_explicit_pr_feed(tmp_path: Path):
         "domain": "serving_specialist",
         "pr_feed": explicit_pr_feed,
     }
-    coord._warm_specialist_params(params)
+    await coord._warm_specialist_params(params)
     assert params["pr_feed"] is explicit_pr_feed
 
 

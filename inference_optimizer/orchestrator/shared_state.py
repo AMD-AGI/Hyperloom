@@ -295,6 +295,15 @@ class SharedState:
     # by design — every step uses fixed idempotency keys / set-once
     # writes).
     close_sequence_done: bool = False
+    # Auto-roofline gate (EXPLORE-entry): set to the task_id of the
+    # Coordinator-enqueued ``roofline`` task while it is pending. The
+    # field is read by ``_handle_delegate`` to block first-round
+    # specialist dispatches until the snapshot lands (so specialists
+    # have ``analysis.md`` ground truth to reason against), and is
+    # cleared by ``_promote_to_shared_state`` when that roofline task
+    # reaches a terminal state. Always defaults to "" on a fresh
+    # session; resume readers tolerate the field being absent.
+    auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
     pruned_families: list[str] = field(default_factory=list)
