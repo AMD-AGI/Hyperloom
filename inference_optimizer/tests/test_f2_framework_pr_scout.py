@@ -140,3 +140,59 @@ def test_dispatch_framework_pr_scout_blocked_without_shared_state():
             _orch_role(gate),
             _payload(sub_kind="framework_pr_scout"),
         )
+
+
+# ---------------------------------------------------------------------------
+# F2-3 — differential subprocess sandbox via _resolve_tools(sub_kind)
+# ---------------------------------------------------------------------------
+
+
+def _make_runner(extra_tools: tuple[str, ...] = ()):
+    from inference_optimizer.orchestrator.specialist_runner import (
+        DEFAULT_SPECIALIST_TOOLS,
+        SpecialistRunner,
+    )
+
+    return SpecialistRunner(
+        backend_factory=lambda d: None,
+        default_tools=DEFAULT_SPECIALIST_TOOLS + extra_tools,
+    )
+
+
+def test_resolve_tools_default_strips_fa_mcp_tools():
+    """Default sub_kind: any pre-loaded ``mcp__fa__*`` tool is stripped."""
+    runner = _make_runner((
+        "mcp__fa__candidates", "mcp__fa__fetch_pr",
+    ))
+    tools = runner._resolve_tools()
+    assert not any(t.startswith("mcp__fa__") for t in tools), tools
+
+
+def test_resolve_tools_framework_pr_scout_keeps_fa_mcp_tools():
+    """framework_pr_scout sub_kind: ``mcp__fa__*`` tools preserved."""
+    runner = _make_runner((
+        "mcp__fa__candidates", "mcp__fa__fetch_pr",
+    ))
+    tools = runner._resolve_tools("framework_pr_scout")
+    assert "mcp__fa__candidates" in tools
+    assert "mcp__fa__fetch_pr" in tools
+    # Bash stays — fa CLI runs through it.
+    assert "Bash" in tools
+
+
+def test_resolve_tools_other_sub_kind_strips_fa_mcp_tools():
+    """Any sub_kind other than framework_pr_scout still strips fa MCP."""
+    runner = _make_runner(("mcp__fa__candidates",))
+    tools = runner._resolve_tools("some_unrelated_sub_kind")
+    assert "mcp__fa__candidates" not in tools
+
+
+def test_prepared_run_carries_sub_kind_field():
+    """``_PreparedRun.sub_kind`` is the audit hook for downstream code
+    (subprocess sandbox / prompt builder)."""
+    from inference_optimizer.orchestrator.specialist_runner import _PreparedRun
+
+    prep = _PreparedRun()
+    assert prep.sub_kind == ""
+    prep2 = _PreparedRun(sub_kind="framework_pr_scout")
+    assert prep2.sub_kind == "framework_pr_scout"
