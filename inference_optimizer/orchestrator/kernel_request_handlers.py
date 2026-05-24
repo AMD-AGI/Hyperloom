@@ -1262,8 +1262,25 @@ async def integrate_handler(
 
 
 # ---------------------------------------------------------------------------
+# F1-2 (roofline composite) — forward-compatible alias.
+#
+# Hyperloom main renamed ``select_kernels_handler`` to
+# ``trace_analyze_handler`` (the function does TraceLens analysis +
+# kernel selection in a single pass, so the new name is more accurate).
+# This branch keeps the legacy name as the canonical definition to
+# avoid touching the ~30 callsites that already import it; the alias
+# below lets cherry-picked F1+ code (RooflineExecutor) and its tests
+# import ``trace_analyze_handler`` unchanged.
+trace_analyze_handler = select_kernels_handler
+
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "select_kernels":   select_kernels_handler,
+    # ``trace_analyze`` dispatch routes to the same handler as
+    # ``select_kernels`` — RooflineExecutor (F1-2) calls the function
+    # directly, but explicit dispatch entries keep the action-table
+    # symmetric for future PolicyGate / audit code that keys on the
+    # request kind.
+    "trace_analyze":    select_kernels_handler,
     "run_optimization": run_optimization_handler,
     "integrate":        integrate_handler,
     "apply_patch":      integrate_handler,   # alias — same flow
@@ -1286,4 +1303,5 @@ __all__ = [
     "integrate_handler",
     "run_optimization_handler",
     "select_kernels_handler",
+    "trace_analyze_handler",
 ]
