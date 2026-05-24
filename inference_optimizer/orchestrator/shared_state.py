@@ -119,6 +119,53 @@ LATEST_STATE_SCHEMA_VERSION: int = 2
 
 
 @dataclass
+class TraceAnalyzeSnapshot:
+    """Reference shape for ``SharedState.last_trace_analyze``.
+
+    F0 placeholder added by ``plan_roofline_framework/F0_pre_merge.MD`` §9.
+    F1 will populate the canonical 11-field dict via
+    ``SharedState.record_trace_analyze`` (ported from main); this dataclass
+    serves as a typed reader on the consumer side via :meth:`from_dict`.
+
+    The on-disk shape stays a plain ``dict`` so the legacy v0.6 ``state.json``
+    round-trip (Inv-10.1 fact-layer compatibility) keeps working.
+    """
+
+    trace_input: str = ""
+    candidates_path: str = ""
+    hot_kernels_top15: list[dict[str, Any]] = field(default_factory=list)
+    task_groups: list[dict[str, Any]] = field(default_factory=list)
+    reusable_native_kernel_ids: list[str] = field(default_factory=list)
+    trace_health_warnings: list[dict[str, Any]] = field(default_factory=list)
+    analysis_md_path: str = ""
+    analysis_md_text: str = ""
+    roofline_snapshot_id: int = 0
+    roofline_baseline_gain_at_snapshot: float = 0.0
+    ts: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "TraceAnalyzeSnapshot":
+        d = d or {}
+        return cls(
+            trace_input=str(d.get("trace_input") or ""),
+            candidates_path=str(d.get("candidates_path") or ""),
+            hot_kernels_top15=list(d.get("hot_kernels_top15") or []),
+            task_groups=list(d.get("task_groups") or []),
+            reusable_native_kernel_ids=list(
+                d.get("reusable_native_kernel_ids") or []
+            ),
+            trace_health_warnings=list(d.get("trace_health_warnings") or []),
+            analysis_md_path=str(d.get("analysis_md_path") or ""),
+            analysis_md_text=str(d.get("analysis_md_text") or ""),
+            roofline_snapshot_id=int(d.get("roofline_snapshot_id") or 0),
+            roofline_baseline_gain_at_snapshot=float(
+                d.get("roofline_baseline_gain_at_snapshot") or 0.0
+            ),
+            ts=str(d.get("ts") or ""),
+        )
+
+
+@dataclass
 class SharedState:
     # v0.8 §3.10 §5.1 — versioned state.json schema. Bumped by the
     # migration step in :meth:`from_dict` whenever a v0.6 payload is
@@ -266,6 +313,39 @@ class SharedState:
     # `trace_input`. Coordinator short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
     last_select_kernels: dict[str, Any] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # F0-8 — roofline-v2 placeholder fields (PR #288 integration).
+    #
+    # ``last_trace_analyze`` mirrors the canonical 11-field dict main's
+    # ``record_trace_analyze`` writes (see ``TraceAnalyzeSnapshot.from_dict``
+    # for the reader-side schema). F1 ports the writer; until then these
+    # stay default-empty and no consumer reads them.
+    #
+    # ``roofline_snapshot_id`` mirrors ``last_trace_analyze['roofline_snapshot_id']``
+    # at the top level for fast PolicyGate / Coordinator access (avoids the
+    # nested-dict lookup on hot paths).
+    #
+    # ``roofline_saturation_history`` is appended by F3-4's saturation
+    # advisory derivation; capped at 10 entries by the writer.
+    # ------------------------------------------------------------------
+    last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+    roofline_snapshot_id: int = 0
+    roofline_saturation_history: list[dict[str, Any]] = field(default_factory=list)
+
+    # ------------------------------------------------------------------
+    # F0-10 — F1/F2/F3 integration toggles (default off).
+    #
+    # Each is mirrored from the matching ``cli.py`` flag at session start.
+    # F0-8 + F0-10 leave them at False so behavior is identical to tag
+    # ``pre-roofline-merge``; subsequent F-steps flip individual toggles
+    # to ``True`` only after their smoke gates pass.
+    # ------------------------------------------------------------------
+    use_roofline_composite: bool = False
+    framework_agent_enabled: bool = False
+    deny_direct_profile: bool = False
+    gain_driven_kernel_opt: bool = False
+    roofline_saturation_advisory: bool = False
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
