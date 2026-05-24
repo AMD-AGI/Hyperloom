@@ -6,7 +6,9 @@ These tests verify that the F0 pre-merge scaffolding lands correctly:
   ``SharedState`` (``last_trace_analyze`` / ``roofline_snapshot_id`` /
   ``roofline_saturation_history``).
 * F0-9: ``'roofline'`` is in the EXPLORE / KERNEL / CLOSE phase
-  allowlists; legacy ``'profile'`` / ``'pmc_roofline'`` remain in EXPLORE.
+  allowlists; legacy ``'profile'`` stays in EXPLORE / KERNEL as the
+  default-denied (per N9) escape hatch. ``'pmc_roofline'`` has been
+  physically removed.
 * F0-10: 5 integration toggles default to ``False`` on ``SharedState``
   and the matching ``--use-roofline-composite`` / ... CLI flags
   resolve from env vars.
@@ -146,30 +148,38 @@ def test_roofline_not_in_prelude_or_sweep():
     assert not is_action_allowed_in_phase("roofline", PHASE_SWEEP)
 
 
-def test_legacy_profile_pmc_roofline_still_in_explore():
-    """F0 must not close the legacy entry points; F3 ``--deny-direct-profile``
-    is the toggle that closes them once roofline composite is on."""
+def test_legacy_profile_still_in_explore():
+    """The legacy ``profile`` entry point stays in EXPLORE — F3's
+    ``--deny-direct-profile`` toggle owns the propose-time denial when
+    the operator wants to force the composite path. ``pmc_roofline``
+    has been physically removed."""
     from inference_optimizer.orchestrator.phase_state import (
         PHASE_EXPLORE,
         is_action_allowed_in_phase,
     )
 
     assert is_action_allowed_in_phase("profile", PHASE_EXPLORE)
-    assert is_action_allowed_in_phase("pmc_roofline", PHASE_EXPLORE)
+    assert not is_action_allowed_in_phase("pmc_roofline", PHASE_EXPLORE)
 
 
 # ---------------------------------------------------------------------------
-# F0-10 — five toggles default off on SharedState + present on the CLI parser
+# Default toggle matrix — the three Roofline-v2 / framework-agent
+# toggles default ON; the gain-driven gate + saturation advisory stay
+# opt-in.
 # ---------------------------------------------------------------------------
 
 
-def test_shared_state_toggles_default_off():
+def test_shared_state_default_toggles():
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     s = SharedState()
-    assert s.use_roofline_composite is False
-    assert s.framework_agent_enabled is False
-    assert s.deny_direct_profile is False
+    # Default-on: roofline composite is the canonical analysis path,
+    # framework-agent is wired by default, N9 hard-denies legacy
+    # ``profile`` propose so the LLM cannot diverge from the snapshot.
+    assert s.use_roofline_composite is True
+    assert s.framework_agent_enabled is True
+    assert s.deny_direct_profile is True
+    # Default-off: opt-in tuning knobs.
     assert s.gain_driven_kernel_opt is False
     assert s.roofline_saturation_advisory is False
 
@@ -179,23 +189,53 @@ def test_cli_parser_exposes_integration_toggles():
 
     parser = cli._build_parser()
     namespace = parser.parse_args(["optimize", "--model", "/tmp/x"])
-    for attr in (
-        "use_roofline_composite",
-        "framework_agent_enabled",
-        "deny_direct_profile",
-        "gain_driven_kernel_opt",
-        "roofline_saturation_advisory",
-    ):
+    expected_defaults = {
+        "use_roofline_composite": True,
+        "framework_agent_enabled": True,
+        "deny_direct_profile": True,
+        "gain_driven_kernel_opt": False,
+        "roofline_saturation_advisory": False,
+    }
+    for attr, expected in expected_defaults.items():
         assert hasattr(namespace, attr), f"CLI missing attribute {attr}"
-        assert getattr(namespace, attr) is False, (
-            f"CLI default for {attr} must be False"
+        assert getattr(namespace, attr) is expected, (
+            f"CLI default for {attr} must be {expected}"
         )
 
 
-def test_cli_toggles_respect_env_var(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE", "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED", "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE", "1")
+def test_cli_default_on_toggles_can_be_disabled_via_no_flag():
+    """``--no-...`` opt-out exists for the three default-on toggles."""
+    from inference_optimizer import cli
+
+    parser = cli._build_parser()
+    namespace = parser.parse_args([
+        "optimize", "--model", "/tmp/x",
+        "--no-use-roofline-composite",
+        "--no-framework-agent-enabled",
+        "--no-deny-direct-profile",
+    ])
+    assert namespace.use_roofline_composite is False
+    assert namespace.framework_agent_enabled is False
+    assert namespace.deny_direct_profile is False
+
+
+def test_cli_default_on_toggles_respect_env_var(monkeypatch):
+    """Env=0 turns the default-on toggles off, so a CI box without a
+    GPU profile lane can flip them with one shared env var."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE", "0")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED", "0")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE", "0")
+
+    from inference_optimizer import cli
+
+    parser = cli._build_parser()
+    namespace = parser.parse_args(["optimize", "--model", "/tmp/x"])
+    assert namespace.use_roofline_composite is False
+    assert namespace.framework_agent_enabled is False
+    assert namespace.deny_direct_profile is False
+
+
+def test_cli_opt_in_toggles_respect_env_var(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ROOFLINE_SATURATION_ADVISORY", "1")
 
@@ -203,8 +243,5 @@ def test_cli_toggles_respect_env_var(monkeypatch):
 
     parser = cli._build_parser()
     namespace = parser.parse_args(["optimize", "--model", "/tmp/x"])
-    assert namespace.use_roofline_composite is True
-    assert namespace.framework_agent_enabled is True
-    assert namespace.deny_direct_profile is True
     assert namespace.gain_driven_kernel_opt is True
     assert namespace.roofline_saturation_advisory is True
