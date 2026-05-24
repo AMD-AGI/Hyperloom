@@ -1234,11 +1234,6 @@ class Coordinator:
         * ``reason`` mirrored verbatim into the task params and the
           idempotency_key suffix so a re-entry to KERNEL (defended
           against by Inv-2.1 but possible in tests) deduplicates.
-        * ``config_path`` from :attr:`SharedState.baseline_config_path`
-          when set, so profile inherits the workload contract
-          (CONC / ISL / OSL / TP / ...) baseline already pinned.
-          Without this, the profile executor would render the
-          shipped default smoke YAML and produce a useless trace.
         * ``base_extra_args`` from current_best (consistent with the
           existing ``_materialize_approved_proposal`` profile branch).
 
@@ -1246,6 +1241,21 @@ class Coordinator:
         ``reason`` is currently only ``"kernel_phase_entry"`` but the
         suffix slot is reserved for future phase entries that might
         also need a profile).
+
+        Config selection: we deliberately do NOT pass
+        ``state.baseline_config_path`` here. ProfileExecutor's
+        ``_resolve_default_config`` picks ``profile_sglang.yaml`` /
+        ``profile_vllm.yaml`` — the YAMLs that actually carry
+        ``profiler.torch_profiler.enabled: true`` so Magpie writes
+        the ``.trace.json.gz`` files downstream consumers
+        (``select_kernels`` / ``trace_analyze``) need. Passing the
+        baseline yaml here silently disables the torch profiler
+        (the materializer's ``is_profile`` heuristic reads the
+        YAML's profiler flag) and the executor ends with
+        ``error_class=no_trace_files``. Workload contract still
+        flows correctly via ``materialize_config_with_envs`` reading
+        CONC / ISL / OSL / TP / PRECISION / MAX_MODEL_LEN from env
+        vars regardless of which YAML it starts from.
 
         Returns the freshly-created (or returned-existing) Task. The
         caller can read ``task.task_id`` for logging or the
@@ -1256,8 +1266,6 @@ class Coordinator:
             "source": "coordinator_internal",
             "reason": str(reason),
         }
-        if state.baseline_config_path:
-            params["config_path"] = state.baseline_config_path
         cb = state.current_best or {}
         if isinstance(cb, dict):
             cb_args = str(cb.get("extra_sglang_args") or "")
@@ -1338,14 +1346,26 @@ class Coordinator:
         Idempotency key: ``internal-roofline-<reason>`` — phase-scoped
         so a re-entry (Inv-2.1 forbids in production but resume edges
         may reach here twice) dedups via the existing task.
+
+        Config selection: we deliberately do NOT pass
+        ``state.baseline_config_path`` here. The composite action's
+        profile sub-step is :class:`ProfileExecutor`, whose
+        ``_resolve_default_config`` picks ``profile_sglang.yaml`` /
+        ``profile_vllm.yaml`` — the YAMLs that actually carry
+        ``profiler.torch_profiler.enabled: true`` so Magpie writes the
+        ``.trace.json.gz`` files ``trace_analyze`` consumes. Passing
+        the baseline yaml here silently disables the torch profiler
+        and the sub-step ends with ``error_class=no_trace_files``.
+        Workload contract (CONC / ISL / OSL / TP / PRECISION /
+        MAX_MODEL_LEN) still flows correctly because
+        ``materialize_config_with_envs`` re-applies the env vars
+        regardless of which YAML the executor starts from.
         """
         state = self.shared_state
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
         }
-        if state.baseline_config_path:
-            params["config_path"] = state.baseline_config_path
         cb = state.current_best or {}
         if isinstance(cb, dict):
             cb_args = str(cb.get("extra_sglang_args") or "")
