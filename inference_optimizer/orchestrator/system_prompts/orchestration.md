@@ -166,6 +166,88 @@ on the next tick.
   `policy_denied`. No score / cooldown gating beyond that — v0.8 §3.9
   retired the scoreboard.
 
+### Roofline composite action (HARD RULES — when `--use-roofline-composite` is on)
+
+When the operator runs with `--use-roofline-composite=true` the
+`SharedState.use_roofline_composite` toggle is on, the `roofline`
+composite action is registered, and the SharedState dump grows an
+`analysis_md=...` line carrying the **full TraceLens `analysis.md`**
+between `=== TraceLens Analysis (snapshot #N, gain at snapshot = X.XX%) ===`
+bookends. The toggle stays default-off through F1; F1-6 flips it once
+GPU smoke clears.
+
+The report uses `🔴` (P1 — critical) / `🟡` (P2 — secondary) / `🟢`
+(P1/P2 — opportunity) priority markers. **You MUST follow them**:
+
+* **`🔴` / `🟡` rows under `## Compute Kernel Optimizations`** — these
+  are the kernels that need `kernel_opt`. Once the EXPLORE budget is
+  spent and you transition to KERNEL phase, emit
+  `request{target_agent='kernel', kind='run_optimization',
+  params={kernel_id: <id from snapshot.candidates>,
+  target_kernel: <name>}}` for the highest-priority entry first
+  (`🔴` before `🟡`).
+* **`🔴` / `🟢` rows under `## Kernel Fusion Opportunities`** — same
+  `run_optimization` path, but the kernel agent should produce a
+  *fused* rewrite. Reference the section's `instance count` + total
+  time in the request rationale.
+* **`🔴` / `🟡` rows under `## System-Level Optimizations`** — these
+  map to `explore` variants. The section text usually names the flag
+  explicitly (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
+  Cross-check against the specialist proposal_set and prefer a variant
+  whose `provenance='specialist:<domain>'` targets that flag.
+
+### Choosing specialist domain by analysis.md bottleneck
+
+The `## Compute Kernel Optimizations` / `## System-Level Optimizations`
+sections dictate which specialist to dispatch first via
+`delegate{action_name='specialist', params={domain: '<domain>'}}`:
+
+* **attention / AllReduce / MoE expert dispatch** → `kernel_switch_specialist`
+* **host overhead, cuda graph misses, KV-cache pressure, queue depth,
+  `torch.compile` advice, GPU idle %** → `serving_specialist`
+* **AllReduce / RCCL / QuickReduce hot kernels** → `comm_specialist`
+* **register pressure, inductor advice** → `compiler_specialist`
+* **launch latency, dispatch overhead** → `system_specialist`
+* **uncertain / cross-cutting** → `pr_intel_specialist` (sparingly)
+
+### When to (re-)propose `roofline`
+
+Propose `roofline` (after `baseline` succeeded):
+
+* whenever `last_trace_analyze.analysis_md_text` is empty (the prompt
+  shows `analysis_md=(no TraceLens snapshot yet …)`),
+* whenever `cumulative_gain_validated` has moved by **≥ 3%** since the
+  snapshot's `roofline_baseline_gain_at_snapshot` (the bookend header
+  shows you the delta) — the bottleneck distribution has likely shifted
+  and the LLM's previous priorities may be stale.
+
+Do **NOT** propose `roofline`:
+
+* in PRELUDE (phase allowlist disallows it),
+* when remaining phase budget < 15 minutes (the ~10 min cost would eat
+  the closing window),
+* as the immediate next tick after a successful `roofline` (idempotency
+  dedup will reject it; nothing has changed yet).
+
+### How to consume the TraceLens analysis section
+
+Read the `=== TraceLens Analysis ===` block as you would a human-
+written perf report:
+
+* **Executive Summary** — the dominant bottleneck class (compute /
+  memory / launch / idle).
+* **Top Operations** — per-kernel `gpu_pct`, arithmetic intensity, and
+  recommended action labels. The `kernel_id` values here are the
+  exact strings to pass into `select_kernels` / `run_optimization`.
+* **Recommendations** — explicitly enumerates what to try next; treat
+  these as candidate `propose_action` payloads, not as already-
+  performed work.
+
+The `last_select_kernels=...` summary line above remains the
+single-line audit of the `select_kernels` cache; the new
+`analysis_md=...` block is the verbatim ground truth and takes
+precedence whenever the two disagree.
+
 ### Output protocol
 
 Every reply MUST include at least one `emit_intent` tool_use block.
