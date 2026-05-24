@@ -17,8 +17,11 @@ and ``remove-select-kernels-action-gate``):
 Two former gates have been demoted; this file holds reverse regressions
 for both:
 
-* ``pmc_roofline`` is now opt-in advisory enrichment for ``kernel_opt``
-  only and never blocks any other action.
+* ``pmc_roofline`` has been physically removed (PMC counter / rocprof
+  collection is no longer part of the action catalogue — the F1
+  composite ``roofline`` action superseded it). The reverse-regression
+  tests below assert no leftover ``pmc_roofline must run before …``
+  denial fires for any other action.
 * ``select_kernels`` is now enforced ONLY at the REQUEST layer for
   ``run_optimization`` (see ``_sequence_denial_for_request``). Action-
   layer explore actions (``params`` / ``backends`` / ``sweep`` /
@@ -103,7 +106,6 @@ def _seed_post_baseline(coord: Coordinator) -> None:
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/x.json",
     }
-    s.last_profile_pmc_summary = "/tmp/pmc.json"
 
 
 # ===========================================================================
@@ -208,20 +210,13 @@ def test_target_analysis_denial_clears_after_baseline_json_written(session_dir):
 
 
 # ===========================================================================
-# pmc_roofline gate — REMOVED. PMC is now opt-in advisory enrichment for
-# `kernel_opt` and never gates any other action. The tests below are
-# reverse regressions guarding against the gate ever coming back.
+# pmc_roofline gate — REMOVED (the action itself was retired in favour
+# of the F1 composite ``roofline``). The reverse regressions below
+# guard against any leftover hard-gate ever coming back.
 # ===========================================================================
-def test_pmc_roofline_gate_does_not_fire_when_pmc_missing(session_dir):
-    """With ``last_profile_trace`` set and ``last_profile_pmc_summary``
-    empty, ``_required_next_step()`` must NOT mention ``pmc_roofline``.
-    The PMC hard-gate has been removed. With no ``kernel_opt`` KEEP
-    pending and no unvalidated stack KEEPs, the chain has reached its
-    end and the required step is empty.
-
-    P3 note: also populate last_select_kernels so the analyze gate is
-    open; this test is about PMC and should not be coupled to analyze.
-    """
+def test_no_pmc_roofline_mention_in_required_next_step(session_dir):
+    """``_required_next_step`` must never name the retired
+    ``pmc_roofline`` action."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
@@ -236,74 +231,33 @@ def test_pmc_roofline_gate_does_not_fire_when_pmc_missing(session_dir):
     assert todo == ""
 
 
-def test_pmc_roofline_gate_does_not_block_explore_actions(session_dir):
-    """``_sequence_denial_for_action`` must not deny any action with the
-    reason ``pmc_roofline must run before ...``. With both the PMC and
-    the action-layer ``select_kernels`` hard-gates removed, no explore
-    action should be denied at all when only the cache is empty."""
+def test_no_pmc_roofline_denial_for_any_action(session_dir):
+    """No surviving rule may produce a denial whose message contains
+    ``pmc_roofline must run before …``."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _write_baseline_json(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    for action in ("explore", "sweep", "report", "profile", "pmc_roofline"):
+    for action in ("explore", "sweep", "report", "profile", "roofline"):
         denied = coord._sequence_denial_for_action(action)
         if denied is None:
             continue
         assert "pmc_roofline must run before" not in str(denied), (
-            f"{action!r} hit the removed PMC hard-gate: {denied!s}"
+            f"{action!r} still hits a removed pmc_roofline gate: {denied!s}"
         )
 
 
-def test_pmc_summary_present_does_not_change_required_next_step(session_dir):
-    """Sanity: setting ``last_profile_pmc_summary`` to a value must NOT
-    change ``_required_next_step()`` because PMC is no longer part of
-    the TODO chain. The chain is empty either way.
-
-    P3 note: also populate last_select_kernels so the analyze gate is
-    open; this test is about PMC and should not be coupled to analyze.
+def test_no_pmc_roofline_action_in_sequence_actions(session_dir):
+    """The Coordinator's ``sequence_actions`` set must not contain
+    ``pmc_roofline``; otherwise an LLM proposing the retired name would
+    receive a sequence denial instead of the canonical
+    ``unknown_action`` PolicyGate denial.
     """
     coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_select_kernels = {
-        "trace_input": "/tmp/profile.tar.gz",
-        "candidates_path": "/tmp/x.json",
-    }
-    todo_without_pmc = coord._required_next_step()
-    s.last_profile_pmc_summary = "/tmp/pmc.json"
-    todo_with_pmc = coord._required_next_step()
-    assert todo_without_pmc == todo_with_pmc
-    assert todo_with_pmc == ""
-
-
-def test_pmc_roofline_gate_skipped_in_no_kernel_mode(session_dir):
-    """In no-kernel mode the entire kernel-pipeline section of TODOs is
-    skipped, so ``_required_next_step`` is empty and explore actions
-    pass through ``_sequence_denial_for_action`` with no PMC mention.
-    This is a regression that should hold both before and after the
-    PMC hard-gate removal."""
-    from inference_optimizer.orchestrator.agent_role import default_role_registry
-    role_registry = {
-        k: v for k, v in default_role_registry().items() if k != "kernel"
-    }
-    silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
-    backends = {
-        "orchestration": MockBackend(silent, name="orch"),
-        "critic":        MockCriticBackend(),
-        "robustness":    MockRobustnessBackend(),
-    }
-    coord = Coordinator(
-        session_dir, backends=backends, role_registry=role_registry,
-    )
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    assert coord._required_next_step() == ""
-    assert coord._sequence_denial_for_action("explore") is None
+    # Calling _sequence_denial_for_action with a name not in the set
+    # short-circuits to ``None`` regardless of state.
+    assert coord._sequence_denial_for_action("pmc_roofline") is None
 
 
 # ===========================================================================
@@ -416,7 +370,7 @@ def test_select_kernels_gate_does_not_block_explore_actions(session_dir):
     s.last_profile_trace = "/tmp/profile.tar.gz"
     # Cache deliberately empty; would have triggered the old gate.
     s.last_select_kernels = {}
-    for action in ("explore", "sweep", "report", "profile", "pmc_roofline"):
+    for action in ("explore", "sweep", "report", "profile", "roofline"):
         denied = coord._sequence_denial_for_action(action)
         if denied is None:
             continue

@@ -53,7 +53,6 @@ from .intent_parser import Intent, IntentType, NoIntentEmitted
 from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
-from .pmc_workload_params import derive_pmc_roofline_params_from_config
 from .policy import (
     KILL_TASK_SOURCE_ALLOWLIST,
     PolicyDenied,
@@ -2917,15 +2916,11 @@ class Coordinator:
             )
         # Profile / analyze / integrate guards only apply when the kernel
         # agent is alive — no-kernel runs have no way to service the
-        # request and the mandate would be meaningless. Two related
-        # gates are NOT surfaced here:
-        # * ``pmc_roofline`` is opt-in advisory enrichment for
-        #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
-        #   never a prerequisite for any other action.
-        # * ``select_kernels`` is a prerequisite ONLY for ``run_optimization``
-        #   REQUESTs (enforced in ``_sequence_denial_for_request``); the
-        #   action-layer hard-gate stays demoted (explore actions are not
-        #   blocked).
+        # request and the mandate would be meaningless.
+        # ``select_kernels`` is a prerequisite ONLY for
+        # ``run_optimization`` REQUESTs (enforced in
+        # ``_sequence_denial_for_request``); the action-layer hard-gate
+        # stays demoted (explore actions are not blocked).
         if "kernel" in self.role_registry:
             if not self.shared_state.last_profile_trace:
                 return (
@@ -3210,7 +3205,7 @@ class Coordinator:
         # appear in the sequence-gate allow-list.
         sequence_actions = {
             "target_analysis",
-            "baseline", "profile", "pmc_roofline",
+            "baseline", "profile", "roofline",
             "sweep", "report", "integrate", "explore",
         }
         if action not in sequence_actions:
@@ -3262,17 +3257,12 @@ class Coordinator:
             if self_loop is not None:
                 return self_loop
         # Profile / integrate guards only apply when kernel agent is in
-        # the role registry — no-kernel mode skips them. Two related gates
-        # are intentionally NOT enforced at the action layer:
-        # * ``pmc_roofline`` is opt-in advisory enrichment for
-        #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
-        #   never blocks any other action. A platform that cannot run
-        #   rocprof must not deadlock the explore / kernel pipeline.
-        # * ``select_kernels`` is enforced at the REQUEST layer
-        #   (``_sequence_denial_for_request``) for ``run_optimization``
-        #   only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
-        #   never gated on a fresh ``last_select_kernels`` cache — those
-        #   actions don't need kernel candidates to make progress.
+        # the role registry — no-kernel mode skips them.
+        # ``select_kernels`` is enforced at the REQUEST layer
+        # (``_sequence_denial_for_request``) for ``run_optimization``
+        # only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
+        # never gated on a fresh ``last_select_kernels`` cache — those
+        # actions don't need kernel candidates to make progress.
         if "kernel" in self.role_registry:
             if (
                 self.shared_state.baseline_tput > 0
@@ -3362,64 +3352,6 @@ class Coordinator:
                 hint="emit request kind='select_kernels' for last_profile_trace",
             )
         return None
-
-    @staticmethod
-    def _pmc_roofline_enabled() -> bool:
-        return os.environ.get("HYPERLOOM_ENABLE_PMC_ROOFLINE", "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
-
-    @staticmethod
-    def _pmc_roofline_force() -> bool:
-        return os.environ.get("HYPERLOOM_PMC_ROOFLINE_FORCE", "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
-
-    def _build_pmc_roofline_params(self) -> dict[str, Any] | None:
-        """Build pmc_roofline task params from the materialized Magpie YAML."""
-        config_path = self.shared_state.baseline_config_path
-        if not config_path:
-            log.info("PMC roofline enabled but baseline_config_path is empty")
-            return None
-        derived = derive_pmc_roofline_params_from_config(
-            config_path,
-            framework=self.shared_state.framework,
-            model_path=self.shared_state.model_path,
-            gpu_type=self.shared_state.gpu_type,
-            output_dir=str(Path(self.session_dir) / "runs" / "pmc_roofline" / "auto"),
-        )
-        return derived
-
-    async def _maybe_enqueue_pmc_roofline(self) -> None:
-        if not self._pmc_roofline_enabled():
-            return
-        if self.shared_state.last_profile_roofline and not self._pmc_roofline_force():
-            return
-        params = self._build_pmc_roofline_params()
-        if not params:
-            return
-        key_src = "|".join([
-            self.shared_state.last_profile_trace or "",
-            self.shared_state.baseline_config_path or "",
-            str(params.get("profile_mode") or ""),
-        ])
-        key = hashlib.sha256(key_src.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        task = await self.tasks.create(
-            kind="pmc_roofline",
-            params=params,
-            idempotency_key=f"auto-pmc-roofline-{key}",
-            requires_lanes=["profile_lane"],
-            lease_ttl_sec=1800,
-        )
-        await self.bus.append_and_seq(Message.new(
-            "coordinator", "*", "event",
-            {
-                "kind": "task_queued",
-                "task_id": task.task_id,
-                "source": "coordinator_auto_pmc_roofline",
-                "action": "pmc_roofline",
-            },
-        ))
 
     # ==================================================================
     # Intent handling
@@ -4919,7 +4851,7 @@ class Coordinator:
         a = str(action or "").strip().lower()
         if a in {"kernel_opt", "integrate", "select_kernels", "run_optimization"}:
             return ("kernel", "kernel_switch_specialist")
-        if a in {"profile", "pmc_roofline"}:
+        if a in {"profile", "roofline"}:
             return ("kernel", "kernel_switch_specialist")
         if a in {"sweep", "explore"}:
             return ("framework", "serving_specialist")
@@ -5416,12 +5348,6 @@ class Coordinator:
             if handler is not None:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
-                if (
-                    kind == "select_kernels"
-                    and self.shared_state.last_profile_roofline
-                    and not merged_payload.get("roofline_json")
-                ):
-                    merged_payload["roofline_json"] = self.shared_state.last_profile_roofline
                 cache_hit_source = None
                 cached_result = self._cached_kernel_request(kind, merged_payload)
                 if cached_result is not None:
@@ -5484,7 +5410,6 @@ class Coordinator:
                     and result.get("status") in ("ok", "succeeded")
                 ):
                     self.shared_state.record_select_kernels(merged_payload, result)
-                    await self._maybe_enqueue_pmc_roofline()
                     self.shared_state.save(self.session_dir)
                 # Mirror kernel-opt outcomes into SharedState so Orch
                 # sees decision/speedup in its prompt next tick and
@@ -6637,8 +6562,8 @@ class Coordinator:
         # ``audit_extras``); after all branches we call
         # ``record_action_attempt`` once so adding a new branch is a
         # local change. ``audit_decision`` remaining ``None`` means
-        # either the kind is out of scope (kernel-owned, pmc_roofline)
-        # or the branch had nothing to record.
+        # either the kind is out of scope (kernel-owned) or the branch
+        # had nothing to record.
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
         if task_kind == "baseline":
@@ -6694,9 +6619,6 @@ class Coordinator:
             audit_extras = {
                 "trace_path": None,
                 "profile_args": None,
-                "pmc_summary_path": result.get("pmc_summary_path"),
-                "roofline_path": result.get("roofline_path"),
-                "kernel_breakdown_path": result.get("kernel_breakdown_path"),
                 "output_throughput": result.get("output_throughput"),
             }
             # Bug C fix: surface the trace path produced by ProfileExecutor
@@ -6751,17 +6673,6 @@ class Coordinator:
                         (float(tput) - self.shared_state.baseline_tput)
                         / self.shared_state.baseline_tput * 100.0
                     )
-                changed = True
-        elif task_kind == "pmc_roofline":
-            if result.get("pmc_summary_path"):
-                self.shared_state.last_profile_pmc_summary = str(result["pmc_summary_path"])
-                changed = True
-            if result.get("roofline_path"):
-                self.shared_state.last_profile_roofline = str(result["roofline_path"])
-                self.shared_state.last_select_kernels = {}
-                changed = True
-            if result.get("kernel_breakdown_path"):
-                self.shared_state.last_profile_kernel_breakdown = str(result["kernel_breakdown_path"])
                 changed = True
         elif task_kind == "roofline":
             # F1-3 (Roofline-v2 / plan_roofline_framework): the

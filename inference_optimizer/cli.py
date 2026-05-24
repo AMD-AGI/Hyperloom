@@ -54,7 +54,6 @@ from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     baseline_executor,
     explore_executor,
-    pmc_roofline_executor,
     profile_executor,
     report_executor,
     session_breakdown_executor,
@@ -697,11 +696,14 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "recover":           recover_executor,
 }
 
-# Real executors enabled only when kernel-mode is on (profile/pmc_roofline
-# only feed kernel-opt and would burn lanes for nothing in --no-kernel).
+# Real executors enabled only when kernel-mode is on (profile only
+# feeds kernel-opt and would burn lanes for nothing in --no-kernel).
+# The composite ``roofline`` action is registered separately by
+# ``_register_executors`` below — it is the v0.8 successor to the
+# retired ``pmc_roofline`` action and is wired even in --no-kernel
+# when the toggle is on.
 _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
-    "profile":      profile_executor,
-    "pmc_roofline": pmc_roofline_executor,
+    "profile": profile_executor,
 }
 
 # Kernel-owned action kinds dispatched via
@@ -3602,46 +3604,50 @@ def _build_parser() -> argparse.ArgumentParser:
     # roofline_saturation_advisory}`` by the cli boot path so PolicyGate /
     # Coordinator / prompt builders see consistent values.
     # ------------------------------------------------------------------
+    # The three Roofline-v2 / framework-agent toggles default to ON.
+    # ``argparse.BooleanOptionalAction`` exposes both ``--flag`` (force
+    # on) and ``--no-flag`` (force off) so operators have a one-line
+    # opt-out for the legacy path. Env-var fallback uses ``"1"`` as
+    # the default, so ``ENV=0`` on a CI box also turns the flag off.
+    def _env_default_on(env_var: str) -> bool:
+        return os.environ.get(env_var, "1").strip() != "0"
+
     opt.add_argument(
         "--use-roofline-composite",
         dest="use_roofline_composite",
-        action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE", "0",
-        ).strip() == "1",
-        help="(F1) Enable the composite ``roofline`` action (atomic "
-             "profile + trace_analyze, produces analysis.md snapshot). "
-             "Default off — falls back to separate ``profile`` / "
-             "``pmc_roofline`` actions. Env: "
-             "INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE=1.",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE"),
+        help="(F1) Composite ``roofline`` action (atomic profile + "
+             "trace_analyze, produces analysis.md snapshot) is the "
+             "default analysis path. Pass ``--no-use-roofline-composite`` "
+             "(or env INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE=0) "
+             "to opt out and fall back to the separate ``profile`` "
+             "action.",
     )
     opt.add_argument(
         "--framework-agent-enabled",
         dest="framework_agent_enabled",
-        action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED", "0",
-        ).strip() == "1",
-        help="(F2) Allow ``serving_specialist`` to invoke ``fa "
-             "candidates`` and ``git fetch refs/pull/...`` via the "
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED"),
+        help="(F2) ``serving_specialist`` may invoke ``fa candidates`` "
+             "and ``git fetch refs/pull/...`` via the "
              "``framework_pr_scout`` sub_kind (PR #280 framework-agent). "
-             "Default off. Env: "
-             "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=1.",
+             "On by default. Pass ``--no-framework-agent-enabled`` "
+             "(or env INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0) "
+             "to opt out.",
     )
     opt.add_argument(
         "--deny-direct-profile",
         dest="deny_direct_profile",
-        action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE", "0",
-        ).strip() == "1",
-        help="(F3 / N9) PolicyGate denies ``propose_action{profile}`` / "
-             "``propose_action{pmc_roofline}`` when "
-             "``--use-roofline-composite`` is on. Forces the LLM through "
-             "the atomic ``roofline`` action so the analysis.md cache + "
-             "snapshot_id stay aligned. Default off (escape hatch for "
-             "debugging). Env: "
-             "INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE=1.",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE"),
+        help="(F3 / N9) PolicyGate denies ``propose_action{profile}`` "
+             "while ``--use-roofline-composite`` is on, forcing the "
+             "LLM through the atomic ``roofline`` action so the "
+             "analysis.md cache + snapshot_id stay aligned. On by "
+             "default. Pass ``--no-deny-direct-profile`` (or env "
+             "INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE=0) to re-open "
+             "the legacy direct ``profile`` path for debugging.",
     )
     opt.add_argument(
         "--gain-driven-kernel-opt",

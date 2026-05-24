@@ -89,7 +89,7 @@ is the merged `explore` action):
     `=== Phase ===` block's `session_buffer_sec`) overrides every
     soft signal — when you see it nearing zero, prefer compact KEEPs
     (≤1 explore round) over deep specialist work.
-  - **KERNEL**: `profile` (single shot at phase entry), `pmc_roofline`,
+  - **KERNEL**: `profile` / `roofline` (single shot at phase entry),
     the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`. Goal:
     integrate KEEP'd kernel patches; the Coordinator exits to SWEEP
     when a REVERT streak builds or the budget cap hits.
