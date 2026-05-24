@@ -430,7 +430,8 @@ async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
 # ===========================================================================
 # 6. specialist warmup (PR 5.6) — gap fields flow into task.params
 # ===========================================================================
-def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
+@pytest.mark.asyncio
+async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
     s = coord.shared_state
     s.baseline_tput = 1000.0
     s.upsert_gap({
@@ -447,7 +448,7 @@ def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
         "domain": "kernel_switch_specialist",
         "gap_canonical_id": "issue.moe.routing",
     }
-    coord._warm_specialist_params(params)
+    await coord._warm_specialist_params(params)
     assert params["gap_symptom"] == "MoE routing overhead"
     assert params["gap_layer"] == "kernel"
     evidence = params["gap_evidence"]
@@ -456,7 +457,8 @@ def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
     assert len(evidence["recent_attempts"]) == 1
 
 
-def test_warm_specialist_params_uses_domain_hint_when_domain_missing(coord):
+@pytest.mark.asyncio
+async def test_warm_specialist_params_uses_domain_hint_when_domain_missing(coord):
     """When the LLM omits ``domain`` we let the gap's ``domain_hint``
     fill in (PolicyGate R2 still validates the routing)."""
     s = coord.shared_state
@@ -468,11 +470,12 @@ def test_warm_specialist_params_uses_domain_hint_when_domain_missing(coord):
         "domain_hint": "comm_specialist",
     })
     params: dict[str, Any] = {"gap_canonical_id": "issue.collective.allreduce"}
-    coord._warm_specialist_params(params)
+    await coord._warm_specialist_params(params)
     assert params.get("domain") == "comm_specialist"
 
 
-def test_warm_specialist_params_noop_when_gap_unknown(coord):
+@pytest.mark.asyncio
+async def test_warm_specialist_params_noop_when_gap_unknown(coord):
     """Unknown ``gap_canonical_id`` must not clobber existing params
     (no silent reset of ``domain`` / ``gap_symptom``)."""
     params: dict[str, Any] = {
@@ -480,7 +483,7 @@ def test_warm_specialist_params_noop_when_gap_unknown(coord):
         "gap_canonical_id": "issue.unknown",
         "gap_symptom": "preset",
     }
-    coord._warm_specialist_params(params)
+    await coord._warm_specialist_params(params)
     assert params["domain"] == "serving_specialist"
     assert params["gap_symptom"] == "preset"
 
