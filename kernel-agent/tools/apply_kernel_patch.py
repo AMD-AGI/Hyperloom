@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import py_compile
@@ -323,6 +324,171 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
     return {"status": "ok", "removed": removed}
 
 
+# ---------------------------------------------------------------------------
+# PR-K: aiter JIT cache invalidation around compiled-source rebuilds.
+#
+# aiter ships ``@compile_ops("module_<name>", gen_func=...)`` decorators that
+# JIT-codegen + hipcc-compile per-instance ``.so`` files into
+# ``<aiter>/jit/build/module_<name>_<sig>/``. ``setup.py develop`` rebuilds the
+# python package + statically-compiled ``.so`` but does NOT invalidate the
+# jit/build entries: a patch under ``aiter/csrc/ck_gemm_moe_2stages_codegen/``
+# would rebuild the wheel yet the next ``import aiter.ops.moe_op`` would still
+# pick up the pre-patch ``module_moe_ck2stages_*.so`` from jit/build/, leaving
+# the integrate benchmark to measure unchanged performance and emit REVERT.
+#
+# We move (NOT copy) the entire jit/build/ directory aside before the rebuild
+# step so the post-rebuild first-import re-codegens + re-compiles every module
+# from clean state. ``shutil.move`` is atomic on the same filesystem and zero-
+# copy. Revert moves the backup back, removing any regenerated jit/build/ dir
+# first so the pre-patch state is restored bit-for-bit.
+#
+# Scope: ONLY aiter is affected. sglang's sgl-kernel and vllm have no JIT
+# codegen layer — their ``.so`` are produced by setup.py at install time, so
+# the standard ``setup.py develop`` rebuild + cache_clear is sufficient and
+# this invalidation step is a no-op for those targets.
+# ---------------------------------------------------------------------------
+_AITER_CSRC_MARKER = "/aiter/csrc/"
+
+
+def _target_is_in_aiter_csrc(target_file: Path) -> bool:
+    """Return True iff ``target_file`` resides under any ``aiter/csrc/`` tree.
+
+    Matches both the editable checkout (``/sgl-workspace/aiter/csrc/...``) and
+    the dist-packages layout (``/usr/local/lib/python3.10/dist-packages/aiter/
+    csrc/...``) — in both cases the relative segment ``aiter/csrc/`` appears
+    verbatim in the absolute path.
+    """
+    return _AITER_CSRC_MARKER in str(target_file).replace(os.sep, "/")
+
+
+def _aiter_jit_build_dir() -> Path | None:
+    """Return ``<aiter>/jit/build`` for the importable aiter, or ``None``.
+
+    Resolved via ``importlib.util.find_spec("aiter")`` so editable installs
+    (``/sgl-workspace/aiter/aiter/__init__.py``), wheel installs
+    (``/usr/local/lib/python3.12/dist-packages/aiter/__init__.py``) and any
+    other layout on ``sys.path`` resolve correctly without hardcoding.
+
+    Returns ``None`` when aiter is not importable in the current interpreter
+    (the kernel-agent sandbox container always has aiter available; this
+    fallback exists so unit tests on a host without aiter still pass).
+    """
+    try:
+        spec = importlib.util.find_spec("aiter")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    aiter_pkg = Path(list(spec.submodule_search_locations)[0])
+    return aiter_pkg / "jit" / "build"
+
+
+def _invalidate_aiter_jit_build(
+    target_file: Path,
+    backup_dir: Path,
+    *,
+    jit_build_dir_override: Path | None = None,
+) -> dict[str, Any]:
+    """Move aiter ``jit/build/`` aside so a post-rebuild first import re-JITs.
+
+    No-op for targets outside ``aiter/csrc/`` and for sandboxes where the
+    aiter package isn't importable / hasn't populated its jit/build/ yet.
+    Returns one of:
+
+      * ``{"status": "ok", "src": ..., "backup_path": ..., "moved_at": ...}``
+        — backup written; caller must persist this in the manifest before
+        rebuild so revert can find it.
+      * ``{"status": "skipped", "reason": ...}`` — non-aiter target, aiter
+        not importable, or jit/build already absent/empty.
+      * ``{"status": "failed", "error": ...}`` — backup path collision; the
+        caller is expected to abort apply rather than rebuild against an
+        inconsistent jit cache.
+
+    ``jit_build_dir_override`` is a test-only escape hatch so unit tests can
+    point at a synthetic jit/build/ tree without an importable aiter package.
+    """
+    if not _target_is_in_aiter_csrc(target_file):
+        return {"status": "skipped", "reason": "target not under aiter/csrc/"}
+    jit_build = jit_build_dir_override or _aiter_jit_build_dir()
+    if jit_build is None:
+        return {"status": "skipped", "reason": "aiter package not importable"}
+    if not jit_build.exists():
+        return {"status": "skipped", "reason": "aiter jit/build/ does not exist"}
+    try:
+        is_empty = not any(jit_build.iterdir())
+    except OSError as exc:
+        return {
+            "status": "failed",
+            "error": f"failed to scan {jit_build}: {exc}",
+            "src": str(jit_build),
+        }
+    if is_empty:
+        return {"status": "skipped", "reason": "aiter jit/build/ is empty"}
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / "jit_build"
+    if backup_path.exists():
+        return {
+            "status": "failed",
+            "error": f"jit/build backup path already exists: {backup_path}",
+            "src": str(jit_build),
+        }
+    try:
+        shutil.move(str(jit_build), str(backup_path))
+    except (OSError, shutil.Error) as exc:
+        return {
+            "status": "failed",
+            "error": f"shutil.move failed: {exc}",
+            "src": str(jit_build),
+            "backup_path": str(backup_path),
+        }
+    return {
+        "status": "ok",
+        "src": str(jit_build),
+        "backup_path": str(backup_path),
+        "moved_at": _now(),
+    }
+
+
+def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]:
+    """Reverse of :func:`_invalidate_aiter_jit_build`.
+
+    Moves the backup back to its original location. If the post-rebuild first
+    import already regenerated a fresh jit/build/, that fresh dir is removed
+    first so the pre-patch state is restored bit-for-bit (revert semantics).
+    """
+    if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") != "ok":
+        return {"status": "skipped", "reason": "no backup recorded"}
+    src = Path(jit_build_backup.get("src", ""))
+    backup_path = Path(jit_build_backup.get("backup_path", ""))
+    if not src or not backup_path:
+        return {"status": "skipped", "reason": "incomplete backup record"}
+    if not backup_path.exists():
+        return {
+            "status": "skipped",
+            "reason": f"backup path missing: {backup_path}",
+        }
+    if src.exists():
+        try:
+            shutil.rmtree(src)
+        except OSError as exc:
+            return {
+                "status": "failed",
+                "error": f"failed to clear regenerated jit/build/: {exc}",
+                "src": str(src),
+            }
+    try:
+        src.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(backup_path), str(src))
+    except (OSError, shutil.Error) as exc:
+        return {
+            "status": "failed",
+            "error": f"shutil.move failed during restore: {exc}",
+            "src": str(src),
+            "backup_path": str(backup_path),
+        }
+    return {"status": "ok", "restored_to": str(src)}
+
+
 def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[str, Any]:
     target = str(target_file)
     lower = target.lower()
@@ -434,6 +600,20 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             restored.append(str(dst))
             if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
                 manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
+
+    # PR-K: restore aiter jit/build/ if it was moved aside during apply.
+    # Done after source/artifact restore but before multi-node fan-out so
+    # the host-local jit cache is back in place even if pod-side revert
+    # subsequently fails. Manifest's ``jit_build_backup`` carries ``src``
+    # and ``backup_path`` set by :func:`_invalidate_aiter_jit_build` and
+    # is only present (with status=ok) when the apply actually moved the
+    # dir aside.
+    jit_build_backup = manifest.get("jit_build_backup") or {}
+    if jit_build_backup.get("status") == "ok":
+        jit_build_restore = _restore_aiter_jit_build(jit_build_backup)
+        manifest["jit_build_restore"] = jit_build_restore
+        if jit_build_restore.get("status") == "ok" and jit_build_restore.get("restored_to"):
+            restored.append(str(jit_build_restore["restored_to"]))
 
     # Multi-node: also fan-out a revert to every pod that received the
     # corresponding apply. Best-effort; sandbox revert above already
@@ -605,7 +785,47 @@ def apply_kernel_patch(
         command = list(strategy["rebuild_command"])
 
     rebuild = {"status": "skipped", "reason": "source-only patch or skip_rebuild=true"}
+    jit_build_backup: dict[str, Any] = {
+        "status": "skipped", "reason": "rebuild not run",
+    }
     if strategy["compiled"] and not skip_rebuild:
+        # PR-K: aiter @compile_ops modules cache JIT-built .so under
+        # <aiter>/jit/build/module_*/. setup.py develop rebuilds the
+        # python package + statically-linked .so but does NOT touch
+        # jit/build/, so a patched .cu under aiter/csrc/ would rebuild
+        # yet the next import would still load the pre-patch .so. Move
+        # jit/build/ aside before rebuild so the post-rebuild first
+        # import re-codegens + re-compiles cleanly. No-op for sglang/
+        # vllm targets (they have no JIT codegen layer).
+        jit_build_backup = _invalidate_aiter_jit_build(target, backup_dir)
+        if jit_build_backup.get("status") == "failed":
+            # Refuse to rebuild against an inconsistent jit cache state:
+            # restore source from backup so the on-disk file matches v0
+            # again, then bail out.
+            try:
+                shutil.copy2(source_backup["backup_path"], target)
+            except OSError:
+                pass
+            return {
+                "status": "failed",
+                "error_class": "aiter_jit_invalidation_failed",
+                "error": (
+                    "aiter jit/build/ invalidation failed: "
+                    f"{jit_build_backup.get('error')}"
+                ),
+                "manifest_path": str(manifest_path),
+                "jit_build_backup": jit_build_backup,
+            }
+        if jit_build_backup.get("status") == "ok":
+            # Persist the backup record into the manifest BEFORE rebuild
+            # so a rebuild failure can still trigger restore via
+            # revert_kernel_patch (which reads the manifest).
+            manifest["jit_build_backup"] = jit_build_backup
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
         cwd = Path(strategy["root"] or target.parent)
         rebuild = _run_rebuild(command, cwd, rebuild_timeout_sec)
         if rebuild["status"] != "ok":
@@ -622,6 +842,11 @@ def apply_kernel_patch(
     manifest["applied_at"] = _now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
+    if jit_build_backup.get("status") in {"ok", "skipped"}:
+        # Surface skipped reason too so manifest readers can audit why
+        # invalidation didn't run on a particular apply (e.g. non-aiter
+        # target, aiter not importable in this sandbox).
+        manifest["jit_build_backup"] = jit_build_backup
     # multinode block (when present) is already persisted at fan-out
     # time above; we don't rewrite it here to avoid clobbering the
     # per-host backup map.
@@ -635,6 +860,7 @@ def apply_kernel_patch(
         "artifact_count": len(artifacts),
         "cache_clear": cache_clear,
         "rebuild": rebuild,
+        "jit_build_backup": jit_build_backup,
     }
     # Only attach the multinode key when fan-out actually ran. Keeps
     # single-node callers' return shape bit-for-bit identical to
