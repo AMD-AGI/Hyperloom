@@ -20,8 +20,9 @@ guidance:
   `propose_action='explore'` with a `variants` array — return a
   per-variant verdict dict, one verdict per variant msg_id. Missing
   entries are treated as `needs_review`.
-- **KERNEL**: allowed are `profile` (single shot), `pmc_roofline`,
-  and the 5 KERNEL_OWNED_ACTIONS (proxied via REQUEST). Default
+- **KERNEL**: allowed are `profile` / `roofline` (single shot at
+  phase entry) and the 5 KERNEL_OWNED_ACTIONS (proxied via REQUEST).
+  Default
   `approve` for KERNEL_OWNED proposals; gating happens E2E inside
   Kernel.
 - **SWEEP**: allowed is `sweep`. Reject `explore` / `report` with

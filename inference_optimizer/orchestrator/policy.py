@@ -768,10 +768,10 @@ class PolicyGate:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
         # F3-1 / F3-2 / F3-5 (plan_roofline_framework): same Roofline-v2
         # propose_action gates also apply at the delegate channel so a
-        # task is never created on the legacy ``profile`` / ``pmc_roofline``
-        # path while the operator has the Roofline composite + deny
-        # toggles on, and so kernel_opt cannot bypass the gain-driven
-        # / explore-minimum gates by skipping propose_action entirely.
+        # task is never created on the legacy ``profile`` path while
+        # the operator has the Roofline composite + deny toggles on,
+        # and so kernel_opt cannot bypass the gain-driven /
+        # explore-minimum gates by skipping propose_action entirely.
         self._validate_roofline_composite_supersedes_profile(action_name)
         self._validate_gain_driven_kernel_opt(action_name)
         self._validate_explore_minimum_before_kernel_opt(action_name)
@@ -861,8 +861,8 @@ class PolicyGate:
             self._validate_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
-        # F3-1 (Roofline-v2 N9): deny direct profile / pmc_roofline when
-        # the operator has flipped --use-roofline-composite + --deny-direct-profile
+        # F3-1 (Roofline-v2 N9): deny direct ``profile`` when the
+        # operator has flipped --use-roofline-composite + --deny-direct-profile
         # on. Forces atomic ``roofline`` use so the snapshot_id counter
         # stays monotonic and ``last_trace_analyze.analysis_md_text`` stays
         # aligned with the trace path it was derived from. See
@@ -908,19 +908,24 @@ class PolicyGate:
     # plan_roofline_framework/README.md §3 and the reason none of the
     # rules is hard-coded "always on".
     # ------------------------------------------------------------------
-    _N9_BLOCKED_ACTIONS: frozenset[str] = frozenset({"profile", "pmc_roofline"})
+    _N9_BLOCKED_ACTIONS: frozenset[str] = frozenset({"profile"})
 
     def _validate_roofline_composite_supersedes_profile(
         self, action_name: str,
     ) -> None:
-        """F3-1 (N9): deny ``profile`` / ``pmc_roofline`` propose_action
-        when composite is on.
+        """F3-1 (N9): deny direct ``profile`` propose_action when
+        composite is on.
 
         Two-toggle gate: both ``use_roofline_composite`` AND
         ``deny_direct_profile`` must be on. The second toggle is the
         operator escape hatch — flipping ``use_roofline_composite`` on
         first lets the LLM exercise both paths in parallel, then
         flipping ``deny_direct_profile`` on closes the legacy path.
+
+        Defers to the phase allowlist when the action is proposed in a
+        phase that disallows it (e.g. ``profile`` in PRELUDE) — the
+        ``phase_incompatible`` rule's hint is more actionable there
+        and the LLM should learn the phase contract first.
         """
         if action_name not in self._N9_BLOCKED_ACTIONS:
             return
@@ -930,6 +935,15 @@ class PolicyGate:
         if not bool(getattr(ss, "use_roofline_composite", False)):
             return
         if not bool(getattr(ss, "deny_direct_profile", False)):
+            return
+        # Defer to phase_incompatible when the action is not in the
+        # current phase's allow-set (single source of truth: phase_state
+        # PHASE_ALLOWED_ACTIONS). Avoids competing denials racing for
+        # the same intent.
+        from .phase_state import PHASE_ALLOWED_ACTIONS
+        current_phase = str(getattr(ss, "phase", "") or "")
+        allowed = PHASE_ALLOWED_ACTIONS.get(current_phase)
+        if allowed is not None and action_name not in allowed:
             return
         raise PolicyDenied(
             f"propose_action: action_name={action_name!r} is denied "

@@ -28,14 +28,15 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # prep (2)
     "target_analysis":      "prep",
     "baseline":             "prep",
-    # analysis (3) — F1-2.5 (Roofline-v2 / plan_roofline_framework F1):
-    # ``roofline`` is the new composite action that runs profile +
+    # analysis (2) — F1-2.5 (Roofline-v2 / plan_roofline_framework F1):
+    # ``roofline`` is the v0.8 composite action that runs profile +
     # trace_analyze atomically and surfaces analysis.md to the next
-    # orchestration tick. The legacy ``profile`` / ``pmc_roofline``
-    # entries stay registered (gated off only after F1-6 flips
-    # --use-roofline-composite to default-on).
+    # orchestration tick. It supersedes the retired ``pmc_roofline``
+    # action (PMC counter / rocprof gathering); ``profile`` stays as
+    # the legacy escape hatch (PolicyGate's N9 rule denies direct
+    # ``profile`` propose when ``--deny-direct-profile`` is on, which
+    # is the default).
     "profile":              "analysis",
-    "pmc_roofline":         "analysis",
     "roofline":             "analysis",
     # shallow (5) — v0.8 M3 + KB_gaps/Dead-A merged the v0.6
     # ``backends`` / ``params`` / ``validate_stack`` actions into
@@ -66,14 +67,18 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
 # / §3.4. ``dream`` / ``re_explore`` / ``comm_optimization`` /
 # ``compiler_tuning`` are replaced by specialist sub-agents;
 # ``backends`` / ``params`` / ``validate_stack`` are merged into
-# ``explore``. All seven yamls were physically deleted; a future
-# regression re-introducing any of them fails loudly here.
+# ``explore``. ``pmc_roofline`` is superseded by the F1 composite
+# ``roofline`` action (rocprof-based PMC gathering retired together
+# with the ``roofline_integration`` / ``pmc_workload_params`` modules).
+# All eight yamls were physically deleted; a future regression
+# re-introducing any of them fails loudly here.
 _REMOVED_LEGACY_ACTIONS: tuple[str, ...] = (
     "backends",
     "comm_optimization",
     "compiler_tuning",
     "dream",
     "params",
+    "pmc_roofline",
     "re_explore",
     "validate_stack",
 )
