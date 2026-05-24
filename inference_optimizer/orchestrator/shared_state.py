@@ -315,9 +315,6 @@ class SharedState:
     # Orchestration uses this to decide whether re-profiling would change the
     # hot-kernel distribution; identical args means the same trace.
     last_profile_args: str = ""
-    last_profile_pmc_summary: str = ""
-    last_profile_roofline: str = ""
-    last_profile_kernel_breakdown: str = ""
     # Cached result of the most recent `select_kernels` request keyed by
     # `trace_input`. Coordinator short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
@@ -350,9 +347,17 @@ class SharedState:
     # ``pre-roofline-merge``; subsequent F-steps flip individual toggles
     # to ``True`` only after their smoke gates pass.
     # ------------------------------------------------------------------
-    use_roofline_composite: bool = False
-    framework_agent_enabled: bool = False
-    deny_direct_profile: bool = False
+    # The three Roofline-v2 / framework-agent toggles default to ON
+    # — RooflineExecutor is the canonical analysis path, framework-
+    # agent is wired by default, and PolicyGate's N9 rule denies the
+    # legacy ``profile`` propose path. Operators opt out via the
+    # matching ``--no-...`` CLI flags or env vars set to ``0``.
+    use_roofline_composite: bool = True
+    framework_agent_enabled: bool = True
+    deny_direct_profile: bool = True
+    # Cheap-rounds gain gate + saturation advisory stay opt-in
+    # (default off) — both lock kernel_opt / mutate the prompt only
+    # when the operator has tuned the thresholds for their workload.
     gain_driven_kernel_opt: bool = False
     roofline_saturation_advisory: bool = False
     # Most recent workload sweep; used to reason about gains beyond the
@@ -3284,8 +3289,6 @@ class SharedState:
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
-            f"last_profile_roofline={self.last_profile_roofline or '(none)'}",
-            f"last_profile_kernel_breakdown={self.last_profile_kernel_breakdown or '(none)'}",
             f"last_select_kernels={self._format_last_select_kernels()}",
             # F1-4 (Roofline-v2 / plan_roofline_framework F1): when the
             # roofline composite toggle is on, surface the full TraceLens

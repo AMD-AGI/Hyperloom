@@ -71,10 +71,11 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # comm_optimization / compiler_tuning yamls, so ``recover`` is the
 # only fallback ``support`` entry.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
-    "baseline", "profile", "pmc_roofline",
-    # F1-2.5 (Roofline-v2): composite analysis action; pipeline_phase
-    # 'analysis' already includes it in the registry-derived set, the
-    # fallback only matters when the yaml can't be loaded.
+    "baseline", "profile",
+    # F1-2.5 (Roofline-v2): composite analysis action that supersedes
+    # the retired ``pmc_roofline`` action; pipeline_phase 'analysis'
+    # already includes it in the registry-derived set, the fallback
+    # only matters when the yaml can't be loaded.
     "roofline",
     "sweep",
     "explore",

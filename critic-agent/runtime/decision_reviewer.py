@@ -125,7 +125,7 @@ _EVIDENCE_PRODUCER_ACTIONS: frozenset[str] = frozenset({
     "specialist",
     "sweep",
     "profile",
-    "pmc_roofline",
+    "roofline",
     "kernel_opt",
     "deep_kernel_analysis",
     "operator_tuning",

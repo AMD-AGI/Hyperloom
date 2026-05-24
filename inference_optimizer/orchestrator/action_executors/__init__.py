@@ -29,7 +29,6 @@ from .profile import (
     ProfileExecutor,
     profile_executor,
 )
-from .pmc_roofline import PMCRooflineExecutor, pmc_roofline_executor
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .sweep import (
@@ -49,7 +48,6 @@ __all__ = [
     "DEFAULT_STACK_STABLE_PCT",
     "ExploreExecutor",
     "PROFILE_DEFAULT_CONFIG",
-    "PMCRooflineExecutor",
     "ProfileExecutor",
     "ReportExecutor",
     "SessionBreakdownExecutor",
@@ -57,7 +55,6 @@ __all__ = [
     "TargetAnalysisExecutor",
     "baseline_executor",
     "explore_executor",
-    "pmc_roofline_executor",
     "profile_executor",
     "report_executor",
     "session_breakdown_executor",
