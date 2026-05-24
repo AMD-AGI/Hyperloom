@@ -89,10 +89,9 @@ def phase_index(phase: str) -> int:
 #   ``phase_incompatible`` "wait for the phase to advance" message.
 # * ``recover`` stays in every phase — phase-orthogonal per §3.2.
 # * ``session_breakdown`` is a CLOSE action (it materializes the
-#   report bundle). ``pmc_roofline`` is kernel-side, in the KERNEL
-#   set. The v0.6 ``validate_stack`` rebench is now inlined into
-#   ``explore`` (KB_design §3.4 §4.4), so it disappears from the
-#   EXPLORE allowlist alongside the other legacy names.
+#   report bundle). The v0.6 ``validate_stack`` rebench is now
+#   inlined into ``explore`` (KB_design §3.4 §4.4), so it disappears
+#   from the EXPLORE allowlist alongside the other legacy names.
 #
 # Note: the dataclass fields ``last_backends`` / ``backends_attempts``
 # / etc. stay on :class:`SharedState` for resume parity (Inv-10.1);
@@ -117,24 +116,17 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # proposes are throttled by ``assess_remaining_gaps_throttle``.
         "assess_remaining_gaps",
         # Local hotfix (skill-launcher): Coordinator's sequence-gate
-        # (coordinator.py:3103) requires ``last_profile_trace`` to be
-        # non-empty before any action in ``sequence_actions`` (which
-        # includes ``explore``) is allowed when the kernel agent is
-        # in role_registry. With the original allow-list, EXPLORE
-        # cannot run ``profile`` to satisfy that prereq, so the
-        # ``explore`` family is auto-pruned at streak=5 of
-        # ``execution_order`` denials. Allow ``profile`` /
-        # ``pmc_roofline`` in EXPLORE so the orchestrator can break
-        # the deadlock — KERNEL phase will still run its
+        # requires ``last_profile_trace`` to be non-empty before any
+        # action in ``sequence_actions`` (which includes ``explore``)
+        # is allowed when the kernel agent is in role_registry. With
+        # the original allow-list, EXPLORE cannot run an analysis
+        # action to satisfy that prereq, so the ``explore`` family is
+        # auto-pruned at streak=5 of ``execution_order`` denials.
+        # Allow ``profile`` (and the composite ``roofline`` that
+        # superseded ``pmc_roofline``) in EXPLORE so the orchestrator
+        # can break the deadlock — KERNEL phase will still run its
         # once-per-phase profile via the §3.2 contract.
-        "profile", "pmc_roofline",
-        # F0-9 placeholder for PR #288 roofline composite action.
-        # Until F1 registers RooflineExecutor + F1 ships the catalogue
-        # entry, ``propose_action{action_name='roofline'}`` clears the
-        # phase allowlist but fails at TaskRegistry with no_executor
-        # (harmless, no behaviour drift). The allowlist entry lands
-        # here in F0 so F1's executor wiring can be a single-file
-        # change that does not touch this module.
+        "profile",
         "roofline",
         "recover",
     }),
@@ -142,8 +134,11 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # Profile is allowed but the §3.2 contract says it fires
         # at most **once per phase**, at KERNEL entry; the per-phase
         # call counter lives in SharedState.phase_history evidence.
-        "profile", "pmc_roofline",
-        # F0-9 placeholder (see EXPLORE comment above).
+        # ``roofline`` is the v0.8 composite that runs profile +
+        # trace_analyze atomically (PolicyGate's N9 rule denies the
+        # legacy direct ``profile`` propose when
+        # ``--deny-direct-profile`` is on, which is the default).
+        "profile",
         "roofline",
         # KERNEL_OWNED_ACTIONS from policy.py.
         "kernel_opt", "integrate", "deep_kernel_analysis",
