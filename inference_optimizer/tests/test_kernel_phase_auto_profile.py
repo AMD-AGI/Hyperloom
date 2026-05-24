@@ -53,6 +53,11 @@ class _BareState:
     current_best: dict[str, Any] = field(default_factory=dict)
     last_baseline: dict[str, Any] = field(default_factory=dict)
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    # Roofline-related fields used by ``_needs_fresh_roofline``.
+    use_roofline_composite: bool = False
+    last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+    cumulative_gain_validated: float = 0.0
+    auto_roofline_pending_task_id: str = ""
     save_count: int = 0
 
     def save(self, _session_dir: Path | None) -> None:
@@ -285,22 +290,164 @@ def test_record_phase_entry_evidence_handles_missing_evidence_dict(coord):
 # ===========================================================================
 # 5. End-to-end via real Coordinator
 # ===========================================================================
+# ===========================================================================
+# 6. Auto-roofline path (use_roofline_composite=True)
+# ===========================================================================
 @pytest.mark.asyncio
-async def test_phase_transition_into_kernel_enqueues_profile_e2e(
+async def test_on_enter_kernel_enqueues_roofline_when_composite_on(coord):
+    """When ``use_roofline_composite=True`` and no fresh snapshot
+    exists, the KERNEL entry hook MUST enqueue a ``roofline`` task,
+    not a ``profile`` task. The idempotency key is phase-scoped under
+    ``internal-roofline-kernel_phase_entry`` so a re-entry dedupes
+    against this exact slot."""
+    coord.shared_state.use_roofline_composite = True
+    coord.shared_state.last_trace_analyze = {}   # no snapshot yet
+    coord.shared_state.baseline_config_path = "/tmp/baseline.yaml"
+    coord.shared_state.phase_history = [
+        {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
+    ]
+    await coord._on_enter_kernel(from_phase="EXPLORE")
+
+    # Roofline key, not profile.
+    assert "internal-roofline-kernel_phase_entry" in coord.tasks._tasks
+    assert "internal-profile-kernel_phase_entry" not in coord.tasks._tasks
+    task = coord.tasks._tasks["internal-roofline-kernel_phase_entry"]
+    assert task.kind == "roofline"
+    assert task.params["source"] == "coordinator_internal"
+    assert task.params["reason"] == "kernel_phase_entry"
+    assert task.params["config_path"] == "/tmp/baseline.yaml"
+
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence.get("auto_roofline_enqueued") is True
+    assert evidence.get("auto_roofline_task_id") == task.task_id
+
+
+@pytest.mark.asyncio
+async def test_on_enter_kernel_skips_when_snapshot_fresh(coord):
+    """When ``use_roofline_composite=True`` AND the existing snapshot
+    is within the gain-drift threshold (10%), no new roofline fires —
+    the existing analysis.md is still representative. Evidence stamps
+    ``auto_roofline_skipped='fresh_snapshot'`` so the audit trail
+    shows why."""
+    coord.shared_state.use_roofline_composite = True
+    coord.shared_state.last_trace_analyze = {
+        "analysis_md_text": "## Executive Summary\n| Compute % | 60% |",
+        "roofline_baseline_gain_at_snapshot": 12.0,
+    }
+    coord.shared_state.cumulative_gain_validated = 15.0   # delta 3% < 10%
+    coord.shared_state.phase_history = [
+        {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
+    ]
+    await coord._on_enter_kernel(from_phase="EXPLORE")
+
+    assert coord.tasks._tasks == {}
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence.get("auto_roofline_skipped") == "fresh_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_on_enter_kernel_fires_roofline_when_gain_drifts(coord):
+    """Existing snapshot's gain anchor is now 12% behind current
+    cumulative_gain — re-roof so analysis.md aligns with stack."""
+    coord.shared_state.use_roofline_composite = True
+    coord.shared_state.last_trace_analyze = {
+        "analysis_md_text": "## Executive Summary\n| Compute % | 60% |",
+        "roofline_baseline_gain_at_snapshot": 5.0,
+    }
+    coord.shared_state.cumulative_gain_validated = 17.5   # delta = 12.5% > 10%
+    coord.shared_state.phase_history = [
+        {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
+    ]
+    await coord._on_enter_kernel(from_phase="EXPLORE")
+
+    assert "internal-roofline-kernel_phase_entry" in coord.tasks._tasks
+    task = coord.tasks._tasks["internal-roofline-kernel_phase_entry"]
+    assert task.kind == "roofline"
+
+
+# ===========================================================================
+# 7. _needs_fresh_roofline freshness gate
+# ===========================================================================
+def test_needs_fresh_roofline_off_when_composite_disabled(coord):
+    coord.shared_state.use_roofline_composite = False
+    coord.shared_state.last_trace_analyze = {}
+    assert coord._needs_fresh_roofline() is False
+
+
+def test_needs_fresh_roofline_true_when_no_snapshot(coord):
+    coord.shared_state.use_roofline_composite = True
+    coord.shared_state.last_trace_analyze = {}
+    assert coord._needs_fresh_roofline() is True
+
+
+def test_needs_fresh_roofline_true_when_analysis_text_empty(coord):
+    coord.shared_state.use_roofline_composite = True
+    coord.shared_state.last_trace_analyze = {
+        "analysis_md_text": "",
+        "roofline_baseline_gain_at_snapshot": 0.0,
+    }
+    assert coord._needs_fresh_roofline() is True
+
+
+def test_needs_fresh_roofline_false_inside_drift_band(coord):
+    coord.shared_state.use_roofline_composite = True
+    coord.shared_state.last_trace_analyze = {
+        "analysis_md_text": "## hello",
+        "roofline_baseline_gain_at_snapshot": 8.0,
+    }
+    coord.shared_state.cumulative_gain_validated = 12.0   # delta 4% < 10%
+    assert coord._needs_fresh_roofline() is False
+
+
+def test_needs_fresh_roofline_true_beyond_drift_band(coord):
+    coord.shared_state.use_roofline_composite = True
+    coord.shared_state.last_trace_analyze = {
+        "analysis_md_text": "## hello",
+        "roofline_baseline_gain_at_snapshot": 2.0,
+    }
+    coord.shared_state.cumulative_gain_validated = 14.0   # delta 12% > 10%
+    assert coord._needs_fresh_roofline() is True
+
+
+# ===========================================================================
+# 8. _enqueue_internal_roofline_task — params construction
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_enqueue_internal_roofline_task_uses_explicit_reason(coord):
+    coord.shared_state.use_roofline_composite = True
+    task = await coord._enqueue_internal_roofline_task(reason="explore_entry")
+    assert task.idempotency_key == "internal-roofline-explore_entry"
+    assert task.kind == "roofline"
+    assert task.params["reason"] == "explore_entry"
+    assert task.params["source"] == "coordinator_internal"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_internal_roofline_task_inherits_workload_contract(coord):
+    coord.shared_state.use_roofline_composite = True
+    coord.shared_state.baseline_config_path = "/tmp/baseline.yaml"
+    coord.shared_state.current_best = {"extra_sglang_args": "--enable-cuda-graph"}
+    coord.shared_state.last_baseline = {"benchmark_script": "sglang_mi300x.sh"}
+    task = await coord._enqueue_internal_roofline_task(reason="kernel_phase_entry")
+    assert task.params["config_path"] == "/tmp/baseline.yaml"
+    assert task.params["base_extra_args"] == "--enable-cuda-graph"
+    assert task.params["benchmark_script"] == "sglang_mi300x.sh"
+
+
+# ===========================================================================
+# 9. E2E test with --no-kernel
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_phase_transition_into_kernel_enqueues_roofline_e2e(
     tmp_path: Path,
 ):
-    """End-to-end: drive the Coordinator's phase machine from PRELUDE
-    → EXPLORE → KERNEL by faking the signals ``compute_next_phase``
-    reads. After the KERNEL transition, the dispatcher must see a
-    queued profile task with the v0.8 idempotency_key.
-    """
+    """E2E with the default ``use_roofline_composite=True``: a KERNEL
+    transition lands a ``roofline`` task (not the legacy ``profile``)
+    under the new internal idempotency key."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-
-    # Mock backends for all primary roles — none of them get invoked
-    # in this test (we drive the phase machine directly).
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
@@ -315,46 +462,83 @@ async def test_phase_transition_into_kernel_enqueues_profile_e2e(
         cortex_kb=None,
         knowledge_plane=None,
     )
-
-    # Seed SharedState as if PRELUDE + EXPLORE already completed.
-    # The phase state machine fires KERNEL when EXPLORE plateau hits
-    # AND kernel_enabled — we cheat by writing the phase directly
-    # then invoking the hook. (Driving compute_next_phase requires a
-    # full plateau signal set; not needed for hook-coverage purposes.)
     coord.shared_state.phase = "EXPLORE"
     coord.shared_state.kernel_enabled = True
+    coord.shared_state.use_roofline_composite = True
+    coord.shared_state.last_trace_analyze = {}  # no snapshot yet
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.cumulative_gain = 5.0
     coord.shared_state.phase_history = [
         {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
     ]
-
-    # Simulate the EXPLORE → KERNEL transition that
-    # `_advance_phase_if_needed` would commit:
     coord.shared_state.record_phase_transition(
         to_phase="KERNEL",
         reason="plateau_explore",
-        evidence={"trigger": "test_e2e"},
+        evidence={"trigger": "test_e2e_roofline"},
     )
     await coord._on_phase_entered(from_phase="EXPLORE", to_phase="KERNEL")
 
-    # Assertion 1: profile task on the registry under the v0.8 key.
+    queued = await coord.tasks.db.fetchall(
+        "SELECT * FROM tasks WHERE idempotency_key=?",
+        ("internal-roofline-kernel_phase_entry",),
+    )
+    assert len(queued) == 1
+    row = queued[0]
+    assert row["kind"] == "roofline"
+    assert row["state"] == "queued"
+
+    # phase_history evidence stamped for roofline path.
+    last_row = coord.shared_state.phase_history[-1]
+    assert last_row["to_phase"] == "KERNEL"
+    evidence = last_row.get("evidence") or {}
+    assert evidence.get("auto_roofline_enqueued") is True
+
+
+@pytest.mark.asyncio
+async def test_phase_transition_into_kernel_enqueues_profile_when_composite_off(
+    tmp_path: Path,
+):
+    """When ``use_roofline_composite=False`` the legacy auto-profile
+    fallback still lands a ``profile`` task on KERNEL entry."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
+    backends = {
+        "orchestration": MockBackend(idle_plan),
+        "kernel":        MockBackend(idle_plan),
+        "critic":        MockBackend(idle_plan),
+        "robustness":    MockBackend(idle_plan),
+    }
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=default_role_registry(),
+        cortex_kb=None,
+        knowledge_plane=None,
+    )
+    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.kernel_enabled = True
+    coord.shared_state.use_roofline_composite = False
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.cumulative_gain = 5.0
+    coord.shared_state.phase_history = [
+        {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
+    ]
+    coord.shared_state.record_phase_transition(
+        to_phase="KERNEL",
+        reason="plateau_explore",
+        evidence={"trigger": "test_e2e_legacy"},
+    )
+    await coord._on_phase_entered(from_phase="EXPLORE", to_phase="KERNEL")
+
     queued = await coord.tasks.db.fetchall(
         "SELECT * FROM tasks WHERE idempotency_key=?",
         ("internal-profile-kernel_phase_entry",),
     )
     assert len(queued) == 1
-    row = queued[0]
-    assert row["kind"] == "profile"
-    assert row["state"] == "queued"
-
-    # Assertion 2: phase_history evidence stamped.
-    last_row = coord.shared_state.phase_history[-1]
-    assert last_row["to_phase"] == "KERNEL"
-    evidence = last_row.get("evidence") or {}
-    assert evidence.get("auto_profile_enqueued") is True
-    assert evidence.get("auto_profile_task_id"), \
-        "evidence should record the enqueued task_id for audit"
+    assert queued[0]["kind"] == "profile"
 
 
 @pytest.mark.asyncio

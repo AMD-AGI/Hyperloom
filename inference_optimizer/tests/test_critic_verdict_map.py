@@ -876,7 +876,12 @@ async def test_delegate_non_explore_action_does_not_route_to_critic(tmp_path: Pa
     coord = _delegate_coord(tmp_path)
     coord._handle_propose_action = AsyncMock()  # type: ignore[method-assign]
     coord.tasks = None
-    coord._warm_specialist_params = lambda _params: None  # type: ignore[method-assign]
+    # Match the new async signature; the no-op coroutine has to
+    # return ``None`` so ``await self._warm_specialist_params(params)``
+    # in _handle_delegate doesn't blow up.
+    async def _noop_warm(_params: dict) -> None:
+        return None
+    coord._warm_specialist_params = _noop_warm  # type: ignore[method-assign]
     intent = Intent(
         type=IntentType.DELEGATE,
         payload={

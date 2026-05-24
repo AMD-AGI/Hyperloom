@@ -927,15 +927,24 @@ python3 "$REPO_ROOT/inference_optimizer/scripts/event_counts.py" "$SESSION"
 The optimizer should:
 
 1. Establish or reuse `baseline_tput`.
-2. Run `profile` only when the active server args differ from
-  `last_profile_args`; otherwise reuse `last_profile_trace`.
+2. **Coordinator** auto-enqueues `roofline` (composite profile +
+  trace_analyze + analysis.md snapshot) on EXPLORE entry and KERNEL
+  entry when `--use-roofline-composite=true`. The LLM CANNOT propose
+  `roofline` — it is no longer in any phase allowlist. A fresh
+  roofline only re-fires when no snapshot exists, or when
+  `|cumulative_gain_validated - roofline_baseline_gain_at_snapshot|
+  > 10%`. When the toggle is off, EXPLORE runs no analysis at all and
+  KERNEL entry falls back to a plain auto-`profile`. Legacy LLM-
+  proposed `profile` is still allowed in EXPLORE / KERNEL as a manual
+  escape hatch (PolicyGate N9 denies it only when both
+  `--use-roofline-composite` and `--deny-direct-profile` are on).
 3. Run `select_kernels` once per trace/config and cache the result in
   `last_select_kernels`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
 5. Require compile + correctness + microbench/E2E evidence before KEEP.
-6. Use `params_search` / `backends_search` to test parameters incrementally
-  and remember rejected candidates across resume. Both ledgers key entries
-  by **content fingerprint** (a sha1 hash of sorted `extra_sglang_args` +
+6. Use `explore_search` to test parameters incrementally and remember
+  rejected candidates across resume. The ledger keys entries by
+  **content fingerprint** (a sha1 hash of sorted `extra_sglang_args` +
   sorted `extra_envs`), so renaming an already-tested variant does not
   bypass dedup — LLM-supplied `params.grid` is filtered through the same
   ledger as the default seed grid.
