@@ -1002,6 +1002,7 @@ class SubmissionRecord:
     display_name: str | None = None
     detected: dict | None = None
     overrides: dict = field(default_factory=dict)
+    pool: dict = field(default_factory=dict)
     error: str | None = None
     # Filled in by process_completion when --wait-for-completion is on.
     final_status: str | None = None    # SaFE: Succeeded/Failed/Interrupted/Timeout
@@ -1029,10 +1030,12 @@ def process_model(
     inferencex_path: str | None = None,
     prompt_prefix: str | None = None,
     prompt_suffix: str | None = None,
+    pool_metadata: dict | None = None,
 ) -> SubmissionRecord:
     rec = SubmissionRecord(
         model=repo_id,
         overrides={k: v for k, v in overrides.items() if v is not None},
+        pool={k: v for k, v in (pool_metadata or {}).items() if v not in (None, "")},
     )
 
     detected = None if manual_mode else auto_detect(hf, repo_id)
@@ -1300,7 +1303,48 @@ def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
     return True
 
 
-def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {
+        "1", "true", "yes", "y", "on",
+    }
+
+
+def _copy_session_tree(src_dir: str, dst_dir: Path) -> int:
+    """Copy an entire persisted session directory into ``dst_dir``.
+
+    Returns the number of files copied. Existing files are left untouched so
+    previously downloaded SaFE artifacts keep their timestamp/content.
+    """
+    copied = 0
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for root, dirnames, filenames in os.walk(src_dir):
+        # Avoid recursively copying accidental nested CI artifact dirs.
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in {".git", "__pycache__", ".pytest_cache"}
+        ]
+        rel_root = os.path.relpath(root, src_dir)
+        out_root = dst_dir if rel_root == "." else dst_dir / rel_root
+        out_root.mkdir(parents=True, exist_ok=True)
+        for fname in filenames:
+            src = os.path.join(root, fname)
+            dst = out_root / fname
+            if dst.exists():
+                continue
+            try:
+                shutil.copy2(src, dst)
+            except Exception as e:
+                log.warning("full-session copy failed %s -> %s: %s", src, dst, e)
+                continue
+            copied += 1
+    return copied
+
+
+def _nfs_fallback_collect(
+    rec: SubmissionRecord,
+    artifacts_dir: Path,
+    copy_full_session: bool = False,
+) -> int:
     """Scan NFS result directories for files matching this model.
 
     Used when Claw API list_artifacts returned nothing useful (the very common
@@ -1498,6 +1542,19 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
         log.info("[task %s] NFS user-session: copied %s -> %s",
                  rec.task_id, src, dst)
 
+    if copy_full_session:
+        session_dst = task_dir / "session"
+        n_full = _copy_session_tree(best_sess, session_dst)
+        if n_full:
+            copied += n_full
+            rec.artifact_count += n_full
+            rec.artifact_files.append(str(session_dst))
+            log.info("[task %s] NFS full-session: copied %d file(s) %s -> %s",
+                     rec.task_id, n_full, best_sess, session_dst)
+        else:
+            log.info("[task %s] NFS full-session: no new files copied from %s",
+                     rec.task_id, best_sess)
+
     return copied
 
 
@@ -1583,7 +1640,10 @@ def wait_and_collect_one(
     if not (has_metrics and has_report):
         log.info("[task %s] missing key files (metrics=%s report=%s) — trying NFS fallback",
                  rec.task_id, has_metrics, has_report)
-        n_added = _nfs_fallback_collect(rec, artifacts_dir)
+        copy_full_session = all_artifacts or _env_truthy("SAFE_OPTIMIZE_COPY_FULL_SESSION")
+        n_added = _nfs_fallback_collect(
+            rec, artifacts_dir, copy_full_session=copy_full_session,
+        )
         if n_added:
             log.info("[task %s] NFS fallback added %d files", rec.task_id, n_added)
         else:
@@ -1663,8 +1723,8 @@ def write_manifest(
         f"- Volume: `{volume}`",
         f"- Submitted at: {payload['submitted_at']}",
         "",
-        "| Model | Submit | Final | Phase | Task ID | Display Name | Artifacts | Note |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Pool | Model | Submit | Final | Phase | Task ID | Display Name | Artifacts | Note |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in records:
         # Final status only meaningful when --wait-for-completion was on.
@@ -1680,8 +1740,20 @@ def write_manifest(
         if r.final_message:
             note_parts.append(r.final_message)
         note = " \\| ".join(note_parts).replace("|", "\\|")[:200]
+        pool_cell = "-"
+        if r.pool:
+            pool_id = r.pool.get("pool_id") or "-"
+            pool_idx = r.pool.get("pool_index")
+            batch_idx = r.pool.get("batch_index")
+            batch_size = r.pool.get("batch_size")
+            pool_cell = (
+                f"`{pool_id}`"
+                f"<br/>idx={pool_idx if pool_idx not in (None, '') else '-'}"
+                f"<br/>batch={batch_idx if batch_idx not in (None, '') else '-'}/"
+                f"{batch_size if batch_size not in (None, '') else '-'}"
+            )
         md.append(
-            f"| `{r.model}` | {r.status} | {final or '-'} | {phase} | "
+            f"| {pool_cell} | `{r.model}` | {r.status} | {final or '-'} | {phase} | "
             f"`{r.task_id or '-'}` | {r.display_name or '-'} | {artifacts_cell} | {note} |"
         )
     (out_dir / "submission_manifest.md").write_text("\n".join(md) + "\n")
@@ -1769,6 +1841,15 @@ def _build_parser() -> argparse.ArgumentParser:
                              "Hyperloom prompt. (env: $SAFE_OPTIMIZE_PROMPT_SUFFIX)")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="HuggingFace token (or set $HF_TOKEN)")
+
+    # Production-pool audit metadata. These fields do not affect submission;
+    # they are copied into submission_manifest.json so we can answer "which
+    # fixed leaderboard pool entry did this task rerun?" after the fact.
+    parser.add_argument("--pool-id", default=os.environ.get("HYPERLOOM_POOL_ID", ""))
+    parser.add_argument("--pool-index", default=os.environ.get("HYPERLOOM_POOL_INDEX", ""))
+    parser.add_argument("--pool-batch-index", default=os.environ.get("HYPERLOOM_POOL_BATCH_INDEX", ""))
+    parser.add_argument("--pool-batch-size", default=os.environ.get("HYPERLOOM_POOL_BATCH_SIZE", ""))
+    parser.add_argument("--pool-source-task-id", default=os.environ.get("HYPERLOOM_POOL_SOURCE_TASK_ID", ""))
 
     parser.add_argument("--dry-run", action="store_true",
                         help="Auto-detect and print plan without registering or submitting")
@@ -1905,6 +1986,13 @@ def main() -> int:
         "concurrency": args.concurrency,
         "image": args.image,
     }
+    pool_metadata = {
+        "pool_id": args.pool_id,
+        "pool_index": args.pool_index,
+        "batch_index": args.pool_batch_index,
+        "batch_size": args.pool_batch_size,
+        "source_task_id": args.pool_source_task_id,
+    }
 
     records: list[SubmissionRecord] = []
     for repo in repos:
@@ -1919,6 +2007,7 @@ def main() -> int:
             inferencex_path=inferencex_path,
             prompt_prefix=args.prompt_prefix or None,
             prompt_suffix=args.prompt_suffix or None,
+            pool_metadata=pool_metadata,
         )
         records.append(rec)
 
