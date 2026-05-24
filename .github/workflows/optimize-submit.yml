@@ -175,14 +175,23 @@ jobs:
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/top2000_2026-05-15.json' || github.event.inputs.candidates_file }}
+      # Production cron rotates over a fixed pool of models that already have
+      # real leaderboard data, so we can compare week-over-week. The file is
+      # generated manually via ci/build_production_leaderboard_pool.py and
+      # refreshed only when we want to bring in newly-published models.
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_leaderboard_2026-05-24.json' || github.event.inputs.candidates_file }}
       INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '60' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
-      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_leaderboard }}
+      # Schedule no longer excludes leaderboard-known models — that was for
+      # the discovery cron. We now WANT to re-run the production pool. We
+      # still exclude active workflows so cron does not double-submit a
+      # model that is already running in a previous batch.
+      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
       INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
       GITHUB_TOKEN:          ${{ github.token }}
+      GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -270,6 +279,11 @@ jobs:
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
           INPUT_ALL_ARTIFACTS:    ${{ github.event.inputs.all_artifacts }}
           INPUT_DRY_RUN:          ${{ github.event.inputs.dry_run }}
+          MATRIX_POOL_ID:         ${{ matrix.pool_id }}
+          MATRIX_POOL_INDEX:      ${{ matrix.pool_index }}
+          MATRIX_BATCH_INDEX:     ${{ matrix.batch_index }}
+          MATRIX_BATCH_SIZE:      ${{ matrix.batch_size }}
+          MATRIX_SOURCE_TASK_ID:  ${{ matrix.task_id }}
           OUTPUT_DIR:             ${{ github.workspace }}/submit-output
           ARTIFACTS_DIR:          ${{ github.workspace }}/task-artifacts
         run: |
@@ -298,6 +312,10 @@ jobs:
             echo "::error::prompt_prefix is empty and ci/prompt_prefix.txt is missing — refusing to submit to SaFE with empty promptPrefix"
             exit 1
           fi
+          if [ -n "${GITHUB_SHA:-}" ]; then
+            PROMPT_PREFIX_VALUE="CI SOURCE PIN:"$'\n'"  export HYPERLOOM_SOURCE_REF=\"${GITHUB_SHA}\""$'\n'"  export HYPERLOOM_SOURCE_REPO=\"https://github.com/${GITHUB_REPOSITORY}.git\""$'\n\n'"${PROMPT_PREFIX_VALUE}"
+            echo "[prompt_prefix] pinned sandbox Hyperloom checkout to ${GITHUB_SHA}"
+          fi
           ARGS+=(--prompt-prefix "$PROMPT_PREFIX_VALUE")
           if [ "${INPUT_WAIT:-true}" = "false" ]; then
             ARGS+=(--no-wait-for-completion)
@@ -310,6 +328,21 @@ jobs:
           fi
           if [ "${INPUT_DRY_RUN:-false}" = "true" ]; then
             ARGS+=(--dry-run)
+          fi
+          if [ -n "${MATRIX_POOL_ID:-}" ]; then
+            ARGS+=(--pool-id "${MATRIX_POOL_ID}")
+          fi
+          if [ -n "${MATRIX_POOL_INDEX:-}" ]; then
+            ARGS+=(--pool-index "${MATRIX_POOL_INDEX}")
+          fi
+          if [ -n "${MATRIX_BATCH_INDEX:-}" ]; then
+            ARGS+=(--pool-batch-index "${MATRIX_BATCH_INDEX}")
+          fi
+          if [ -n "${MATRIX_BATCH_SIZE:-}" ]; then
+            ARGS+=(--pool-batch-size "${MATRIX_BATCH_SIZE}")
+          fi
+          if [ -n "${MATRIX_SOURCE_TASK_ID:-}" ]; then
+            ARGS+=(--pool-source-task-id "${MATRIX_SOURCE_TASK_ID}")
           fi
           ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-480}")
           ARGS+=(--output-dir "${OUTPUT_DIR}")
