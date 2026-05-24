@@ -128,6 +128,14 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # the deadlock — KERNEL phase will still run its
         # once-per-phase profile via the §3.2 contract.
         "profile", "pmc_roofline",
+        # F0-9 placeholder for PR #288 roofline composite action.
+        # Until F1 registers RooflineExecutor + F1 ships the catalogue
+        # entry, ``propose_action{action_name='roofline'}`` clears the
+        # phase allowlist but fails at TaskRegistry with no_executor
+        # (harmless, no behaviour drift). The allowlist entry lands
+        # here in F0 so F1's executor wiring can be a single-file
+        # change that does not touch this module.
+        "roofline",
         "recover",
     }),
     PHASE_KERNEL: frozenset({
@@ -135,6 +143,8 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # at most **once per phase**, at KERNEL entry; the per-phase
         # call counter lives in SharedState.phase_history evidence.
         "profile", "pmc_roofline",
+        # F0-9 placeholder (see EXPLORE comment above).
+        "roofline",
         # KERNEL_OWNED_ACTIONS from policy.py.
         "kernel_opt", "integrate", "deep_kernel_analysis",
         "operator_tuning", "vendor_kernel_config",
@@ -144,7 +154,12 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         "sweep", "recover",
     }),
     PHASE_CLOSE: frozenset({
-        "report", "session_breakdown", "recover",
+        "report", "session_breakdown",
+        # F0-9 placeholder. F3-3 N31 auto-enqueues a final ``roofline``
+        # task on CLOSE entry when ``--use-roofline-composite`` is on,
+        # so the action must be allowed in this phase.
+        "roofline",
+        "recover",
     }),
 }
 
