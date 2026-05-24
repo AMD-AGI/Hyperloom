@@ -450,5 +450,44 @@ PY
 
 _probe_framework_source_roots
 
+# ---------------------------------------------------------------------------
+# F2-1 — framework-agent (PR #280 sibling skill).
+#
+# The framework-agent ships as a sibling tool that ``serving_specialist``
+# subprocesses can shell out to (``fa candidates`` + ``git fetch refs/pull/...``)
+# under the ``framework_pr_scout`` sub_kind. It owns its own python deps
+# and venv layout; we only need to invoke its installer.
+#
+# Gated on the env var so the F0 / F1 install path stays byte-identical
+# until an operator opts in. ``--framework-agent-enabled`` (F0-10 CLI
+# flag) is what flips the orchestrator-side dispatch validation; the
+# install gate is the SAME env var so an operator who turned the CLI
+# flag on automatically gets the install too.
+# ---------------------------------------------------------------------------
+ensure_framework_agent() {
+  if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-0}" != "1" ]; then
+    log "framework-agent: skipped (set INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=1 to enable)"
+    return 0
+  fi
+  local fa_dir="${INFERENCE_OPTIMIZER_REPO:-$(pwd)}/framework-agent"
+  if [ ! -d "$fa_dir" ]; then
+    warn "framework-agent: directory missing at $fa_dir — skipping"
+    return 0
+  fi
+  if [ ! -f "$fa_dir/scripts/install.sh" ]; then
+    warn "framework-agent: $fa_dir/scripts/install.sh missing — skipping"
+    return 0
+  fi
+  log "framework-agent: installing from $fa_dir"
+  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+    log "would run: bash '$fa_dir/scripts/install.sh'"
+    return 0
+  fi
+  bash "$fa_dir/scripts/install.sh"
+  log "framework-agent: install complete"
+}
+
+ensure_framework_agent
+
 log "install complete"
 log "next: source ${KERNEL_AGENT_ENV}, then run inference_optimizer.cli"
