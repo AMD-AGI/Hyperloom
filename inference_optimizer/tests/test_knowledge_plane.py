@@ -180,6 +180,31 @@ class _FakePlane:
         return [], []
 
 
+def _make_bare_shared_state():
+    """Minimal SharedState stand-in used by the EXPLORE-entry tests.
+
+    Provides only the attributes the auto-roofline freshness gate
+    reads; ``use_roofline_composite=False`` keeps the gate inert so
+    the test stays focused on the pr_feed warmup branch.
+    """
+    from dataclasses import dataclass, field
+    from typing import Any
+
+    @dataclass
+    class _SS:
+        use_roofline_composite: bool = False
+        last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+        cumulative_gain_validated: float = 0.0
+        auto_roofline_pending_task_id: str = ""
+        phase_history: list[dict[str, Any]] = field(default_factory=list)
+        save_count: int = 0
+
+        def save(self, _session_dir):
+            self.save_count += 1
+
+    return _SS()
+
+
 @pytest.mark.asyncio
 async def test_on_enter_explore_warms_pr_feed(tmp_path: Path):
     """Coordinator's EXPLORE-entry hook must call
@@ -191,9 +216,10 @@ async def test_on_enter_explore_warms_pr_feed(tmp_path: Path):
     coord = Coordinator.__new__(Coordinator)
     plane = _FakePlane()
     coord.knowledge_plane = plane
+    coord.shared_state = _make_bare_shared_state()
     # Patch in just enough infrastructure for the dispatcher methods
     # this test touches. The hook itself is pure dispatch + 1 plane
-    # call.
+    # call when composite is off.
 
     await coord._on_enter_explore(from_phase="PRELUDE")
     assert plane.warm_calls == 1
@@ -207,6 +233,7 @@ async def test_on_enter_explore_graceful_when_plane_is_none(tmp_path: Path):
 
     coord = Coordinator.__new__(Coordinator)
     coord.knowledge_plane = None
+    coord.shared_state = _make_bare_shared_state()
     # Should not raise:
     await coord._on_enter_explore(from_phase="PRELUDE")
 
@@ -228,6 +255,7 @@ async def test_on_enter_explore_swallows_warmup_exceptions(tmp_path: Path):
 
     coord = Coordinator.__new__(Coordinator)
     coord.knowledge_plane = _BadPlane()
+    coord.shared_state = _make_bare_shared_state()
     # Should not raise:
     await coord._on_enter_explore(from_phase="PRELUDE")
 

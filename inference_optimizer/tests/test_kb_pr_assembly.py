@@ -205,7 +205,8 @@ def test_select_kb_for_domain_caps_lists():
 # ---------------------------------------------------------------------------
 # 4. Coordinator warmup integration
 # ---------------------------------------------------------------------------
-def test_warm_specialist_params_pipes_kb_subgraph_through(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_warm_specialist_params_pipes_kb_subgraph_through(tmp_path: Path):
     """The Coordinator's specialist pre-dispatch warmup must call
     ``select_kb_for_domain`` and stash the result on
     ``params['kb_subgraph']`` so SpecialistPromptInputs picks it up."""
@@ -236,14 +237,15 @@ def test_warm_specialist_params_pipes_kb_subgraph_through(tmp_path: Path):
     c.knowledge_plane = plane
 
     params: dict[str, Any] = {"domain": "serving_specialist"}
-    c._warm_specialist_params(params)
+    await c._warm_specialist_params(params)
     assert "kb_subgraph" in params
     sub = params["kb_subgraph"]
     assert sub["anchor"] == "framework"
     assert "framework.cuda_graph" in sub["neighbors"][0]
 
 
-def test_warm_specialist_params_kb_subgraph_when_cortex_disabled(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_warm_specialist_params_kb_subgraph_when_cortex_disabled(tmp_path: Path):
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.shared_state import SharedState
 
@@ -253,7 +255,7 @@ def test_warm_specialist_params_kb_subgraph_when_cortex_disabled(tmp_path: Path)
     c.knowledge_plane = plane
 
     params: dict[str, Any] = {"domain": "serving_specialist"}
-    c._warm_specialist_params(params)
+    await c._warm_specialist_params(params)
     # Defensive default: empty dict so the prompt builder renders
     # ``(none)`` instead of NameError'ing.
     assert params.get("kb_subgraph") == {}
