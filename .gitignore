@@ -58,3 +58,7 @@ Thumbs.db
 inference_optimizer/remain_todo.md
 inference_optimizer/remain_issue.md
 inference_optimizer/remain_robustness_todo.md
+
+# F0 integration: keep test baselines and dry-run merge maps tracked
+!docs/test-baselines/*.log
+!docs/integration/*.log
