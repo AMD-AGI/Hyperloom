@@ -391,10 +391,24 @@ async def test_route_continue_explore_missing_gap_id_coerced():
 # ===========================================================================
 # PolicyGate throttle (LLM-side propose path)
 # ===========================================================================
+def _ready_to_throttle_state(session_id: str) -> SharedState:
+    """Return a SharedState that satisfies the Issue-A preconditions
+    (phase=EXPLORE + len(optimization_stack)>=3) so the throttle path
+    is the only remaining gate. The throttle tests below all start
+    from this fixture; the new precondition tests use a bare state."""
+    state = SharedState(session_id=session_id)
+    state.phase = "EXPLORE"
+    state.optimization_stack = [
+        {"variant_name": f"stub-{i}", "tput": 100.0 + i}
+        for i in range(3)
+    ]
+    return state
+
+
 def test_assess_remaining_gaps_throttle_blocks_back_to_back(monkeypatch):
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
-    state = SharedState(session_id="t-throttle")
+    state = _ready_to_throttle_state("t-throttle")
     state.last_remaining_gaps_assessment = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "recommendation": "advance_to_kernel",
@@ -408,7 +422,7 @@ def test_assess_remaining_gaps_throttle_blocks_back_to_back(monkeypatch):
 def test_assess_remaining_gaps_throttle_permits_after_window(monkeypatch):
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
-    state = SharedState(session_id="t-throttle-ok")
+    state = _ready_to_throttle_state("t-throttle-ok")
     state.last_remaining_gaps_assessment = {
         "ts": (
             datetime.now(timezone.utc) - timedelta(hours=2)
@@ -423,11 +437,40 @@ def test_assess_remaining_gaps_throttle_permits_after_window(monkeypatch):
 def test_assess_remaining_gaps_throttle_first_call_passes():
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
-    state = SharedState(session_id="t-throttle-first")
-    # No prior assessment -> no throttle.
+    state = _ready_to_throttle_state("t-throttle-first")
+    # No prior assessment -> no throttle (and preconditions satisfied).
     fake = SimpleNamespace(shared_state=state)
     denial = Coordinator._assess_remaining_gaps_throttle_denial(fake)
     assert denial is None
+
+
+# ---------------------------------------------------------------------------
+# Issue-A (Saturday May 2026): preconditions enforced before the throttle
+# ---------------------------------------------------------------------------
+def test_assess_remaining_gaps_denied_outside_explore():
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+
+    state = SharedState(session_id="t-precondition-phase")
+    state.phase = "PRELUDE"
+    state.optimization_stack = [
+        {"variant_name": f"stub-{i}"} for i in range(5)
+    ]
+    fake = SimpleNamespace(shared_state=state)
+    denial = Coordinator._assess_remaining_gaps_throttle_denial(fake)
+    assert denial is not None
+    assert denial.rule == "assess_remaining_gaps_phase"
+
+
+def test_assess_remaining_gaps_denied_when_stack_too_short():
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+
+    state = SharedState(session_id="t-precondition-stack")
+    state.phase = "EXPLORE"
+    state.optimization_stack = [{"variant_name": "stub-0"}]
+    fake = SimpleNamespace(shared_state=state)
+    denial = Coordinator._assess_remaining_gaps_throttle_denial(fake)
+    assert denial is not None
+    assert denial.rule == "assess_remaining_gaps_min_stack"
 
 
 # ===========================================================================
