@@ -135,6 +135,18 @@ def build(session_dir: Path | str, *, detail_level: str = "standard") -> dict[st
     phase_timeline    = _safe_collect("phase_timeline",
                                        lambda: collectors.collect_phase_timeline(state, warnings, sd),
                                        warnings)
+    # Back-fill session timing + closing-event duration once both
+    # session_meta and phase_timeline are available. ``collect_session``
+    # runs before phase_timeline and therefore can't derive the
+    # "session_started/ended from phase_timeline" fallback or fill the
+    # closing event's duration_seconds against the session end. We do
+    # that here so the two sections stay consistent.
+    try:
+        collectors.enrich_session_and_timeline(session_meta, phase_timeline, state)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(
+            f"enrich_session_and_timeline failed: {type(exc).__name__}: {exc}"
+        )
     geak_invocations, oob_invocations = _safe_collect(
         "invocations",
         lambda: collectors.collect_kernel_invocations(sd, warnings),
@@ -190,6 +202,44 @@ def build(session_dir: Path | str, *, detail_level: str = "standard") -> dict[st
         warnings,
         default=[],
     )
+    roofline             = _safe_collect(
+        "roofline",
+        lambda: collectors.collect_roofline(sd, warnings),
+        warnings,
+        default=[],
+    )
+
+    # Pre-assemble the breakdown payload so ``collect_data_provenance``
+    # can decide each section's ``populated`` flag without re-deriving
+    # the section dicts from disk. The provenance collector only reads
+    # the dict values + on-disk artifact existence; it never mutates the
+    # payload it receives.
+    breakdown_so_far: dict[str, Any] = {
+        "session":              session_meta,
+        "workload":             workload,
+        "baseline":             baseline,
+        "final":                final,
+        "phase_timeline":       phase_timeline,
+        "capability_summary":   capability_summary,
+        "geak_invocations":     geak_invocations,
+        "oob_invocations":      oob_invocations,
+        "kernel_lifecycle":     kernel_lifecycle,
+        "param_search":         param_search,
+        "sweep":                sweep,
+        "critic_robustness":    critic_robustness,
+        "telemetry":            telemetry,
+        "attribution":          attribution,
+        "decision_journal":     decision_journal,
+        "kernel_profiling":     kernel_profiling,
+        "kernel_decision_path": kernel_decision_path,
+        "roofline":             roofline,
+    }
+    data_provenance      = _safe_collect(
+        "data_provenance",
+        lambda: collectors.collect_data_provenance(sd, breakdown_so_far, warnings),
+        warnings,
+        default=[],
+    )
 
     source_files = collectors.collect_source_files(
         sd,
@@ -233,6 +283,8 @@ def build(session_dir: Path | str, *, detail_level: str = "standard") -> dict[st
         "decision_journal":    decision_journal,
         "kernel_profiling":    kernel_profiling,
         "kernel_decision_path": kernel_decision_path,
+        "roofline":            roofline,
+        "data_provenance":     data_provenance,
 
         "warnings":            warnings,
         "source_files":        source_files,
