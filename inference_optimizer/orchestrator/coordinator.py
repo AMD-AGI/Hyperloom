@@ -1202,6 +1202,119 @@ class Coordinator:
             )
         return task
 
+    # ------------------------------------------------------------------
+    # F3-3 / N31 — final-roofline auto-enqueue on CLOSE entry
+    # (plan_roofline_framework/F3_policygate_advisory.MD §F3-3)
+    # ------------------------------------------------------------------
+    _N31_STALE_AGE_SEC: float = 300.0   # 5 min
+    _N31_GAIN_DRIFT_PCT: float = 3.0    # %
+
+    async def _maybe_enqueue_final_roofline_n31(self) -> Any:
+        """Auto-enqueue a ``roofline`` task on CLOSE entry when the
+        existing ``last_trace_analyze`` snapshot is stale.
+
+        Stale = any of:
+        * no snapshot ever recorded (``last_trace_analyze`` empty),
+        * snapshot ``ts`` is older than :attr:`_N31_STALE_AGE_SEC`,
+        * ``cumulative_gain_validated`` has drifted from
+          ``roofline_baseline_gain_at_snapshot`` by more than
+          :attr:`_N31_GAIN_DRIFT_PCT` percentage points.
+
+        Idempotent: the enqueue uses a fixed
+        ``internal-roofline-n31_close`` idempotency key so a re-entry
+        to CLOSE (Inv-2.1 forbids in production but tests + crash
+        resume may reach here twice) reuses the existing task.
+
+        No-op when ``--use-roofline-composite`` is off — legacy CLOSE
+        sequencer behaviour is byte-identical for sessions that have
+        not opted into the composite action.
+
+        Returns the freshly-created (or returned-existing) Task on
+        enqueue, or ``None`` when the gate decided the snapshot was
+        already fresh enough / the toggle was off.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "use_roofline_composite", False)):
+            return None
+        last_ta = state.last_trace_analyze or {}
+        if not isinstance(last_ta, dict):
+            last_ta = {}
+
+        no_snapshot = not last_ta or not last_ta.get("analysis_md_text")
+        age_seconds = self._snapshot_age_seconds(last_ta.get("ts"))
+        stale_due_to_age = (
+            age_seconds is not None and age_seconds > self._N31_STALE_AGE_SEC
+        )
+        snapshot_gain = float(
+            last_ta.get("roofline_baseline_gain_at_snapshot") or 0.0,
+        )
+        current_gain = float(state.cumulative_gain_validated or 0.0)
+        gain_drift = abs(current_gain - snapshot_gain)
+        stale_due_to_drift = gain_drift > self._N31_GAIN_DRIFT_PCT
+        if not (no_snapshot or stale_due_to_age or stale_due_to_drift):
+            log.info(
+                "n31_final_roofline: snapshot fresh (age=%.0fs "
+                "drift=%.2f%%); skipping auto-enqueue",
+                age_seconds or 0.0, gain_drift,
+            )
+            return None
+
+        reason = (
+            "n31_no_snapshot" if no_snapshot
+            else "n31_stale_age" if stale_due_to_age
+            else "n31_gain_drift"
+        )
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": reason,
+        }
+        if state.baseline_config_path:
+            params["config_path"] = state.baseline_config_path
+        cb = state.current_best or {}
+        if isinstance(cb, dict):
+            cb_args = str(cb.get("extra_sglang_args") or "")
+            if cb_args:
+                params["base_extra_args"] = cb_args
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="roofline",
+            params=params,
+            idempotency_key="internal-roofline-n31_close",
+        )
+        log.info(
+            "n31_final_roofline: enqueued task_id=%s (reason=%s "
+            "age=%.0fs drift=%.2f%% existing=%s)",
+            task.task_id, reason, age_seconds or 0.0, gain_drift,
+            was_existing,
+        )
+        await self._record_close_step(
+            "n31_final_roofline", status="enqueued",
+            task_id=task.task_id,
+            detail=(
+                f"reason={reason} age_s={age_seconds or 0.0:.0f} "
+                f"drift={gain_drift:.2f}%"
+            ),
+        )
+        return task
+
+    @staticmethod
+    def _snapshot_age_seconds(ts_iso: Any) -> "float | None":
+        """Best-effort parse of an ISO-8601 ts (UTC) into seconds-since.
+
+        Returns ``None`` when ``ts_iso`` is missing / unparseable so
+        the N31 gate falls back to its other two staleness signals.
+        """
+        if not isinstance(ts_iso, str) or not ts_iso.strip():
+            return None
+        try:
+            from datetime import datetime, timezone
+            ts = datetime.fromisoformat(ts_iso)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            return max(0.0, (now - ts).total_seconds())
+        except (TypeError, ValueError):
+            return None
+
     def _record_phase_entry_evidence(self, **kvs: Any) -> None:
         """Merge ``kvs`` into the latest ``phase_history`` row's
         ``evidence`` dict.
@@ -1532,6 +1645,22 @@ class Coordinator:
         log.info("CLOSE entered (from=%s); starting 5-step close sequence",
                  from_phase or "<unknown>")
         await self._record_close_step("sequencer_started", status="running")
+
+        # ---------------- Step 0 (F3-3 / N31): final roofline ---------
+        # Gated on ``--use-roofline-composite``. When the toggle is on,
+        # we want the final report's ``analysis.md`` reference to be
+        # fresh (within 5 min of CLOSE entry) AND aligned with the
+        # current ``cumulative_gain_validated`` (gain drift < 3%).
+        # Skipped silently when the toggle is off so legacy CLOSE
+        # sequencer behaviour is byte-identical.
+        try:
+            await self._maybe_enqueue_final_roofline_n31()
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            log.exception("CLOSE step 0 (n31 final roofline) failed")
+            await self._record_close_step(
+                "n31_final_roofline", status="failed",
+                detail=repr(exc)[:240],
+            )
 
         # ---------------- Step 1: report ----------------
         try:
