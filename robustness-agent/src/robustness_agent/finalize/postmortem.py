@@ -43,7 +43,7 @@ _DECISION_TRACE_FILENAME: str = "decision_trace.json"
 _DECISION_TRACE_ACTION_DIRS: tuple[str, ...] = (
     "baseline",
     "profile",
-    "pmc_roofline",
+    "roofline",
     "backends",
     "params",
     "sweep",

@@ -2,7 +2,7 @@
 
 Three independent ``propose_action`` rules:
 
-* **F3-1 N9** — ``profile`` / ``pmc_roofline`` denied while
+* **F3-1 N9** — direct ``profile`` denied while
   ``--use-roofline-composite`` AND ``--deny-direct-profile`` are both
   on. Forces atomic ``roofline`` so the snapshot_id counter +
   analysis.md cache stay aligned with the trace.
@@ -71,11 +71,10 @@ def _state_n9_on() -> SharedState:
     return s
 
 
-@pytest.mark.parametrize("action", ["profile", "pmc_roofline"])
-def test_n9_denies_blocked_actions_when_both_toggles_on(action: str):
+def test_n9_denies_direct_profile_when_both_toggles_on():
     gate = _gate(_state_n9_on())
     with pytest.raises(PolicyDenied) as exc_info:
-        gate._validate_propose_action(_orch(gate), _propose(action))
+        gate._validate_propose_action(_orch(gate), _propose("profile"))
     assert exc_info.value.rule == "n9_deny_direct_profile_when_composite_on"
     assert "roofline" in (exc_info.value.hint or "")
 
@@ -94,7 +93,7 @@ def test_n9_allows_profile_when_composite_off():
 
 def test_n9_allows_profile_when_only_composite_on():
     """The deny-toggle is the operator escape hatch — until it flips,
-    profile / pmc_roofline stay legal so operators can A/B test."""
+    direct ``profile`` stays legal so operators can A/B test."""
     s = _state_n9_on()
     s.deny_direct_profile = False
     gate = _gate(s)
