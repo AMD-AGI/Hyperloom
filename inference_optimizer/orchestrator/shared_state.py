@@ -2056,6 +2056,120 @@ class SharedState:
         self.last_action_failures = history
         return entry
 
+    def record_trace_analyze(
+        self,
+        payload: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """F1-1 — write the canonical 11-field ``last_trace_analyze`` dict.
+
+        Called by :class:`RooflineExecutor` (F1-2) after a successful
+        ``trace_analyze`` sub-step. Distinct from the legacy
+        :meth:`record_select_kernels` writer below, which writes a thinner
+        ``last_select_kernels`` schema for the ``select_kernels_handler``
+        path and stays in place for backward compatibility.
+
+        On every successful call, ``roofline_snapshot_id`` is read from the
+        previous ``last_trace_analyze`` and incremented by one — giving a
+        monotonic counter the orchestration prompt + N31 final-roofline
+        guard rely on. ``roofline_baseline_gain_at_snapshot`` captures
+        ``cumulative_gain_validated`` at write time so the prompt can
+        surface the gain delta since the report was taken.
+
+        ``analysis_md_text`` is read verbatim from
+        ``result['trace_report_path']``; OSErrors degrade silently to
+        empty text (the ``analysis_md_path`` field still lets a future
+        ``read_artifact`` intent re-fetch it on demand).
+
+        Cherry-picked from /wekafs/zgong/Hyperloom main @ c6f0a71
+        ``shared_state.py:1508`` ; verbatim except for the docstring tying
+        it to F1-1 / F1-2 of this branch's integration plan.
+        """
+        if not isinstance(result, dict):
+            return
+        trace_input = (
+            (payload or {}).get("trace_input")
+            or (payload or {}).get("trace_dir")
+            or ""
+        )
+        candidates_path = result.get("candidates_path") or ""
+        if not candidates_path:
+            artifacts = result.get("artifact_paths") or {}
+            if isinstance(artifacts, dict):
+                candidates_path = artifacts.get("kernel_candidates", "") or ""
+        hot = result.get("hot_kernels") or []
+        summary: list[dict[str, Any]] = []
+        reusable_ids: list[str] = []
+        for entry in hot[:15] if isinstance(hot, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            kid = entry.get("kernel_id")
+            reusable = bool(entry.get("reusable_native_kernel"))
+            summary.append({
+                "kernel_id": kid,
+                "name": entry.get("name"),
+                "gpu_pct": entry.get("gpu_pct"),
+                "bottleneck": entry.get("bottleneck"),
+                "arithmetic_intensity": entry.get("arithmetic_intensity"),
+                "source_file": entry.get("source_file"),
+                "reusable_native_kernel": reusable,
+                "recommended_backends": entry.get("recommended_backends") or [],
+                "recommended_actions": entry.get("recommended_actions") or [],
+            })
+            if reusable and kid:
+                reusable_ids.append(str(kid))
+
+        raw_warnings = result.get("trace_health_warnings") or []
+        warnings_cleaned: list[dict[str, Any]] = []
+        if isinstance(raw_warnings, list):
+            for entry in raw_warnings:
+                if isinstance(entry, dict) and entry.get("code"):
+                    warnings_cleaned.append(dict(entry))
+
+        # Monotonic snapshot counter: read previous value + 1.
+        prev_snapshot_id = 0
+        if isinstance(self.last_trace_analyze, dict):
+            prev_raw = self.last_trace_analyze.get("roofline_snapshot_id")
+            if isinstance(prev_raw, int):
+                prev_snapshot_id = prev_raw
+        snapshot_id = prev_snapshot_id + 1
+
+        analysis_md_path = result.get("trace_report_path") or ""
+        analysis_md_text = ""
+        if analysis_md_path:
+            try:
+                # No truncation: typical analysis.md is 10-20 KB, worst
+                # case ~200 KB — well within the 200K-token orchestration
+                # context budget.
+                analysis_md_text = Path(analysis_md_path).read_text(
+                    encoding="utf-8", errors="replace",
+                )
+            except (OSError, ValueError):
+                analysis_md_text = ""
+
+        task_groups = result.get("task_groups") or []
+        if not isinstance(task_groups, list):
+            task_groups = []
+
+        self.last_trace_analyze = {
+            "trace_input": str(trace_input),
+            "candidates_path": str(candidates_path),
+            "hot_kernels_top15": summary,
+            "task_groups": task_groups,
+            "reusable_native_kernel_ids": reusable_ids,
+            "trace_health_warnings": warnings_cleaned,
+            "analysis_md_path": str(analysis_md_path),
+            "analysis_md_text": analysis_md_text,
+            "roofline_snapshot_id": snapshot_id,
+            "roofline_baseline_gain_at_snapshot": float(
+                self.cumulative_gain_validated,
+            ),
+            "ts": _now_iso(),
+        }
+        # Mirror the snapshot id at the top level so PolicyGate /
+        # Coordinator can read it without the nested-dict lookup.
+        self.roofline_snapshot_id = snapshot_id
+
     def record_select_kernels(self, payload: dict[str, Any],
                               result: dict[str, Any]) -> None:
         """Cache the latest select_kernels output keyed by trace_input.
