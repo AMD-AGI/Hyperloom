@@ -3564,6 +3564,87 @@ def _build_parser() -> argparse.ArgumentParser:
              "MCP servers into specialists. Default: None.",
     )
     # ------------------------------------------------------------------
+    # F0-10 — F1 / F2 / F3 integration toggles (default off).
+    #
+    # These flags scaffold the upcoming roofline-v2 (PR #288) +
+    # framework-agent (PR #280) integration. F0 lands them at default
+    # ``False`` so behaviour matches tag ``pre-roofline-merge``; each
+    # subsequent F-step (F1 / F2 / F3) flips one or more on after its
+    # smoke gate passes. See plan_roofline_framework/{F1,F2,F3}_*.MD.
+    #
+    # Mirrored into ``SharedState.{use_roofline_composite,
+    # framework_agent_enabled, deny_direct_profile, gain_driven_kernel_opt,
+    # roofline_saturation_advisory}`` by the cli boot path so PolicyGate /
+    # Coordinator / prompt builders see consistent values.
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--use-roofline-composite",
+        dest="use_roofline_composite",
+        action="store_true",
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE", "0",
+        ).strip() == "1",
+        help="(F1) Enable the composite ``roofline`` action (atomic "
+             "profile + trace_analyze, produces analysis.md snapshot). "
+             "Default off — falls back to separate ``profile`` / "
+             "``pmc_roofline`` actions. Env: "
+             "INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE=1.",
+    )
+    opt.add_argument(
+        "--framework-agent-enabled",
+        dest="framework_agent_enabled",
+        action="store_true",
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED", "0",
+        ).strip() == "1",
+        help="(F2) Allow ``serving_specialist`` to invoke ``fa "
+             "candidates`` and ``git fetch refs/pull/...`` via the "
+             "``framework_pr_scout`` sub_kind (PR #280 framework-agent). "
+             "Default off. Env: "
+             "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=1.",
+    )
+    opt.add_argument(
+        "--deny-direct-profile",
+        dest="deny_direct_profile",
+        action="store_true",
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE", "0",
+        ).strip() == "1",
+        help="(F3 / N9) PolicyGate denies ``propose_action{profile}`` / "
+             "``propose_action{pmc_roofline}`` when "
+             "``--use-roofline-composite`` is on. Forces the LLM through "
+             "the atomic ``roofline`` action so the analysis.md cache + "
+             "snapshot_id stay aligned. Default off (escape hatch for "
+             "debugging). Env: "
+             "INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE=1.",
+    )
+    opt.add_argument(
+        "--gain-driven-kernel-opt",
+        dest="gain_driven_kernel_opt",
+        action="store_true",
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT", "0",
+        ).strip() == "1",
+        help="(F3 / N19c) Lock ``kernel_opt`` until the 3-round moving "
+             "average of ``last_explore_delta_gain_pct`` drops below "
+             "epsilon (0.5%%). Prevents premature deep work while cheap "
+             "exploration is still earning. Default off. Env: "
+             "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT=1.",
+    )
+    opt.add_argument(
+        "--roofline-saturation-advisory",
+        dest="roofline_saturation_advisory",
+        action="store_true",
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_ROOFLINE_SATURATION_ADVISORY", "0",
+        ).strip() == "1",
+        help="(F3) Inject a ``Roofline Saturation Advisory`` section "
+             "into the orchestration prompt listing directions whose "
+             "saturation exceeds 80%%. Soft hint only — never hard-"
+             "rejects an LLM dispatch. Default off. Env: "
+             "INFERENCE_OPTIMIZER_ROOFLINE_SATURATION_ADVISORY=1.",
+    )
+    # ------------------------------------------------------------------
     # v0.8 §3.9 — drop scoreboard (KB_design §3.9 §7)
     # ------------------------------------------------------------------
     # v0.8 retires the v0.6 ``action_scores`` decision system. The
