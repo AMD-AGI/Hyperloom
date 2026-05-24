@@ -440,20 +440,82 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 # ---------------------------------------------------------------------------
 # Section 4 — Cortex KB sub-graph
 # ---------------------------------------------------------------------------
+def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
+    """Issue-J (Saturday May 2026): all three prior sources are empty.
+
+    When the model is brand new to the KB (HTTP 4xx schema rejects on
+    ``propose_point`` for the recipe canonical_id) AND PR Monitor has
+    no domain-tagged PRs AND ``find-recipe`` returned no recipe, the
+    specialist's ``## 4`` / ``## 5`` / ``## 6`` sections all render
+    ``(none)``. Historically this caused specialists to return
+    ``proposal_set=[]`` (no priors → no anchor → no candidates),
+    which the orchestrator then read as "exhausted" and routed into
+    ``no_more_leverage``. Detecting this condition lets us inject an
+    explicit cold-start directive instead of relying on the model to
+    self-recover.
+    """
+    return (
+        not inp.kb_subgraph
+        and not inp.warm_start_recipe
+        and not inp.warm_start_pitfalls
+        and not inp.pr_feed
+    )
+
+
 def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 4. CORTEX KB SUB-GRAPH", ""]
+    cold = _is_cold_start(inp)
     if not inp.kb_subgraph:
-        rows.extend([
-            _NONE_PLACEHOLDER,
-            "",
-            "(No KB sub-graph supplied. The Coordinator pre-warms this "
-            "section via select_kb_for_domain before dispatch; an empty "
-            "block means the anchor has no committed entries yet (cold "
-            "start) or the warmup hit a soft failure. The specialist "
-            "subprocess has no live KB connection — surface what you "
-            "need in ``residual_questions`` so a future round can "
-            "re-warm with a richer anchor.)",
-        ])
+        if cold:
+            # Cold-start directive: replaces the bare "(none)" with a
+            # specific instruction so the specialist proposes
+            # canonical defaults from its domain focus block (Section
+            # 1) rather than emitting an empty proposal_set. The
+            # Critic still gates the final answer; this only ensures
+            # the KB cold-start path doesn't degenerate to silence.
+            rows.extend([
+                "**COLD-START MODE — no priors available.**",
+                "",
+                "All three prior sources for this gap are empty:",
+                "",
+                "- KB sub-graph: ``(none)`` — Cortex anchor has no "
+                "committed points for this (model, hardware, domain) "
+                "tuple yet, OR the warmup hit a 4xx schema reject "
+                "(common on first-time models).",
+                "- Warm-start recipe: ``(none)`` (Section 5).",
+                "- PR feed: ``(none)`` (Section 6).",
+                "",
+                "**Directive — DO NOT return an empty proposal_set.** "
+                "Treat the *Winning techniques* + *Pitfalls* in your "
+                "**domain focus** block (Section 1) as your fallback "
+                "prior. Pick the **1–2 most conservative, "
+                "well-attested defaults** from those bullets that are "
+                "compatible with the hardware (Section 2) and the "
+                "gap symptom (Section 3); flag each as "
+                "``confidence: low`` and ``provenance: "
+                "domain_focus_default`` in the proposal. Use the "
+                "``residual_questions`` field to record what KB "
+                "anchor / PR query a future round should pre-warm.",
+                "",
+                "If the *Winning techniques* block is generic enough "
+                "that no proposal is safer than a coin-flip, you may "
+                "still emit ``empty=true`` — but you MUST cite which "
+                "bullets you considered and why each was rejected "
+                "(in ``summary``). A bare empty exit with no rationale "
+                "will be treated as a tool failure by the Coordinator.",
+            ])
+        else:
+            rows.extend([
+                _NONE_PLACEHOLDER,
+                "",
+                "(No KB sub-graph supplied. The Coordinator pre-warms this "
+                "section via select_kb_for_domain before dispatch; an empty "
+                "block means the anchor has no committed entries yet (cold "
+                "start) or the warmup hit a soft failure. The specialist "
+                "subprocess has no live KB connection — surface what you "
+                "need in ``residual_questions`` so a future round can "
+                "re-warm with a richer anchor.)",
+            ])
         return rows
     rows.append("```json")
     rows.append(json.dumps(inp.kb_subgraph, sort_keys=True, indent=2))

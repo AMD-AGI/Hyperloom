@@ -306,9 +306,135 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+def write_minimal_final_report(
+    session_dir: Path | str,
+    *,
+    output_path: Path | str | None = None,
+) -> Path:
+    """Issue-I (Saturday May 2026): cli.finally safety-net for
+    ``reports/final.md`` when the CLOSE phase sequencer never reached
+    step 1 (e.g. SIGTERM mid-tick, ``no_more_leverage`` set before any
+    EXPLORE work landed, or the report executor itself failed).
+
+    The full :class:`ReportExecutor` walks the message bus to render
+    rich highlights; this helper deliberately stays minimal (one
+    SharedState read + the breakdown json that ``cli.finally`` already
+    writes alongside) so it never raises and never blocks shutdown. The
+    output is a plain markdown summary that always documents
+    ``stop_reason`` / ``baseline_tput`` / ``current_best`` / ``last_*``
+    + a pointer to ``session_breakdown.json`` for the structured
+    detail.
+
+    Returns the absolute path written. Idempotent: never overwrites a
+    pre-existing ``reports/final.md`` (the sequencer's authoritative
+    output).
+    """
+    from ..orchestrator.shared_state import SharedState
+    from ..session_paths import reports_dir
+
+    sd = Path(session_dir).resolve()
+    target = (
+        Path(output_path).resolve()
+        if output_path
+        else reports_dir(sd) / "final.md"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target.stat().st_size > 0:
+        return target
+
+    state = SharedState.load_or_init(sd)
+    breakdown_link = sd / BREAKDOWN_FILENAME
+
+    def _fmt_attempt(d: dict[str, Any] | None, label: str) -> str:
+        if not isinstance(d, dict) or not d:
+            return f"- **{label}**: (none)"
+        ts = d.get("ts") or "-"
+        body = json.dumps(
+            {k: v for k, v in d.items() if k != "ts"},
+            sort_keys=True,
+            default=str,
+        )[:600]
+        return f"- **{label}** (`{ts}`): `{body}`"
+
+    current_best = state.current_best or {}
+    cb_action = current_best.get("action") or "-"
+    cb_tput = current_best.get("tput")
+    cb_tput_s = (
+        f"{cb_tput:.2f}" if isinstance(cb_tput, (int, float)) else "-"
+    )
+    last_sweep = state.last_sweep or {}
+    if last_sweep:
+        sw_grid = last_sweep.get("grid_size", 0)
+        sw_best = last_sweep.get("best_overall") or {}
+        sw_tput = sw_best.get("output_throughput")
+        sw_line = (
+            f"grid_size={sw_grid} "
+            f"best_tput="
+            f"{(f'{sw_tput:.2f}' if isinstance(sw_tput, (int, float)) else '-')}"
+        )
+    else:
+        sw_line = "(none)"
+
+    lines = [
+        f"# Inference Optimizer — emergency final report",
+        "",
+        "> **Auto-generated safety-net.** The CLOSE phase 5-step "
+        "sequencer did not run to completion (process exited before "
+        "phase transition, or ``report`` executor failed). For the "
+        "full audit trail open `session_breakdown.json` next to this "
+        "file.",
+        "",
+        f"- session_id     : `{state.session_id or '-'}`",
+        f"- model_path     : `{state.model_path or '-'}`",
+        f"- framework      : `{state.framework or '-'}`",
+        f"- gpu_type       : `{state.gpu_type or '-'}`",
+        f"- phase (last)   : `{state.phase or '-'}`",
+        f"- stop_reason    : `{state.stop_reason or '-'}`",
+        f"- baseline_tput  : `{state.baseline_tput:.2f}`",
+        f"- current_best   : `{cb_action}` @ `{cb_tput_s}` tok/s",
+        f"- cumul_gain     : `{state.cumulative_gain:.2f}%` "
+        f"(validated `{state.cumulative_gain_validated:.2f}%`)",
+        f"- stack_entries  : `{len(state.optimization_stack or [])}`",
+        f"- sweep summary  : {sw_line}",
+        "",
+        "## Last action attempts",
+        "",
+        _fmt_attempt(getattr(state, "last_baseline", None), "last_baseline"),
+        _fmt_attempt(getattr(state, "last_profile", None), "last_profile"),
+        _fmt_attempt(getattr(state, "last_backends", None), "last_backends"),
+        _fmt_attempt(getattr(state, "last_params", None), "last_params"),
+        _fmt_attempt(state.last_sweep, "last_sweep"),
+        "",
+        f"## Structured detail",
+        "",
+        f"See `{breakdown_link.name}` (sibling of session root) for the "
+        f"complete `phase_history` / `critic_robustness` / "
+        f"`kb_provenance` blocks.",
+        "",
+    ]
+
+    fd, tmp = tempfile.mkstemp(
+        prefix=".final.md.", suffix=".tmp", dir=str(target.parent),
+    )
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        tmp_path.write_text("\n".join(lines), encoding="utf-8")
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    log.info("emergency final report: wrote %s", target)
+    return target
+
+
 __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "build",
     "write_breakdown_json",
+    "write_minimal_final_report",
 ]
