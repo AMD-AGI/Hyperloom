@@ -457,6 +457,13 @@ class SpecialistRunner:
                 gap_layer=str(params.get("gap_layer") or ""),
                 gap_evidence=dict(params.get("gap_evidence") or {}),
                 kb_subgraph=dict(params.get("kb_subgraph") or {}),
+                # Coordinator-populated roofline / fa pre-fetch payloads
+                # (see Coordinator._warm_specialist_params). Both
+                # default to empty so non-warmed dispatches still build
+                # a valid SpecialistPromptInputs.
+                roofline_evidence=dict(params.get("roofline_evidence") or {}),
+                sub_kind=str(params.get("sub_kind") or ""),
+                pr_candidates=list(params.get("pr_candidates") or []),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(
                     params.get("warm_start_pitfalls") or []
