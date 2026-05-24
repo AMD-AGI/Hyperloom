@@ -137,8 +137,10 @@ async def test_on_enter_kernel_skips_when_kernel_disabled(coord):
 
 @pytest.mark.asyncio
 async def test_on_enter_kernel_skips_on_resume_with_existing_trace(coord):
-    """Resume case: a prior session already landed a profile trace.
-    The hook must skip re-profiling (5–10 min wasted bench)."""
+    """Resume case (composite OFF): a prior session already landed a
+    profile trace. The hook must skip re-profiling (5–10 min wasted
+    bench)."""
+    coord.shared_state.use_roofline_composite = False
     coord.shared_state.last_profile_trace = (
         "/tmp/session/runs/profile/abc/torch_trace/run-1.trace.json.gz"
     )
@@ -156,8 +158,18 @@ async def test_on_enter_kernel_skips_on_resume_with_existing_trace(coord):
 
 @pytest.mark.asyncio
 async def test_on_enter_kernel_enqueues_profile_happy_path(coord):
-    """Fresh KERNEL entry with no prior trace: hook enqueues an
-    internal profile task + stamps phase_history evidence."""
+    """Fresh KERNEL entry with no prior trace and composite OFF: hook
+    enqueues an internal profile task + stamps phase_history evidence.
+
+    The hook deliberately does NOT propagate
+    ``state.baseline_config_path`` into the task params — that would
+    point ProfileExecutor at a baseline YAML where
+    ``profiler.torch_profiler.enabled`` is false, silently disabling
+    Magpie's torch profiler. ProfileExecutor's
+    ``_resolve_default_config`` picks ``profile_sglang.yaml`` instead;
+    workload contract still flows via env-driven materialization.
+    """
+    coord.shared_state.use_roofline_composite = False
     coord.shared_state.baseline_config_path = "/tmp/baseline.yaml"
     coord.shared_state.current_best = {
         "extra_sglang_args": "--mla 1",
@@ -174,10 +186,10 @@ async def test_on_enter_kernel_enqueues_profile_happy_path(coord):
     task = coord.tasks._tasks["internal-profile-kernel_phase_entry"]
     assert task.kind == "profile"
     assert task.state == "queued"
-    # Params inherit baseline workload contract.
     assert task.params["source"] == "coordinator_internal"
     assert task.params["reason"] == "kernel_phase_entry"
-    assert task.params["config_path"] == "/tmp/baseline.yaml"
+    # config_path is intentionally NOT propagated — see helper docstring.
+    assert "config_path" not in task.params
     assert task.params["base_extra_args"] == "--mla 1"
     assert task.params["benchmark_script"] == "sglang_mi300x.sh"
     # Evidence stamp visible on the phase_history row.
@@ -188,9 +200,10 @@ async def test_on_enter_kernel_enqueues_profile_happy_path(coord):
 
 @pytest.mark.asyncio
 async def test_on_enter_kernel_omits_optional_params_when_state_empty(coord):
-    """Bare state (no baseline_config_path / current_best / last_baseline):
+    """Bare state (no current_best / last_baseline), composite OFF:
     hook still enqueues the task. The profile executor falls back to
     its own defaults; params only carry source + reason."""
+    coord.shared_state.use_roofline_composite = False
     coord.shared_state.phase_history = [
         {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
     ]
@@ -315,7 +328,9 @@ async def test_on_enter_kernel_enqueues_roofline_when_composite_on(coord):
     assert task.kind == "roofline"
     assert task.params["source"] == "coordinator_internal"
     assert task.params["reason"] == "kernel_phase_entry"
-    assert task.params["config_path"] == "/tmp/baseline.yaml"
+    # config_path is intentionally NOT propagated so ProfileExecutor
+    # picks profile_sglang.yaml (the one with torch_profiler enabled).
+    assert "config_path" not in task.params
 
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert evidence.get("auto_roofline_enqueued") is True
@@ -423,13 +438,19 @@ async def test_enqueue_internal_roofline_task_uses_explicit_reason(coord):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_internal_roofline_task_inherits_workload_contract(coord):
+async def test_enqueue_internal_roofline_task_carries_extra_args(coord):
+    """Roofline task inherits current_best.extra_sglang_args +
+    last_baseline.benchmark_script, but deliberately does NOT carry
+    ``state.baseline_config_path`` — the profile sub-step needs the
+    profile YAML (with torch_profiler enabled) and finds it via
+    ``ProfileExecutor._resolve_default_config``. Passing baseline YAML
+    here silently disables Magpie's torch profiler → no trace files."""
     coord.shared_state.use_roofline_composite = True
     coord.shared_state.baseline_config_path = "/tmp/baseline.yaml"
     coord.shared_state.current_best = {"extra_sglang_args": "--enable-cuda-graph"}
     coord.shared_state.last_baseline = {"benchmark_script": "sglang_mi300x.sh"}
     task = await coord._enqueue_internal_roofline_task(reason="kernel_phase_entry")
-    assert task.params["config_path"] == "/tmp/baseline.yaml"
+    assert "config_path" not in task.params
     assert task.params["base_extra_args"] == "--enable-cuda-graph"
     assert task.params["benchmark_script"] == "sglang_mi300x.sh"
 
