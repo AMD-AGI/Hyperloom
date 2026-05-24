@@ -28,9 +28,15 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # prep (2)
     "target_analysis":      "prep",
     "baseline":             "prep",
-    # analysis (2)
+    # analysis (3) — F1-2.5 (Roofline-v2 / plan_roofline_framework F1):
+    # ``roofline`` is the new composite action that runs profile +
+    # trace_analyze atomically and surfaces analysis.md to the next
+    # orchestration tick. The legacy ``profile`` / ``pmc_roofline``
+    # entries stay registered (gated off only after F1-6 flips
+    # --use-roofline-composite to default-on).
     "profile":              "analysis",
     "pmc_roofline":         "analysis",
+    "roofline":             "analysis",
     # shallow (5) — v0.8 M3 + KB_gaps/Dead-A merged the v0.6
     # ``backends`` / ``params`` / ``validate_stack`` actions into
     # ``explore``; their yamls + executors were physically deleted.
