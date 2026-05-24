@@ -116,6 +116,18 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # this internally on plateau (bypasses PolicyGate); LLM-side
         # proposes are throttled by ``assess_remaining_gaps_throttle``.
         "assess_remaining_gaps",
+        # Local hotfix (skill-launcher): Coordinator's sequence-gate
+        # (coordinator.py:3103) requires ``last_profile_trace`` to be
+        # non-empty before any action in ``sequence_actions`` (which
+        # includes ``explore``) is allowed when the kernel agent is
+        # in role_registry. With the original allow-list, EXPLORE
+        # cannot run ``profile`` to satisfy that prereq, so the
+        # ``explore`` family is auto-pruned at streak=5 of
+        # ``execution_order`` denials. Allow ``profile`` /
+        # ``pmc_roofline`` in EXPLORE so the orchestrator can break
+        # the deadlock — KERNEL phase will still run its
+        # once-per-phase profile via the §3.2 contract.
+        "profile", "pmc_roofline",
         "recover",
     }),
     PHASE_KERNEL: frozenset({
