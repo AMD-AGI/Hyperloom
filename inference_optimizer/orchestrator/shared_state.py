@@ -96,6 +96,12 @@ _GAPS_ATTEMPTS_HISTORY = 20
 # helpers so adding a new audit action is a one-line change.
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "sweep", "explore",
+    # F1-3 (Roofline-v2 / plan_roofline_framework): the composite
+    # ``roofline`` action runs profile + trace_analyze atomically.
+    # Audit each attempt so the prompt's RECENT ACTION ATTEMPTS block
+    # surfaces the snapshot id + analysis_md_path the executor produced
+    # (or the failure phase / error_class on the failure path).
+    "roofline",
 })
 
 # Mapping from audit-action name to (result-dict key, prompt-display label).
@@ -108,6 +114,9 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "profile":  ("output_throughput", "output_throughput"),
     "sweep":    ("output_throughput", "output_throughput"),
     "explore":  ("best_gain_pct",     "gain_pct"),
+    # F1-3: ``roofline`` is an analysis composite, not a benchmark — its
+    # key metric is the monotonic snapshot id, not a throughput number.
+    "roofline": ("snapshot_id",       "snapshot_id"),
 }
 
 
