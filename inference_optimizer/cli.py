@@ -62,6 +62,10 @@ from .orchestrator.action_executors import (
 )
 from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
 from .orchestrator.action_executors.recover import recover_executor
+from .orchestrator.action_executors.roofline import (
+    make_roofline_executor,
+    make_roofline_stub_executor,
+)
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
@@ -939,6 +943,27 @@ def _register_executors(
         coordinator.sub.register_executor(kind, fn)
     for kind in _NOOP_KINDS_KERNEL_ONLY:
         coordinator.sub.register_executor(kind, _noop_prep)
+
+    # F1-3 (Roofline-v2 / plan_roofline_framework): the composite
+    # ``roofline`` action runs profile + trace_analyze atomically and
+    # surfaces analysis.md to the next orchestration tick. Gated by
+    # ``SharedState.use_roofline_composite`` (F0-10 toggle, default
+    # off): when the toggle is off we register the stub executor so a
+    # speculative ``propose_action{action='roofline'}`` returns
+    # ``status='succeeded' degraded=True`` instead of failing with
+    # ``no_executor`` — keeps PolicyGate's ``rule='no_executor'`` path
+    # exclusively for genuine misconfiguration. Flipping the toggle on
+    # (post-F1 smoke per plan §F1-6) swaps in the real executor.
+    if getattr(coordinator.shared_state, "use_roofline_composite", False):
+        coordinator.sub.register_executor(
+            "roofline",
+            make_roofline_executor(shared_state=coordinator.shared_state),
+        )
+    else:
+        coordinator.sub.register_executor(
+            "roofline",
+            make_roofline_stub_executor(shared_state=coordinator.shared_state),
+        )
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
