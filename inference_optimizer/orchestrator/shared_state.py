@@ -3287,6 +3287,19 @@ class SharedState:
             f"last_profile_roofline={self.last_profile_roofline or '(none)'}",
             f"last_profile_kernel_breakdown={self.last_profile_kernel_breakdown or '(none)'}",
             f"last_select_kernels={self._format_last_select_kernels()}",
+            # F1-4 (Roofline-v2 / plan_roofline_framework F1): when the
+            # roofline composite toggle is on, surface the full TraceLens
+            # ``analysis.md`` (snapshot id + gain in the bookend header)
+            # so the orchestration LLM grounds propose_action decisions
+            # in the actual report. Toggle stays default-off through F1
+            # so the legacy ``last_select_kernels`` summary remains the
+            # single source of TraceLens-derived state for existing
+            # sessions; F1-6 flips the default once smoke clears.
+            *(
+                [f"analysis_md={self._format_analysis_md_full()}"]
+                if getattr(self, "use_roofline_composite", False)
+                else []
+            ),
             # v0.8 §3.9 — the streak counter is a *fact* the LLM may
             # read (KEEP/REVERT counts are explicitly allowed per
             # Inv-9.1); only system-side *priorities* (action_scores)
@@ -3584,6 +3597,71 @@ class SharedState:
                 f"{entry.get('action','?')}:{entry.get('variant_name','?')}"
             )
         return parts or "(none)"
+
+    @staticmethod
+    def _strip_base64_data_urls(text: str) -> str:
+        """Drop base64 image payloads before prompt injection.
+
+        TraceLens ``analysis.md`` embeds charts as
+        ``![alt](data:image/png;base64,...)`` data URLs that can balloon
+        the section to hundreds of KB of opaque noise. Stripping is
+        in-memory only; the on-disk file stays intact for operators.
+
+        Cherry-picked from main alongside F1-2 (RooflineExecutor); the
+        helper module ``inference_optimizer/tracelens_md.py`` lands in
+        the same commit.
+        """
+        if not text:
+            return text or ""
+        from inference_optimizer.tracelens_md import strip_base64_data_urls
+        return strip_base64_data_urls(text)
+
+    def _format_analysis_md_full(self) -> str:
+        """F1-4 (Roofline-v2 N5): inject TraceLens analysis.md verbatim.
+
+        Roofline composite design §6.1 mandates that analysis.md is
+        handed to the orchestration LLM verbatim — no truncation, no
+        sub-agent interpretation layer. The full report renders between
+        ``=== TraceLens Analysis ... ===`` bookends so the LLM can
+        syntactically distinguish report content from surrounding
+        SharedState dump lines.
+
+        Header carries ``snapshot=N`` + ``gain at snapshot=X.XX%`` so
+        the LLM (and the orchestration.md re-profile guidance landed in
+        F1-5) can detect "report is stale, gain has moved by ≥3% since
+        snapshot" without parsing the body.
+
+        Render modes:
+          * cache empty / ``analysis_md_text`` missing → one-line hint
+            asking the LLM to propose ``roofline``.
+          * cache populated → full report between bookends.
+
+        Cherry-picked from /wekafs/zgong/Hyperloom main @ c6f0a71
+        ``shared_state.py:2772`` ; the N27 fallback-mode branch is
+        omitted because PolicyGate fallback (F3) is not yet on this
+        branch — the simpler default-hint message stands in until F3.
+        """
+        cached = self.last_trace_analyze or {}
+        md_text = cached.get("analysis_md_text") or ""
+        if not md_text:
+            return (
+                "(no TraceLens snapshot yet — propose `roofline` to "
+                "produce one; roofline is a composite action that "
+                "runs profile + trace_analyze atomically)"
+            )
+        md_text = self._strip_base64_data_urls(md_text)
+        snap = cached.get("roofline_snapshot_id", "?")
+        gain = cached.get("roofline_baseline_gain_at_snapshot", 0.0)
+        try:
+            gain_str = f"{float(gain):.2f}"
+        except (TypeError, ValueError):
+            gain_str = "?"
+        return (
+            f"\n=== TraceLens Analysis (snapshot #{snap}, "
+            f"gain at snapshot = {gain_str}%) ===\n"
+            f"{md_text}\n"
+            f"=== End TraceLens Analysis ===\n"
+        )
 
     def _format_last_select_kernels(self) -> str:
         if not self.last_select_kernels:
