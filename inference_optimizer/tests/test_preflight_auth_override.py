@@ -624,7 +624,13 @@ def test_validate_claude_model_aborts_when_catalog_unreachable(monkeypatch, caps
 
 
 def test_validate_claude_model_uses_proxy_url_when_available(monkeypatch):
-    """When auth-proxy is alive, probe routes through 127.0.0.1:4002."""
+    """When auth-proxy is alive AND no env override is set, probe routes
+    through 127.0.0.1:4002. The two env knobs
+    (``INFERENCE_OPTIMIZER_CATALOG_PROBE_URL`` /
+    ``OPENAI_BASE_URL``) take precedence over the proxy_urls argument,
+    so clear them here to isolate the proxy fallback path."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     seen_base_urls: list[str] = []
 
     def _capture_probe(**kw):
