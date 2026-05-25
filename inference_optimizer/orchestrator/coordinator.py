@@ -3624,11 +3624,18 @@ class Coordinator:
         req_kind = str(kind or "").strip()
         if target != "kernel" or self.shared_state.stop_reason:
             return None
-        # select_kernels is the prerequisite request itself. It is also used
-        # directly by tests/tools that pass an explicit trace_input, so allow it
-        # through; later backends/params/sweep are guarded until the result is
-        # cached in SharedState.
-        if req_kind == "select_kernels":
+        # select_kernels / trace_analyze IS the prerequisite request: it
+        # produces ``last_select_kernels`` / ``last_trace_analyze`` cache
+        # the rest of the chain consults. It is also used directly by
+        # tests / tools passing an explicit ``trace_input``, so allow it
+        # through; later backends/params/sweep are guarded until the
+        # result is cached in SharedState. (Main M4 renamed
+        # ``select_kernels`` → ``trace_analyze``; on this branch both
+        # request kinds dispatch to the same handler via the
+        # back-compat alias in ``kernel_request_handlers.py``, so the
+        # allowlist must accept both names to keep this carve-out
+        # working under both pre- and post-rename test surfaces.)
+        if req_kind in ("select_kernels", "trace_analyze"):
             return None
         if get_handler(req_kind) is None:
             return None
@@ -3644,13 +3651,22 @@ class Coordinator:
                 rule="execution_order",
                 hint="propose/delegate `profile` before select_kernels/run_optimization",
             )
-        select = self.shared_state.last_select_kernels or {}
+        # Main M4 renamed the cache field from ``last_select_kernels`` to
+        # ``last_trace_analyze``; this branch populates BOTH (legacy +
+        # canonical) on each handler success, but tests and external
+        # callers may seed only the canonical one. Accept either as the
+        # prerequisite cache.
+        select = (
+            self.shared_state.last_trace_analyze
+            or self.shared_state.last_select_kernels
+            or {}
+        )
         needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
-        if needs_select and req_kind != "select_kernels":
+        if needs_select and req_kind not in ("select_kernels", "trace_analyze"):
             return PolicyDenied(
-                f"request kind={req_kind!r} denied: select_kernels must run first",
+                f"request kind={req_kind!r} denied: trace_analyze must run first",
                 rule="execution_order",
-                hint="emit request kind='select_kernels' for last_profile_trace",
+                hint="emit request kind='trace_analyze' for last_profile_trace",
             )
         # Note (c900791): main also gates ``run_optimization`` here on a
         # gain-driven N19c rule (snapshot_id >= 1 + cheap-attempt
@@ -5975,11 +5991,16 @@ class Coordinator:
                     },
                     in_reply_to=request_msg.msg_id, priority=1,
                 ))
-                # Cache select_kernels output so subsequent identical
-                # requests are short-circuited next tick. Only cache real
-                # successful runs, not failures, to avoid sticky errors.
+                # Cache select_kernels / trace_analyze output so subsequent
+                # identical requests are short-circuited next tick. Only
+                # cache real successful runs, not failures, to avoid
+                # sticky errors. Main M4 renamed ``select_kernels`` →
+                # ``trace_analyze`` so accept both request kinds at the
+                # cache write site too — the back-compat alias on
+                # ``KERNEL_REQUEST_HANDLERS`` lets either name reach
+                # here.
                 if (
-                    kind == "select_kernels"
+                    kind in ("select_kernels", "trace_analyze")
                     and cache_hit_source is None
                     and result.get("status") in ("ok", "succeeded")
                 ):
@@ -6028,10 +6049,23 @@ class Coordinator:
                 )
 
     def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """Return a cached programmatic_handler result if applicable."""
-        if kind != "select_kernels":
+        """Return a cached programmatic_handler result if applicable.
+
+        Main M4 renamed ``select_kernels`` → ``trace_analyze``; both
+        request kinds dispatch to the same handler via the back-compat
+        alias and the cache lives under either of ``last_trace_analyze``
+        (canonical post-M4) or ``last_select_kernels`` (legacy resume
+        parity). Prefer the canonical field; fall back to the legacy
+        one so cached requests work regardless of which field the
+        handler write path populated last.
+        """
+        if kind not in ("select_kernels", "trace_analyze"):
             return None
-        cached = self.shared_state.last_select_kernels or {}
+        cached = (
+            self.shared_state.last_trace_analyze
+            or self.shared_state.last_select_kernels
+            or {}
+        )
         if not isinstance(cached, dict) or not cached:
             return None
         trace_input = payload.get("trace_input") or payload.get("trace_dir")
@@ -6048,7 +6082,7 @@ class Coordinator:
                 "reusable_native_kernel_ids", []
             ),
             "cached_at": cached.get("ts"),
-            "note": "served from shared_state.last_select_kernels cache",
+            "note": "served from shared_state.last_trace_analyze cache",
         }
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
@@ -7306,8 +7340,12 @@ class Coordinator:
                         (task.params or {}).get("base_extra_args") or ""
                     )
                 self.shared_state.last_profile_args = profile_args
-                # Stale select_kernels cache no longer matches this trace.
+                # Stale select_kernels / trace_analyze cache no longer matches
+                # this trace. Clear both (M4 main merge: ``last_trace_analyze``
+                # is the canonical post-rename field; ``last_select_kernels``
+                # is kept on this branch for v0.6 resume parity).
                 self.shared_state.last_select_kernels = {}
+                self.shared_state.last_trace_analyze = {}
                 changed = True
                 audit_extras["trace_path"] = str(trace_path)
                 audit_extras["profile_args"] = profile_args

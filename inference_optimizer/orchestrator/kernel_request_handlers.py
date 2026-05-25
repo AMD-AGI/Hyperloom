@@ -485,8 +485,8 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
 
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
     kernels = (
-        (state.last_select_kernels or {}).get("hot_kernels_top15")
-        or (state.last_select_kernels or {}).get("hot_kernels")
+        (state.last_trace_analyze or {}).get("hot_kernels_top15")
+        or (state.last_trace_analyze or {}).get("hot_kernels")
         or []
     )
     for item in kernels:
@@ -502,7 +502,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
 
     Orchestration often knows only ``kernel_id`` after a successful
     ``run_optimization``. The concrete artifact path lives in
-    ``last_kernel_opt`` and the source target lives in ``last_select_kernels``.
+    ``last_kernel_opt`` and the source target lives in ``last_trace_analyze``.
     Resolve them here so integrate applies the optimized source before
     re-baselining; never silently run an E2E benchmark without applying a patch.
     """
@@ -585,6 +585,14 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
     """
     def _run() -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        from .action_executors._multi_node_env import (
+            is_multi_node,
+            ray_gcs_address_from_state,
+        )
+        if is_multi_node():
+            addr = ray_gcs_address_from_state()
+            if addr:
+                env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
         return subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout_sec, env=env,
@@ -595,7 +603,7 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
 
 
 # ---------------------------------------------------------------------------
-async def select_kernels_handler(
+async def trace_analyze_handler(
     payload: dict, *, session_dir: Path,
 ) -> HandlerResult:
     """Run Hyperloom/kernel-agent's tracelens_analysis.py on a trace dir.
@@ -671,6 +679,22 @@ async def select_kernels_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
+    # Load the materialized baseline workload metadata once. Used twice:
+    # (1) here to feed CONC / OSL / RANDOM_RANGE_RATIO into the splitter
+    #     CLI flags (`--split-conc` / `--split-osl` / `--split-r`) so
+    #     TraceLens.TraceUtils.split_inference_trace_annotation picks the
+    #     correct steady-state window — without these the splitter falls
+    #     back to in-trace heuristics that can yield 0 chunks
+    #     (`trace_split_no_steady_state`) and collapse the whole
+    #     select_kernels / kernel_opt / integrate chain.
+    # (2) downstream below to enrich result.hot_kernels and the
+    #     kernel_candidates artifact with the same runtime context.
+    metadata = _load_materialized_workload_metadata(state.baseline_config_path)
+    workload = (
+        metadata.get("runtime_args", {}).get("workload", {})
+        if isinstance(metadata, dict) else {}
+    )
+
     cmd = [
         "python3",
         str(_kernel_agent_tool_path("tracelens_analysis.py")),
@@ -687,6 +711,28 @@ async def select_kernels_handler(
         cmd += ["--target-platform", str(target_platform)]
     if analysis_mode:
         cmd += ["--analysis-mode", str(analysis_mode)]
+
+    # Splitter workload hints. Priority chain: payload (explicit
+    # operator/critic override) > materialized baseline metadata > drop
+    # the flag entirely so tracelens_analysis.py keeps its existing env
+    # fallback (TRACELENS_SPLIT_* / CONC / OSL / RANDOM_RANGE_RATIO).
+    # Without these, the splitter has historically had to guess the
+    # mixed-window selection's PD ratio from heuristics; on workloads
+    # where heuristics miss, all three steady-state windows come back
+    # empty and `select_kernels` returns
+    # ``status=failed error=trace_split_no_steady_state``, blocking the
+    # entire kernel-optimization chain (select_kernels -> kernel_opt ->
+    # integrate -> operator_tuning -> deep_kernel_analysis).
+    split_conc = payload.get("split_conc") or workload.get("conc")
+    if split_conc not in (None, ""):
+        cmd += ["--split-conc", str(split_conc).strip()]
+    split_osl = payload.get("split_osl") or workload.get("osl")
+    if split_osl not in (None, ""):
+        cmd += ["--split-osl", str(split_osl).strip()]
+    split_r = payload.get("split_r") or workload.get("random_range_ratio")
+    if split_r not in (None, ""):
+        cmd += ["--split-r", str(split_r).strip()]
+
     capture_folder = (
         payload.get("capture_folder")
         or payload.get("graph_capture_path")
@@ -771,7 +817,9 @@ async def select_kernels_handler(
         # a ``None``-guard. Empty list = steady-state ("nothing wrong").
         result.setdefault("trace_health_warnings", [])
 
-        metadata = _load_materialized_workload_metadata(state.baseline_config_path)
+        # ``metadata`` was loaded once at the top of the handler so both
+        # the splitter CLI hints and the downstream candidate enrichment
+        # see the same materialized baseline workload state.
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
         candidates_path = result.get("candidates_path")
         if isinstance(candidates_path, str):
@@ -940,12 +988,23 @@ def _batch_kernel_candidates(
         )))
     except (TypeError, ValueError):
         max_attempts = 1
+    # PR-I: default min_gpu_pct must match SharedState.untried_hot_
+    # reusable_kernels' default (3.0). Earlier code defaulted to 0.0
+    # here, so the LLM saw an empty "untried" queue (gate >=3%) but
+    # _batch_kernel_candidates would still dispatch <3% candidates
+    # picked up via task_group fallback (e.g. rmsnorm group's k006 at
+    # gpu_pct=1.3% in Qwen3-30B-A3B-Base session 20260523T035235Z's
+    # third batch round). Mirroring the SharedState default keeps the
+    # two layers in sync and avoids tiny kernels eating 30-90 min of
+    # ladder wall-clock for no E2E gain.
+    from .shared_state import _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
     try:
         min_gpu_pct = float(os.environ.get(
-            "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0",
+            "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
+            _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
         ))
     except (TypeError, ValueError):
-        min_gpu_pct = 0.0
+        min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
     if session_dir is not None:
         try:
             from .shared_state import SharedState
@@ -1308,7 +1367,7 @@ async def _run_optimization_single(
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
 
-    # Same convention as :func:`select_kernels_handler`: pass the session
+    # Same convention as :func:`trace_analyze_handler`: pass the session
     # root so ``kernel_optimization.py`` lands its run artefacts at
     # ``<session_dir>/kernel-agent/runs/<session_id>/`` while still reading
     # ``<session_dir>/kernel-agent-workspace/<kernel_id>/`` for the
@@ -1376,6 +1435,15 @@ async def _run_optimization_single(
     # Give kernel_optimization.py time to handle its own backend timeout and
     # salvage partial artifacts. GEAK defaults to 90 min; OOB defaults to 60.
     timeout_sec = _optimization_wrapper_timeout_sec(payload)
+
+    from .action_executors._multi_node_env import is_multi_node
+
+    if is_multi_node():
+        from inference_optimizer.multi_node.cli import (
+            kill_inference_for_kernel_agent_best_effort,
+        )
+
+        await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
 
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
     result = _shape_tool_result(rc, stdout, stderr)
@@ -1555,6 +1623,48 @@ async def integrate_handler(
     )
     ctx = RunnerContext(task=fake_task, lease=None)
 
+    # Multi-node: apply_kernel_patch has just fanned the new source
+    # files to every pod. sglang must be FULLY restarted (not resume-
+    # pathed) so it re-imports the patched modules; otherwise the
+    # re-baseline measures the pre-patch process and integrate decisions
+    # become noise. We do the restart HERE (not inside BaselineExecutor)
+    # and set ctx.extra["mn_round_restarted"] so BaselineExecutor does
+    # NOT restart a second time. force_full_restart=True scopes the env
+    # override (MULTI_NODE_RESTART_RESUME_RUNNING=0) for this call only;
+    # subsequent non-integrate rounds keep their resume savings.
+    from .action_executors._multi_node_env import is_multi_node
+    if is_multi_node():
+        from .action_executors._multi_node_server_lifecycle import (
+            ServerRestartFailed,
+            restart_server_for_round,
+        )
+        try:
+            await restart_server_for_round(
+                extra_sglang_args=extra_args,
+                framework=os.environ.get("FRAMEWORK") or None,
+                model_path=(
+                    str(payload.get("model_path") or "").strip()
+                    or os.environ.get("MODEL_PATH") or None
+                ),
+                tp=int(os.environ.get("TP") or 0) or None,
+                ep=int(os.environ.get("EP") or 0) or None,
+                force_full_restart=True,
+            )
+            ctx.extra = {**(getattr(ctx, "extra", None) or {}),
+                         "mn_round_restarted": True}
+        except ServerRestartFailed as exc:
+            revert_result = _maybe_revert_kernel_patch(apply_result)
+            return {
+                "status": "failed",
+                "error_class": "mn_server_restart_failed_post_patch",
+                "error": str(exc),
+                "kernel_id": kernel_id,
+                "patch_path": patch_path,
+                "apply_result": apply_result,
+                "revert_result": revert_result,
+                "decision": "REVERT",
+            }
+
     try:
         bench_result = await BaselineExecutor(session_dir=session_dir)(ctx)
     except Exception as exc:  # noqa: BLE001
@@ -1612,25 +1722,24 @@ async def integrate_handler(
 
 
 # ---------------------------------------------------------------------------
-# F1-2 (roofline composite) — forward-compatible alias.
+# F1-2 (roofline composite) + main M4 — back-compat alias.
 #
 # Hyperloom main renamed ``select_kernels_handler`` to
 # ``trace_analyze_handler`` (the function does TraceLens analysis +
 # kernel selection in a single pass, so the new name is more accurate).
-# This branch keeps the legacy name as the canonical definition to
-# avoid touching the ~30 callsites that already import it; the alias
-# below lets cherry-picked F1+ code (RooflineExecutor) and its tests
-# import ``trace_analyze_handler`` unchanged.
-trace_analyze_handler = select_kernels_handler
+# The M4 merge adopts main's canonical ``trace_analyze_handler`` name;
+# the back-compat alias below keeps the ~30 legacy callsites that import
+# ``select_kernels_handler`` working unchanged.
+select_kernels_handler = trace_analyze_handler
 
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
-    "select_kernels":   select_kernels_handler,
+    "select_kernels":   trace_analyze_handler,
     # ``trace_analyze`` dispatch routes to the same handler as
     # ``select_kernels`` — RooflineExecutor (F1-2) calls the function
     # directly, but explicit dispatch entries keep the action-table
     # symmetric for future PolicyGate / audit code that keys on the
     # request kind.
-    "trace_analyze":    select_kernels_handler,
+    "trace_analyze":    trace_analyze_handler,
     "run_optimization": run_optimization_handler,
     "integrate":        integrate_handler,
     "apply_patch":      integrate_handler,   # alias — same flow

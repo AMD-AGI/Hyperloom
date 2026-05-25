@@ -271,6 +271,13 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 ):
     from inference_optimizer.orchestrator import kernel_request_handlers as krh
 
+    # PR-I (M4 main merge): ``_batch_kernel_candidates`` defaults
+    # ``min_gpu_pct`` to 3.0 to mirror the SharedState gate. The test
+    # candidates intentionally omit ``gpu_pct`` (the focus is the
+    # backend-fallback ladder, not the gpu_pct gate), so disable the
+    # gate via the documented env knob to keep the test focused on
+    # batch dispatch / backend ladder semantics.
+    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0")
     candidates = tmp_path / "kernel_candidates.json"
     candidates.write_text(
         """

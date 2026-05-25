@@ -3,6 +3,7 @@
 *.env
 !*.env.template
 kernel-agent/env.sh
+framework-agent/scripts/env.sh
 
 # Python
 __pycache__/
