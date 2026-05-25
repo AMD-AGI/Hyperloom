@@ -1,0 +1,25 @@
+........................................................................ [ 11%]
+........................................................................ [ 22%]
+........................................................................ [ 33%]
+........................................................................ [ 44%]
+........................................................................ [ 55%]
+........................................................................ [ 66%]
+........................................................................ [ 77%]
+........................................................................ [ 88%]
+........................................................................ [ 99%]
+...                                                                      [100%]
+=============================== warnings summary ===============================
+tests/test_conductor.py::TestIntentEmitter::test_emit_alert
+  /wekafs/zgong/Hyperloom-KB/robustness-agent/tests/test_conductor.py:70: DeprecationWarning: IntentEmitter writes intents directly into conductor.db, which is deprecated. Migrate to `python -m robustness_agent.runtime.cli tick` (subprocess transport, mirrors critic-agent).
+    emitter = IntentEmitter(conductor_db)
+
+tests/test_conductor.py::TestIntentEmitter::test_emit_kill_task
+  /wekafs/zgong/Hyperloom-KB/robustness-agent/tests/test_conductor.py:90: DeprecationWarning: IntentEmitter writes intents directly into conductor.db, which is deprecated. Migrate to `python -m robustness_agent.runtime.cli tick` (subprocess transport, mirrors critic-agent).
+    emitter = IntentEmitter(conductor_db)
+
+tests/test_conductor.py::TestIntentEmitter::test_emit_prune_branch
+  /wekafs/zgong/Hyperloom-KB/robustness-agent/tests/test_conductor.py:107: DeprecationWarning: IntentEmitter writes intents directly into conductor.db, which is deprecated. Migrate to `python -m robustness_agent.runtime.cli tick` (subprocess transport, mirrors critic-agent).
+    emitter = IntentEmitter(conductor_db)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+651 passed, 3 warnings in 32.16s
