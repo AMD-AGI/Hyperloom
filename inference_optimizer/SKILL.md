@@ -398,6 +398,8 @@ already handle the read-only-source case.
 
 ### Step 2 — Launch
 
+**Multi-node (`nodes >= 2`):** [`multi_node/SKILL.md`](multi_node/SKILL.md).
+
 ```bash
 inference_optimizer optimize \
   --model "$MODEL_PATH" \
