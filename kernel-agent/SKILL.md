@@ -67,7 +67,12 @@ are accepted as no-ops for backwards compat):
 - GEAK CLI from `GEAK_REF` (default `v3.2.0`) +
   `${HYPERLOOM_ROOT}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
-  `claude-opus-4-7`)
+  `claude-opus-4-7`). Run-mode default for the generated yaml is
+  controlled by `GEAK_RUN_MODE` (`quick` or `full`; defaults to `full`,
+  which selects the 2 h / 5-round `run.budgets.full` preset). Set
+  `GEAK_RUN_MODE=quick` before `install.sh` for the 1 h / 2-round smoke
+  preset. Other yaml budget knobs are not env-overridable on purpose —
+  edit `$GEAK_CONFIG` directly if you need to tune them per pod.
 - GEAK MCP tools — installed as four pip packages from
   `${HYPERLOOM_ROOT}/geak/mcp_tools/`. The bundled `minisweagent` imports
   these at preprocess + run time; missing any of them fails the GEAK
