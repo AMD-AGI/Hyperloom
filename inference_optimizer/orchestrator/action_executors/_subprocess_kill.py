@@ -205,6 +205,22 @@ def kill_my_spawned_server(
         pass
 
 
+# Sentinel ``returncode`` used when ``run_with_session_kill`` reaps a
+# child because its ``soft_deadline_sec`` elapsed (vs the legacy
+# ``timeout=`` hard cap which still raises ``TimeoutExpired``).
+# Callers that opted into the soft deadline detect this by checking
+# ``returncode == OVERTIME_KILL_RETURNCODE``; the ExploreExecutor in
+# particular turns this into the ``KILLED_OVERTIME`` per-variant
+# outcome (no tput, no fingerprint promotion).
+#
+# Value chosen so it cannot collide with a real POSIX signal-based
+# returncode (which is encoded as ``-N`` for signal ``N``; the largest
+# defined signal on Linux is well under 100). 909 is the canonical
+# Hyperloom "soft overtime kill" sentinel — grep this constant first
+# when triaging a mystery returncode.
+OVERTIME_KILL_RETURNCODE: int = -909
+
+
 def run_with_session_kill(
     cmd: list[str],
     *,
@@ -212,6 +228,7 @@ def run_with_session_kill(
     cwd: str | None = None,
     timeout: int | float | None = None,
     text: bool = True,
+    soft_deadline_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
     """``subprocess.run``-compatible call that ALSO tears down the entire
     descendant tree on every exit path (success, nonzero, timeout,
@@ -237,6 +254,18 @@ def run_with_session_kill(
     ``.returncode / .stdout / .stderr`` access) and re-raises
     ``subprocess.TimeoutExpired`` exactly like ``subprocess.run`` does.
 
+    ``soft_deadline_sec``: optional secondary deadline that fires
+    BEFORE the (typically much larger) ``timeout=`` hard cap. When
+    set, the helper polls the child every 0.5 s; once the deadline
+    elapses, the process tree is reaped and the function returns a
+    :class:`subprocess.CompletedProcess` with
+    ``returncode = OVERTIME_KILL_RETURNCODE`` (does NOT raise). This
+    lets the ExploreExecutor implement the per-variant
+    "wall-clock > baseline × ratio" early-kill rule (Fix E) while
+    preserving the legacy ``TimeoutExpired`` semantics for any
+    caller that doesn't opt in. Pass ``None`` (or any value ≤ 0) to
+    keep the legacy behaviour.
+
     Tests that previously patched ``subprocess.run`` should patch this
     function instead (e.g.
     ``patch("inference_optimizer.orchestrator.action_executors._subprocess_kill.run_with_session_kill")``)
@@ -254,7 +283,11 @@ def run_with_session_kill(
             **new_session_kwargs(),
         )
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            stdout, stderr = _communicate_with_soft_deadline(
+                proc,
+                hard_timeout=timeout,
+                soft_deadline_sec=soft_deadline_sec,
+            )
         except subprocess.TimeoutExpired:
             # Reap before re-raising so the caller's `finally:` /
             # `except:` doesn't see a still-running tree.
@@ -266,6 +299,23 @@ def run_with_session_kill(
             except subprocess.TimeoutExpired:
                 stdout, stderr = "", ""
             raise
+        except _SoftDeadlineExceeded as exc:
+            kill_my_spawned_server(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            log.info(
+                "_subprocess_kill: soft_deadline_sec=%.1fs exceeded "
+                "(elapsed=%.1fs); reaped tree with sentinel returncode=%d.",
+                exc.deadline_sec, exc.elapsed_sec, OVERTIME_KILL_RETURNCODE,
+            )
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=OVERTIME_KILL_RETURNCODE,
+                stdout=stdout if stdout is not None else ("" if text else b""),
+                stderr=stderr if stderr is not None else ("" if text else b""),
+            )
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=proc.returncode,
@@ -276,7 +326,73 @@ def run_with_session_kill(
         kill_my_spawned_server(proc)
 
 
+class _SoftDeadlineExceeded(Exception):
+    """Internal sentinel raised by :func:`_communicate_with_soft_deadline`
+    when the soft (Fix-E) wall-clock deadline elapses. NEVER bubbles
+    past :func:`run_with_session_kill` — converted into a sentinel
+    ``CompletedProcess`` instead.
+    """
+
+    def __init__(self, *, deadline_sec: float, elapsed_sec: float) -> None:
+        super().__init__(
+            f"soft deadline {deadline_sec:.1f}s elapsed "
+            f"(actual={elapsed_sec:.1f}s)"
+        )
+        self.deadline_sec = float(deadline_sec)
+        self.elapsed_sec = float(elapsed_sec)
+
+
+def _communicate_with_soft_deadline(
+    proc: subprocess.Popen,
+    *,
+    hard_timeout: int | float | None,
+    soft_deadline_sec: float | None,
+) -> tuple[str | bytes, str | bytes]:
+    """``proc.communicate`` shim that also enforces ``soft_deadline_sec``.
+
+    No-op fast path (``soft_deadline_sec`` falsy or ≤ 0) delegates
+    straight to ``proc.communicate(timeout=hard_timeout)`` so callers
+    that did not opt in see byte-identical behaviour.
+
+    When ``soft_deadline_sec`` is positive, polls ``proc.communicate``
+    in 0.5 s slices, raising :class:`_SoftDeadlineExceeded` once the
+    monotonic wall-clock exceeds the deadline. The legacy
+    ``hard_timeout`` is still enforced via ``communicate``'s own
+    timeout argument on the final slice so a stuck child can't dodge
+    both gates.
+    """
+    if soft_deadline_sec is None or float(soft_deadline_sec) <= 0.0:
+        return proc.communicate(timeout=hard_timeout)
+
+    deadline_sec = float(soft_deadline_sec)
+    poll_interval = 0.5
+    start = time.monotonic()
+    while True:
+        elapsed = time.monotonic() - start
+        remaining_soft = deadline_sec - elapsed
+        if remaining_soft <= 0.0:
+            raise _SoftDeadlineExceeded(
+                deadline_sec=deadline_sec, elapsed_sec=elapsed,
+            )
+        # The slice we wait this iteration: bounded above by the soft
+        # remaining AND the hard remaining (so ``TimeoutExpired`` still
+        # fires at the right wall-clock if the soft deadline is huge).
+        slice_sec = min(poll_interval, remaining_soft)
+        if hard_timeout is not None:
+            hard_remaining = float(hard_timeout) - elapsed
+            if hard_remaining <= 0.0:
+                # Let proc.communicate's own TimeoutExpired path fire.
+                return proc.communicate(timeout=0.0)
+            slice_sec = min(slice_sec, hard_remaining)
+        try:
+            return proc.communicate(timeout=slice_sec)
+        except subprocess.TimeoutExpired:
+            # Not yet done; loop to re-evaluate both deadlines.
+            continue
+
+
 __all__ = [
+    "OVERTIME_KILL_RETURNCODE",
     "kill_my_spawned_server",
     "new_session_kwargs",
     "run_with_session_kill",

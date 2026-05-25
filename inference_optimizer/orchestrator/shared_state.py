@@ -227,6 +227,14 @@ class SharedState:
     # downstream executors fall back to materializing the shipped YAML
     # against current process env when this is empty.
     baseline_config_path: str = ""
+    # Wall-clock seconds the baseline Magpie subprocess took to
+    # finish (success path only). Populated by Coordinator from the
+    # baseline executor's ``subprocess_runtime_sec`` and read by the
+    # ExploreExecutor to derive a per-variant overtime-kill deadline
+    # (``baseline_runtime_sec * SharedState.explore_overtime_kill_ratio``).
+    # Zero = "unset" → overtime kill is a no-op (variant uses the
+    # legacy timeout). Resume restores the value verbatim.
+    baseline_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
     # Full accepted configuration stack across action families. Each entry
     # records the incremental candidate that was accepted; current_best keeps
@@ -369,6 +377,22 @@ class SharedState:
     # when the operator has tuned the thresholds for their workload.
     gain_driven_kernel_opt: bool = False
     roofline_saturation_advisory: bool = False
+    # Per-variant overtime kill multiplier for ExploreExecutor: when
+    # > 0 AND ``baseline_runtime_sec`` > 0, single-variant Magpie runs
+    # in the explore loop are killed once their wall-clock exceeds
+    # ``baseline_runtime_sec * explore_overtime_kill_ratio``. The
+    # variant is recorded with ``outcome='KILLED_OVERTIME'`` +
+    # ``runtime_sec`` + ``wall_clock_ratio_vs_baseline`` (no tput) so
+    # the orchestration LLM can distinguish "ran too slow → early
+    # kill" from "benchmark crashed / timed out at the hard cap".
+    # Mirrored from ``--explore-overtime-kill-ratio`` at session
+    # start. The stack-rebench step does NOT use this gate — only the
+    # initial single-variant run (kernel rationale: a stack already
+    # carrying multiple winners can legitimately take longer than the
+    # bare baseline, and rebench is small enough that the hard
+    # ``variant_timeout_sec`` is a sufficient backstop). Default 1.10
+    # (kill at +10 % over baseline wall-clock).
+    explore_overtime_kill_ratio: float = 1.10
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
