@@ -22,7 +22,7 @@ from .base import Backend, BackendTurnResult
 
 
 # Coordinator renders inbox rows as:
-#   seq=N msg_id=<hex32> from=orchestration topic=request payload={'target_agent': 'kernel', 'kind': 'select_kernels', ...}
+#   seq=N msg_id=<hex32> from=orchestration topic=request payload={'target_agent': 'kernel', 'kind': 'trace_analyze', ...}
 _REQUEST_RE = re.compile(
     r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=request\s+payload=(.*)$",
     re.MULTILINE,
