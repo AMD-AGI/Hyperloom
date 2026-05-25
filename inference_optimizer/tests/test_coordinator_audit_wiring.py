@@ -144,6 +144,36 @@ async def test_promote_backends_records_success_attempt(session_dir):
         assert last["decision"] == "promoted"
         assert last["extras"]["best_variant_name"] == "v1"
         assert last["extras"]["candidate_extra_sglang_args"] == "--foo"
+        assert last["extras"]["promotion_rule"] == "single_shot"
+        assert last["extras"]["keep_threshold_pct"] == pytest.approx(0.2)
+        assert "gain_vs_cb" in last["extras"]["promotion_rule_detail"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_backends_discarded_records_below_threshold_rule(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.current_best = {"action": "baseline", "tput": 800.0}
+        task = _mk_task("backends", "t-be-2")
+        result = {
+            "grid_size": 2,
+            "single_results": [{"name": "v1"}, {"name": "v2"}],
+            "winners": [],
+            "best_variant": {"name": "v1"},
+            "output_throughput": 800.4,
+            "best_gain_pct": 0.05,
+            "base_tput": 800.0,
+        }
+        await c._promote_to_shared_state("backends", result, task=task)
+        last = c.shared_state.last_backends
+        assert last["decision"] == "discarded"
+        assert last["extras"]["promotion_rule"] == "below_threshold"
+        assert last["extras"]["variants_tested_count"] == 2
+        assert "single_shot_threshold=0.2%" in last["extras"]["promotion_rule_detail"]
     finally:
         await c.stop()
 
