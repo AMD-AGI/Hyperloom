@@ -179,7 +179,7 @@ jobs:
       # real leaderboard data, so we can compare week-over-week. The file is
       # generated manually via ci/build_production_leaderboard_pool.py and
       # refreshed only when we want to bring in newly-published models.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_leaderboard_2026-05-24.json' || github.event.inputs.candidates_file }}
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_leaderboard_2026-05-25.json' || github.event.inputs.candidates_file }}
       INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '60' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}

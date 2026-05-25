@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.parse
@@ -132,33 +133,74 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _load_inferencex_exclusions(path: Path | None) -> set[str]:
-    """Read ci/inferenceX_models.yaml and return HF model ids to exclude.
+def _load_inferencex_exclusions(path: Path | None) -> tuple[set[str], list[str]]:
+    """Read ci/inferenceX_models.yaml.
 
-    PyYAML is present in the workflow, but keep a tiny regex fallback so the
-    script stays usable in minimal local shells.
+    Returns ``(exact_hf_models, family_keywords)``:
+
+    * ``exact_hf_models`` — lower-cased ``hf_model`` fields under ``models:``.
+      Matched exactly against ``repo_id.lower()`` (legacy behavior, never
+      catches third-party quant variants such as ``unsloth/gpt-oss-120b``).
+    * ``family_keywords`` — lower-cased substrings from
+      ``production_pool_exclusion_keywords:``. ANY of these appearing inside
+      ``repo_id.lower()`` triggers exclusion. Used to cover InferenceX-owned
+      families + customer-roadmap "do-not-add" lists across all variants.
+
+    PyYAML is required for the keyword section; the legacy regex fallback only
+    recovers the exact ``hf_model`` field.
     """
     if not path or not path.exists():
-        return set()
+        return set(), []
     text = path.read_text(encoding="utf-8")
     try:
         import yaml  # type: ignore
         data = yaml.safe_load(text) or {}
         models = data.get("models") or []
-        return {
+        exact = {
             str(item.get("hf_model")).strip().lower()
             for item in models
             if isinstance(item, dict) and item.get("hf_model")
         }
+        keywords_raw = data.get("production_pool_exclusion_keywords") or []
+        keywords = [
+            str(k).strip().lower()
+            for k in keywords_raw
+            if isinstance(k, str) and str(k).strip()
+        ]
+        return exact, keywords
     except Exception:
-        out: set[str] = set()
+        exact: set[str] = set()
         for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("#"):
+            ls = line.strip()
+            if ls.startswith("#"):
                 continue
-            if line.startswith("hf_model:"):
-                out.add(line.split(":", 1)[1].strip().strip("'\"").lower())
-        return out
+            if ls.startswith("hf_model:"):
+                exact.add(ls.split(":", 1)[1].strip().strip("'\"").lower())
+        return exact, []
+
+
+# ─── repo-name <N>B heuristic for --min-params ─────────────────────────────
+_PARAM_RE = re.compile(r"(?<![\d.])(\d{1,4}(?:\.\d+)?)\s*b(?![a-z0-9])", re.IGNORECASE)
+
+
+def _parse_params_b(repo_id: str) -> float | None:
+    """Heuristic: extract '<N>B' from a HF repo id.
+
+    Picks the largest plausible match in [0.05, 2000] so MoE strings like
+    'Qwen3-235B-A22B' resolve to 235 instead of 22. Returns None when the
+    name contains no recognisable size token (≈15% of leaderboard rows).
+    """
+    nums: list[float] = []
+    for m in _PARAM_RE.findall(repo_id):
+        try:
+            n = float(m)
+        except ValueError:
+            continue
+        if 0.05 <= n <= 2000:
+            nums.append(n)
+    if not nums:
+        return None
+    return max(nums)
 
 
 def _quality_rank(task: dict[str, Any]) -> int:
@@ -185,11 +227,17 @@ def build_candidates(
     sort_mode: str,
     pool_id: str,
     excluded_models: set[str],
+    excluded_keywords: list[str] | None = None,
+    min_params_b: float = 0.0,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     candidates: list[dict[str, Any]] = []
+    keywords = [k for k in (excluded_keywords or []) if k]
     stats = {
         "rows_seen": len(rows),
         "models_excluded_inferencex": 0,
+        "models_excluded_keyword": 0,
+        "models_excluded_min_params": 0,
+        "models_kept_unparseable_size": 0,
         "models_with_positive_task": 0,
         "models_with_partial_task": 0,
         "models_with_leaderboard_record_only": 0,
@@ -199,9 +247,23 @@ def build_candidates(
         model = str(row.get("model") or "").strip()
         if not model:
             continue
-        if model.lower() in excluded_models:
+        model_lc = model.lower()
+        if model_lc in excluded_models:
             stats["models_excluded_inferencex"] += 1
             continue
+        if keywords and any(kw in model_lc for kw in keywords):
+            stats["models_excluded_keyword"] += 1
+            continue
+        if min_params_b > 0:
+            parsed = _parse_params_b(model)
+            if parsed is None:
+                # Name has no recognisable '<N>B' token. Leaderboard hides
+                # exact param count and 'size?' rows are dominated by ≥7B
+                # real models — keep them rather than risk false positives.
+                stats["models_kept_unparseable_size"] += 1
+            elif parsed < min_params_b:
+                stats["models_excluded_min_params"] += 1
+                continue
         tasks = [t for t in (row.get("tasks") or []) if isinstance(t, dict)]
         if not tasks:
             continue
@@ -293,12 +355,17 @@ def main() -> int:
     ap.add_argument("--max-models", type=int, default=1000)
     ap.add_argument("--min-models", type=int, default=1000,
                     help="Minimum corpus size; fills with partial/empty leaderboard rows when needed")
+    ap.add_argument("--min-params", type=float, default=0.0,
+                    help="Heuristic: drop rows whose repo_id parses to '<N>B' < this value (B). 0 disables.")
     ap.add_argument("--sort", choices=["latest", "gain", "model"], default="latest")
     ap.add_argument("--pool-id", default="")
     ap.add_argument("--output", default="")
     ap.add_argument("--exclude-inferencex-models",
                     default="ci/inferenceX_models.yaml",
-                    help="YAML mapping whose hf_model entries are excluded from this production pool")
+                    help="YAML with `models[].hf_model` (exact match) + "
+                         "`production_pool_exclusion_keywords` (substring match)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Run the full selection but print summary instead of writing the JSON")
     args = ap.parse_args()
 
     now = datetime.now(timezone.utc)
@@ -309,7 +376,9 @@ def main() -> int:
     )
 
     rows = iter_leaderboard_rows(args.leaderboard_url)
-    excluded_models = _load_inferencex_exclusions(Path(args.exclude_inferencex_models))
+    excluded_models, excluded_keywords = _load_inferencex_exclusions(
+        Path(args.exclude_inferencex_models)
+    )
     candidates, stats = build_candidates(
         rows,
         max_models=args.max_models,
@@ -317,6 +386,8 @@ def main() -> int:
         sort_mode=args.sort,
         pool_id=pool_id,
         excluded_models=excluded_models,
+        excluded_keywords=excluded_keywords,
+        min_params_b=args.min_params,
     )
     if len(candidates) < args.min_models:
         print(
@@ -333,6 +404,7 @@ def main() -> int:
         "policy": {
             "max_models": args.max_models,
             "min_models": args.min_models,
+            "min_params_b": args.min_params,
             "sort": args.sort,
             "primary_tier": "baseline_throughput > 0 and optimized_throughput > 0",
             "fallback_tiers": [
@@ -340,6 +412,7 @@ def main() -> int:
                 "leaderboard row exists but numeric throughput is empty/zero",
             ],
             "excluded_inferencex_models": sorted(excluded_models),
+            "exclusion_keywords": excluded_keywords,
             "refresh_mode": "manual",
         },
         "stats": {
@@ -348,6 +421,11 @@ def main() -> int:
         },
         "candidates": candidates,
     }
+    if args.dry_run:
+        print("[DRY RUN] would write to:", output)
+        print(json.dumps(payload["policy"], indent=2))
+        print(json.dumps(payload["stats"], indent=2))
+        return 0
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"wrote {output} ({len(candidates)} candidates)")
