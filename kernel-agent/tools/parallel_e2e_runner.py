@@ -293,12 +293,12 @@ def main() -> int:
                              "soon as they hit >=1.50x with passing correctness; "
                              "otherwise they iterate up to ~85%% of this budget "
                              "and SIGTERM at 100%%.")
-    parser.add_argument("--geak-budget-min", type=float, default=90,
+    parser.add_argument("--geak-budget-min", type=float, default=130,
                         help="Per-attempt wall-clock budget for GEAK only "
-                             "(default 90 min). GEAK runs N sub-agent tasks "
-                             "serially + a select_patch round; 60 min "
-                             "consistently SIGTERMs the select_patch round "
-                             "(observed r38/r39).")
+                             "(default 130 min). Aligns with GEAK v3.2.0 "
+                             "yaml run.budgets.full.total_s=7200s + "
+                             "finalize_grace + kill_buffer + safety so the "
+                             "prompt-quoted budget triggers mode=full.")
     parser.add_argument("--replicas-per-backend", type=int, default=2)
     parser.add_argument("--backends", default=None,
                         help="Comma list of agentic backends. Defaults to "

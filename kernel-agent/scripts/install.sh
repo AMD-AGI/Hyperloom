@@ -107,7 +107,7 @@ GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 # Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
 # memory together. Keep this overridable so future GEAK fixes can move Hyperloom
 # forward without reworking the installer contract.
-GEAK_REF="${GEAK_REF:-v3.1.0}"
+GEAK_REF="${GEAK_REF:-v3.2.0}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
@@ -535,20 +535,20 @@ ensure_geak() {
     # no-op so the flag is safe to keep unconditionally).
     _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
     run python3 -m pip install ${_PIP_FLAGS} "${HYPERLOOM_ROOT}/geak"
-    # GEAK v3.1.0 ships 5 MCP tools under mcp_tools/; all of them are
-    # imported by the bundled ``minisweagent`` at preprocess time:
+    # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
+    # by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
-    #   * profiler-mcp               — Metrix instrumented profiling
-    #                                  (preprocessor.py:1073 import)
-    #   * metrix-mcp                 — backend for profiler-mcp
+    #   * profiler-mcp               — Metrix-backed instrumented profiling
+    #                                  (preprocessor.py import); Metrix is now
+    #                                  a PyPI dep declared in its pyproject,
+    #                                  not a separate mcp_tools/ folder.
     #   * cross-session-memory-mcp   — GEAK_MEMORY_STORE_PATH retriever
     #   * automated-test-discovery   — pre-fills eval_command harness
-    # Installing only rag-mcp (the historical default) leaves the
-    # other four ``ModuleNotFoundError`` at runtime — observed on the
-    # 2026-05-15 Qwen3-32B GEAK attempts where ``profiler_mcp`` was
-    # missing and every GEAK attempt aborted in ~4 minutes with a
-    # zero-byte baseline. Install all five together.
-    for _geak_mcp in rag-mcp profiler-mcp metrix-mcp \
+    # v3.1.0 -> v3.2.0 change: ``metrix-mcp`` folder was removed and the
+    # metrix runtime is now consumed transitively via profiler-mcp's
+    # ``dependencies = ["metrix>=0.1.0"]``. Listing it here again would
+    # break install with "File ... does not exist".
+    for _geak_mcp in rag-mcp profiler-mcp \
                     cross-session-memory-mcp automated-test-discovery; do
       run python3 -m pip install ${_PIP_FLAGS} \
         "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
