@@ -2696,7 +2696,7 @@ class SharedState:
         # ``last_select_kernels`` schema; task_groups is added so the
         # downstream lookups behave identically regardless of which
         # path populated SharedState.
-        self.last_select_kernels = {
+        cached = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "hot_kernels_top15": summary,
@@ -2705,6 +2705,14 @@ class SharedState:
             "trace_health_warnings": warnings_cleaned,
             "ts": _now_iso(),
         }
+        self.last_select_kernels = cached
+        # Main M4 main merge: ``last_trace_analyze`` is the canonical
+        # post-rename name (RooflineExecutor / `record_trace_analyze`
+        # writes a richer schema there, but the legacy
+        # ``record_select_kernels`` writer must also mirror its slim
+        # schema into ``last_trace_analyze`` so the policy gate's cache
+        # lookup (which prefers the canonical field) finds the entry.
+        self.last_trace_analyze = dict(cached)
 
     def record_sweep(self, result: dict[str, Any]) -> None:
         if not isinstance(result, dict):
@@ -3699,6 +3707,12 @@ class SharedState:
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_select_kernels={self._format_last_select_kernels()}",
+            # Main M4 main merge: ``last_trace_analyze`` mirrors the
+            # canonical post-rename name; both keys carry the same
+            # slim cache schema, so we render both lines for backward
+            # compatibility with prompt-format-stable tests on either
+            # side (legacy regression_locks expects `last_trace_analyze=`).
+            f"last_trace_analyze={self._format_last_trace_analyze()}",
             # F1-4 (Roofline-v2 / plan_roofline_framework F1): when the
             # roofline composite toggle is on, surface the full TraceLens
             # ``analysis.md`` (snapshot id + gain in the bookend header)
@@ -4159,19 +4173,31 @@ class SharedState:
         )
 
     def _format_last_select_kernels(self) -> str:
-        if not self.last_select_kernels:
+        return self._format_select_kernels_blob(self.last_select_kernels)
+
+    def _format_last_trace_analyze(self) -> str:
+        # Main M4 renamed ``select_kernels`` → ``trace_analyze`` and the
+        # back-compat path ships the same dict shape under both keys; on
+        # this branch ``last_trace_analyze`` is populated alongside
+        # ``last_select_kernels`` for resume + v0.6 prompt-format parity.
+        # Prefer ``last_trace_analyze`` (canonical post-M4), fall back to
+        # ``last_select_kernels`` (legacy writer) so tests that seed only
+        # one of the two keys still render meaningfully.
+        blob = self.last_trace_analyze or self.last_select_kernels
+        return self._format_select_kernels_blob(blob)
+
+    def _format_select_kernels_blob(self, blob: dict[str, Any] | None) -> str:
+        if not blob:
             return "(none)"
         ids = [
             str(e.get("kernel_id"))
-            for e in self.last_select_kernels.get("hot_kernels_top15", [])
+            for e in blob.get("hot_kernels_top15", [])
             if isinstance(e, dict) and e.get("kernel_id")
         ]
-        reusable = list(
-            self.last_select_kernels.get("reusable_native_kernel_ids", [])
-        )
+        reusable = list(blob.get("reusable_native_kernel_ids", []))
         base = (
-            f"trace={self.last_select_kernels.get('trace_input','?')} "
-            f"candidates_path={self.last_select_kernels.get('candidates_path','?')} "
+            f"trace={blob.get('trace_input','?')} "
+            f"candidates_path={blob.get('candidates_path','?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
         # T3 / T4 finishing-touches: when TraceLens emitted a routing
@@ -4184,7 +4210,7 @@ class SharedState:
         # and omit the suffix entirely in the steady-state (no
         # warnings) so existing prompt-format-stable tests don't see
         # gratuitous additions.
-        warnings = self.last_select_kernels.get("trace_health_warnings") or []
+        warnings = blob.get("trace_health_warnings") or []
         if not warnings:
             return base
         rendered: list[str] = []
