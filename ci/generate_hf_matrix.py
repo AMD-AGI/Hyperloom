@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from optimize_submit import HuggingFaceClient   # noqa: E402
 
 DEFAULT_CRON_CANDIDATES_FILE = (
-    "ci/candidates/production_1000_from_leaderboard_2026-05-24.json"
+    "ci/candidates/production_1000_from_leaderboard_2026-05-25.json"
 )
 
 
