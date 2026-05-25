@@ -390,7 +390,18 @@ ensure_node() {
 
   log "installing Node.js 20 from NodeSource"
   apt-get -y purge libnode-dev libnode72 nodejs nodejs-doc npm >/dev/null 2>&1 || true
-  if ! curl -fsSL https://deb.nodesource.com/setup_20.x 2>/dev/null | bash - >/dev/null 2>&1; then
+  local ns_url="https://deb.nodesource.com/setup_20.x"
+  local ns_sha="2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be"
+  local ns_script="/tmp/nodesource_setup_20.x"
+  if ! curl -fsSL "$ns_url" -o "$ns_script"; then
+    verify_die "NodeSource setup download failed; cannot install Node.js/npm for claude/codex CLIs"
+    return 0
+  fi
+  if ! echo "${ns_sha}  ${ns_script}" | sha256sum -c - >/dev/null 2>&1; then
+    verify_die "NodeSource setup SHA256 mismatch; aborting Node.js/npm install"
+    return 0
+  fi
+  if ! bash "$ns_script" >/dev/null 2>&1; then
     verify_die "NodeSource setup failed; cannot install Node.js/npm for claude/codex CLIs"
     return 0
   fi
