@@ -113,27 +113,88 @@ _BENCH_SERVING_SENTINEL = "PROFILE_EXTRA_BODY"
 _BENCH_SERVING_LOCK_PATH = "/tmp/hyperloom_benchmark_serving_patcher.lock"
 
 
+def _discover_inferencex_roots(
+    inferencex_path: Path | str | None,
+) -> list[Path]:
+    """Return every InferenceX checkout root Hyperloom should patch.
+
+    #210 root cause (Deval, 2026-05-15 — see issue #210 comments 4 + 6):
+    Magpie loads its own bundled InferenceX from
+    ``$MAGPIE_DIR/InferenceX`` at runtime, NOT from
+    ``$INFERENCEX_PATH``. If those two paths differ, patching only
+    ``$INFERENCEX_PATH`` leaves Magpie's actual runtime copy untouched
+    — ``profile_by_stage=True`` leaks through, ``PROFILE_EXTRA_BODY``
+    is ignored, and the trace folder ends up with separate
+    ``_extend_*`` / ``_decode_*`` files instead of the expected
+    ``_steady_state_*`` (the smoking-gun symptom mohbasit reported on
+    the same issue).
+
+    Patches ALL discovered roots (deduplicated by resolved absolute
+    path) so the patch reaches whichever InferenceX Magpie actually
+    imports at runtime:
+
+    1. ``inferencex_path`` arg (caller-provided override)
+    2. ``$INFERENCEX_PATH`` env (existing behaviour, PR #207's path)
+    3. ``$MAGPIE_DIR/InferenceX`` (the new path — the #210 fix)
+
+    Returns ``[]`` when no roots resolve to existing directories;
+    callers fail-soft as before. Same paths from multiple sources
+    collapse to one entry (the standard install layout where
+    ``$INFERENCEX_PATH = $MAGPIE_DIR/InferenceX`` produces one root,
+    not two).
+    """
+    roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(candidate: Path | str | None) -> None:
+        if not candidate:
+            return
+        try:
+            resolved = Path(candidate).expanduser().resolve()
+        except OSError:
+            return
+        if not resolved.is_dir():
+            return
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        roots.append(resolved)
+
+    _add(inferencex_path)
+    _add(os.environ.get("INFERENCEX_PATH", "").strip() or None)
+    magpie_dir = os.environ.get("MAGPIE_DIR", "").strip()
+    if magpie_dir:
+        _add(Path(magpie_dir) / "InferenceX")
+    return roots
+
+
+def _resolve_benchmark_lib_paths(
+    inferencex_path: Path | str | None,
+) -> list[Path]:
+    """Return every existing ``<root>/benchmarks/benchmark_lib.sh`` to
+    patch (one per InferenceX root from :func:`_discover_inferencex_roots`).
+
+    Returns ``[]`` when no root has the expected file so callers can
+    treat "no InferenceX checkout" as "skip patching".
+    """
+    out: list[Path] = []
+    for root in _discover_inferencex_roots(inferencex_path):
+        candidate = root / "benchmarks" / "benchmark_lib.sh"
+        if candidate.is_file():
+            out.append(candidate)
+    return out
+
+
+# Back-compat: existing callers / tests that import this single-path
+# helper get the first discovered candidate (or None). New code must
+# use :func:`_resolve_benchmark_lib_paths` to patch every root.
 def _resolve_benchmark_lib_path(
     inferencex_path: Path | str | None,
 ) -> Path | None:
-    """Resolve ``<inferencex_root>/benchmarks/benchmark_lib.sh``.
-
-    Returns ``None`` when the path is unconfigured or missing on disk
-    so callers can treat "no InferenceX checkout" as "skip patching"
-    (this is what unit tests need — they exercise profile YAML
-    rendering without provisioning a real InferenceX tree).
-    """
-    root: Path | None = None
-    if inferencex_path:
-        root = Path(inferencex_path)
-    else:
-        env = os.environ.get("INFERENCEX_PATH", "").strip()
-        if env:
-            root = Path(env)
-    if root is None:
-        return None
-    candidate = root / "benchmarks" / "benchmark_lib.sh"
-    return candidate if candidate.is_file() else None
+    """Single-path back-compat shim — returns first
+    :func:`_resolve_benchmark_lib_paths` result."""
+    paths = _resolve_benchmark_lib_paths(inferencex_path)
+    return paths[0] if paths else None
 
 
 @contextmanager
@@ -262,51 +323,79 @@ def ensure_benchmark_lib_patched(
     lock entirely when the file is already patched (which is the case
     for every call after the first on a given checkout).
     """
-    src = _resolve_benchmark_lib_path(inferencex_path)
-    if src is None:
+    sources = _resolve_benchmark_lib_paths(inferencex_path)
+    if not sources:
         log.info(
-            "_inferencex_patcher: INFERENCEX_PATH unset or "
+            "_inferencex_patcher: no InferenceX root discovered "
+            "(checked $INFERENCEX_PATH, $MAGPIE_DIR/InferenceX) or "
             "benchmark_lib.sh missing — skipping patch (this is fine "
             "for tests and dry-runs without a real InferenceX tree)",
         )
         return False
 
-    if _is_patched(src):
-        return True
+    # #210 fix: patch every discovered InferenceX root, not just the
+    # first. Magpie loads its bundled InferenceX from
+    # $MAGPIE_DIR/InferenceX at runtime regardless of $INFERENCEX_PATH;
+    # patching only one of the two leaves the actual runtime copy
+    # untouched. Single-lock-for-all-paths is fine — each individual
+    # patch is microsecond-fast, and the loop preserves atomic-replace
+    # per-file.
+    any_patched = False
+    pre_patched = [src for src in sources if _is_patched(src)]
+    if len(pre_patched) == len(sources):
+        return True  # all paths already patched, fast-path no lock
 
     with _file_lock(_LOCK_PATH):
-        # Re-check under the lock: another process may have patched
-        # while we were blocked on flock.
-        if _is_patched(src):
-            return True
-        return _apply_patch_atomic(src)
+        for src in sources:
+            # Re-check under the lock: another process may have patched
+            # while we were blocked on flock.
+            if _is_patched(src):
+                any_patched = True
+                continue
+            if _apply_patch_atomic(src):
+                any_patched = True
+            else:
+                log.warning(
+                    "_inferencex_patcher: failed to patch %s; other "
+                    "discovered roots will still be attempted", src,
+                )
+    return any_patched
 
 
 # =====================================================================
 # PR-D §2: PROFILE_EXTRA_BODY consumer patch for benchmark_serving.py
 # =====================================================================
+def _resolve_benchmark_serving_paths(
+    inferencex_path: Path | str | None,
+) -> list[Path]:
+    """Return every existing
+    ``<root>/utils/bench_serving/benchmark_serving.py`` to patch
+    (one per InferenceX root from :func:`_discover_inferencex_roots`).
+
+    Independent of the benchmark_lib.sh resolver because the two
+    patches are independently useful: shape-aware steady-state windows
+    (this one — PROFILE_EXTRA_BODY) and NUM_PROMPTS honouring (the
+    other) sit on different files.
+
+    #210 fix: includes Magpie's bundled InferenceX so Hyperloom
+    patches the file Magpie actually loads at runtime, not just
+    whatever ``$INFERENCEX_PATH`` resolves to.
+    """
+    out: list[Path] = []
+    for root in _discover_inferencex_roots(inferencex_path):
+        candidate = root / "utils" / "bench_serving" / "benchmark_serving.py"
+        if candidate.is_file():
+            out.append(candidate)
+    return out
+
+
 def _resolve_benchmark_serving_path(
     inferencex_path: Path | str | None,
 ) -> Path | None:
-    """Resolve ``<inferencex_root>/utils/bench_serving/benchmark_serving.py``.
-
-    Returns ``None`` for the same reasons :func:`_resolve_benchmark_lib_path`
-    does (no INFERENCEX_PATH, or file missing). Independent of the
-    benchmark_lib.sh resolver because the two patches are independently
-    useful: shape-aware steady-state windows (this one) and
-    NUM_PROMPTS honouring (the other) sit on different files.
-    """
-    root: Path | None = None
-    if inferencex_path:
-        root = Path(inferencex_path)
-    else:
-        env = os.environ.get("INFERENCEX_PATH", "").strip()
-        if env:
-            root = Path(env)
-    if root is None:
-        return None
-    candidate = root / "utils" / "bench_serving" / "benchmark_serving.py"
-    return candidate if candidate.is_file() else None
+    """Single-path back-compat shim — returns first
+    :func:`_resolve_benchmark_serving_paths` result."""
+    paths = _resolve_benchmark_serving_paths(inferencex_path)
+    return paths[0] if paths else None
 
 
 def _is_benchmark_serving_patched(src: Path) -> bool:
@@ -402,23 +491,40 @@ def ensure_benchmark_serving_patched(
     the two patches don't serialize on each other (typical workflow
     calls both once per profile run).
     """
-    src = _resolve_benchmark_serving_path(inferencex_path)
-    if src is None:
+    sources = _resolve_benchmark_serving_paths(inferencex_path)
+    if not sources:
         log.info(
-            "_inferencex_patcher: INFERENCEX_PATH unset or "
+            "_inferencex_patcher: no InferenceX root discovered "
+            "(checked $INFERENCEX_PATH, $MAGPIE_DIR/InferenceX) or "
             "benchmark_serving.py missing — skipping PROFILE_EXTRA_BODY "
             "patch (this is fine for tests and dry-runs without a real "
             "InferenceX tree)",
         )
         return False
 
-    if _is_benchmark_serving_patched(src):
-        return True
+    # #210 fix: patch every discovered InferenceX root, not just the
+    # first. Magpie loads its bundled InferenceX at runtime; patching
+    # only $INFERENCEX_PATH leaves Magpie's $MAGPIE_DIR/InferenceX
+    # copy untouched, which is exactly the silent failure mode Deval
+    # diagnosed in #210 comments 4 + 6.
+    if all(_is_benchmark_serving_patched(src) for src in sources):
+        return True  # all paths already patched, fast-path no lock
 
+    any_patched = False
     with _file_lock(_BENCH_SERVING_LOCK_PATH):
-        if _is_benchmark_serving_patched(src):
-            return True
-        return _apply_benchmark_serving_patch_atomic(src)
+        for src in sources:
+            if _is_benchmark_serving_patched(src):
+                any_patched = True
+                continue
+            if _apply_benchmark_serving_patch_atomic(src):
+                any_patched = True
+            else:
+                log.warning(
+                    "_inferencex_patcher: failed to PROFILE_EXTRA_BODY-"
+                    "patch %s; other discovered roots will still be "
+                    "attempted", src,
+                )
+    return any_patched
 
 
 __all__ = ["ensure_benchmark_lib_patched", "ensure_benchmark_serving_patched"]
