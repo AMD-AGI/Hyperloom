@@ -2508,16 +2508,19 @@ def main() -> int:
     parser.add_argument("--budget-minutes", type=float, default=60.0,
                         help="Per-attempt wall-clock budget for claude/codex "
                              "OOB backends. GEAK uses --geak-budget-min.")
-    parser.add_argument("--geak-budget-min", type=float, default=130.0,
+    # Default tracks $GEAK_RUN_MODE (exported by install.sh / env.sh):
+    # quick (yaml total_s=3600s) -> 65 min, full (yaml total_s=7200s) -> 130 min.
+    # Both sit above their yaml total_s + finalize_grace + kill_buffer + safety,
+    # so the prompt-quoted budget triggers the matching mode (mini.py:435).
+    _geak_budget_default = 65.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
+    parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
                         help="Per-attempt wall-clock budget for GEAK only "
-                             "(default 130 min). Aligns with GEAK v3.2.0 "
-                             "yaml run.budgets.full.total_s=7200s + "
-                             "finalize_grace_s=300s + kill_buffer_s=60s + "
-                             "safety margin, so the prompt-quoted budget "
-                             "triggers GEAK's mode=full path (mini.py:435 "
-                             "task_extracted_mode). Older 90 min default "
-                             "fell between GEAK quick (60) and full (120), "
-                             "downgrading runs to mode=quick.")
+                             "(default tracks $GEAK_RUN_MODE: full -> 130, "
+                             "quick -> 65; both aligned with yaml "
+                             "run.budgets.<mode>.total_s + finalize_grace + "
+                             "kill_buffer + safety so the prompt-quoted "
+                             "budget triggers the matching GEAK mode at "
+                             "mini.py:435 task_extracted_mode).")
     parser.add_argument("--micro-speedup", type=float, default=None)
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
