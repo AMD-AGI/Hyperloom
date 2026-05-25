@@ -213,27 +213,51 @@ class KernelAgentToolTests(unittest.TestCase):
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
-        self.assertIn('GEAK_REF="${GEAK_REF:-v3.1.0}"', install_text)
-        self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"', install_text)
-        # All five GEAK v3.1.0 MCP tools must be pip-installed; minisweagent
-        # imports profiler_mcp / metrix_mcp / cross_session_memory_mcp /
-        # automated_test_discovery in addition to rag-mcp. The
-        # ``for _geak_mcp in ...; do pip install ...; done`` loop has to
-        # include all five, in any order.
+        self.assertIn('GEAK_REF="${GEAK_REF:-v3.2.0}"', install_text)
+        # pip flags are factored into `_PIP_FLAGS`; assert the core flags
+        # survive (prefix match allows future additions) and the install line
+        # references the variable.
+        self.assertIn('_PIP_FLAGS="-q --no-cache-dir', install_text)
+        self.assertIn('python3 -m pip install ${_PIP_FLAGS} "${HYPERLOOM_ROOT}/geak"', install_text)
+        # GEAK v3.2.0 ships 4 MCP tool folders; minisweagent imports
+        # profiler_mcp / cross_session_memory_mcp / automated_test_discovery
+        # in addition to rag-mcp. Metrix is consumed transitively as a
+        # PyPI dependency of profiler-mcp (no standalone metrix-mcp folder
+        # in v3.2.0). Regression-guard: install.sh must NOT pip-install a
+        # ``mcp_tools/metrix-mcp`` path (it does not exist in v3.2.0 and
+        # was causing install to fail with "File ... does not exist").
+        # We assert on the path form to allow human-readable comments that
+        # explain the v3.1.0 -> v3.2.0 removal to keep mentioning the name.
         for _mcp in (
             "rag-mcp",
             "profiler-mcp",
-            "metrix-mcp",
             "cross-session-memory-mcp",
             "automated-test-discovery",
         ):
             self.assertIn(_mcp, install_text)
+        # The actual install loop iterates over hyphenated names; v3.1.0
+        # had ``rag-mcp profiler-mcp metrix-mcp ...``. Pin the v3.2.0
+        # ordering so accidental re-adding of ``metrix-mcp`` between
+        # ``profiler-mcp`` and ``cross-session-memory-mcp`` regresses
+        # this test (the comment block above is allowed to mention
+        # ``metrix-mcp`` for human readers).
         self.assertIn(
-            'python3 -m pip install -q --no-cache-dir \\\n'
+            "for _geak_mcp in rag-mcp profiler-mcp \\\n"
+            "                    cross-session-memory-mcp automated-test-discovery; do",
+            install_text,
+        )
+        self.assertIn(
+            'python3 -m pip install ${_PIP_FLAGS} \\\n'
             '        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"',
             install_text,
         )
-        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE:-cuda}"', install_text)
+        # GEAK_RAG_INDEX_DEVICE_VAL was refactored from a single-line `:-cuda`
+        # default into an auto-detect block (rocm-smi / torch.cuda) with an
+        # explicit env override. Assert the two semantic invariants instead of
+        # the old literal: cuda remains the preferred default, and the env var
+        # can still override.
+        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cuda"', install_text)
+        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"', install_text)
         self.assertIn("python3 scripts/build_index.py --force --device", install_text)
         self.assertIn("ensure_node()", install_text)
         self.assertIn("installing Node.js 20 from NodeSource", install_text)
