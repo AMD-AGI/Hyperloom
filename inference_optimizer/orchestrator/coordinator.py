@@ -7259,6 +7259,12 @@ class Coordinator:
                     "profile_workspace": result.get("profile_workspace"),
                     "degraded": bool(result.get("degraded", False)),
                 }
+                # N27 — reset the outer roofline failure streak on a
+                # successful snapshot. The per-phase fallback (commit
+                # 6078012) already keeps the run alive when roofline
+                # keeps failing; the streak is exposed for prompt-side
+                # visibility only.
+                self.shared_state.roofline_failure_streak = 0
                 changed = True
             else:
                 audit_decision = "discarded"
@@ -7267,6 +7273,14 @@ class Coordinator:
                     "error_class": result.get("error_class"),
                     "error": result.get("error"),
                 }
+                # N27 — bump the outer failure streak. The action_failure
+                # audit ledger already records the structured ``error_class``
+                # / ``error`` fields; this counter mirrors that signal on
+                # SharedState so prompt renderers (``_format_analysis_md_full``)
+                # can surface the cumulative count without having to grep
+                # ``action_attempts``.
+                self.shared_state.roofline_failure_streak += 1
+                changed = True
                 # Per-phase fallback on roofline failure (operator-
                 # requested 2026-05-25 after the TraceLens-patch-missing
                 # incident that left both EXPLORE-entry and KERNEL-entry
