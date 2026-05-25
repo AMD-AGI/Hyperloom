@@ -86,3 +86,48 @@ denial 永真,合并后 `kernel_opt` 永久锁死 → 整个 KERNEL phase 跑不
 | `sub_agent_runner.py` | "ours";F1/F2 不需要扩 lease 类型 |
 | `paths.py` / `session_paths.py` | "ours";v0.6 路径常量已删 |
 | 5 个测试文件 (test_p0_1_protocol / p1_2_full_action_catalogue / p5_decision / prompt_assets / required_step_gates) | 大概率 "ours"(本 branch 的 PolicyGate 规则集和 main 不同);case-by-case |
+
+## 类别 7: N-series follow-up commits (M3 决策表)
+
+> M3-extracted: which Nxx commits from `origin/main` between `c6f0a71`
+> (PR #288 merge) and `m3-staging` were ADOPTED / ADAPTED / DROPPED.
+> See `plan_main_merge/M3_pure_n_extracts.MD` for per-N rationale.
+
+| N | Decision | Reason / replacement |
+|---|---|---|
+| N5 | DONE in F1-5 | analysis.md verbatim injection already ported |
+| N6 | ADOPT CP | ClaudeBackend cache hit metric (M3 commit) |
+| N9 | ADOPT MP | PolicyGate done in F3-1; doc + adapted test ported in M3 |
+| N10 | ADOPT CP | RooflineExecutor SharedState persist (M3 commit) |
+| N11 | DONE earlier | `strip_base64_data_urls` already on branch |
+| N12 | DONE in F1-5 | orchestration.md hard rules + analysis.md → action mapping |
+| N13 | DROP | depends on scoreboard (retired §3.9) |
+| N14 | DROP | scoreboard counter-driven kernel_opt unlock |
+| N15 | DONE in M2 | auto-source `kernel-agent.env.sh` |
+| N16 | DONE in M2 | revert applied (no-op on this branch) |
+| N17 | DONE in M2 | per-model+per-launch session_dir layout |
+| N18 / N18b | DROP | catalog rewrite for the retired scoreboard |
+| N19c | DONE in F3-5 | gain-driven kernel_opt unlock (uses `gain_per_stack_entry`, not v0.6 `backends_attempts`) |
+| N20-A | DROP | v0.6-only backends/params variant subset selection |
+| N21 | DONE in F3-4 | `roofline_saturation_advisory` rule |
+| N22 | DROP (infra kept, no callers) | `_analysis_keyword_map.py` retained as reference; F3 does not wire the advisory rule |
+| N23 | DONE in M2 | `--resume-from` + `find_latest_per_session_dir` |
+| N24 | DONE in M2 | kernel-agent env hard-fail |
+| N25 | ADOPT CP | TraceLens `--steady-state-mode` + empty-chunk hard-fail |
+| N26 | ADOPT MP | auto-retry trace_analyze on chunk warnings |
+| N27 | ADAPT | port `roofline_failure_streak` counter only; main's PolicyGate fallback targets v0.6 `backends/params/comm_optimization` which this branch dropped (commit 6078012 already handles per-phase fallback) |
+| N28 / N29 / N35 / N37 | DROP | all reference `validate_stack` (retired §3.4) |
+| N30 | DROP | scoreboard "cheap-exhausted deep boost" |
+| N31 (main form) | DONE in F3-3 differently | F3-3 retired the auto-enqueue final-roofline; this branch uses gain-only freshness |
+| N31 (report-only part) | ADOPT MP | `_format_roofline_comparison_section` in report.py |
+| N32 | DROP | `to_action_scores_summary` renders the retired scoreboard; backfill targets `last_trace_analyze_baseline` (also retired) |
+| N33 | ADOPT CP | idle-tick early-close + critic archival exception |
+| N34 | ADOPT CP | dispatcher resilience + report-success exits run loop |
+| N36 | ADOPT CP | TraceLens chunk-quality gate (paired with N26 auto-retry) |
+| N38 | ADOPT MP | per-action verdict_class metadata + action_verdict_policy lookup; v0.6 actions dropped from the test's expected-buckets list |
+
+Reconciliation summary (m3-done):
+
+- **ADOPTED**: 14 of 28 (~50%)
+- **DROPPED**: 9 (scoreboard / validate_stack / v0.6 dependencies)
+- **DONE in earlier F/M phases**: 5
