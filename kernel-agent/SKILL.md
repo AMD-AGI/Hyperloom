@@ -346,7 +346,7 @@ than a silent skip.
 - **Default budget**:
   - claude / codex / cursor: **60 minutes** per attempt (`--backend-budget-min 60`)
   - GEAK: tracks `$GEAK_RUN_MODE` (set by `install.sh`, exported via
-    `kernel-agent.env.sh`). `full` (default) → **130 min**, `quick` → **65 min**.
+    `kernel-agent.env.sh`). `full` (default) → **130 min**, `quick` → **70 min**.
     Both `kernel_optimization.py` and `parallel_e2e_runner.py` read
     `$GEAK_RUN_MODE` to pick the `--geak-budget-min` default; override by
     passing the flag explicitly.
@@ -365,7 +365,7 @@ than a silent skip.
   `run.budgets.full.total_s=7200` (2 h, 5 rounds). GEAK's mini.py:435
   resolves mode by LLM-parsing the prompt-quoted budget: <120 min → quick,
   >=120 min → full. 130 min ≥ full.total_s (7200s) + finalize_grace_s (300s)
-  + kill_buffer_s (60s) + safety, and 65 min ≥ quick.total_s (3600s) + the
+  + kill_buffer_s (60s) + safety, and 70 min ≥ quick.total_s (3600s) + the
   same finalize_grace + kill_buffer + safety. Defaults sit one tier above
   their respective yaml total_s so the matching mode's last round +
   select_patch can complete (vs the old uniform 90 min default which fell
