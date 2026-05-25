@@ -91,12 +91,16 @@ fi
 echo "  OK ($SS_FIELDS v0.8 fields confirmed)"
 
 # ---- Section 6: v0.8 test files exist -------------------------------------
+#
+# Commit 247888e (Sun May 24 2026) renamed the milestone-prefixed
+# files; the table below maps each pre-rename name to its post-rename
+# home so the check passes either way.
 echo "[6/6] v0.8 test files"
 V08_TESTS=(
   "inference_optimizer/tests/test_phase_force_exit.py"
   "inference_optimizer/tests/test_assess_remaining_gaps.py"
-  "inference_optimizer/tests/test_v08_m2_phase_machine.py"
-  "inference_optimizer/tests/test_v08_m5_specialist.py"
+  "inference_optimizer/tests/test_phase_state_machine.py"        # was test_v08_m2_phase_machine.py
+  "inference_optimizer/tests/test_per_domain_prompts.py"          # absorbed test_v08_m5_specialist.py
   "inference_optimizer/tests/test_specialist_subprocess.py"
 )
 for f in "${V08_TESTS[@]}"; do
