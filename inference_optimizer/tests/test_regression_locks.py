@@ -14,7 +14,7 @@ Locks the three P3 fixes uncovered by the resume3 1h validation
   immediately after the handler responds, so the next reactor pass for
   that agent doesn't see the request in its inbox.
 
-* **Bug C** Orchestration fabricated trace paths for ``select_kernels``
+* **Bug C** Orchestration fabricated trace paths for ``trace_analyze``
   REQUESTs because SharedState never exposed the trace path produced by
   ``ProfileExecutor``. Fix: ``Coordinator._promote_to_shared_state`` writes
   ``main_trace_path`` to ``shared_state.last_profile_trace`` on profile
@@ -132,7 +132,7 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypatch):
-    """After Coordinator handles a 'select_kernels' request inline, the
+    """After Coordinator handles a 'trace_analyze' request inline, the
     kernel agent's cursor should be past the request seq so its next
     compose_prompt won't include the already-handled request."""
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -143,7 +143,7 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
             return {"status": "ok", "selected_kernels": [{"rank": 1, "name": "x"}]}
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "select_kernels", fake_handler,
+            "trace_analyze", fake_handler,
         )
 
         # Cursor for kernel starts at 0
@@ -153,7 +153,7 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
         # Dispatch a REQUEST from orchestration → kernel
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "select_kernels",
+            payload={"target_agent": "kernel", "kind": "trace_analyze",
                      "params": {"trace_input": "/tmp/trace.json"}},
         )
         await c._handle_intent("orchestration", intent)
@@ -182,8 +182,8 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_caches_result_to_shared_state(session_dir, monkeypatch, tmp_path):
-    """Successful select_kernels writes a cache entry; the next identical
+async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypatch, tmp_path):
+    """Successful trace_analyze writes a cache entry; the next identical
     request short-circuits without invoking the handler."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
@@ -205,19 +205,19 @@ async def test_select_kernels_caches_result_to_shared_state(session_dir, monkeyp
             }
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "select_kernels", fake_handler,
+            "trace_analyze", fake_handler,
         )
 
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "select_kernels",
+            payload={"target_agent": "kernel", "kind": "trace_analyze",
                      "params": {"trace_input": "/tmp/trace-A.json.gz"}},
         )
         await c._handle_intent("orchestration", intent)
         await c._handle_intent("orchestration", intent)
 
         assert call_count["n"] == 1, "second identical request must hit the cache"
-        cached = c.shared_state.last_select_kernels
+        cached = c.shared_state.last_trace_analyze
         assert cached["trace_input"] == "/tmp/trace-A.json.gz"
         assert cached["candidates_path"] == str(candidates_path)
         assert cached["hot_kernels_top15"][0]["kernel_id"] == "k001"
@@ -226,13 +226,13 @@ async def test_select_kernels_caches_result_to_shared_state(session_dir, monkeyp
         # Different trace_input must NOT hit the cache.
         await c._handle_intent("orchestration", Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "select_kernels",
+            payload={"target_agent": "kernel", "kind": "trace_analyze",
                      "params": {"trace_input": "/tmp/trace-B.json.gz"}},
         ))
         assert call_count["n"] == 2
 
         # to_prompt_summary surfaces the cached state for Orchestration.
-        assert "last_select_kernels=" in c.shared_state.to_prompt_summary()
+        assert "last_trace_analyze=" in c.shared_state.to_prompt_summary()
     finally:
         await c.stop()
 
@@ -242,12 +242,12 @@ async def test_select_kernels_caches_result_to_shared_state(session_dir, monkeyp
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_profile_promotion_records_args_and_clears_select_cache(session_dir):
-    """A new profile invalidates any prior select_kernels cache and stamps
+    """A new profile invalidates any prior trace_analyze cache and stamps
     the server config that produced the trace into shared_state."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator.task_registry import Task
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/old/trace.json.gz",
             "candidates_path": "/old/k.json",
             "hot_kernels_top15": [],
@@ -270,7 +270,7 @@ async def test_profile_promotion_records_args_and_clears_select_cache(session_di
         await c._promote_to_shared_state("profile", result, task=task)
         assert c.shared_state.last_profile_trace == "/new/trace.json.gz"
         assert c.shared_state.last_profile_args == "--cuda-graph-max-bs 8"
-        assert c.shared_state.last_select_kernels == {}
+        assert c.shared_state.last_trace_analyze == {}
         summary = c.shared_state.to_prompt_summary()
         assert "last_profile_args='--cuda-graph-max-bs 8'" in summary
     finally:

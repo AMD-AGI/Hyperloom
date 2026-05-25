@@ -231,6 +231,8 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         c1.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
         c1.shared_state.last_select_kernels = {
             "trace_input": "/tmp/profile.trace.json.gz",
+            # Roofline-v2 N3: backends now requires fresh analysis_md_text.
+            "analysis_md_text": "FAKE_REPORT",
         }
         c1.shared_state.save(session_dir)
         proposal_ids = []
