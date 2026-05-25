@@ -28,8 +28,10 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer.orchestrator.action_executors._subprocess_kill import (
+    OVERTIME_KILL_RETURNCODE,
     kill_my_spawned_server,
     new_session_kwargs,
+    run_with_session_kill,
 )
 
 
@@ -273,3 +275,55 @@ async def test_baseline_executor_kills_grandchild_on_timeout(tmp_path, monkeypat
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, OSError):
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Fix E — run_with_session_kill soft_deadline_sec
+# ---------------------------------------------------------------------------
+def test_run_with_session_kill_soft_deadline_returns_sentinel():
+    """A child that sleeps past ``soft_deadline_sec`` is reaped and the
+    function returns a :class:`subprocess.CompletedProcess` whose
+    ``returncode`` is the canonical ``OVERTIME_KILL_RETURNCODE``
+    sentinel (does NOT raise ``TimeoutExpired``)."""
+    start = time.monotonic()
+    cp = run_with_session_kill(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        timeout=30,        # hard cap well above the soft deadline
+        soft_deadline_sec=1.0,
+    )
+    elapsed = time.monotonic() - start
+    assert cp.returncode == OVERTIME_KILL_RETURNCODE
+    # Must have returned within a few seconds of the deadline. Upper
+    # bound accounts for:
+    #   * 0.5 s poll overrun in ``_communicate_with_soft_deadline``,
+    #   * up to 5 s SIGTERM grace in ``kill_my_spawned_server``,
+    #   * 2 s pipe drain after the kill,
+    # plus generous CI jitter. Keep this loose — false-positive
+    # tightness on a CI box would mask a real perf regression in the
+    # production kill path.
+    assert elapsed < 10.0, f"soft-deadline path took {elapsed:.2f}s"
+
+
+def test_run_with_session_kill_soft_deadline_does_not_fire_for_quick_child():
+    """A child that exits well before ``soft_deadline_sec`` returns
+    normally with the child's own returncode — the soft-deadline gate
+    must not perturb the success path."""
+    cp = run_with_session_kill(
+        [sys.executable, "-c", "print('hi'); raise SystemExit(0)"],
+        timeout=10,
+        soft_deadline_sec=5.0,
+    )
+    assert cp.returncode == 0
+    assert "hi" in (cp.stdout or "")
+
+
+def test_run_with_session_kill_legacy_timeout_still_raises():
+    """When ``soft_deadline_sec`` is None (legacy behaviour) the
+    function must still raise :class:`subprocess.TimeoutExpired` for a
+    child that exceeds the hard ``timeout``."""
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_with_session_kill(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            timeout=1,
+            soft_deadline_sec=None,
+        )
