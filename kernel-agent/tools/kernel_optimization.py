@@ -28,10 +28,12 @@ sys.path.pop(0)
 
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write JSON to ``path`` using a temp file then rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
         json.dump(data, tmp, indent=2, sort_keys=True)
@@ -41,18 +43,21 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
+    """Append one JSON object as a line to the given JSONL file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(data, sort_keys=True) + "\n")
 
 
 def append_log(log_path: Path, message: str) -> None:
+    """Append a log line to ``log_path`` (ensuring parent dirs exist)."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(message.rstrip() + "\n")
 
 
 def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
+    """Return the last ``limit`` lines of a log file, empty if missing."""
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -70,6 +75,7 @@ def update_status(
     started_at: str,
     error: str | None = None,
 ) -> None:
+    """Persist a status snapshot for the current run."""
     payload: dict[str, Any] = {
         "tool": "kernel_optimization",
         "run_id": run_id,
@@ -89,6 +95,7 @@ def update_status(
 
 
 def load_candidates(path: Path) -> list[dict[str, Any]]:
+    """Load kernel candidates from JSON, normalizing legacy shapes."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
         return payload
@@ -108,6 +115,7 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
 
 
 def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any]:
+    """Find a candidate by ``kernel_id`` (or name) or raise KeyError."""
     for candidate in candidates:
         if candidate.get("kernel_id") == kernel_id or candidate.get("name") == kernel_id:
             return candidate
