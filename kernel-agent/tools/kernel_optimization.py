@@ -2509,14 +2509,14 @@ def main() -> int:
                         help="Per-attempt wall-clock budget for claude/codex "
                              "OOB backends. GEAK uses --geak-budget-min.")
     # Default tracks $GEAK_RUN_MODE (exported by install.sh / env.sh):
-    # quick (yaml total_s=3600s) -> 65 min, full (yaml total_s=7200s) -> 130 min.
+    # quick (yaml total_s=3600s) -> 70 min, full (yaml total_s=7200s) -> 130 min.
     # Both sit above their yaml total_s + finalize_grace + kill_buffer + safety,
     # so the prompt-quoted budget triggers the matching mode (mini.py:435).
-    _geak_budget_default = 65.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
+    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
     parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
                         help="Per-attempt wall-clock budget for GEAK only "
                              "(default tracks $GEAK_RUN_MODE: full -> 130, "
-                             "quick -> 65; both aligned with yaml "
+                             "quick -> 70; both aligned with yaml "
                              "run.budgets.<mode>.total_s + finalize_grace + "
                              "kill_buffer + safety so the prompt-quoted "
                              "budget triggers the matching GEAK mode at "
