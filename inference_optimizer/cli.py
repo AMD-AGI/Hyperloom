@@ -2864,8 +2864,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # mask the actual stop_reason, so we swallow exceptions and log.
         try:
             from .breakdown import write_breakdown_json
+            from .breakdown.claw_mirror import mirror_breakdown_to_claw_storage
             breakdown_path = write_breakdown_json(session_dir)
             print(f"Session breakdown : {breakdown_path}")
+            mirror_path = mirror_breakdown_to_claw_storage(
+                breakdown_path,
+                session_id=coordinator.shared_state.session_id or "",
+            )
+            if mirror_path is not None:
+                print(f"Session breakdown (claw mirror): {mirror_path}")
         except Exception:  # noqa: BLE001
             log.exception("session_breakdown finalize failed (non-fatal)")
 
