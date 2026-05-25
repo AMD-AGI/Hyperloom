@@ -14,6 +14,9 @@ on:
         required: false
         default: 'manual'
 
+permissions:
+  contents: read
+
 env:
   SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
   NFS_ROOT: ${{ secrets.NFS_ROOT }}
