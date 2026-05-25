@@ -64,11 +64,16 @@ are accepted as no-ops for backwards compat):
   verifies `TraceLens_generate_perf_report_pytorch_inference --help`
   (Hyperloom is inference-only since v0.4; the training-mode CLI is no
   longer accepted)
-- GEAK CLI from `GEAK_REF` (default `v3.1.0`) +
+- GEAK CLI from `GEAK_REF` (default `v3.2.0`) +
   `${HYPERLOOM_ROOT}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
-  `claude-opus-4-7`)
-- GEAK MCP tools — installed as five pip packages from
+  `claude-opus-4-7`). Run-mode default for the generated yaml is
+  controlled by `GEAK_RUN_MODE` (`quick` or `full`; defaults to `full`,
+  which selects the 2 h / 5-round `run.budgets.full` preset). Set
+  `GEAK_RUN_MODE=quick` before `install.sh` for the 1 h / 2-round smoke
+  preset. Other yaml budget knobs are not env-overridable on purpose —
+  edit `$GEAK_CONFIG` directly if you need to tune them per pod.
+- GEAK MCP tools — installed as four pip packages from
   `${HYPERLOOM_ROOT}/geak/mcp_tools/`. The bundled `minisweagent` imports
   these at preprocess + run time; missing any of them fails the GEAK
   attempt fast (observed on Qwen3-32B 2026-05-15: `profiler_mcp` not
@@ -80,9 +85,10 @@ are accepted as no-ops for backwards compat):
       `GEAK_RAG_INDEX_DEVICE=cuda` by default because CPU embedding can
       take hours; set `GEAK_RAG_INDEX_DEVICE=cpu` only for CPU-only
       environments.
-    - `profiler-mcp` — Metrix-backed instrumented profiling
-      (`preprocessor.py` Step 5/7); produces `profile.json` per attempt.
-    - `metrix-mcp` — AMD Metrix backend for `profiler-mcp`.
+    - `profiler-mcp` — unified profiling MCP (Metrix + rocprof-compute);
+      produces `profile.json` per attempt. Metrix is no longer a separate
+      `metrix-mcp` folder in v3.2.0 — it is pulled in transitively via
+      `profiler-mcp/pyproject.toml` (`dependencies = ["metrix>=0.1.0"]`).
     - `cross-session-memory-mcp` — SQLite-backed cross-session memory
       retriever; points at `GEAK_MEMORY_STORE_PATH` (default
       `/wekafs/hyperloom/geak-memory/memory.db`).
@@ -339,25 +345,34 @@ than a silent skip.
   rms_norm 1.18x.)
 - **Default budget**:
   - claude / codex / cursor: **60 minutes** per attempt (`--backend-budget-min 60`)
-  - GEAK: **90 minutes** per attempt (`--geak-budget-min 90`)
+  - GEAK: tracks `$GEAK_RUN_MODE` (set by `install.sh`, exported via
+    `kernel-agent.env.sh`). `full` (default) → **130 min**, `quick` → **70 min**.
+    Both `kernel_optimization.py` and `parallel_e2e_runner.py` read
+    `$GEAK_RUN_MODE` to pick the `--geak-budget-min` default; override by
+    passing the flag explicitly.
 - **GEAK task parameters** (prompt-injected, align with GEAK team defaults):
-  - `max_rounds`: **5** (multi-round heterogeneous optimization)
-  - `step_limit`: **200** (GEAK recommended; 100 limits multi-round runs)
-  
+  - `max_rounds`: **5** for full / **2** for quick (driven by yaml
+    `run.presets.<mode>.orchestrator.max_rounds`).
+  - `step_limit`: **200** (GEAK recommended; 100 limits multi-round runs).
+
   Agents are instructed to **early-exit** as soon as they hit `>=1.50x` with
   passing correctness; otherwise they iterate up to ~85% of the budget and the
   runner SIGTERMs at 100%. `parallel_e2e_runner` will still extract whatever
   `optimization_report.md` / `optimized_versions/*` were on disk at SIGTERM
   time and promote the attempt to `partial` (see Proposal Rules).
-- **Why GEAK budget is 90 min, not 60**: GEAK runs N sub-agent tasks serially
-  (each 5-10 min: baseline measurement + LLM patch generation + per-patch
-  benchmark) + a final `select_patch` round that LLM-judges all patches and
-  writes `final_report.json`. With a 60 min budget, the select_patch round
-  consistently gets SIGTERM'd before it finishes (observed r38/r39: driver
-  had to fall back to per-task `best_results.json` salvage). 90 min lets the
-  select_patch round run, producing `final_report.json` with the canonical
-  best_speedup. Do not drop GEAK budget below 60 min or it will return
-  `partial` with an empty patch.
+- **Why GEAK budget tracks $GEAK_RUN_MODE**: GEAK v3.2.0 yaml ships two
+  presets — `run.budgets.quick.total_s=3600` (1 h, 2 rounds) and
+  `run.budgets.full.total_s=7200` (2 h, 5 rounds). GEAK's mini.py:435
+  resolves mode by LLM-parsing the prompt-quoted budget: <120 min → quick,
+  >=120 min → full. 130 min ≥ full.total_s (7200s) + finalize_grace_s (300s)
+  + kill_buffer_s (60s) + safety, and 70 min ≥ quick.total_s (3600s) + the
+  same finalize_grace + kill_buffer + safety. Defaults sit one tier above
+  their respective yaml total_s so the matching mode's last round +
+  select_patch can complete (vs the old uniform 90 min default which fell
+  between GEAK quick (60) and full (120) and silently downgraded every run
+  to mode=quick). 60 min is still the floor — do not drop GEAK budget below
+  it; r38/r39 SIGTERM'd the select_patch round and had to fall back to
+  per-task `best_results.json` salvage.
 
 ## Artifacts
 
