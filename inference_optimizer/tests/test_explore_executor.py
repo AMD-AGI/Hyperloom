@@ -370,7 +370,7 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -453,7 +453,7 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -514,7 +514,7 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "inference_optimizer.orchestrator.action_executors._grid_runner.subprocess.run",
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
