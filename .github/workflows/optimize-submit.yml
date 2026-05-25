@@ -286,6 +286,11 @@ jobs:
           MATRIX_SOURCE_TASK_ID:  ${{ matrix.task_id }}
           OUTPUT_DIR:             ${{ github.workspace }}/submit-output
           ARTIFACTS_DIR:          ${{ github.workspace }}/task-artifacts
+          # GitHub-issued, repo-scoped, 7-day token. We embed it into the
+          # HYPERLOOM_SOURCE_REPO URL handed to the sandbox so `git clone`
+          # can authenticate against the private Hyperloom repo. Renamed
+          # from GITHUB_TOKEN to avoid clobbering actions/checkout's env.
+          HYPERLOOM_GIT_TOKEN:    ${{ github.token }}
         run: |
           set -euo pipefail
           ARGS=(--model "${MODEL_REPO}")
@@ -313,8 +318,19 @@ jobs:
             exit 1
           fi
           if [ -n "${GITHUB_SHA:-}" ]; then
-            PROMPT_PREFIX_VALUE="CI SOURCE PIN:"$'\n'"  export HYPERLOOM_SOURCE_REF=\"${GITHUB_SHA}\""$'\n'"  export HYPERLOOM_SOURCE_REPO=\"https://github.com/${GITHUB_REPOSITORY}.git\""$'\n\n'"${PROMPT_PREFIX_VALUE}"
-            echo "[prompt_prefix] pinned sandbox Hyperloom checkout to ${GITHUB_SHA}"
+            # The sandbox needs git credentials to clone the private Hyperloom
+            # repo. We embed the workflow-scoped, 7-day `github.token` directly
+            # into the clone URL (same pattern that actions/checkout uses
+            # internally). This expands at submit time so the agent sees a
+            # ready-to-use URL — it must NOT be echoed back into the GHA log.
+            if [ -z "${HYPERLOOM_GIT_TOKEN:-}" ]; then
+              echo "::error::HYPERLOOM_GIT_TOKEN not set; cannot pin sandbox checkout to a private repo"
+              exit 1
+            fi
+            REPO_URL_AUTH="https://x-access-token:${HYPERLOOM_GIT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            PROMPT_PREFIX_VALUE="CI SOURCE PIN:"$'\n'"  export HYPERLOOM_SOURCE_REF=\"${GITHUB_SHA}\""$'\n'"  export HYPERLOOM_SOURCE_REPO=\"${REPO_URL_AUTH}\""$'\n\n'"${PROMPT_PREFIX_VALUE}"
+            # Log the SHA only — never the URL (it contains the token).
+            echo "[prompt_prefix] pinned sandbox Hyperloom checkout to ${GITHUB_SHA} (token-authenticated clone URL injected)"
           fi
           ARGS+=(--prompt-prefix "$PROMPT_PREFIX_VALUE")
           if [ "${INPUT_WAIT:-true}" = "false" ]; then
