@@ -14,8 +14,13 @@ the shared wekafs tree.
   export RESULT_DIR="${RESULT_DIR:-/workspace/hyperloom/}"
   export HYPERLOOM_SOURCE_REPO="${HYPERLOOM_SOURCE_REPO:-https://github.com/AMD-AGI/Hyperloom.git}"
   export HYPERLOOM_SOURCE_REF="${HYPERLOOM_SOURCE_REF:-main}"
-  export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-$RESULT_DIR/runtime/Hyperloom-main}"
-  mkdir -p "$RESULT_DIR/runtime"
+  # Clone OUTSIDE $RESULT_DIR — otherwise the ~100MB shallow checkout gets
+  # copied into $PERSIST_DIR on every run (waste of wekafs). The audit
+  # files written below (hyperloom_source_commit.txt + source_commits.json)
+  # still live in $RESULT_DIR so they DO get persisted.
+  export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/workspace/Hyperloom-main}"
+  mkdir -p "$RESULT_DIR"
+  mkdir -p "$(dirname "$HYPERLOOM_SOURCE_DIR")"
   rm -rf "$HYPERLOOM_SOURCE_DIR"
   # 1) shallow clone main (always works regardless of HYPERLOOM_SOURCE_REF).
   if ! git clone --depth 1 --branch main "$HYPERLOOM_SOURCE_REPO" "$HYPERLOOM_SOURCE_DIR"; then
@@ -145,6 +150,42 @@ verify that `[PERSIST OK]` appears in the output. If you skip this, the
 run will be reported as Failed regardless of what numbers you produced.
 
   mkdir -p "$RESULT_DIR"
+
+  # Step 1 of PERSIST — legacy back-fill. The V2 orchestrator (older skill
+  # versions) sometimes writes its outputs into /wekafs/users/<uid>/<sess>/
+  # instead of $RESULT_DIR. Pull the three Required Artifacts back into
+  # $RESULT_DIR FIRST so the cp -a below captures a complete snapshot.
+  # session_breakdown.json typically sits one level deeper than
+  # ci_metrics.json (V2 cli.py writes it to <session_dir>/, i.e.
+  # <workspace>/<model>/<ts>/), so the glob has an extra wildcard.
+  CI=$(ls -t /wekafs/users/*/*/ci_metrics.json \
+             /wekafs/users/*/*/phase10_report/ci_metrics.json \
+             /wekafs/users/*/*/results/ci_metrics.json \
+             /wekafs/users/*/*/*/ci_metrics.json \
+             2>/dev/null | head -1)
+  REPORT=$(ls -t /wekafs/users/*/*/optimization_report.md \
+                 /wekafs/users/*/*/phase10_report/optimization_report.md \
+                 /wekafs/users/*/*/reports/final.md \
+                 /wekafs/users/*/*/*/optimization_report.md \
+                 2>/dev/null | head -1)
+  BREAKDOWN=$(ls -t /wekafs/users/*/*/session_breakdown.json \
+                    /wekafs/users/*/*/phase10_report/session_breakdown.json \
+                    /wekafs/users/*/*/*/session_breakdown.json \
+                    2>/dev/null | head -1)
+  if [ -n "$CI" ] && [ ! -s "$RESULT_DIR/ci_metrics.json" ]; then
+    cp -f "$CI" "$RESULT_DIR/ci_metrics.json"
+    echo "[BACKFILL] $CI -> $RESULT_DIR/ci_metrics.json"
+  fi
+  if [ -n "$REPORT" ] && [ ! -s "$RESULT_DIR/optimization_report.md" ]; then
+    cp -f "$REPORT" "$RESULT_DIR/optimization_report.md"
+    echo "[BACKFILL] $REPORT -> $RESULT_DIR/optimization_report.md"
+  fi
+  if [ -n "$BREAKDOWN" ] && [ ! -s "$RESULT_DIR/session_breakdown.json" ]; then
+    cp -f "$BREAKDOWN" "$RESULT_DIR/session_breakdown.json"
+    echo "[BACKFILL] $BREAKDOWN -> $RESULT_DIR/session_breakdown.json"
+  fi
+
+  # Step 2 of PERSIST — copy the whole $RESULT_DIR (now complete) to wekafs.
   UID_HEX="$(ls /hyperloom/users 2>/dev/null | head -1)"
   if [ -z "$UID_HEX" ]; then
     echo "[PERSIST FAIL] /hyperloom/users/<uid>/ not mounted in this sandbox — cannot persist to wekafs" >&2
@@ -185,29 +226,7 @@ run will be reported as Failed regardless of what numbers you produced.
     fi
     ls -la "$PERSIST_DIR/"
   fi
-
-  # Legacy back-fill direction: when the V2 orchestrator writes
-  # into /wekafs/users/<uid>/<sess>/ (older skill versions did
-  # this), the snippet below pulls it into $RESULT_DIR so SaFE
-  # sees the canonical files. Kept for backward compat — when
-  # we already wrote $RESULT_DIR ourselves above this is a no-op.
-  CI=$(ls -t /wekafs/users/*/*/ci_metrics.json \
-             /wekafs/users/*/*/phase10_report/ci_metrics.json \
-             /wekafs/users/*/*/results/ci_metrics.json \
-             2>/dev/null | head -1)
-  REPORT=$(ls -t /wekafs/users/*/*/optimization_report.md \
-                 /wekafs/users/*/*/phase10_report/optimization_report.md \
-                 /wekafs/users/*/*/reports/final.md \
-                 2>/dev/null | head -1)
-  if [ -n "$CI" ] && [ ! -s "$RESULT_DIR/ci_metrics.json" ]; then
-    cp -f "$CI" $RESULT_DIR/ci_metrics.json
-    echo "[BACKFILL] $CI -> $RESULT_DIR/ci_metrics.json"
-  fi
-  if [ -n "$REPORT" ] && [ ! -s "$RESULT_DIR/optimization_report.md" ]; then
-    cp -f "$REPORT" $RESULT_DIR/optimization_report.md
-    echo "[BACKFILL] $REPORT -> $RESULT_DIR/optimization_report.md"
-  fi
-  ls -la $RESULT_DIR/
+  ls -la "$RESULT_DIR/"
 
 The ci_metrics.json values you write here MUST match what the V2
 orchestrator actually measured (proper baseline from phase 1 / best
