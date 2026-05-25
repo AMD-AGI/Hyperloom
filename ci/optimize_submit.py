@@ -1167,11 +1167,11 @@ def process_model(
 DEFAULT_ARTIFACT_PATTERNS = (
     "optimization_report",   # matches optimization_report.md / *-optimization_report.md / etc.
     "ci_metrics.json",
-    # Optional but recommended audit artifact emitted by inference_optimizer
-    # (and consumed by claw-stats-service / the dashboard). Not part of the
-    # key-results gate in ``_KEY_RESULT_SUFFIXES`` — missing it must not
-    # trigger NFS fallback or retries — but we still want it copied when
-    # the agent / skill emits it.
+    # Promoted to a key result alongside optimization_report.md +
+    # ci_metrics.json in 2026-05 — claw-stats-service / V2 dashboard prefer
+    # this over ci_metrics.json. Now part of ``_KEY_RESULT_SUFFIXES``, so
+    # missing it WILL trigger the wekafs NFS fallback (same as the other
+    # two contract files).
     "session_breakdown.json",
     "baseline_summary.json",
     "sweep_results.csv",
@@ -1203,7 +1203,17 @@ def _safe_local_path(artifacts_dir: Path, task_id: str, remote_path: str) -> Pat
     return artifacts_dir / task_id / Path(*parts) if parts else artifacts_dir / task_id / "artifact.bin"
 
 
-_KEY_RESULT_SUFFIXES: tuple[str, ...] = ("optimization_report.md", "ci_metrics.json")
+# Files that MUST be present in the task directory for the run to count as
+# "delivered". session_breakdown.json was promoted from optional/audit to a
+# key result in 2026-05 because claw-stats-service / the V2 dashboard prefer
+# it over ci_metrics.json. NFS legacy fallback scans for any of these
+# suffixes; missing any one of them is what triggers the wekafs PERSIST_DIR
+# rescue path in `_nfs_user_session_fallback`.
+_KEY_RESULT_SUFFIXES: tuple[str, ...] = (
+    "optimization_report.md",
+    "ci_metrics.json",
+    "session_breakdown.json",
+)
 
 
 def _norm_token(s: str) -> str:
