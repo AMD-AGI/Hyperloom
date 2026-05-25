@@ -149,6 +149,21 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         config.auto_probe_inference_server = bool(
             options["auto_probe_inference_server"]
         )
+    # B3 ``no_levers_found`` floor knobs let hosts override the
+    # default 45 min / 8 tick observation window without forking the
+    # whole Config. Multi-node large-model setups need a longer floor
+    # because sglang cold start + baseline + profile + turnaround
+    # alone consume 35-50 min before any explore family runs;
+    # inference_optimizer's _build_robustness_options injects 60.0
+    # when args.nodes >= 2 (single-node defaults stay at 45.0).
+    if "progress_no_levers_min_minutes" in options:
+        config.progress_no_levers_min_minutes = float(
+            options["progress_no_levers_min_minutes"]
+        )
+    if "progress_no_levers_min_ticks" in options:
+        config.progress_no_levers_min_ticks = int(
+            options["progress_no_levers_min_ticks"]
+        )
 
     # L4 — advertise our session_dir to co-deployed Critic processes so
     # their ``prepare-review`` can find ``agents/robustness/findings/
