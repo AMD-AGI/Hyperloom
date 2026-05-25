@@ -28,10 +28,12 @@ sys.path.pop(0)
 
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write JSON to ``path`` using a temp file then rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
         json.dump(data, tmp, indent=2, sort_keys=True)
@@ -41,18 +43,21 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
+    """Append one JSON object as a line to the given JSONL file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(data, sort_keys=True) + "\n")
 
 
 def append_log(log_path: Path, message: str) -> None:
+    """Append a log line to ``log_path`` (ensuring parent dirs exist)."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(message.rstrip() + "\n")
 
 
 def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
+    """Return the last ``limit`` lines of a log file, empty if missing."""
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -70,6 +75,7 @@ def update_status(
     started_at: str,
     error: str | None = None,
 ) -> None:
+    """Persist a status snapshot for the current run."""
     payload: dict[str, Any] = {
         "tool": "kernel_optimization",
         "run_id": run_id,
@@ -89,6 +95,7 @@ def update_status(
 
 
 def load_candidates(path: Path) -> list[dict[str, Any]]:
+    """Load kernel candidates from JSON, normalizing legacy shapes."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
         return payload
@@ -108,6 +115,7 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
 
 
 def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any]:
+    """Find a candidate by ``kernel_id`` (or name) or raise KeyError."""
     for candidate in candidates:
         if candidate.get("kernel_id") == kernel_id or candidate.get("name") == kernel_id:
             return candidate
@@ -1017,7 +1025,12 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     }
 
 
-def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
+def build_prompt(
+    candidate: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    backend: str | None = None,
+) -> str:
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
     if source_file and Path(str(source_file)).exists():
@@ -1044,7 +1057,13 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
     kernel_metadata = build_kernel_metadata(candidate, args)
-    budget_min = int(getattr(args, "budget_minutes", 60) or 60)
+    # Quote the per-backend wall-clock so GEAK v3.2.0's LLM task-mode parser
+    # (mini.py:435 task_extracted_mode) infers the right mode (>=120min→full,
+    # else quick), instead of always seeing the OOB 60min default.
+    if backend == "geak":
+        budget_min = int(getattr(args, "geak_budget_min", 130) or 130)
+    else:
+        budget_min = int(getattr(args, "budget_minutes", 60) or 60)
     target_platform = (
         getattr(args, "target_platform", "") or _env_target_platform()
     )
@@ -1092,15 +1111,17 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "  search inside the repo, scope to the repo root: `find <repo> -name ...`\n"
         "  or `rg ... <repo>`, NEVER `find /`.\n"
         "\n"
-        "GOAL & EARLY-EXIT:\n"
-        "- Target speedup: >= 1.50x on the dominant inference shape(s).\n"
-        f"- Hard wall-clock budget: ~{budget_min} minutes. If you reach >=1.50x with\n"
-        "  passing correctness BEFORE the budget expires, STOP immediately, write the\n"
-        "  final `optimization_report.md` with `speedup: X.XXx` and exit (don't keep\n"
-        "  squeezing for marginal gains).\n"
-        f"- Otherwise iterate up to minute {int(budget_min*0.85)}, then STOP iterating\n"
-        "  and finalize the report with your best so-far measured speedup. The runner\n"
-        "  will SIGTERM at minute "
+        "GOAL & TIME BUDGET:\n"
+        # GEAK v3.2.0 LLM-parses prompt for `--mode full` / `mode=quick` etc.
+        # (prompts.py:73-76 trigger list). Emit the explicit token so the
+        # parser locks in the right preset (yaml run.budgets.<mode>) instead
+        # of leaking off other prompt phrases like "quick micro-benchmark".
+        f"- Run mode: {'full' if budget_min >= 120 else 'quick'} "
+        f"(--mode {'full' if budget_min >= 120 else 'quick'}).\n"
+        f"- Hard wall-clock budget: ~{budget_min} minutes. Iterate up to minute "
+        f"{int(budget_min*0.85)},\n"
+        "  then STOP iterating and finalize the report with your best so-far measured\n"
+        "  speedup. The runner will SIGTERM at minute "
         f"{budget_min}; any in-flight work not on disk is lost.\n"
         "- Always print the final number in the form `speedup: X.XXx` (lowercase `x`)\n"
         "  at the END of `optimization_report.md` so the runner can extract it; if you\n"
@@ -1272,9 +1293,6 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "```json",
         json.dumps(kernel_metadata, indent=2, sort_keys=True),
         "```",
-        "",
-        "GEAK configuration (ignored by non-GEAK backends):",
-        "- Use homogeneous mode. Set max_rounds to 5.",
         "",
         hardware_notes,
         hypothesis_block,
@@ -1465,10 +1483,10 @@ def invoke_backend(
     # GEAK needs more wall-clock than claude/codex: a single sub-agent task
     # already takes 5-10 min (baseline + LLM patch generation + per-patch
     # benchmark), and the orchestrator typically dispatches 4-9 tasks per
-    # round + a select_patch round at the end. Empirically 60 min lets
-    # individual sub-agents finish but consistently SIGTERMs the
-    # select_patch round (r38, r39 both fell back to per-task best_results
-    # salvage). 90 min is the new default; override via --geak-budget-min.
+    # round + a select_patch round at the end. 130 min is the default so
+    # the prompt-quoted budget triggers GEAK v3.2.0's mode=full path
+    # (yaml run.budgets.full.total_s=7200s + finalize_grace + kill_buffer);
+    # override via --geak-budget-min.
     if backend == "geak":
         budget_min = float(getattr(args, "geak_budget_min", 0)
                            or getattr(args, "budget_minutes", 60) or 60)
@@ -1648,7 +1666,7 @@ def run_attempt(
     prompt_dir = run_dir / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
     prompt_file = prompt_dir / f"{attempt_id}.md"
-    prompt_file.write_text(build_prompt(candidate, args), encoding="utf-8")
+    prompt_file.write_text(build_prompt(candidate, args, backend=backend), encoding="utf-8")
 
     source_file = args.source_file or str(candidate.get("source_file") or "")
     started = time.time()
@@ -2498,12 +2516,19 @@ def main() -> int:
     parser.add_argument("--budget-minutes", type=float, default=60.0,
                         help="Per-attempt wall-clock budget for claude/codex "
                              "OOB backends. GEAK uses --geak-budget-min.")
-    parser.add_argument("--geak-budget-min", type=float, default=90.0,
+    # Default tracks $GEAK_RUN_MODE (exported by install.sh / env.sh):
+    # quick (yaml total_s=3600s) -> 70 min, full (yaml total_s=7200s) -> 130 min.
+    # Both sit above their yaml total_s + finalize_grace + kill_buffer + safety,
+    # so the prompt-quoted budget triggers the matching mode (mini.py:435).
+    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
+    parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
                         help="Per-attempt wall-clock budget for GEAK only "
-                             "(default 90 min; needed because GEAK runs "
-                             "per-task patch sub-agents serially + a final "
-                             "select_patch round, and 60 min consistently "
-                             "SIGTERMs the select_patch round).")
+                             "(default tracks $GEAK_RUN_MODE: full -> 130, "
+                             "quick -> 70; both aligned with yaml "
+                             "run.budgets.<mode>.total_s + finalize_grace + "
+                             "kill_buffer + safety so the prompt-quoted "
+                             "budget triggers the matching GEAK mode at "
+                             "mini.py:435 task_extracted_mode).")
     parser.add_argument("--micro-speedup", type=float, default=None)
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")

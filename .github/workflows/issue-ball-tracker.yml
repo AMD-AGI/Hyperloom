@@ -25,10 +25,12 @@ on:
     types: [created]
 
 permissions:
-  issues: write
+  contents: read
 
 jobs:
   track:
+    permissions:
+      issues: write
     # Only act on issue comments, not PR comments
     if: ${{ !github.event.issue.pull_request }}
     runs-on: ubuntu-latest
