@@ -78,7 +78,14 @@ def _bypass_upstream_gates(c: Coordinator) -> None:
     c.shared_state.baseline_tput = 1500.0
     c.shared_state.last_profile_trace = "/tmp/fake-trace"
     c.shared_state.last_profile_pmc_summary = "/tmp/fake-pmc.json"
-    c.shared_state.last_select_kernels = {"trace_input": "/tmp/fake-trace"}
+    c.shared_state.last_trace_analyze = {
+        "trace_input": "/tmp/fake-trace",
+        # v2 N27/_ROOFLINE_REQUIRED_ACTIONS gate also needs a populated
+        # analysis_md_text to allow backends/params/comm_optimization;
+        # the validate_stack gate skip alone isn't enough.
+        "analysis_md_text": "# Stub analysis\nCompute 50%, Idle 50%\n",
+        "roofline_snapshot_id": 1,
+    }
     c.shared_state.action_scores = {}
 
 
