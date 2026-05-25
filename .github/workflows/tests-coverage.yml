@@ -1,0 +1,47 @@
+name: Tests with Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .[test] pytest pytest-cov coverage
+
+      - name: Run tests with coverage
+        run: |
+          pytest --cov=. --cov-report=xml --cov-report=term
+
+      - name: Coverage summary
+        run: |
+          python - <<'PY'
+import coverage
+
+cov = coverage.Coverage(data_file=".coverage")
+cov.load()
+total = cov.report(show_missing=False)
+print(f"Total coverage: {total:.2f}%")
+
+with open("/tmp/summary.md", "w") as f:
+    f.write("## Coverage\n\n")
+    f.write(f"Total: {total:.2f}%\n")
+
+PY
+          cat /tmp/summary.md >> "$GITHUB_STEP_SUMMARY"
