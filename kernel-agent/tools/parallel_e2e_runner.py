@@ -294,13 +294,13 @@ def main() -> int:
                              "otherwise they iterate up to ~85%% of this budget "
                              "and SIGTERM at 100%%.")
     # Default tracks $GEAK_RUN_MODE (exported by install.sh / env.sh):
-    # quick -> 65 min, full -> 130 min. Both aligned with yaml
+    # quick -> 70 min, full -> 130 min. Both aligned with yaml
     # run.budgets.<mode>.total_s + finalize_grace + kill_buffer + safety.
-    _geak_budget_default = 65 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130
+    _geak_budget_default = 70 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130
     parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
                         help="Per-attempt wall-clock budget for GEAK only "
                              "(default tracks $GEAK_RUN_MODE: full -> 130, "
-                             "quick -> 65; aligned with yaml "
+                             "quick -> 70; aligned with yaml "
                              "run.budgets.<mode>.total_s + finalize_grace + "
                              "kill_buffer + safety so the prompt-quoted "
                              "budget triggers the matching GEAK mode).")
