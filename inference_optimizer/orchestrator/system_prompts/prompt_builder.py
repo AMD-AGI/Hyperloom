@@ -397,7 +397,7 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "extra_args, extra_envs, provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
-            "keep_threshold_pct?: 0.2, stack_stable_threshold_pct?: 0.5}}`. "
+            "keep_threshold_pct?: 0.2, stack_stable_threshold_pct?: 0.2}}`. "
             "Variants run serially; each KEEP triggers an inlined "
             "stack rebench (replaces validate_stack). "
             "**Provenance is now restricted (PR-A9):** every variant "

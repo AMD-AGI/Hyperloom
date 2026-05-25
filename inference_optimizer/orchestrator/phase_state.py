@@ -765,6 +765,26 @@ def compute_plateau_kernel(
     flat.sort(key=lambda r: r[1])
     recent = flat[-lookback:]
 
+    # Empty-data guard: an empty ledger (KERNEL just entered, or every
+    # prior session-kernel attempt was dropped during resume cleanup)
+    # must NOT auto-trigger plateau via the
+    # ``recent_keep_gain (=0.0) < keep_gain_threshold_pct (=0.5)`` arm.
+    # That degenerate trigger used to flip plateau true the moment KERNEL
+    # started with zero attempts on record — coupled with EXPLORE that
+    # produced no KEEPs (e.g. force-exit on low budget), the session went
+    # EXPLORE→KERNEL→SWEEP without ever spawning a single
+    # ``select_kernels`` / ``run_optimization`` request. Returning False
+    # here lets the LLM (and the in-loop scheduling-police) actually
+    # exercise the kernel phase before plateau is reconsidered.
+    if not recent:
+        return False, {
+            "reason":                   "no_kernel_attempts_yet",
+            "revert_streak_threshold":  int(revert_streak_threshold),
+            "keep_gain_threshold_pct":  keep_gain_threshold_pct,
+            "lookback":                 int(lookback),
+            "attempts_seen":            0,
+        }
+
     # REVERT streak from the tail.
     revert_streak = 0
     for decision, _ts, _g in reversed(recent):
