@@ -168,16 +168,51 @@ class ValidateStackExecutor(BaselineExecutor):
         # Resolve the optimization stack. Two sources, in priority order:
         # 1. Explicit ``stack`` passed via task.params (tests / Coordinator
         #    overrides).
-        # 2. SharedState loaded from the active session_dir.
+        # 2. SharedState loaded from the ACTIVE session_dir.
+        #
+        # N28 fix: resolve the active session_dir lazily at every call
+        # using ``ctx.extra["session_dir"]`` (injected by SubAgentRunner
+        # at task dispatch time -- see sub_agent_runner.py line 127),
+        # falling back to ``self.session_dir`` for direct-instantiation
+        # tests, then to the env-driven ``_resolve_session_dir()``
+        # global fallback.
+        #
+        # Why the lazy resolve matters: ``self.session_dir`` is captured
+        # in ``BaselineExecutor.__init__`` at MODULE-IMPORT time (via
+        # ``validate_stack_executor = ValidateStackExecutor()`` at the
+        # bottom of this file), which happens BEFORE cli.py's
+        # ``make_session_dir(model_name=...)`` creates the per-session
+        # subdir and pins INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR. So
+        # ``self.session_dir`` ends up pinned to the workspace root
+        # (e.g. ``/wekafs/xiaofei/sessions``) instead of the per-session
+        # subdir (e.g. ``/wekafs/.../<model>/<UTC ts>/``), and
+        # ``SharedState.load_or_init`` reads the workspace root's
+        # nonexistent state.json -> blank SharedState -> empty
+        # optimization_stack -> bogus "stack_len=0" warning that
+        # silently degrades validate_stack to a pure baseline run.
+        # The empirical case that drove this fix: SOLAR-10.7B TP=1
+        # session 20260521T062837Z, where decode_steps_16 promoted to
+        # optimization_stack at 07:11:10 with +0.74% gain, then the
+        # 07:13:36 validate_stack ignored the stack entirely and just
+        # re-ran a baseline noise check (+0.33% noise, NOT the real
+        # +0.74% validation the operator wanted).
+        from ._grid_runner import _resolve_session_dir
+        ctx_sd = (ctx.extra or {}).get("session_dir") if ctx.extra else None
+        if ctx_sd:
+            active_session_dir = Path(str(ctx_sd))
+        elif self.session_dir:
+            active_session_dir = Path(self.session_dir)
+        else:
+            active_session_dir = _resolve_session_dir()
         stack: list[dict[str, Any]] | None = params.pop("stack", None)
         if stack is None:
             try:
-                state = SharedState.load_or_init(self.session_dir)
+                state = SharedState.load_or_init(active_session_dir)
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "validate_stack_executor: failed to load SharedState "
                     "from %s: %s",
-                    self.session_dir, exc,
+                    active_session_dir, exc,
                 )
                 state = SharedState()
             stack = list(state.optimization_stack or [])
@@ -279,10 +314,33 @@ class ValidateStackExecutor(BaselineExecutor):
         forwarded_params = dict(params)
         forwarded_params["config_path"] = str(materialised)
         forwarded_params["output_dir"] = str(output_dir)
-        # Do NOT re-pass extra_sglang_args/extra_envs — they're already
-        # baked into the materialised YAML.
-        forwarded_params.pop("extra_sglang_args", None)
-        forwarded_params.pop("extra_envs", None)
+        # Single-node: pop merged args/envs. They're already baked into
+        # the materialised YAML above; BaselineExecutor will call
+        # ``materialize_config_with_envs`` again but its idempotent
+        # "non-empty-or-skip" guard preserves the EXTRA_*_ARGS we just
+        # wrote, so the launched Magpie subprocess sees the full stack.
+        #
+        # Multi-node: KEEP merged args/envs in ``task.params``. The
+        # BaselineExecutor multi-node path forwards
+        # ``params["extra_sglang_args"]`` straight into
+        # ``restart_server_for_round`` -> ``cmd_restart_server`` which
+        # boots sglang via the multi_node CLI **without** ever reading
+        # the materialised YAML. Popping there silently launches sglang
+        # with default args and drops the entire ``optimization_stack``,
+        # making ``cumulative_gain_validated`` collapse to ~0% no matter
+        # how many variants were KEPT (validate_stack would
+        # re-baseline against a vanilla server). Forward merged values
+        # so the restarted multi-node sglang sees every KEEP'd flag.
+        from ._multi_node_env import is_multi_node
+        if is_multi_node():
+            forwarded_params["extra_sglang_args"] = merged_args
+            if merged_envs:
+                forwarded_params["extra_envs"] = merged_envs
+            else:
+                forwarded_params.pop("extra_envs", None)
+        else:
+            forwarded_params.pop("extra_sglang_args", None)
+            forwarded_params.pop("extra_envs", None)
         ctx.task.params = forwarded_params  # type: ignore[assignment]
         result = await super().__call__(ctx)
 
