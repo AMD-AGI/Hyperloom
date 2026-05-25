@@ -49,19 +49,28 @@ class _BareState:
 
     kernel_enabled: bool = True
     last_profile_trace: str = ""
+    last_profile_status: str = ""
+    last_profile_args: str = ""
     baseline_config_path: str = ""
+    baseline_tput: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
     last_baseline: dict[str, Any] = field(default_factory=dict)
     phase_history: list[dict[str, Any]] = field(default_factory=list)
     # Roofline-related fields used by ``_needs_fresh_roofline``.
     use_roofline_composite: bool = False
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+    cumulative_gain: float = 0.0
     cumulative_gain_validated: float = 0.0
     auto_roofline_pending_task_id: str = ""
     save_count: int = 0
+    # Audit ledger touched by Coordinator._promote_to_shared_state.
+    action_attempts: list[dict[str, Any]] = field(default_factory=list)
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
+
+    def record_action_attempt(self, **kwargs: Any) -> None:
+        self.action_attempts.append(dict(kwargs))
 
 
 class _StubTaskRegistry:
@@ -600,3 +609,165 @@ async def test_phase_transition_skips_when_no_kernel_mode(tmp_path: Path):
         ("internal-profile-kernel_phase_entry",),
     )
     assert len(rows) == 0
+
+
+# ===========================================================================
+# 10. Roofline-failure fallback (operator-requested 2026-05-25)
+# ===========================================================================
+def _make_roofline_task(*, reason: str, task_id: str = "rl-task-1"):
+    """Build a Task object resembling a Coordinator-internal roofline
+    task (kind='roofline', params['reason']=<...>)."""
+    from inference_optimizer.orchestrator.task_registry import Task
+
+    return Task(
+        task_id=task_id,
+        kind="roofline",
+        state="succeeded",   # promote runs after task reached terminal state
+        params={"source": "coordinator_internal", "reason": reason},
+        idempotency_key=f"internal-roofline-{reason}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_promote_explore_roofline_failure_skips_no_fallback(coord):
+    """EXPLORE-entry roofline failure: NO fallback profile enqueued,
+    pending gate cleared, audit row records 'discarded'."""
+    coord.shared_state.auto_roofline_pending_task_id = "rl-explore-1"
+    coord.shared_state.phase_history = [
+        {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
+    ]
+    task = _make_roofline_task(reason="explore_entry", task_id="rl-explore-1")
+    result = {
+        "status": "failed",
+        "error_class": "trace_analyze_failed",
+        "error": "RuntimeError: trace_split_no_steady_state",
+        "phase": "trace_analyze",
+    }
+    await coord._promote_to_shared_state("roofline", result, task=task)
+
+    # Gate cleared so subsequent specialists can dispatch.
+    assert coord.shared_state.auto_roofline_pending_task_id == ""
+    # NO fallback profile task created.
+    assert "internal-profile-kernel_phase_entry_roofline_failed" not in coord.tasks._tasks
+    assert "internal-profile-kernel_phase_entry" not in coord.tasks._tasks
+    # Audit row recorded the discard.
+    assert any(a.get("action") == "roofline" and a.get("decision") == "discarded"
+               for a in coord.shared_state.action_attempts)
+
+
+@pytest.mark.asyncio
+async def test_promote_kernel_roofline_failure_enqueues_fallback_profile(coord):
+    """KERNEL-entry roofline failure: fallback profile task enqueued
+    with the canonical idempotency key + phase_history evidence stamp."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
+    ]
+    task = _make_roofline_task(
+        reason="kernel_phase_entry", task_id="rl-kernel-1",
+    )
+    result = {
+        "status": "failed",
+        "error_class": "trace_analyze_failed",
+        "error": "RuntimeError: trace_split_no_steady_state",
+        "phase": "trace_analyze",
+    }
+    await coord._promote_to_shared_state("roofline", result, task=task)
+
+    # Fallback profile lands under the canonical idempotency key.
+    fallback_key = "internal-profile-kernel_phase_entry_roofline_failed"
+    assert fallback_key in coord.tasks._tasks
+    fallback = coord.tasks._tasks[fallback_key]
+    assert fallback.kind == "profile"
+    assert fallback.params["reason"] == "kernel_phase_entry_roofline_failed"
+    # config_path intentionally NOT propagated (lets ProfileExecutor pick
+    # profile_sglang.yaml — see _enqueue_internal_profile_task docstring).
+    assert "config_path" not in fallback.params
+
+    # Phase-history evidence stamped.
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence.get("auto_profile_fallback_enqueued") is True
+    assert evidence.get("auto_profile_fallback_task_id") == fallback.task_id
+    assert evidence.get("auto_profile_fallback_reason") == "roofline_failed"
+
+
+@pytest.mark.asyncio
+async def test_promote_kernel_roofline_fallback_idempotent_on_double_failure(coord):
+    """A second KERNEL-roofline failure with the same reason reuses
+    the same fallback task (idempotency_key dedup)."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
+    ]
+    task1 = _make_roofline_task(
+        reason="kernel_phase_entry", task_id="rl-kernel-1",
+    )
+    result_fail = {
+        "status": "failed", "error_class": "trace_analyze_failed",
+        "error": "...", "phase": "trace_analyze",
+    }
+    await coord._promote_to_shared_state("roofline", result_fail, task=task1)
+    fallback1 = coord.tasks._tasks["internal-profile-kernel_phase_entry_roofline_failed"]
+
+    # Simulate a second KERNEL-entry roofline failure (e.g., resume edge).
+    task2 = _make_roofline_task(
+        reason="kernel_phase_entry", task_id="rl-kernel-2",
+    )
+    await coord._promote_to_shared_state("roofline", result_fail, task=task2)
+    fallback2 = coord.tasks._tasks["internal-profile-kernel_phase_entry_roofline_failed"]
+
+    # Same task — idempotency key dedup.
+    assert fallback1 is fallback2
+    # Only one entry in the registry under that key.
+    matching = [k for k in coord.tasks._tasks
+                if k == "internal-profile-kernel_phase_entry_roofline_failed"]
+    assert len(matching) == 1
+
+
+@pytest.mark.asyncio
+async def test_promote_successful_roofline_does_not_fire_fallback(coord):
+    """A succeeded roofline must never trigger the fallback profile —
+    that path is only for the failure branch."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
+    ]
+    task = _make_roofline_task(reason="kernel_phase_entry", task_id="rl-ok-1")
+    result_ok = {
+        "status": "succeeded",
+        "snapshot_id": 1,
+        "last_profile_trace": "/tmp/trace.json.gz",
+        "analysis_md_path": "/tmp/analysis.md",
+        "profile_workspace": "/tmp/ws",
+    }
+    await coord._promote_to_shared_state("roofline", result_ok, task=task)
+
+    # No fallback.
+    assert "internal-profile-kernel_phase_entry_roofline_failed" not in coord.tasks._tasks
+    # Audit row records 'promoted'.
+    assert any(a.get("action") == "roofline" and a.get("decision") == "promoted"
+               for a in coord.shared_state.action_attempts)
+
+
+@pytest.mark.asyncio
+async def test_promote_explore_roofline_success_does_not_skip_log(coord):
+    """A succeeded EXPLORE-entry roofline clears the gate WITHOUT
+    logging the skip message (no fallback either)."""
+    coord.shared_state.auto_roofline_pending_task_id = "rl-explore-ok-1"
+    coord.shared_state.phase_history = [
+        {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
+    ]
+    task = _make_roofline_task(
+        reason="explore_entry", task_id="rl-explore-ok-1",
+    )
+    result_ok = {
+        "status": "succeeded",
+        "snapshot_id": 1,
+        "last_profile_trace": "/tmp/trace.json.gz",
+        "analysis_md_path": "/tmp/analysis.md",
+        "profile_workspace": "/tmp/ws",
+    }
+    await coord._promote_to_shared_state("roofline", result_ok, task=task)
+
+    # Gate cleared, audit promoted, no fallback.
+    assert coord.shared_state.auto_roofline_pending_task_id == ""
+    assert "internal-profile-kernel_phase_entry_roofline_failed" not in coord.tasks._tasks
+    assert any(a.get("action") == "roofline" and a.get("decision") == "promoted"
+               for a in coord.shared_state.action_attempts)
