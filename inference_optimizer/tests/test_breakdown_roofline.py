@@ -27,8 +27,6 @@ import os
 import time
 from pathlib import Path
 
-import pytest
-
 from inference_optimizer.breakdown import build
 from inference_optimizer.breakdown.collectors import collect_roofline
 from inference_optimizer.breakdown.reporters.compose import render_session_report
