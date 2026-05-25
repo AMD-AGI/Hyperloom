@@ -398,6 +398,7 @@ class Coordinator:
         compare_against_gpu: str | None = None,
         model_class: str | None = None,
     ):
+        """Wire core coordinator dependencies and runtime configuration."""
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
         # External-SKILL-driven configuration. Both replace the deleted
@@ -2825,6 +2826,7 @@ class Coordinator:
     # Intent handling
     # ==================================================================
     async def _handle_intent(self, source: str, intent: Intent) -> None:
+        """Validate policy, then dispatch the intent to the appropriate handler."""
         try:
             self.policy.validate_intent(source, intent)
         except PolicyDenied as denied:
@@ -2868,6 +2870,7 @@ class Coordinator:
     # PROPOSE_ACTION + REVIEW_VERDICT
     # ------------------------------------------------------------------
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
+        """Persist a proposed action, gate it, and enqueue for Critic review."""
         action_name = intent.payload["action_name"]
         # Pruned-family check reads from persistent SharedState so resume
         # after crash still respects the prune.
@@ -3492,6 +3495,7 @@ class Coordinator:
         }
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
+        """Fan-out a RESPONSE intent back to the original requester."""
         in_reply_to = intent.payload["in_reply_to"]
         # Locate the original requester so we can address the response.
         original = await self.bus.lookup_by_id(in_reply_to)
@@ -3573,6 +3577,7 @@ class Coordinator:
         ))
 
     async def _handle_update_state(self, source: str, intent: Intent) -> None:
+        """Apply allowed SharedState mutations and broadcast the diff."""
         # Apply to persistent SharedState (PolicyGate already enforced that
         # the source role can't write CORE_STATE_FIELDS unless allowed).
         applied = self.shared_state.apply_changes(
