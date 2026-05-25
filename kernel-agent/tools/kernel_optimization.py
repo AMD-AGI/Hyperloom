@@ -1296,16 +1296,12 @@ def build_prompt(
         "",
         hardware_notes,
         hypothesis_block,
-        benchmark_cases_block,
         priority_block,
         "",
         "Preserve function name, signature, decorators, and numerical behavior.",
         "Return complete optimized code plus explanation of correctness assumptions.",
         repo_block,
-        bench_block,
         safety,
-        source_block,
-        tracelens_context_block,
     ])
 
 
@@ -1545,7 +1541,6 @@ def invoke_backend(
                     num_gpus=num_gpus,
                     prefer_ray=prefer_ray,
                     kernel_repo=kernel_repo,
-                    test_command=test_command,
                 )
             finally:
                 _restore_env(previous_env)

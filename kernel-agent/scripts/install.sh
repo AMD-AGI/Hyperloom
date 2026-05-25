@@ -107,7 +107,7 @@ GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 # Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
 # memory together. Keep this overridable so future GEAK fixes can move Hyperloom
 # forward without reworking the installer contract.
-GEAK_REF="${GEAK_REF:-v3.2.0}"
+GEAK_REF="${GEAK_REF:-main}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
