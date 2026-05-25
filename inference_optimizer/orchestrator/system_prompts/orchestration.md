@@ -165,6 +165,14 @@ on the next tick.
   `rule='phase_incompatible'`; the denial lands in your inbox as
   `policy_denied`. No score / cooldown gating beyond that — v0.8 §3.9
   retired the scoreboard.
+* **NEVER propose `profile` directly when the roofline composite is
+  active.** Always propose `roofline` instead — its executor runs
+  profile + trace_analyze atomically and produces the snapshot
+  downstream actions (`explore` / `integrate_patch` / `kernel_opt`)
+  read. Direct `profile` proposes are hard-rejected by PolicyGate
+  rule `n9_deny_direct_profile_when_composite_on` (F3-1 N9) to
+  prevent the duplicate-profile waste pattern observed during the
+  Roofline-v2 roll-out.
 
 ### Roofline composite action (auto-managed — you cannot propose it)
 
