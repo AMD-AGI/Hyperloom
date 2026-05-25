@@ -149,6 +149,14 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         config.auto_probe_inference_server = bool(
             options["auto_probe_inference_server"]
         )
+    # The ``ray status`` probe was introduced in PR #239 and runs on
+    # every tick of the agent backend. Heartbeat tests (and any host
+    # without an in-sandbox Ray head) need to disable it to keep the
+    # default heartbeat envelope clean of false-positive
+    # ``ray_head_dead`` alerts. The Coordinator wiring mirrors
+    # ``auto_probe_*`` above.
+    if "ray_probe_enabled" in options:
+        config.ray_probe_enabled = bool(options["ray_probe_enabled"])
     # B3 ``no_levers_found`` floor knobs let hosts override the
     # default 45 min / 8 tick observation window without forking the
     # whole Config. Multi-node large-model setups need a longer floor
