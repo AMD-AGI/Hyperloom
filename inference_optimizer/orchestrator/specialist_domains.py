@@ -121,8 +121,9 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         pr_repos=("ROCm/ROCm",),
         available_in="M6",
         description=(
-            "Read-only access to /proc, rocm-smi, dmesg; focuses on "
-            "dispatch overhead, launch latency, memory fragmentation."
+            "Fixes launch latency, dispatch overhead, device "
+            "synchronization and host-blocking calls; tunes KFD/driver "
+            "env vars, numactl, HSA_ENABLE_SDMA, memory fragmentation."
         ),
     ),
     SpecialistDomain(
