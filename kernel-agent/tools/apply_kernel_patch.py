@@ -31,6 +31,158 @@ KNOWN_TARGET_ROOTS = (
 )
 
 
+# Default location of the multi-node patch backup directory on the
+# RayJob pod. Mirrors the apply_kernel_patch.backup_root convention
+# (per-target subdir) but lives on the pod's local fs, not the
+# sandbox's, so it survives sglang restarts without depending on
+# wekafs. Overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR for tests.
+_MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
+
+# State file written by ``inference_optimizer.multi_node create-rayjob``.
+# Presence of ``nodes >= 2`` is the multi-node signal used to decide
+# whether apply_kernel_patch.py should fan-out the patch to RayJob pods
+# via the multi_node CLI in addition to writing the sandbox-local copy.
+#
+# Resolution mirrors ``inference_optimizer.orchestrator.action_executors
+# ._multi_node_env._state_path``: ``$MULTI_NODE_STATE_FILE`` wins,
+# default ``/tmp/multi_node_state.json``. Honouring the env var keeps
+# test runs isolated — pytest can point this at a non-existent path
+# so the fan-out branch is never taken, even on a sandbox whose
+# hardcoded ``/tmp`` file is left over from a prior real multi-node
+# session (without this override, an active inference_optimizer's
+# ``/tmp/multi_node_state.json`` would silently turn ``test_p2_4``
+# integrate fixtures into multi-node fan-out attempts that
+# mock-mismatch ``subprocess.run``).
+_MN_STATE_FILE_DEFAULT = "/tmp/multi_node_state.json"
+
+
+def _mn_state_path() -> Path:
+    """Resolve where ``inference_optimizer.multi_node`` dropped its state."""
+    return Path(os.environ.get("MULTI_NODE_STATE_FILE", _MN_STATE_FILE_DEFAULT))
+
+
+# Legacy module attribute. Kept for any caller / test that imports
+# ``_MN_STATE_FILE`` directly; runtime checks go through
+# :func:`_mn_state_path` so each call re-resolves the env override.
+_MN_STATE_FILE = Path(_MN_STATE_FILE_DEFAULT)
+
+
+def _is_multi_node() -> bool:
+    """True iff a multi-node RayJob is active (nodes >= 2).
+
+    Reads ``$MULTI_NODE_STATE_FILE`` (default
+    ``/tmp/multi_node_state.json``) — the same checkpoint
+    ``inference_optimizer.multi_node.cli`` writes after
+    ``create-rayjob``. Missing file / unreadable / ``nodes < 2`` →
+    ``False``, so single-node and standalone CLI use of this tool
+    keep their pre-multinode behaviour bit-for-bit.
+    """
+    state_path = _mn_state_path()
+    try:
+        if not state_path.is_file():
+            return False
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        return int(data.get("nodes") or 0) >= 2
+    except (OSError, ValueError):
+        return False
+
+
+def _dispatch_multinode_apply(
+    *,
+    target_file: Path,
+    patch_path: Path,
+    kernel_id: str,
+    backup_dir_on_pod: str,
+    timeout_sec: int = 180,
+) -> dict[str, Any]:
+    """Run ``python3 -m inference_optimizer.multi_node apply-patch`` to
+    fan the same patch out to every pod (head + workers).
+
+    Returns the parsed JSON document produced by
+    kernel_patch_multinode.py — caller checks ``status == "ok"`` and
+    persists ``per_node`` (host → backup_path map) into the
+    apply-kernel-patch manifest so revert can reach the same pods.
+
+    Raises RuntimeError on subprocess failure / non-JSON output / pod
+    status != ok so the apply_kernel_patch caller can roll back the
+    sandbox-local copy.
+    """
+    cmd = [
+        sys.executable, "-m", "inference_optimizer.multi_node",
+        "apply-patch",
+        "--patch-file", str(patch_path),
+        "--target-path", str(target_file),
+        "--backup-dir", backup_dir_on_pod,
+        "--kernel-id", kernel_id or "",
+    ]
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout_sec,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"multi-node apply-patch returned rc={proc.returncode}: "
+            f"stderr={(proc.stderr or '')[-2000:]!r}"
+        )
+    try:
+        parsed = json.loads(proc.stdout.strip().splitlines()[-1]) \
+            if proc.stdout.strip().startswith("{") is False \
+            else json.loads(proc.stdout)
+    except (json.JSONDecodeError, IndexError) as exc:
+        raise RuntimeError(
+            f"multi-node apply-patch stdout not JSON: {exc!r}; "
+            f"stdout_tail={(proc.stdout or '')[-2000:]!r}"
+        ) from exc
+    if str(parsed.get("status", "")).lower() != "ok":
+        raise RuntimeError(
+            f"multi-node apply-patch reported status={parsed.get('status')!r}: "
+            f"failures={parsed.get('failures')!r}"
+        )
+    return parsed
+
+
+def _dispatch_multinode_revert(
+    *,
+    target_path: str,
+    backup_map: dict[str, str],
+    timeout_sec: int = 120,
+) -> dict[str, Any]:
+    """Run ``python3 -m inference_optimizer.multi_node revert-patch`` to
+    restore the original file on every pod that received the apply.
+
+    Best-effort: a partial revert is logged but not raised — the
+    caller (revert_kernel_patch) has already restored the sandbox
+    copy, and re-running revert is idempotent on noop_missing_backup.
+    """
+    cmd = [
+        sys.executable, "-m", "inference_optimizer.multi_node",
+        "revert-patch",
+        "--target-path", str(target_path),
+        "--backup-map-json", json.dumps(backup_map, sort_keys=True),
+    ]
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout_sec,
+    )
+    out = (proc.stdout or "").strip()
+    try:
+        parsed = json.loads(out) if out.startswith("{") else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    if proc.returncode != 0 or str(parsed.get("status", "")).lower() != "ok":
+        # Don't raise — sandbox revert already won; warn-only so caller
+        # can mark the manifest reverted regardless.
+        sys.stderr.write(
+            f"WARN multi-node revert-patch rc={proc.returncode} "
+            f"status={parsed.get('status')!r} "
+            f"stderr_tail={(proc.stderr or '')[-1000:]!r}\n"
+        )
+    return parsed or {
+        "status": "partial",
+        "returncode": proc.returncode,
+        "stdout_tail": out[-2000:],
+        "stderr_tail": (proc.stderr or "")[-2000:],
+    }
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -277,17 +429,46 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             restored.append(str(dst))
             if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
                 manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
+
+    # Multi-node: also fan-out a revert to every pod that received the
+    # corresponding apply. Best-effort; sandbox revert above already
+    # restored the LLM-visible source, but we still want pod-side
+    # sglang to load v0 on the next restart so the integrate
+    # baseline rerun measures the right thing.
+    multinode_info = manifest.get("multinode") or {}
+    mn_revert: dict[str, Any] = {}
+    if multinode_info and multinode_info.get("host_backup_map"):
+        target_path = multinode_info.get("target_path") or (
+            source_backup.get("path") if source_backup else ""
+        )
+        backup_map = multinode_info.get("host_backup_map") or {}
+        if target_path and backup_map:
+            try:
+                mn_revert = _dispatch_multinode_revert(
+                    target_path=target_path,
+                    backup_map=backup_map,
+                )
+            except Exception as exc:  # noqa: BLE001
+                mn_revert = {"status": "failed", "error": str(exc)}
+
     reverted_at = _now()
     manifest["status"] = "reverted"
     manifest["reverted_at"] = reverted_at
     manifest["restored_paths"] = restored
+    if mn_revert:
+        manifest["multinode_revert"] = mn_revert
     manifest_file.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return {
+    result: dict[str, Any] = {
         "status": "ok",
         "manifest_path": str(manifest_file),
         "restored_paths": restored,
         "reverted_at": reverted_at,
     }
+    # Only attach multinode_revert when fan-out actually ran. Preserves
+    # single-node revert return shape bit-for-bit.
+    if mn_revert:
+        result["multinode_revert"] = mn_revert
+    return result
 
 
 def apply_kernel_patch(
@@ -348,6 +529,68 @@ def apply_kernel_patch(
         if target.suffix.lower() in PYTHON_SOURCE_SUFFIXES else
         {"status": "skipped", "reason": "not a python source target"}
     )
+
+    # Multi-node: fan-out the SAME patch to every RayJob pod so head +
+    # workers see identical source. Sandbox-local write above already
+    # succeeded, so the apply is in a "sandbox-applied, pod-pending"
+    # state; the dispatch either promotes it to a fully-applied state
+    # across all three (sandbox + head + workers) or we hard-revert the
+    # sandbox copy to avoid a partial multinode state where LLM would
+    # next round see v1 source locally but pod-side sglang still runs
+    # v0.
+    multinode_info: dict[str, Any] = {}
+    if _is_multi_node():
+        pod_backup_dir = os.environ.get(
+            "HYPERLOOM_MN_KERNEL_BACKUP_DIR", _MN_POD_BACKUP_DIR_DEFAULT,
+        )
+        try:
+            mn_apply = _dispatch_multinode_apply(
+                target_file=target,
+                patch_path=patch,
+                kernel_id=kernel_id,
+                backup_dir_on_pod=pod_backup_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Pod fan-out failed: revert sandbox copy from the source
+            # backup so the three sides agree on v0 again.
+            try:
+                shutil.copy2(source_backup["backup_path"], target)
+            except OSError:
+                pass
+            return {
+                "status": "failed",
+                "error": (
+                    "multi-node apply fan-out failed; sandbox copy "
+                    f"reverted to {source_backup['backup_path']}: {exc}"
+                ),
+                "manifest_path": str(manifest_path),
+            }
+        # Persist per-host backups into the manifest so revert can find
+        # them. Map shape: {hostname: backup_path}.
+        backup_map: dict[str, str] = {}
+        for entry in mn_apply.get("per_node", []) or []:
+            host = (entry.get("host") or "").strip()
+            bp = (entry.get("backup_path") or "").strip()
+            if host and bp:
+                backup_map[host] = bp
+        multinode_info = {
+            "status": "ok",
+            "target_path": str(target),
+            "backup_dir_on_pod": pod_backup_dir,
+            "host_backup_map": backup_map,
+            "per_node": mn_apply.get("per_node", []),
+        }
+        # CRITICAL: persist multinode info to the manifest NOW (not at
+        # the end with status=applied) so a later rebuild failure
+        # triggers revert_kernel_patch with the multinode block still
+        # visible — without this, rebuild failure would revert only
+        # the sandbox copy and leave pod-side patches stranded.
+        manifest["multinode"] = multinode_info
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
     command: list[str] = []
     if isinstance(rebuild_command, str):
         command = ["/bin/bash", "-lc", rebuild_command]
@@ -374,8 +617,11 @@ def apply_kernel_patch(
     manifest["applied_at"] = _now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
+    # multinode block (when present) is already persisted at fan-out
+    # time above; we don't rewrite it here to avoid clobbering the
+    # per-host backup map.
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return {
+    result: dict[str, Any] = {
         "status": "ok",
         "manifest_path": str(manifest_path),
         "target_file": str(target),
@@ -385,6 +631,12 @@ def apply_kernel_patch(
         "cache_clear": cache_clear,
         "rebuild": rebuild,
     }
+    # Only attach the multinode key when fan-out actually ran. Keeps
+    # single-node callers' return shape bit-for-bit identical to
+    # pre-multinode behaviour.
+    if multinode_info:
+        result["multinode"] = multinode_info
+    return result
 
 
 def main() -> int:

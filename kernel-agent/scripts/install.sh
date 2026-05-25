@@ -10,6 +10,12 @@
 
 set -euo pipefail
 
+# Ray/K8s subprocesses may inherit a minimal PATH; git/apt/node live under
+# /usr/bin even when callers only prepend /opt/venv/bin. Prepend the
+# standard system bins so multi-node RayJob children resolve them.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+export PATH="/opt/venv/bin:$PATH"
+
 # Default every writable artefact location under $USER_DATA_PATH so a single
 # session-dir move relocates Magpie / source mirrors / GEAK config / the
 # kernel-agent env file. Operators can still pin individual paths via env
@@ -129,6 +135,16 @@ if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then
 else
   GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"
 fi
+# When 1, ensure_rag_index runs GEAK scripts/build_index.py after GEAK
+# install. Defaults to 1 so GEAK kernel-opt gets RAG-augmented retrieval
+# out of the box on the canonical GPU-pod path (cuda auto-detect, BGE-
+# large embedding ~1min). Callers that don't want this — e.g. claude-only
+# kernel-opt, CPU-only sandbox where BGE-large takes ~1.5h, or any path
+# where install.sh latency matters more than RAG quality — should set
+# `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0` in the launching env (Brain
+# propagates Environment block vars from the prompt into sandbox env, so
+# operators can flip this per-task without editing this script).
+KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
@@ -186,6 +202,11 @@ Options:
   --check-only       Verify current environment, do not install
   --dry-run          Print actions without running installs
   -h, --help         Show this help
+
+Environment (optional):
+  KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
+                                        Set 0 to skip — useful for claude-only kernel-opt or CPU-only
+                                        sandboxes where BGE-large embedding takes ~1.5h.
 
 Legacy options (accepted but no-op, kept for backwards compat):
   --with-geak / --with-oob / --with-llm / --all-backends / --backend NAME
@@ -384,7 +405,7 @@ ensure_node() {
 ensure_ray() {
   log "ensuring ray[default]==2.44.1 and click<8.3.0"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install --quiet --no-cache-dir "click<8.3.0" "ray[default]==2.44.1"
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "click<8.3.0" "ray[default]==2.44.1"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     python3 - <<'PY'
@@ -467,6 +488,7 @@ ensure_tracelens() {
       log "TraceLens root not writable ($TRACELENS_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
       mkdir -p "$(dirname "$TRACELENS_MIRROR_DIR")"
       if [ ! -d "$TRACELENS_MIRROR_DIR" ]; then
+        log "mirroring TraceLens to writable dir (large tree; may take minutes): $TRACELENS_ROOT -> $TRACELENS_MIRROR_DIR"
         run cp -r "$TRACELENS_ROOT" "$TRACELENS_MIRROR_DIR"
       else
         log "TraceLens mirror already present: $TRACELENS_MIRROR_DIR"
@@ -479,7 +501,8 @@ ensure_tracelens() {
   fi
   log "ensuring TraceLens CLI from $TRACELENS_ROOT"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run bash -lc "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
+    # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
+    run sh -c "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     # TraceLens #124: only the inference variant is accepted (the correct
@@ -506,7 +529,12 @@ ensure_geak() {
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"
+    # Pin the pip flag set so we work in both venv installs (main upstream
+    # assumption) and sandbox / system-python installs (multi-node feature
+    # branch needs --break-system-packages; pip in a venv treats it as a
+    # no-op so the flag is safe to keep unconditionally).
+    _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
+    run python3 -m pip install ${_PIP_FLAGS} "${HYPERLOOM_ROOT}/geak"
     # GEAK v3.1.0 ships 5 MCP tools under mcp_tools/; all of them are
     # imported by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
@@ -522,7 +550,7 @@ ensure_geak() {
     # zero-byte baseline. Install all five together.
     for _geak_mcp in rag-mcp profiler-mcp metrix-mcp \
                     cross-session-memory-mcp automated-test-discovery; do
-      run python3 -m pip install -q --no-cache-dir \
+      run python3 -m pip install ${_PIP_FLAGS} \
         "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
     done
     # Patch GEAK's bundled prompt YAML to remove the misleading
@@ -584,6 +612,12 @@ EOF
 }
 
 ensure_rag_index() {
+  case "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL" in
+    0|false|FALSE|no|NO|off|OFF)
+      log "skipping GEAK RAG index build (KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL)"
+      return 0
+      ;;
+  esac
   if [ -d "$RAG_INDEX_DIR" ] && [ -n "$(ls -A "$RAG_INDEX_DIR" 2>/dev/null)" ]; then
     log "RAG index already present at $RAG_INDEX_DIR"
     return
@@ -593,7 +627,7 @@ ensure_rag_index() {
     return
   fi
   log "building RAG index at $RAG_INDEX_DIR on device=${GEAK_RAG_INDEX_DEVICE_VAL} (first run downloads ~1.3 GB embedding model)"
-  run bash -lc "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
+  run sh -c "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
 }
 
 ensure_oob() {
@@ -607,9 +641,9 @@ ensure_oob() {
         run cp -r "$OOB_SRC" "${HYPERLOOM_ROOT}/OOB/oob_cli"
       fi
       if [ -f "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt" ]; then
-        run python3 -m pip install -q --no-cache-dir -r "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt"
+        run python3 -m pip install -q --no-cache-dir --break-system-packages -r "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt"
       fi
-      run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/OOB/oob_cli"
+      run python3 -m pip install -q --no-cache-dir --break-system-packages "${HYPERLOOM_ROOT}/OOB/oob_cli"
     else
       warn "OOB source not found: $OOB_SRC"
     fi
