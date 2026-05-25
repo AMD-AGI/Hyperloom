@@ -344,10 +344,15 @@ def run_model(
     # No sleep here — sandbox is already gone after session ends; download immediately.
     report_content = None
     os.makedirs(result_dir, exist_ok=True)
-    # session_breakdown.json is the V2 dashboard contract emitted by
-    # inference_optimizer/cli.py's finally block (or manually written by the
-    # agent when running a non-cli pipeline). claw-stats-service prefers it
-    # over ci_metrics.json, so we pull it back here when present.
+    # All three suffixes are part of the canonical Required Artifacts
+    # contract (see ci/prompt_prefix.txt and DEFAULT_ARTIFACT_PATTERNS /
+    # _KEY_RESULT_SUFFIXES in optimize_submit.py). session_breakdown.json
+    # is the V2 dashboard contract emitted by inference_optimizer/cli.py's
+    # finally block (or, for non-cli pipelines, manually written by the
+    # agent with the documented schema). claw-stats-service prefers
+    # session_breakdown.json over ci_metrics.json for dashboard rollup, so
+    # this list MUST stay in sync with optimize_submit.py — adding or
+    # removing entries should happen in both places.
     download_suffixes = (
         "optimization_report.md",
         "ci_metrics.json",
