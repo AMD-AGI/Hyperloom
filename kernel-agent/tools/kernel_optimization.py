@@ -976,6 +976,46 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "Pick whichever option matches the kernel; do NOT just measure baseline\n"
         "and write `speedup: N/A` — that wastes the run.\n"
     )
+    # Multi-node sandbox is GPU-less: any local `hipcc` / `torch.cuda.*` /
+    # `torch.utils.cpp_extension.load` call WILL fail. Direct the LLM to
+    # delegate compile + execution to a GPU-bearing pod via the
+    # `inference_optimizer.multi_node kernel-bench` subcommand (head pod,
+    # single-GPU actor); LLM still iterates locally on source, just
+    # off-loads each measurement step. The CLI base64-encodes any
+    # supporting files, stages them under --workspace on the pod, runs
+    # the bench inside that workspace with the GPU, and returns
+    # stdout/stderr + any matching result*.json artifacts.
+    mn_state_file = Path("/tmp/multi_node_state.json")
+    is_multinode_run = False
+    try:
+        if mn_state_file.is_file():
+            _st = json.loads(mn_state_file.read_text(encoding="utf-8"))
+            is_multinode_run = int(_st.get("nodes") or 0) >= 2
+    except (OSError, ValueError):
+        is_multinode_run = False
+    if is_multinode_run:
+        safety += (
+            "\nMULTI-NODE SANDBOX (no local GPU): every compile + benchmark\n"
+            "step MUST be dispatched to a GPU-bearing RayJob pod. Do NOT\n"
+            "call `hipcc`, `torch.cuda.*`, or `torch.utils.cpp_extension.load`\n"
+            "directly; they have no GPU here and will hang or crash.\n"
+            "Instead, for each A/B benchmark iteration:\n"
+            "  1. Write the bench script (and any deps) under your\n"
+            "     workspace ($WORKSPACE/benchmarks/, $WORKSPACE/optimized_versions/).\n"
+            "  2. Invoke:\n"
+            "       python3 -m inference_optimizer.multi_node kernel-bench \\\n"
+            "         --workspace /tmp/kbench_$KERNEL_ID \\\n"
+            "         --bench-command 'cd /tmp/kbench_$KERNEL_ID && bash bench.sh' \\\n"
+            "         --files-b64-json '<{\"bench.sh\":\"<b64>\",\"v1.cu\":\"<b64>\",...}>' \\\n"
+            "         --result-glob 'result*.json'\n"
+            "  3. Parse the printed JSON document's `result.stdout_tail`\n"
+            "     and `result.artifacts[].content` for the speedup number;\n"
+            "     write it into optimization_report.md as `[MICRO_SPEEDUP]`.\n"
+            "Helper script to construct the b64 map cleanly:\n"
+            "    python3 -c 'import base64,json,glob;print(json.dumps({p:base64.b64encode(open(p,\"rb\").read()).decode() for p in glob.glob(\"**/*\",recursive=True) if __import__(\"os\").path.isfile(p)}))'\n"
+            "Treat `kernel-bench` as your only measurement gate; everything\n"
+            "else (code edits, correctness reasoning) still happens locally.\n"
+        )
     if not is_multigpu:
         safety += "- Use the provided benchmark/test files above for correctness/perf measurement.\n"
     elif num_gpus >= 2:
