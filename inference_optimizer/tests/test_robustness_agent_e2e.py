@@ -97,14 +97,18 @@ async def test_robustness_agent_real_runtime_heartbeat(
         session_dir=session_dir,
         # IMPORTANT: do NOT pass runtime_caller_factory — we want the
         # real subprocess path here.
-        # Heartbeat path: explicitly disable both auto-probes so an
-        # inert CI host (no auth-proxy / no inference server on
-        # 127.0.0.1) doesn't fire ``local_server_unreachable`` alerts
+        # Heartbeat path: explicitly disable all three LocalProbe family
+        # probes so an inert CI host (no auth-proxy / no inference
+        # server / no Ray head on 127.0.0.1) doesn't fire
+        # ``local_server_unreachable`` / ``ray_head_dead`` HIGH alerts
         # that would mask the expected heartbeat ``send_message``.
+        # ``ray_probe_enabled`` was added by PR #239 and defaults to
+        # True; the e2e heartbeat test needs all three off.
         options={
             "robustness_server_url": "",
             "auto_probe_auth_proxy": False,
             "auto_probe_inference_server": False,
+            "ray_probe_enabled": False,
         },
     )
 
