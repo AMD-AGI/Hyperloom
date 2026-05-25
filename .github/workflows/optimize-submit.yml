@@ -26,7 +26,7 @@ name: SaFE Optimize Submit
 #
 # How to dispatch:
 #   • Single/few models      : `-f models='Qwen/Qwen2.5-7B-Instruct ...'`
-#   • Reproducible batch run : `-f candidates_file=ci/candidates/top600_2026-05-12.json
+#   • Reproducible batch run : `-f candidates_file=ci/candidates/production_1000_from_hf_2026-05-25.json
 #                              -f batch_index=0 -f batch_size=130`
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
@@ -44,7 +44,7 @@ on:
         required: false
         default: ''
       candidates_file:
-        description: 'Path to a build_candidates.py JSON (e.g. ci/candidates/top600_2026-05-12.json). Used when models is empty.'
+        description: 'Path to a candidates JSON built by ci/build_production_hf_pool.py (e.g. ci/candidates/production_1000_from_hf_2026-05-25.json). Used when models is empty.'
         required: false
         default: ''
       batch_index:
@@ -179,7 +179,7 @@ jobs:
       # real leaderboard data, so we can compare week-over-week. The file is
       # generated manually via ci/build_production_leaderboard_pool.py and
       # refreshed only when we want to bring in newly-published models.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_leaderboard_2026-05-25.json' || github.event.inputs.candidates_file }}
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_hf_2026-05-25.json' || github.event.inputs.candidates_file }}
       INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '60' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
