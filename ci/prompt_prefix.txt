@@ -150,72 +150,52 @@ verify that `[PERSIST OK]` appears in the output. If you skip this, the
 run will be reported as Failed regardless of what numbers you produced.
 
   mkdir -p "$RESULT_DIR"
-
-  # Step 1 of PERSIST — legacy back-fill. The V2 orchestrator (older skill
-  # versions) sometimes writes its outputs into /wekafs/users/<uid>/<sess>/
-  # instead of $RESULT_DIR. Pull the three Required Artifacts back into
-  # $RESULT_DIR FIRST so the cp -a below captures a complete snapshot.
-  # session_breakdown.json typically sits one level deeper than
-  # ci_metrics.json (V2 cli.py writes it to <session_dir>/, i.e.
-  # <workspace>/<model>/<ts>/), so the glob has an extra wildcard.
-  CI=$(ls -t /wekafs/users/*/*/ci_metrics.json \
-             /wekafs/users/*/*/phase10_report/ci_metrics.json \
-             /wekafs/users/*/*/results/ci_metrics.json \
-             /wekafs/users/*/*/*/ci_metrics.json \
-             2>/dev/null | head -1)
-  REPORT=$(ls -t /wekafs/users/*/*/optimization_report.md \
-                 /wekafs/users/*/*/phase10_report/optimization_report.md \
-                 /wekafs/users/*/*/reports/final.md \
-                 /wekafs/users/*/*/*/optimization_report.md \
-                 2>/dev/null | head -1)
-  BREAKDOWN=$(ls -t /wekafs/users/*/*/session_breakdown.json \
-                    /wekafs/users/*/*/phase10_report/session_breakdown.json \
-                    /wekafs/users/*/*/*/session_breakdown.json \
-                    2>/dev/null | head -1)
-  if [ -n "$CI" ] && [ ! -s "$RESULT_DIR/ci_metrics.json" ]; then
-    cp -f "$CI" "$RESULT_DIR/ci_metrics.json"
-    echo "[BACKFILL] $CI -> $RESULT_DIR/ci_metrics.json"
-  fi
-  if [ -n "$REPORT" ] && [ ! -s "$RESULT_DIR/optimization_report.md" ]; then
-    cp -f "$REPORT" "$RESULT_DIR/optimization_report.md"
-    echo "[BACKFILL] $REPORT -> $RESULT_DIR/optimization_report.md"
-  fi
-  if [ -n "$BREAKDOWN" ] && [ ! -s "$RESULT_DIR/session_breakdown.json" ]; then
-    cp -f "$BREAKDOWN" "$RESULT_DIR/session_breakdown.json"
-    echo "[BACKFILL] $BREAKDOWN -> $RESULT_DIR/session_breakdown.json"
-  fi
-
-  # Step 2 of PERSIST — copy the whole $RESULT_DIR (now complete) to wekafs.
   UID_HEX="$(ls /hyperloom/users 2>/dev/null | head -1)"
   if [ -z "$UID_HEX" ]; then
     echo "[PERSIST FAIL] /hyperloom/users/<uid>/ not mounted in this sandbox — cannot persist to wekafs" >&2
-    # Do NOT proceed silently — emit the contract artifacts a second time
-    # at top of $RESULT_DIR so at least the SaFE artifact upload (when it
-    # works) has a chance to grab them.
+    # Do NOT proceed silently — emit a directory listing so the artifact
+    # upload (when it works) at least has a chance to grab the files.
     ls -la "$RESULT_DIR/"
   else
     MODEL_TAG="$(echo "${DISPLAYNAME:-task}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/-*$//')"
     TASK_TAG="${SAFE_TASK_ID:-$(date +%Y%m%d%H%M%S)}"
     PERSIST_DIR="/hyperloom/users/$UID_HEX/${MODEL_TAG}-${TASK_TAG##*-}-opt"
     mkdir -p "$PERSIST_DIR"
-    # Copy the full result tree (not just the three key artifacts) so logs,
-    # kernel candidates/results, sweep outputs, traces, and any future audit
-    # files survive sandbox cleanup. Do NOT silence stderr — surfacing copy
-    # errors here is what lets us debug "0 files persisted" outcomes.
+    # Copy the FULL result tree — not just the three key artifacts — so
+    # logs, kernel candidates/results, sweep outputs, traces, manifest.json,
+    # state.json, every phase*/ dir, and any future audit files survive
+    # sandbox cleanup. This catches:
+    #   * $RESULT_DIR/ci_metrics.json (Required at root)
+    #   * $RESULT_DIR/optimization_report.md (Required at root)
+    #   * $RESULT_DIR/<model>/<ts>/session_breakdown.json (V2 cli.py writes
+    #     this to <session_dir>/, i.e. one level deeper than RESULT_DIR)
+    #   * $RESULT_DIR/hyperloom_source_commit.txt + source_commits.json (audit)
+    # Do NOT silence stderr — surfacing copy errors is what lets us debug
+    # "0 files persisted" outcomes.
     if cp -a "$RESULT_DIR/." "$PERSIST_DIR/"; then
       echo "[PERSIST] cp -a $RESULT_DIR/. -> $PERSIST_DIR/ succeeded"
     else
       echo "[PERSIST FAIL] cp -a returned non-zero exit; partial state may exist in $PERSIST_DIR/" >&2
     fi
-    # Verify each Required Artifact individually. Missing ANY of these
-    # three is a contract violation and must be surfaced in the log so
-    # the CI summary can route the run to manual review.
+    # Verify each Required Artifact appears SOMEWHERE under PERSIST_DIR.
+    # We use `find` because session_breakdown.json is nested under
+    # <model>/<ts>/ (V2 cli.py writes it inside the session dir, not at
+    # RESULT_DIR root). If the file isn't found at all, that's a real
+    # contract violation and the CI summary should route the run to
+    # manual review.
+    #
+    # NB: if V2 cli.py was launched with $USER_DATA_PATH already pointing
+    # into /wekafs/users/<uid>/<sess>/ (Claw-style pod), the files are
+    # ALREADY persistent at that path — the find below will still report
+    # them missing under $PERSIST_DIR, but the operator can recover them
+    # from $USER_DATA_PATH directly. We log $USER_DATA_PATH for that case.
     PERSIST_MISSING=""
     for f in ci_metrics.json optimization_report.md session_breakdown.json; do
-      if [ -s "$PERSIST_DIR/$f" ]; then
-        echo "[PERSIST] ok: $PERSIST_DIR/$f"
+      hit="$(find "$PERSIST_DIR" -name "$f" -type f \! -size 0 2>/dev/null | head -1)"
+      if [ -n "$hit" ]; then
+        echo "[PERSIST] ok: $f -> $hit"
       else
-        echo "[PERSIST FAIL] missing required artifact: $PERSIST_DIR/$f" >&2
+        echo "[PERSIST FAIL] missing required artifact: $f (searched $PERSIST_DIR)" >&2
         PERSIST_MISSING="${PERSIST_MISSING} $f"
       fi
     done
@@ -223,6 +203,7 @@ run will be reported as Failed regardless of what numbers you produced.
       echo "[PERSIST OK] all three required artifacts present under $PERSIST_DIR/"
     else
       echo "[PERSIST FAIL] missing required artifact(s):$PERSIST_MISSING" >&2
+      echo "[PERSIST] note: USER_DATA_PATH=${USER_DATA_PATH:-<unset>} — if Claw set it to a wekafs path, the files may already be persistent there." >&2
     fi
     ls -la "$PERSIST_DIR/"
   fi
