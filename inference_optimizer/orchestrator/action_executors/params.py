@@ -35,6 +35,13 @@ from ._grid_runner import (
     GridVariant,
     VariantResult,
     _resolve_session_dir,
+    MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT,
+    apply_compatibility_filter,
+    apply_multi_node_invalid_variants,
+    apply_single_node_invalid_variants,
+    apply_user_skip_list,
+    reorder_grid_for_multi_node,
+    resolve_skip_spec,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -196,6 +203,18 @@ DEFAULT_PARAMS_GRID: list[GridVariant] = [
     GridVariant("sglang_tilelang_indexer",
                  extra_envs={"SGLANG_OPT_USE_TILELANG_INDEXER": "true"},
                  note="indexer"),
+    # N22 (May 2026): explicitly register torch_compile_on so the
+    # catalogue lists it + the keyword map can reference it. Previously
+    # this lever was only surfaced via AST auto-discovery
+    # (`_augment_grid_with_discovered_flags`), which means it appeared
+    # in the LLM-visible grid AT RUNTIME but never showed up in the
+    # static prompt catalogue. Result: LLM that didn't read auto-
+    # discovery output (e.g. Qwen3-30B-A3B N20c session) skipped it
+    # even when analysis.md explicitly mentioned `torch.compile`. Now
+    # it's a first-class entry — both prompt catalogue and N22 keyword
+    # advisory point at the same name.
+    GridVariant("torch_compile_on", "--enable-torch-compile",
+                 note="compile"),
 ]
 
 
@@ -443,8 +462,25 @@ class ParamsExecutor:
         base_tput = float(params.get("base_tput", 0.0))
         timeout_sec = int(params.get("variant_timeout_sec",
                                        self.variant_timeout_sec))
-        keep_threshold_pct = float(params.get("keep_threshold_pct",
-                                              self.keep_threshold_pct))
+        # M1: KEEP threshold resolution with multi-node noise awareness.
+        # Resolution order: explicit task param > multi-node default
+        # (2.0%) > single-node default (self.keep_threshold_pct, 0.5%).
+        # Explicit caller value always wins so unit tests and the Brain
+        # agent can still tighten/loosen the threshold per-task. The
+        # multi-node fallback exists because the empirical noise floor
+        # on >=2-node TP runs is ~1-2% (cross-node RDMA jitter + Ray
+        # scheduling drift); the 0.5% single-node default would otherwise
+        # flag noise as KEEP and trigger a wasted ~40-min validate_stack.
+        explicit_keep = params.get("keep_threshold_pct")
+        if explicit_keep is not None:
+            keep_threshold_pct = float(explicit_keep)
+        else:
+            from ._multi_node_env import is_multi_node
+            keep_threshold_pct = (
+                MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT
+                if is_multi_node()
+                else self.keep_threshold_pct
+            )
         max_candidates = int(params.get(
             "max_candidates_per_round", self.default_max_candidates_per_round,
         ))
@@ -452,6 +488,22 @@ class ParamsExecutor:
         # Compose grid: flags first, then optional NCCL.
         grid_override = params.get("grid")
         framework = _config_framework(config_path)
+        # N20-A: roofline-driven variant subset selection (mirrors the
+        # backends.py contract added in the same N20-A commit). Three
+        # LLM-controlled surfaces:
+        #   * `grid`     — list[{name, extra_sglang_args, extra_envs,
+        #                    note}]: full custom variants (Option B,
+        #                    pre-N20). LLM owns the entire search space.
+        #   * `variants` — list[str]: subset of registered grid variant
+        #                    names (Option A, N20). Safer surface; LLM
+        #                    cannot hallucinate flag VALUES (params
+        #                    flags need values, not just presence).
+        # `grid` takes precedence over `variants` when both are passed.
+        variants_subset_raw = params.get("variants") or []
+        variants_subset: list[str] = [
+            str(v).strip() for v in variants_subset_raw
+            if isinstance(v, str) and str(v).strip()
+        ] if isinstance(variants_subset_raw, list) else []
         if grid_override:
             grid = [
                 GridVariant(name=v["name"],
@@ -468,6 +520,35 @@ class ParamsExecutor:
             )
             if self.include_nccl or params.get("include_nccl"):
                 grid += list(self.default_nccl_grid)
+            # N20-A subset filter applied AFTER NCCL augmentation but
+            # BEFORE the params_search ledger filtering — so the subset
+            # is the set the LLM actually wants, and the ledger then
+            # drops any already-tested fingerprints from that set.
+            if variants_subset:
+                requested = set(variants_subset)
+                grid_by_name = {v.name: v for v in grid}
+                missing = sorted(requested - set(grid_by_name))
+                resolved = [grid_by_name[n] for n in variants_subset
+                            if n in grid_by_name]
+                if not resolved:
+                    return {
+                        "status": "failed",
+                        "error_class": "bad_param",
+                        "error": (
+                            f"none of variants={variants_subset!r} matched "
+                            f"the registered "
+                            f"{'vllm' if 'vllm' in framework else 'sglang'} "
+                            f"params grid; "
+                            f"available names: {sorted(grid_by_name)}"
+                        ),
+                    }
+                log.info(
+                    "params: LLM requested %d variants from registered "
+                    "grid of %d (resolved=%d, missing=%s)",
+                    len(requested), len(grid_by_name), len(resolved),
+                    missing or "none",
+                )
+                grid = resolved
 
         # T1 — AST-discover parameter flag names from the live framework
         # so the Orchestration prompt sees the full namespace and can
@@ -495,6 +576,53 @@ class ParamsExecutor:
                     f"discover_param_flags: no flags from {discovered_source} "
                     f"({discovery_error})"
                 )
+
+        # User-declared variant skip list (operator prompt / --skip-variants
+        # / task params). Same helper as backends.py so the contract is
+        # uniform: a single SKIP_VARIANTS spec prunes both grids. Pure
+        # name/glob match; no model knowledge required. Anything the agent
+        # already knows is incompatible should come through here. Applied
+        # AFTER discovery so dropped flags don't accidentally re-appear.
+        skip_spec = resolve_skip_spec(params)
+        grid, user_dropped = apply_user_skip_list(grid, skip_spec=skip_spec)
+        for d in user_dropped:
+            log.info("params: user-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        grid, mn_dropped = apply_multi_node_invalid_variants(grid)
+        for d in mn_dropped:
+            log.info("params: multi-node-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        # A+B filter step 1: single-node-side filter for
+        # ``note=multi_node_only_*`` variants (noop in multi-node).
+        # The default params grid currently ships zero multi-node-only
+        # variants — the helper is wired anyway so a future LLM
+        # grid-override injecting MN-only flags is silently filtered
+        # in single-node runs instead of crashing them.
+        grid, sn_dropped = apply_single_node_invalid_variants(grid)
+        for d in sn_dropped:
+            log.info("params: single-node-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        # A+B filter step 2: compatibility filter for model-class /
+        # sglang-version mismatches. Conservative — probe failures
+        # fall through, so bad-variant cost falls back to one wasted
+        # sglang restart (same as the no-filter baseline).
+        grid, compat_dropped = apply_compatibility_filter(grid)
+        for d in compat_dropped:
+            log.info("params: compatibility-skipped variant %s (%s)",
+                     d["name"], d["reason"])
+        dropped_variants = (
+            list(user_dropped) + list(mn_dropped)
+            + list(sn_dropped) + list(compat_dropped)
+        )
+        # M2: multi-node grid reorder (single-node noop).
+        # Surfaces likely-winners (cuda_graph_max_bs == CONC,
+        # mem_fraction, max_num_seqs, ...) ahead of low-leverage tail
+        # so the run can plateau within --max-hours budget. See
+        # _grid_runner._MN_PARAMS_PRIORITY for the tag order.
+        from ._grid_runner import _MN_PARAMS_PRIORITY
+        grid = reorder_grid_for_multi_node(
+            grid, priority_tags=_MN_PARAMS_PRIORITY,
+        )
 
         search = dict(params.get("params_search") or _initial_search_state())
         # Schema versions: v1 keyed tested by variant name; v2 keys by
@@ -582,6 +710,7 @@ class ParamsExecutor:
                 "workspace": output_root.as_posix(),
                 "params_search_update": search,
                 "params_search_exhausted": True,
+                "dropped_variants": dropped_variants,
                 "discovered_flags_update": (
                     {
                         "framework": framework or "sglang",
@@ -773,6 +902,7 @@ class ParamsExecutor:
             "workspace": output_root.as_posix(),
             "params_search_update": search_update,
             "params_search_exhausted": params_search_exhausted,
+            "dropped_variants": dropped_variants,
             "discovered_flags_update": (
                 {
                     "framework": framework or "sglang",

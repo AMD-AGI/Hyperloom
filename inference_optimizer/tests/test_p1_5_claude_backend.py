@@ -252,7 +252,7 @@ async def test_run_extracts_multiple_emit_intent_tool_uses():
         }),
         ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input={
             "intent_type": "request",
-            "payload": {"target_agent": "kernel", "kind": "select_kernels"},
+            "payload": {"target_agent": "kernel", "kind": "trace_analyze"},
         }),
     ])
     backend = ClaudeBackend(
