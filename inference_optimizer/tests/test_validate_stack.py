@@ -69,6 +69,25 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_multi_node_state(tmp_path_factory, monkeypatch):
+    """Pin ``MULTI_NODE_STATE_FILE`` to a non-existent path under tmp so
+    ``_multi_node_env.is_multi_node()`` does NOT pick up the real
+    ``/tmp/multi_node_state.json`` that a sandbox running on a shared
+    wekafs node may have left behind from a prior multi-node session.
+
+    Without this guard, the e2e tests below default to ``is_multi_node()
+    = True`` on such hosts, which makes ``validate_stack`` follow the
+    multi-node branch and call the *real* ``cmd_restart_server`` via
+    ``restart_server_for_round`` (RayJob kill + relaunch), turning the
+    "Magpie subprocess mocked" tests into ~30s flakes against live
+    infra. Tests that explicitly need multi-node mode opt in via
+    ``patch(... 'is_multi_node', return_value=True)``.
+    """
+    isolated = tmp_path_factory.mktemp("mn_state") / "absent.json"
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(isolated))
+
+
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -273,7 +292,7 @@ async def test_validate_stack_executor_combines_stack_and_returns_validated_fiel
     )
     sub.register_executor("validate_stack", ValidateStackExecutor(session_dir=tmp_path))
 
-    with patch("subprocess.run", return_value=fake_completed):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -288,6 +307,149 @@ async def test_validate_stack_executor_combines_stack_and_returns_validated_fiel
     assert [e["variant_name"] for e in res.result["applied_entries"]] == [
         "aiter", "graphs",
     ]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_validate_stack_executor_single_node_pops_extra_args_before_forwarding(
+    tmp_path, monkeypatch,
+):
+    """Single-node (default): merged args are baked into the materialised
+    YAML by validate_stack itself, so ``task.params`` must NOT re-pass
+    them to BaselineExecutor. Re-passing would be a no-op today (Magpie
+    reads ``EXTRA_*_ARGS`` from the YAML, not the dict), but the contract
+    is "YAML wins on single-node" — verify it explicitly to guard
+    against accidental drift if BaselineExecutor's single-node launch
+    starts honouring ``params['extra_sglang_args']``.
+    """
+    db = SqliteConnection(tmp_path / "validate.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    SharedState(
+        baseline_tput=1000.0,
+        optimization_stack=[
+            {"action": "backends", "variant_name": "aiter",
+             "candidate_extra_sglang_args": "--attention-backend aiter",
+             "extra_envs": {"AITER_USE_OOB": "0"}},
+        ],
+    ).save(tmp_path)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    captured: dict[str, object] = {}
+
+    async def _stub_baseline_call(self, ctx):  # pylint: disable=unused-argument
+        # Capture the forwarded task.params snapshot — this is what the
+        # multi-node restart helper would consume in
+        # baseline.py:restart_server_for_round.
+        params = ctx.task.params or {}
+        captured["extra_sglang_args"] = params.get("extra_sglang_args", "<absent>")
+        captured["extra_envs"] = params.get("extra_envs", "<absent>")
+        return {"status": "succeeded", "output_throughput": 1100.0}
+
+    task = await tr.create(
+        kind="validate_stack",
+        params={"output_dir": str(output_dir),
+                "config_path": str(_default_baseline_config())},
+        idempotency_key="validate-single-node-pop",
+    )
+    sub.register_executor("validate_stack", ValidateStackExecutor(session_dir=tmp_path))
+
+    # is_multi_node() defaults to False (no state file, env var absent).
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "BaselineExecutor.__call__",
+        new=_stub_baseline_call,
+    ):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    # Single-node contract: keys popped before super().__call__.
+    assert captured["extra_sglang_args"] == "<absent>"
+    assert captured["extra_envs"] == "<absent>"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_validate_stack_executor_multi_node_forwards_merged_args(
+    tmp_path, monkeypatch,
+):
+    """Multi-node: BaselineExecutor.restart_server_for_round boots sglang
+    via the multi_node CLI which does NOT read the materialised YAML's
+    ``EXTRA_SGLANG_ARGS``. validate_stack must forward the merged args
+    + envs through ``task.params`` so the restarted server sees the
+    full optimization_stack (otherwise cumulative_gain_validated
+    collapses to ~0% because we re-baseline against vanilla sglang).
+    """
+    db = SqliteConnection(tmp_path / "validate.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    SharedState(
+        baseline_tput=1000.0,
+        optimization_stack=[
+            {"action": "backends", "variant_name": "aiter",
+             "candidate_extra_sglang_args": "--attention-backend aiter",
+             "extra_envs": {"AITER_USE_OOB": "0"}},
+            {"action": "params", "variant_name": "graphs",
+             "candidate_extra_sglang_args": "--cuda-graph-max-bs 256",
+             "extra_envs": {"NCCL_DEBUG": "WARN"}},
+        ],
+    ).save(tmp_path)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    captured: dict[str, object] = {}
+
+    async def _stub_baseline_call(self, ctx):  # pylint: disable=unused-argument
+        params = ctx.task.params or {}
+        captured["extra_sglang_args"] = params.get("extra_sglang_args")
+        captured["extra_envs"] = dict(params.get("extra_envs") or {})
+        return {"status": "succeeded", "output_throughput": 1100.0}
+
+    task = await tr.create(
+        kind="validate_stack",
+        params={"output_dir": str(output_dir),
+                "config_path": str(_default_baseline_config())},
+        idempotency_key="validate-multi-node-forward",
+    )
+    sub.register_executor("validate_stack", ValidateStackExecutor(session_dir=tmp_path))
+
+    # Force is_multi_node()=True via env (state file path resolution
+    # falls through to env when no /tmp/multi_node_state.json exists in
+    # the isolated test environment).
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._multi_node_env."
+        "is_multi_node",
+        return_value=True,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.validate_stack."
+        "is_multi_node",
+        return_value=True,
+        create=True,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "BaselineExecutor.__call__",
+        new=_stub_baseline_call,
+    ):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    # Multi-node contract: merged args + envs MUST land in task.params
+    # so restart_server_for_round forwards them to cmd_restart_server.
+    assert captured["extra_sglang_args"] == (
+        "--attention-backend aiter --cuda-graph-max-bs 256"
+    )
+    assert captured["extra_envs"] == {
+        "AITER_USE_OOB": "0", "NCCL_DEBUG": "WARN",
+    }
     db.close()
 
 
@@ -317,7 +479,7 @@ async def test_validate_stack_executor_warns_when_stack_empty(tmp_path):
     sub.register_executor(
         "validate_stack", ValidateStackExecutor(session_dir=tmp_path),
     )
-    with patch("subprocess.run", return_value=fake_completed):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -358,7 +520,7 @@ async def test_validate_stack_executor_accepts_explicit_stack_param(tmp_path):
     sub.register_executor(
         "validate_stack", ValidateStackExecutor(session_dir=tmp_path),
     )
-    with patch("subprocess.run", return_value=fake_completed):
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"

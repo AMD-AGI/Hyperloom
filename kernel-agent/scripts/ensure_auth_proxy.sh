@@ -36,6 +36,14 @@ USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 PROXY_PY="${PROXY_PY:-${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py}"
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_HYPERLOOM_REPO="$(cd "${_SCRIPT_DIR}/../.." && pwd)"
+if [ ! -f "$PROXY_PY" ]; then
+  PROXY_PY="${HYPERLOOM_ROOT}/OOB/auth_proxy.py"
+fi
+if [ ! -f "$PROXY_PY" ]; then
+  PROXY_PY="${_HYPERLOOM_REPO}/OOB/auth_proxy.py"
+fi
 PROXY_PORT="${AUTH_PROXY_PORT:-4002}"
 # Auth-proxy stdout/stderr lands under $USER_DATA_PATH/logs/auth-proxy/
 # by default so a single $USER_DATA_PATH tail covers it. Override

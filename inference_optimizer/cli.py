@@ -41,6 +41,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -48,15 +49,17 @@ from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     backends_executor,
     baseline_executor,
+    framework_pr_executor,
+    make_roofline_executor,
     params_executor,
     pmc_roofline_executor,
     profile_executor,
+    recover_executor,
     report_executor,
     session_breakdown_executor,
     sweep_executor,
     validate_stack_executor,
 )
-from .orchestrator.action_executors.recover import recover_executor
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
@@ -71,18 +74,19 @@ from .orchestrator.coordinator import Coordinator
 from .orchestrator.framework_paths import resolve_source_file_allowlist
 from .orchestrator.objective import Objective, build_objective
 from .orchestrator.shared_state import SharedState
-from .orchestrator.system_prompts.critic_prompt_builder import build_critic_prompt
 from .orchestrator.system_prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
 from .paths import (
     DEFAULT_SESSION_DIR,
+    ENV_CURRENT_SESSION_DIR,
     ENV_USER_DATA_PATH,
     _SESSION_SKELETON,
     asset_system_prompts_dir,
     make_session_dir,
     session_dir as _session_dir_resolve,
+    workspace_root,
 )
 from .session_paths import (
     agent_prompt_snapshot,
@@ -121,6 +125,7 @@ def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | st
 def _build_orchestration_prompt(
     *,
     no_kernel: bool,
+    no_framework: bool = False,
     framework: str,
     objective: Objective,
     max_minutes: int,
@@ -130,13 +135,18 @@ def _build_orchestration_prompt(
 
     The legacy ``_load_orchestration_prompt(no_kernel)`` returned a
     hand-maintained markdown file; this replacement assembles the prompt
-    from typed inputs so kernel-enabled / no-kernel split is just a
-    parameter and every enabled action carries a 1-line description.
+    from typed inputs so the kernel/framework-agent toggles are parameters
+    and every enabled action carries a 1-line description.
+
+    ``no_framework=True`` strips ``framework_pr`` from the enabled set so
+    the bandit cannot pull the framework-agent arm.
 
     Callers may still pass ``--orch-prompt`` to fully override the result.
     """
     registry = action_registry or ActionRegistry().load()
-    enabled = default_enabled_actions(no_kernel=no_kernel)
+    enabled = default_enabled_actions(
+        no_kernel=no_kernel, no_framework=no_framework,
+    )
     kind, value = _objective_summary_for_prompt(objective)
     return build_orchestration_prompt(
         action_registry=registry,
@@ -151,34 +161,9 @@ def _build_orchestration_prompt(
     )
 
 
-def _critic_rules_fragment_path() -> Path:
-    """Path to the critic rules-only fragment (section 6 of the built prompt)."""
-    return asset_system_prompts_dir() / "critic.md"
-
-
-def _build_critic_prompt(
-    *,
-    no_kernel: bool,
-    framework: str,
-    max_minutes: int,
-    action_registry: ActionRegistry | None = None,
-) -> str:
-    """Compose the Critic system prompt for this run.
-
-    Replaces the legacy hand-maintained whitelist in ``critic.md`` with a
-    registry-driven catalogue so new actions (e.g. ``validate_stack``) cannot
-    drift out of the critic's known-action list.
-    """
-    registry = action_registry or ActionRegistry().load()
-    enabled = default_enabled_actions(no_kernel=no_kernel)
-    return build_critic_prompt(
-        action_registry=registry,
-        enabled_actions=enabled,
-        framework=framework,
-        kernel_enabled=not no_kernel,
-        max_minutes=int(max_minutes),
-        rules_fragment_path=_critic_rules_fragment_path(),
-    )
+def _load_critic_prompt() -> str:
+    """Return the Critic system prompt sourced from ``system_prompts/critic.md``."""
+    return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
 
 
 _DEFAULT_KERNEL_PROMPT = (
@@ -462,12 +447,27 @@ def _build_backends(
             raise ValueError(
                 "_build_backends: critic_choice='agent' requires critic_agent_root"
             )
+        # N38 (May 2026) — feed the registry-derived per-action
+        # verdict policy so the critic-agent runtime sees
+        # ``review_constraints.action_verdict_policy[<action_name>]``
+        # and approves exploration / archival actions without
+        # demanding the before/after evidence they themselves produce.
+        # Replaces the prompt-hardcoded carve-out lists N33/N35/N37
+        # had to patch one action at a time.
+        try:
+            from inference_optimizer.orchestrator.action_registry import (
+                ActionRegistry,
+            )
+            _reg = ActionRegistry().load()
+            _policy = {a.name: a.verdict_class for a in _reg.all()}
+        except Exception:  # noqa: BLE001 — degrade to empty policy
+            _policy = {}
         critic_backend = CriticAgentBackend(
             critic_agent_root=critic_agent_root,
             session_dir=session_dir,
             codex_model=codex_model,
             kb_mode=critic_kb_mode,
-            known_actions=default_enabled_actions(no_kernel=no_kernel),
+            action_verdict_policy=_policy,
         )
 
     if robustness_choice not in ("mock", "agent"):
@@ -498,7 +498,7 @@ def _build_backends(
         if kernel_codex:
             backends["kernel"] = CodexBackend(model=codex_model)
         else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=20)
+            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=4)
     return backends
 
 
@@ -518,6 +518,7 @@ def _seed_shared_state(
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         kernel_enabled=not getattr(args, "no_kernel", False),
+        framework_enabled=not getattr(args, "no_framework", False),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain=0.0,
@@ -582,15 +583,10 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "backends":       backends_executor,
     "params":         params_executor,
     "sweep":          sweep_executor,
+    "framework_pr":   framework_pr_executor,
     "report":            report_executor,
     "session_breakdown": session_breakdown_executor,
     "validate_stack":    validate_stack_executor,
-    # ``recover`` re-enabled in 2026-05 alongside the robustness-agent
-    # ``gpu_memory_leaked`` signal (Change A/B): a real executor now
-    # cleans up leaked VRAM owners and, behind
-    # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, optionally shells out to
-    # ``rocm-smi --gpureset``. See
-    # ``orchestrator/action_executors/recover.py``.
     "recover":           recover_executor,
 }
 
@@ -607,21 +603,14 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
 # agent's request handlers). Kept as a tuple so SubAgentRunner doesn't
 # fail with "no_executor" when these names appear in stale tasks.
 #
-# `dream` / `re_explore` / `comm_optimization` / `compiler_tuning` were
-# removed from this list alongside the corresponding entries in
-# `prompt_builder.{FULL,NO_KERNEL}_ENABLED_ACTIONS`. Their executors
-# were `_noop_prep` (silent success) which produced misleading
-# "succeeded" outcomes; with them gone, any stale state.json resume
-# that still references one of these kinds will surface as
+# `dream` / `re_explore` / `recover` / `comm_optimization` /
+# `compiler_tuning` were removed from this list alongside the
+# corresponding entries in `prompt_builder.{FULL,NO_KERNEL}_ENABLED_ACTIONS`.
+# Their executors were `_noop_prep` (silent success) which produced
+# misleading "succeeded" outcomes; with them gone, any stale state.json
+# resume that still references one of these kinds will surface as
 # `no_executor` instead of a fake KEEP. Re-add only when real
 # executors land (see remain_todo.md sections C, I, M).
-#
-# `recover` was originally in that removed-stub list, but is now bound
-# above to :data:`recover_executor` (a real implementation that frees
-# leaked GPU VRAM). See the Change A/B/C plan
-# (``gpu-leak-robustness-fix``) for the design notes; the executor is
-# the SubAgentRunner-side counterpart of the robustness-agent
-# ``gpu_memory_leaked`` signal.
 #
 # `target_analysis` used to be a noop-when-unset stub here; it is now
 # wired unconditionally to the real :class:`TargetAnalysisExecutor`
@@ -637,6 +626,7 @@ def _register_executors(
     coordinator: Coordinator,
     *,
     no_kernel: bool = False,
+    no_framework: bool = False,
     compare_against_gpu: str | None = None,
     session_dir: Path | None = None,
 ) -> None:
@@ -651,6 +641,11 @@ def _register_executors(
     skipped, the kernel-only no-op stubs are skipped, and ``profile`` is
     also skipped (profiling only feeds kernel-opt).
 
+    When ``no_framework`` is True, the ``framework_pr`` executor is
+    skipped so any stale ``framework_pr`` task surfaces as
+    ``no_executor`` rather than silently invoking the framework-agent.
+    Combined with ``no_kernel`` this yields four agent-combinations.
+
     ``target_analysis`` is *always* registered with the real
     :class:`TargetAnalysisExecutor`. When ``compare_against_gpu`` is a
     non-empty string, the executor fetches the matching InferenceX
@@ -659,6 +654,8 @@ def _register_executors(
     section is rendered uniformly in both cases.
     """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
+        if no_framework and kind == "framework_pr":
+            continue
         coordinator.sub.register_executor(kind, fn)
 
     coordinator.sub.register_executor(
@@ -667,6 +664,19 @@ def _register_executors(
             compare_against_gpu=(compare_against_gpu or "").strip(),
             session_dir=session_dir,
         ),
+    )
+
+    # Roofline-v2 N2b: wire the `roofline` composite action with the real
+    # `RooflineExecutor` that orchestrates profile + trace_analyze
+    # sub-steps in-process and promotes SharedState inline. The
+    # `RooflineStubExecutor` (kept exported in action_executors) is
+    # available as a §11 fallback wiring path: swap to
+    # `make_roofline_stub_executor` here to temporarily disable real
+    # execution without removing the action entry. See design/roofline-v2.md
+    # §8.4 for the orchestration algorithm.
+    coordinator.sub.register_executor(
+        "roofline",
+        make_roofline_executor(shared_state=coordinator.shared_state),
     )
 
     if no_kernel:
@@ -913,6 +923,116 @@ def _load_dotenv_fallback() -> None:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
 
 
+def _load_kernel_agent_env_fallback() -> None:
+    """If ``HYPERLOOM_KERNEL_AGENT_ROOT`` is unset, auto-source the
+    kernel-agent env file produced by ``inference_optimizer/scripts/
+    install.sh`` at ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``
+    (overridable via ``$KERNEL_AGENT_ENV``).
+
+    Background: the May 2026 R1 N14 run stalled for 1h 12min because
+    the launcher only sourced the user's basic ``.env`` (3 vars) and
+    missed kernel-agent.env.sh. ``RooflineExecutor``'s trace_analyze
+    sub-step imports ``kernel_request_handlers.HYPERLOOM_KERNEL_AGENT_ROOT``
+    at module load — that read happens before any user code can fix the
+    env, so the only way to recover without a restart is to source the
+    file here, before any orchestrator import. Setting the env in this
+    process also propagates to all subprocesses launched by Magpie /
+    TraceLens / GEAK runners.
+
+    Hard-fail contract (revised after the May 2026 Qwen1.5-7B 10h
+    silent-stall: env file at the wrong path -> silent WARN-only ->
+    5 rooflines all profile-success / trace_analyze-fail / snapshot
+    stays None / LLM heartbeat-only 7.5h). The function now:
+
+    * Looks ONLY at ``$KERNEL_AGENT_ENV`` (if set) or
+      ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``. USER_DATA_PATH
+      MUST be the workspace root (per N17 split: ``runtime/`` is
+      workspace-shared, not per-session). No parent-dir fallback.
+    * If the file is missing OR parses 0 vars OR
+      HYPERLOOM_KERNEL_AGENT_ROOT is still unset after sourcing,
+      ``sys.exit(2)`` with a clear actionable message instead of
+      silently warning and letting trace_analyze fail later. Fail
+      early, fail loud: the operator sees the problem in the first
+      30 seconds, not 10 hours in.
+    * Skip entirely when HYPERLOOM_KERNEL_AGENT_ROOT is already set
+      (operator pre-sourced manually, or running from a sandbox that
+      injected it — both fine).
+    """
+    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
+        return
+    candidate = os.environ.get("KERNEL_AGENT_ENV")
+    if not candidate:
+        user_data = os.environ.get("USER_DATA_PATH")
+        if not user_data:
+            print(
+                "Preflight: ERROR — neither $HYPERLOOM_KERNEL_AGENT_ROOT "
+                "nor $KERNEL_AGENT_ENV nor $USER_DATA_PATH is set. Cannot "
+                "resolve kernel-agent.env.sh. Run "
+                "inference_optimizer/scripts/install.sh and export "
+                "USER_DATA_PATH=/path/to/sessions first.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
+    env_path = Path(candidate)
+    if not env_path.is_file():
+        print(
+            f"Preflight: ERROR — kernel-agent env file not found at "
+            f"{env_path}. USER_DATA_PATH must be the workspace root "
+            f"(parent of <model>/<ts>/ per-session subdirs); runtime/ "
+            f"is workspace-shared, not per-session. Either "
+            f"(a) re-run inference_optimizer/scripts/install.sh under "
+            f"USER_DATA_PATH={os.environ.get('USER_DATA_PATH','?')}, "
+            f"(b) set $KERNEL_AGENT_ENV to point at an existing file, or "
+            f"(c) set $HYPERLOOM_KERNEL_AGENT_ROOT directly to skip this "
+            f"fallback entirely. Aborting now (was: silently warning and "
+            f"letting trace_analyze fail 10h in).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    loaded = 0
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(
+            f"Preflight: ERROR — failed to read {env_path}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
+        print(
+            f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
+            f"HYPERLOOM_KERNEL_AGENT_ROOT is still unset. The env file is "
+            f"malformed or stale. Re-run inference_optimizer/scripts/"
+            f"install.sh to regenerate it.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    print(
+        f"Preflight: loaded {loaded} kernel-agent var(s) from "
+        f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
+        f"{os.environ['HYPERLOOM_KERNEL_AGENT_ROOT']})"
+    )
+
+
 def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
     """Install Python SDKs that ``inference_optimizer`` imports at runtime.
 
@@ -1099,6 +1219,63 @@ def _check_shm_disk() -> None:
         )
 
 
+_TRACELENS_REQUIRED_CLIS: tuple[str, ...] = (
+    "TraceLens_generate_perf_report_pytorch_inference",
+)
+
+
+def _check_tracelens_cli() -> None:
+    """Hard-gate TraceLens CLI presence — abort BEFORE Coordinator starts.
+
+    Why this is hard-fail (vs ``_check_node_claude_cli`` which is WARN-only):
+
+    The ``TraceLens_*`` console_scripts are installed by
+    ``kernel-agent/scripts/install.sh`` (chained from
+    ``inference_optimizer/scripts/install.sh``) into the *pod-local*
+    ``/opt/venv/bin/`` — they do NOT persist across pod restarts even
+    when ``$USER_DATA_PATH`` (typically ``/workspace/hyperloom``) is a
+    WekaFS-backed session dir that survives pod recycling. SKILL §IR-2
+    therefore requires running ``install.sh`` before every launch; the
+    only carve-out is ``--resume`` in the *same shell* that earlier ran
+    install.sh.
+
+    Brain-generated launchers that source only
+    ``runtime/kernel-agent.env.sh`` and skip install.sh (fresh-start
+    ``--model`` path) land here with no TraceLens CLI on PATH. Until this
+    gate was added, the missing-CLI failure was surfaced only by the
+    robustness agent's J3 signal at tick ~6 (HIGH severity
+    ``tracelens_cli_missing``) — after baseline had already completed
+    (or hung) and a multi-minute setup cost was wasted.
+    ``select_kernels`` / ``kernel_opt`` then fail downstream when they
+    shell out to ``tracelens_analysis.py``.
+
+    Moving discovery to launch — mirroring ``_gate_claude_model``
+    (SKILL §Step 2 step 10) — turns a delayed silent strike into a
+    fail-fast with an actionable error pointing at the install.sh fix.
+    """
+    missing = [
+        name for name in _TRACELENS_REQUIRED_CLIS
+        if shutil.which(name) is None
+    ]
+    if not missing:
+        return
+    session_dir = os.environ.get("USER_DATA_PATH", "/workspace/hyperloom")
+    print(
+        f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
+        f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
+        f"kernel-agent/scripts/install.sh (chained from "
+        f"inference_optimizer/scripts/install.sh) and do NOT persist "
+        f"across pod restarts. SKILL IR-2 requires running install.sh "
+        f"before every launch (carve-out applies only to --resume in "
+        f"the same shell that earlier ran install.sh). Re-run:\n"
+        f"  bash $REPO_ROOT/inference_optimizer/scripts/install.sh\n"
+        f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
+        f"then retry `inference_optimizer optimize`. Refusing to start.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def _check_node_claude_cli() -> None:
     """WARN-only presence check for the bundled agent CLIs and ``@cursor/sdk``.
 
@@ -1183,9 +1360,14 @@ def _emit_preflight_diagnostics(
     print("Preflight diagnostics:")
     print(f"  asset_root          = {asset_root()}")
     print(
-        f"  session_dir         = {_session_dir_resolve()}  "
+        f"  workspace_root      = {workspace_root()}  "
         f"({ENV_USER_DATA_PATH}="
-        f"{os.environ.get(ENV_USER_DATA_PATH, '<unset>')}, "
+        f"{os.environ.get(ENV_USER_DATA_PATH, '<unset>')})"
+    )
+    print(
+        f"  session_dir         = {_session_dir_resolve()}  "
+        f"({ENV_CURRENT_SESSION_DIR}="
+        f"{os.environ.get(ENV_CURRENT_SESSION_DIR, '<unset>')}, "
         f"default={DEFAULT_SESSION_DIR})"
     )
     print(f"  magpie_python       = {magpie_python}")
@@ -1431,6 +1613,7 @@ def _preflight() -> tuple[str, str] | None:
     (``_run_optimize``) can route the catalog probe through the proxy.
     """
     _load_dotenv_fallback()
+    _load_kernel_agent_env_fallback()
 
     # --- Auth alias export ---
     safe_key = os.environ.get("SAFE_API_KEY", "")
@@ -1538,6 +1721,7 @@ def _preflight() -> tuple[str, str] | None:
     )
     if check.returncode != 0:
         magpie_env = os.environ.get("MAGPIE_DIR")
+        magpie_env_explicit = bool(magpie_env)
         if magpie_env:
             magpie_dir = Path(magpie_env)
         else:
@@ -1545,6 +1729,23 @@ def _preflight() -> tuple[str, str] | None:
             magpie_dir = _magpie_default(_session_dir_resolve())
         magpie_dir.parent.mkdir(parents=True, exist_ok=True)
         if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
+            # Refuse-to-clobber guard: when $MAGPIE_DIR was set explicitly by
+            # the operator (e.g. a wekafs fork with un-pushed local commits),
+            # cloning Magpie main on top would silently destroy local work.
+            # Auto-clone only happens for the default path resolved from
+            # `paths.magpie_dir(session_dir)`.
+            if magpie_env_explicit:
+                print(
+                    f"Preflight: ERROR — $MAGPIE_DIR={magpie_dir} has no "
+                    f"setup.py/pyproject.toml; refusing to clone Magpie "
+                    f"main on top of an operator-supplied path. Fix the "
+                    f"env or unset $MAGPIE_DIR to fall back to the "
+                    f"session-default location.",
+                    file=sys.stderr,
+                )
+                raise FileNotFoundError(
+                    f"$MAGPIE_DIR={magpie_dir} is not a valid Magpie checkout"
+                )
             print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
             subprocess.run(
                 ["git", "clone", "--depth", "1",
@@ -1599,6 +1800,12 @@ def _preflight() -> tuple[str, str] | None:
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
+
+    # --- TraceLens CLI presence (HARD-FAIL; SKILL Step 2 step 8.5) ---
+    # Catches brain-generated launchers that source only env.sh and skip
+    # install.sh — without this gate the missing-CLI symptom would not
+    # surface until robustness J3 fires at tick ~6, after baseline.
+    _check_tracelens_cli()
 
     # --- Single canonical diagnostics block ---
     _emit_preflight_diagnostics(
@@ -1658,8 +1865,29 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     ``--robustness-mock`` / ``--robustness-agent`` (sets
     ``args.robustness_backend``); ``None`` falls back to
     :data:`DEFAULT_ROBUSTNESS_BACKEND`. Hard-fails on an invalid value.
+
+    Multi-node auto-downgrade: when ``args.nodes >= 2`` the
+    robustness-agent's ``LocalProbeSource`` family targets
+    sandbox-local resources only — ``ray status``, the inference
+    server health URL, the auth-proxy URL, GPU / FD / disk / shm
+    metrics, etc. On multi-node every one of those resources lives
+    in a separate Kubernetes pod (head pod / worker pod / RayJob
+    submitter), unreachable from the sandbox by design. Each probe
+    failure surfaces as a HIGH-severity false positive symptom
+    (``ray_head_dead``, ``local_server_unreachable``,
+    ``auth_proxy_unhealthy``, ``gpu_memory_leaked``, ...) that
+    drowns the bus, eats ActionLadder cooldown slots, and risks
+    tripping ``escalate_strategy_change`` chains that stall
+    Orchestration. Until ``robustness-agent`` grows multi-node-aware
+    probe targeting, the cleanest path is to disable the real
+    backend on multi-node and rely on the mock heartbeat. Operators
+    who explicitly pass ``--robustness-agent`` get a WARNING and
+    the auto-downgrade is honoured anyway; passing
+    ``--robustness-mock`` suppresses the WARNING. Single-node
+    behaviour is unchanged.
     """
     chosen = getattr(args, "robustness_backend", None)
+    explicit = chosen is not None
     if chosen is None:
         chosen = DEFAULT_ROBUSTNESS_BACKEND
     if chosen not in _VALID_ROBUSTNESS_BACKENDS:
@@ -1671,6 +1899,22 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
             file=sys.stderr,
         )
         sys.exit(2)
+    nodes = int(getattr(args, "nodes", 1) or 1)
+    if nodes >= 2 and chosen == "agent":
+        if explicit:
+            print(
+                f"WARN: --robustness-agent selected but nodes={nodes} — "
+                f"robustness-agent's LocalProbe family targets "
+                f"sandbox-local resources (ray, inference server, "
+                f"auth-proxy, GPU, ...) that all live in separate pods "
+                f"on multi-node and surface as HIGH false positives. "
+                f"Auto-downgrading to --robustness-mock; pass "
+                f"--robustness-mock explicitly to suppress this "
+                f"warning. See inference_optimizer/multi_node/SKILL.md "
+                f"(Robustness limitation in multi-node mode).",
+                file=sys.stderr,
+            )
+        chosen = "mock"
     return chosen
 
 
@@ -1679,6 +1923,18 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
 
     Only emits keys the operator actually passed so the runtime CLI
     falls back to its own defaults / env-discovery for the rest.
+
+    Multi-node auto-disable: when ``args.nodes >= 2`` the inference
+    server runs in the head pod (separate Kubernetes pod from the
+    sandbox where the robustness-agent subprocess lives), so the
+    hardcoded ``http://127.0.0.1:8888/health`` probe baked into
+    ``robustness_agent.config.Config.auto_probe_inference_server``
+    can never succeed and floods the bus with false-positive
+    ``local_server_unreachable`` symptoms each tick. Disable the
+    auto-probe by default in multi-node so single-node semantics stay
+    intact while multi-node stops emitting the bogus alert. Operators
+    who configure an explicit cluster-local probe target can re-enable
+    via a future ``--robustness-auto-probe-inference-server`` flag.
     """
     options: dict[str, Any] = {}
     server_url = getattr(args, "robustness_server_url", None)
@@ -1687,10 +1943,432 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     llm_rca = getattr(args, "robustness_llm_rca", None)
     if llm_rca is not None:
         options["llm_rca_enabled"] = bool(llm_rca)
+    nodes = int(getattr(args, "nodes", 1) or 1)
+    if nodes >= 2:
+        options["auto_probe_inference_server"] = False
+        # B3 no_levers_found floor — multi-node large-model spends
+        # 35-50 min on sglang cold start + baseline + profile +
+        # turnaround alone before the first explore family runs.
+        # Bumping the elapsed-time floor from 45 to 60 minutes layers
+        # a wall-clock buffer on top of the explore_started gate
+        # (commit 97318ee) so the symptom only fires when both
+        # exploration has started AND a full hour has elapsed
+        # without finding a lever. Single-node default (45.0) stays
+        # untouched.
+        options["progress_no_levers_min_minutes"] = 60.0
     return options
 
 
+def _gc_old_profile_traces(
+    root: str = "/wekafs/hyperloom/profile-traces",
+    retention_days: int = 7,
+    keep: str | None = None,
+) -> None:
+    """Best-effort GC of stale per-RayJob profile-trace dirs on shared wekafs.
+
+    Removes only top-level subdirectories whose mtime is older than
+    ``retention_days``. The active session's dir (just mkdir'd seconds ago)
+    is always young enough; ``keep`` adds an explicit name-match guard so
+    the current run is never collected even if a clock skew flipped mtime.
+
+    Failure is logged + swallowed: GC must never block optimizer startup.
+
+    Override knobs (env):
+      HYPERLOOM_MN_TRACE_RETENTION_DAYS -- int days, default 7
+      HYPERLOOM_MN_TRACE_GC_DISABLE     -- "1" disables GC entirely
+    """
+    if os.environ.get("HYPERLOOM_MN_TRACE_GC_DISABLE", "").strip() in (
+        "1", "true", "yes",
+    ):
+        return
+    try:
+        retention_days = int(
+            os.environ.get("HYPERLOOM_MN_TRACE_RETENTION_DAYS") or retention_days
+        )
+    except ValueError:
+        retention_days = 7
+    base = Path(root)
+    if not base.is_dir():
+        return
+    cutoff = time.time() - retention_days * 86400
+    keep_name = Path(keep).name if keep else ""
+    removed = 0
+    kept = 0
+    try:
+        for child in base.iterdir():
+            if not child.is_dir():
+                continue
+            if keep_name and child.name == keep_name:
+                kept += 1
+                continue
+            try:
+                mtime = child.stat().st_mtime
+            except OSError:
+                continue
+            if mtime >= cutoff:
+                kept += 1
+                continue
+            try:
+                shutil.rmtree(child)
+                removed += 1
+            except OSError as exc:
+                print(
+                    f"WARN multi-node GC: failed to rm {child}: {exc}",
+                    file=sys.stderr,
+                )
+    except OSError as exc:
+        print(f"WARN multi-node GC: scan failed under {base}: {exc}", file=sys.stderr)
+        return
+    if removed or kept:
+        print(
+            f"multi-node: GC profile-traces removed={removed} kept={kept} "
+            f"retention={retention_days}d root={root}"
+        )
+
+
+def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
+    """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS."""
+    nodes = max(1, int(args.nodes))
+    if nodes < 2:
+        return
+
+    from .multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
+    from .orchestrator.action_executors._multi_node_env import export_ray_address_to_os
+
+    state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
+    image = (
+        (getattr(args, "rayjob_image", None) or "").strip()
+        or os.environ.get("INFERENCE_OPTIMIZER_RAYJOB_IMAGE", "").strip()
+    )
+    if not image and state_path.is_file():
+        try:
+            prior = json.loads(state_path.read_text(encoding="utf-8"))
+            image = str((prior.get("last_create_request") or {}).get("image") or "").strip()
+        except (OSError, json.JSONDecodeError, TypeError):
+            image = ""
+    if not image:
+        print(
+            "ERROR: --nodes >= 2 requires a RayJob container image. Pass "
+            "--rayjob-image <harbor/...> or set INFERENCE_OPTIMIZER_RAYJOB_IMAGE.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    gpn = getattr(args, "rayjob_gpus_per_node", None)
+    if gpn is None:
+        try:
+            gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
+        except ValueError:
+            gpn = 8
+
+    ns_create = argparse.Namespace(
+        workspace=None,
+        image=image,
+        nodes=nodes,
+        gpus_per_node=int(gpn),
+        cpus_per_node=96,
+        mem_per_node=1024,
+        ephemeral_per_node=400,
+        display_name=None,
+        description=None,
+        owner_id=None,
+        extra_env=[],
+        extra_label=[],
+        no_wait=False,
+        recreate=False,
+        poll_interval=6,
+        poll_timeout=int(
+            os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110
+        ),
+    )
+    rc = cmd_create_rayjob(ns_create)
+    if rc != 0:
+        sys.exit(rc)
+
+    state = _load_state()
+    if not state.get("last_bootstrap_submission_id"):
+        ns_boot = argparse.Namespace(
+            script=None,
+            force=False,
+            print_logs=False,
+            poll_interval=6,
+            poll_timeout=int(
+                os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110
+            ),
+        )
+        rc_boot = cmd_bootstrap(ns_boot)
+        if rc_boot != 0:
+            sys.exit(rc_boot)
+
+    export_ray_address_to_os()
+    ra = os.environ.get("RAY_ADDRESS", "")
+    if ra:
+        print(f"multi-node: exported RAY_ADDRESS={ra} for kernel-agent Ray tasks")
+
+    # Multi-node only: server-side sglang/vllm pods (head + worker) must
+    # write torch traces to a path that the sandbox-side profile_executor
+    # can read. Per-pod /tmp is invisible to the sandbox; wekafs is the
+    # only fs both sides mount. Namespace the dir by ``rayjob_id`` so a
+    # restart of the same RayJob reuses the directory and a new RayJob
+    # gets a fresh one. This env is consumed by:
+    #   * multi_node.cli._build_multinode_launch_entrypoint -> --torch-profiler-dir
+    #   * orchestrator.action_executors.profile.ProfileExecutor.__call__
+    state_after = _load_state()
+    rid = (state_after.get("rayjob_id") or "").strip()
+    if rid:
+        trace_root = f"/wekafs/hyperloom/profile-traces/{rid}/torch_trace"
+        try:
+            Path(trace_root).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(
+                f"WARN multi-node: cannot mkdir {trace_root}: {exc}; "
+                f"server traces will fall back to per-pod /tmp",
+                file=sys.stderr,
+            )
+        else:
+            os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = trace_root
+            print(
+                f"multi-node: exported HYPERLOOM_MN_PROFILE_TRACE_DIR={trace_root}"
+            )
+            # Best-effort GC of older sibling RayJob trace dirs. Runs only
+            # AFTER the current session's dir is mkdir'd, so the active
+            # rayjob_id is name-guarded and its mtime is fresh.
+            _gc_old_profile_traces(
+                root="/wekafs/hyperloom/profile-traces",
+                keep=rid,
+            )
+
+    # RayJob recreate path: when an existing session's RayJob was killed
+    # (OOM, manual recreate, SaFE rescheduling) and we provisioned a
+    # fresh one above, any kernel-agent patches previously applied to
+    # the OLD pods are gone from the new pods' filesystems (the pod
+    # local fs is destroyed with the old pod). The sandbox-side
+    # SharedState.optimization_stack still records every promoted patch
+    # though, so we replay them here before any executor's first
+    # restart_server_for_round. Best-effort; failures degrade to
+    # warnings — the orchestrator will notice missing speedups in the
+    # next baseline and re-run kernel-agent on the affected kernels.
+    _replay_kernel_patches_for_multi_node(args)
+
+
+def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
+    """Replay every applied kernel-agent patch onto the (possibly new)
+    RayJob pods.
+
+    Scans the session's ``kernel-agent-workspace`` tree for manifest
+    files with ``status="applied"`` and a ``multinode`` block, then
+    invokes ``python3 -m inference_optimizer.multi_node apply-patch``
+    once per patch. The fan-out is idempotent — re-running apply on
+    pods that already have the new file produces a fresh backup of
+    the (now-current) source and overwrites with the same bytes.
+
+    Run only when ``--nodes >= 2``. Best-effort: stdout/stderr from
+    each replay is mirrored verbatim; per-patch failures emit a
+    warning but do not raise so a single broken patch doesn't block
+    other replays or the subsequent optimize loop.
+    """
+    nodes = max(1, int(getattr(args, "nodes", 1) or 1))
+    if nodes < 2:
+        return
+    session_dir = _session_dir_resolve()
+    workspace_root = session_dir / "kernel-agent-workspace"
+    if not workspace_root.is_dir():
+        return
+
+    manifests: list[Path] = sorted(workspace_root.rglob("manifest.json"))
+    if not manifests:
+        return
+
+    replayed = 0
+    skipped = 0
+    failed = 0
+    for mpath in manifests:
+        try:
+            data = json.loads(mpath.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(
+                f"WARN multi-node patch replay: skipping unreadable "
+                f"manifest {mpath}: {exc}",
+                file=sys.stderr,
+            )
+            skipped += 1
+            continue
+        if str(data.get("status", "")).lower() != "applied":
+            continue
+        mn = data.get("multinode") or {}
+        if not mn:
+            continue
+        target_file = data.get("target_file") or ""
+        patch_path = data.get("patch_path") or ""
+        kernel_id = data.get("kernel_id") or ""
+        backup_dir_on_pod = mn.get("backup_dir_on_pod") or "/var/kernel_patch_backups"
+        if not target_file or not patch_path:
+            skipped += 1
+            continue
+        if not Path(patch_path).is_file():
+            print(
+                f"WARN multi-node patch replay: source patch missing for "
+                f"{target_file} (manifest={mpath} patch_path={patch_path}); "
+                f"skipping",
+                file=sys.stderr,
+            )
+            skipped += 1
+            continue
+        cmd = [
+            sys.executable, "-m", "inference_optimizer.multi_node",
+            "apply-patch",
+            "--patch-file", str(patch_path),
+            "--target-path", str(target_file),
+            "--backup-dir", str(backup_dir_on_pod),
+            "--kernel-id", str(kernel_id),
+        ]
+        print(
+            f"multi-node patch replay: target={target_file} kernel_id={kernel_id!r} "
+            f"(from {mpath})",
+        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            failed += 1
+            print(
+                f"WARN multi-node patch replay failed for {target_file} "
+                f"rc={proc.returncode} stderr={(proc.stderr or '')[-1000:]!r}",
+                file=sys.stderr,
+            )
+            continue
+        replayed += 1
+    if replayed or failed or skipped:
+        print(
+            f"multi-node patch replay: applied={replayed} "
+            f"skipped={skipped} failed={failed} "
+            f"(scanned {len(manifests)} manifest(s) under {workspace_root})"
+        )
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
+    # Surface --nodes to the rest of the process (preflight diagnostics
+    # and any executor that wants to short-circuit when the optimizer is
+    # in single-node mode) by exporting it before _preflight runs. We
+    # re-export even when the env var was already set so the CLI flag
+    # always wins, matching the documented resolution order.
+    nodes_resolved = max(1, int(args.nodes))
+    tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
+    ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
+    # Resolve gpus_per_node with the same priority chain
+    # `_provision_multi_node_rayjob_stack` uses (CLI > env > 8) so the
+    # validation here matches what SaFE actually ends up seeing.
+    gpn_attr = getattr(args, "rayjob_gpus_per_node", None)
+    if gpn_attr is not None:
+        gpus_per_node_resolved = int(gpn_attr)
+    else:
+        try:
+            gpus_per_node_resolved = int(
+                os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8,
+            )
+        except ValueError:
+            gpus_per_node_resolved = 8
+    total_gpus = nodes_resolved * gpus_per_node_resolved
+
+    # Topology sanity gates — multi-node ONLY (nodes >= 2). Single-pod
+    # runs keep their legacy code paths untouched (Magpie owns the
+    # server lifecycle there, and the TP/EP knobs flow through env
+    # rather than the multi_node CLI). Rejected at CLI parse time so
+    # the agent gets an immediate, attributable error instead of a
+    # cryptic sglang/vllm launcher crash 30 minutes into a cold start.
+    if nodes_resolved >= 2:
+        # Gate 1: total cluster GPUs must hold the model's TP shards.
+        #   nodes * gpus_per_node >= tp
+        # Anything less means at least one TP rank has no GPU to land on.
+        if total_gpus < tp_resolved:
+            print(
+                f"ERROR: TP={tp_resolved} exceeds total GPU count "
+                f"({nodes_resolved} nodes * {gpus_per_node_resolved} "
+                f"gpus_per_node = {total_gpus}). Either lower --tp, raise "
+                "--nodes, or use a larger --rayjob-gpus-per-node pod "
+                "template.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # Gate 2: expert-parallel size cannot exceed TP — sglang/vllm
+        # cannot place more expert shards than ranks. Helper repeats
+        # this check at server-restart time, but failing here keeps
+        # the agent from spending bootstrap minutes on an unrunnable
+        # topology.
+        if ep_resolved > tp_resolved:
+            print(
+                f"ERROR: EP={ep_resolved} > TP={tp_resolved}. Expert-parallel "
+                "size must be <= tensor-parallel size. Either lower --ep or "
+                "raise --tp.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
+    # Re-export $TP / $CONC / $EP from the resolved CLI args, but ONLY in
+    # multi-node mode. Rationale: main's single-node design carries TP /
+    # CONC via `benchmark.envs.TP` / `benchmark.envs.CONC` in the YAML
+    # config (see SKILL.md §"Before a new model run"). Writing the
+    # argparse defaults ("1" / "8" / "1") back into os.environ here
+    # would silently override those YAML values via
+    # `_workload_envs.apply_runtime_benchmark_overrides` (which prefers
+    # env over envs.* for these keys). The multi-node orchestrator
+    # subprocess + sweep child workers still need to see the resolved
+    # CLI values, so the env export stays for nodes>=2 runs.
+    if nodes_resolved >= 2:
+        os.environ["TP"] = str(tp_resolved)
+        os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
+        os.environ["EP"] = str(ep_resolved)
+    # User-declared grid skip list. Resolution order is already enforced
+    # by argparse default (--skip-variants > $SKIP_VARIANTS); we re-export
+    # so executors started later via subprocess (multi-node orchestrator,
+    # sweep child workers) inherit the same spec without re-parsing argv.
+    # Empty string is intentional: it clears any stale value left by a
+    # prior session in the same shell.
+    skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
+    os.environ["SKIP_VARIANTS"] = skip_variants_resolved
+    # Surface PD_* knobs the same way for executors / helper. Empty
+    # string means "let helper resolve from state.json"; pd_mode
+    # always exported so colocated runs explicitly clear any stale
+    # PD_MODE the operator may have left set.
+    pd_mode = (getattr(args, "pd_mode", "") or "colocated").lower()
+    # nodes_resolved is already computed above (TP/EP gates).
+    if pd_mode == "disaggregated" and nodes_resolved < 2:
+        # PD disaggregation logically requires at least one prefill pod
+        # and one decode pod; with NODES=1 that would mean co-hosting
+        # both server roles on the same GPU set, which defeats the
+        # latency-isolation purpose and is not supported by sglang/vllm
+        # in the current architecture (also rejected later by
+        # _resolve_pd_args, but we fail at CLI parse so the agent gets
+        # an immediate, attributable error).
+        print(
+            f"ERROR: --pd-mode disaggregated requires --nodes >= 2 "
+            f"(got --nodes {nodes_resolved}). PD splits the cluster "
+            "into prefill + decode groups; a single pod cannot host "
+            "both. Either drop --pd-mode (defaults to colocated) or "
+            "raise --nodes.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    os.environ["PD_MODE"] = pd_mode
+    if pd_mode == "disaggregated":
+        for cli_attr, env_key in (
+            ("pd_prefill_nodes", "PD_PREFILL_NODES"),
+            ("pd_decode_nodes", "PD_DECODE_NODES"),
+            ("pd_prefill_tp", "PD_PREFILL_TP"),
+            ("pd_decode_tp", "PD_DECODE_TP"),
+        ):
+            v = int(getattr(args, cli_attr, 0) or 0)
+            if v > 0:
+                os.environ[env_key] = str(v)
+        for cli_attr, env_key in (
+            ("pd_transfer_backend", "PD_TRANSFER_BACKEND"),
+            ("pd_ib_device", "PD_IB_DEVICE"),
+        ):
+            v = (getattr(args, cli_attr, "") or "").strip()
+            if v:
+                os.environ[env_key] = v
+
+    await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
+
     proxy_urls = _preflight()
 
     # Hard-gate Claude model BEFORE any session work. Mutates args.claude_model
@@ -1699,12 +2377,77 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     catalog_ids = _validate_and_resolve_claude_model(args, proxy_urls)
     _smoke_test_codex_model(args, catalog_ids)
 
+    # `--resume-from <path>` implies `--resume` (operator convenience).
+    if args.resume_from and not args.resume:
+        args.resume = True
+
     if args.resume:
-        # Resume mode: session_dir is fixed at /workspace/hyperloom (or
-        # $USER_DATA_PATH). We re-mkdir the skeleton (idempotent) so a
-        # partially-initialised previous run is healed before we touch
-        # state.
-        session_dir = make_session_dir()
+        # Resume mode (N17-aware): USER_DATA_PATH stays at workspace
+        # level so runtime/ + logs/ resolution doesn't break (N15
+        # `_load_kernel_agent_env_fallback` looks at $USER_DATA_PATH/
+        # runtime/kernel-agent.env.sh, which only exists at workspace
+        # level after install.sh ran). We then pick the per-session
+        # subdir to resume from via either:
+        #
+        # * --resume-from <path>  : explicit operator choice
+        # * --resume alone        : auto-pick LATEST per-session subdir
+        #                            under workspace_root/<model>/<ts>/.
+        #                            Falls back to workspace_root itself
+        #                            (legacy flat layout) when no
+        #                            per-session subdir exists.
+        #
+        # We pin INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR to the picked
+        # subdir so every paths.session_dir() call later (and every
+        # subprocess that inherits env) resolves consistently.
+        from .paths import (
+            ENV_CURRENT_SESSION_DIR, find_latest_per_session_dir,
+            workspace_root,
+        )
+        ws = workspace_root()
+        if args.resume_from:
+            session_dir = Path(args.resume_from).expanduser().resolve()
+            try:
+                session_dir.relative_to(ws.resolve())
+            except ValueError:
+                print(
+                    f"ERROR: --resume-from {session_dir!r} is not under "
+                    f"$USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
+                    f"workspace root (the parent of the per-session subdirs) "
+                    f"and pass the per-session subdir via --resume-from.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if not session_dir.is_dir():
+                print(
+                    f"ERROR: --resume-from {session_dir!r} does not exist.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        else:
+            picked = find_latest_per_session_dir()
+            if picked is not None:
+                session_dir = picked
+                print(f"  --resume: auto-picked latest per-session subdir")
+            else:
+                # Legacy flat layout — workspace_root itself is the
+                # session_dir. Validate it has manifest.json + state.json
+                # the same way the per-session branch does below.
+                session_dir = ws
+                print(
+                    f"  --resume: no per-session subdir found under "
+                    f"{ws}/<model>/<ts>/; falling back to flat layout "
+                    f"({ws})"
+                )
+        # Pin so every paths.session_dir() / subprocess inherits the
+        # resolved location BEFORE Coordinator/SharedState load.
+        os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
+        # Make sure per-session skeleton exists (mkdir -p semantics,
+        # idempotent; doesn't disturb existing files).
+        for sub in __import__(
+            "inference_optimizer.paths", fromlist=["_SESSION_SKELETON"]
+        )._SESSION_SKELETON:
+            (session_dir / sub).mkdir(parents=True, exist_ok=True)
+
         try:
             manifest = load_manifest(session_dir)
         except FileNotFoundError as exc:
@@ -1751,6 +2494,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if not state.kernel_enabled:
             args.no_kernel = True
             print("  kernel agent          : DISABLED (persisted from original run)")
+        # Mirror logic for framework-agent toggle. ``framework_enabled``
+        # defaults to True for older state.json files so legacy resumes keep
+        # the fa arm enabled; an explicit persisted False is honoured.
+        if not getattr(state, "framework_enabled", True):
+            args.no_framework = True
+            print("  framework agent       : DISABLED (persisted from original run)")
 
         # CRITICAL: a leftover stop_reason from the prior run (most often
         # "time_exhausted") fools Orchestration into thinking the work is
@@ -1781,6 +2530,49 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"(was {prior_crash}) for fresh resume"
             )
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
+        # N31 backfill: when resuming a session that already ran roofline
+        # under pre-N31 code (or any session where the baseline freeze
+        # never got populated), copy the current last_trace_analyze
+        # metadata into last_trace_analyze_baseline so the eventual
+        # closing-phase report's ``## Roofline Comparison`` section
+        # still has a "before" snapshot to render. Without this backfill,
+        # resumed sessions would always render single-snapshot fallback
+        # even when the original session had a perfectly good snapshot 1.
+        #
+        # Backfill ONLY when:
+        # * baseline freeze is still empty (no overwriting existing
+        #   freezes -- the post-promote freeze path is authoritative for
+        #   sessions that ran end-to-end on N31+ code), AND
+        # * current last_trace_analyze has snapshot_id >= 1 (we have
+        #   something to freeze; an empty cache means roofline never ran
+        #   successfully and there's nothing useful to backfill).
+        cached_for_backfill = state.last_trace_analyze or {}
+        cur_snap_id = cached_for_backfill.get("roofline_snapshot_id", 0)
+        if (
+            not state.last_trace_analyze_baseline
+            and isinstance(cur_snap_id, int)
+            and cur_snap_id >= 1
+        ):
+            from datetime import datetime as _dt, timezone as _tz
+            state.last_trace_analyze_baseline = {
+                "roofline_snapshot_id": cur_snap_id,
+                "analysis_md_path": str(
+                    cached_for_backfill.get("analysis_md_path") or ""
+                ),
+                "trace_input": str(
+                    cached_for_backfill.get("trace_input") or ""
+                ),
+                "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+                "source": "n31_resume_backfill",
+            }
+            state.save(session_dir)
+            print(
+                f"  → N31 backfill: froze current snapshot "
+                f"#{cur_snap_id} into last_trace_analyze_baseline "
+                "(session pre-dates N31 baseline freeze; the final "
+                "report's Roofline Comparison section can now render "
+                "a baseline view)"
+            )
     else:
         # Resolve model path from --model first, then $MODEL_PATH env. Without
         # either, fail fast: silently falling back to the YAML's hardcoded
@@ -1853,10 +2645,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Workload        : ISL={args.isl} OSL={args.osl} "
               f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
 
-        # session_dir is fixed at /workspace/hyperloom (override:
-        # $USER_DATA_PATH). Each sandbox is single-use, so collision
-        # detection is unnecessary; mkdir -p is enough.
-        session_dir = make_session_dir()
+        # N17: session_dir is now <workspace_root>/<model>/<UTC ts>/
+        # by default (per-model + per-launch). Workspace_root is
+        # $USER_DATA_PATH (fallback /workspace/hyperloom). To restore
+        # the legacy flat layout, set INFERENCE_OPTIMIZER_SESSION_LAYOUT=
+        # flat. `make_session_dir(model_name=...)` does the layout
+        # decision + pins the result via $INFERENCE_OPTIMIZER_CURRENT_
+        # SESSION_DIR for every subprocess.
+        session_dir = make_session_dir(model_name=args.model)
         manifest = write_manifest(session_dir, args=args)
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
@@ -1873,6 +2669,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     })
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     no_kernel = getattr(args, "no_kernel", False)
+    no_framework = getattr(args, "no_framework", False)
 
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
@@ -1953,10 +2750,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_options=robustness_options,
         no_kernel=no_kernel,
     )
-    # Bug A fix: expose the active session_dir to in-process executors
-    # (e.g. ReportExecutor) that don't get session_dir threaded through
-    # task.params. This is read in report.py::_resolve_session_dir.
-    os.environ["USER_DATA_PATH"] = str(session_dir)
+    # Session dir is already pinned via $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR
+    # (make_session_dir / --resume). Do NOT overwrite $USER_DATA_PATH here —
+    # workspace_root() must keep pointing at the launcher-provided workspace
+    # so runtime/ + kernel-agent.env.sh resolution stays correct (N17).
+    # ReportExecutor resolves session_dir via paths.session_dir() → pin.
     # Production: enable strict path-containment checks in PolicyGate so
     # any LLM-emitted intent whose path field escapes session_dir lands
     # as `policy_denied` in its inbox. Tests omit this and keep the
@@ -1989,15 +2787,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt or _build_orchestration_prompt(
             no_kernel=no_kernel,
+            no_framework=no_framework,
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,
         ),
-        "critic":        _build_critic_prompt(
-            no_kernel=no_kernel,
-            framework=framework_for_prompt,
-            max_minutes=max_minutes_for_prompt,
-        ),
+        "critic":        args.critic_prompt or _load_critic_prompt(),
     }
     if not no_kernel:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
@@ -2005,6 +2800,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     _register_executors(
         coordinator,
         no_kernel=no_kernel,
+        no_framework=no_framework,
         compare_against_gpu=getattr(args, "compare_against_gpu", None),
         session_dir=session_dir,
     )
@@ -2014,6 +2810,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     kernel_str = "DISABLED" if no_kernel else (
         f"{'Codex' if args.kernel_codex else 'Claude'}"
     )
+    framework_str = "DISABLED" if no_framework else "ENABLED"
     if critic_choice == "mock":
         critic_str = "mock"
     elif critic_choice == "codex_bare":
@@ -2033,6 +2830,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Backends        : "
           f"orchestration=Claude({args.claude_model}), "
           f"kernel={kernel_str}, "
+          f"framework_pr={framework_str}, "
           f"critic={critic_str}, "
           f"robustness={robustness_str}")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} "
@@ -2109,6 +2907,131 @@ def _build_parser() -> argparse.ArgumentParser:
              "session-wide; mixing sglang and vllm in a single session is "
              "not supported.",
     )
+    opt.add_argument(
+        "--nodes", type=int,
+        # Resolution: --nodes (CLI) > $INFERENCE_OPTIMIZER_NODES > $NODES > 1.
+        # Brain / SaFE sandbox prompts conventionally export ``NODES=2`` in
+        # ``optimizer.env`` (not the ``INFERENCE_OPTIMIZER_NODES`` form), so
+        # without the ``NODES`` fallback the optimizer silently fell back to
+        # single-node mode and the brain-supplied nodes value never reached
+        # ``args.nodes``. The downstream ``nodes_resolved >= 2`` gate in
+        # ``_run_optimize`` (and ``is_multi_node()`` in
+        # ``_multi_node_env.py``) still hard-requires >= 2 before any
+        # multi-node code path runs, so falling through to ``NODES=1``
+        # produces the same single-pod behaviour as before this fallback
+        # existed.
+        default=int(
+            os.environ.get("INFERENCE_OPTIMIZER_NODES")
+            or os.environ.get("NODES")
+            or "1"
+        ),
+        help="Total number of GPU nodes for the inference RayJob. "
+             "1 (default) keeps the legacy single-pod path. "
+             ">=2: `optimize` provisions the SaFE RayJob before preflight "
+             "(unless already in /tmp/multi_node_state.json), runs bootstrap "
+             "once, and exports RAY_ADDRESS for kernel-agent. Does not stop the "
+             "RayJob on exit; run `python3 -m inference_optimizer.multi_node "
+             "stop-rayjob` when you want to release it. Requires "
+             "--rayjob-image or INFERENCE_OPTIMIZER_RAYJOB_IMAGE. "
+             "Resolution: --nodes > $INFERENCE_OPTIMIZER_NODES > $NODES > 1.",
+    )
+    opt.add_argument(
+        "--rayjob-image",
+        default=None,
+        help="Container image for the multi-node RayJob (head+workers). "
+             "Required when --nodes>=2 unless INFERENCE_OPTIMIZER_RAYJOB_IMAGE "
+             "is set or state file last_create_request.image is present.",
+    )
+    opt.add_argument(
+        "--rayjob-gpus-per-node",
+        type=int,
+        default=None,
+        help="GPUs per RayJob pod (default: INFERENCE_OPTIMIZER_GPUS_PER_NODE "
+             "or 8). Passed to multi_node create-rayjob.",
+    )
+    opt.add_argument(
+        "--tp", type=int,
+        default=int(os.environ.get("TP", "1") or 1),
+        help="Tensor parallel size. Resolution: --tp > $TP env > 1. "
+             "Symmetric with --ep — historically TP only flowed in via "
+             "$TP env (read by _workload_envs); the CLI flag was added "
+             "so the agent can pass `--tp N` directly from the prompt's "
+             "Environment block instead of having to `export TP=N` "
+             "first. Either path still works.",
+    )
+    opt.add_argument(
+        "--conc", type=int,
+        default=int(os.environ.get("CONC", "8") or 8),
+        help="Magpie client concurrency cap (max in-flight requests). "
+             "Resolution: --conc > $CONC env > 8. Symmetric with --tp; "
+             "agent can pass `--conc N` directly from the prompt.",
+    )
+    opt.add_argument(
+        "--ep", type=int,
+        default=int(os.environ.get("EP", "1") or 1),
+        help="Expert-parallel size for MoE inference. 1 (default) keeps "
+             "experts sharded by TP (legacy behaviour). >=2 enables true "
+             "expert parallelism: sglang adds `--expert-parallel-size N`, "
+             "vllm adds `--enable-expert-parallel`. Typical: EP=TP for "
+             "DSr1/DSv3 on multi-node. Resolution: --ep > $EP env > 1. "
+             "EP > TP is rejected at server-restart time.",
+    )
+    opt.add_argument(
+        "--pd-mode",
+        choices=("colocated", "disaggregated"),
+        default="colocated",
+        help="Prefill-Decode disaggregation mode. ALWAYS defaults to "
+             "`colocated` regardless of any inherited $PD_MODE env, so "
+             "PD only turns on when the agent explicitly passes "
+             "`--pd-mode disaggregated` (driven by the prompt's "
+             "Environment block having a PD_MODE=disaggregated line). "
+             "Stale env from a previous restart cannot accidentally "
+             "re-enable PD.",
+    )
+    opt.add_argument(
+        "--pd-prefill-nodes", type=int,
+        default=int(os.environ.get("PD_PREFILL_NODES", "0") or 0),
+        help="Number of prefill nodes (disaggregated only); pn+dn=nodes",
+    )
+    opt.add_argument(
+        "--pd-decode-nodes", type=int,
+        default=int(os.environ.get("PD_DECODE_NODES", "0") or 0),
+        help="Number of decode nodes (disaggregated only)",
+    )
+    opt.add_argument(
+        "--pd-prefill-tp", type=int,
+        default=int(os.environ.get("PD_PREFILL_TP", "0") or 0),
+        help="TP for prefill group (disaggregated only); default = --tp",
+    )
+    opt.add_argument(
+        "--pd-decode-tp", type=int,
+        default=int(os.environ.get("PD_DECODE_TP", "0") or 0),
+        help="TP for decode group (disaggregated only); default = --tp",
+    )
+    opt.add_argument(
+        "--pd-transfer-backend", type=str,
+        default=os.environ.get("PD_TRANSFER_BACKEND", ""),
+        help="sglang: mooncake|nixl ; vllm: NixlConnector|...; empty = default",
+    )
+    opt.add_argument(
+        "--pd-ib-device", type=str,
+        default=os.environ.get("PD_IB_DEVICE", ""),
+        help="comma-separated IB/RoCE device list (e.g. mlx5_0,mlx5_1). "
+             "Empty = use $NCCL_IB_HCA from RayJob pod env at server-launch time.",
+    )
+    opt.add_argument(
+        "--skip-variants", type=str,
+        default=os.environ.get("SKIP_VARIANTS", ""),
+        help="Comma/whitespace-separated list of variant names or fnmatch "
+             "globs to drop from the backends/params grids before launch. "
+             "Examples: `attn_aiter` (exact), `attn_aiter,sched_dfs` (two "
+             "exacts), `attn_*,vllm_aiter_*` (globs). Resolution: "
+             "--skip-variants > $SKIP_VARIANTS > empty. Exported back into "
+             "$SKIP_VARIANTS so all executors and the multi-node orchestrator "
+             "subprocess see the same value. Dropped variants surface in "
+             "state.json under each action's `dropped_variants` field tagged "
+             "`source=user_skip`.",
+    )
     opt.add_argument("--max-hours", type=float, default=2.0,
                       help="Wall-clock budget in hours (default 2.0)")
     opt.add_argument(
@@ -2136,13 +3059,21 @@ def _build_parser() -> argparse.ArgumentParser:
     grp.add_argument("--target-baseline-dir", type=str, default=None,
                       help="Stop when current best matches the baseline in DIR")
     opt.add_argument("--resume", action="store_true", default=False,
-                      help="Resume the session at the canonical session_dir "
-                           "(/workspace/hyperloom by default, or "
-                           "$USER_DATA_PATH). "
-                           "Skips the SharedState seed and lets the "
-                           "Coordinator replay the prior event log + "
-                           "state.json. Refuses to start if manifest.json or "
-                           "state.json is missing.")
+                      help="Resume an existing session. Without --resume-from, "
+                           "auto-picks the latest per-session subdir under "
+                           "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
+                           "falls back to $USER_DATA_PATH (legacy flat layout). "
+                           "USER_DATA_PATH MUST stay at workspace level "
+                           "(/wekafs/.../sessions/, not the per-session subdir) "
+                           "so runtime/ resolution works. Skips the SharedState "
+                           "seed and lets the Coordinator replay the prior "
+                           "event log + state.json.")
+    opt.add_argument("--resume-from", type=str, default=None,
+                      help="Explicit per-session subdir to resume from. Use "
+                           "when multiple per-launch ts dirs exist under the "
+                           "same model and the latest is not what you want. "
+                           "Must be an absolute path under $USER_DATA_PATH "
+                           "(workspace_root). Implies --resume.")
     opt.add_argument(
         "--model-class", type=str,
         default=os.environ.get("MODEL_CLASS", None),
@@ -2189,10 +3120,20 @@ def _build_parser() -> argparse.ArgumentParser:
                       default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
     opt.add_argument("--no-kernel", action="store_true", default=False,
                       help="Disable the Kernel agent entirely. The run will "
-                           "only do baseline + params + backends + sweep (pure "
-                           "parameter search). Useful when GEAK/OOB/GPU "
-                           "compile env is unavailable or you just want the "
-                           "quick-win parameter path. Default: kernel enabled.")
+                           "only do baseline + params + backends + sweep "
+                           "(+ framework_pr if not also --no-framework). "
+                           "Useful when GEAK/OOB/GPU compile env is "
+                           "unavailable or you just want the quick-win "
+                           "parameter path. Default: kernel enabled.")
+    opt.add_argument("--no-framework", action="store_true", default=False,
+                      help="Disable the Framework-agent (fa) integration: "
+                           "the `framework_pr` arm is unregistered and "
+                           "stripped from the orchestration prompt so the "
+                           "bandit never proposes a PR-import action. "
+                           "Combine with --no-kernel for a pure parameter-"
+                           "search run (baseline + params + backends + "
+                           "sweep + validate_stack + report). "
+                           "Default: framework agent enabled.")
     opt.add_argument("--kernel-codex", action="store_true", default=True,
                       help="Use Codex backend for Kernel agent (default — faster). "
                            "Pass --kernel-claude to switch.")
@@ -2285,6 +3226,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")
+    opt.add_argument("--critic-prompt", type=str, default=None,
+                      help="Override Critic system prompt")
     opt.add_argument("--kernel-prompt", type=str, default=None,
                       help="Override Kernel system prompt")
 
@@ -2301,7 +3244,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.command == "optimize":
         # Resolve any --*-prompt that point at a file.
-        for attr in ("orch_prompt", "kernel_prompt"):
+        for attr in ("orch_prompt", "critic_prompt", "kernel_prompt"):
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))

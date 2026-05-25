@@ -23,7 +23,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `profile`, `backends`, `params`, `sweep`, Kernel requests, `report`).
-- Kernel: responder path for `select_kernels`, `run_optimization`, `integrate`.
+- Kernel: responder path for `trace_analyze`, `run_optimization`, `integrate`.
 - Critic: proposal review (default: `--critic-agent` — drives the
   `critic-agent/` skill runtime with KB priors / session memory /
   `review_constraints`-gated verdicts). `--critic-mock` for offline /
@@ -32,45 +32,92 @@ The CLI starts a Python Coordinator that coordinates:
 - Robustness: default `--robustness-agent` — drives the `robustness-agent/`
   subprocess runtime for health monitoring, RCA, and scheduling-police
   intents. `--robustness-mock` for offline / smoke tests.
+  - **Multi-node auto-downgrade (`--nodes >= 2`)**: the agent backend's
+    `LocalProbeSource` targets sandbox-local resources only (ray status,
+    inference server, auth-proxy, GPU, FD, disk, shm). On multi-node every
+    such resource lives in a separate pod (head / worker / RayJob), so each
+    probe surfaces as a HIGH false positive that floods the bus. The CLI
+    auto-downgrades to `--robustness-mock` (heartbeat only) and prints a
+    WARNING; pass `--robustness-mock` explicitly to suppress it. See
+    `multi_node/SKILL.md` (Robustness limitation in multi-node mode).
 
-State lives in **one fixed session directory** — `/workspace/hyperloom`
-by default. Every sandbox is single-use, so the path is flat (no
-`session_id` subdirectory). Override via `$USER_DATA_PATH` (documented
-in `.env.template`).
+State lives under a **session directory** (per optimization run).
+The **workspace root** is ``$USER_DATA_PATH`` (default
+``/workspace/hyperloom``) — it holds shared ``runtime/`` and ``logs/``.
+
+### Layout (N17 default: ``per_model_ts``)
 
 ```text
-/workspace/hyperloom/                     # session_dir (default; override via $USER_DATA_PATH)
-├── manifest.json                         # Python-written session resume tag
-├── state.json                            # SharedState (Coordinator-owned)
-├── storage/coordinator.db                # SQLite WAL
-├── agents/{orchestration,kernel,critic,robustness}/
-│   ├── inbox.jsonl  outbox.jsonl
-│   ├── persona.md
-│   └── system_prompt.snapshot.md
-├── personas/  checkpoints/  findings/  kb/
-├── runs/                                 # data-plane (executor outputs)
-│   ├── baseline/<task_id>/
-│   ├── profile/<task_id>/
-│   ├── backends/<task_id>/{variant_NN_*/, result.json}
-│   ├── params/<task_id>/{variant_NN_*/, combo/, result.json}
-│   ├── sweep/<task_id>/
-│   ├── integrate/<task_id>/
-│   └── kernel_opt/<kernel_id>/<task_id>/
-├── kernel-agent-workspace/<kernel_id>/   # cross-task GEAK/OOB artefacts
-├── kernel-agent/runs/<session_id>/       # kernel-agent CLI tool outputs
-├── patches/<kernel_id>/                  # KEEP'd patches + backup
-├── optimizer_runs/                       # launcher stdout / PID / resume / monitor logs
-├── runtime/
-│   ├── kernel-agent.env.sh               # generated; source before any tool call
-│   ├── geak-config/local.yaml            # generated GEAK litellm config
-│   ├── Magpie/                           # cloned by install.sh (was /workspace/Magpie)
-│   └── source-mirrors/                   # writable mirrors (was /opt/hyperloom)
-│       ├── geak/
-│       ├── OOB/oob_cli/
-│       └── TraceLens-internal/
-├── reports/                              # `report` action output
-└── logs/                                 # cli + reactor + auth-proxy logs
+$USER_DATA_PATH/                          # workspace_root — set by operator / Claw / SaFE
+├── runtime/                              # workspace-shared (install.sh, Magpie, kernel-agent.env.sh)
+│   ├── kernel-agent.env.sh
+│   ├── geak-config/local.yaml
+│   ├── Magpie/
+│   └── source-mirrors/{geak,OOB,TraceLens-internal}/
+├── logs/                                 # workspace-shared launcher stdout
+└── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
+    └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
+        ├── manifest.json
+        ├── state.json
+        ├── storage/coordinator.db
+        ├── agents/{orchestration,kernel,critic,robustness}/
+        ├── runs/{baseline,profile,roofline,backends,params,...}/<task_id>/
+        ├── kernel-agent/runs/<session_id>/
+        ├── kernel-agent-workspace/<kernel_id>/
+        ├── optimizer_runs/               # per-session launcher logs / PID / monitor
+        ├── reports/
+        └── …
 ```
+
+**Claw / SaFE pods:** the launcher often sets ``$USER_DATA_PATH`` to a
+run-scoped path *before* the optimizer starts, e.g.
+``/hyperloom/users/<uid>/deepseek-ai-DeepSeek-V3-20260522_034024/``.
+That outer directory is **platform isolation** (one Claw job). The
+optimizer then creates ``<model_basename>/<UTC_ts>/`` inside it. Full
+session path example::
+
+    /hyperloom/users/<uid>/deepseek-ai-DeepSeek-V3-20260522_034024/   ← USER_DATA_PATH (Claw)
+        deepseek-ai-DeepSeek-V3/20260522T035359Z/                      ← session_dir (optimizer)
+
+**Legacy flat layout:** set ``INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat``
+so ``session_dir == workspace_root`` (no ``<model>/<ts>`` subdirs).
+
+### Path resolution (do not guess)
+
+| Concept | Env / helper | Meaning |
+|---|---|---|
+| Workspace root | ``$USER_DATA_PATH`` → ``paths.workspace_root()`` | Shared ``runtime/``, parent of all sessions |
+| Session dir | ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` → ``paths.session_dir()`` | Where ``manifest.json`` / ``state.json`` live |
+| Session id | ``manifest.json`` → ``session_id`` | Logical label only — **not** a directory name |
+
+Resolution order for ``paths.session_dir()``:
+
+1. ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` (pin from CLI — **authoritative**)
+2. ``$USER_DATA_PATH`` (legacy flat / tests without pin)
+3. ``/workspace/hyperloom``
+
+**Iron rule for agents:** never treat ``$USER_DATA_PATH`` as the session
+dir when ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set. Read
+``manifest.json`` / ``state.json`` from the **session dir** (CLI prints
+``Session dir : …`` at startup). For monitoring after launch, parse that
+line or walk ``$USER_DATA_PATH/<model_basename>/`` for the latest
+``*T*Z/`` timestamp dir.
+
+Path helpers (don't string-concat):
+
+| Helper | Returns |
+|---|---|
+| `paths.workspace_root()` | `$USER_DATA_PATH` (workspace root) |
+| `paths.session_dir()` | Pinned session dir (see resolution order above) |
+| `paths.make_session_dir(model_name=…)` | Creates `<workspace>/<model>/<ts>/` + pin |
+| `paths.find_latest_per_session_dir(model_name=…)` | Latest `*T*Z/` under workspace (for `--resume`) |
+| `paths.db_path_for(sd)` | `<sd>/storage/coordinator.db` |
+| `session_paths.runs_dir(sd, kind, task_id)` | `<sd>/runs/<kind>/<task_id>/` |
+| `session_paths.kernel_workspace(sd, kernel_id)` | `<sd>/kernel-agent-workspace/<kernel_id>/` |
+| `session_paths.patches_dir(sd, kernel_id)` | `<sd>/patches/<kernel_id>/` |
+| `session_paths.agent_log(sd, role)` | `<sd>/logs/<role>.log` |
+| `session_paths.agent_prompt_snapshot(sd, role)` | `<sd>/agents/<role>/system_prompt.snapshot.md` |
+| `manifest.write_manifest(sd, args)` / `load_manifest(sd)` | manifest.json read/write |
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): `$TRACELENS_ROOT` (default `/wekafs/hyperloom/
@@ -85,32 +132,14 @@ required by `_server_patcher`),
 (GEAK cross-session memory). Each is overridable via its own env if
 you want a fully self-contained session.
 
-Paths emitted by agents must resolve under `$SESSION_DIR` — PolicyGate
+Paths emitted by agents must resolve under the **session dir** — PolicyGate
 enforces this (with a framework-source allowlist for `source_file`:
 `/sgl-workspace/{aiter,sglang,vllm}/` plus any paths in
 `$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` — colon-separated, unioned
 with defaults; auto-probed by `inference_optimizer/scripts/install.sh`).
 
-Always prefer `manifest.json` / `state.json` / `coordinator.db` over
-guessing from terminal logs.
-
-Session dir resolution order (`inference_optimizer/paths.py`):
-1. `$USER_DATA_PATH` env → use as-is.
-2. Default `/workspace/hyperloom`.
-
-Path helpers (don't string-concat):
-
-| Helper | Returns |
-|---|---|
-| `paths.session_dir()` | `/workspace/hyperloom` (or env override) |
-| `paths.make_session_dir()` | session dir + full skeleton, idempotent |
-| `paths.db_path_for(sd)` | `<sd>/storage/coordinator.db` |
-| `session_paths.runs_dir(sd, kind, task_id)` | `<sd>/runs/<kind>/<task_id>/` |
-| `session_paths.kernel_workspace(sd, kernel_id)` | `<sd>/kernel-agent-workspace/<kernel_id>/` |
-| `session_paths.patches_dir(sd, kernel_id)` | `<sd>/patches/<kernel_id>/` |
-| `session_paths.agent_log(sd, role)` | `<sd>/logs/<role>.log` |
-| `session_paths.agent_prompt_snapshot(sd, role)` | `<sd>/agents/<role>/system_prompt.snapshot.md` |
-| `manifest.write_manifest(sd, args)` / `load_manifest(sd)` | manifest.json read/write |
+Always prefer `manifest.json` / `state.json` / `coordinator.db` under the
+**session dir** over guessing from terminal logs.
 
 ## Iron Rules
 
@@ -139,7 +168,7 @@ source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
 in the **same shell** that will spawn `inference_optimizer optimize`.
 Skipping install strikes silently *after* `baseline` succeeds: missing
-TraceLens/GEAK/OOB CLI → `select_kernels` / `kernel_opt` fail; dead
+TraceLens/GEAK/OOB CLI → `trace_analyze` / `kernel_opt` fail; dead
 auth-proxy → Claude SDK `401`; no live Ray head → `kernel_opt` tasks
 hang; missing `kernel-agent.env.sh` → first claude/codex call returns
 `401`. `install.sh --check-only` is a *diagnostic*, never a substitute.
@@ -187,6 +216,20 @@ user later passes `--no-kernel` at runtime, the installer still prepares
 kernel-agent / TraceLens / GEAK / OOB / auth-proxy; `--no-kernel` only means
 that this `optimize` run skips the kernel optimization phase.
 
+The kernel agent and the framework agent (fa, surfaced as the `framework_pr`
+arm) are independent and each have a dedicated CLI toggle:
+
+* `--no-kernel`    → strips kernel-owned arms (`kernel_opt`, `integrate`,
+  `deep_kernel_analysis`, `operator_tuning`, `vendor_kernel_config`) plus
+  `profile` / `pmc_roofline`.
+* `--no-framework` → strips the `framework_pr` arm so the bandit never
+  invokes fa.
+
+Combining both yields a pure parameter-search run (baseline + params +
+backends + sweep + validate_stack + report). The toggles are persisted in
+`state.json` (`kernel_enabled`, `framework_enabled`) so resumes honour the
+original session's agent topology.
+
 `install.sh` installs everything in one shot (no `--with-*` flags to
 remember). Direct steps in `inference_optimizer/scripts/install.sh`:
 
@@ -223,6 +266,8 @@ production default) need none of this — `ensure_tracelens` / `ensure_oob`
 already handle the read-only-source case.
 
 ### Step 2 — Launch
+
+**Multi-node (`nodes >= 2`):** [`multi_node/SKILL.md`](multi_node/SKILL.md).
 
 ```bash
 inference_optimizer optimize \
@@ -266,7 +311,7 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 
 Quirks: with `set -u`, assign dependent vars on separate lines (chained
 `export A=... B=$A` can fail with `unbound variable`). The installer
-leaves a live Ray head; `ray status` must succeed because `select_kernels`
+leaves a live Ray head; `ray status` must succeed because `trace_analyze`
 submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 
 `_preflight()` runs every launch as the in-loop counterpart of IR-2.
@@ -311,15 +356,16 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 ```
 
 In sandboxes where `/workspace/hyperloom` is unwritable, override the
-session location with `USER_DATA_PATH`:
+**workspace root** with `USER_DATA_PATH` (not the per-session subdir):
 
 ```bash
-export USER_DATA_PATH="$RUN_ROOT/optimizer-session"
+export USER_DATA_PATH="/wekafs/xiaofei/sessions"   # workspace root
 mkdir -p "$USER_DATA_PATH"
 ```
 
-The CLI calls `make_session_dir()` once at startup; that creates the
-full subdirectory skeleton in place (idempotent — safe to re-run).
+The CLI calls `make_session_dir(model_name=…)` once at startup; that
+creates `$USER_DATA_PATH/<model_basename>/<UTC_ts>/` and pins
+`$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`.
 
 ## Portable Preflight
 
@@ -556,6 +602,74 @@ The backend prunes everything older than the latest 50 turn workdirs
 on every tick to avoid unbounded growth.
 
 
+## Framework-Agent as Bandit Arm (`framework_pr` action)
+
+Framework-agent (fa) integration moved from a CLI pre-stage hook to a
+regular bandit arm called `framework_pr` (DESIGN doc:
+`claw-dev/docs-zh/fa-as-io-arm-design.md`). PR discovery and apply
+now happen *inside* the Coordinator tick loop, alongside `baseline` /
+`backends` / `params` / `sweep`, so PR selection participates in
+cooldown + streak penalties + observability exactly like every other
+arm. There is no longer any session-killing irreversible git side
+effect at CLI startup.
+
+What each `framework_pr` tick does (see
+`orchestrator/action_executors/framework_pr.py`):
+
+1. Compose `(gap, keywords)` from SharedState (`framework` /
+   `gpu_type` / `model_class` / `last_profile_kernel_breakdown`) +
+   manifest `precision`. Operator-supplied `proposal.params.gap_override`
+   or `keyword_override` win when present.
+2. Call `fa candidates` (read-only) to enumerate top-K PRs. No git
+   fetch, no worktree.
+3. Filter candidates: drop refs whose head_sha already matches the
+   sglang HEAD (= already KEEP'd this session, or shipped in the
+   base image).
+4. Stash the current `git rev-parse HEAD`; `git fetch` +
+   `git checkout --detach` the PR head.
+5. Run a sub-baseline benchmark against
+   `base_tput = current_best.tput || baseline_tput`, re-using the
+   same materialized YAML (`baseline_config_path`) + server flags
+   (`base_extra_args`) so we measure the PR delta, not a flag
+   regression.
+6. **KEEP** when `delta_pct >= min_gain_pct` (default 1.0): leave
+   the worktree on the PR head, return `status='succeeded'` +
+   `output_throughput=new_tput` so the Coordinator promotes the
+   PR into `current_best` via the normal `_lift_to_current_best`
+   path.
+7. **DISCARD** otherwise: `git checkout --detach <prev_head>` to
+   undo the apply, return `status='succeeded'` + `decision='discarded'`
+   so the bandit records a `no_promote` on the streak counter.
+8. Subprocess / git / sub-baseline failures return `status='failed'`
+   with an `error_class`, triggering the bandit's failure streak
+   penalty. The arm cools down on its own; the session continues.
+
+Operator-tunable `proposal.params`:
+
+| key | default | meaning |
+|---|---|---|
+| `max_candidates` | 5 | top-K returned by `fa candidates` |
+| `min_gain_pct` | 1.0 | KEEP threshold (PR-applied tput vs base_tput) |
+| `gap_override` | "" | bypass the auto-composer (raw gap_description) |
+| `keyword_override` | [] | bypass extract_keywords (verbatim list) |
+| `dry_run` | false | only enumerate + pick, skip apply + bench |
+
+Discover vs Kernel role boundary:
+
+| | framework-agent (`framework_pr` arm) | kernel-agent (in-loop) |
+|---|---|---|
+| When | Many times per session, scheduled by bandit | Many times, inside the optimize loop |
+| Granularity | Whole PR (cross-file change set) | Single kernel function |
+| Effect on session | New `current_best` source baseline | KEEP'd patches per kernel |
+| IO integration | `framework_pr` action executor (bandit arm) | Coordinator Kernel role + REQUEST kinds |
+| Hand-off | git checkout sglang to PR head + auto-rollback on DISCARD | `apply_kernel_patch.py` per-kernel |
+| Cooldown | Bandit streak counter (`consecutive_no_promote`) | Per-kernel `kernel_opt_attempts` |
+
+Gap / keywords for each tick are auto-composed from SharedState
+(`framework`, `gpu_type`, `model_class`, `precision`, optional profile
+bottleneck). Override per tick via `proposal.params.gap_override` /
+`proposal.params.keyword_override` from the Orchestration prompt.
+
 ## Framework Selection
 
 A session is single-framework. Pick `sglang` (default) or `vllm` via
@@ -642,11 +756,10 @@ only when `_workload_envs.materialize_config_with_envs` defaults don't fit
 
 ## Launch a New Optimization
 
-Assumes Step 1 (install) already ran. Session lives at `/workspace/hyperloom`
-(override `$USER_DATA_PATH`); there is no `--session-name`. Launcher
-artefacts (stdout / PID / resume / monitor logs) land under
-`$USER_DATA_PATH/optimizer_runs/` so a single session-dir move relocates
-the entire run tail.
+Assumes Step 1 (install) already ran. Set `$USER_DATA_PATH` to the **workspace
+root** (parent of per-session dirs). The CLI creates
+`$USER_DATA_PATH/<model_basename>/<UTC_ts>/` via `make_session_dir`.
+Launcher stdout / PID files go under that session's `optimizer_runs/`.
 For sandboxes that don't persist `export`s across shell calls (Cursor agents),
 copy `inference_optimizer/scripts/setup_env.sh.example` to
 `$USER_DATA_PATH/optimizer_runs/setup_env.sh`, fill in the workload block,
@@ -660,6 +773,8 @@ if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
+# RUN_LOG/PID under workspace until session_dir is known; move or re-tail
+# from $session_dir/optimizer_runs/ after parsing "Session dir" from stdout.
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
@@ -676,6 +791,19 @@ setsid nohup inference_optimizer --verbose optimize \
 echo $! > "$PID_FILE"
 ```
 
+framework-agent PR discovery is now a regular bandit arm (`framework_pr`,
+see [Framework-Agent as Bandit Arm](#framework-agent-as-bandit-arm-framework_pr-action)) —
+no startup flags needed. The Orchestration agent decides per tick when
+to propose the arm; the Coordinator composes the search gap from
+SharedState (`framework` / `gpu_type` / `model_class` / latest
+profile bottleneck). Override the auto-composed gap for an individual
+tick via `proposal.params.gap_override` from the Orchestration prompt.
+The arm self-disables when (a) `framework=vllm` (returns
+`unsupported_framework`), (b) `fa` binary is missing from PATH
+(returns `fa_candidates_failed`), or (c) the candidate set is empty
+(returns `no_applicable_candidate`); in all three cases the bandit
+streak counter cools the arm down and the session keeps running.
+
 `setsid nohup ... &` is required for runs > 5 min — Cursor's background
 shell can die on SSH disconnect.
 
@@ -691,8 +819,13 @@ After launching, do a short health check:
 sleep 30
 pid="$(cat "$PID_FILE")"
 test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
-session_dir="${USER_DATA_PATH:-/workspace/hyperloom}"
-test -f "$session_dir/manifest.json" && echo "manifest_present=true"
+# Parse session dir from RUN_LOG or resolve latest timestamp subdir:
+session_dir="$(grep -m1 '^Session dir' "$RUN_LOG" 2>/dev/null | sed 's/^Session dir[[:space:]]*:[[:space:]]*//')"
+if [ -z "$session_dir" ]; then
+  model_base="$(basename "$MODEL_PATH")"
+  session_dir="$(ls -d "${USER_DATA_PATH:-/workspace/hyperloom}/$model_base/"*T*Z 2>/dev/null | sort | tail -1)"
+fi
+test -f "$session_dir/manifest.json" && echo "manifest_present=true session_dir=$session_dir"
 test -f "$session_dir/state.json" && echo "state_exists=true" \
   && python3 -c "import json; print(json.load(open('$session_dir/state.json')).get('stop_reason'))"
 ```
@@ -702,9 +835,11 @@ exist + no early `stop_reason`.
 
 ## Resume Existing Session
 
-`--resume` is a flag (no argument); it picks up `/workspace/hyperloom`
-(override: `$USER_DATA_PATH`). The CLI refuses to start
-if `manifest.json` or `state.json` is missing.
+`--resume` auto-picks the latest `$USER_DATA_PATH/<model>/<UTC_ts>/`
+(without `--resume-from`) or an explicit path via `--resume-from`.
+`$USER_DATA_PATH` must stay at the **workspace root** so
+`runtime/kernel-agent.env.sh` resolves. The CLI refuses to start if
+`manifest.json` or `state.json` is missing in the picked session dir.
 
 Reuse the Launch template above with these diffs: drop `--model`, add
 `--resume`, set `RUN_TAG="resume-$(date +%Y%m%d_%H%M%S)"`. Resume preserves
@@ -743,7 +878,7 @@ python3 - <<'PY'
 import json, os, pathlib
 s = json.loads((pathlib.Path(os.environ["SESSION"]) / "state.json").read_text())
 for k in ("stop_reason", "baseline_tput", "cumulative_gain", "current_best",
-          "last_kernel_opt", "last_select_kernels", "last_sweep"):
+          "last_kernel_opt", "last_trace_analyze", "last_sweep"):
     print(f"{k}: {s.get(k)}")
 print("params_search_last_round:", s.get("params_search", {}).get("last_round"))
 print("backends_search_last_round:", s.get("backends_search", {}).get("last_round"))
@@ -763,8 +898,8 @@ The optimizer should:
 1. Establish or reuse `baseline_tput`.
 2. Run `profile` only when the active server args differ from
   `last_profile_args`; otherwise reuse `last_profile_trace`.
-3. Run `select_kernels` once per trace/config and cache the result in
-  `last_select_kernels`.
+3. Run `trace_analyze` once per trace/config and cache the result in
+  `last_trace_analyze`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
 5. Require compile + correctness + microbench/E2E evidence before KEEP.
 6. Use `params_search` / `backends_search` to test parameters incrementally
@@ -894,7 +1029,7 @@ direct Codex). See `## Critic Backend Selection`.
 ### Run-time signals
 
 - `No accelerator` (Magpie): subprocess `PATH` must lead with `$(dirname "$PYTHON")` (or set `MAGPIE_PYTHON`); use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
-- Repeated `select_kernels` with unchanged trace/config: bug — reuse `last_select_kernels`.
+- Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
 - `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied` events for the same action/rule pair; all top actions may be locked or pruned. Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials` block. To recover: manually edit `state.json` to remove the action from `pruned_families`, clear `policy_denial_streak` / `stop_reason`, and re-propose with fresh `params.grid` content (omit stale `idempotency_key`).
