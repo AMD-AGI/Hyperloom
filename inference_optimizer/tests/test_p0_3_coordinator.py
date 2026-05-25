@@ -199,7 +199,14 @@ class _AlwaysFailingBackend(Backend):
         self.name = name
         self.calls = 0
 
-    async def run(self, prompt, system_prompt, tools, max_turns):  # noqa: D401
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         from inference_optimizer.orchestrator.backends.base import BackendError
         self.calls += 1
         raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
@@ -298,9 +305,15 @@ async def test_coordinator_stops_when_no_more_leverage(session_dir):
         c.shared_state.baseline_tput = 100.0
         c.shared_state.current_best = {"action": "backends", "tput": 101.0}
         c.shared_state.params_no_promote_streak = 5
+        # Use the actual registered grid length so adding a new variant
+        # (e.g. N22 added torch_compile_on) doesn't break this test.
+        from inference_optimizer.orchestrator.action_executors.params import (
+            DEFAULT_PARAMS_GRID,
+        )
+        _grid_size = len(DEFAULT_PARAMS_GRID)
         c.shared_state.params_search = {
-            "cursor": 29,
-            "tested": {f"v{i}": {} for i in range(29)},
+            "cursor": _grid_size,
+            "tested": {f"v{i}": {} for i in range(_grid_size)},
             "accepted": [],
             "rejected": [],
         }
@@ -312,7 +325,7 @@ async def test_coordinator_stops_when_no_more_leverage(session_dir):
             "backends_search_exhausted": True,
             "tested": {},
         }
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "reusable_native_kernel_ids": ["k003", "k006", "k007"],
         }
         c.shared_state.rejected_kernel_ids = ["k003"]
@@ -452,6 +465,11 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
         c.shared_state.baseline_tput = 100.0
         c.shared_state.baseline_config_path = "/tmp/baseline.yaml"
         c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
+        # Roofline-v2 N3: params delegate requires fresh roofline snapshot.
+        c.shared_state.last_trace_analyze = {
+            "trace_input": "/tmp/trace.json.gz",
+            "analysis_md_text": "FAKE_REPORT",
+        }
         c.shared_state.save(session_dir)
         await c.tick(1)
         assert captured["idempotency_key"] == "params-round-2"
@@ -468,7 +486,7 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
 @pytest.mark.asyncio
 async def test_coordinator_request_routes_to_kernel(session_dir):
     req = Intent(type=IntentType.REQUEST, payload={
-        "target_agent": "kernel", "kind": "select_kernels",
+        "target_agent": "kernel", "kind": "trace_analyze",
         "params": {"top_k": 5},
     })
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
@@ -479,7 +497,7 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
         c.shared_state.save(session_dir)
         await c.tick(1)
         kernel_inbox = await c.bus.tail(to_agent="kernel", topic="request")
-        assert any(m.payload.get("kind") == "select_kernels" for m in kernel_inbox)
+        assert any(m.payload.get("kind") == "trace_analyze" for m in kernel_inbox)
     finally:
         await c.stop()
 
@@ -487,7 +505,7 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
 @pytest.mark.asyncio
 async def test_coordinator_response_routes_back_to_requester(session_dir):
     req = Intent(type=IntentType.REQUEST, payload={
-        "target_agent": "kernel", "kind": "select_kernels",
+        "target_agent": "kernel", "kind": "trace_analyze",
     })
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
@@ -505,7 +523,7 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
         await c._handle_intent("kernel", Intent(
             type=IntentType.RESPONSE, payload={
                 "in_reply_to": request_msg_id,
-                "kind": "select_kernels_done",
+                "kind": "trace_analyze_done",
                 "status": "ok",
                 "result": {"chosen": ["k1", "k2"]},
             },
@@ -545,13 +563,13 @@ async def test_execution_order_denies_backends_before_profile(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_execution_order_does_not_deny_backends_when_select_kernels_stale(
+async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     session_dir,
 ):
-    """Reverse regression: the action-layer ``select_kernels`` hard-gate
+    """Reverse regression: the action-layer ``trace_analyze`` hard-gate
     has been removed. ``params`` / ``backends`` / ``sweep`` / ``report``
-    must NOT be denied when ``last_select_kernels`` is empty / stale.
-    The select_kernels prerequisite is now enforced ONLY at the REQUEST
+    must NOT be denied when ``last_trace_analyze`` is empty / stale.
+    The trace_analyze prerequisite is now enforced ONLY at the REQUEST
     layer for ``run_optimization`` (see test_required_step_gates.py)."""
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "params", "predicted_gain_pct": 3.0,
@@ -562,22 +580,22 @@ async def test_execution_order_does_not_deny_backends_when_select_kernels_stale(
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = "/tmp/trace-a.json.gz"
         c.shared_state.last_profile_pmc_summary = "/tmp/pmc-a.json"
-        c.shared_state.last_select_kernels = {}
+        c.shared_state.last_trace_analyze = {}
         c.shared_state.save(session_dir)
 
         await c.tick(1)
 
         # Proposal should now be accepted into pending_proposals (gate
-        # removed); no `policy_denied{select_kernels...}` observation
+        # removed); no `policy_denied{trace_analyze...}` observation
         # should be emitted.
         obs = await c.bus.tail(to_agent="orchestration", topic="observation")
         for m in obs:
             if m.payload.get("kind") != "policy_denied":
                 continue
-            assert "select_kernels must run first" not in str(
+            assert "trace_analyze must run first" not in str(
                 m.payload.get("hint") or m.payload.get("reason") or ""
             ), (
-                "select_kernels action-layer gate fired for params despite "
+                "trace_analyze action-layer gate fired for params despite "
                 f"removal: {m.payload!r}"
             )
     finally:
