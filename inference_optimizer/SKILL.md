@@ -41,44 +41,83 @@ The CLI starts a Python Coordinator that coordinates:
     WARNING; pass `--robustness-mock` explicitly to suppress it. See
     `multi_node/SKILL.md` (Robustness limitation in multi-node mode).
 
-State lives in **one fixed session directory** — `/workspace/hyperloom`
-by default. Every sandbox is single-use, so the path is flat (no
-`session_id` subdirectory). Override via `$USER_DATA_PATH` (documented
-in `.env.template`).
+State lives under a **session directory** (per optimization run).
+The **workspace root** is ``$USER_DATA_PATH`` (default
+``/workspace/hyperloom``) — it holds shared ``runtime/`` and ``logs/``.
+
+### Layout (N17 default: ``per_model_ts``)
 
 ```text
-/workspace/hyperloom/                     # session_dir (default; override via $USER_DATA_PATH)
-├── manifest.json                         # Python-written session resume tag
-├── state.json                            # SharedState (Coordinator-owned)
-├── storage/coordinator.db                # SQLite WAL
-├── agents/{orchestration,kernel,critic,robustness}/
-│   ├── inbox.jsonl  outbox.jsonl
-│   ├── persona.md
-│   └── system_prompt.snapshot.md
-├── personas/  checkpoints/  findings/  kb/
-├── runs/                                 # data-plane (executor outputs)
-│   ├── baseline/<task_id>/
-│   ├── profile/<task_id>/
-│   ├── backends/<task_id>/{variant_NN_*/, result.json}
-│   ├── params/<task_id>/{variant_NN_*/, combo/, result.json}
-│   ├── sweep/<task_id>/
-│   ├── integrate/<task_id>/
-│   └── kernel_opt/<kernel_id>/<task_id>/
-├── kernel-agent-workspace/<kernel_id>/   # cross-task GEAK/OOB artefacts
-├── kernel-agent/runs/<session_id>/       # kernel-agent CLI tool outputs
-├── patches/<kernel_id>/                  # KEEP'd patches + backup
-├── optimizer_runs/                       # launcher stdout / PID / resume / monitor logs
-├── runtime/
-│   ├── kernel-agent.env.sh               # generated; source before any tool call
-│   ├── geak-config/local.yaml            # generated GEAK litellm config
-│   ├── Magpie/                           # cloned by install.sh (was /workspace/Magpie)
-│   └── source-mirrors/                   # writable mirrors (was /opt/hyperloom)
-│       ├── geak/
-│       ├── OOB/oob_cli/
-│       └── TraceLens-internal/
-├── reports/                              # `report` action output
-└── logs/                                 # cli + reactor + auth-proxy logs
+$USER_DATA_PATH/                          # workspace_root — set by operator / Claw / SaFE
+├── runtime/                              # workspace-shared (install.sh, Magpie, kernel-agent.env.sh)
+│   ├── kernel-agent.env.sh
+│   ├── geak-config/local.yaml
+│   ├── Magpie/
+│   └── source-mirrors/{geak,OOB,TraceLens-internal}/
+├── logs/                                 # workspace-shared launcher stdout
+└── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
+    └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
+        ├── manifest.json
+        ├── state.json
+        ├── storage/coordinator.db
+        ├── agents/{orchestration,kernel,critic,robustness}/
+        ├── runs/{baseline,profile,roofline,backends,params,...}/<task_id>/
+        ├── kernel-agent/runs/<session_id>/
+        ├── kernel-agent-workspace/<kernel_id>/
+        ├── optimizer_runs/               # per-session launcher logs / PID / monitor
+        ├── reports/
+        └── …
 ```
+
+**Claw / SaFE pods:** the launcher often sets ``$USER_DATA_PATH`` to a
+run-scoped path *before* the optimizer starts, e.g.
+``/hyperloom/users/<uid>/deepseek-ai-DeepSeek-V3-20260522_034024/``.
+That outer directory is **platform isolation** (one Claw job). The
+optimizer then creates ``<model_basename>/<UTC_ts>/`` inside it. Full
+session path example::
+
+    /hyperloom/users/<uid>/deepseek-ai-DeepSeek-V3-20260522_034024/   ← USER_DATA_PATH (Claw)
+        deepseek-ai-DeepSeek-V3/20260522T035359Z/                      ← session_dir (optimizer)
+
+**Legacy flat layout:** set ``INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat``
+so ``session_dir == workspace_root`` (no ``<model>/<ts>`` subdirs).
+
+### Path resolution (do not guess)
+
+| Concept | Env / helper | Meaning |
+|---|---|---|
+| Workspace root | ``$USER_DATA_PATH`` → ``paths.workspace_root()`` | Shared ``runtime/``, parent of all sessions |
+| Session dir | ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` → ``paths.session_dir()`` | Where ``manifest.json`` / ``state.json`` live |
+| Session id | ``manifest.json`` → ``session_id`` | Logical label only — **not** a directory name |
+
+Resolution order for ``paths.session_dir()``:
+
+1. ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` (pin from CLI — **authoritative**)
+2. ``$USER_DATA_PATH`` (legacy flat / tests without pin)
+3. ``/workspace/hyperloom``
+
+**Iron rule for agents:** never treat ``$USER_DATA_PATH`` as the session
+dir when ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set. Read
+``manifest.json`` / ``state.json`` from the **session dir** (CLI prints
+``Session dir : …`` at startup). For monitoring after launch, parse that
+line or walk ``$USER_DATA_PATH/<model_basename>/`` for the latest
+``*T*Z/`` timestamp dir.
+
+Path helpers (don't string-concat):
+
+| Helper | Returns |
+|---|---|
+| `paths.workspace_root()` | `$USER_DATA_PATH` (workspace root) |
+| `paths.session_dir()` | Pinned session dir (see resolution order above) |
+| `paths.make_session_dir(model_name=…)` | Creates `<workspace>/<model>/<ts>/` + pin |
+| `paths.find_latest_per_session_dir(model_name=…)` | Latest `*T*Z/` under workspace (for `--resume`) |
+| `paths.db_path_for(sd)` | `<sd>/storage/coordinator.db` |
+| `session_paths.runs_dir(sd, kind, task_id)` | `<sd>/runs/<kind>/<task_id>/` |
+| `session_paths.kernel_workspace(sd, kernel_id)` | `<sd>/kernel-agent-workspace/<kernel_id>/` |
+| `session_paths.patches_dir(sd, kernel_id)` | `<sd>/patches/<kernel_id>/` |
+| `session_paths.agent_log(sd, role)` | `<sd>/logs/<role>.log` |
+| `session_paths.agent_prompt_snapshot(sd, role)` | `<sd>/agents/<role>/system_prompt.snapshot.md` |
+| `manifest.write_manifest(sd, args)` / `load_manifest(sd)` | manifest.json read/write |
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): `$TRACELENS_ROOT` (default `/wekafs/hyperloom/
@@ -93,32 +132,14 @@ required by `_server_patcher`),
 (GEAK cross-session memory). Each is overridable via its own env if
 you want a fully self-contained session.
 
-Paths emitted by agents must resolve under `$SESSION_DIR` — PolicyGate
+Paths emitted by agents must resolve under the **session dir** — PolicyGate
 enforces this (with a framework-source allowlist for `source_file`:
 `/sgl-workspace/{aiter,sglang,vllm}/` plus any paths in
 `$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` — colon-separated, unioned
 with defaults; auto-probed by `inference_optimizer/scripts/install.sh`).
 
-Always prefer `manifest.json` / `state.json` / `coordinator.db` over
-guessing from terminal logs.
-
-Session dir resolution order (`inference_optimizer/paths.py`):
-1. `$USER_DATA_PATH` env → use as-is.
-2. Default `/workspace/hyperloom`.
-
-Path helpers (don't string-concat):
-
-| Helper | Returns |
-|---|---|
-| `paths.session_dir()` | `/workspace/hyperloom` (or env override) |
-| `paths.make_session_dir()` | session dir + full skeleton, idempotent |
-| `paths.db_path_for(sd)` | `<sd>/storage/coordinator.db` |
-| `session_paths.runs_dir(sd, kind, task_id)` | `<sd>/runs/<kind>/<task_id>/` |
-| `session_paths.kernel_workspace(sd, kernel_id)` | `<sd>/kernel-agent-workspace/<kernel_id>/` |
-| `session_paths.patches_dir(sd, kernel_id)` | `<sd>/patches/<kernel_id>/` |
-| `session_paths.agent_log(sd, role)` | `<sd>/logs/<role>.log` |
-| `session_paths.agent_prompt_snapshot(sd, role)` | `<sd>/agents/<role>/system_prompt.snapshot.md` |
-| `manifest.write_manifest(sd, args)` / `load_manifest(sd)` | manifest.json read/write |
+Always prefer `manifest.json` / `state.json` / `coordinator.db` under the
+**session dir** over guessing from terminal logs.
 
 ## Iron Rules
 
@@ -487,15 +508,16 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 ```
 
 In sandboxes where `/workspace/hyperloom` is unwritable, override the
-session location with `USER_DATA_PATH`:
+**workspace root** with `USER_DATA_PATH` (not the per-session subdir):
 
 ```bash
-export USER_DATA_PATH="$RUN_ROOT/optimizer-session"
+export USER_DATA_PATH="/wekafs/xiaofei/sessions"   # workspace root
 mkdir -p "$USER_DATA_PATH"
 ```
 
-The CLI calls `make_session_dir()` once at startup; that creates the
-full subdirectory skeleton in place (idempotent — safe to re-run).
+The CLI calls `make_session_dir(model_name=…)` once at startup; that
+creates `$USER_DATA_PATH/<model_basename>/<UTC_ts>/` and pins
+`$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`.
 
 ## Portable Preflight
 
@@ -818,11 +840,10 @@ only when `_workload_envs.materialize_config_with_envs` defaults don't fit
 
 ## Launch a New Optimization
 
-Assumes Step 1 (install) already ran. Session lives at `/workspace/hyperloom`
-(override `$USER_DATA_PATH`); there is no `--session-name`. Launcher
-artefacts (stdout / PID / resume / monitor logs) land under
-`$USER_DATA_PATH/optimizer_runs/` so a single session-dir move relocates
-the entire run tail.
+Assumes Step 1 (install) already ran. Set `$USER_DATA_PATH` to the **workspace
+root** (parent of per-session dirs). The CLI creates
+`$USER_DATA_PATH/<model_basename>/<UTC_ts>/` via `make_session_dir`.
+Launcher stdout / PID files go under that session's `optimizer_runs/`.
 For sandboxes that don't persist `export`s across shell calls (Cursor agents),
 copy `inference_optimizer/scripts/setup_env.sh.example` to
 `$USER_DATA_PATH/optimizer_runs/setup_env.sh`, fill in the workload block,
@@ -836,6 +857,8 @@ if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
+# RUN_LOG/PID under workspace until session_dir is known; move or re-tail
+# from $session_dir/optimizer_runs/ after parsing "Session dir" from stdout.
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
@@ -867,8 +890,13 @@ After launching, do a short health check:
 sleep 30
 pid="$(cat "$PID_FILE")"
 test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
-session_dir="${USER_DATA_PATH:-/workspace/hyperloom}"
-test -f "$session_dir/manifest.json" && echo "manifest_present=true"
+# Parse session dir from RUN_LOG or resolve latest timestamp subdir:
+session_dir="$(grep -m1 '^Session dir' "$RUN_LOG" 2>/dev/null | sed 's/^Session dir[[:space:]]*:[[:space:]]*//')"
+if [ -z "$session_dir" ]; then
+  model_base="$(basename "$MODEL_PATH")"
+  session_dir="$(ls -d "${USER_DATA_PATH:-/workspace/hyperloom}/$model_base/"*T*Z 2>/dev/null | sort | tail -1)"
+fi
+test -f "$session_dir/manifest.json" && echo "manifest_present=true session_dir=$session_dir"
 test -f "$session_dir/state.json" && echo "state_exists=true" \
   && python3 -c "import json; print(json.load(open('$session_dir/state.json')).get('stop_reason'))"
 ```
@@ -878,9 +906,11 @@ exist + no early `stop_reason`.
 
 ## Resume Existing Session
 
-`--resume` is a flag (no argument); it picks up `/workspace/hyperloom`
-(override: `$USER_DATA_PATH`). The CLI refuses to start
-if `manifest.json` or `state.json` is missing.
+`--resume` auto-picks the latest `$USER_DATA_PATH/<model>/<UTC_ts>/`
+(without `--resume-from`) or an explicit path via `--resume-from`.
+`$USER_DATA_PATH` must stay at the **workspace root** so
+`runtime/kernel-agent.env.sh` resolves. The CLI refuses to start if
+`manifest.json` or `state.json` is missing in the picked session dir.
 
 Reuse the Launch template above with these diffs: drop `--model`, add
 `--resume`, set `RUN_TAG="resume-$(date +%Y%m%d_%H%M%S)"`. Resume preserves
