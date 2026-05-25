@@ -64,7 +64,27 @@ _SCALAR_KEYS = {
     "tick",
     "stop_reason",
     "optimization_stack",
+    # ``last_*`` lines are aggregated by ``_parse_shared_state`` into
+    # ``SharedStateSnapshot.explore_started`` so ``no_levers_found``
+    # can defer until at least one explore family (backends / params /
+    # sweep / validate_stack) has been attempted. Each line surfaces
+    # as either ``(none)`` (Coordinator-rendered sentinel for "never")
+    # or a status= record. We only inspect these four lines to set
+    # the boolean; their full content is not modelled in the snapshot.
+    "last_backends",
+    "last_params",
+    "last_sweep",
+    "last_validate_stack",
 }
+
+# Subset of ``_SCALAR_KEYS`` whose presence with a non-``(none)`` value
+# flips :attr:`SharedStateSnapshot.explore_started` to True.
+_EXPLORE_FAMILY_KEYS = frozenset({
+    "last_backends",
+    "last_params",
+    "last_sweep",
+    "last_validate_stack",
+})
 
 # Pattern for the Coordinator's Time-budget body line, e.g.:
 #   ``elapsed=12.3min  remaining=347.7min  budget=360min  closing_phase=False``
@@ -113,6 +133,14 @@ class SharedStateSnapshot:
     # #8). We parse the size from the rendered ``optimization_stack=``
     # line by counting commas; an exact list is too noisy for a signal.
     optimization_stack_size: int = 0
+    # ``explore_started`` is True once any explore family (backends /
+    # params / sweep / validate_stack) has produced at least one
+    # ``last_*`` record (i.e. its rendered Coordinator line is no
+    # longer ``(none)``). ``no_levers_found`` defers until this flag
+    # flips so the cold-start window (sglang launch + baseline +
+    # profile + turnaround on multi-node large-model) does not get
+    # mistaken for an empty exploration.
+    explore_started: bool = False
     # Time-budget fields populated from the Coordinator's
     # ``=== Time budget ===`` section. When the section is absent (legacy
     # prompt or no wall-clock deadline configured) the three fields stay
@@ -261,6 +289,13 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
             snapshot.stop_reason = "" if head == "(none)" else head
         elif key == "optimization_stack":
             snapshot.optimization_stack_size = _count_optimization_stack(head)
+        elif key in _EXPLORE_FAMILY_KEYS:
+            # Any non-``(none)`` value (e.g. ``status=succeeded ...``)
+            # flips ``explore_started`` to True. The parse stays
+            # idempotent across the four keys: once any of them sets
+            # the flag, later ``(none)`` lines must not clear it.
+            if head and head != "(none)":
+                snapshot.explore_started = True
     return snapshot
 
 

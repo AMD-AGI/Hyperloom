@@ -225,8 +225,12 @@ def test_shared_state_prompt_summary_mentions_new_fields():
     assert "discovered_flags=" in summary
     assert "backend_winners_history=" in summary
     assert "synergy_attempted=" in summary
-    # Counts surface, not full lists
-    assert "sglang:backend=1/param=0" in summary
+    # Roofline-v2 N4: replaced the per-framework count summary with
+    # a layered listing that surfaces every real flag name + tested
+    # status tag. See design §8.6 / test_format_discovered_flags_layered.
+    assert "sglang.backends (1 flags):" in summary
+    assert "--enable-aiter" in summary
+    assert "[untested]" in summary
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +483,12 @@ def test_prompt_section_count_unchanged(registry, rules_path):
         "## 3. PIPELINE & TIME BUDGET",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
+        # N20-A: unnumbered auxiliary catalogue, emitted whenever the
+        # `backends` action is in the run's enabled-action set so the
+        # LLM has the registered variant names + trigger hints to
+        # cite when proposing params.variants=[...].
+        "## BACKENDS GRID CATALOGUE (SGLang)",
+        "## PARAMS GRID CATALOGUE (SGLang)",
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]

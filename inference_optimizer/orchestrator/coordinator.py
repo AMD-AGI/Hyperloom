@@ -78,6 +78,10 @@ log = logging.getLogger(__name__)
 # (record_kernel_opt / record_kernel_integrate_result).
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+    # Roofline-v2 N10: roofline composite action enters the audit set
+    # so each invocation is visible in `roofline_attempts` (the same
+    # pattern used by N7's verify/audit scripts to count snapshots).
+    "roofline",
 })
 
 # ---------------------------------------------------------------------------
@@ -114,6 +118,28 @@ _BASELINE_SELF_LOOP_THRESHOLD: int = 2
 _VALIDATE_STACK_FAIL_THRESHOLD: int = 10
 
 
+def _cheap_exhausted_epsilon() -> float:
+    """Marginal-gain threshold below which a cheap-action round is
+    considered "exhausted" for N19c kernel_opt unlock + N21 roofline
+    redenial. Default 0.3% sits comfortably above the empirical noise
+    floor (~0.1% session-to-session jitter on a stable workload) but
+    below the smallest typical real cheap-action gain (~0.5%). Override
+    via INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON env, e.g.
+    "0.1" for low-noise workloads or "1.0" to require a substantial
+    cheap-action win before declaring exhaustion.
+    """
+    raw = os.environ.get(
+        "INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON", "",
+    ).strip()
+    if not raw:
+        return 0.3
+    try:
+        v = float(raw)
+        return v if v >= 0.0 else 0.3
+    except ValueError:
+        return 0.3
+
+
 def effective_closing_grace_sec(
     max_minutes: float | None,
     closing_grace_sec: float | None,
@@ -128,6 +154,77 @@ def effective_closing_grace_sec(
     if closing_grace_sec is not None:
         return float(closing_grace_sec)
     return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
+
+
+def _resolve_silent_ticks_closing_threshold() -> int:
+    """N33: how many consecutive idle ticks must elapse before the
+    Coordinator force-enters closing phase.
+
+    "Idle" = ``shared_state.consecutive_silent_ticks`` was bumped
+    because the tick had no queued tasks, no running tasks, no pending
+    proposals and no ``current_action``. Default 120 ticks; with the
+    prod ``tick_interval_sec=5.0`` that is ~10 minutes of total LLM
+    silence before we short-circuit. Override via the env knob; ``0``
+    disables the early-close (legacy behaviour: idle until the wall-
+    clock deadline). Negative / non-numeric values fall back to the
+    default.
+    """
+    raw = os.environ.get(
+        "INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "",
+    ).strip()
+    if not raw:
+        return 120
+    try:
+        v = int(raw)
+    except ValueError:
+        return 120
+    return v if v >= 0 else 120
+
+
+def _summarize_failed_variants(
+    all_results: Any, *, max_entries: int = 10,
+) -> list[dict[str, Any]]:
+    """Project the ``status=='failed'`` rows of a grid_runner result list.
+
+    Returns a compact ``[{name, error_class, error_excerpt,
+    extra_sglang_args}, ...]`` so the audit-trail extras can carry
+    per-variant failure context without ballooning the prompt context.
+
+    Why this exists: backends / params executors run a multi-variant
+    grid via ``run_grid`` and reduce it to one ``record_action_attempt``
+    entry (1 task = 1 attempt, by Coordinator design). Before this
+    helper the only place a failed variant landed was the
+    ``all_results`` blob inside the raw delegated_result and the
+    ``rejected`` list inside ``backends_search`` / ``params_search``;
+    neither surface bubbles up into ``last_<action>`` /
+    ``<action>_attempts``. The LLM critic prompt assembled from
+    SharedState therefore could not see prior silent aborts and might
+    keep re-proposing the same variant on the next round.
+
+    Truncation: at most ``max_entries`` failed rows so a runaway grid
+    can't bloat attempts_history. ``error_excerpt`` is capped at
+    400 chars (smaller than the per-entry 2000-char cap used by
+    ``_write_variant_abort_marker`` because this lives inside a
+    promptable audit trail, not on-disk forensics).
+    """
+    if not isinstance(all_results, list):
+        return []
+    failed: list[dict[str, Any]] = []
+    for row in all_results:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "") != "failed":
+            continue
+        err = str(row.get("error") or "")
+        failed.append({
+            "name": str(row.get("name") or ""),
+            "error_class": str(row.get("error_class") or "") or None,
+            "error_excerpt": err[:400] if err else None,
+            "extra_sglang_args": str(row.get("extra_sglang_args") or ""),
+        })
+        if len(failed) >= max_entries:
+            break
+    return failed
 
 
 def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
@@ -249,6 +346,40 @@ class CoordinatorState:
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
 
 
+# Default for N27 roofline-failure fallback. Two consecutive OUTER
+# roofline failures (= 3-4 inner trace_analyze attempts thanks to
+# N26 retry) before the gate downgrades. Tuned conservatively so a
+# transient rocprofiler-sdk / network blip doesn't immediately drop
+# the LLM into the no-analysis-md grid; raise via env to be more
+# tolerant of flaky upstream profilers, lower to 1 when operating
+# in a known-broken environment.
+_ROOFLINE_FALLBACK_THRESHOLD_DEFAULT = 2
+_ROOFLINE_FALLBACK_THRESHOLD_ENV = (
+    "INFERENCE_OPTIMIZER_ROOFLINE_FAILURE_FALLBACK_THRESHOLD"
+)
+
+
+def _resolve_roofline_fallback_threshold() -> int:
+    """Read N27 fallback threshold from env, with safe defaulting.
+
+    Negative / zero / unparseable values fall back to the default
+    (2). The threshold is read on every gate check rather than
+    cached because operator tools sometimes mutate env between
+    ticks (e.g. ``recover`` action twiddling INFERENCE_OPTIMIZER_*
+    knobs); the cost is one env lookup per denied propose.
+    """
+    raw = os.environ.get(_ROOFLINE_FALLBACK_THRESHOLD_ENV, "").strip()
+    if not raw:
+        return _ROOFLINE_FALLBACK_THRESHOLD_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return _ROOFLINE_FALLBACK_THRESHOLD_DEFAULT
+    if value < 1:
+        return _ROOFLINE_FALLBACK_THRESHOLD_DEFAULT
+    return value
+
+
 class Coordinator:
     """The single Coordinator instance per session.
 
@@ -332,6 +463,34 @@ class Coordinator:
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
         self._validate_stack_gate_skip_warned: bool = False
+
+        # Per-agent consecutive ``BackendError`` streak. Successful turns
+        # reset the counter for that agent; a streak crossing
+        # ``_backend_error_streak_threshold`` records a single
+        # ``backend_unhealthy`` observation so operators (and the
+        # robustness reactor, which tails Coordinator events) notice the
+        # subprocess transport is degraded — particularly relevant for
+        # the robustness-agent / critic-agent subprocess backends whose
+        # in-loop failures otherwise would only show up as scattered
+        # ``backend_error`` events. The escalation observation fires once
+        # per crossing, then the counter must reset and re-arm before it
+        # can fire again, so we never spam the inbox.
+        self._backend_error_streak: dict[str, int] = {
+            name: 0 for name in self.role_registry
+        }
+        self._backend_error_alarm_armed: dict[str, bool] = {
+            name: True for name in self.role_registry
+        }
+        try:
+            self._backend_error_streak_threshold: int = max(
+                1,
+                int(os.environ.get(
+                    "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
+                    "5",
+                )),
+            )
+        except ValueError:
+            self._backend_error_streak_threshold = 5
 
         # Per-agent consecutive ``BackendError`` streak. Successful turns
         # reset the counter for that agent; a streak crossing
@@ -608,7 +767,7 @@ class Coordinator:
             else:
                 self._score_action_keep(task_kind, gain_pct=0.0)
             return
-        if task_kind in {"backends", "params", "sweep"}:
+        if task_kind in {"backends", "params", "sweep", "framework_pr"}:
             if failed:
                 self._score_action_failure(task_kind)
             elif promoted:
@@ -646,6 +805,11 @@ class Coordinator:
             return
         kernel_enabled = "kernel" in self.role_registry
         enabled = FULL_ENABLED_ACTIONS if kernel_enabled else NO_KERNEL_ENABLED_ACTIONS
+        # Strip framework_pr when the framework-agent toggle is off so the
+        # scoreboard never surfaces an arm the bandit cannot pull. Defaults
+        # to True for older state.json files (see SharedState.framework_enabled).
+        if not getattr(self.shared_state, "framework_enabled", True):
+            enabled = tuple(a for a in enabled if a != "framework_pr")
         model_class = (self.shared_state.model_class or "moe_mla").strip()
         try:
             seeded = _scoring.seed_action_scores(
@@ -729,6 +893,7 @@ class Coordinator:
         # Stash so ``_compose_prompt`` can update target_gap_pct.
         self._current_objective = objective
         grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
+        idle_close_ticks_threshold = _resolve_silent_ticks_closing_threshold()
         deadline = (
             time.monotonic() + max_minutes * 60.0 if max_minutes else None
         )
@@ -778,6 +943,31 @@ class Coordinator:
                 if not self._stop.is_set():
                     await self._pump_dispatcher_once()
 
+                # N33: bump ``consecutive_silent_ticks`` when the post-
+                # tick state shows nothing in flight (no queued / running
+                # task, no pending proposal, no ``current_action``). Any
+                # non-empty signal means the run is still making forward
+                # progress (LLM proposed, executor running, critic
+                # reviewing, etc.) so we reset the counter to 0. Skipped
+                # while we're already in closing to avoid double-firing
+                # the closing-phase trigger below.
+                if not in_closing:
+                    try:
+                        queued_now = len(await self.tasks.queued())
+                        running_now = len(await self.tasks.running())
+                    except Exception:  # noqa: BLE001
+                        queued_now = running_now = 0
+                    tick_is_idle = (
+                        queued_now == 0
+                        and running_now == 0
+                        and not self.state.pending_proposals
+                        and not (self.shared_state.current_action or "").strip()
+                    )
+                    if tick_is_idle:
+                        self.shared_state.consecutive_silent_ticks += 1
+                    else:
+                        self.shared_state.consecutive_silent_ticks = 0
+
                 # ---- check stop conditions ----
                 if self._stop.is_set():
                     stop_reason = "signal"
@@ -802,6 +992,39 @@ class Coordinator:
                     closing_deadline = await self._enter_closing_phase(
                         grace_sec=grace_sec,
                     )
+                    continue
+                # N33: if the run has been silent for
+                # ``idle_close_ticks_threshold`` consecutive ticks (LLM
+                # has stopped proposing anything actionable, no tasks in
+                # flight, no pending proposals), short-circuit to closing
+                # phase NOW instead of idling until the wall-clock
+                # deadline. This is the common failure mode where the
+                # LLM keeps re-proposing rejected ``report`` actions (or
+                # no actions at all) and would otherwise burn the
+                # remaining budget for nothing. ``threshold <= 0``
+                # disables the early-close (legacy behaviour).
+                if (
+                    idle_close_ticks_threshold > 0
+                    and not in_closing
+                    and self.shared_state.consecutive_silent_ticks
+                        >= idle_close_ticks_threshold
+                ):
+                    log.warning(
+                        "Coordinator: idle for %d consecutive ticks "
+                        "(threshold=%d); entering closing phase early "
+                        "to flush final report instead of waiting for "
+                        "wall-clock deadline (max_minutes=%.0f).",
+                        self.shared_state.consecutive_silent_ticks,
+                        idle_close_ticks_threshold,
+                        max_minutes_value,
+                    )
+                    if grace_sec <= 0:
+                        stop_reason = "idle_timeout"
+                        break
+                    closing_deadline = await self._enter_closing_phase(
+                        grace_sec=grace_sec,
+                    )
+                    self.shared_state.consecutive_silent_ticks = 0
                     continue
                 if in_closing:
                     report_terminal = await self._closing_report_terminal()
@@ -987,6 +1210,77 @@ class Coordinator:
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )
 
+        # N31 (May 2026): if the session has accumulated validated
+        # gain but only the baseline roofline snapshot exists, enqueue
+        # a final ``roofline`` task BEFORE the closing report so the
+        # report's ``## Roofline Comparison`` section can render a
+        # real before/after view of the hot-kernel distribution.
+        #
+        # Skip when:
+        # * cumulative_gain_validated <= 0 (no real improvement to
+        #   compare against -- the latest snapshot IS the final view)
+        # * optimization_stack empty (same reason)
+        # * roofline_snapshot_id >= 2 already (a snapshot has been
+        #   captured post-optimization, no need for another)
+        # * stop_reason set (the run aborted before getting here;
+        #   running an expensive ~20min roofline before report would
+        #   delay the diagnostic the operator is waiting for)
+        # Honors the same N31 exception in ``_proposal_denial_for_
+        # roofline`` so the LLM and Coordinator agree on when a
+        # post-optimization snapshot is wanted.
+        cached_final = self.shared_state.last_trace_analyze or {}
+        snap_id = cached_final.get("roofline_snapshot_id", 0)
+        validated_gain = float(
+            self.shared_state.cumulative_gain_validated or 0.0
+        )
+        stack_len = len(self.shared_state.optimization_stack or [])
+        want_final_roofline = (
+            isinstance(snap_id, int) and snap_id == 1
+            and validated_gain > 0.0
+            and stack_len >= 1
+            and not (self.shared_state.stop_reason or "").strip()
+        )
+        if want_final_roofline:
+            roofline_key = (
+                f"closing-roofline-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
+            )
+            try:
+                roofline_task, _ = await self.tasks.create_or_return_existing(
+                    kind="roofline",
+                    params={
+                        "session_dir": str(self.session_dir),
+                        "notes": (
+                            "N31 closing-phase final snapshot for the "
+                            "Roofline Comparison report section "
+                            "(post-optimization vs baseline)."
+                        ),
+                    },
+                    idempotency_key=roofline_key,
+                    requires_lanes=["profile_lane"],
+                    allowed_tools=[],
+                    side_effects=["writes_results"],
+                    lease_ttl_sec=int(grace_sec),
+                )
+                log.info(
+                    "Coordinator: N31 enqueued final roofline task=%s "
+                    "(validated_gain=%.2f%%, stack_len=%d) before report",
+                    roofline_task.task_id, validated_gain, stack_len,
+                )
+                await self.bus.append_and_seq(Message.new(
+                    "coordinator", "*", "event",
+                    {
+                        "kind": "n31_final_roofline_enqueued",
+                        "task_id": roofline_task.task_id,
+                        "validated_gain": validated_gain,
+                        "stack_len": stack_len,
+                    },
+                ))
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "Coordinator: N31 final roofline enqueue failed; "
+                    "report will fall through to single-snapshot mode",
+                )
+
         idempotency_key = (
             f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         )
@@ -1032,7 +1326,7 @@ class Coordinator:
         }
 
     def _all_reusable_kernels_rejected(self) -> bool:
-        select = self.shared_state.last_select_kernels or {}
+        select = self.shared_state.last_trace_analyze or {}
         reusable = {
             str(k) for k in (select.get("reusable_native_kernel_ids") or [])
             if k
@@ -1322,62 +1616,48 @@ class Coordinator:
             return True
 
     def _kernel_opt_keep_pending(self) -> str:
-        """Return the kernel_id awaiting integrate, or "" if none.
+        """Return the next kernel_id awaiting integrate, or "" if none.
 
-        Detects the "kernel_opt produced a KEEP whose patch has not yet
-        been integrated into the optimization_stack" state. Returns the
-        kernel_id so the gate text can name it; empty string means the
-        gate is closed.
+        Delegates to :meth:`SharedState.next_pending_keep_kernel_id`,
+        which scans the per-kernel ``kernel_opt_attempts`` ledger instead
+        of the single ``last_kernel_opt`` slot. This is what lets the
+        TODO 4/5 integrate gate drain a batch's full KEEP queue (sorted
+        strongest-first, same-source-file collapsed) rather than only
+        the most recently recorded KEEP.
 
-        Closed when ANY of these hold:
-          * ``last_kernel_opt`` is empty (no recent kernel_opt call).
-          * Last decision is not ``KEEP``.
-          * The kernel_id is already retired (``rejected_kernel_ids``).
-          * An ``integrate`` entry with the same kernel_id is already on
-            ``optimization_stack`` (i.e. integrate already ran for this
-            patch and stuck).
+        Closed when ANY of these hold (all enforced by
+        :meth:`SharedState.next_pending_keep_kernel_id`):
+          * No ``KEEP`` entries in ``kernel_opt_attempts``.
+          * Every pending KEEP has been retired (``rejected_kernel_ids``)
+            or already absorbed into ``optimization_stack`` as an
+            ``integrate`` entry.
+          * Every pending KEEP shares its source_file with a KEEP that
+            already landed on the stack (whole-file overwrite conflict).
         """
-        last = self.shared_state.last_kernel_opt or {}
-        decision = str(last.get("decision") or "").upper()
-        if decision != "KEEP":
-            return ""
-        kernel_id = str(last.get("kernel_id") or "").strip()
-        if not kernel_id:
-            return ""
-        if kernel_id in (self.shared_state.rejected_kernel_ids or []):
-            return ""
-        for entry in self.shared_state.optimization_stack or []:
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("action") != "integrate":
-                continue
-            if str(entry.get("kernel_id") or "") == kernel_id:
-                return ""
-        return kernel_id
+        return self.shared_state.next_pending_keep_kernel_id()
 
     def _required_next_step(self) -> str:
         """Return the coordinator-enforced next step, or empty if flexible.
 
-        The Orchestration prompt says baseline -> profile -> analyze ->
-        kernel_opt -> integrate -> validate_stack, but the LLM can still
-        skip ahead. This guard makes that sequence deterministic and
-        visible in the prompt every tick.
+        The Orchestration prompt says baseline -> profile -> trace_analyze,
+        but the LLM can still skip to backends/params. This guard makes that
+        sequence deterministic and visible in the prompt every tick.
 
-        Pipeline (the ``analyze`` step sits between profile and integrate
-        so the TraceLens ``analysis.md`` contract is honored before
-        kernel_opt fires. The TODO is purely guidance —
-        `_sequence_denial_for_action` still does NOT block explore actions
-        (params/backends/sweep) on a stale `last_select_kernels` cache;
-        that demoted gate stays demoted. Only
-        `_sequence_denial_for_request` enforces it for `run_optimization`
-        REQUESTs, as before):
+        Pipeline (after the v2 rename of ``select_kernels`` to
+        ``trace_analyze``, the deletion of the in-loop ``setup`` /
+        ``classify`` actions, the deletion of the PMC hard-gate, and
+        the deletion of the action-layer ``trace_analyze`` hard-gate
+        — ``trace_analyze`` is now only enforced as a prerequisite for
+        ``run_optimization`` REQUESTs at the request layer, never for
+        explore actions like ``params`` / ``backends`` / ``sweep`` /
+        ``report``):
 
             TODO 0  target_analysis  (only when --compare-against-gpu set)
             TODO 1  baseline
             TODO 2  profile          (kernel mode only)
             TODO 3  analyze          (kernel mode only, when
                                       last_profile_trace is fresh but
-                                      last_select_kernels is stale)
+                                      last_trace_analyze is stale)
             TODO 4  integrate        (kernel mode only, after kernel_opt KEEP)
             TODO 5  validate_stack   (when unvalidated KEEPs landed)
 
@@ -1419,10 +1699,11 @@ class Coordinator:
         # * ``pmc_roofline`` is opt-in advisory enrichment for
         #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
         #   never a prerequisite for any other action.
-        # * ``select_kernels`` is a prerequisite ONLY for ``run_optimization``
-        #   REQUESTs (enforced in ``_sequence_denial_for_request``); the
-        #   action-layer hard-gate stays demoted (explore actions are not
-        #   blocked).
+        # * ``trace_analyze`` (v2 rename of ``select_kernels``) is a
+        #   prerequisite ONLY for ``run_optimization`` REQUESTs
+        #   (enforced in ``_sequence_denial_for_request``); it is NOT
+        #   a prerequisite for ``params`` / ``backends`` / ``sweep`` /
+        #   ``report`` (the action-layer hard-gate stays demoted).
         if "kernel" in self.role_registry:
             if not self.shared_state.last_profile_trace:
                 return (
@@ -1436,22 +1717,31 @@ class Coordinator:
             # only -- explore actions (params/backends/sweep/report) are
             # not blocked; only run_optimization is hard-gated on the
             # same cache by `_sequence_denial_for_request`.
-            cached = self.shared_state.last_select_kernels or {}
+            cached = self.shared_state.last_trace_analyze or {}
             current_trace = self.shared_state.last_profile_trace
             cache_matches_trace = (
                 isinstance(cached, dict)
                 and cached.get("trace_input") == current_trace
             )
             if not cache_matches_trace:
+                # v2: select_kernels was renamed trace_analyze and folded
+                # into the `roofline` composite action so it always runs
+                # atomically with `profile`. A bare profile (without
+                # roofline) is N9-blocked at propose-time, so reaching
+                # this branch implies the operator manually advanced
+                # last_profile_trace -- in which case the right recovery
+                # is to propose `roofline` (composite) rather than emit a
+                # legacy select_kernels REQUEST.
                 return (
-                    "TODO 3/5: analyze is required now. last_profile_trace "
-                    f"={current_trace!r} but last_select_kernels is "
-                    "empty/stale; TraceLens has not yet produced "
-                    "analysis.md for this trace. Emit "
-                    "request{target_agent='kernel', kind='select_kernels', "
-                    "params={trace_input: <last_profile_trace>, top_k: 10}}. "
-                    "Do NOT propose kernel_opt / run_optimization / "
-                    "integrate until this cache populates."
+                    "TODO 3/5: roofline snapshot is required now. "
+                    f"last_profile_trace={current_trace!r} but "
+                    "last_trace_analyze is empty/stale; TraceLens has "
+                    "not yet produced analysis.md for this trace. "
+                    "Propose/delegate `roofline` (composite action that "
+                    "runs profile + trace_analyze atomically) so the "
+                    "snapshot is refreshed. Do NOT propose kernel_opt "
+                    "/ run_optimization / integrate until this cache "
+                    "populates."
                 )
             pending_kid = self._kernel_opt_keep_pending()
             if pending_kid:
@@ -1465,6 +1755,38 @@ class Coordinator:
                     "`validate_stack` / `report`) before any further "
                     "explore."
                 )
+            # PR-C TODO 4a/5: hot-kernel must-try gate. Surfaces the
+            # untried hot reusable kernel queue so Orchestration knows
+            # it has to ``run_optimization`` (not ``report``) until the
+            # gpu_pct >= 3% set is drained. Same source of truth as the
+            # ``_sequence_denial_for_action('report')`` denial.
+            #
+            # Only fires when N19c (cheap-exhausted) gate has opened --
+            # otherwise the LLM would propose ``run_optimization``,
+            # bounce off ``execution_order`` repeatedly, and hit the
+            # policy_loop auto-stop (Qwen3-30B-A3B-Base 20260523T014653Z
+            # died at tick=14 this way). When cheap is still earning
+            # marginal gain (last_cheap_delta_gain >= EPSILON), let the
+            # LLM keep exploring; PR-C re-activates the instant N19c
+            # unlocks.
+            if self._kernel_opt_unlocked():
+                untried_hot = self.shared_state.untried_hot_reusable_kernels()
+                if untried_hot:
+                    untried_str = ", ".join(untried_hot)
+                    return (
+                        f"TODO 4a/5: kernel_opt required on untried hot "
+                        f"reusable kernels [{untried_str}]. Each kernel "
+                        "with gpu_pct >= 3% (capped at top 5 by gpu_pct) "
+                        "must get at least one full backend ladder "
+                        "(GEAK -> Claude -> Codex). Emit request"
+                        "{target_agent='kernel', kind='run_optimization', "
+                        "params={candidates_path="
+                        "<last_trace_analyze.candidates_path>}} -- batch "
+                        "mode fans out automatically. Failed ladders "
+                        "retire the kernel (max_failures=1), so this list "
+                        "shrinks monotonically. `report` is denied until "
+                        "empty."
+                    )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
             if self._validate_stack_gate_skipped():
                 return (
@@ -1662,8 +1984,14 @@ class Coordinator:
         sequence_actions = {
             "target_analysis",
             "baseline", "profile", "pmc_roofline",
+            "roofline",
             "backends", "params", "sweep", "report",
             "integrate", "validate_stack",
+            # Roofline-v2 N3: comm_optimization joins so the roofline-
+            # required gate below can catch its propose. (kernel_opt
+            # is kernel-owned + routed through _sequence_denial_for_request,
+            # not here.)
+            "comm_optimization",
         }
         if action not in sequence_actions:
             return None
@@ -1713,6 +2041,44 @@ class Coordinator:
             self_loop = self._baseline_self_loop_denial(proposed_params)
             if self_loop is not None:
                 return self_loop
+        # Roofline-v2 N21 (May 2026): a roofline proposal is denied
+        # when discovered_flags has NOT changed since the previous
+        # snapshot. Re-running the composite roofline action in that
+        # state would launch sglang with byte-identical args, produce
+        # a byte-equivalent trace, and emit an analysis.md whose hot
+        # kernel distribution is mathematically identical to the
+        # cached one — burning ~20-35min of wall-clock for zero new
+        # information. The "flags didn't change" signal is itself
+        # produced upstream by the cheap-action grid runner writing
+        # `last_cheap_delta_gain ~= 0` (no variant beat current_best,
+        # so no new flag was promoted), so this gate is the symmetric
+        # complement of the N19c kernel_opt unlock — together they
+        # implement the user's roofline-driven flow:
+        #   - flags changed (cheap found gain) -> roofline allowed
+        #     (snapshot will differ + tells LLM what to try next)
+        #   - flags unchanged (cheap exhausted) -> roofline denied,
+        #     hint to propose backends/params (try the other cheap
+        #     lever) or request kernel_opt (unlocked by N19c)
+        #
+        # The very first roofline (snapshot_id absent) is always
+        # allowed — that's the baseline analysis snapshot. The gate
+        # only fires from the 2nd roofline onward.
+        if action == "roofline":
+            denied = self._proposal_denial_for_roofline()
+            if denied is not None:
+                return denied
+        # Roofline-v2 N22 (May 2026): non-blocking keyword-implied
+        # variant check. When the LLM proposes backends/params with a
+        # variants subset (N20-A surface), compare the proposed list
+        # against the variants implied by analysis.md keywords (e.g.
+        # mentioning "torch.compile" implies torch_compile_on). If
+        # any implied variant is missing, RECORD an advisory into
+        # shared_state.last_proposal_advice (the next-tick prompt will
+        # render it). DO NOT deny — the LLM keeps agency; the advisory
+        # surfaces in the audit log + next prompt so the LLM corrects
+        # on the follow-up cheap-action propose.
+        if action in {"backends", "params"} and proposed_params:
+            self._record_keyword_implied_advice(action, proposed_params)
         # Profile / integrate guards only apply when kernel agent is in
         # the role registry — no-kernel mode skips them. Two related gates
         # are intentionally NOT enforced at the action layer:
@@ -1720,21 +2086,74 @@ class Coordinator:
         #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
         #   never blocks any other action. A platform that cannot run
         #   rocprof must not deadlock the explore / kernel pipeline.
-        # * ``select_kernels`` is enforced at the REQUEST layer
+        # * ``trace_analyze`` is enforced at the REQUEST layer
         #   (``_sequence_denial_for_request``) for ``run_optimization``
         #   only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
-        #   never gated on a fresh ``last_select_kernels`` cache — those
+        #   never gated on a fresh ``last_trace_analyze`` cache — those
         #   actions don't need kernel candidates to make progress.
+        # Roofline-v2 N9: hard-block direct LLM propose of `profile`.
+        # Rationale (GPU-empirical, see design §6.5 N9 amendment):
+        # N3 left `profile` as a permitted-but-deprecated direct propose
+        # path via prompt hint. Qwen3-32B GPU run showed the LLM falls
+        # back to v0 training-distribution behaviour and proposes
+        # `profile` directly, which then forces `roofline` to redo the
+        # profile internally — wasting ~10 min wall-clock/session.
+        # N9 blocks the direct LLM proposal; `profile_executor` is
+        # still invoked by `RooflineExecutor._wrap_profile_ctx +
+        # _call_profile_sub_step` (does NOT pass through this gate
+        # because that path bypasses SubAgentRunner's intent layer
+        # entirely — see action_executors/roofline.py).
+        #
+        # Escape hatch: ``INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE=1``
+        # restores N3 soft-hint behaviour for:
+        # (a) debug sessions where an operator wants to manually drive
+        #     profile + trace_analyze in two steps;
+        # (b) robustness recovery paths that may need to force-reprofile
+        #     when roofline's atomic semantics get in the way;
+        # (c) v2.1 subset-retry feature (deferred).
+        _direct_profile_allowed = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE", "",
+            ).strip().lower() in {"1", "true", "yes", "on"}
+        )
+        if action == "profile" and not _direct_profile_allowed:
+            return PolicyDenied(
+                "action='profile' denied: use `roofline` instead "
+                "(composite action that runs profile + trace_analyze "
+                "atomically; design/roofline-v2.md §6.5 N9)",
+                rule="execution_order",
+                hint=(
+                    "propose/delegate `roofline` — the composite action "
+                    "internally invokes profile_executor as sub-step 1 "
+                    "and trace_analyze_handler as sub-step 2, producing "
+                    "a fresh TraceLens snapshot atomically. Direct "
+                    "`profile` propose duplicates the work and is "
+                    "blocked. Set INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE=1 "
+                    "to bypass for debug/recovery."
+                ),
+            )
         if "kernel" in self.role_registry:
+            # Roofline-v2 N3+N9: `roofline` composite action internally
+            # runs profile as its first sub-step (via direct executor
+            # call, not via SubAgentRunner — so it bypasses the N9 gate
+            # above). The pre-existing "profile must run first" gate
+            # must therefore exempt `roofline` so the LLM has a way to
+            # ever produce last_profile_trace. `profile` itself remains
+            # in the exempt set so the escape-hatch + Robustness paths
+            # still work.
             if (
                 self.shared_state.baseline_tput > 0
                 and not self.shared_state.last_profile_trace
-                and action not in {"profile", "validate_stack"}
+                and action not in {"profile", "roofline", "validate_stack"}
             ):
                 return PolicyDenied(
                     f"action={action!r} denied: profile must run before {action!r}",
                     rule="execution_order",
-                    hint="propose/delegate `profile`; last_profile_trace is empty",
+                    hint=(
+                        "propose/delegate `roofline` (composite action that "
+                        "runs profile + trace_analyze atomically); "
+                        "last_profile_trace is empty"
+                    ),
                 )
             # integrate gate: kernel_opt KEEP awaiting integrate. Allow
             # integrate / validate_stack / report through; recover is not
@@ -1754,6 +2173,48 @@ class Coordinator:
                         f"{pending_kid!r}}}}} before any further explore"
                     ),
                 )
+            # PR-C: hot-kernel report-gate. Block ``report`` when any
+            # reusable hot kernel with gpu_pct >= 3% has not yet been
+            # tried (and is not rejected / integrated). Prevents the
+            # log1 (164910Z) failure mode where tick=8 -> report_emitted
+            # with k001=24% / k002=37% / k004=9.7% untouched.
+            #
+            # Allowed through the gate:
+            #   - kernel_opt request itself (handled at request layer)
+            #   - integrate / validate_stack (still need to drain prior
+            #     KEEPs; the integrate-pending gate above already
+            #     handles ordering)
+            #   - recover (not in sequence_actions, bypasses entirely)
+            # Blocked:
+            #   - report -- the LLM cannot declare the session done
+            #     while a meaningful kernel lever exists.
+            # The hot_kernel_unfinished rule only fires when
+            # ``run_optimization`` is actually dispatchable -- otherwise
+            # N19c will reject the LLM's resulting request and we'd
+            # deadlock the LLM between two opposing gates (death-spiral
+            # observed on 20260523T014653Z).
+            if action == "report" and self._kernel_opt_unlocked():
+                untried = self.shared_state.untried_hot_reusable_kernels()
+                if untried:
+                    untried_str = ", ".join(untried)
+                    return PolicyDenied(
+                        f"action='report' denied: untried hot reusable "
+                        f"kernels still present ({untried_str})",
+                        rule="hot_kernel_unfinished",
+                        hint=(
+                            "Every reusable hot kernel with gpu_pct >= 3% "
+                            "must get at least one kernel_opt attempt (or "
+                            "be retired via REVERT / max_failures) before "
+                            f"the session may end. Pending: {untried_str}. "
+                            "Emit request{target_agent='kernel', "
+                            "kind='run_optimization', "
+                            "params={candidates_path=<from "
+                            "last_trace_analyze>}} so the batch fans out "
+                            "across the queue. Threshold overrides: "
+                            "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT / "
+                            "HYPERLOOM_KERNEL_OPT_GATE_TOP_N."
+                        ),
+                    )
         # validate_stack precedence — once new KEEPs are stacked we must
         # rebench before any further explore / report. We allow:
         #   - validate_stack itself
@@ -1774,6 +2235,117 @@ class Coordinator:
                     "before any further explore or report"
                 ),
             )
+        # Roofline-v2 N3: 3 propose-path optimization actions require a
+        # fresh roofline snapshot (i.e. last_trace_analyze.analysis_md_text
+        # is populated). See design/roofline-v2.md §6.5 / §8.5. This is
+        # what makes the `roofline` composite action a real prerequisite —
+        # without this gate the LLM could go straight from baseline to
+        # params and never see analysis.md.
+        #
+        # Why these three specifically (on the propose path):
+        # * backends / params  — flag-tuning actions whose decisions
+        #   benefit most from knowing the bottleneck distribution.
+        # * comm_optimization  — only worth running when comm shows up
+        #   as a real bottleneck in the report.
+        # NOT in this list:
+        # * kernel_opt         — KERNEL_OWNED_ACTIONS path: routed via
+        #   _sequence_denial_for_request (REQUEST kind="run_optimization")
+        #   which has its own analysis_md_text check.
+        # * sweep              — frontier sweep across CONC/ISL/OSL, not
+        #   kernel-bottleneck-driven.
+        # * validate_stack     — measurement, not exploration.
+        # * report             — closing artefact.
+        # * integrate          — handles KEEP'd kernel_opt outputs.
+        # * roofline           — the prerequisite producer itself.
+        _ROOFLINE_REQUIRED_ACTIONS = {
+            "backends", "params", "comm_optimization",
+        }
+        if action in _ROOFLINE_REQUIRED_ACTIONS:
+            cached = self.shared_state.last_trace_analyze or {}
+            if not cached.get("analysis_md_text"):
+                # N27: when roofline has failed enough consecutive
+                # times that retrying is unlikely to help (default
+                # threshold = 2 outer failures; each outer call
+                # already exhausted N26's inner retry, so streak=2
+                # means roughly 3-4 trace_analyze attempts already
+                # happened), downgrade the gate from PolicyDenied to
+                # PASS-with-advisory. The LLM falls back to the
+                # pre-roofline default grid behaviour rather than
+                # hard-looping on roofline forever.
+                #
+                # Design intent (operator):
+                #   "有roofline依赖roofline去选参数, roofline如果异常,
+                #    就回到之前的选择方式, 不会导致程序完全跑不了"
+                #
+                # The threshold is env-overridable so operators with
+                # a known-broken rocprofiler can lower it to 1 (fall
+                # back after the very first failure) and operators
+                # with flaky upstream profilers can raise it.
+                fallback_threshold = _resolve_roofline_fallback_threshold()
+                streak = int(
+                    getattr(self.shared_state, "roofline_failure_streak", 0)
+                    or 0
+                )
+                if streak >= fallback_threshold:
+                    # Stamp the LAST trace_analyze (which may be empty
+                    # dict pre-first-attempt) with a fallback marker
+                    # the prompt builder reads to swap the "propose
+                    # roofline first" line for "roofline failed N
+                    # times -- running without analysis.md guidance".
+                    last_ta = self.shared_state.last_trace_analyze or {}
+                    last_ta["fallback_mode_active"] = True
+                    last_ta["fallback_after_failures"] = streak
+                    last_ta["fallback_threshold"] = fallback_threshold
+                    self.shared_state.last_trace_analyze = last_ta
+                    # Push a one-shot advisory the LLM will see on the
+                    # NEXT tick so it knows it's in degraded mode.
+                    # FIFO cap (5) is enforced by SharedState.
+                    advice = (
+                        f"[N27 fallback] roofline failed "
+                        f"{streak} consecutive times (>= threshold "
+                        f"{fallback_threshold}); unlocking "
+                        f"{sorted(_ROOFLINE_REQUIRED_ACTIONS)!r} so "
+                        "the run can make progress without "
+                        "analysis.md guidance. N20-A variants subset "
+                        "advice + N22 keyword advisory are NATURALLY "
+                        "degraded (no analysis.md keyword to match), "
+                        "so falling through to the executor's default "
+                        "full grid is correct here. Re-propose "
+                        "`roofline` whenever you think the upstream "
+                        "issue may have cleared -- success resets the "
+                        "streak and restores roofline-driven "
+                        "variant selection."
+                    )
+                    existing_advice = (
+                        getattr(self.shared_state, "last_proposal_advice", [])
+                        or []
+                    )
+                    if advice not in existing_advice:
+                        existing_advice = list(existing_advice) + [advice]
+                        # FIFO cap matches SharedState (max 5 entries).
+                        self.shared_state.last_proposal_advice = (
+                            existing_advice[-5:]
+                        )
+                    return None  # fallthrough -- gate downgraded
+                return PolicyDenied(
+                    f"action={action!r} denied: roofline must run first "
+                    "(no cached TraceLens analysis.md)",
+                    rule="execution_order",
+                    hint=(
+                        "propose/delegate `roofline` (composite action that "
+                        "internally runs profile + trace_analyze). Do NOT "
+                        "call profile / trace_analyze separately — roofline "
+                        "atomically produces the snapshot all 4 optimisation "
+                        f"actions ({sorted(_ROOFLINE_REQUIRED_ACTIONS)!r}) "
+                        "depend on. After "
+                        f"{_resolve_roofline_fallback_threshold()} "
+                        "consecutive roofline failures the N27 fallback "
+                        "kicks in and these actions unlock automatically; "
+                        "you've had "
+                        f"{int(getattr(self.shared_state, 'roofline_failure_streak', 0) or 0)} "
+                        "so far."
+                    ),
+                )
         return None
 
     def _sequence_denial_for_request(
@@ -1784,11 +2356,11 @@ class Coordinator:
         req_kind = str(kind or "").strip()
         if target != "kernel" or self.shared_state.stop_reason:
             return None
-        # select_kernels is the prerequisite request itself. It is also used
+        # trace_analyze is the prerequisite request itself. It is also used
         # directly by tests/tools that pass an explicit trace_input, so allow it
         # through; later backends/params/sweep are guarded until the result is
         # cached in SharedState.
-        if req_kind == "select_kernels":
+        if req_kind == "trace_analyze":
             return None
         if get_handler(req_kind) is None:
             return None
@@ -1802,17 +2374,394 @@ class Coordinator:
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: profile must run first",
                 rule="execution_order",
-                hint="propose/delegate `profile` before select_kernels/run_optimization",
+                hint=(
+                    "propose/delegate `roofline` (composite action that "
+                    "runs profile + trace_analyze atomically) before "
+                    "trace_analyze/run_optimization"
+                ),
             )
-        select = self.shared_state.last_select_kernels or {}
+        select = self.shared_state.last_trace_analyze or {}
         needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
-        if needs_select and req_kind != "select_kernels":
+        if needs_select and req_kind != "trace_analyze":
             return PolicyDenied(
-                f"request kind={req_kind!r} denied: select_kernels must run first",
+                f"request kind={req_kind!r} denied: trace_analyze must run first",
                 rule="execution_order",
-                hint="emit request kind='select_kernels' for last_profile_trace",
+                hint=(
+                    "propose/delegate `roofline` (preferred — composite "
+                    "action) or emit request kind='trace_analyze' for "
+                    "last_profile_trace (legacy path)"
+                ),
+            )
+        # Roofline-v2 N19c (May 2026, GPU+empirical-history evidence-driven):
+        # kernel_opt unlock is now GAIN-DRIVEN, not counter-driven (N14).
+        # The previous N14 enforcement (backends_attempts >= 2 AND
+        # params_attempts >= 2 AND snapshot_id >= 3) wasted hours on
+        # workloads where the first cheap round already exhausted the
+        # leverage:
+        #
+        # * R1 N12 (10h, 12 tasks)  : cumulative_gain = 0.81%,
+        #   ~0.07%/round avg — N14 would force 2x more cheap rounds
+        #   on top, ~3h wasted.
+        # * Qwen3 N18b today        : params_2 base_tput=0.0 (no new
+        #   variant beat current_best) — flags didn't change, so re-
+        #   rooflining would produce a byte-equivalent trace, AND
+        #   continuing to backends_2 + roofline_3 is pure waste because
+        #   the cheap-action search space is already exhausted.
+        # * 202 historical reports  : 165 sessions (82%) had no clear
+        #   single-action winner > 0.5% — N14 would burn 2+h of cheap
+        #   exploration on each of those sessions before unlocking
+        #   kernel_opt, where the actual leverage lives (top session
+        #   qwen1-5-7b got 66.56% all from kernel_opt).
+        #
+        # New rule (replaces N14):
+        #   kernel_opt UNLOCK iff:
+        #     snapshot_id >= 1                  (baseline + 1 roofline done)
+        #     AND last_cheap_delta_gain < EPS   (last cheap round exhausted)
+        #
+        # EPS default = 0.3% (above the empirical noise floor ~0.1% but
+        # below the smallest typical real gain ~0.5%; override via
+        # INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON env). If no cheap
+        # round has run yet, last_cheap_delta_gain is None and we
+        # require at least one cheap attempt (backends OR params) to
+        # have been recorded — otherwise the LLM could jump straight
+        # to kernel_opt from baseline without learning anything from
+        # the flag space.
+        #
+        # Escape hatch: INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1
+        # restores pre-N13 behaviour (snapshot_id >= 1 only, no cheap
+        # exhaustion check). Use cases: v0 baseline comparison;
+        # workloads known to have no leverage in cheap actions;
+        # debug / unit-test paths.
+        if req_kind == "run_optimization" and not self._allow_early_kernel_opt():
+            snapshot_id = (
+                (self.shared_state.last_trace_analyze or {}).get(
+                    "roofline_snapshot_id", 0
+                )
+            )
+            backends_attempts = len(self.shared_state.backends_attempts or [])
+            params_attempts = len(self.shared_state.params_attempts or [])
+            any_cheap_attempt = backends_attempts + params_attempts >= 1
+            last_delta = self.shared_state.last_cheap_delta_gain
+            eps = _cheap_exhausted_epsilon()
+
+            missing: list[str] = []
+            if not isinstance(snapshot_id, int) or snapshot_id < 1:
+                missing.append(
+                    f"snapshot_id={snapshot_id} (need >= 1; "
+                    "propose `roofline` to capture the baseline snapshot)"
+                )
+            if not any_cheap_attempt:
+                missing.append(
+                    "no cheap exploration yet (need >= 1 backends OR params "
+                    "attempt; propose one before kernel_opt so the search "
+                    "space is at least probed)"
+                )
+            elif last_delta is None:
+                # Cheap attempts exist but no delta recorded — this is a
+                # legacy / corrupted state.json situation. Reject defensively;
+                # the operator can re-run a cheap action to populate the field.
+                missing.append(
+                    "last_cheap_delta_gain not recorded; re-run a cheap "
+                    "action (backends/params) so the gate can read the "
+                    "marginal-gain signal"
+                )
+            elif last_delta >= eps:
+                missing.append(
+                    f"last_cheap_delta_gain={last_delta:.3f}% "
+                    f">= EPSILON={eps:.3f}% (cheap exploration still finding "
+                    "gain; continue with another backends/params round, "
+                    "then re-evaluate)"
+                )
+            if missing:
+                return PolicyDenied(
+                    f"request kind={req_kind!r} denied: "
+                    f"kernel_opt requires either (a) cheap exploration "
+                    f"exhausted (last_cheap_delta_gain < {eps:.3f}%), or "
+                    f"(b) escape hatch enabled; missing: "
+                    f"{', '.join(missing)}",
+                    rule="execution_order",
+                    hint=(
+                        "Per design/roofline-v2.md §6.5.3 (N19c, replaces "
+                        "N14 counter-driven), kernel_opt unlocks as soon "
+                        "as cheap-action exploration stops finding "
+                        "marginal gain (delta vs current_best < EPSILON, "
+                        "default 0.3%, override via "
+                        "INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON). "
+                        "If you just ran a cheap round that did improve "
+                        "current_best, run it again or switch to the "
+                        "other cheap action (backends<->params) until "
+                        "marginal gain settles. The roofline snapshot "
+                        "you have is enough — N21 will deny re-running "
+                        "roofline as long as discovered_flags hasn't "
+                        "changed since the last snapshot. Override with "
+                        "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1 "
+                        "for debug / v0-baseline-comparison paths."
+                    ),
+                )
+        return None
+
+    @staticmethod
+    def _allow_early_kernel_opt() -> bool:
+        """N13 escape hatch — `INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1`
+        restores pre-N13 behaviour (no cheap-action prerequisites)."""
+        return os.environ.get(
+            "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _kernel_opt_unlocked(self) -> bool:
+        """Return True when ``run_optimization`` can actually be
+        dispatched right now -- i.e. N19c's cheap-exhausted gate is
+        either satisfied or explicitly bypassed via the escape hatch.
+
+        PR-C TODO 4a / hot_kernel_unfinished gate uses this to avoid
+        a death-spiral with N19c: if N19c is still demanding more
+        cheap exploration (last_cheap_delta_gain >= EPSILON), forcing
+        the LLM to propose ``run_optimization`` only racks up
+        ``execution_order`` PolicyDenied counters until policy_loop
+        kills the session (Qwen3-30B-A3B-Base 20260523T014653Z died
+        at tick=14 this way: TODO 4a said "must kernel_opt", N19c
+        said "must finish cheap first", LLM oscillated for 10 ticks
+        and hit the auto-stop streak).
+
+        The gate is open in any of:
+          * escape hatch env set
+          * ``snapshot_id >= 1`` AND at least one cheap attempt has
+            been recorded AND ``last_cheap_delta_gain`` is set AND
+            below ``_cheap_exhausted_epsilon()``
+
+        When closed, callers should:
+          * NOT surface TODO 4a (don't push LLM to propose kernel_opt)
+          * NOT deny `report` on the hot_kernel_unfinished rule
+        Both behaviours let the LLM keep exploring cheap actions, and
+        once cheap exhausts, the gate reopens and PR-C re-activates.
+        """
+        if self._allow_early_kernel_opt():
+            return True
+        ta = self.shared_state.last_trace_analyze or {}
+        snapshot_id = ta.get("roofline_snapshot_id", 0)
+        if not isinstance(snapshot_id, int) or snapshot_id < 1:
+            return False
+        backends_attempts = len(self.shared_state.backends_attempts or [])
+        params_attempts = len(self.shared_state.params_attempts or [])
+        if backends_attempts + params_attempts < 1:
+            return False
+        last_delta = self.shared_state.last_cheap_delta_gain
+        if last_delta is None:
+            return False
+        try:
+            eps = _cheap_exhausted_epsilon()
+        except Exception:  # noqa: BLE001
+            eps = 0.3
+        return float(last_delta) < float(eps)
+
+    def _record_keyword_implied_advice(
+        self,
+        action_name: str,
+        proposed_params: dict[str, Any],
+    ) -> None:
+        """N22: advisory-only check that the LLM's proposed `variants`
+        list includes every variant implied by analysis.md keywords.
+
+        Non-blocking: missing variants are surfaced as an advisory
+        appended to `shared_state.last_proposal_advice` (rendered into
+        the next-tick orchestration prompt). The LLM keeps agency and
+        the proposal still goes through.
+
+        Skipped when:
+        * `variants` field is absent / empty (LLM chose full default
+          grid — the catalogue intent is to be inclusive, no advisory
+          needed).
+        * analysis.md cached text is missing (no snapshot yet, or
+          using legacy code path).
+        * `available_variants` cannot be resolved (e.g. test fixture
+          without registered grids).
+        """
+        from ._analysis_keyword_map import (
+            extract_required_variants_from_analysis,
+            format_missing_variants_advice,
+        )
+        proposed_variants = proposed_params.get("variants") or []
+        if not isinstance(proposed_variants, list) or not proposed_variants:
+            return
+        proposed_str = [str(v).strip() for v in proposed_variants
+                        if isinstance(v, str) and str(v).strip()]
+        if not proposed_str:
+            return
+        analysis_text = (
+            (self.shared_state.last_trace_analyze or {}).get(
+                "analysis_md_text", ""
+            )
+            or ""
+        )
+        if not analysis_text:
+            return
+        # Resolve the registered grid for the current framework so we
+        # narrow keyword-implied variants to ones the executor can
+        # actually run (an SGLang-only variant shouldn't surface on a
+        # vLLM session).
+        available = self._registered_variants_for(action_name)
+        if not available:
+            return
+        required, matches = extract_required_variants_from_analysis(
+            analysis_text, available,
+        )
+        advice = format_missing_variants_advice(
+            proposed_str, required, matches, action_name=action_name,
+        )
+        if advice:
+            # Cap FIFO at 5 most-recent advisories so a long session
+            # doesn't grow this list unbounded; the prompt only
+            # renders the latest few anyway.
+            history = list(self.shared_state.last_proposal_advice or [])
+            history.append(advice)
+            if len(history) > 5:
+                history = history[-5:]
+            self.shared_state.last_proposal_advice = history
+
+    def _registered_variants_for(self, action_name: str) -> list[str]:
+        """Return the names of the registered grid variants for the
+        given action + current framework. Used by the N22 keyword
+        advisory to narrow keyword-implied variants to ones the
+        executor can actually run. Returns [] when the framework can't
+        be resolved (defensive — N22 advisory will skip)."""
+        try:
+            framework = (
+                os.environ.get("FRAMEWORK", "") or "sglang"
+            ).strip().lower()
+            if action_name == "backends":
+                from .action_executors.backends import (
+                    DEFAULT_BACKENDS_GRID,
+                    DEFAULT_VLLM_BACKENDS_GRID,
+                )
+                grid = (
+                    DEFAULT_VLLM_BACKENDS_GRID if "vllm" in framework
+                    else DEFAULT_BACKENDS_GRID
+                )
+            elif action_name == "params":
+                from .action_executors.params import (
+                    DEFAULT_PARAMS_GRID,
+                    DEFAULT_VLLM_PARAMS_GRID,
+                )
+                grid = (
+                    DEFAULT_VLLM_PARAMS_GRID if "vllm" in framework
+                    else DEFAULT_PARAMS_GRID
+                )
+            else:
+                return []
+            return [v.name for v in grid]
+        except Exception:  # noqa: BLE001 - defensive, advisory is best-effort
+            return []
+
+    def _proposal_denial_for_roofline(self) -> PolicyDenied | None:
+        """N21: deny re-running roofline when discovered_flags hasn't
+        changed since the previous snapshot. See the call site in
+        `_sequence_denial_for_action` for the rationale.
+
+        Returns None (allow) when:
+        * No snapshot exists yet (this is the first roofline -> always
+          let it run to capture the baseline analysis).
+        * `INFERENCE_OPTIMIZER_FORCE_ROOFLINE_RERUN=1` escape hatch is
+          set (operator debugging / regression-pinning a known trace).
+        * `discovered_flags` actually differs from the frozen snapshot
+          (some cheap action promoted a new flag — sglang launch args
+          will change, so the new trace will differ).
+
+        Returns PolicyDenied when flags are unchanged AND a prior
+        snapshot exists. The hint points the LLM at the two productive
+        alternatives.
+        """
+        if os.environ.get(
+            "INFERENCE_OPTIMIZER_FORCE_ROOFLINE_RERUN", "",
+        ).strip().lower() in {"1", "true", "yes", "on"}:
+            return None
+        snapshot = self.shared_state.last_trace_analyze or {}
+        snapshot_id = snapshot.get("roofline_snapshot_id", 0)
+        if not isinstance(snapshot_id, int) or snapshot_id < 1:
+            # First roofline — always allowed.
+            return None
+        # N31 (May 2026): post-optimization "before/after" exception.
+        # When the session has actually accumulated validated gain
+        # (``cumulative_gain_validated > 0`` AND
+        # ``optimization_stack`` non-empty) but only one roofline
+        # snapshot exists, the kernel rewrites + integrate changes
+        # have shifted the hot-kernel distribution AND a fresh
+        # snapshot is required for the final ``## Roofline
+        # Comparison`` report section. Allow a single re-roofline
+        # (snapshot_id == 1 -> snapshot_id == 2) regardless of whether
+        # discovered_flags changed -- the gain itself is the signal
+        # that the analysis.md needs refreshing.
+        #
+        # This does NOT re-open cheap exploration loops: the gate
+        # exception only fires once per session (snapshot_id == 1
+        # check + stack-non-empty + validated gain). Subsequent
+        # rooflines hit the regular flags-changed check.
+        validated_gain = float(
+            self.shared_state.cumulative_gain_validated or 0.0
+        )
+        stack_len = len(self.shared_state.optimization_stack or [])
+        if (
+            snapshot_id == 1
+            and validated_gain > 0.0
+            and stack_len >= 1
+        ):
+            return None  # N31: allow the final "after" snapshot
+        current = self.shared_state.discovered_flags or {}
+        frozen = self.shared_state.discovered_flags_at_last_snapshot or {}
+        if self._flags_equivalent(current, frozen):
+            return PolicyDenied(
+                f"action='roofline' denied: discovered_flags unchanged "
+                f"since snapshot #{snapshot_id}; a re-run would produce "
+                f"a byte-equivalent trace and identical analysis.md "
+                f"(sglang launch args derive from discovered_flags). "
+                f"Wasted wall-clock budget ~20-35min.",
+                rule="execution_order",
+                hint=(
+                    "Per design/roofline-v2.md §6.5.3 (N19c+N21), "
+                    "roofline only makes sense when at least one new "
+                    "cheap-action flag has been applied since the last "
+                    "snapshot. Two productive next moves: "
+                    "(a) propose the OTHER cheap action (if last was "
+                    "`backends`, try `params`, or vice versa) to keep "
+                    "exploring the flag space, OR (b) if both cheap "
+                    "lanes are exhausted (last_cheap_delta_gain<EPSILON), "
+                    "the kernel_opt REQUEST is already unlocked (N19c) "
+                    "— go straight to kernel optimisation. Override "
+                    "this gate with "
+                    "INFERENCE_OPTIMIZER_FORCE_ROOFLINE_RERUN=1 for "
+                    "debug / regression-pinning."
+                ),
             )
         return None
+
+    @staticmethod
+    def _flags_equivalent(
+        a: dict[str, Any], b: dict[str, Any],
+    ) -> bool:
+        """Compare two `discovered_flags` dicts for N21 equivalence.
+
+        The schema is two-level: framework -> {backend_flags: [...],
+        param_flags: [...], source_path: str, ...}. We compare only the
+        sets of backend_flags + param_flags per framework — source_path
+        and other metadata fields are infrastructural and shouldn't
+        gate roofline re-runs.
+        """
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return a == b
+        if set(a.keys()) != set(b.keys()):
+            return False
+        for fw in a:
+            av = a.get(fw) or {}
+            bv = b.get(fw) or {}
+            if not isinstance(av, dict) or not isinstance(bv, dict):
+                if av != bv:
+                    return False
+                continue
+            for key in ("backend_flags", "param_flags"):
+                aval = set(av.get(key) or [])
+                bval = set(bv.get(key) or [])
+                if aval != bval:
+                    return False
+        return True
 
     @staticmethod
     def _pmc_roofline_enabled() -> bool:
@@ -2035,6 +2984,39 @@ class Coordinator:
                 params.setdefault("max_candidates_per_round", 5)
                 if isinstance(cb, dict) and cb.get("variant_name"):
                     params.setdefault("base_variant_name", str(cb["variant_name"]))
+        if pending.action_name == "framework_pr":
+            # Plumb the context the framework_pr arm needs from SharedState
+            # so the executor stays stateless. ``base_tput`` is the gate
+            # the arm compares PR-applied throughput against (KEEP only if
+            # delta_pct >= min_gain_pct); ``base_extra_args`` keeps the
+            # sub-baseline server flags identical to current_best so we
+            # measure the PR effect, not a flag regression. ``framework``
+            # / ``gpu_type`` / ``model_class`` feed the gap composer
+            # (replaces the legacy hand-typed ``--framework-gap`` flag).
+            # ``last_profile_kernel_breakdown`` enriches the composer
+            # with a bottleneck keyword when a recent profile is on disk.
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else self.shared_state.baseline_tput
+            params.setdefault("base_tput", float(base or 0.0))
+            params.setdefault("base_extra_args", cb_args)
+            if self.shared_state.baseline_config_path:
+                params.setdefault(
+                    "config_path", self.shared_state.baseline_config_path
+                )
+            if self.shared_state.framework:
+                params.setdefault("framework", self.shared_state.framework)
+            if self.shared_state.gpu_type:
+                params.setdefault("gpu_type", self.shared_state.gpu_type)
+            if self.shared_state.model_class:
+                params.setdefault("model_class", self.shared_state.model_class)
+            if self.shared_state.last_profile_kernel_breakdown:
+                params.setdefault(
+                    "last_profile_kernel_breakdown",
+                    self.shared_state.last_profile_kernel_breakdown,
+                )
+            if self.shared_state.model_path:
+                params.setdefault("model_path", self.shared_state.model_path)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
             params=params,
@@ -2269,11 +3251,37 @@ class Coordinator:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
                 if (
-                    kind == "select_kernels"
+                    kind == "trace_analyze"
                     and self.shared_state.last_profile_roofline
                     and not merged_payload.get("roofline_json")
                 ):
                     merged_payload["roofline_json"] = self.shared_state.last_profile_roofline
+                # PR-X: Force batch dispatch for run_optimization.
+                # ``kernel_request_handlers.run_optimization_handler`` upgrades
+                # the request to ``_run_optimization_batch`` only when the
+                # payload carries ``candidates_path`` (so it can fan out to
+                # every reusable kernel concurrently, bounded by
+                # ``_DEFAULT_KERNEL_BATCH_PARALLEL`` / Ray's per-task
+                # ``num_gpus`` reservation). Orchestration prompts already
+                # teach the LLM to include this field, but a missing /
+                # malformed value would silently collapse the dispatch back
+                # to a single-kernel run -- wasting 7 idle GPUs on a typical
+                # MI300X node and serializing the rest of the candidates
+                # over many LLM turns. Inject it from the SharedState
+                # snapshot here so batch mode is deterministic regardless of
+                # LLM compliance. LLM-supplied value still wins (e.g. when
+                # operators or future prompts want to target a different
+                # TraceLens snapshot).
+                if (
+                    kind == "run_optimization"
+                    and self.shared_state.last_trace_analyze
+                    and not merged_payload.get("candidates_path")
+                ):
+                    cached_candidates_path = self.shared_state.last_trace_analyze.get(
+                        "candidates_path"
+                    )
+                    if cached_candidates_path:
+                        merged_payload["candidates_path"] = cached_candidates_path
                 cache_hit_source = None
                 cached_result = self._cached_kernel_request(kind, merged_payload)
                 if cached_result is not None:
@@ -2301,10 +3309,45 @@ class Coordinator:
                         }
                         cache_hit_source = "shared_state_kernel_rejection"
                     else:
+                        # Inject base_tput tied to ``current_best.tput`` whenever
+                        # Orchestration omits it on an ``integrate`` request -- the
+                        # multi-KEEP integrate queue routinely drains 2-3 patches per
+                        # session, and a missing base_tput would otherwise fail the
+                        # second/third request with ``integrate_handler requires
+                        # base_tput > 0`` (the LLM only consistently remembers the
+                        # field for the first integrate). Explicit operator value
+                        # still wins. See PR-B follow-up.
+                        if (
+                            kind == "integrate"
+                            and not merged_payload.get("base_tput")
+                        ):
+                            cb_tput = (
+                                self.shared_state.current_best or {}
+                            ).get("tput")
+                            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                                merged_payload["base_tput"] = float(cb_tput)
+
+                        # Streaming-record callback for ``run_optimization`` batch.
+                        # Without this, each batch's KEEP/REVERT sub-result is
+                        # only seen by SharedState *after* asyncio.gather()
+                        # wait-all returns -- so one 60-min timeout sibling
+                        # starves a 5-min KEEP's integrate path for the rest
+                        # of the session. With it, each sub-attempt completion
+                        # writes immediately; the dispatch await still blocks
+                        # until gather finishes, but the moment it unblocks the
+                        # Orchestration LLM sees all KEEPs queued up via
+                        # ``next_pending_keep_kernel_id``.
+                        handler_kwargs: dict[str, Any] = {
+                            "session_dir": self.session_dir,
+                        }
+                        if kind == "run_optimization":
+                            handler_kwargs["record_partial"] = (
+                                self._record_kernel_opt_partial
+                            )
                         try:
                             result = await handler(
                                 merged_payload,
-                                session_dir=self.session_dir,
+                                **handler_kwargs,
                             )
                         except Exception as exc:  # noqa: BLE001
                             log.exception(
@@ -2327,22 +3370,32 @@ class Coordinator:
                     },
                     in_reply_to=request_msg.msg_id, priority=1,
                 ))
-                # Cache select_kernels output so subsequent identical
+                # Cache trace_analyze output so subsequent identical
                 # requests are short-circuited next tick. Only cache real
                 # successful runs, not failures, to avoid sticky errors.
                 if (
-                    kind == "select_kernels"
+                    kind == "trace_analyze"
                     and cache_hit_source is None
                     and result.get("status") in ("ok", "succeeded")
                 ):
-                    self.shared_state.record_select_kernels(merged_payload, result)
+                    self.shared_state.record_trace_analyze(merged_payload, result)
                     await self._maybe_enqueue_pmc_roofline()
                     self.shared_state.save(self.session_dir)
                 # Mirror kernel-opt outcomes into SharedState so Orch
                 # sees decision/speedup in its prompt next tick and
                 # doesn't re-dispatch the same kernel_id forever.
                 if kind == "run_optimization":
-                    self.shared_state.record_kernel_opt(result)
+                    # In batch mode every sub-result was already streamed
+                    # via ``_record_kernel_opt_partial`` while the batch
+                    # was in flight. Re-recording the best sub-result
+                    # here would double-count attempts (+1 per kernel)
+                    # and could prematurely trip the PARTIAL retire gate.
+                    # Cache-hit results never carry ``batch_mode`` so they
+                    # still flow through ``record_kernel_opt`` normally.
+                    if not bool(
+                        isinstance(result, dict) and result.get("batch_mode")
+                    ):
+                        self.shared_state.record_kernel_opt(result)
                     # Wire run_optimization decision (KEEP / REVERT / PARTIAL)
                     # into the per-action scoring for kernel_opt. KEEP uses
                     # the micro_speedup if it surfaces a percentage-shaped
@@ -2416,9 +3469,9 @@ class Coordinator:
 
     def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Return a cached programmatic_handler result if applicable."""
-        if kind != "select_kernels":
+        if kind != "trace_analyze":
             return None
-        cached = self.shared_state.last_select_kernels or {}
+        cached = self.shared_state.last_trace_analyze or {}
         if not isinstance(cached, dict) or not cached:
             return None
         trace_input = payload.get("trace_input") or payload.get("trace_dir")
@@ -2435,7 +3488,7 @@ class Coordinator:
                 "reusable_native_kernel_ids", []
             ),
             "cached_at": cached.get("ts"),
-            "note": "served from shared_state.last_select_kernels cache",
+            "note": "served from shared_state.last_trace_analyze cache",
         }
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
@@ -2594,6 +3647,38 @@ class Coordinator:
             top = latest[0]
             await self.cursors.advance(agent_name, seq=top.seq, msg_id=top.msg_id)
 
+    def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
+        """Streaming callback for ``_run_optimization_batch`` sub-attempts.
+
+        Every batch sub-result calls this the instant
+        :meth:`_run_kernel_backend_sequence` returns -- well before the
+        gather wait-all unblocks the parent ``run_optimization``
+        handler. Each call writes the per-kernel entry to
+        ``kernel_opt_attempts`` and (when warranted by the KEEP-wins
+        overwrite policy) updates ``last_kernel_opt``. The state.json
+        write is atomic via :meth:`SharedState.save`.
+
+        Why this exists: the Qwen3-30B-A3B-Base session
+        (20260522T093903Z) lost a k009 KEEP @4.13x because the
+        gather() was still blocked on k001's GEAK 63min timeout when
+        Orch tried to surface KEEPs. Streaming the record makes the
+        next-tick prompt accurate even mid-batch (and makes recovery
+        possible after a Coordinator crash).
+        """
+        try:
+            self.shared_state.record_kernel_opt(result)
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            # Never let a per-sub-attempt bookkeeping hiccup propagate
+            # back into asyncio.gather and poison the entire batch --
+            # the worst case is we miss this one sub-result and the
+            # final ``record_kernel_opt(result)`` call after gather
+            # picks it up later.
+            log.exception(
+                "_record_kernel_opt_partial failed for kernel_id=%s",
+                (result or {}).get("kernel_id") if isinstance(result, dict) else None,
+            )
+
     def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
@@ -2745,6 +3830,17 @@ class Coordinator:
                 "error_class": result_payload.get("error_class"),
             }
             any_changed = True
+        # N27: roofline-failure streak. Bump on every failed roofline
+        # action (the RooflineExecutor returns status=failed only after
+        # N26 inner auto-retry is exhausted, so this counter is the
+        # OUTER attempt counter -- each tick = at least one trace_analyze
+        # attempt, often two with N26). Reset is handled in the success
+        # promotion path (search for "roofline_failure_streak = 0"
+        # below) so we don't have to detect success from a failed
+        # event payload here.
+        if task.kind == "roofline":
+            self.shared_state.roofline_failure_streak += 1
+            any_changed = True
         if any_changed:
             self.shared_state.save(self.session_dir)
         if baseline_event_payload is not None:
@@ -2782,6 +3878,32 @@ class Coordinator:
                 )
             else:
                 await self._handle_unpromotable_result(task, result.result)
+            # N34 (May 2026) Bug #4: a successful ``report`` task is
+            # the canonical terminal signal -- the operator-facing
+            # ``final.md`` / ``final.json`` are already on disk.
+            # Without this guard the main loop kept iterating after
+            # the report was written, the LLM kept proposing fresh
+            # params/backends rounds, and the session burned the
+            # rest of its wall-clock budget producing data nobody
+            # would read. Set ``stop_reason`` immediately so the
+            # next iteration's stop check breaks the loop and the
+            # launcher gets a clean exit. Skip when ``stop_reason``
+            # is already set (signal / other terminal already won)
+            # so we don't paper over an earlier failure with the
+            # cheery "report_emitted" reason.
+            if (
+                task.kind == "report"
+                and result.state == "succeeded"
+                and not (self.shared_state.stop_reason or "").strip()
+            ):
+                log.info(
+                    "Coordinator: report task %s succeeded; setting "
+                    "stop_reason='report_emitted' to terminate the run "
+                    "loop (N34 Bug #4 fix).",
+                    task.task_id,
+                )
+                self.shared_state.stop_reason = "report_emitted"
+                self.shared_state.save(self.session_dir)
 
     def _lift_to_current_best(
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
@@ -2947,6 +4069,84 @@ class Coordinator:
                     task.params if task is not None else None
                 ),
             }
+        elif task_kind == "roofline":
+            # Roofline-v2 N10 (GPU-empirical fix): the RooflineExecutor
+            # mutates `self.shared_state.last_profile_trace` +
+            # `last_profile_status` + `last_profile_args` +
+            # `last_trace_analyze` inline during its sub-step
+            # orchestration (see action_executors/roofline.py). The
+            # mutations land on the in-memory SharedState object so
+            # the next-tick LLM prompt reflects them, BUT _promote_to_
+            # shared_state previously had no `roofline` branch so
+            # `changed` stayed False and `state.json` was never
+            # persisted — leaving the disk view stale (snapshot_id=0
+            # while in-memory snapshot_id was actually >=1).
+            #
+            # This branch flips `changed=True` so the standard
+            # `if changed: self.shared_state.save(...)` tail at the
+            # end of the method persists the mutations the executor
+            # already made. It does NOT re-mutate any field; the
+            # executor remains the single writer.
+            audit_decision = "promoted"
+            audit_extras = {
+                "snapshot_id": (self.shared_state.last_trace_analyze or {}).get(
+                    "roofline_snapshot_id"
+                ),
+                "analysis_md_path": (self.shared_state.last_trace_analyze or {}).get(
+                    "analysis_md_path"
+                ),
+                "trace_path": self.shared_state.last_profile_trace or None,
+                "profile_workspace": result.get("profile_workspace"),
+            }
+            # N27: roofline succeeded -> reset the failure streak so
+            # the next failure gets the full retry budget (2 outer
+            # attempts) before falling back to the no-analysis-md
+            # grid behaviour. Note `_record_action_failure` bumps
+            # the streak for FAILED roofline runs (status=failed
+            # after N26 inner retry exhausted); the success path
+            # is the symmetric reset.
+            self.shared_state.roofline_failure_streak = 0
+            changed = True
+            # N31: freeze the FIRST successful roofline as the
+            # ``baseline`` snapshot for the final ``## Roofline
+            # Comparison`` report section. Skip on subsequent
+            # rooflines so the freeze stays at snapshot #1 even when
+            # the N31 gate exception fires a snapshot #2 after
+            # optimization completes.
+            cached_now = self.shared_state.last_trace_analyze or {}
+            current_snap_id = cached_now.get("roofline_snapshot_id", 0)
+            baseline_locked = bool(self.shared_state.last_trace_analyze_baseline)
+            if (
+                not baseline_locked
+                and isinstance(current_snap_id, int)
+                and current_snap_id >= 1
+            ):
+                self.shared_state.last_trace_analyze_baseline = {
+                    "roofline_snapshot_id": current_snap_id,
+                    "analysis_md_path": str(
+                        cached_now.get("analysis_md_path") or ""
+                    ),
+                    "trace_input": str(cached_now.get("trace_input") or ""),
+                    "ts": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds",
+                    ),
+                }
+            # N21 / N19c: freeze current discovered_flags into
+            # `discovered_flags_at_last_snapshot` so the next-tick
+            # `_proposal_denial_for_roofline` gate can compare and
+            # deny redundant roofline re-runs when flags haven't
+            # changed (which would produce a byte-equivalent trace
+            # — same sglang launch args, same hot kernel distribution).
+            # Deep-copy via json round-trip is overkill; a shallow
+            # dict() + per-framework dict() is enough because the
+            # discovered_flags schema is two-level (framework ->
+            # {backend_flags, param_flags}).
+            current = self.shared_state.discovered_flags or {}
+            self.shared_state.discovered_flags_at_last_snapshot = {
+                k: dict(v) if isinstance(v, dict) else v
+                for k, v in current.items()
+            }
+            changed = True
         elif task_kind == "profile":
             audit_decision = "promoted"
             audit_extras = {
@@ -2959,7 +4159,7 @@ class Coordinator:
             }
             # Bug C fix: surface the trace path produced by ProfileExecutor
             # to SharedState so Orch can pass a real path to the kernel
-            # `select_kernels` REQUEST instead of fabricating one.
+            # `trace_analyze` REQUEST instead of fabricating one.
             trace_path = (
                 result.get("main_trace_path")
                 or (result.get("trace_files") or [None])[0]
@@ -2981,8 +4181,8 @@ class Coordinator:
                         (task.params or {}).get("base_extra_args") or ""
                     )
                 self.shared_state.last_profile_args = profile_args
-                # Stale select_kernels cache no longer matches this trace.
-                self.shared_state.last_select_kernels = {}
+                # Stale trace_analyze cache no longer matches this trace.
+                self.shared_state.last_trace_analyze = {}
                 changed = True
                 audit_extras["trace_path"] = str(trace_path)
                 audit_extras["profile_args"] = profile_args
@@ -3016,7 +4216,7 @@ class Coordinator:
                 changed = True
             if result.get("roofline_path"):
                 self.shared_state.last_profile_roofline = str(result["roofline_path"])
-                self.shared_state.last_select_kernels = {}
+                self.shared_state.last_trace_analyze = {}
                 changed = True
             if result.get("kernel_breakdown_path"):
                 self.shared_state.last_profile_kernel_breakdown = str(result["kernel_breakdown_path"])
@@ -3239,6 +4439,15 @@ class Coordinator:
                 if isinstance(best_tput, (int, float)) and best_tput > 0 and cur_best > 0
                 else None
             )
+            # N19c: record marginal gain for the gain-driven kernel_opt
+            # unlock + flags-conditional roofline gates. Cheap rounds that
+            # don't improve over current_best signal "cheap exhausted",
+            # at which point kernel_opt becomes proposable (snapshot >= 1
+            # floor still applies) and redundant roofline re-runs get
+            # denied. Always write — None / 0.0 are valid signals too.
+            self.shared_state.last_cheap_delta_gain = (
+                float(gain_vs_cb) if gain_vs_cb is not None else 0.0
+            )
             # Always record this round to the rolling history regardless
             # of whether it promotes — `consistent_winner` consults it.
             if isinstance(bv, dict) and bv.get("name") and gain_vs_cb is not None:
@@ -3424,7 +4633,75 @@ class Coordinator:
                 "keep_threshold_pct": PROMOTE_THRESHOLD_PCT,
                 "accuracy_gate_passed": accuracy_gate_passed,
                 "variants_tested_count": variants_tested_count,
+                # PR-2: surface per-variant failures into the audit
+                # extras so the LLM critic prompt sees which variants
+                # silently aborted and avoids re-proposing them.
+                # Pairs with the on-disk abort_reason.json markers
+                # written by _grid_runner._write_variant_abort_marker.
+                "failed_variants": _summarize_failed_variants(
+                    result.get("all_results"),
+                ),
             }
+        elif task_kind == "framework_pr":
+            # framework_pr arm: executor returns ``decision='kept'`` with a
+            # PR-applied ``output_throughput`` when the new throughput beat
+            # ``base_tput`` by ``min_gain_pct`` (the bench gate is INSIDE
+            # the executor, not here, because rollback on DISCARD has to
+            # happen synchronously with the sub-baseline result). KEEP
+            # → lift into current_best like backends/params does; DISCARD
+            # → score_no_promote so the bandit cools the arm down. Failure
+            # / rollback paths fall through to the fallback score handler
+            # below.
+            decision = str(result.get("decision") or "")
+            new_tput = result.get("output_throughput")
+            promoted = False
+            gain_vs_cb_fpr: float | None = None
+            if decision == "kept" and isinstance(new_tput, (int, float)) and new_tput > 0:
+                cb = self.shared_state.current_best or {}
+                cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+                cur_best = (
+                    float(cb_tput)
+                    if isinstance(cb_tput, (int, float)) and cb_tput > 0
+                    else float(self.shared_state.baseline_tput or 0.0)
+                )
+                if cur_best > 0:
+                    gain_vs_cb_fpr = (float(new_tput) - cur_best) / cur_best * 100.0
+                bv_fpr: dict[str, Any] = {
+                    "name": result.get("applied_ref"),
+                    "candidate_extra_sglang_args": "",
+                    "extra_sglang_args": (
+                        str((task.params or {}).get("base_extra_args") or "")
+                        if task is not None else ""
+                    ),
+                    "extra_envs": {},
+                    "workspace": result.get("workspace"),
+                    "ttft_mean_ms": (
+                        result.get("sub_baseline_result", {}).get("ttft_mean_ms")
+                        if isinstance(result.get("sub_baseline_result"), dict)
+                        else None
+                    ),
+                    "e2el_mean_ms": (
+                        result.get("sub_baseline_result", {}).get("e2el_mean_ms")
+                        if isinstance(result.get("sub_baseline_result"), dict)
+                        else None
+                    ),
+                }
+                self._lift_to_current_best("framework_pr", float(new_tput), bv_fpr)
+                promoted = True
+                changed = True
+                log.info(
+                    "framework_pr promoted: ref=%s new_tput=%.1f gain_vs_cb=%.2f%%",
+                    result.get("applied_ref"), float(new_tput),
+                    gain_vs_cb_fpr if gain_vs_cb_fpr is not None else 0.0,
+                )
+            self._apply_action_score_update(
+                "framework_pr", result,
+                promoted=promoted,
+                gain_vs_cb=(
+                    float(gain_vs_cb_fpr) if gain_vs_cb_fpr is not None else 0.0
+                ),
+            )
+            changed = True
         # Out-of-band score updates for the task_kinds that don't have a
         # promoted-vs-discard notion (profile / pmc_roofline / validate_stack
         # bump runs + cooldown; baseline is treated as a gate and skipped
