@@ -704,7 +704,13 @@ def test_select_kernels_gate_still_blocks_run_optimization_request(session_dir):
     denied = coord._sequence_denial_for_request("kernel", "run_optimization")
     assert isinstance(denied, PolicyDenied)
     assert denied.rule == "execution_order"
-    assert "select_kernels must run first" in str(denied)
+    # Main M4 renamed the prerequisite from ``select_kernels`` to
+    # ``trace_analyze``; both names refer to the same request kind
+    # via the back-compat alias, so accept either wording.
+    assert (
+        "trace_analyze must run first" in str(denied)
+        or "select_kernels must run first" in str(denied)
+    )
 
 
 def test_select_kernels_request_itself_passes(session_dir):

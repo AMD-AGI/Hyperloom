@@ -798,6 +798,34 @@ def test_build_prompt_includes_tracelens_context_from_trace_report_path(tmp_path
     assert "P1: paged attention" in prompt
 
 
+def test_build_prompt_strips_base64_images_from_tracelens_context(tmp_path):
+    big_b64 = "A" * 5000
+    report = tmp_path / "analysis.md"
+    report.write_text(
+        "# TraceLens Analysis\n\n"
+        f"![Performance Improvement](data:image/png;base64,{big_b64})\n\n"
+        "## Detailed Analysis\nP2: rmsnorm tuning\n",
+        encoding="utf-8",
+    )
+    args = _args(source_file="")
+    args.kernel_id = "k009"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+    candidate = {
+        "name": "aiter::rmsnorm",
+        "source_file": "/tmp/rmsnorm.py",
+        "source_type": "python",
+        "trace_report_path": str(report),
+    }
+
+    prompt = ko.build_prompt(candidate, args)
+
+    assert "data:image/png;base64" not in prompt
+    assert big_b64 not in prompt
+    assert "<<stripped: base64 image — Performance Improvement>>" in prompt
+    assert "P2: rmsnorm tuning" in prompt
+
+
 # ============================================================================
 # PR-A §4: TraceLens hypothesis block in build_prompt
 # ============================================================================

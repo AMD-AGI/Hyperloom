@@ -2541,7 +2541,7 @@ def test_resolve_idle_pct_threshold_rejects_nonsense_env_value(monkeypatch):
 
 def test_build_high_idle_warning_shape(tmp_path):
     """The structured warning is the contract between
-    ``tracelens_analysis`` and ``select_kernels_handler`` (T4). Pin the
+    ``tracelens_analysis`` and ``trace_analyze_handler`` (T4). Pin the
     shape: code, severity, idle_pct (rounded), threshold_pct (rounded),
     source path, and a human-readable message that names both numbers."""
     report = tmp_path / "analysis.md"
