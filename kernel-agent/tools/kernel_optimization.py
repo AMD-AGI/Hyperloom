@@ -1025,7 +1025,12 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     }
 
 
-def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
+def build_prompt(
+    candidate: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    backend: str | None = None,
+) -> str:
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
     if source_file and Path(str(source_file)).exists():
@@ -1052,7 +1057,13 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
     kernel_metadata = build_kernel_metadata(candidate, args)
-    budget_min = int(getattr(args, "budget_minutes", 60) or 60)
+    # Quote the per-backend wall-clock so GEAK v3.2.0's LLM task-mode parser
+    # (mini.py:435 task_extracted_mode) infers the right mode (>=120min→full,
+    # else quick), instead of always seeing the OOB 60min default.
+    if backend == "geak":
+        budget_min = int(getattr(args, "geak_budget_min", 130) or 130)
+    else:
+        budget_min = int(getattr(args, "budget_minutes", 60) or 60)
     target_platform = (
         getattr(args, "target_platform", "") or _env_target_platform()
     )
@@ -1101,6 +1112,12 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "  or `rg ... <repo>`, NEVER `find /`.\n"
         "\n"
         "GOAL & TIME BUDGET:\n"
+        # GEAK v3.2.0 LLM-parses prompt for `--mode full` / `mode=quick` etc.
+        # (prompts.py:73-76 trigger list). Emit the explicit token so the
+        # parser locks in the right preset (yaml run.budgets.<mode>) instead
+        # of leaking off other prompt phrases like "quick micro-benchmark".
+        f"- Run mode: {'full' if budget_min >= 120 else 'quick'} "
+        f"(--mode {'full' if budget_min >= 120 else 'quick'}).\n"
         f"- Hard wall-clock budget: ~{budget_min} minutes. Iterate up to minute "
         f"{int(budget_min*0.85)},\n"
         "  then STOP iterating and finalize the report with your best so-far measured\n"
@@ -1466,10 +1483,10 @@ def invoke_backend(
     # GEAK needs more wall-clock than claude/codex: a single sub-agent task
     # already takes 5-10 min (baseline + LLM patch generation + per-patch
     # benchmark), and the orchestrator typically dispatches 4-9 tasks per
-    # round + a select_patch round at the end. Empirically 60 min lets
-    # individual sub-agents finish but consistently SIGTERMs the
-    # select_patch round (r38, r39 both fell back to per-task best_results
-    # salvage). 90 min is the new default; override via --geak-budget-min.
+    # round + a select_patch round at the end. 130 min is the default so
+    # the prompt-quoted budget triggers GEAK v3.2.0's mode=full path
+    # (yaml run.budgets.full.total_s=7200s + finalize_grace + kill_buffer);
+    # override via --geak-budget-min.
     if backend == "geak":
         budget_min = float(getattr(args, "geak_budget_min", 0)
                            or getattr(args, "budget_minutes", 60) or 60)
@@ -1649,7 +1666,7 @@ def run_attempt(
     prompt_dir = run_dir / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
     prompt_file = prompt_dir / f"{attempt_id}.md"
-    prompt_file.write_text(build_prompt(candidate, args), encoding="utf-8")
+    prompt_file.write_text(build_prompt(candidate, args, backend=backend), encoding="utf-8")
 
     source_file = args.source_file or str(candidate.get("source_file") or "")
     started = time.time()
@@ -2499,12 +2516,19 @@ def main() -> int:
     parser.add_argument("--budget-minutes", type=float, default=60.0,
                         help="Per-attempt wall-clock budget for claude/codex "
                              "OOB backends. GEAK uses --geak-budget-min.")
-    parser.add_argument("--geak-budget-min", type=float, default=90.0,
+    # Default tracks $GEAK_RUN_MODE (exported by install.sh / env.sh):
+    # quick (yaml total_s=3600s) -> 70 min, full (yaml total_s=7200s) -> 130 min.
+    # Both sit above their yaml total_s + finalize_grace + kill_buffer + safety,
+    # so the prompt-quoted budget triggers the matching mode (mini.py:435).
+    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
+    parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
                         help="Per-attempt wall-clock budget for GEAK only "
-                             "(default 90 min; needed because GEAK runs "
-                             "per-task patch sub-agents serially + a final "
-                             "select_patch round, and 60 min consistently "
-                             "SIGTERMs the select_patch round).")
+                             "(default tracks $GEAK_RUN_MODE: full -> 130, "
+                             "quick -> 70; both aligned with yaml "
+                             "run.budgets.<mode>.total_s + finalize_grace + "
+                             "kill_buffer + safety so the prompt-quoted "
+                             "budget triggers the matching GEAK mode at "
+                             "mini.py:435 task_extracted_mode).")
     parser.add_argument("--micro-speedup", type=float, default=None)
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
