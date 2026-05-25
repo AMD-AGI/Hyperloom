@@ -228,7 +228,9 @@ sections dictate which specialist to dispatch first via
   `torch.compile` advice, GPU idle %** → `serving_specialist`
 * **AllReduce / RCCL / QuickReduce hot kernels** → `comm_specialist`
 * **register pressure, inductor advice** → `compiler_specialist`
-* **launch latency, dispatch overhead** → `system_specialist`
+* **launch latency, dispatch overhead, device synchronization
+  bottlenecks, host-blocking calls, host-pacing GPU idle** →
+  `system_specialist` (owns the fix, not just diagnosis)
 * **uncertain / cross-cutting** → `pr_intel_specialist` (sparingly)
 
 ### How to consume the TraceLens analysis section

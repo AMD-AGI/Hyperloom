@@ -4622,6 +4622,19 @@ class Coordinator:
             ) or 0.0)
             if kill_ratio > 0:
                 params.setdefault("explore_overtime_kill_ratio", kill_ratio)
+            # Mirror the sweep/integrate branches: inject ``base_tput`` (and
+            # ``base_extra_args``) tied to current_best (or baseline_tput as
+            # fallback) whenever Orchestration omits them. Without this the
+            # ExploreExecutor sees ``base_tput=0``, ``_gain_pct`` returns
+            # ``None`` for every variant, and the KEEP/REVERT ladder is
+            # skipped — every variant lands in ``FAILED`` regardless of how
+            # far it beat baseline. Explicit operator value still wins via
+            # setdefault.
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else self.shared_state.baseline_tput
+            params.setdefault("base_tput", float(base or 0.0))
+            params.setdefault("base_extra_args", cb_args)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
             params=params,
@@ -6675,10 +6688,18 @@ class Coordinator:
             # run-loop iteration breaks out. Skip when ``stop_reason``
             # is already set (signal / other terminal already won) so
             # we don't paper over an earlier failure.
+            # N34 Bug #4 (May 2026) only fires for LLM-driven report
+            # tasks (kind="report" outside the closing phase). When the
+            # closing-phase report task is already in flight,
+            # ``in_closing`` owns the stop-reason transition — let the
+            # run loop's existing ``time_exhausted`` / ``no_more_leverage``
+            # path resolve it. Otherwise an LLM-proposed mid-run report
+            # would burn the rest of the budget without this guard.
             if (
                 task.kind == "report"
                 and result.state == "succeeded"
                 and not (self.shared_state.stop_reason or "").strip()
+                and not self.shared_state.closing_report_task_id
             ):
                 log.info(
                     "Coordinator: report task %s succeeded; setting "
@@ -7254,33 +7275,6 @@ class Coordinator:
             # v0.8 KB_gaps/Gap-09 — seed the gaps[] ledger from baseline.
             # Best-effort; failure is logged + absorbed inside the helper.
             await self._refresh_gaps(reason="baseline_done")
-        elif task_kind == "roofline":
-            # Roofline-v2 N10 (GPU-empirical fix): the RooflineExecutor
-            # mutates ``self.shared_state.last_profile_trace`` +
-            # ``last_profile_status`` + ``last_profile_args`` +
-            # ``last_trace_analyze`` inline during its sub-step
-            # orchestration. The mutations land on the in-memory
-            # SharedState object so the next-tick LLM prompt reflects
-            # them, BUT ``_promote_to_shared_state`` previously had no
-            # ``roofline`` branch so ``changed`` stayed False and
-            # ``state.json`` was never persisted — leaving the disk
-            # view stale (snapshot_id=0 while in-memory snapshot_id
-            # was actually >=1). This branch flips ``changed=True``
-            # so the standard ``if changed: self.shared_state.save(...)``
-            # tail persists the mutations the executor already made;
-            # the executor remains the single writer.
-            audit_decision = "promoted"
-            audit_extras = {
-                "snapshot_id": (self.shared_state.last_trace_analyze or {}).get(
-                    "roofline_snapshot_id"
-                ),
-                "analysis_md_path": (self.shared_state.last_trace_analyze or {}).get(
-                    "analysis_md_path"
-                ),
-                "trace_path": self.shared_state.last_profile_trace or None,
-                "profile_workspace": result.get("profile_workspace"),
-            }
-            changed = True
         elif task_kind == "profile":
             audit_decision = "promoted"
             audit_extras = {
@@ -7356,10 +7350,27 @@ class Coordinator:
             status = str(result.get("status") or "")
             if status == "succeeded":
                 audit_decision = "promoted"
+                # N10: prefer the executor's already-published
+                # ``last_trace_analyze`` snapshot fields over the
+                # result dict so the audit row stays consistent with
+                # the SharedState view the LLM prompt renders. The
+                # result-dict fields still win for keys the snapshot
+                # does not carry (``profile_workspace`` / ``degraded``).
+                _last_ta = self.shared_state.last_trace_analyze or {}
                 audit_extras = {
-                    "snapshot_id": result.get("snapshot_id"),
-                    "last_profile_trace": result.get("last_profile_trace"),
-                    "analysis_md_path": result.get("analysis_md_path"),
+                    "snapshot_id": (
+                        _last_ta.get("roofline_snapshot_id")
+                        if _last_ta.get("roofline_snapshot_id") is not None
+                        else result.get("snapshot_id")
+                    ),
+                    "last_profile_trace": (
+                        self.shared_state.last_profile_trace
+                        or result.get("last_profile_trace")
+                    ),
+                    "analysis_md_path": (
+                        _last_ta.get("analysis_md_path")
+                        or result.get("analysis_md_path")
+                    ),
                     "profile_workspace": result.get("profile_workspace"),
                     "degraded": bool(result.get("degraded", False)),
                 }
@@ -7367,8 +7378,10 @@ class Coordinator:
                 # successful snapshot. The per-phase fallback (commit
                 # 6078012) already keeps the run alive when roofline
                 # keeps failing; the streak is exposed for prompt-side
-                # visibility only.
-                self.shared_state.roofline_failure_streak = 0
+                # visibility only. ``setattr`` lets test stubs that omit
+                # the field still pass.
+                if hasattr(self.shared_state, "roofline_failure_streak"):
+                    self.shared_state.roofline_failure_streak = 0
                 changed = True
             else:
                 audit_decision = "discarded"
@@ -7380,10 +7393,12 @@ class Coordinator:
                 # N27 — bump the outer failure streak. The action_failure
                 # audit ledger already records the structured ``error_class``
                 # / ``error`` fields; this counter mirrors that signal on
-                # SharedState so prompt renderers (``_format_analysis_md_full``)
-                # can surface the cumulative count without having to grep
-                # ``action_attempts``.
-                self.shared_state.roofline_failure_streak += 1
+                # SharedState so prompt renderers
+                # (``_format_analysis_md_full``) can surface the cumulative
+                # count without having to grep ``action_attempts``.
+                # Guard for test stubs that omit the field.
+                if hasattr(self.shared_state, "roofline_failure_streak"):
+                    self.shared_state.roofline_failure_streak += 1
                 changed = True
                 # Per-phase fallback on roofline failure (operator-
                 # requested 2026-05-25 after the TraceLens-patch-missing
