@@ -4333,6 +4333,24 @@ class Coordinator:
                 params.setdefault(
                     "config_path", self.shared_state.baseline_config_path
                 )
+        if pending.action_name == "explore":
+            # Fix E (per-variant overtime kill — Q1 baseline-anchored,
+            # Q5 default-on-with-flag). These two fields are NOT LLM
+            # strategy: they're operational knobs the Coordinator
+            # owns. We always inject them so the ExploreExecutor can
+            # derive ``soft_deadline_sec = baseline_runtime_sec *
+            # explore_overtime_kill_ratio`` for the single-variant
+            # phase (stack rebench intentionally bypasses this gate
+            # — Q4). ``setdefault`` leaves an LLM-supplied override
+            # in place for one-off rebench / debug variants.
+            br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+            if br > 0:
+                params.setdefault("baseline_runtime_sec", br)
+            kill_ratio = float(getattr(
+                self.shared_state, "explore_overtime_kill_ratio", 0.0,
+            ) or 0.0)
+            if kill_ratio > 0:
+                params.setdefault("explore_overtime_kill_ratio", kill_ratio)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
             params=params,
@@ -4435,6 +4453,20 @@ class Coordinator:
             params.setdefault(
                 "config_path", self.shared_state.baseline_config_path
             )
+        # Fix E (parity with _materialize_approved_proposal): inject
+        # overtime-kill operational knobs for direct explore delegates
+        # too. The common path is the Critic-gated reroute above, but
+        # this branch covers anything that bypasses the verdict map
+        # (legacy resume, tests that delegate explore directly).
+        if action_name == "explore":
+            br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+            if br > 0:
+                params.setdefault("baseline_runtime_sec", br)
+            kill_ratio = float(getattr(
+                self.shared_state, "explore_overtime_kill_ratio", 0.0,
+            ) or 0.0)
+            if kill_ratio > 0:
+                params.setdefault("explore_overtime_kill_ratio", kill_ratio)
         # IR-7 — ``assess_remaining_gaps`` is a thin wrapper: rewrite
         # the kind to ``specialist`` and force the
         # ``session_steward_specialist`` domain (LLM cannot pick any
@@ -6778,6 +6810,17 @@ class Coordinator:
             if isinstance(materialized, str) and materialized:
                 self.shared_state.baseline_config_path = materialized
                 changed = True
+            # Fix E: promote the baseline Magpie wall-clock so the
+            # ExploreExecutor can derive a per-variant overtime kill
+            # deadline (``baseline_runtime_sec * explore_overtime_kill_ratio``).
+            # Only the success path carries this field; failure paths
+            # (timeout / nonzero / no_workspace / no_report) deliberately
+            # omit it so a botched baseline cannot seed a tiny / huge
+            # deadline downstream.
+            runtime_sec_raw = result.get("subprocess_runtime_sec")
+            if isinstance(runtime_sec_raw, (int, float)) and runtime_sec_raw > 0:
+                self.shared_state.baseline_runtime_sec = float(runtime_sec_raw)
+                changed = True
             self.shared_state.current_best = {
                 "action": "baseline",
                 "tput": float(tput) if isinstance(tput, (int, float)) else None,
@@ -6898,6 +6941,75 @@ class Coordinator:
                     "error_class": result.get("error_class"),
                     "error": result.get("error"),
                 }
+                # Per-phase fallback on roofline failure (operator-
+                # requested 2026-05-25 after the TraceLens-patch-missing
+                # incident that left both EXPLORE-entry and KERNEL-entry
+                # roofline failing with ``trace_split_no_steady_state``
+                # and KERNEL plateauing immediately because
+                # ``last_profile_trace`` had no usable analysis path):
+                #
+                # * ``reason='explore_entry'`` → **skip** silently. The
+                #   gate-clear path below releases the specialist
+                #   dispatch lock and EXPLORE continues in degraded
+                #   mode (specialists run without ROOFLINE EVIDENCE).
+                #   No retry / no fallback — re-issuing the same
+                #   roofline almost always fails the same way and
+                #   eats 10-20 min of EXPLORE budget.
+                #
+                # * ``reason='kernel_phase_entry'`` → **fall back to a
+                #   plain profile task** so ``kernel_opt`` /
+                #   ``select_kernels`` has a fresh ``last_profile_trace``
+                #   to consume. ProfileExecutor's
+                #   ``_resolve_default_config`` picks
+                #   ``profile_sglang.yaml`` (torch_profiler enabled).
+                #   The fallback uses a phase-scoped idempotency key so
+                #   a re-entry to KERNEL deduplicates.
+                reason = (
+                    str((task.params or {}).get("reason") or "")
+                    if task is not None
+                    else ""
+                )
+                if reason == "kernel_phase_entry":
+                    try:
+                        fallback = await self._enqueue_internal_profile_task(
+                            reason="kernel_phase_entry_roofline_failed",
+                        )
+                        log.warning(
+                            "KERNEL-entry roofline %s failed "
+                            "(phase=%s error_class=%s); enqueued "
+                            "fallback profile task=%s",
+                            task.task_id if task else "?",
+                            result.get("phase"),
+                            result.get("error_class"),
+                            fallback.task_id,
+                        )
+                        # Stamp the latest phase_history row when it
+                        # is the KERNEL entry we just transitioned to;
+                        # safe no-op when the row has already moved on
+                        # (e.g. compute_next_phase fired plateau_kernel
+                        # before the fallback could land — rare but
+                        # possible under heavy budget pressure).
+                        self._record_phase_entry_evidence(
+                            auto_profile_fallback_enqueued=True,
+                            auto_profile_fallback_task_id=fallback.task_id,
+                            auto_profile_fallback_reason="roofline_failed",
+                        )
+                    except Exception as exc:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "KERNEL-entry roofline %s failed and the "
+                            "fallback profile enqueue also failed: %r",
+                            task.task_id if task else "?", exc,
+                        )
+                elif reason == "explore_entry":
+                    log.warning(
+                        "EXPLORE-entry roofline %s failed (phase=%s "
+                        "error_class=%s); skipping (no retry, no "
+                        "fallback). Specialists will proceed in "
+                        "degraded mode without analysis_md.",
+                        task.task_id if task else "?",
+                        result.get("phase"),
+                        result.get("error_class"),
+                    )
             # Clear the EXPLORE-entry auto-roofline gate: regardless of
             # success/failure, this task is no longer in-flight, so
             # subsequent specialist dispatches stop being held by
