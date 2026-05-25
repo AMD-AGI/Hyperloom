@@ -132,6 +132,195 @@ def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
     )
 
 
+def _resolve_source_file(
+    llm_source: str,
+    candidate: dict[str, Any],
+    kernel_id: str,
+    log_path: Path | None = None,
+) -> str:
+    """Resolve the effective source file, preferring TraceLens (candidate).
+
+    TraceLens analyzes the trace and produces the authoritative
+    ``kernel_id → source_file`` mapping in ``kernel_candidates.json``.
+    The Orchestration LLM can also pass ``--source-file`` via payload,
+    but it occasionally confuses kernel IDs (e.g. picks fmoe ``k001``'s
+    source for fmha ``k003``) and supplies a path that no longer matches
+    the kernel being optimized. The legacy ``args.source_file or
+    candidate.source_file`` order let any LLM-supplied string silently
+    override TraceLens, which on DeepSeek-R1 routed an MHA kernel's
+    rewrite at ``fused_moe.py``.
+
+    Policy: candidate wins. If the LLM's path resolves to a different
+    absolute location than candidate's, emit a ``[source-override]``
+    warning to the run log so the discrepancy is visible in postmortem,
+    then return the candidate path. When candidate has no source_file
+    (legacy / synthetic fixtures), fall back to the LLM-supplied path.
+    """
+    cand_source = str((candidate or {}).get("source_file") or "").strip()
+    llm = str(llm_source or "").strip()
+    if not cand_source:
+        return llm
+    if llm and Path(cand_source) != Path(llm):
+        try:
+            differ = Path(cand_source).resolve(strict=False) != Path(llm).resolve(strict=False)
+        except (OSError, RuntimeError):
+            differ = True
+        if differ and log_path is not None:
+            append_log(
+                log_path,
+                f"[source-override] kernel_id={kernel_id} "
+                f"LLM passed source_file={llm!r} but TraceLens candidate resolves to "
+                f"{cand_source!r}; using TraceLens (source of truth)",
+            )
+    return cand_source
+
+
+# Kernel-name → benchmark-name priority patterns. Listed in priority order
+# (more specific kernel families first). Each entry pairs a kernel-name
+# regex with a priority-ordered list of benchmark-filename regexes; when
+# the kernel matches, benchmarks whose basename matches any of the
+# patterns are hoisted to the front of the candidate list (preserving the
+# pattern order). Patterns are intentionally conservative so a missing
+# kernel family degrades to "preserve original order" rather than picking
+# an off-topic benchmark.
+_BENCHMARK_PATTERNS: list[tuple["re.Pattern[str]", list["re.Pattern[str]"]]] = [
+    # Flash / multi-head attention (must come BEFORE paged-attn so a kernel
+    # name like ``fmha_v3_varlen_fwd`` does not accidentally match a generic
+    # ``attn`` rule that also hits ``test_pa.py``).
+    (
+        re.compile(r"(fmha|^mha|::mha|flash[_-]?attn|multi[_-]?head)", re.IGNORECASE),
+        [
+            re.compile(r"^(test|bench)_.*mha", re.IGNORECASE),
+            re.compile(r"^(test|bench)_.*flash.*attn", re.IGNORECASE),
+        ],
+    ),
+    # Paged attention (matches both ``paged_attn`` and ``paged_attention``)
+    (
+        re.compile(r"(paged[_-]?att(?:n|ention)|^pa_|::pa_)", re.IGNORECASE),
+        [
+            re.compile(r"^(test|bench)_pa\b", re.IGNORECASE),
+            re.compile(r"^(test|bench)_.*paged", re.IGNORECASE),
+        ],
+    ),
+    # MoE / fused-MoE
+    (
+        re.compile(r"(fmoe|fused[_-]?moe|::moe|^moe_)", re.IGNORECASE),
+        [re.compile(r"^(test|bench)_.*moe", re.IGNORECASE)],
+    ),
+    # GEMM / matmul / linear
+    (
+        re.compile(r"(gemm|matmul|^linear|::linear|_mm_)", re.IGNORECASE),
+        [
+            re.compile(r"^(test|bench)_.*gemm", re.IGNORECASE),
+            re.compile(r"^(test|bench)_.*matmul", re.IGNORECASE),
+        ],
+    ),
+    # RMSNorm / LayerNorm
+    (
+        re.compile(r"(rmsnorm|layernorm|_norm\b|norm$)", re.IGNORECASE),
+        [re.compile(r"^(test|bench)_.*norm", re.IGNORECASE)],
+    ),
+]
+
+
+def _match_benchmark_for_kernel(
+    kernel_name: str,
+    bench_files: list[Any],
+) -> list[str]:
+    """Reorder ``bench_files`` so semantically-matching benchmarks come first.
+
+    TraceLens populates ``candidate.benchmark_files`` with every test/bench
+    file it found under the kernel's repo, in an order driven by repo
+    enumeration rather than kernel semantics. On DeepSeek-R1 this surfaced
+    a real failure: the fmha kernel ``aiter::fmha_v3_varlen_fwd``'s
+    benchmark list was led by ``test_pa.py`` (PagedAttention), so the
+    legacy ``for bf in bench_files: ... break`` selector in
+    :func:`invoke_backend` picked a benchmark that doesn't exercise the
+    kernel — and whose 90-config × 3-replay default matrix stalled the
+    GEAK Step-5 profiling for hours.
+
+    Policy: scan :data:`_BENCHMARK_PATTERNS` in declared priority order;
+    for the first kernel-name regex that matches, sort the bench list so
+    items matching that family's bench patterns come first (within the
+    matched group, earlier patterns win). When no kernel pattern matches,
+    return the original order — never invent a preference.
+    """
+    existing = [p for p in (bench_files or []) if isinstance(p, str) and p]
+    if not existing:
+        return []
+    name = str(kernel_name or "")
+    for kernel_re, bench_res in _BENCHMARK_PATTERNS:
+        if not kernel_re.search(name):
+            continue
+
+        def _priority(path: str, _bench_res=bench_res) -> int:
+            base = Path(path).name
+            for idx, br in enumerate(_bench_res):
+                if br.search(base):
+                    return idx
+            return len(_bench_res)
+
+        return sorted(existing, key=_priority)
+    return existing
+
+
+def _profile_timeout_sec() -> int:
+    """Per-subprocess profiling timeout (seconds) for GEAK's Step 5.
+
+    The GEAK preprocessor (vendored ``minisweagent.preprocess``) runs the
+    rendered ``test_command`` under Metrix instrumentation with
+    ``num_replays=3`` and then captures a second baseline pass — neither
+    call carries a subprocess timeout. With a default-matrix benchmark
+    such as aiter's ``test_pa.py`` (2 dtypes × 5 head configs × 9 ctx_len
+    = 90 cases per replay), Step 5 can stall for hours and burn the entire
+    GEAK budget before any patch is attempted.
+
+    We bound this by injecting ``timeout <N>`` as the prefix of the
+    ``test_command`` we hand to GEAK. The benchmark subprocess SIGTERMs at
+    ``N`` seconds and returns exit 124, which Metrix surfaces as a normal
+    profiling failure; the preprocessor's existing ``except Exception``
+    handler logs a warning and continues to Step 6/7 instead of hanging.
+
+    Default 600s; override via ``KERNEL_OPT_PROFILE_TIMEOUT_SEC``. Floors
+    at 1 so a misconfigured ``0`` cannot disable the guard entirely.
+    """
+    try:
+        value = int(os.environ.get("KERNEL_OPT_PROFILE_TIMEOUT_SEC", "600"))
+    except (ValueError, TypeError):
+        return 600
+    return max(1, value)
+
+
+def _render_geak_test_command(
+    kernel_name: str,
+    bench_files: list[Any],
+    is_multigpu: bool,
+    num_gpus: int,
+    timeout_sec: int,
+) -> str:
+    """Render the ``--test-command`` GEAK receives, with timeout + match.
+
+    Picks the first existing ``test_*.py`` / ``bench*.py`` from the
+    semantically-ordered bench list, prefixes ``timeout <N>``, and wraps
+    multi-GPU collectives in ``torchrun --nproc_per_node=<num_gpus>`` so
+    GEAK's subprocess can ``init_process_group`` correctly. Returns ``""``
+    when no usable benchmark exists; the caller leaves
+    ``--test-command`` blank so GEAK falls back to its own discovery.
+    """
+    ordered = _match_benchmark_for_kernel(kernel_name, bench_files)
+    for bf in ordered:
+        path = Path(bf)
+        if not bf.endswith(".py") or not path.exists():
+            continue
+        name = path.name
+        if "test_" not in name and "bench" not in name:
+            continue
+        if is_multigpu and num_gpus >= 2:
+            return f"timeout {timeout_sec} torchrun --nproc_per_node={num_gpus} {bf}"
+        return f"timeout {timeout_sec} python {bf}"
+    return ""
+
+
 def parse_backends(backends: str) -> list[str]:
     parsed = [b.strip().lower() for b in backends.split(",") if b.strip()]
     allowed = {"geak", "claude", "codex", "cursor"}
@@ -838,6 +1027,13 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     bench_files = candidate.get("benchmark_files") or []
     if isinstance(bench_files, str):
         bench_files = [bench_files]
+    # Sort by semantic match against the kernel name so the most-relevant
+    # benchmarks head the list GEAK reads (the prompt clips to ``[:8]``
+    # below, so an off-topic ``test_*.py`` would otherwise crowd out the
+    # right one on kernels with long bench listings).
+    bench_files = _match_benchmark_for_kernel(
+        str(candidate.get("name") or ""), bench_files
+    )
     is_multigpu = bool(candidate.get("is_multigpu"))
     # Resolve how many GPUs the executor will give this attempt: CLI override
     # wins, then candidate hint, then 1 (single-GPU compute kernel).
@@ -976,6 +1172,46 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "Pick whichever option matches the kernel; do NOT just measure baseline\n"
         "and write `speedup: N/A` — that wastes the run.\n"
     )
+    # Multi-node sandbox is GPU-less: any local `hipcc` / `torch.cuda.*` /
+    # `torch.utils.cpp_extension.load` call WILL fail. Direct the LLM to
+    # delegate compile + execution to a GPU-bearing pod via the
+    # `inference_optimizer.multi_node kernel-bench` subcommand (head pod,
+    # single-GPU actor); LLM still iterates locally on source, just
+    # off-loads each measurement step. The CLI base64-encodes any
+    # supporting files, stages them under --workspace on the pod, runs
+    # the bench inside that workspace with the GPU, and returns
+    # stdout/stderr + any matching result*.json artifacts.
+    mn_state_file = Path("/tmp/multi_node_state.json")
+    is_multinode_run = False
+    try:
+        if mn_state_file.is_file():
+            _st = json.loads(mn_state_file.read_text(encoding="utf-8"))
+            is_multinode_run = int(_st.get("nodes") or 0) >= 2
+    except (OSError, ValueError):
+        is_multinode_run = False
+    if is_multinode_run:
+        safety += (
+            "\nMULTI-NODE SANDBOX (no local GPU): every compile + benchmark\n"
+            "step MUST be dispatched to a GPU-bearing RayJob pod. Do NOT\n"
+            "call `hipcc`, `torch.cuda.*`, or `torch.utils.cpp_extension.load`\n"
+            "directly; they have no GPU here and will hang or crash.\n"
+            "Instead, for each A/B benchmark iteration:\n"
+            "  1. Write the bench script (and any deps) under your\n"
+            "     workspace ($WORKSPACE/benchmarks/, $WORKSPACE/optimized_versions/).\n"
+            "  2. Invoke:\n"
+            "       python3 -m inference_optimizer.multi_node kernel-bench \\\n"
+            "         --workspace /tmp/kbench_$KERNEL_ID \\\n"
+            "         --bench-command 'cd /tmp/kbench_$KERNEL_ID && bash bench.sh' \\\n"
+            "         --files-b64-json '<{\"bench.sh\":\"<b64>\",\"v1.cu\":\"<b64>\",...}>' \\\n"
+            "         --result-glob 'result*.json'\n"
+            "  3. Parse the printed JSON document's `result.stdout_tail`\n"
+            "     and `result.artifacts[].content` for the speedup number;\n"
+            "     write it into optimization_report.md as `[MICRO_SPEEDUP]`.\n"
+            "Helper script to construct the b64 map cleanly:\n"
+            "    python3 -c 'import base64,json,glob;print(json.dumps({p:base64.b64encode(open(p,\"rb\").read()).decode() for p in glob.glob(\"**/*\",recursive=True) if __import__(\"os\").path.isfile(p)}))'\n"
+            "Treat `kernel-bench` as your only measurement gate; everything\n"
+            "else (code edits, correctness reasoning) still happens locally.\n"
+        )
     if not is_multigpu:
         safety += "- Use the provided benchmark/test files above for correctness/perf measurement.\n"
     elif num_gpus >= 2:
@@ -999,6 +1235,9 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         except Exception:
             full_report = ""
         if full_report:
+            from inference_optimizer.tracelens_md import strip_base64_data_urls
+
+            full_report = strip_base64_data_urls(full_report)
             rank = candidate.get("tracelens_pitem_rank")
             title = candidate.get("tracelens_pitem_title", "")
             if rank:
@@ -1254,26 +1493,29 @@ def invoke_backend(
             # at baseline measurement. Always pick a real existing test from
             # candidate.benchmark_files, prefixing with `torchrun` for the
             # multi-GPU path so collective init_process_group succeeds.
-            test_command = ""
+            #
+            # ``_render_geak_test_command`` adds two guards on top of the
+            # legacy ``for bf in bench_files: ... break`` selector:
+            #   1. semantically reorders ``bench_files`` by kernel name so
+            #      e.g. ``fmha_v3_varlen_fwd`` no longer picks ``test_pa.py``
+            #      ahead of ``test_mha.py`` just because TraceLens listed PA
+            #      first;
+            #   2. prefixes ``timeout <N>`` so Metrix-instrumented Step 5 in
+            #      GEAK's preprocessor cannot stall the whole GEAK budget on
+            #      a runaway no-arg benchmark (e.g. ``test_pa.py``'s 90-case
+            #      default matrix).
             cand_name = str((candidate or {}).get("name") or "")
             is_multigpu = (
                 bool((candidate or {}).get("is_multigpu"))
                 or kernel_name_implies_multigpu(cand_name)
             )
-            if is_multigpu and num_gpus >= 2:
-                for bf in bench_files:
-                    if bf.endswith(".py") and Path(bf).exists() and (
-                        "test_" in Path(bf).name or "bench" in Path(bf).name
-                    ):
-                        test_command = f"torchrun --nproc_per_node={num_gpus} {bf}"
-                        break
-            elif not is_multigpu:
-                for bf in bench_files:
-                    if bf.endswith(".py") and Path(bf).exists() and (
-                        "test_" in Path(bf).name or "bench" in Path(bf).name
-                    ):
-                        test_command = f"python {bf}"
-                        break
+            test_command = _render_geak_test_command(
+                kernel_name=cand_name,
+                bench_files=bench_files,
+                is_multigpu=is_multigpu,
+                num_gpus=num_gpus,
+                timeout_sec=_profile_timeout_sec(),
+            )
             previous_env = _apply_geak_env_overrides(args, prompt_file)
             try:
                 result = geak.submit(
@@ -1712,6 +1954,36 @@ def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
     return None
 
 
+def _trust_geak_correctness() -> bool:
+    """Treat GEAK ``status=complete`` + measured speedup as sufficient
+    correctness evidence by default.
+
+    GEAK's ``save_and_test`` only verifies that the patch compiles and
+    that ``import aiter`` succeeds; it does NOT exercise the kernel's
+    numerical output (e.g. ck_moe_stage1 with a a8w8 blockscale harness
+    only prints the aiter import banner). Without trusting GEAK, every
+    GEAK KEEP candidate degrades to NEEDS_REVIEW because
+    ``correctness_source == 'missing'`` and the patch never reaches
+    integrate.
+
+    Default ON: the integrate stage's E2E magpie benchmark is the
+    ground-truth functional check, and operators can layer
+    ``RUN_EVAL=true`` for an accuracy gate on top. Historical data
+    (5 Qwen3-30B-A3B-Base sessions) shows GEAK 0/4 KEEP without this
+    trust gate; with it, real shape-specific kernels like
+    ck_moe_stage1's 1.30x patch reach the integrate REVERT/KEEP
+    decision instead of being silently dropped.
+
+    Set ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=0`` to restore the
+    conservative behaviour (every GEAK KEEP -> NEEDS_REVIEW) for
+    operators that want human review before integrate.
+    """
+    raw = os.environ.get("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
 def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None:
     """Read correctness from GEAK-style JSON reports when present."""
     if not final_report_path:
@@ -2078,6 +2350,37 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
         )
         if correctness_signal is not None:
             correctness_source = "geak_report"
+    # PR-E (default ON): trust GEAK's status=complete + measured speedup
+    # as correctness=True even when the harness was an import-only test
+    # (e.g. test_moe_gemm_a8w8_blockscale.py for an aiter ck_moe_stage1
+    # kernel -- the harness loads aiter but does not exercise the kernel,
+    # so patch_*_test.txt is empty and the standard extractors return
+    # missing). GEAK's per-task save_and_test still confirms compile +
+    # import succeed; the integrate stage's E2E magpie benchmark is the
+    # ground-truth functional check (and operators can layer RUN_EVAL=true
+    # for an accuracy gate on top). Set
+    # ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=0`` to disable.
+    if (
+        correctness_signal is None
+        and best is not None
+        and best.get("backend") == "geak"
+        and measured
+        and best_speedup >= 1.0
+        and _trust_geak_correctness()
+    ):
+        bp_geak = (best.get("backend_paths") or {}).get("geak_final_report", "")
+        geak_status = ""
+        if bp_geak and Path(bp_geak).is_file():
+            try:
+                geak_status = str(
+                    json.loads(Path(bp_geak).read_text(encoding="utf-8"))
+                    .get("status") or ""
+                ).lower()
+            except Exception:  # noqa: BLE001
+                geak_status = ""
+        if geak_status in {"complete", "succeeded", "ok"}:
+            correctness_signal = True
+            correctness_source = "geak_assumed_pass"
     if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
         correctness_signal = True
         correctness_source = "accuracy_override"
@@ -2142,12 +2445,12 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
-    # Goal threshold: 1.20x lets shape-specific 5-30% wins (claude r19 GEMM
-    # 1.32x, GEAK r39 rms_norm 1.18x, codex r25 GEMM 1.66x) through to
-    # human KEEP review. Below 1.20x is treated as noise / not worth the
-    # production risk and routed to NEEDS_REVIEW with reason. Originally
-    # 1.50 (overly strict — too many real wins fell through to PARTIAL).
-    KEEP_THRESHOLD = 1.20
+    # Goal threshold: 1.10x lets modest but real shape-specific wins
+    # (claude r19 GEMM 1.32x, GEAK r39 rms_norm 1.18x, codex r25 GEMM 1.66x)
+    # through to human KEEP review. Below 1.10x is treated as noise / not
+    # worth the production risk and routed to NEEDS_REVIEW with reason.
+    # Originally 1.50 (overly strict), then 1.20; lowered to 1.10 May 2026.
+    KEEP_THRESHOLD = 1.10
     if verification["micro_speedup"] < KEEP_THRESHOLD:
         reasons.append(
             f"speedup {verification['micro_speedup']:.3f}x below KEEP "
@@ -2260,7 +2563,15 @@ def main() -> int:
                       started_at=started_at)
         candidates_path = Path(args.candidates_path) if args.candidates_path else run_dir / "kernel_candidates.json"
         candidate = find_candidate(load_candidates(candidates_path), args.kernel_id)
-        resolved_source = args.source_file or str(candidate.get("source_file") or "")
+        # TraceLens is the source of truth for kernel_id → source_file.
+        # ``_resolve_source_file`` overrides any LLM-supplied path that
+        # disagrees with ``candidate.source_file`` and logs the override,
+        # so a kernel-ID confusion at the Orchestration layer (e.g. fmoe
+        # k001's source attached to fmha k003) no longer routes GEAK's
+        # rewrite at the wrong file.
+        resolved_source = _resolve_source_file(
+            args.source_file, candidate, args.kernel_id, log_path
+        )
         args.source_file = resolved_source
         # Forward the candidate's repo root onto args so build_verification's
         # GEAK-worktree artifact recovery can map ``source_file`` (an

@@ -1,7 +1,7 @@
 """P5 decision-framework regression tests.
 
 Locks the fixes to the resume5 9h finding: Orch was stuck in a 38-round
-params loop emitting the same select_kernels REQUEST over and over,
+params loop emitting the same trace_analyze REQUEST over and over,
 never advancing to run_optimization, while 35/38 winning variants beat
 the current_best by 0.3–0.84% but never crossed the 1.0% promote bar.
 
@@ -61,7 +61,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     # to resolve apply_kernel_patch.py / kernel_optimization.py from disk
     # work even when the host env var is unset.
     kernel_agent_root = Path(__file__).resolve().parents[2] / "kernel-agent"
-    monkeypatch.setattr(krh, "HYPERLOOM_KERNEL_AGENT_ROOT", kernel_agent_root)
+    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Skip the `python3 -c "import Magpie"` probe inside _resolve_magpie_python
     # so subprocess.run mocks only see the actual Magpie launch command.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
@@ -226,16 +226,23 @@ async def test_run_optimization_response_records_to_shared_state(
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        # Roofline-v2 N13: run_optimization REQUEST now requires
+        # backends_attempts>=1 + params_attempts>=1 + snapshot_id>=2.
+        # Use the escape hatch to keep this test focused on the
+        # response-recording behaviour (orthogonal to the ordering
+        # rule). The escape-hatch path is itself covered by
+        # test_n13_kernel_opt_ordering.py.
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
         c.shared_state.baseline_tput = 800.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
             "reusable_native_kernel_ids": ["k006"],
         }
         c.shared_state.save(session_dir)
         # Stub the handler so we don't shell out.
         from inference_optimizer.orchestrator import kernel_request_handlers
-        async def fake(payload, *, session_dir):
+        async def fake(payload, *, session_dir, **kwargs):
             return {
                 "status": "ok",
                 "kernel_id": "k006",
@@ -274,10 +281,10 @@ async def test_run_optimization_response_records_to_shared_state(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_does_not_record_kernel_opt(
+async def test_trace_analyze_does_not_record_kernel_opt(
     session_dir, monkeypatch,
 ):
-    """Only run_optimization (not select_kernels) writes to last_kernel_opt."""
+    """Only run_optimization (not trace_analyze) writes to last_kernel_opt."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator import kernel_request_handlers
@@ -285,11 +292,11 @@ async def test_select_kernels_does_not_record_kernel_opt(
             return {"status": "ok", "hot_kernels": [{"kernel_id": "k001"}]}
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "select_kernels", fake,
+            "trace_analyze", fake,
         )
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "select_kernels",
+            payload={"target_agent": "kernel", "kind": "trace_analyze",
                      "params": {"trace_input": "/tmp/t.json"}},
         )
         await c._handle_intent("orchestration", intent)
@@ -438,13 +445,15 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
               "kernel_id": "k003",
               "name": "native_moe_gemm",
               "source_file": "/sgl-workspace/aiter/csrc/kernels/moe.cu",
-              "reusable_native_kernel": true
+              "reusable_native_kernel": true,
+              "gpu_pct": 24.5
             },
             {
               "kernel_id": "k006",
               "name": "native_quant",
               "source_file": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
-              "reusable_native_kernel": true
+              "reusable_native_kernel": true,
+              "gpu_pct": 11.2
             }
           ],
           "reusable_native_kernel_ids": ["k003", "k006"]

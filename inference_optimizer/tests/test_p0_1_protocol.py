@@ -140,7 +140,7 @@ def test_parse_claude_tool_calls_with_emit_intent():
     tool_uses = [
         {"name": "emit_intent", "input": {
             "intent_type": "request",
-            "payload": {"target_agent": "kernel", "kind": "select_kernels"},
+            "payload": {"target_agent": "kernel", "kind": "trace_analyze"},
         }},
         {"name": "Read", "input": {"path": "/tmp/x"}},  # ignored
         {"name": "emit_intent", "input": {
@@ -180,7 +180,7 @@ def test_topic_allowlist_v06_changes():
 async def test_message_bus_append_assigns_seq(db):
     bus = MessageBus(db)
     msg = Message.new("Orchestration", "Kernel", "request",
-                      {"target_agent": "kernel", "kind": "select_kernels"})
+                      {"target_agent": "kernel", "kind": "trace_analyze"})
     seq = await bus.append_and_seq(msg)
     assert seq >= 1
     assert msg.seq == seq
