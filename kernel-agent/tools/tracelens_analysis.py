@@ -76,7 +76,7 @@ def _build_high_idle_warning(
 ) -> dict[str, Any]:
     """Build the structured ``trace_health_warnings[]`` entry for a high-idle trace.
 
-    The entry is consumed by ``kernel_request_handlers.select_kernels_handler``
+    The entry is consumed by ``kernel_request_handlers.trace_analyze_handler``
     (T4) which uses it to route to parameter optimization instead of
     GEAK kernel rewriting. The shape is deliberately minimal and
     JSON-serializable so it can be written verbatim into the audit
@@ -121,6 +121,319 @@ def _build_trace_split_warning(
             "high idle and suppress valid kernel opportunities. Verify the "
             "profile request used TraceLens-compatible annotations and enough "
             "NUM_PROMPTS to reach the requested start_step/num_steps window."
+        ),
+    }
+
+
+def _check_selected_chunk_has_gpu_events(
+    *,
+    split_dir: Path,
+    selected_chunk: Path,
+    mode: str,
+    available_modes: "dict[str, tuple[str, list[Path]]]",
+) -> "dict[str, Any] | None":
+    """Verify the splitter-produced chunk selected by ``--steady-state-mode``
+    actually contains GPU events.
+
+    The TraceLens splitter writes one row per produced chunk to
+    ``execution_details.csv`` with the columns ``output_path``,
+    ``num_gpu_events``, ``gpu_duration``, ``gpu_busy_duration`` (see
+    ``TraceLens/TraceUtils/split_inference_trace_annotation.py:1324-1331``).
+    Returns ``None`` when the row says the chunk carries real GPU work,
+    otherwise returns a ``steady_state_chunk_empty`` warning dict the
+    caller should ``trace_health_warnings.append`` and raise on.
+
+    This is a data-validity gate, not a heuristic chunk-reordering rule:
+    TraceLens analysis is only meaningful when the chunk has events to
+    analyze. Falling back to a different mode is the OPERATOR's call
+    (re-issue with a different ``--steady-state-mode`` after seeing the
+    warning); we never silently swap.
+
+    The empirical case that drove this gate is SOLAR-10.7B TP=1 BF16,
+    where:
+      - mixed_steady_state_*: num_gpu_events=160, gpu_busy_duration=1,428 us
+        out of gpu_duration=1,118,730 us (0.13% busy) -- 96 sampler kernels
+        only, forward fully inside CUDA graph + rocprofiler-sdk emits no
+        Dispatch Task aggregate without TP-multi-stream sync;
+      - prefilldecode_steady_state_*: num_gpu_events=2,790,
+        gpu_busy_duration=2,723,452 us out of 4,538,984 us (60% busy) --
+        480 Tensile GEMM + 240 paged_attention + 480 add_rmsnorm_quant
+        (the real workload).
+    Pre-N25 we silently consumed the mixed chunk and produced an
+    Executive Summary saying "Compute %=0.18%, Idle %=99.77%" that
+    misled the LLM into selecting host-bound params variants. N25 hard-
+    fails here and the coordinator re-issues with
+    ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE=prefilldecode``.
+    """
+    import csv
+
+    details_path = split_dir / "execution_details.csv"
+    if not details_path.is_file():
+        # Splitter didn't emit the CSV (older TraceLens?) -- cannot
+        # validate; let the chunk through and hope for the best. The
+        # downstream Executive Summary idle gate (T3) still catches
+        # high-idle traces, just less specifically.
+        return None
+    try:
+        with details_path.open("r", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+    except (OSError, csv.Error):
+        return None
+
+    selected_resolved = str(selected_chunk.resolve())
+    selected_row: dict[str, str] | None = None
+    for row in rows:
+        out_path = row.get("output_path", "")
+        if not out_path:
+            continue
+        try:
+            if str(Path(out_path).resolve()) == selected_resolved:
+                selected_row = row
+                break
+        except (OSError, ValueError):
+            continue
+    if selected_row is None:
+        return None
+
+    def _f(name: str) -> float:
+        try:
+            return float(selected_row.get(name) or "0") or 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    num_gpu_events = int(_f("num_gpu_events"))
+    gpu_busy_duration = _f("gpu_busy_duration")
+    if num_gpu_events > 0 and gpu_busy_duration > 0.0:
+        return None  # chunk carries real GPU work -- proceed.
+
+    # Selected chunk is empty. Surface which OTHER modes' chunks DO have
+    # gpu events so the coordinator / operator knows what to re-issue
+    # with.
+    non_empty_modes: list[str] = []
+    for other_mode, (label, chunks) in available_modes.items():
+        if other_mode == mode or not chunks:
+            continue
+        other_resolved = str(chunks[0].resolve())
+        for row in rows:
+            try:
+                if str(Path(row.get("output_path", "")).resolve()) != other_resolved:
+                    continue
+            except (OSError, ValueError):
+                continue
+            try:
+                other_events = int(float(row.get("num_gpu_events") or "0"))
+                other_busy = float(row.get("gpu_busy_duration") or "0")
+            except (TypeError, ValueError):
+                other_events, other_busy = 0, 0.0
+            if other_events > 0 and other_busy > 0.0:
+                non_empty_modes.append(other_mode)
+            break
+
+    return {
+        "code": "steady_state_chunk_empty",
+        "severity": "blocking",
+        "requested_mode": mode,
+        "selected_chunk": str(selected_chunk),
+        "num_gpu_events": num_gpu_events,
+        "gpu_busy_duration": gpu_busy_duration,
+        "non_empty_modes": non_empty_modes,
+        "remediation": (
+            "Re-issue roofline with env "
+            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
+            f"{non_empty_modes or ['(none of the splitter outputs has GPU events; re-profile required)']}. "
+            "Most common cause: short / batched workload (e.g. "
+            "NUM_PROMPTS<=CONC*OSL/2) where prefill is burst-shaped so "
+            "the mixed window degenerates to PD=0; switching to "
+            "'prefilldecode' picks up the real GEMM/attention region."
+        ),
+        "message": (
+            f"TraceLens splitter selected chunk ({mode}) has "
+            f"num_gpu_events={num_gpu_events}, "
+            f"gpu_busy_duration={gpu_busy_duration:.1f}us -- structurally "
+            "empty. Refusing to feed it into TraceLens analysis (would "
+            "produce a misleading high-idle Executive Summary). The "
+            "coordinator should re-issue roofline with a different "
+            "--steady-state-mode per the 'remediation' field."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# N36 — chunk-quality gate (busy_ratio threshold + alternate-mode lookup)
+# ---------------------------------------------------------------------------
+# Background: N25 deliberately stays a STRUCTURAL gate (num_gpu_events>0 AND
+# gpu_busy_duration>0). The DSR1-0528 (671B FP8 MoE) TP=8 10k/1k production
+# run on 2026-05-21 exposed a gap: TraceLens' splitter happily produced a
+# ``mixed_steady_state`` chunk with 160 events / 2053us busy out of 3.26s
+# (0.063% busy) -- structurally non-empty so N25 passed -- but
+# substantively garbage. Downstream analysis.md reported "Compute %=0.09%
+# / Idle %=99.90%" with ``reusable_native_kernel_ids=[]`` and the LLM
+# was left with nothing to feed GEAK with.
+#
+# Root cause: the profile window calibration in ``_workload_envs``
+# computes ``delay_iters = OSL * (R+1) * 3 - max_iters/2`` -- it only
+# considers OSL, so a 10k/1k workload (10x ISL prefill) lands at the
+# same ``start_step=6016`` as a 1k/1k workload. With CONC=64, by step
+# 6016 every batch has finished its single prefill iter and the
+# profiler captures only decode iters where the 8x MI300X is sparse.
+#
+# N36 closes that gap: this helper checks busy_ratio AND looks for an
+# alternate mode with materially higher busy_ratio. When such an
+# alternate exists we emit ``steady_state_chunk_low_quality`` (in the
+# N26 retry allowlist) so the coordinator re-issues trace_analyze
+# automatically. When NO mode is better we return ``None`` -- emitting
+# a retry-warning would spin the same bad trace forever; the
+# ``roofline_failure_streak`` path handles that case (N27 fallback).
+_DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
+# Alternate mode must beat the requested mode by at least this margin
+# for the auto-retry to be worth it. Otherwise we'd thrash between
+# equally-bad modes.
+_CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
+
+
+def _resolve_min_busy_ratio() -> float:
+    raw = os.environ.get(
+        "INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO", "",
+    ).strip()
+    if not raw:
+        return _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
+    try:
+        v = float(raw)
+        return v if 0.0 <= v <= 1.0 else _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
+    except ValueError:
+        return _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
+
+
+def _busy_ratio(num_events: float, busy_us: float, dur_us: float) -> float | None:
+    """Return ``busy_us / dur_us`` or ``None`` when undefined (zero
+    duration). Caller treats ``None`` as "no signal, defer to N25".
+    """
+    if dur_us <= 0.0 or num_events <= 0:
+        return None
+    return max(0.0, min(1.0, busy_us / dur_us))
+
+
+def _check_selected_chunk_has_gpu_events_quality(
+    *,
+    split_dir: "Path",
+    selected_chunk: "Path",
+    mode: str,
+    available_modes: "dict[str, tuple[str, list[Path]]]",
+) -> "dict[str, Any] | None":
+    """Quality gate that complements N25's structural gate.
+
+    Returns ``None`` when the selected chunk is acceptable (busy_ratio
+    >= threshold) OR no alternate mode is materially better OR the CSV
+    is missing / row not found. Returns a structured warning dict
+    (``code=steady_state_chunk_low_quality``, same shape as N25 for
+    drop-in compatibility with the N26 retry path) when an alternate
+    mode with materially higher busy_ratio exists.
+
+    See module-level N36 comment for the empirical case + design.
+    """
+    import csv as _csv
+
+    details_path = split_dir / "execution_details.csv"
+    if not details_path.is_file():
+        return None
+    try:
+        with details_path.open("r", encoding="utf-8") as fh:
+            rows = list(_csv.DictReader(fh))
+    except (OSError, _csv.Error):
+        return None
+
+    def _row_for(chunk_path: "Path") -> "dict[str, str] | None":
+        resolved = str(chunk_path.resolve())
+        for row in rows:
+            out_path = row.get("output_path", "")
+            if not out_path:
+                continue
+            try:
+                if str(Path(out_path).resolve()) == resolved:
+                    return row
+            except (OSError, ValueError):
+                continue
+        return None
+
+    def _stats(row: "dict[str, str] | None") -> "tuple[int, float, float]":
+        if row is None:
+            return 0, 0.0, 0.0
+        def _f(k: str) -> float:
+            try:
+                return float(row.get(k) or "0") or 0.0
+            except (TypeError, ValueError):
+                return 0.0
+        return int(_f("num_gpu_events")), _f("gpu_busy_duration"), _f("gpu_duration")
+
+    selected_row = _row_for(selected_chunk)
+    if selected_row is None:
+        return None
+    sel_events, sel_busy, sel_dur = _stats(selected_row)
+    sel_ratio = _busy_ratio(sel_events, sel_busy, sel_dur)
+    if sel_ratio is None:
+        # Can't measure ratio; N25 already covers the structural empty
+        # case. Defer.
+        return None
+    threshold = _resolve_min_busy_ratio()
+    if sel_ratio >= threshold:
+        return None
+
+    # Selected chunk is below threshold. Look for an alternate mode
+    # whose chunk has materially higher busy_ratio (otherwise retrying
+    # is pointless).
+    alternates: list[tuple[str, float]] = []
+    for other_mode, (_label, chunks) in available_modes.items():
+        if other_mode == mode or not chunks:
+            continue
+        other_row = _row_for(chunks[0])
+        if other_row is None:
+            continue
+        oth_events, oth_busy, oth_dur = _stats(other_row)
+        oth_ratio = _busy_ratio(oth_events, oth_busy, oth_dur)
+        if oth_ratio is None:
+            continue
+        if oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
+            alternates.append((other_mode, oth_ratio))
+    if not alternates:
+        return None  # No better mode exists; let roofline_failure_streak path handle.
+
+    # Sort by descending busy_ratio so the best alternate is first --
+    # roofline._extract_steady_state_retry_mode picks the head of the
+    # non_empty_modes list.
+    alternates.sort(key=lambda mr: -mr[1])
+    non_empty_modes = [m for m, _r in alternates]
+    return {
+        "code": "steady_state_chunk_low_quality",
+        "severity": "blocking",
+        "requested_mode": mode,
+        "selected_chunk": str(selected_chunk),
+        "num_gpu_events": sel_events,
+        "gpu_busy_duration": sel_busy,
+        "gpu_duration": sel_dur,
+        "busy_ratio": sel_ratio,
+        "threshold": threshold,
+        "non_empty_modes": non_empty_modes,
+        "alternate_busy_ratios": dict(alternates),
+        "remediation": (
+            "Re-issue roofline with env "
+            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
+            f"{non_empty_modes}. The TraceLens splitter chunk for the "
+            f"requested mode '{mode}' is {sel_ratio*100:.2f}% busy "
+            f"(threshold {threshold*100:.0f}%) -- non-empty but "
+            "substantively garbage. Most common cause for prefill-"
+            "heavy workloads: profile window misalignment "
+            "(_workload_envs.delay_iters formula only considers OSL, "
+            "so high-ISL workloads land in pure-decode windows)."
+        ),
+        "message": (
+            f"TraceLens splitter selected chunk ({mode}) busy_ratio="
+            f"{sel_ratio*100:.3f}% (events={sel_events}, "
+            f"busy={sel_busy:.1f}us / dur={sel_dur:.1f}us) -- below "
+            f"the {threshold*100:.0f}% threshold and alternate "
+            f"modes have higher busy_ratio. Refusing to feed it into "
+            "TraceLens analysis (would produce a misleading analysis.md "
+            "with reusable_native_kernel_ids=[] and stall the "
+            "optimization loop, per DSR1-0528 10k/1k case)."
         ),
     }
 
@@ -1769,6 +2082,39 @@ def main() -> int:
             "the splitter fall back to its built-in heuristic."
         ),
     )
+    parser.add_argument(
+        "--steady-state-mode",
+        choices=("mixed", "decode_only", "prefilldecode"),
+        default=(
+            os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip()
+            or "mixed"
+        ),
+        help=(
+            "Which of TraceLens splitter's three steady-state chunks to "
+            "consume for the perf report (see docs/Inference_analysis.md "
+            "in TraceLens-internal). The splitter always produces all "
+            "three (mixed / decode_only / prefilldecode); this flag picks "
+            "ONE per TraceLens's design that the chunks are parallel "
+            "view-of-the-same-trace, not a fallback ladder. "
+            "Defaults to 'mixed' (representative DO:PD mix at ~max "
+            "concurrency) which matches roofline-v2's default profiling "
+            "intent. Switch to 'prefilldecode' when the workload is "
+            "short / batched (NUM_PROMPTS << CONC*OSL) so prefill is "
+            "burst-shaped and the mixed window degenerates to PD=0 -- "
+            "TP=1 + CUDA-graph traces frequently hit this corner case "
+            "because the decode region's GPU work is fully inside the "
+            "graph replay and rocprofiler-sdk doesn't emit aggregate "
+            "Dispatch Task events outside TP-multi-stream contexts, so "
+            "the mixed chunk looks 99%% idle while the prefilldecode "
+            "chunk carries the real GEMM / attention kernels. "
+            "Switch to 'decode_only' when you specifically want the "
+            "longest pure-decode region (decode-perf comparison runs). "
+            "May also be set via env "
+            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE so the coordinator "
+            "can re-issue roofline with a different mode after a "
+            "steady_state_chunk_empty warning lands."
+        ),
+    )
     args = parser.parse_args()
 
     session_id = args.session_id or uuid.uuid4().hex[:12]
@@ -1918,9 +2264,27 @@ def main() -> int:
                     log_path=log_path,
                     timeout_s=max(60, int(args.budget_minutes * 60)),
                 )
-                # Splitter writes <type>_steady_state_*.json[.gz]; accept any of
-                # the three windows (mixed first, then decode_only, then
-                # prefilldecode) and prefer mixed for perf-report consumption.
+                # TraceLens splitter writes three parallel views of the same
+                # steady-state region:
+                #   - mixed_steady_state_*        (representative DO:PD mix)
+                #   - decode_only_steady_state_*  (longest pure-decode run)
+                #   - prefilldecode_steady_state_*(longest pure-PD run)
+                # Per TraceLens docs/Inference_analysis.md these are three
+                # parallel view-of-the-same-trace, NOT a fallback ladder
+                # (TraceLens itself has no internal preference between them).
+                # The consumer (us) picks ONE per the configured intent.
+                #
+                # Pre-N25 behaviour was an implicit `mixed or decode_only or
+                # prefilldecode` chain that auto-fell-through silently. This
+                # broke for the SOLAR-10.7B TP=1 case where the mixed window
+                # degenerated to gpu_busy=0.13% (all forward in CUDA graph
+                # + rocprofiler-sdk emits no Dispatch Task aggregate without
+                # TP-multi-stream sync) while the prefilldecode chunk carried
+                # 60% busy + 480 GEMM + 240 paged_attention. Implicit
+                # fall-through hid the issue. N25 makes the mode explicit
+                # (--steady-state-mode flag, default 'mixed') and hard-fails
+                # when the selected chunk doesn't exist or is empty so the
+                # operator can re-issue roofline with a different mode.
                 def _collect(prefix: str) -> list[Path]:
                     out: list[Path] = []
                     for ext in ("trace.json.gz", "json.gz", "trace.json", "json"):
@@ -1930,19 +2294,10 @@ def main() -> int:
                 mixed_chunks = _collect("mixed")
                 decode_chunks = _collect("decode_only")
                 prefill_chunks = _collect("prefilldecode")
-                steady_chunks = mixed_chunks or decode_chunks or prefill_chunks
-                if split_rc == 0 and steady_chunks:
-                    cli_trace_path = steady_chunks[0]
-                    artifacts["tracelens_trace_split_dir"] = str(split_dir)
-                    artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
-                    append_log(
-                        log_path,
-                        f"trace split OK: mixed={len(mixed_chunks)} "
-                        f"decode_only={len(decode_chunks)} "
-                        f"prefilldecode={len(prefill_chunks)}; "
-                        f"using {cli_trace_path.name} for perf report",
-                    )
-                else:
+                # Splitter produced nothing at all -> existing
+                # trace_split_no_steady_state failure (treated as unrecoverable
+                # at the action layer; operator must re-profile).
+                if split_rc != 0 or not (mixed_chunks or decode_chunks or prefill_chunks):
                     warning = _build_trace_split_warning(
                         trace_input=trace_files[0],
                         split_dir=split_dir,
@@ -1966,6 +2321,146 @@ def main() -> int:
                         "produced no steady-state chunks; refusing to run "
                         "TraceLens analysis on the raw trace"
                     )
+
+                _mode_to_chunks = {
+                    "mixed": ("mixed_steady_state", mixed_chunks),
+                    "decode_only": ("decode_only_steady_state", decode_chunks),
+                    "prefilldecode": ("prefilldecode_steady_state", prefill_chunks),
+                }
+                chunk_label, selected_chunks = _mode_to_chunks[args.steady_state_mode]
+                if not selected_chunks:
+                    # Requested mode produced no chunk; the OTHER two may have
+                    # produced chunks but per TraceLens design we don't pick
+                    # them as a silent fallback -- emit a structured warning
+                    # so the coordinator can re-issue roofline with a
+                    # different --steady-state-mode (N25 contract).
+                    warning = {
+                        "code": "steady_state_chunk_missing",
+                        "severity": "blocking",
+                        "requested_mode": args.steady_state_mode,
+                        "requested_chunk_label": chunk_label,
+                        "available_modes": [
+                            m for m, (_, ch) in _mode_to_chunks.items() if ch
+                        ],
+                        "remediation": (
+                            "Re-issue roofline with env "
+                            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one "
+                            "of the available_modes (or pass --steady-state-mode "
+                            "directly when invoking tracelens_analysis.py)."
+                        ),
+                        "trace_input": str(trace_files[0]),
+                        "split_dir": str(split_dir),
+                    }
+                    trace_health_warnings.append(warning)
+                    append_log(
+                        log_path,
+                        f"ERROR: --steady-state-mode={args.steady_state_mode} "
+                        f"requested but no {chunk_label}_*.json[.gz] in "
+                        f"{split_dir} (mixed={len(mixed_chunks)}, "
+                        f"decode_only={len(decode_chunks)}, "
+                        f"prefilldecode={len(prefill_chunks)}); refusing "
+                        "silent fallback per TraceLens parallel-chunk design",
+                    )
+                    raise RuntimeError(
+                        f"steady_state_chunk_missing: requested "
+                        f"--steady-state-mode={args.steady_state_mode} but "
+                        f"splitter produced no matching chunk under "
+                        f"{split_dir}"
+                    )
+
+                # Sanity check: the selected chunk must have observable GPU
+                # work. Splitter's execution_details.csv carries
+                # `num_gpu_events` per chunk -- when it's 0 (or
+                # gpu_busy_duration == 0) the chunk is structurally empty
+                # (e.g. SOLAR-10.7B TP=1 mixed = pure-decode region with all
+                # forward inside CUDA graph + no Dispatch Task aggregate).
+                # Running TraceLens on such a chunk yields the misleading
+                # "Compute %=0.18%, Idle %=99.77%, kernel_count=0" report.
+                # This is NOT a heuristic chunk-reordering rule; it's a
+                # data-validity gate: TraceLens analysis only makes sense
+                # when the chunk has GPU events to analyze. The remediation
+                # is the same as `_chunk_missing`: re-issue with a different
+                # --steady-state-mode (the other two chunks may carry the
+                # real workload).
+                cli_trace_path = selected_chunks[0]
+                empty_chunk_warning = _check_selected_chunk_has_gpu_events(
+                    split_dir=split_dir,
+                    selected_chunk=cli_trace_path,
+                    mode=args.steady_state_mode,
+                    available_modes=_mode_to_chunks,
+                )
+                if empty_chunk_warning is not None:
+                    trace_health_warnings.append(empty_chunk_warning)
+                    append_log(
+                        log_path,
+                        f"ERROR: --steady-state-mode={args.steady_state_mode} "
+                        f"selected chunk {cli_trace_path.name} has "
+                        f"num_gpu_events={empty_chunk_warning['num_gpu_events']} "
+                        f"/ gpu_busy_duration={empty_chunk_warning['gpu_busy_duration']}"
+                        f"; refusing to feed an empty chunk to TraceLens "
+                        "analysis (would produce misleading "
+                        "'Compute %=~0, Idle %=~100' Executive Summary)",
+                    )
+                    raise RuntimeError(
+                        f"steady_state_chunk_empty: requested "
+                        f"--steady-state-mode={args.steady_state_mode} but the "
+                        f"selected chunk has zero GPU events; available "
+                        f"non-empty modes: "
+                        f"{empty_chunk_warning['non_empty_modes']}"
+                    )
+
+                # N36 (May 2026) — quality gate on busy_ratio. N25
+                # only catches structurally empty chunks (events==0
+                # OR busy==0); a chunk like the DSR1-0528 10k/1k case
+                # (160 events / 2ms busy / 3.26s duration = 0.06%
+                # busy) passes N25 but is substantively garbage. The
+                # quality gate looks for an alternate mode with
+                # materially higher busy_ratio and emits a
+                # ``steady_state_chunk_low_quality`` warning the
+                # coordinator's N26 retry path consumes -- same
+                # remediation flow as the empty-chunk case, no
+                # additional wiring required. See N36 module-level
+                # comment + test_n36_chunk_quality_gate.py.
+                low_quality_warning = _check_selected_chunk_has_gpu_events_quality(
+                    split_dir=split_dir,
+                    selected_chunk=cli_trace_path,
+                    mode=args.steady_state_mode,
+                    available_modes=_mode_to_chunks,
+                )
+                if low_quality_warning is not None:
+                    trace_health_warnings.append(low_quality_warning)
+                    append_log(
+                        log_path,
+                        f"ERROR: --steady-state-mode={args.steady_state_mode} "
+                        f"selected chunk {cli_trace_path.name} is "
+                        f"non-empty but low-quality: busy_ratio="
+                        f"{low_quality_warning['busy_ratio']*100:.3f}% "
+                        f"(threshold "
+                        f"{low_quality_warning['threshold']*100:.0f}%); "
+                        f"alternate modes with higher busy_ratio: "
+                        f"{low_quality_warning['non_empty_modes']}. "
+                        "Refusing to analyze (would yield misleading "
+                        "high-idle Executive Summary).",
+                    )
+                    raise RuntimeError(
+                        f"steady_state_chunk_low_quality: requested "
+                        f"--steady-state-mode={args.steady_state_mode} chunk "
+                        f"busy_ratio="
+                        f"{low_quality_warning['busy_ratio']*100:.3f}%; "
+                        f"better alternates: "
+                        f"{low_quality_warning['non_empty_modes']}"
+                    )
+
+                artifacts["tracelens_trace_split_dir"] = str(split_dir)
+                artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
+                append_log(
+                    log_path,
+                    f"trace split OK: mixed={len(mixed_chunks)} "
+                    f"decode_only={len(decode_chunks)} "
+                    f"prefilldecode={len(prefill_chunks)}; "
+                    f"--steady-state-mode={args.steady_state_mode} -> "
+                    f"using {cli_trace_path.name} for perf report",
+                )
 
             if args.use_llm_orchestrator and not trace_split_blocked:
                 update_status(status_path, state="running",
@@ -2198,7 +2693,7 @@ def main() -> int:
             "orchestrator_mode": orchestrator_mode,
             "orchestrator_error": orchestrator_error,
             # T3: structured trace-quality findings (high GPU idle, …) that
-            # the handler (``select_kernels_handler``, T4) surfaces upward
+            # the handler (``trace_analyze_handler``, T4) surfaces upward
             # so the Coordinator can decide between kernel-rewrite and
             # parameter-optimization routes. Empty list is the steady-state
             # ("nothing wrong") signal.
@@ -2222,6 +2717,13 @@ def main() -> int:
         update_status(status_path, state="failed", current_step="failed",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at, error=f"{type(exc).__name__}: {exc}")
+        # N26: include any trace_health_warnings accumulated before the
+        # exception fired so the handler / Coordinator can auto-recover
+        # (e.g. re-issue with a different --steady-state-mode when a
+        # steady_state_chunk_empty warning carries non_empty_modes).
+        # Pre-N26 the failure JSON dropped warnings on the floor, so
+        # the RooflineExecutor saw `status=failed` without the structured
+        # hint it needed to decide between hard-fail and auto-retry.
         print(json.dumps({
             "tool": "tracelens_analysis",
             "session_id": session_id,
@@ -2230,6 +2732,7 @@ def main() -> int:
             "error": f"{type(exc).__name__}: {exc}",
             "cli_log_path": str(log_path),
             "status_path": str(status_path),
+            "trace_health_warnings": trace_health_warnings,
         }, indent=2, sort_keys=True))
         return 1
 

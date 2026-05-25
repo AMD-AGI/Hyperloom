@@ -279,6 +279,16 @@ class CriticAgentBackend:
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
     static_context: dict[str, Any] | None = None
     known_actions: tuple[str, ...] = ()
+    # N38 (May 2026) — per-action verdict policy map (action_name ->
+    # one of "archival" / "exploration" / "promotion"). When non-empty,
+    # the backend enriches ``judge_bundle.review_constraints.
+    # action_verdict_policy`` with this mapping right after the
+    # runtime's ``prepare-review`` returns. The LLM-critic then uses
+    # the lookup as its primary per-proposal rule (see critic.md),
+    # replacing the hard-coded carve-out lists that N33 / N35 / N37
+    # had to patch one action at a time. Wire from CLI by passing
+    # ``{a.name: a.verdict_class for a in ActionRegistry().all()}``.
+    action_verdict_policy: dict[str, str] = field(default_factory=dict)
     name: str = "critic-agent"
 
     # Runtime state — populated in __post_init__ and mutated turn-over-turn.
@@ -342,8 +352,8 @@ class CriticAgentBackend:
                     "(CriticAgentBackend cannot reach Codex for review reasoning)"
                 )
             base_url = (
-                os.environ.get("ANTHROPIC_BASE_URL")
-                or os.environ.get("OPENAI_BASE_URL")
+                os.environ.get("OPENAI_BASE_URL")
+                or os.environ.get("ANTHROPIC_BASE_URL")
             )
             kwargs: dict[str, Any] = {"api_key": api_key}
             if base_url:
@@ -426,6 +436,21 @@ class CriticAgentBackend:
                 f"CriticAgentBackend: failed to read judge_bundle from "
                 f"{judge_path}: {exc}"
             ) from exc
+
+        # N38 (May 2026) — enrich review_constraints with per-action
+        # verdict policy so the LLM-critic can look up each proposal's
+        # class (archival / exploration / promotion) and apply the
+        # correct rule. Replaces the prompt-hardcoded carve-out lists
+        # N33/N35/N37 had to patch one action at a time. Critic
+        # runtime owns ``review_constraints.approve_requires`` /
+        # ``allowed_verdicts`` / etc.; we layer
+        # ``action_verdict_policy`` on top.
+        if self.action_verdict_policy:
+            rc = judge_bundle.setdefault("review_constraints", {})
+            if not isinstance(rc, dict):
+                rc = {}
+                judge_bundle["review_constraints"] = rc
+            rc["action_verdict_policy"] = dict(self.action_verdict_policy)
 
         # Phase 2 — Codex reasoning. Note we still call the LLM even when
         # `judge_bundle.proposals` is empty (the runtime returns an empty

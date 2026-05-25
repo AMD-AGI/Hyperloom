@@ -48,7 +48,7 @@ run the rest of the pipeline.
 and therefore pays no extra GPU/server cost.
 
 Set `HYPERLOOM_ENABLE_PMC_ROOFLINE=1` to have the Coordinator enqueue one
-`pmc_roofline` task after a successful `select_kernels` response. The auto task
+`pmc_roofline` task after a successful `trace_analyze` response. The auto task
 reuses the materialized Magpie workload YAML from `baseline_config_path` to build
 the dedicated server and benchmark commands, so the PMC run uses the same model,
 framework, precision, TP, ISL/OSL/CONC, and server args as the Magpie workload

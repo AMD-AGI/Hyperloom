@@ -44,10 +44,18 @@ from ..action_registry import (
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # analysis
-    "profile", "pmc_roofline", "deep_kernel_analysis",
+    # analysis — `roofline` is the composite action (profile + trace_analyze
+    # in one shot), replacing the standalone `profile` + `pmc_roofline`
+    # actions per roofline-v2 D1/N2. The latter two executors remain
+    # registered for stale-state.json resume compatibility (cli.py
+    # _REAL_EXECUTORS_KERNEL_ONLY) and to let RooflineExecutor invoke
+    # `profile` internally, but they MUST NOT be proposed directly by
+    # the LLM — surface only `roofline` in the catalogue + critic
+    # approve list + scoring priors so the orchestration loop has a
+    # single canonical entry point.
+    "roofline", "deep_kernel_analysis",
     # explore
-    "backends", "params", "sweep",
+    "backends", "params", "sweep", "framework_pr",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
     # validate (Phase 3 — closes the loop on accumulated KEEPs)
@@ -74,8 +82,12 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # explore (no profile — it only feeds kernel-opt)
-    "backends", "params", "sweep",
+    # analysis — roofline is still useful in no-kernel mode for the
+    # snapshot it provides (cheap actions consume it via discovered_flags)
+    "roofline",
+    # explore — framework_pr is safe to enable even without the kernel
+    # agent: it only mutates sglang source, never proposes per-kernel work.
+    "backends", "params", "sweep", "framework_pr",
     # validate (still useful — bench the stacked backends/params)
     "validate_stack",
     # finalize
@@ -287,23 +299,54 @@ def _format_grid_injection_hint(name: str) -> str | None:
     """Return a per-action one-liner showing the LLM how to override grid."""
     if name == "backends":
         return (
-            "GRID OVERRIDE (T1/T2): emit "
+            "TWO GRID-CONTROL SURFACES (pick the one that fits your "
+            "intent):\n"
+            "  (A) SUBSET (N20-A, recommended for roofline-driven runs): "
+            "emit `delegate{action_name='backends', params={variants: "
+            "['attn_aiter','sched_lpm', ...]}}` — names must come from "
+            "the registered DEFAULT_BACKENDS_GRID listed in the "
+            "BACKENDS GRID CATALOGUE block below. Use this when the "
+            "roofline analysis.md points at specific kernel categories "
+            "(e.g. attention-heavy -> only try `attn_*` variants; "
+            "AllReduce-heavy -> only `custom_ar`). Cheaper + safer "
+            "than full grid; no flag hallucination risk.\n"
+            "  (B) FULL CUSTOM (T1/T2): emit "
             "`delegate{action_name='backends', params={grid: [{name, "
             "extra_sglang_args, extra_envs, note}, ...], "
-            "synergy_groups?: [[name1,name2], ...] | synergy_mode?: 'auto'}}` "
-            "to add candidates beyond the shipped DEFAULT_BACKENDS_GRID. "
-            "See SharedState.discovered_flags for the live framework's "
-            "full flag namespace and SharedState.backend_winners_history "
-            "for prior-round winners worth combining."
+            "synergy_groups?: [[name1,name2], ...] | "
+            "synergy_mode?: 'auto'}}` to add candidates beyond the "
+            "shipped DEFAULT_BACKENDS_GRID. Use this when "
+            "SharedState.discovered_flags surfaces a flag the registered "
+            "grid doesn't carry yet, or when you want to combine winners "
+            "from prior rounds (backend_winners_history).\n"
+            "If both `variants` and `grid` are passed, `grid` wins "
+            "(full control mode)."
         )
     if name == "params":
         return (
-            "GRID OVERRIDE (T1/T2): emit "
+            "TWO GRID-CONTROL SURFACES (pick the one that fits your "
+            "intent):\n"
+            "  (A) SUBSET (N20-A, recommended for roofline-driven runs): "
+            "emit `delegate{action_name='params', params={variants: "
+            "['cuda_graph_max_bs_64','mem_fraction_0_90', ...]}}` — "
+            "names must come from the registered DEFAULT_PARAMS_GRID "
+            "listed in the PARAMS GRID CATALOGUE block below. Use this "
+            "when the roofline analysis.md points at specific bottlenecks "
+            "(e.g. cuda-graph misses high -> try the cuda_graph_max_bs_* "
+            "family; KV-cache pressure -> mem_fraction_* + chunked_prefill_*; "
+            "queue depth growing -> max_running_requests_* + scheduling). "
+            "Safer + cheaper than full grid; no flag-value hallucination "
+            "risk (the values come from the registered grid).\n"
+            "  (B) FULL CUSTOM (T1/T2): emit "
             "`delegate{action_name='params', params={grid: [{name, "
-            "extra_sglang_args, extra_envs, note}, ...]}}` to add value-"
-            "filled parameter candidates. SharedState.discovered_flags "
-            "lists the param flag namespace (--max-num-seqs, "
-            "--cuda-graph-max-bs, etc.) you can fill in."
+            "extra_sglang_args, extra_envs, note}, ...]}}` to synthesize "
+            "value-filled parameter candidates beyond the registered "
+            "grid (e.g. when SharedState.discovered_flags surfaces a new "
+            "param flag and you want to pick a specific value). "
+            "SharedState.discovered_flags lists the param flag namespace "
+            "(--max-num-seqs, --cuda-graph-max-bs, etc.) you can fill in.\n"
+            "If both `variants` and `grid` are passed, `grid` wins "
+            "(full control mode)."
         )
     if name == "sweep":
         return (
@@ -521,26 +564,22 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "An explore round that produces zero new ideas is a bug — heartbeat",
         "with body_md='idea-pipeline-empty' so Robustness can intervene.",
         "",
-        "### PMC roofline (dual mode)",
+        "### Roofline analysis (composite action)",
         "",
-        "Use `pmc_roofline` after `profile` when you need hardware counters /",
-        "roofline charts. Two deployment modes:",
+        "Propose `roofline` whenever you need a fresh TraceLens snapshot:",
+        "right after baseline (snapshot #1), then between every interleaved",
+        "round of cheap exploration (backends + params) so kernel_opt sees",
+        "the post-exploration hot-kernel distribution rather than the",
+        "baseline one. The executor internally runs `profile` + `trace_analyze`",
+        "in one shot; do NOT propose `profile` or the legacy `pmc_roofline`",
+        "directly — they are kept registered for back-compat only and the",
+        "PolicyGate hard-blocks direct profile proposals (N9, see",
+        "design/roofline-v2.md §6.5/§6.5.1 for the full enforcement chain).",
         "",
-        "**RayJob mode (production)** — omit `server_cmd`; Coordinator derives",
-        "it from `baseline_config_path` / materialized Magpie YAML. Set",
-        "`params.ray_worker=true` inside the Ray job so GPU allocation is",
-        "owned by Ray.",
-        "",
-        "    delegate{action_name='pmc_roofline',",
-        "        params={ray_worker: true,",
-        "                config_path: <SharedState.baseline_config_path>,",
-        "                output_dir: '<SESSION_DIR>/runs/pmc_roofline/<round>'},",
+        "    delegate{action_name='roofline',",
+        "        params={notes: 'baseline snapshot' | 'post-backends-N snapshot' | ...},",
         "        predicted_gain_pct: 0,",
-        "        notes: 'PMC roofline via Ray — server_cmd auto-derived'}",
-        "",
-        "**Local debug mode** — set `allow_direct_gpu=true` (or export",
-        "`HYPERLOOM_ALLOW_DIRECT_PMC_ROOFLINE=1`) and pass explicit",
-        "`server_cmd` + `health_url` when no Ray worker is available.",
+        "        notes: 'TraceLens analysis.md will appear in shared_state.last_trace_analyze'}",
     ])
     return lines
 
@@ -548,28 +587,29 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
 _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-The three kernel-owned actions (`select_kernels`, `kernel_opt`,
+The three kernel-owned actions (`trace_analyze`, `kernel_opt`,
 `integrate`) are scored on the `Action scores` board like every other
 action. Pick them by `eff_score` per the DECISION FRAMEWORK; the blocks
 below are only **payload templates** describing how to build the REQUEST
 once you have selected the action. The Coordinator hard-gates the
 obvious prerequisites (TODO 3/5 surfaces as guidance after a fresh
-`profile` until `select_kernels` populates the cache so TraceLens writes
+`profile` until `trace_analyze` populates the cache so TraceLens writes
 `analysis.md`; TODO 4/5 fires after a `kernel_opt` KEEP forces
 `integrate`). Explore actions like `params` / `backends` / `sweep` are
-NEVER gated on `select_kernels` at the action layer (only
+NEVER gated on `trace_analyze` at the action layer (only
 `run_optimization` REQUESTs are gated, by
-`_sequence_denial_for_request`).
+`_sequence_denial_for_request`). Everything else flows through the
+scoreboard.
 
-### `select_kernels` — payload (Coordinator gates `run_optimization` until cache is fresh)
+### `trace_analyze` — payload (Coordinator gates `run_optimization` until cache is fresh)
 
-  request{target_agent: 'kernel', kind: 'select_kernels',
+  request{target_agent: 'kernel', kind: 'trace_analyze',
           params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
 
-  STRICT: if `last_select_kernels.trace_input` already equals
+  STRICT: if `last_trace_analyze.trace_input` already equals
   `last_profile_trace`, the candidate list is cached — do NOT re-emit.
-  `select_kernels` must precede every `run_optimization` request — the
-  Coordinator denies kernel_opt requests with `select_kernels must run
+  `trace_analyze` must precede every `run_optimization` request — the
+  Coordinator denies kernel_opt requests with `trace_analyze must run
   first` when the cache is stale, but `params` / `backends` / `sweep` /
   `report` are NEVER gated on it. Re-emit only after a fresh `profile`
   action invalidates the cache.  TODO 3/5 surfaces in
@@ -580,7 +620,7 @@ NEVER gated on `select_kernels` at the action layer (only
 ### `kernel_opt` — payload for `run_optimization`
 
 When the scoreboard surfaces `kernel_opt`, pick the next reusable
-native kernel from `last_select_kernels.reusable_native_kernel_ids`,
+native kernel from `last_trace_analyze.reusable_native_kernel_ids`,
 in order, skipping any kernel_id already present in
 `last_kernel_opt.kernel_id`.
 
@@ -592,11 +632,23 @@ HARD RULES (applied at REQUEST build time, NOT at action-selection time):
   - If `reusable_native_kernel_ids` is empty, do NOT propose
     `kernel_opt` (its `applicable_when` is implicitly violated).
     Heartbeat instead and consider re-profiling.
+  - DO NOT pass `backends` in `params`. The Coordinator + kernel
+    handler use a fixed ladder `GEAK -> Claude -> Codex -> Cursor`
+    (Cursor only when `CURSOR_API_KEY` is set). Pinning `backends`
+    bypasses the ladder, e.g. forcing every kernel through Claude
+    even on hip_cpp kernels where GEAK is the only backend that
+    can KEEP. Failed ladders are retired after ONE pass per
+    `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES=1` -- so the LLM
+    cannot re-dispatch the same kernel by re-emitting
+    `run_optimization`. Read `kernel_opt_attempts` + `pending_keep_kernels`
+    in the shared-state summary to decide what's still queueable;
+    the batch handler filters rejected/in-flight/exhausted candidates
+    automatically.
 
   request{target_agent: 'kernel', kind: 'run_optimization',
           params: {kernel_id: <picked kernel_id>,
                    source_file: <hot_kernels[i].source_file>,
-                   candidates_path: <select_kernels_done.candidates_path>,
+                   candidates_path: <trace_analyze_done.candidates_path>,
                    budget_minutes: 60}}
 
   HARD RULE — backend selection: DO NOT add a `backends` field unless the
@@ -621,6 +673,18 @@ until the patch lands on `optimization_stack`. Payload:
           params: {kernel_id, patch_path, target_file, base_tput,
                    extra_sglang_args, config_path}}
 
+If you omit `base_tput`, the Coordinator auto-fills it from
+`current_best.tput` so chained integrates (multi-KEEP drain, see below)
+do not need you to track the running baseline manually. Explicit operator
+override still wins.
+
+If you omit `patch_path` / `source_file`, the Coordinator resolves them
+from `last_kernel_opt.best_artifact_path` first, then from
+`kernel_opt_attempts[<kernel_id>].last_artifact_path` (the per-kernel
+ledger). This second fallback is what makes multi-KEEP queue drain
+work: queued KEEPs whose kernel_id != `last_kernel_opt.kernel_id` still
+resolve to a real patch.
+
 If `result.proposal.decision` is `PARTIAL` or `REVERT`, the patch is
 rejected — do NOT integrate. The Coordinator unlocks immediately; consult
 the scoreboard for the next action like normal. A second `kernel_opt`
@@ -628,13 +692,71 @@ round on the next reusable kernel_id often surfaces as top-1 (because
 the previous KEEP/REVERT decayed only that kernel_id's branch), but is
 not required — the scoreboard decides.
 
+#### Multi-KEEP integrate queue (PR-B)
+
+A single `run_optimization` batch may produce KEEPs for multiple
+kernels at once. The Coordinator streams each sub-result into
+SharedState the instant it lands (not after gather wait-all), and
+maintains a queue keyed off `kernel_opt_attempts`. Read these state
+fields to drive the drain:
+
+  * `pending_keep_kernels`         — list[str] of queued KEEP
+    `kernel_id`s, sorted strongest-first by micro_speedup. The TODO 4/5
+    integrate gate stays open as long as this list is non-empty, so
+    DO NOT propose `report` while pending KEEPs remain.
+  * `has_keep_pending_integrate`   — bool mirror, convenient short-circuit.
+
+For each tick where `has_keep_pending_integrate=true`:
+  1. Pick `pending_keep_kernels[0]` (highest micro) as the next
+     `integrate` target.
+  2. Emit the `integrate` request; the Coordinator fills in
+     `patch_path` / `source_file` / `base_tput` automatically.
+  3. After the result lands, the queue either advances to the next
+     pending KEEP or drains to empty — `validate_stack` (TODO 5/5)
+     fires once the integrate stack has new unvalidated entries.
+
+Same-source-file collision: `apply_kernel_patch` is a whole-file
+overwrite, so if two KEEPs target the same `source_file`, the
+queue collapses to the strongest one and silently drops the rest
+(no manual conflict handling required).
+
 After every successful `integrate` (KEEP), the Coordinator records a
 new entry on `optimization_stack` and the TODO 5/5 `validate_stack`
 gate fires; obey it before resuming any explore / deep round.
 
+#### Hot-kernel must-try gate (PR-C)
+
+The Coordinator denies `action='report'` while
+`untried_hot_reusable_kernels` is non-empty -- i.e. while ANY reusable
+hot kernel with `gpu_pct >= 3.0%` (capped at top-5 by gpu_pct,
+deduplicated by `task_group`) has zero recorded `kernel_opt_attempts`.
+
+This prevents the failure mode where the LLM looks at an idle-bound
+roofline (e.g. compute=31%, idle=69%) and concludes "no kernel lever
+left", emitting `report` while a 37% gpu_pct ck_moe_stage1 has never
+been tried (Qwen3-30B-A3B-Base session 164910Z: report at tick=8 with
+k001=24%, k002=37%, k004=9.7% all untouched).
+
+Read these two state fields each tick:
+
+  * `pending_keep_kernels`              -- queued integrate work
+  * `kernel_opt_attempts_count`         -- how many unique kernels
+                                           the session has touched
+  * the TODO line `TODO 4a/5: kernel_opt required on untried hot
+    reusable kernels [...]` -- the explicit list the gate consults.
+
+Drain by emitting:
+
+    request{target_agent: 'kernel', kind: 'run_optimization',
+            params: {candidates_path: <from last_trace_analyze>}}
+
+The batch handler fans out across every live candidate automatically
+and filters rejected / in-flight / exhausted kernels, so re-emitting
+the same payload does not re-attempt retired kernels.
+
 ### KERNEL TARGETING (native vs torch.compile)
 
-`select_kernels` profiles the *final* serving mode (with or without
+`trace_analyze` profiles the *final* serving mode (with or without
 torch.compile / CUDAGraph), but kernel-opt may only rewrite reusable
 native sources that still appear in that trace. NEVER optimize
 `/tmp/torchinductor*`, Inductor cache, or `triton_poi_*` /
@@ -651,6 +773,312 @@ def _read_rules_fragment(path: Path | None) -> str:
         return path.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def _section_params_grid_catalogue(*, framework: str) -> list[str]:
+    """N20-A: render the registered params grid as a catalogue so the
+    LLM can name a SUBSET when proposing the `params` action.
+
+    Mirror of _section_backends_grid_catalogue. params grid is bigger
+    (~28 SGLang variants vs ~10 backends) so the LLM benefit from
+    subset selection is larger here — running all 28 is ~4-5h on
+    R1 / 30-45min on Qwen3-32B, vs ~30-60min if the LLM picks 3-5
+    relevant ones based on the roofline analysis.
+    """
+    from inference_optimizer.orchestrator.action_executors.params import (
+        DEFAULT_PARAMS_GRID,
+        DEFAULT_VLLM_PARAMS_GRID,
+    )
+
+    fw = (framework or "sglang").strip().lower()
+    grid = DEFAULT_VLLM_PARAMS_GRID if "vllm" in fw else DEFAULT_PARAMS_GRID
+    fw_label = "vLLM" if "vllm" in fw else "SGLang"
+
+    HINT_BY_NOTE: dict[str, str] = {
+        "cuda_graph":  "high cuda-graph miss rate / decode under-utilised",
+        "decode_steps":"long decode chains (raise step batching)",
+        "memory":      "KV-cache pressure / OOM near-misses",
+        "scheduling":  "queue depth growing / request batching",
+        "prefill":     "long prompts / prefill-throughput bound",
+        "cache":       "radix-cache hit rate low / hurts MoE throughput",
+        "tokenizer":   "tokenizer CPU bound (rare; high-concurrency only)",
+        "streaming":   "client streaming-interval pressure",
+        "overlap":     "decode/prefill overlap stalls (CPU sync hot)",
+        "attention":   "attention backend swap (advanced; for hot attn)",
+        "indexer":     "MLA indexer kernel hot",
+        "comm":        "NCCL/RCCL tuning (rare; comm-bound only)",
+    }
+
+    lines: list[str] = [
+        f"## PARAMS GRID CATALOGUE ({fw_label})",
+        "",
+        "Registered variants you may name in `params.variants=[...]` "
+        "when proposing `params`. The executor will run only the ones "
+        "you list. Pick variants whose trigger hint matches the "
+        "dominant pattern in the roofline analysis.md.",
+        "",
+        f"{'name':32s}  {'flag(s) / env(s)':46s}  trigger hint",
+        f"{'-' * 32}  {'-' * 46}  {'-' * 60}",
+    ]
+    for v in grid:
+        flag = (v.extra_sglang_args or "").strip()
+        if v.extra_envs:
+            env_repr = " ".join(
+                f"{k}={vv}" for k, vv in sorted(v.extra_envs.items())
+            )
+            flag = (
+                f"{flag} {env_repr}" if flag else f"env: {env_repr}"
+            )
+        if len(flag) > 46:
+            flag = flag[:43] + "..."
+        hint = HINT_BY_NOTE.get(v.note or "", v.note or "(generic)")
+        lines.append(f"{v.name:32s}  {flag:46s}  {hint}")
+
+    lines.extend([
+        "",
+        "Example (roofline shows cuda-graph miss 30% + KV pressure):",
+        "  delegate{action_name='params', params={variants: "
+        "['cuda_graph_max_bs_64','cuda_graph_max_bs_32',"
+        "'mem_fraction_0_90']}, predicted_gain_pct: 1.0}",
+        "",
+        "Same advice as backends — name ALL variants whose trigger hint "
+        "matches the dominant pattern(s) in analysis.md (no upper cap; "
+        "the executor has no max_candidates_per_round limit by default). "
+        "When analysis.md flags multiple bottleneck categories (e.g. "
+        "host-bound + KV-pressure), include every relevant variant "
+        "across all flagged categories. Skipping `torch_compile_on` "
+        "when analysis explicitly mentions `torch.compile` is the "
+        "kind of miss this catalogue is designed to prevent. Better "
+        "to over-include 8-10 relevant variants than miss a category "
+        "the analysis flagged; only skip variants whose trigger hint "
+        "is clearly orthogonal to what analysis.md surfaces.",
+        "",
+        "### N22 ENFORCED MAPPINGS (analysis.md keyword -> required variants)",
+        "",
+        "The PolicyGate runs a non-blocking advisory check on every "
+        "params proposal: if analysis.md mentions a keyword below and "
+        "your `variants` list omits the implied variant, an advisory "
+        "lands in SharedState.last_proposal_advice (you'll see it on "
+        "the NEXT tick). The propose still goes through — but you should "
+        "self-correct on the follow-up cheap-action propose by adding "
+        "the missing variant. The map below is the canonical contract;",
+        "consult `_analysis_keyword_map.py` for the full machine-readable "
+        "version (~50 keys covering compile, cuda-graph, KV cache, attn, "
+        "moe, scheduling, host-bound, fusion, radix cache).",
+        "",
+        "  analysis.md mentions ...     -> include variant(s)",
+        "  -----------------------       -------------------",
+        "  'torch.compile'              -> torch_compile_on",
+        "  'cuda graph(s)'              -> cuda_graph_max_bs_8/16/32/64",
+        "  'kv cache' / 'kv-cache'      -> mem_fraction_0_85/0_90/0_80",
+        "  'decode bound' / 'long decode' -> decode_steps_8/16/32",
+        "  'long prompt(s)' / 'prefill' -> chunked_prefill_32k/64k/128k,",
+        "                                  max_prefill_tokens_32k/64k",
+        "  'queue depth' / 'scheduling' / 'concurrency' / 'batching'",
+        "                               -> max_running_requests_128/256,",
+        "                                  sched_lpm, sched_dfs",
+        "  'host-bound' / 'host-side'   -> torch_compile_on,",
+        "                                  cuda_graph_max_bs_32/64,",
+        "                                  decode_steps_16/32",
+        "  'gpu idle' / 'underutilization' -> torch_compile_on,",
+        "                                  cuda_graph_max_bs_64,",
+        "                                  decode_steps_32",
+        "  'overlap' / 'multi-stream'   -> sglang_multi_stream_overlap",
+        "  'kernel fusion'              -> enable_fused_moe, enable_mixed",
+        "  'radix cache'                -> disable_radix_cache",
+        "  'MoE' / 'expert routing'     -> moe_aiter, enable_fused_moe",
+        "  'attention backend'          -> attn_aiter, attn_triton,",
+        "                                  decode_aiter",
+        "  'AllReduce' / 'NCCL' / 'RCCL'-> custom_ar",
+        "",
+        "(Mapping is case-insensitive substring match. False positives "
+        "are tolerable — the LLM may trim genuinely-orthogonal ones; "
+        "false negatives — i.e. silently skipping a clearly-implied "
+        "variant — is what this catalogue is here to prevent.)",
+    ])
+    return lines
+
+
+def _section_backends_grid_catalogue(*, framework: str) -> list[str]:
+    """N20-A: render the registered backends grid as a catalogue so the
+    LLM can name a SUBSET when proposing the `backends` action.
+
+    Each row shows: variant name, the flag(s) it sets, a one-line
+    trigger hint ("when roofline shows X is hot, try me"). The names
+    are stable identifiers the executor matches against in
+    DEFAULT_BACKENDS_GRID / DEFAULT_VLLM_BACKENDS_GRID.
+
+    Framework-aware: SGLang grid for sglang, vLLM grid for vllm. We
+    keep the full registered set visible (no Tier 1 filter at prompt
+    time) — the LLM decides which subset to try based on hot-kernel
+    analysis, not based on a pre-baked heuristic.
+    """
+    # Lazy import to avoid a circular dep (action_executors -> prompt_builder
+    # is fine, prompt_builder -> action_executors at module load is not).
+    from inference_optimizer.orchestrator.action_executors.backends import (
+        DEFAULT_BACKENDS_GRID,
+        DEFAULT_VLLM_BACKENDS_GRID,
+    )
+
+    fw = (framework or "sglang").strip().lower()
+    grid = DEFAULT_VLLM_BACKENDS_GRID if "vllm" in fw else DEFAULT_BACKENDS_GRID
+    fw_label = "vLLM" if "vllm" in fw else "SGLang"
+
+    # Per-variant trigger hint. The LLM reads roofline analysis.md to
+    # find which kernel category dominates GPU time; then maps that to
+    # a variant whose `note` tag matches. We keep this map small +
+    # explicit (no auto-generation) so the prompt stays deterministic.
+    HINT_BY_NOTE: dict[str, str] = {
+        "tier1_attention":     "attention-heavy traces (FlashAttn/AITER bound)",
+        "tier1_decode_attn":   "decode-bound traces (long decode chains)",
+        "tier2_schedule":      "queue-bound traces (high prefill queue depth)",
+        "tier2_overlap":       "overlap conflicts (decode stalls on prefill)",
+        "tier3_fusion":        "fused-MoE or chunked-prefill candidates",
+        "tier4_moe":           "MoE-dominant traces (expert dispatch hot)",
+        "tier5_comm":          "AllReduce-heavy traces (TP comm bound)",
+        "kv_cache":            "KV-cache memory bound traces",
+        "memory":              "GPU-memory ceiling pressure",
+        "scheduling":          "request-batching bound traces",
+        "compile":             "graph-capture / compile bound",
+        "compile_off":         "compile causing regressions (eager-only test)",
+        "cuda_graph":          "CUDA-graph capture bound",
+        "rocm_aiter":          "AITER toggle (rocm general)",
+        "rocm_aiter_linear":   "linear ops AITER bound",
+        "rocm_aiter_rmsnorm":  "rmsnorm-hot traces",
+        "rocm_aiter_fp8bmm":   "FP8 BMM hot in attention",
+        "rocm_fp4":            "FP4 GEMM workloads",
+        "rocm_rope":           "RoPE-bound traces (long context)",
+        "rocm_collectives":    "AllReduce / collectives bound (ROCm path)",
+        "rocm_buffer":         "buffer-op corruption suspected (regression test)",
+        "rocm_scratch":        "scratch-reclaim caused stalls",
+        "rocm_kv_layout":      "KV-layout shuffle experiment",
+        "attention_backend":   "attention backend swap (vLLM ROCM_AITER_FA)",
+        "cache":               "prefix-cache off (some MoE workloads)",
+        "cache_mla":           "block-size 1 (MLA-specific cache)",
+        "prefill":             "prefill-throughput bound (long prompts)",
+    }
+
+    lines: list[str] = [
+        f"## BACKENDS GRID CATALOGUE ({fw_label})",
+        "",
+        "Registered variants you may name in "
+        "`params.variants=[...]` when proposing `backends`. The "
+        "executor will run only the ones you list, in order. Pick "
+        "variants whose trigger hint matches the dominant pattern "
+        "in the roofline analysis.md (e.g. if analysis says "
+        "attention is 40% of GPU time, name only `attn_*` variants).",
+        "",
+        f"{'name':28s}  {'flag(s) / env(s)':50s}  trigger hint",
+        f"{'-' * 28}  {'-' * 50}  {'-' * 60}",
+    ]
+    for v in grid:
+        # Truncate long flag strings so the catalogue stays readable.
+        flag = (v.extra_sglang_args or "").strip()
+        if v.extra_envs:
+            env_repr = " ".join(
+                f"{k}={v}" for k, v in sorted(v.extra_envs.items())
+            )
+            flag = (
+                f"{flag} {env_repr}" if flag else f"env: {env_repr}"
+            )
+        if len(flag) > 50:
+            flag = flag[:47] + "..."
+        hint = HINT_BY_NOTE.get(v.note or "", v.note or "(generic)")
+        lines.append(f"{v.name:28s}  {flag:50s}  {hint}")
+
+    lines.extend([
+        "",
+        "Example (roofline shows attention 38% + AllReduce 22%):",
+        "  delegate{action_name='backends', params={variants: "
+        "['attn_aiter','attn_triton','custom_ar']}, "
+        "predicted_gain_pct: 1.5}",
+        "",
+        "When in doubt, name ALL variants whose trigger hint matches "
+        "the dominant pattern(s) in analysis.md (no upper cap; the "
+        "executor has no max_candidates_per_round limit by default). "
+        "When analysis.md flags multiple bottleneck categories include "
+        "every relevant variant across all flagged categories. Only "
+        "skip variants whose trigger hint is clearly orthogonal to "
+        "what analysis.md surfaces.",
+        "",
+        "### N22 ENFORCED MAPPINGS (analysis.md keyword -> required variants)",
+        "",
+        "Same PolicyGate advisory applies to `backends` proposals. The",
+        "machine-readable map lives in `_analysis_keyword_map.py`; the "
+        "backends-relevant subset:",
+        "",
+        "  analysis.md mentions ...     -> include variant(s)",
+        "  -----------------------       -------------------",
+        "  'attention backend' /        -> attn_aiter, attn_triton,",
+        "  'flash attention' / 'aiter'     decode_aiter",
+        "  'decode bound' / 'long decode' -> decode_aiter",
+        "  'MoE' / 'mixture of experts' /-> moe_aiter, enable_fused_moe",
+        "  'expert routing/dispatch'",
+        "  'kernel fusion' / 'fusion'   -> enable_fused_moe, enable_mixed",
+        "  'scheduling' / 'schedule'    -> sched_lpm, sched_dfs",
+        "  'overlap' / 'multi-stream'   -> sglang_multi_stream_overlap",
+        "                                  (params-side, but listed for",
+        "                                   completeness across catalogues)",
+        "  'AllReduce' / 'NCCL' / 'RCCL' -> custom_ar",
+        "  'collective communication'   -> custom_ar",
+        "",
+        "(Same false-positive-tolerable, false-negative-blocking contract",
+        "as the params catalogue.)",
+    ])
+    return lines
+
+
+def _section_multi_node_doctrine(*, kernel_enabled: bool) -> list[str]:
+    """Multi-node-only doctrine appended between DECISION FRAMEWORK and RULES.
+
+    Only emitted when the optimizer is operating on a >=2-node RayJob
+    cluster (gated by ``is_multi_node()`` at the call site). Single-node
+    runs skip this section entirely, preserving their existing prompt
+    text bit-for-bit.
+
+    Two empirically-driven rules, no phase-ordering hacks:
+
+    * Rule 1 nudges the FIRST explore round towards ``backends`` (where
+      aiter/decode_aiter historically yield +10-30% on multi-node) and
+      explicitly preserves the scoreboard's natural KEEP-cooldown
+      alternation for subsequent rounds. KV-cache class params are
+      called out as a documented exception so the LLM does not
+      over-prune ``--max-num-seqs`` / ``--mem-fraction-static`` etc.
+    * Rule 2 informs the LLM that the grid runner now silently drops
+      ``--cuda-graph-max-bs N < $CONC`` variants on multi-node (see
+      ``_grid_runner.apply_multi_node_invalid_variants``), so manual
+      re-proposals are wasted turns rather than rejections.
+
+    Both rules are advisory; PolicyGate does not gate on them. The
+    ``kernel_enabled`` parameter is accepted for parity with other
+    section builders but unused today — kept so adding a future
+    kernel-only rule does not change the signature.
+    """
+    del kernel_enabled  # accepted for parity; no kernel-specific text yet
+    return [
+        "## 5b. MULTI-NODE TESTING DOCTRINE",
+        "",
+        "This run is on a >=2-node RayJob cluster. Single variant cost:",
+        "~35-40 min (cmd_restart_server 9-10 min + bench 25-30 min).",
+        "Prioritise actions by per-minute leverage:",
+        "",
+        "1. **First explore round prefers `backends`** when both `backends`",
+        "   and `params` are uncooldowned + unlocked in the scoreboard.",
+        "   Rationale: multi-node aiter/decode_aiter historically yields",
+        "   +10-30%, while `--cuda-graph-max-bs` (params) typically yields",
+        "   <2% and is mostly pre-filtered (rule 2). After the first round,",
+        "   follow the scoreboard's natural KEEP-cooldown alternation — do",
+        "   NOT hand-roll ordering. EXCEPTION: KV-cache class params",
+        "   (`--max-num-seqs`, `--mem-fraction-static`, `--max-prefill-tokens`)",
+        "   remain high-leverage and follow the scoreboard as normal.",
+        "",
+        "2. `--cuda-graph-max-bs N` variants where `N < $CONC` are",
+        "   **silently dropped at the grid runner** (NOT a `policy_denied`;",
+        "   the runner just skips them and logs `multi-node-skipped`).",
+        "   Manual re-proposals are no-ops at runtime — they waste a turn",
+        "   but cannot crash anything. Prefer other `params` candidates",
+        "   from `SharedState.discovered_flags`.",
+    ]
 
 
 def _section_rules(rules_md: str) -> list[str]:
@@ -723,6 +1151,29 @@ def build_orchestration_prompt(
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
     ]
+    # N20-A: render the registered backends grid catalogue so the LLM
+    # can name a SUBSET (params.variants=['name', ...]) when proposing
+    # the `backends` action. Only emit when backends is in this run's
+    # enabled-action set; otherwise the catalogue is dead weight in
+    # the prompt.
+    if any(a.name == "backends" for a in actions):
+        sections.append(
+            _section_backends_grid_catalogue(framework=framework_norm),
+        )
+    # N20-A params: same conditional render, separate catalogue. The
+    # params grid is ~3x larger than backends so subset selection
+    # has larger leverage here.
+    if any(a.name == "params" for a in actions):
+        sections.append(
+            _section_params_grid_catalogue(framework=framework_norm),
+        )
+    # Multi-node doctrine: only rendered when running on a >=2-node RayJob.
+    # Single-node runs skip this entirely so their prompt stays bit-for-bit
+    # identical to the pre-multi-node-doctrine builds (snapshot diffs in
+    # test_prompt_assets only flip when the multi_node state file is set).
+    from ..action_executors._multi_node_env import is_multi_node
+    if is_multi_node():
+        sections.append(_section_multi_node_doctrine(kernel_enabled=kernel_enabled))
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
     sections.append(_section_rules(rules_md))
@@ -735,9 +1186,24 @@ def build_orchestration_prompt(
     return "\n\n".join(parts).rstrip() + "\n"
 
 
-def default_enabled_actions(*, no_kernel: bool) -> tuple[str, ...]:
-    """Return the canonical enabled-action set used by the CLI."""
-    return NO_KERNEL_ENABLED_ACTIONS if no_kernel else FULL_ENABLED_ACTIONS
+def default_enabled_actions(
+    *, no_kernel: bool, no_framework: bool = False,
+) -> tuple[str, ...]:
+    """Return the canonical enabled-action set used by the CLI.
+
+    Two independent toggles select among 4 combinations:
+
+    * ``no_kernel=False, no_framework=False`` (default) — full pipeline:
+      kernel-owned arms + ``framework_pr``.
+    * ``no_kernel=False, no_framework=True``  — kernel arms enabled, ``framework_pr`` stripped.
+    * ``no_kernel=True,  no_framework=False`` — kernel arms stripped, ``framework_pr`` kept.
+    * ``no_kernel=True,  no_framework=True``  — pure parameter-search
+      (baseline + params + backends + sweep + validate_stack + report).
+    """
+    base = NO_KERNEL_ENABLED_ACTIONS if no_kernel else FULL_ENABLED_ACTIONS
+    if no_framework:
+        return tuple(a for a in base if a != "framework_pr")
+    return base
 
 
 __all__ = [
