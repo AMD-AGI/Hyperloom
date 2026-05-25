@@ -429,6 +429,9 @@ class BaselineExecutor:
                 run_with_session_kill, cmd,
                 env=env, cwd=str(self.cwd), timeout=timeout_sec,
             )
+            subprocess_runtime_sec = max(
+                0.0, time.time() - subprocess_started_unix,
+            )
         except subprocess.TimeoutExpired as exc:
             timeout_candidates = sorted(output_dir.glob("benchmark_*"))
             timeout_destination = (
@@ -559,6 +562,17 @@ class BaselineExecutor:
             # OSL=256/TP=1) and produce ~10x lower throughput than baseline.
             # See `_workload_envs.py` for the bug history.
             "materialized_config": str(materialized_config_path),
+            # Wall-clock of the Magpie subprocess (success path only).
+            # Coordinator promotes this into
+            # ``SharedState.baseline_runtime_sec`` so the explore
+            # overtime-kill gate (``--explore-overtime-kill-ratio``)
+            # can derive a per-variant deadline of
+            # ``baseline_runtime_sec * ratio``. Measured around the
+            # ``run_with_session_kill`` call only; not exposed on the
+            # failure paths (timeout / nonzero / no_workspace /
+            # no_report / invalid_measurement) so a botched baseline
+            # cannot accidentally seed a tiny / huge deadline.
+            "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
         }
 
         # Parse accuracy eval results (GSM8K). RUN_EVAL=true was injected
