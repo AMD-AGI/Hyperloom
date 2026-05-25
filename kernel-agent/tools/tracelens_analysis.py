@@ -495,6 +495,7 @@ def update_status(
     started_at: str,
     error: str | None = None,
 ) -> None:
+    updated_at = utc_now()
     payload: dict[str, Any] = {
         "tool": "tracelens_analysis",
         "run_id": run_id,
@@ -502,12 +503,33 @@ def update_status(
         "current_step": current_step,
         "pid": os.getpid(),
         "started_at": started_at,
-        "updated_at": utc_now(),
+        "updated_at": updated_at,
         "log_path": str(log_path),
         "artifact_paths": artifact_paths,
         "offset_bytes": log_path.stat().st_size if log_path.exists() else 0,
         "last_lines": read_last_lines(log_path),
     }
+    # Hyperloom P2-3: emit ``ended_at`` + ``duration_seconds`` once the
+    # run reaches a terminal state so the session_breakdown collector
+    # can fill the ``tracelens_analysis`` timeline event with a real
+    # wall-clock duration (previously always None). Both fields are
+    # purely additive — older callers/readers that don't know about
+    # them ignore the keys, preserving back-compat with status JSONs
+    # written by previous kernel-agent revisions.
+    if state in ("succeeded", "failed", "aborted", "cancelled"):
+        payload["ended_at"] = updated_at
+        try:
+            start_dt = datetime.fromisoformat(started_at)
+            end_dt = datetime.fromisoformat(updated_at)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            payload["duration_seconds"] = max(
+                0.0, (end_dt - start_dt).total_seconds(),
+            )
+        except (ValueError, TypeError):
+            payload["duration_seconds"] = None
     if error:
         payload["error"] = error
     atomic_write_json(status_path, payload)
@@ -2169,7 +2191,9 @@ def main() -> int:
             # TRACELENS_ROOT / --tracelens-root for older release branches.
             skill = tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
             if not skill.exists():
-                raise FileNotFoundError(f"TraceLens standalone skill not found: {skill}")
+                skill = tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
+            if not skill.exists():
+                raise FileNotFoundError(f"TraceLens standalone skill not found (tried Agent/Analysis and AgenticMode/Standalone paths): {skill}")
             append_log(log_path, f"TraceLens skill: {skill}")
 
             tracelens_dir = run_dir / "tracelens"
