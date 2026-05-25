@@ -184,19 +184,23 @@ def _dispatch_multinode_revert(
 
 
 def _now() -> str:
+    """Return the current UTC timestamp as an ISO8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_name(value: str) -> str:
+    """Sanitize a filename component to a safe, short identifier."""
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "kernel"
 
 
 def _path_hash(path: Path) -> str:
+    """Return a short, stable hash for ``path`` to disambiguate backups."""
     return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
 
 
 def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
+    """Copy a file into the backup tree and return the manifest entry."""
     dst = backup_dir / group / f"{_path_hash(path)}_{path.name}"
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, dst)
@@ -204,6 +208,7 @@ def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
 
 
 def _source_text_looks_complete(text: str, suffix: str) -> bool:
+    """Heuristically check that the patch text is a full source file."""
     stripped = text.strip()
     if not stripped or "```" in stripped:
         return False
