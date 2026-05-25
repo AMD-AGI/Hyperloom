@@ -965,6 +965,20 @@ def _run_magpie(
     from ._multi_node_env import magpie_remote_env
     env.update(magpie_remote_env())
 
+    # #210 (Deval, comment 8): pin Magpie's InferenceX-resolution to
+    # ``$INFERENCEX_PATH`` so Magpie loads the SAME InferenceX checkout
+    # that Hyperloom's ``_inferencex_patcher`` has patched. Without
+    # this, Magpie's ``_resolve_default_inferencex_dir`` falls through
+    # to ``./InferenceX`` next to its repo or
+    # ``$XDG_CACHE_HOME/magpie/InferenceX``, either of which may be a
+    # separate, unpatched checkout — the symptom reported in #210
+    # comments 4 + 6. ``MAGPIE_INFERENCEX_PATH`` is the highest-
+    # precedence resolution rung in Magpie itself
+    # (``Magpie/modes/benchmark/inferencex.py:43``), so this is the
+    # documented contract for tying the two checkouts together.
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+    if inferencex_path:
+        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
     # Always-on RESULT_DIR default: covers Magpie scripts that respect
     # the env var (and would otherwise fall back to a hardcoded path).
     # Scripts that ignore RESULT_DIR (e.g. ``dsr1_fp8_mi300x.sh`` with its
