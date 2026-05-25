@@ -371,6 +371,15 @@ class SharedState:
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
     roofline_saturation_history: list[dict[str, Any]] = field(default_factory=list)
+    # N27 — outer roofline failure counter. Bumped by
+    # ``Coordinator._promote_to_shared_state`` on every failed
+    # ``roofline`` task and reset to 0 on the next successful one.
+    # The per-phase fallback in commit 6078012 ("per-phase fallback
+    # when auto-roofline fails") already handles the EXPLORE-degraded
+    # / KERNEL-fall-back-to-profile behaviour main's N27 fallback
+    # threshold targets; the counter exists here for prompt-side
+    # visibility (the LLM sees how many outer attempts failed).
+    roofline_failure_streak: int = 0
 
     # ------------------------------------------------------------------
     # F0-10 — F1/F2/F3 integration toggles (default off).
