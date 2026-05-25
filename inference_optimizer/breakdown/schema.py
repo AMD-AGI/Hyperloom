@@ -169,7 +169,7 @@ class Final(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 class PhaseEvent(TypedDict, total=False):
     ts: str
-    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / select_kernels / integrate / tracelens_analysis / closing
+    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / select_kernels / trace_analyze / tracelens_analysis / integrate / closing
     task_id: str
     kernel_id: str | None         # only for kernel-owned actions
     status: str                   # succeeded / failed
