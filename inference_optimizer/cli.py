@@ -581,6 +581,21 @@ def _seed_shared_state(
         except (TypeError, ValueError):
             return 0
 
+    # Fix E (--explore-overtime-kill-ratio): mirror the CLI value into
+    # the fresh SharedState so the ExploreExecutor can read it via the
+    # Coordinator-injected task.params on the very first explore round.
+    # ``0`` (and any non-positive) disables the gate.
+    explore_overtime_kill_ratio_raw = getattr(
+        args, "explore_overtime_kill_ratio", None,
+    )
+    try:
+        explore_overtime_kill_ratio = (
+            float(explore_overtime_kill_ratio_raw)
+            if explore_overtime_kill_ratio_raw is not None else 1.10
+        )
+    except (TypeError, ValueError):
+        explore_overtime_kill_ratio = 1.10
+
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -611,6 +626,7 @@ def _seed_shared_state(
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
         plateau_overrides=plateau_overrides,
+        explore_overtime_kill_ratio=explore_overtime_kill_ratio,
     )
     state.save(session_dir)
     return state
@@ -3674,6 +3690,54 @@ def _build_parser() -> argparse.ArgumentParser:
              "saturation exceeds 80%%. Soft hint only — never hard-"
              "rejects an LLM dispatch. Default off. Env: "
              "INFERENCE_OPTIMIZER_ROOFLINE_SATURATION_ADVISORY=1.",
+    )
+    # ------------------------------------------------------------------
+    # Fix E — per-variant explore overtime kill ratio.
+    #
+    # Mirrored into :attr:`SharedState.explore_overtime_kill_ratio`
+    # and read by :class:`ExploreExecutor` via task.params (Coordinator
+    # injects ``baseline_runtime_sec`` + ``explore_overtime_kill_ratio``
+    # alongside ``base_extra_args`` / ``base_tput`` on every explore
+    # task).
+    #
+    # Default 1.10: kill a single-variant Magpie run once its
+    # wall-clock exceeds the baseline run's wall-clock by +10 %. The
+    # killed variant is recorded with ``outcome='KILLED_OVERTIME'`` +
+    # ``runtime_sec`` + ``wall_clock_ratio_vs_baseline`` (no tput) so
+    # the orchestration LLM can tell "ran too slow → early kill" from
+    # "benchmark crashed" or "hit the hard variant timeout".
+    #
+    # Pass ``0`` (or any non-positive value) to disable the gate; the
+    # legacy ``variant_timeout_sec`` hard cap is still enforced in
+    # that case. The gate ONLY applies to the per-variant single-run
+    # step; the inlined stack rebench (Q4) intentionally uses the
+    # legacy timeout because a deep stack legitimately runs slower
+    # than the bare baseline.
+    # ------------------------------------------------------------------
+    def _env_float_or(default: float, env_var: str) -> float:
+        raw = os.environ.get(env_var, "").strip()
+        if not raw:
+            return float(default)
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return float(default)
+    opt.add_argument(
+        "--explore-overtime-kill-ratio",
+        dest="explore_overtime_kill_ratio",
+        type=float,
+        default=_env_float_or(
+            1.10, "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
+        ),
+        help="Per-variant explore overtime kill: each single-variant "
+             "Magpie run in the explore loop is reaped once its "
+             "wall-clock exceeds ``baseline_runtime_sec * RATIO``. The "
+             "variant is recorded with outcome=KILLED_OVERTIME + "
+             "runtime_sec + wall_clock_ratio_vs_baseline (no tput) so "
+             "the LLM can distinguish it from a hard timeout / crash. "
+             "Default 1.10 (kill at +10%% over baseline wall-clock). "
+             "Pass 0 to disable. Env: "
+             "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
     )
     # ------------------------------------------------------------------
     # v0.8 §3.9 — drop scoreboard (KB_design §3.9 §7)

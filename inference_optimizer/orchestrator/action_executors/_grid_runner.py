@@ -29,7 +29,7 @@ from typing import Any
 import yaml
 
 from ._robustness_pulse import pulse as _robustness_pulse
-from ._subprocess_kill import run_with_session_kill
+from ._subprocess_kill import OVERTIME_KILL_RETURNCODE, run_with_session_kill
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
@@ -173,6 +173,18 @@ class VariantResult:
     nonfatal_warnings: list[str] = field(default_factory=list)
     error: str | None = None
     note: str = ""
+    # Fix-E (Q3 — Q3c): wall-clock seconds the Magpie subprocess
+    # actually consumed. Populated on success AND on the
+    # ``killed_overtime`` path so the ExploreExecutor can record
+    # ``runtime_sec`` + ``wall_clock_ratio_vs_baseline`` against the
+    # variant ledger without re-measuring.
+    runtime_sec: float | None = None
+    # Fix-E: True iff this variant was reaped by the
+    # ``baseline_runtime_sec * explore_overtime_kill_ratio`` soft
+    # deadline (vs a regular crash / hard timeout / success). Caller
+    # is expected to demote this to a synthetic outcome
+    # ``KILLED_OVERTIME`` (no tput, no fingerprint promotion).
+    killed_overtime: bool = False
 
     @property
     def fingerprint(self) -> str:
@@ -201,6 +213,8 @@ class VariantResult:
             "nonfatal_warnings":  self.nonfatal_warnings,
             "error":              self.error,
             "note":               self.note,
+            "runtime_sec":        self.runtime_sec,
+            "killed_overtime":    self.killed_overtime,
         }
 
 
@@ -488,6 +502,7 @@ def _run_magpie(
     timeout_sec: int,
     cwd: str,
     result_dir: str | None = None,
+    soft_deadline_sec: float | None = None,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
@@ -497,6 +512,13 @@ def _run_magpie(
     when caller doesn't override) so even a Magpie script that respects
     ``$RESULT_DIR`` writes ``inferencex_result.json`` into the per-task
     workspace rather than ``/workspace/``.
+
+    ``soft_deadline_sec`` is the Fix-E per-variant overtime cap. When
+    set, ``run_with_session_kill`` reaps the tree once the deadline
+    elapses and returns a sentinel ``returncode = OVERTIME_KILL_RETURNCODE``
+    instead of raising ``TimeoutExpired``. The caller distinguishes
+    "overtime kill" (returncode sentinel) from "hard timeout"
+    (TimeoutExpired) and from "crash" (any other nonzero).
     """
     # Pre-clean: kill lingering server processes + clear shared memory so the
     # next vLLM/SGLang startup doesn't collide with stale resources.
@@ -543,6 +565,7 @@ def _run_magpie(
     # scripts in bugs.md §C #1). See ``_subprocess_kill.py``.
     proc = run_with_session_kill(
         cmd, env=env, cwd=cwd, timeout=timeout_sec,
+        soft_deadline_sec=soft_deadline_sec,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -562,6 +585,7 @@ async def run_grid(
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
     result_dir: str | None = None,
+    soft_deadline_sec: float | None = None,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -586,6 +610,16 @@ async def run_grid(
     ``$RESULT_DIR`` so scripts that respect the env var write into the
     variant slot. The salvage path is still wired in (mtime-gated per
     variant below) for scripts that ignore both knobs.
+
+    ``soft_deadline_sec`` (Fix E — per-variant overtime kill): when
+    set, every variant's Magpie subprocess is reaped once its
+    wall-clock exceeds this many seconds; the resulting
+    :class:`VariantResult` has ``status='failed'``,
+    ``killed_overtime=True`` and ``runtime_sec`` populated. Caller
+    (ExploreExecutor) demotes those to the synthetic
+    ``KILLED_OVERTIME`` outcome instead of running them through the
+    normal KEEP / REVERT / FAILED ladder. None / 0 = disabled (legacy
+    behaviour, only ``variant_timeout_sec`` is enforced).
     """
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
@@ -644,6 +678,7 @@ async def run_grid(
                 timeout_sec=variant_timeout_sec,
                 cwd=cwd,
                 result_dir=result_dir,
+                soft_deadline_sec=soft_deadline_sec,
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks (``server.log`` / GPU metrics /
@@ -660,11 +695,60 @@ async def run_grid(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed", error=f"timeout: {exc}", note=variant.note,
+                runtime_sec=round(
+                    max(0.0, time.time() - variant_started_unix), 2,
+                ),
                 nonfatal_warnings=[
                     f"harvested_leaked_artifact:{src}"
                     for src, _ in to_harvested
                 ],
             ))
+            await _pulse_after_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
+
+        # Fix E (Q3c): the soft overtime gate fired. Record a synthetic
+        # ``killed_overtime=True`` VariantResult with no tput / report
+        # so the ExploreExecutor can demote this variant to the
+        # ``KILLED_OVERTIME`` ledger outcome (no fingerprint promotion,
+        # no stack advance). We still run harvest_leaked_artifacts so
+        # any server.log / GPU metrics the wrapper managed to write
+        # before being reaped land alongside ``variant_NN_<name>/`` for
+        # post-mortem.
+        if rc == OVERTIME_KILL_RETURNCODE:
+            variant_runtime_sec = round(
+                max(0.0, time.time() - variant_started_unix), 2,
+            )
+            ok_candidates = sorted(slot.glob("benchmark_*"))
+            ok_destination = ok_candidates[-1] if ok_candidates else slot
+            ok_harvested = harvest_leaked_artifacts(
+                ok_destination,
+                subprocess_started_unix=variant_started_unix,
+            )
+            results.append(VariantResult(
+                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                extra_envs=dict(variant.extra_envs),
+                status="failed",
+                returncode=rc,
+                killed_overtime=True,
+                runtime_sec=variant_runtime_sec,
+                error=(
+                    f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
+                    f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
+                ),
+                note=variant.note,
+                nonfatal_warnings=[
+                    f"harvested_leaked_artifact:{src}"
+                    for src, _ in ok_harvested
+                ],
+            ))
+            log.info(
+                "_grid_runner: variant %s killed_overtime "
+                "(runtime=%.1fs deadline=%.1fs)",
+                variant.name, variant_runtime_sec,
+                float(soft_deadline_sec or 0.0),
+            )
             await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
@@ -768,6 +852,9 @@ async def run_grid(
             nonfatal_warnings=warnings,
             error=(stderr or stdout)[-2000:] if rc != 0 else None,
             note=variant.note,
+            runtime_sec=round(
+                max(0.0, time.time() - variant_started_unix), 2,
+            ),
         ))
         log.info(
             "grid_runner: variant %s tput=%.1f tok/s",

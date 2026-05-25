@@ -530,6 +530,194 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
     assert "stack_unstable" in rejected_reasons
 
 
+def test_default_stack_stable_pct_lowered_to_noise_band():
+    """Fix B unit-pin: the module default ``DEFAULT_STACK_STABLE_PCT``
+    must equal :data:`DEFAULT_KEEP_THRESHOLD_PCT` so the stack-rebench
+    gate stays inside the ±1 % inter-run noise band (the 0.5 % floor
+    used to silently downgrade real +0.3 % wins on MI300X)."""
+    from inference_optimizer.orchestrator.action_executors.explore import (
+        DEFAULT_KEEP_THRESHOLD_PCT,
+        DEFAULT_STACK_STABLE_PCT,
+    )
+    # Pin: defaults must match — both gates speak the same noise floor.
+    assert DEFAULT_STACK_STABLE_PCT == DEFAULT_KEEP_THRESHOLD_PCT == 0.2
+
+
+def test_stack_stable_floor_arithmetic_at_new_default():
+    """Fix B integration-pin: a rebench at +0.3 % vs baseline now sits
+    above ``base * (1 + 0.2/100)`` and would NOT trigger KEEP_UNSTABLE
+    eviction. Under the legacy 0.5 % default the same rebench was
+    below the floor — this test guards against any future revert."""
+    from inference_optimizer.orchestrator.action_executors.explore import (
+        DEFAULT_STACK_STABLE_PCT,
+    )
+    base = 4438.83   # mirrors the real-run baseline_tput in the bug report
+    rebench_tput = base * 1.003   # +0.3 %, just inside the noise band
+    stable_floor = base * (1.0 + DEFAULT_STACK_STABLE_PCT / 100.0)
+    assert rebench_tput > stable_floor, (
+        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT} would "
+        f"still reject +0.3% rebenches; floor={stable_floor:.2f}, "
+        f"rebench={rebench_tput:.2f}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_killed_overtime_no_tput_no_keep(
+    sub_agent_runner, tmp_path,
+):
+    """Fix E (Q3c): when the per-variant soft deadline fires, the
+    variant is recorded with outcome=KILLED_OVERTIME, no tput, no
+    KEEP/REVERT branch, and the running stack does NOT advance.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-overtime"
+
+    # Patch run_with_session_kill (where the soft_deadline lives) to
+    # return the OVERTIME_KILL_RETURNCODE sentinel directly. This
+    # bypasses the actual sleep / poll loop so the test is fast and
+    # deterministic. We patch it at the _grid_runner module symbol
+    # because that's where _run_magpie imports it from.
+    from inference_optimizer.orchestrator.action_executors._subprocess_kill import (
+        OVERTIME_KILL_RETURNCODE,
+    )
+
+    def _fake_kill(cmd, *args, **kwargs):
+        # Make sure the executor passed our deadline through.
+        assert kwargs.get("soft_deadline_sec") == pytest.approx(11.0)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=OVERTIME_KILL_RETURNCODE,
+            stdout="",
+            stderr="",
+        )
+
+    grid = [{
+        "name": "slow_variant",
+        "extra_args": "--slow-flag",
+        "extra_envs": {},
+        "provenance": "default_grid",
+    }]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir":  str(output_dir),
+            "base_tput":   800.0,
+            "grid":        grid,
+            "variant_timeout_sec": 60,
+            "baseline_runtime_sec": 10.0,
+            "explore_overtime_kill_ratio": 1.10,
+        },
+        idempotency_key="ex-overtime",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_kill,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    # Status is succeeded — KILLED_OVERTIME counts as a useful signal
+    # the LLM needs to see, not a hard failure of the explore task.
+    assert out["status"] == "succeeded"
+    # No winners; no KEEP_UNSTABLE; one loser tagged killed_overtime.
+    assert out["winners"] == []
+    assert out["keep_unstable_in_stack"] == []
+    assert len(out["losers"]) == 1
+    loser = out["losers"][0]
+    assert loser["name"] == "slow_variant"
+    assert loser["reason"] == "killed_overtime"
+    assert loser["tput"] is None
+    assert loser["gain_pct"] is None
+    assert loser["runtime_sec"] is not None
+    assert loser["wall_clock_ratio_vs_baseline"] is not None
+    # Ledger row carries the diagnostic fields.
+    fp = canonical_fingerprint("--slow-flag", {})
+    ledger = out["explore_search_update"]
+    te = ledger["tested"][fp]
+    assert te["outcome"] == "KILLED_OVERTIME"
+    assert te["tput"] is None
+    assert te["gain_pct"] is None
+    assert te["runtime_sec"] is not None
+    assert te["wall_clock_ratio_vs_baseline"] is not None
+    assert te["baseline_runtime_sec"] == pytest.approx(10.0)
+    assert te["overtime_kill_ratio"] == pytest.approx(1.10)
+    # Rejected ledger picked the variant up so a re-proposal hits the
+    # ledger.dedup path immediately.
+    rejected_reasons = {r["reason"] for r in ledger["rejected"]}
+    assert "killed_overtime" in rejected_reasons
+    # per_variant_outcomes surfaces the KILLED_OVERTIME row alongside
+    # KEEP / REVERT / FAILED / KEEP_UNSTABLE so Cortex KB sees it too.
+    outcomes = {row["variant_name"]: row["outcome"]
+                for row in out["per_variant_outcomes"]}
+    assert outcomes["slow_variant"] == "KILLED_OVERTIME"
+    # last_round summary surfaces the kill set so the prompt can see
+    # how many variants were reaped this round at a glance.
+    assert fp in out["explore_search_update"]["last_round"]["killed_overtime"]
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_overtime_disabled_when_ratio_zero(
+    sub_agent_runner, tmp_path,
+):
+    """Fix E (Q5): ratio=0 (or any non-positive) disables the gate; the
+    legacy ``variant_timeout_sec`` hard cap is the only gate. The
+    ExploreExecutor must NOT pass ``soft_deadline_sec`` in that case so
+    ``run_with_session_kill``'s legacy timeout semantics stay intact.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-no-overtime"
+
+    received_deadlines: list[float | None] = []
+
+    def _fake_kill(cmd, *args, **kwargs):
+        received_deadlines.append(kwargs.get("soft_deadline_sec"))
+        # Simulate a successful run so we can verify the legacy path
+        # still completes happily.
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=820.0)   # +2.5% KEEP
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir":  str(output_dir),
+            "base_tput":   800.0,
+            "grid": [{
+                "name": "fast_variant",
+                "extra_args": "--fast-flag",
+                "extra_envs": {},
+                "provenance": "default_grid",
+            }],
+            "variant_timeout_sec": 60,
+            "baseline_runtime_sec": 10.0,
+            "explore_overtime_kill_ratio": 0.0,   # disabled
+        },
+        idempotency_key="ex-overtime-off",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_kill,
+    ):
+        res = await sub.run_task(task)
+
+    # Every Magpie call must have received ``soft_deadline_sec=None``.
+    assert received_deadlines, "no Magpie calls were made"
+    assert all(d is None for d in received_deadlines)
+    out = res.result
+    assert out["status"] == "succeeded"
+
+
 @pytest.mark.asyncio
 async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_path):
     sub, tr, _ = sub_agent_runner

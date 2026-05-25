@@ -223,6 +223,37 @@ def test_plateau_kernel_zero_lookback_returns_false():
     assert "thresholds_disabled" in ev.get("reason", "")
 
 
+def test_plateau_kernel_empty_attempts_does_not_trigger():
+    """Fix A: zero kernel attempts must NOT flip plateau via the
+    ``recent_keep_gain == 0.0 < 0.5`` arm.
+
+    Pre-fix this returned ``(True, ...)`` the moment KERNEL entered
+    with an empty ``kernel_integrate_attempts`` ledger — coupled with
+    EXPLORE that produced no KEEPs (e.g. force-exit on low budget),
+    the session went EXPLORE → KERNEL → SWEEP without ever spawning a
+    single ``select_kernels`` / ``run_optimization`` request.
+    """
+    state = SimpleNamespace(kernel_integrate_attempts={})
+    triggered, ev = compute_plateau_kernel(state)
+    assert triggered is False
+    assert ev.get("reason") == "no_kernel_attempts_yet"
+    assert ev.get("attempts_seen") == 0
+
+
+def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
+    """Same Fix-A invariant when the ledger has keys but every entry
+    is structurally empty (resume cleanup edge case)."""
+    state = SimpleNamespace(
+        kernel_integrate_attempts={
+            "k_pruned": {"attempts": []},
+            "k_corrupt": {},
+        },
+    )
+    triggered, ev = compute_plateau_kernel(state)
+    assert triggered is False
+    assert ev.get("reason") == "no_kernel_attempts_yet"
+
+
 # ===========================================================================
 # 4. exit_normal_explore / exit_normal_kernel — wired to real plateau
 # ===========================================================================

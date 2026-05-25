@@ -87,8 +87,18 @@ DEFAULT_KEEP_THRESHOLD_PCT = 0.2
 
 # Stack rebench stability threshold. After a KEEP, the stack-applied
 # rebench tput must beat ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)``;
-# otherwise the variant is evicted. KB_design §3.4 §4.4: "保守值 0.5%".
-DEFAULT_STACK_STABLE_PCT = 0.5
+# otherwise the variant is evicted (KEEP_UNSTABLE → REVERT).
+#
+# Default lowered from 0.5% → 0.2% so the rebench gate matches
+# ``DEFAULT_KEEP_THRESHOLD_PCT`` (per-variant KEEP threshold). The 0.5%
+# default was originally KB_design §3.4 §4.4's "保守值"; in practice it
+# sat squarely inside the ±1% inter-run noise band observed on MI300X
+# (e.g. Qwen3-32B FP8: single-run +0.4% rebench dipping to −0.4% on the
+# 2nd run), which silently downgraded otherwise-real wins to
+# KEEP_UNSTABLE and pushed `cumulative_gain_validated` to 0%.
+# Matching the single-variant KEEP threshold keeps both decisions
+# consistent under the same noise floor.
+DEFAULT_STACK_STABLE_PCT = 0.2
 
 
 def _now_iso() -> str:
@@ -286,6 +296,36 @@ class ExploreExecutor:
             "enable_stack_rebench", self.enable_stack_rebench,
         ))
 
+        # Fix E (per-variant overtime kill — Q1: anchored on baseline
+        # wall-clock; Q4: single-variant runs only, NOT stack_rebench).
+        # The Coordinator injects ``baseline_runtime_sec`` and
+        # ``explore_overtime_kill_ratio`` into task.params from
+        # SharedState. When either is missing / non-positive the
+        # deadline stays None and the legacy ``variant_timeout_sec``
+        # hard cap is the only gate.
+        baseline_runtime_sec_raw = params.get("baseline_runtime_sec")
+        try:
+            baseline_runtime_sec = (
+                float(baseline_runtime_sec_raw)
+                if baseline_runtime_sec_raw is not None else 0.0
+            )
+        except (TypeError, ValueError):
+            baseline_runtime_sec = 0.0
+        overtime_kill_ratio_raw = params.get("explore_overtime_kill_ratio")
+        try:
+            overtime_kill_ratio = (
+                float(overtime_kill_ratio_raw)
+                if overtime_kill_ratio_raw is not None else 0.0
+            )
+        except (TypeError, ValueError):
+            overtime_kill_ratio = 0.0
+        if baseline_runtime_sec > 0 and overtime_kill_ratio > 0:
+            overtime_deadline_sec: float | None = (
+                baseline_runtime_sec * overtime_kill_ratio
+            )
+        else:
+            overtime_deadline_sec = None
+
         # Resolve framework from materialized YAML (informational only —
         # both sglang and vllm route through the same EXTRA_*_ARGS env;
         # _grid_runner picks the correct env name on render).
@@ -433,6 +473,8 @@ class ExploreExecutor:
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # 1. Run the single variant on top of the running stack.
+                #    ``soft_deadline_sec`` is the Fix-E overtime kill;
+                #    stack_rebench below intentionally omits it (Q4).
                 results = await run_grid(
                     base_yaml_path=config_path,
                     base_extra_args=stack_extra_args,
@@ -443,6 +485,7 @@ class ExploreExecutor:
                     gpu_type=resolved_gpu,
                     benchmark_script=override_script,
                     result_dir=override_result_dir,
+                    soft_deadline_sec=overtime_deadline_sec,
                 )
                 if not results:
                     # Defensive — run_grid returns a list of the same
@@ -451,6 +494,86 @@ class ExploreExecutor:
                     log.warning("explore: variant %s produced no result", gv.name)
                     continue
                 r = results[0]
+
+                # Fix E (Q3c): the per-variant overtime gate fired.
+                # Record a dedicated ``KILLED_OVERTIME`` row carrying
+                # ``runtime_sec`` + ``wall_clock_ratio_vs_baseline``
+                # (no tput, no gain — Q3 explicitly said "don't fake a
+                # number"). Skip every downstream gate (KEEP / REVERT /
+                # accuracy / stack_rebench) and dedup so a re-proposal
+                # of the same fingerprint hits the ``tested`` ledger
+                # immediately. The running stack is NOT advanced.
+                if getattr(r, "killed_overtime", False):
+                    variant_runtime = float(r.runtime_sec or 0.0)
+                    wall_clock_ratio = (
+                        round(variant_runtime / baseline_runtime_sec, 3)
+                        if baseline_runtime_sec > 0 else None
+                    )
+                    tested_update[fp] = {
+                        "fingerprint": fp,
+                        "name": gv.name,
+                        "extra_sglang_args": gv.extra_sglang_args,
+                        "extra_envs": dict(gv.extra_envs),
+                        "note": gv.note,
+                        "outcome": "KILLED_OVERTIME",
+                        "status": r.status,
+                        "tput": None,
+                        "gain_pct": None,
+                        "base_tput": running_base_tput,
+                        "round_id": round_id,
+                        "ts": _now_iso(),
+                        "provenance": provenance,
+                        "workload_signature": ws_sig,
+                        "framework": framework,
+                        "workspace": r.workspace,
+                        "kb_edge_id": kb_edge_id,
+                        "runtime_sec": round(variant_runtime, 2),
+                        "wall_clock_ratio_vs_baseline": wall_clock_ratio,
+                        "baseline_runtime_sec": round(
+                            baseline_runtime_sec, 2,
+                        ),
+                        "overtime_kill_ratio": overtime_kill_ratio,
+                    }
+                    if gv.name:
+                        name_index[gv.name] = fp
+                    rejected_update.append({
+                        "fingerprint": fp,
+                        "name": gv.name,
+                        "extra_sglang_args": gv.extra_sglang_args,
+                        "extra_envs": dict(gv.extra_envs),
+                        "note": gv.note,
+                        "reason": "killed_overtime",
+                        "gain_pct": None,
+                        "tput": None,
+                        "runtime_sec": round(variant_runtime, 2),
+                        "wall_clock_ratio_vs_baseline": wall_clock_ratio,
+                        "round_id": round_id,
+                        "ts": _now_iso(),
+                        "provenance": provenance,
+                    })
+                    losers.append({
+                        "fingerprint": fp,
+                        "name": gv.name,
+                        "extra_sglang_args": gv.extra_sglang_args,
+                        "extra_envs": dict(gv.extra_envs),
+                        "provenance": provenance,
+                        "gain_pct": None,
+                        "tput": None,
+                        "reason": "killed_overtime",
+                        "workspace": r.workspace,
+                        "runtime_sec": round(variant_runtime, 2),
+                        "wall_clock_ratio_vs_baseline": wall_clock_ratio,
+                    })
+                    log.warning(
+                        "explore: variant %s KILLED_OVERTIME "
+                        "(runtime=%.1fs vs baseline=%.1fs, ratio=%.2fx, "
+                        "kill_ratio=%.2fx); skipping KEEP/REVERT ladder.",
+                        gv.name, variant_runtime, baseline_runtime_sec,
+                        wall_clock_ratio if wall_clock_ratio is not None else -1.0,
+                        overtime_kill_ratio,
+                    )
+                    continue
+
                 # Carry the variant's content-only fingerprint forward
                 # (run_grid recomputes from args/envs which match exactly).
                 gain = _gain_pct(r.output_throughput, running_base_tput)
@@ -743,7 +866,10 @@ class ExploreExecutor:
             if te.get("round_id") != round_id:
                 continue
             outcome = str(te.get("outcome") or "")
-            if outcome not in ("KEEP", "REVERT", "FAILED", "KEEP_UNSTABLE"):
+            if outcome not in (
+                "KEEP", "REVERT", "FAILED", "KEEP_UNSTABLE",
+                "KILLED_OVERTIME",
+            ):
                 continue
             metrics: dict[str, Any] = {}
             if te.get("tput") is not None:
@@ -752,6 +878,15 @@ class ExploreExecutor:
                 metrics["gain_pct"] = te.get("gain_pct")
             if te.get("stack_rebench_tput") is not None:
                 metrics["stack_rebench_tput"] = te.get("stack_rebench_tput")
+            # Fix E: surface wall-clock + kill ratio so the orchestration
+            # LLM (and downstream KB writers) see "ran too slow → early
+            # kill" instead of an opaque FAILED row with no signal.
+            if te.get("runtime_sec") is not None:
+                metrics["runtime_sec"] = te.get("runtime_sec")
+            if te.get("wall_clock_ratio_vs_baseline") is not None:
+                metrics["wall_clock_ratio_vs_baseline"] = te.get(
+                    "wall_clock_ratio_vs_baseline",
+                )
             per_variant_outcomes.append({
                 "variant_name": str(te.get("name") or ""),
                 "outcome":      outcome,
@@ -773,6 +908,12 @@ class ExploreExecutor:
             })
 
         # ``last_round`` summary for the prompt / breakdown.
+        killed_overtime_fps = [
+            str(te.get("fingerprint") or "")
+            for te in tested_update.values()
+            if te.get("round_id") == round_id
+            and te.get("outcome") == "KILLED_OVERTIME"
+        ]
         last_round_summary = {
             "round_id": round_id,
             "base_tput": base_tput,
@@ -782,6 +923,7 @@ class ExploreExecutor:
             ],
             "round_winners": [w["fingerprint"] for w in winners],
             "keep_unstable": [k["fingerprint"] for k in keep_unstable],
+            "killed_overtime": killed_overtime_fps,
             "skipped_dup": skipped_dup,
             "ts": _now_iso(),
         }
@@ -817,9 +959,15 @@ class ExploreExecutor:
             output_throughput = None
 
         # Successful in the M3 sense = at least one bench actually
-        # produced a measurement (KEEP, REVERT-with-gain, or KEEP_UNSTABLE).
+        # produced a measurement (KEEP, REVERT-with-gain, KEEP_UNSTABLE)
+        # OR was deliberately reaped by the Fix-E overtime gate
+        # (KILLED_OVERTIME) — the latter is a real, useful signal the
+        # LLM needs to see in ``per_variant_outcomes`` to avoid
+        # re-proposing the same heavy variant on the next round.
         produced_measurement = any(
-            t.get("outcome") in ("KEEP", "REVERT", "KEEP_UNSTABLE")
+            t.get("outcome") in (
+                "KEEP", "REVERT", "KEEP_UNSTABLE", "KILLED_OVERTIME",
+            )
             for t in tested_update.values()
             if t.get("round_id") == round_id
         )
