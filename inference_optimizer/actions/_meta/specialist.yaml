@@ -26,7 +26,7 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 8
 lease_ttl_sec: 1800
-description: "Dispatch an LLM specialist sub-agent on the research_lane; it reads KB / PR feed for the requested domain, optionally writes patches under runs/specialist/<task_id>/worktree/, and emits exactly one specialist_done intent on exit."
+description: "Dispatch an LLM specialist sub-agent on research_lane; reads KB / PR feed for the domain, optionally writes patches under runs/specialist/<task_id>/worktree/, emits one specialist_done intent."
 pipeline_phase: explore
 typical_runtime_min: 6.0
 applicable_when:
