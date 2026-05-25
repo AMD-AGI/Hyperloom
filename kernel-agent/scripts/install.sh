@@ -107,11 +107,28 @@ GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 # Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
 # memory together. Keep this overridable so future GEAK fixes can move Hyperloom
 # forward without reworking the installer contract.
-GEAK_REF="${GEAK_REF:-v3.1.0}"
+GEAK_REF="${GEAK_REF:-v3.2.0}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+# Run mode for the GEAK CLI. Drives ``run.mode`` in the generated
+# ``$GEAK_CONFIG`` yaml: ``full`` (default) selects the 2 h / 5-round preset
+# at ``run.budgets.full`` and ``run.presets.full``; ``quick`` selects the
+# 1 h / 2-round preset for smoke tests. GEAK's ``mini.py:435`` mode
+# precedence still honours later overrides (CLI ``--mode`` or
+# LLM-parsed task hints), but this is the yaml-default operators can set
+# at install time without hand-editing $GEAK_CONFIG.
+GEAK_RUN_MODE_VAL="${GEAK_RUN_MODE:-full}"
+# Validate inline (the ``die`` helper is defined further down; calling it
+# from this top-level scope would error with "die: command not found").
+case "$GEAK_RUN_MODE_VAL" in
+  quick|full) ;;
+  *)
+    echo "[kernel-agent ERROR] GEAK_RUN_MODE must be 'quick' or 'full'; got '$GEAK_RUN_MODE_VAL'" >&2
+    exit 1
+    ;;
+esac
 RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
 # RAG index build device. Resolution:
 #   1. If $GEAK_RAG_INDEX_DEVICE is set explicitly, honor it verbatim
@@ -390,7 +407,18 @@ ensure_node() {
 
   log "installing Node.js 20 from NodeSource"
   apt-get -y purge libnode-dev libnode72 nodejs nodejs-doc npm >/dev/null 2>&1 || true
-  if ! curl -fsSL https://deb.nodesource.com/setup_20.x 2>/dev/null | bash - >/dev/null 2>&1; then
+  local ns_url="https://deb.nodesource.com/setup_20.x"
+  local ns_sha="2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be"
+  local ns_script="/tmp/nodesource_setup_20.x"
+  if ! curl -fsSL "$ns_url" -o "$ns_script"; then
+    verify_die "NodeSource setup download failed; cannot install Node.js/npm for claude/codex CLIs"
+    return 0
+  fi
+  if ! echo "${ns_sha}  ${ns_script}" | sha256sum -c - >/dev/null 2>&1; then
+    verify_die "NodeSource setup SHA256 mismatch; aborting Node.js/npm install"
+    return 0
+  fi
+  if ! bash "$ns_script" >/dev/null 2>&1; then
     verify_die "NodeSource setup failed; cannot install Node.js/npm for claude/codex CLIs"
     return 0
   fi
@@ -475,7 +503,7 @@ ensure_tracelens() {
   # $TRACELENS_ROOT is on a read-only mount (the WekaFS default), pip
   # install -e fails because it must write *.egg-info into the source
   # tree, and at runtime tools/tracelens_analysis.py re-runs the same
-  # editable install in a subprocess on every select_kernels request,
+  # editable install in a subprocess on every trace_analyze request,
   # producing a tight failure loop. Detecting unwritable source up front
   # and mirroring to ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to
   # ${HYPERLOOM_ROOT}/geak / ${HYPERLOOM_ROOT}/OOB/oob_cli) lets both
@@ -535,20 +563,20 @@ ensure_geak() {
     # no-op so the flag is safe to keep unconditionally).
     _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
     run python3 -m pip install ${_PIP_FLAGS} "${HYPERLOOM_ROOT}/geak"
-    # GEAK v3.1.0 ships 5 MCP tools under mcp_tools/; all of them are
-    # imported by the bundled ``minisweagent`` at preprocess time:
+    # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
+    # by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
-    #   * profiler-mcp               — Metrix instrumented profiling
-    #                                  (preprocessor.py:1073 import)
-    #   * metrix-mcp                 — backend for profiler-mcp
+    #   * profiler-mcp               — Metrix-backed instrumented profiling
+    #                                  (preprocessor.py import); Metrix is now
+    #                                  a PyPI dep declared in its pyproject,
+    #                                  not a separate mcp_tools/ folder.
     #   * cross-session-memory-mcp   — GEAK_MEMORY_STORE_PATH retriever
     #   * automated-test-discovery   — pre-fills eval_command harness
-    # Installing only rag-mcp (the historical default) leaves the
-    # other four ``ModuleNotFoundError`` at runtime — observed on the
-    # 2026-05-15 Qwen3-32B GEAK attempts where ``profiler_mcp`` was
-    # missing and every GEAK attempt aborted in ~4 minutes with a
-    # zero-byte baseline. Install all five together.
-    for _geak_mcp in rag-mcp profiler-mcp metrix-mcp \
+    # v3.1.0 -> v3.2.0 change: ``metrix-mcp`` folder was removed and the
+    # metrix runtime is now consumed transitively via profiler-mcp's
+    # ``dependencies = ["metrix>=0.1.0"]``. Listing it here again would
+    # break install with "File ... does not exist".
+    for _geak_mcp in rag-mcp profiler-mcp \
                     cross-session-memory-mcp automated-test-discovery; do
       run python3 -m pip install ${_PIP_FLAGS} \
         "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
@@ -583,6 +611,28 @@ model:
     max_tokens: 16384
 tools:
   rag: true
+run:
+  mode: ${GEAK_RUN_MODE_VAL}
+  budgets:
+    quick:
+      total_s: 3600
+      preprocess_soft_cap_s: 900
+      preprocess_hard_cap_fraction: 0.5
+      finalize_grace_s: 300
+      kill_buffer_s: 60
+    full:
+      total_s: 7200
+      preprocess_soft_cap_s: 900
+      preprocess_hard_cap_fraction: 0.5
+      finalize_grace_s: 300
+      kill_buffer_s: 60
+  presets:
+    quick:
+      orchestrator:
+        max_rounds: 2
+    full:
+      orchestrator:
+        max_rounds: 5
 EOF
       chmod 600 "$GEAK_CONFIG"
       grep -Eq '^[[:space:]]*model_class:[[:space:]]*litellm[[:space:]]*$' "$GEAK_CONFIG" \
@@ -808,6 +858,7 @@ write_env_file() {
     # mirror instead of falling back to the read-only /wekafs default.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
+    [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
     [ -n "${GEAK_API_KEY_VAL}" ] && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
     [ -n "${GEAK_BASE_URL_VAL}" ] && echo "export GEAK_BASE_URL='${GEAK_BASE_URL_VAL}'"

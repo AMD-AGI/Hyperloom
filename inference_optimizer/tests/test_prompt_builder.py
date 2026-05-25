@@ -186,6 +186,11 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
+        # N20-A "BACKENDS GRID CATALOGUE" + "PARAMS GRID CATALOGUE"
+        # sections retired on this branch alongside the v0.6
+        # backends / params executors (KB_design §3.4 / Dead-A).
+        # The v0.8 ``explore`` action covers the same surface
+        # internally; no per-action grid catalogue is rendered.
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]

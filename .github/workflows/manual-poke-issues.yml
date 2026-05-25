@@ -30,10 +30,12 @@ on:
         default: '48'
 
 permissions:
-  issues: write
+  contents: read
 
 jobs:
   scan-and-poke:
+    permissions:
+      issues: write
     runs-on: ubuntu-latest
     steps:
       - name: Fetch SaFE team members
