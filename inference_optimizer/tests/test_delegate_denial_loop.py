@@ -390,13 +390,17 @@ def test_phase_explore_allowlist_drops_legacy_actions():
     EXPLORE-phase serving-lane-locked patch integration step (consumes
     specialist worktree patches). IR-7 (Honest self-stop) added
     ``assess_remaining_gaps`` as a thin wrapper that dispatches the
-    session_steward_specialist domain. Both are canonical additions,
-    not legacy re-emergences; the test below still pins out the v0.6
-    deprecated names via ``test_full_enabled_actions_drops_legacy_grid_actions``.
+    session_steward_specialist domain. Commit 8aeaa11 (cumulative_gain
+    hotfix) added ``profile`` as an LLM-proposable escape hatch for the
+    sequence-gate when ``--use-roofline-composite=False`` (with composite
+    on, ``Coordinator._on_enter_explore``'s auto-roofline hook satisfies
+    the same prereq). All three are canonical v0.8 additions, not legacy
+    re-emergences; the test below still pins out the v0.6 deprecated
+    names via ``test_full_enabled_actions_drops_legacy_grid_actions``.
     """
     assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
         "explore", "specialist", "integrate_patch",
-        "assess_remaining_gaps", "recover",
+        "assess_remaining_gaps", "profile", "recover",
     })
 
 
