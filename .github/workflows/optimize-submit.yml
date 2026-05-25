@@ -277,7 +277,12 @@ jobs:
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
-          INPUT_ALL_ARTIFACTS:    ${{ github.event.inputs.all_artifacts }}
+          # Cron rotates through the production pool — operators can't go
+          # back and re-fetch sandbox state after the fact, so force
+          # `--all-artifacts=true` on schedule. workflow_dispatch keeps
+          # the user-provided value so manual runs can still pull only
+          # the three contract files when they want a faster batch.
+          INPUT_ALL_ARTIFACTS:    ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.all_artifacts }}
           INPUT_DRY_RUN:          ${{ github.event.inputs.dry_run }}
           MATRIX_POOL_ID:         ${{ matrix.pool_id }}
           MATRIX_POOL_INDEX:      ${{ matrix.pool_index }}
