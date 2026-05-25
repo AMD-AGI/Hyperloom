@@ -5859,11 +5859,11 @@ class Coordinator:
                     ):
                         self.shared_state.record_kernel_opt(result)
                     # Note: main commit ce36e70 also routes the decision
-                    # into a per-action scoreboard (``_score_action_keep``
-                    # / ``_score_action_no_promote``); the scoreboard was
-                    # retired by KB_design §3.9 on this branch (see
-                    # docs/integration/MAIN_FEATURES_DROPPED.md §4), so
-                    # those calls are omitted.
+                    # into a per-action scoreboard (KEEP / no-promote
+                    # accounting on the action-priority table). The
+                    # scoreboard was retired by KB_design §3.9 on this
+                    # branch (see docs/integration/MAIN_FEATURES_DROPPED.md
+                    # §4), so the post-record bookkeeping is omitted.
                     self.shared_state.save(self.session_dir)
                 if kind == "integrate":
                     if result.get("status") != "skipped":
