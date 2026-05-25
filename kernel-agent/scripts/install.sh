@@ -112,6 +112,23 @@ OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
 GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+# Run mode for the GEAK CLI. Drives ``run.mode`` in the generated
+# ``$GEAK_CONFIG`` yaml: ``full`` (default) selects the 2 h / 5-round preset
+# at ``run.budgets.full`` and ``run.presets.full``; ``quick`` selects the
+# 1 h / 2-round preset for smoke tests. GEAK's ``mini.py:435`` mode
+# precedence still honours later overrides (CLI ``--mode`` or
+# LLM-parsed task hints), but this is the yaml-default operators can set
+# at install time without hand-editing $GEAK_CONFIG.
+GEAK_RUN_MODE_VAL="${GEAK_RUN_MODE:-full}"
+# Validate inline (the ``die`` helper is defined further down; calling it
+# from this top-level scope would error with "die: command not found").
+case "$GEAK_RUN_MODE_VAL" in
+  quick|full) ;;
+  *)
+    echo "[kernel-agent ERROR] GEAK_RUN_MODE must be 'quick' or 'full'; got '$GEAK_RUN_MODE_VAL'" >&2
+    exit 1
+    ;;
+esac
 RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
 # RAG index build device. Resolution:
 #   1. If $GEAK_RAG_INDEX_DEVICE is set explicitly, honor it verbatim
@@ -584,7 +601,7 @@ model:
 tools:
   rag: true
 run:
-  mode: full
+  mode: ${GEAK_RUN_MODE_VAL}
   budgets:
     quick:
       total_s: 3600
