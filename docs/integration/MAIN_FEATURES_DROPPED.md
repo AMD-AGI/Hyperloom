@@ -131,3 +131,63 @@ Reconciliation summary (m3-done):
 - **ADOPTED**: 14 of 28 (~50%)
 - **DROPPED**: 9 (scoreboard / validate_stack / v0.6 dependencies)
 - **DONE in earlier F/M phases**: 5
+
+## 类别 7b: M4 (post-m3 main commits)
+
+> M4-extracted: which commits from `origin/main` between `m3-staging`
+> (PR #288 follow-up window) and the M4 merge head were
+> ADOPTED / ADAPTED / DROPPED. See `plan_main_merge/M4_late_features.MD`
+> for the per-file decision table and conflict resolutions.
+
+| Commit | Decision | Reason / replacement |
+|---|---|---|
+| 13664b7 docstrings core orchestrator | DROP | Documentation-only; LLM-authored, conflicts with our diverged surface |
+| 58c9670 add compliance docs + harden CI | ADAPT | Adopt CI hardening (`.github/workflows/manual-poke-issues.yml`); compliance docs already on this branch |
+| fc31475 magpie MAGPIE_INFERENCEX_PATH pin | ADOPT MP | M4 §3 logic merge with our `8aeaa11` soft_deadline_sec (orthogonal) |
+| 7e3c8e9 post-profile trace structure validator | ADOPT MP | M4 §2.2 B-2 — route validator warnings through N36 chunk-quality gate |
+| 29267fe inferencex-patcher patch every root | ADOPT CP | Plumbing fix; v0.8-compatible |
+| 9d62e8e breakdown mirror session_breakdown.json | ADOPT MP | M4 §2.1 B-1 |
+| d65c2d8 kernel_optimization remove obsolete 1.50x + homogeneous | ADOPT CP | Cleanup; matches our heterogeneous default |
+| 50b2253 framework-agent untrack auto-generated env.sh | ADOPT CP | Hygiene |
+| 26d2c64 framework-agent portable env.sh | ADOPT CP | Hygiene |
+| a709990 breakdown drop unused pytest import | ADOPT CP | Lint cleanup |
+| bbb143d breakdown v1.1 roofline + data_provenance | ADOPT MP | M4 §2.1 B-1 |
+| e9415ad PR-I align min_gpu_pct default | ADOPT MP | M4 §2.3 B-3 |
+| c4a519b drop design/roofline-v2.md from PR | ALREADY DONE | File not on this branch |
+| cd43641 breakdown v1.1 fill coverage gaps + KDP | ADOPT MP | M4 §2.1 B-1 |
+| 81f4e06 trust GEAK correctness by default | ADOPT MP | M4 §2.3 B-3 (mitigated by 1010c06 status=complete guard) |
+| 893bc6f shared-state propagate task_groups | ADOPT CP | Plumbing; SharedState write goes through validated helper |
+| 2e06fc8 ladder best-selection prefer KEEP > micro | ADOPT MP | M4 §2.3 B-3 |
+| 1010c06 opt-in trust GEAK correctness on complete | ADOPT MP | M4 §2.3 B-3 — the guard that makes 81f4e06 safe |
+| cb97e00 codeql second pass cleanup | ADAPT | Adopt clean imports/excepts that touch surviving v0.8 files; skip those touching retired files |
+| 7e0eed9 codeql first pass cleanup | ADAPT | Same as above |
+| 73773fa framework-agent install.sh prefer /opt/venv | ADOPT CP | M4 §4 housekeeping |
+| 166a45a drop legacy --framework-gap CLI flags | DONE in F2 | We never adopted these flags |
+| 13b3ae2 framework_pr first-explore priority rule | DROP | Violates IR-4 (PR-A9 specialist-first); see §3 |
+| 9159cde --no-kernel / --no-framework arm toggles | ADOPT CP | Compatible with our specialist-first wiring |
+| 9ea1885 integrate framework-agent as bandit arm | DONE in F2 | Bandit concept retired (§3.9 priors → KB); we kept the wiring without the bandit label |
+| c37d68a framework-agent pre-stage by default | DONE in F2 | Pre-stage already wired in F2 |
+| c6e4aa6 framework-agent pre-stage hook + B2 routing | DONE in F2 | Same |
+| 1252b36 framework-agent remove deploy/ | DROP | Already removed on our side |
+| 7bcbeee framework-agent remove deploy/README.md | DROP | Same |
+| 418dcc3 framework-agent PR exploration tool | DONE in F2 | PR Monitor wired into specialist via F2 |
+| c900791 yield hot_kernel_unfinished gate to N19c | ADOPT MP | M4 §2.3 B-3 — no death-spiral safety |
+| 0270b67 deny report while untried hot reusable | ADOPT MP | M4 §2.3 B-3 |
+| 7bba999 filter rejected/exhausted/in-flight | ADOPT MP | M4 §2.3 B-3 |
+| 90b187a retire kernel after 1 failed ladder | ADOPT MP | M4 §2.3 B-3 |
+| 75c2b73 isolate batch sub-task exceptions | ADOPT MP | M4 §2.3 B-3 — asyncio.gather hardening |
+| 1760ce0 silence no_levers_found while kernel_opt in flight | ADOPT MP | M4 §2.4 B-4 |
+| ce36e70 GEAK 90min wrapper timeout + multi-KEEP queue | ADOPT MP | M4 §2.3 B-3 |
+| 0b55fc5 manual-poke skip stale label | ADOPT CP | M4 §4 housekeeping |
+| 1cd9f7d default batch fanout 3 -> 8 + candidates_path | ADOPT MP | M4 §2.3 B-3 |
+| c087580 shared TraceLens base64 sanitizer + roofline_snapshot split | VERIFY / ADOPT CP | Cross-check against N11 (sanitizer already on branch) — if module split is missing, adopt CP |
+| 97318ee robustness/no_levers_found defer until explore | ADOPT MP | M4 §2.4 B-4 |
+| 468504f robustness multi-node elapsed floor 45→60 | ADOPT MP | M4 §2.4 B-4 |
+
+Reconciliation summary (m4-staging):
+
+- Additional commits audited: ~40 since the m3-done window.
+- **ADOPTED (CP or MP)**: ~26
+- **DROPPED**: 4 (IR-4 conflict / already-removed deploy / docstring noise)
+- **DONE in earlier F/M phases**: 7
+- **ADAPTED**: 3 (codeql cleanups split by file)
