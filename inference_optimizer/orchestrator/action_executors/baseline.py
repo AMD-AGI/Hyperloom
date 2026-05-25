@@ -392,6 +392,20 @@ class BaselineExecutor:
         # `python3` resolves to one with torch+rocm. Magpie YAML also sets
         # this but defending in depth costs nothing.
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+        # #210 (Deval, comment 8): pin Magpie's InferenceX-resolution
+        # to ``$INFERENCEX_PATH`` so Magpie loads the SAME InferenceX
+        # checkout that Hyperloom's ``_inferencex_patcher`` has
+        # patched. ``MAGPIE_INFERENCEX_PATH`` is the highest-precedence
+        # resolution rung in Magpie's
+        # ``_resolve_default_inferencex_dir`` (``Magpie/modes/
+        # benchmark/inferencex.py:43``); without setting it, Magpie
+        # falls through to ``./InferenceX`` next to its repo or the
+        # ``$XDG_CACHE_HOME/magpie/InferenceX`` cache, either of which
+        # may be a separate, unpatched checkout (the symptom reported
+        # in #210 comments 4 + 6).
+        inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+        if inferencex_path:
+            env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Always-on ``$RESULT_DIR`` default: covers Magpie scripts that
         # respect the env var (and would otherwise fall back to a
         # hardcoded path under ``/workspace/``). Scripts that ignore
@@ -433,10 +447,11 @@ class BaselineExecutor:
         if not ctx_extra.get("mn_round_restarted"):
             try:
                 # PD knobs (pd_mode / pd_prefill_nodes / pd_decode_nodes
-                # / ...) are resolved by the helper from $PD_* env (set
-                # by cli.py) and fall back to state.json — keeping this
-                # call site identical between colocated and disaggregated
-                # runs.
+                # / pd_prefill_tp / pd_decode_tp / pd_transfer_backend /
+                # pd_ib_device) are resolved by the helper from $PD_* env
+                # (set by cli.py) and fall back to state.json — keeping
+                # this call site identical between colocated and
+                # disaggregated runs (the agent only changes CLI flags).
                 await restart_server_for_round(
                     extra_sglang_args=str(params.get("extra_sglang_args") or ""),
                     framework=os.environ.get("FRAMEWORK") or None,

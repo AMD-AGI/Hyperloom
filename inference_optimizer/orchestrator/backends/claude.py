@@ -188,6 +188,10 @@ class ClaudeBackend:
             max_turns=max_turns_use,
             system_prompt=system_prompt,
         )
+        # Combine N6 (cache metric extraction via 4-tuple from
+        # _invoke_and_collect) with main's timeout guard (#243 area):
+        # wrap the SDK call in asyncio.wait_for so an upstream proxy
+        # stall doesn't park the reactor indefinitely.
         try:
             intents, raw_text, tool_block_count, usage = await asyncio.wait_for(
                 self._invoke_and_collect(full_prompt, options),

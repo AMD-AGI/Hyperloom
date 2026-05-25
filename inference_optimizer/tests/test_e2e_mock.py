@@ -4,7 +4,7 @@ Covers the full P0 main path with all 4 agents wired to mock backends:
 
 * Orchestration proposes → Critic mock approves → task materialized →
   dispatcher runs the registered baseline runner → succeeded.
-* Orchestration emits REQUEST{target=kernel, kind=select_kernels} →
+* Orchestration emits REQUEST{target=kernel, kind=trace_analyze} →
   Coordinator mirrors to kernel inbox → Kernel mock auto-RESPONSEs →
   Coordinator routes response back to orchestration inbox.
 * Robustness mock keeps ticking heartbeats throughout — no scheduling
@@ -59,14 +59,14 @@ async def test_mock_kernel_responds_to_request():
     prompt = (
         "Inbox for kernel:\n"
         "  seq=4 msg_id=cafe1234 from=orchestration topic=request "
-        "payload={'target_agent': 'kernel', 'kind': 'select_kernels', 'params': {'top_k': 5}}"
+        "payload={'target_agent': 'kernel', 'kind': 'trace_analyze', 'params': {'top_k': 5}}"
     )
     res = await backend.run(prompt)
     assert len(res.intents) == 1
     intent = res.intents[0]
     assert intent.type == IntentType.RESPONSE
     assert intent.payload["in_reply_to"] == "cafe1234"
-    assert intent.payload["kind"] == "select_kernels_done"
+    assert intent.payload["kind"] == "trace_analyze_done"
     assert intent.payload["status"] == "ok"
 
 
@@ -76,7 +76,7 @@ async def test_mock_kernel_dedups_same_request():
     prompt = (
         "Inbox for kernel:\n"
         "  seq=1 msg_id=ded00ad0 from=orchestration topic=request "
-        "payload={'target_agent': 'kernel', 'kind': 'select_kernels'}"
+        "payload={'target_agent': 'kernel', 'kind': 'trace_analyze'}"
     )
     r1 = await backend.run(prompt)
     r2 = await backend.run(prompt)
@@ -149,7 +149,7 @@ async def test_e2e_request_response_round_trip(session_dir):
     Uses a kind (`explore_options`) that is NOT registered in
     KERNEL_REQUEST_HANDLERS so the request flows through the LLM-backed
     kernel agent instead of being intercepted by a programmatic handler.
-    Production kinds (select_kernels / run_optimization / integrate)
+    Production kinds (trace_analyze / run_optimization / integrate)
     have dedicated handler tests in test_p3_bugfixes.py and the
     integration suite.
     """
