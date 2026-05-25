@@ -13,10 +13,12 @@ on:
   workflow_dispatch:           # Manual trigger for testing
 
 permissions:
-  issues: write
+  contents: read
 
 jobs:
   stale:
+    permissions:
+      issues: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/stale@v9

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-SCHEMA_VERSION = "hyperloom.session_breakdown.v1"
+SCHEMA_VERSION = "hyperloom.session_breakdown.v1.1"
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +41,24 @@ class SessionMeta(TypedDict, total=False):
     session_dir: str
     tick_count: int
     image: str | None             # container image fully-qualified (or None if not configured)
+    # v1.1 additions — image fingerprint + real session lifecycle timestamps.
+    # ``image_id`` is the short / human-friendly image tag suffix (e.g. ``rocm/sglang:6.4``)
+    # when the manifest carries a fully-qualified ``image`` plus a separate id; ``image_digest``
+    # is the immutable content digest (``sha256:...``) when known. Both default to None.
+    image_id: str | None
+    image_digest: str | None
+    # Real session start / end timestamps and duration, distinct from the
+    # legacy ``ended_at_utc`` field which records dump (export) time for
+    # backward compatibility with existing consumers. When the
+    # orchestrator wrote ``state.start_ts`` we propagate it verbatim into
+    # ``session_started_at_utc``; ``session_ended_at_utc`` is derived from
+    # ``state.closing_started_unix`` (preferred) or the latest
+    # phase_timeline event end, and ``session_duration_seconds`` is the
+    # arithmetic difference (rounded to 1s). All three are None when the
+    # underlying signal is missing.
+    session_started_at_utc: str | None
+    session_ended_at_utc: str | None
+    session_duration_seconds: float | None
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +96,7 @@ class BaselineAttemptSummary(TypedDict, total=False):
     key_metric: float | None
     workspace: str | None
     error_class: str | None
+    invocation: BenchmarkInvocation
 
 
 class BenchmarkInvocation(TypedDict, total=False):
@@ -101,6 +120,14 @@ class BenchmarkInvocation(TypedDict, total=False):
     server_log_path: str | None   # for debug
 
 
+class WorkloadDims(TypedDict, total=False):
+    conc: int | None
+    isl: int | None
+    osl: int | None
+    tp: int | None
+    precision: str
+
+
 class Baseline(TypedDict, total=False):
     throughput_tok_s_per_gpu: float
     accuracy: float
@@ -112,6 +139,7 @@ class Baseline(TypedDict, total=False):
     attempts_history: list[BaselineAttemptSummary]
     failure_streak: int
     invocation: BenchmarkInvocation
+    workload_dims: WorkloadDims
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +169,7 @@ class Final(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 class PhaseEvent(TypedDict, total=False):
     ts: str
-    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
+    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / select_kernels / trace_analyze / tracelens_analysis / integrate / closing
     task_id: str
     kernel_id: str | None         # only for kernel-owned actions
     status: str                   # succeeded / failed
@@ -151,6 +179,11 @@ class PhaseEvent(TypedDict, total=False):
     workspace: str | None
     error_class: str | None
     extras: dict[str, Any]
+    # v1.1 additions — per-event timing so the timeline conveys total
+    # wall-clock cost without consumers having to walk benchmark_report.json
+    # on disk. Both fields are optional and default to None when unknown.
+    duration_seconds: float | None  # workload wall-clock seconds
+    ended_ts_utc: str | None        # ts + duration_seconds (iso8601, UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +218,13 @@ class KernelMetadata(TypedDict, total=False):
     arithmetic_intensity: float | None
 
 
+class VerificationSummary(TypedDict, total=False):
+    micro_speedup: float | None
+    compile_passed: bool | None
+    correctness_passed: bool | None
+    best_artifact_path: str | None
+
+
 class Invocation(TypedDict, total=False):
     """One backend invocation for one kernel.
 
@@ -196,6 +236,7 @@ class Invocation(TypedDict, total=False):
     ts: str
     backend: str                  # geak / claude / codex
     model: str | None
+    status: str                   # succeeded / failed / error (per-attempt)
     kernel_metadata: KernelMetadata
     prompt_path: str | None
     optimized_files: list[str]
@@ -206,6 +247,8 @@ class Invocation(TypedDict, total=False):
     compile_passed: bool | None
     correctness_passed: bool | None
     best_artifact_path: str | None
+    proposal_reasons: list[str]
+    verification_summary: VerificationSummary
     error: str | None
     cli_log_path: str | None
 
@@ -224,6 +267,14 @@ class DetectedKernel(TypedDict, total=False):
     source_file: str | None
     detected_from_task: str       # which profile task_id surfaced it
     benchmark_report_path: str
+    # v1.1 additions — TraceLens roofline merge (set when category_data
+    # operations can be matched by name; left absent when no roofline
+    # signal is available for this kernel).
+    efficiency_percent: float | None
+    bound_type: str | None
+    tflops_achieved: float | None
+    flops_per_byte: float | None
+    library: str | None
 
 
 class RecommendedKernel(TypedDict, total=False):
@@ -430,10 +481,213 @@ class SourceFiles(TypedDict, total=False):
     robustness_workdir: str | None
 
 
+# ---------------------------------------------------------------------------
+# v1.1 — decision journal + kernel profiling
+# ---------------------------------------------------------------------------
+class VariantDecision(TypedDict, total=False):
+    name: str
+    fingerprint: str
+    extra_sglang_args: str
+    extra_envs: dict[str, str]
+    status: str                   # succeeded / failed / skipped
+    output_throughput: float | None
+    gain_pct_vs_base: float | None
+    gain_pct_vs_current_best: float | None
+    outcome: str                  # tested / round_winner / promoted / rejected
+    reject_reason: str | None     # not_keep / combo_conflict / ...
+    benchmark_report_path: str | None
+    invocation: BenchmarkInvocation
+    # v1.1 additions — per-variant duration (from the variant's own
+    # benchmark_report.json) and the human-readable note recorded by
+    # the round winner (e.g. "retry_alt_value_larger", "new_family_…").
+    duration_seconds: float | None
+    decision_note: str | None
+
+
+class RoundDecision(TypedDict, total=False):
+    outcome: str                    # promoted / discarded
+    best_variant_name: str | None
+    gain_vs_cb_pct: float | None
+    best_gain_pct_vs_base: float | None
+    promotion_rule: str | None      # single_shot / cross_round_consistent / accuracy_blocked / below_threshold
+    promotion_rule_detail: str | None
+    keep_threshold_pct: float | None
+    accuracy_gate_passed: bool | None
+    variants_tested_count: int | None
+
+
+class DecisionJournalEntry(TypedDict, total=False):
+    ts: str
+    phase: str                      # params / backends
+    round_id: str | None
+    task_id: str | None
+    workspace: str | None
+    baseline_ref_tput: float | None
+    current_best_tput: float | None
+    keep_threshold_pct: float | None
+    variants: list[VariantDecision]
+    round_decision: RoundDecision
+
+
+class KernelProfilingLaunch(TypedDict, total=False):
+    framework_args: str
+    framework_args_source: str
+    extra_envs: dict[str, str]
+    tracelens_patched: bool | None
+
+
+class KernelProfilingArtifacts(TypedDict, total=False):
+    benchmark_report_path: str | None
+    trace_paths: list[str]
+    kernel_summary_csv: str | None
+    kernel_candidates_json: str | None
+    tracelens_status_json: str | None
+    tracelens_log: str | None
+
+
+class KernelProfilingOutputs(TypedDict, total=False):
+    tool: str                       # tracelens_analysis / magpie_torch_profiler
+    # Each ``top_kernels`` entry is a free-form ``dict[str, Any]`` (deliberately
+    # unconstrained so the schema doesn't force every collector branch into a
+    # uniform shape). v1.1 collectors emit at minimum:
+    #   ``kernel_id``, ``name``, ``gpu_pct``, ``duration_us``, ``bottleneck``,
+    # plus when TraceLens roofline data is available:
+    #   ``efficiency_percent``, ``bound_type``, ``flops_per_byte``,
+    #   ``tflops_achieved``, ``percent_of_total``, ``arithmetic_intensity``,
+    #   ``library``, ``operation_count``.
+    # Consumers MUST treat any subset of these keys as optional.
+    top_kernels: list[dict[str, Any]]
+    analysis_summary: str | None
+
+
+class KernelProfilingRun(TypedDict, total=False):
+    run_id: str
+    ts: str
+    task_id: str
+    framework: str | None
+    profile_config_path: str | None
+    launch: KernelProfilingLaunch
+    artifacts: KernelProfilingArtifacts
+    outputs: KernelProfilingOutputs
+    # v1.1 P2-3 addition — derived end-of-run wall-clock (ISO8601 UTC)
+    # and total seconds. Populated when the underlying status JSON
+    # carries ``ended_at`` / ``duration_seconds`` (new kernel-agent
+    # runs). Left absent on historical sessions.
+    ended_ts_utc: str | None
+    duration_seconds: float | None
+
+
+# ---------------------------------------------------------------------------
+# v1.1 P2-1 — kernel decision path (per-kid causal chain across
+#             select_kernels → kernel_opt → integrate → validate_stack)
+# ---------------------------------------------------------------------------
+class KernelDecisionStep(TypedDict, total=False):
+    kid: str                       # kernel id (orchestrator alias, e.g. k001)
+    kernel_name: str               # human-readable name when known
+    step: str                      # "select" | "kernel_opt" | "integrate" | "validate"
+    backend: str | None            # geak / oob — only meaningful for kernel_opt
+    ts: str                        # ISO8601 UTC, "" if unknown
+    duration_seconds: float | None
+    ended_ts_utc: str | None
+    task_id: str
+    workspace: str | None
+    # Free-form decision label coming straight from the underlying
+    # audit entry: ``promoted`` / ``discarded`` / ``rejected`` /
+    # ``skipped`` / ``KEEP`` / ``PARTIAL`` / ``REVERT`` / …
+    outcome: str
+    decision_note: str
+    gain_pct: float | None
+    speedup: float | None
+    extras: dict[str, Any]
+
+
+class KernelDecisionPathSummary(TypedDict, total=False):
+    total_steps: int
+    backends_attempted: list[str]   # e.g. ["geak", "oob"]
+    final_outcome: str              # last step's outcome
+    total_duration_seconds: float | None
+
+
+class KernelDecisionPathEntry(TypedDict, total=False):
+    kid: str
+    kernel_name: str
+    steps: list[KernelDecisionStep]
+    summary: KernelDecisionPathSummary
+
+
+# ---------------------------------------------------------------------------
+# v1.1 — data provenance (per-section source artifact probes)
+# ---------------------------------------------------------------------------
+# ``data_provenance`` lets consumers answer the "why is this section
+# empty?" question without having to walk the session_dir themselves.
+# Each entry records, for one logical section of the breakdown,
+# (a) whether the section emitted any data, and
+# (b) for each source artifact the collector relies on, whether that
+#     artifact actually exists on disk (or whether the relevant env
+#     var was configured). Probes are stat / glob only — no file
+#     contents are read, so producing the provenance block is cheap.
+#
+# Status values:
+#   * ``complete`` — every ``required`` probe found a hit. The
+#     section may still be ``populated=False`` (e.g. ``sweep`` never
+#     ran), which the consumer reads as "data sources are present
+#     but the session never produced this kind of activity".
+#   * ``partial``  — at least one ``required`` probe missing AND the
+#     section produced some output. The section is partially
+#     reconstructible from whatever was available.
+#   * ``empty``    — at least one ``required`` probe missing AND the
+#     section is empty. ``missing_required`` enumerates exactly
+#     which source roles are absent so the operator knows what
+#     would have to be re-collected.
+class FileSourceProbe(TypedDict, total=False):
+    path: str                    # relative-to-session_dir path or glob pattern;
+                                 # env vars use ``env:<NAME>`` form.
+    role: str                    # human-readable description of what the
+                                 # artifact provides (e.g. "Magpie yaml").
+    required: bool               # True if the section's collector cannot
+                                 # function without this source.
+    found: bool                  # glob hit count > 0 (or env var set).
+    found_count: int             # number of paths matched (1 for env probes).
+    representative_path: str | None  # first hit's relative path (or env value
+                                     # for env probes), None when not found.
+    note: str | None             # extra context (e.g. "permission denied",
+                                 # "value masked", ...).
+
+
+class SectionProvenance(TypedDict, total=False):
+    section: str                 # section identifier (matches the breakdown
+                                 # key, e.g. ``baseline`` / ``decision_journal``
+                                 # / ``kernel_profiling`` / ``roofline`` / ...).
+    status: str                  # ``complete`` / ``partial`` / ``empty``.
+    populated: bool              # True iff the corresponding breakdown section
+                                 # carries non-trivial data (list with items,
+                                 # dict with at least one meaningful key, ...).
+    sources: list[FileSourceProbe]
+    missing_required: list[str]  # simplified list of ``role`` strings whose
+                                 # required probe missed; empty when all
+                                 # required sources are present.
+    notes: list[str]             # free-form explanations (e.g. "baseline run
+                                 # failed → benchmark_report.json absent").
+
+
 class SessionBreakdown(TypedDict, total=False):
     schema_version: str
     exported_at_utc: str
     exporter_version: str
+    detail_level: str               # standard / verbose
+    # ``coverage`` records which of the two canonical input files
+    # (``state.json`` + ``manifest.json``) were available when the
+    # breakdown was built. Consumers can use this to distinguish a real
+    # session run (``full``) from a post-orchestrator output directory
+    # that lacks the in-flight session state (``shell_only``):
+    #   ``full``        — both state.json and manifest.json present
+    #   ``partial``     — exactly one of the two was present
+    #   ``shell_only``  — neither present; emitted payload is best-effort
+    #                     file-system walk only (no kernel lifecycle,
+    #                     no decision journal, no attribution, ...).
+    # Field is optional for backwards compatibility — older breakdowns
+    # produced by exporters < this revision will simply not carry it.
+    coverage: str
 
     session: SessionMeta
     workload: Workload
@@ -450,6 +704,20 @@ class SessionBreakdown(TypedDict, total=False):
     telemetry: Telemetry
     attribution: Attribution
 
+    decision_journal: list[DecisionJournalEntry]
+    kernel_profiling: list[KernelProfilingRun]
+    # v1.1 P2-1 addition — per-kid causal chain. Empty list when the
+    # session ran no kernel selection / optimization / integration.
+    kernel_decision_path: list[KernelDecisionPathEntry]
+    # v1.1 addition — per-section source-artifact provenance. Each entry
+    # explains why a section is empty (or partial) by listing the
+    # required / optional source files (or env vars) the collector
+    # consulted and whether each one was actually present. Optional for
+    # backwards compatibility — older breakdowns will not carry the
+    # field, and downstream consumers MUST treat its absence as "no
+    # provenance information available" rather than an error.
+    data_provenance: list[SectionProvenance]
+
     warnings: list[str]
     source_files: SourceFiles
 
@@ -457,6 +725,7 @@ class SessionBreakdown(TypedDict, total=False):
 __all__ = [
     "SCHEMA_VERSION",
     "AdoptedKernel",
+    "DecisionJournalEntry",
     "Attribution",
     "Baseline",
     "BaselineAttemptSummary",
@@ -466,10 +735,18 @@ __all__ = [
     "CriticIteration",
     "CriticRobustness",
     "DetectedKernel",
+    "FileSourceProbe",
     "Final",
     "GpuMonitorAggregate",
     "Invocation",
     "KernelLifecycle",
+    "KernelDecisionPathEntry",
+    "KernelDecisionPathSummary",
+    "KernelDecisionStep",
+    "KernelProfilingArtifacts",
+    "KernelProfilingLaunch",
+    "KernelProfilingOutputs",
+    "KernelProfilingRun",
     "KernelMetadata",
     "OptimizedKernel",
     "ParamSearch",
@@ -479,6 +756,11 @@ __all__ = [
     "RecommendedKernel",
     "RejectedKernel",
     "RobustnessSignal",
+    "RoundDecision",
+    "SectionProvenance",
+    "VariantDecision",
+    "VerificationSummary",
+    "WorkloadDims",
     "SessionBreakdown",
     "SessionMeta",
     "SourceBreakdown",
