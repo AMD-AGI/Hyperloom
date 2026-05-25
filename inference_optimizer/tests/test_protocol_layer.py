@@ -139,7 +139,7 @@ def test_topic_allowlist_v06_changes():
 async def test_message_bus_append_assigns_seq(db):
     bus = MessageBus(db)
     msg = Message.new("Orchestration", "Kernel", "request",
-                      {"target_agent": "kernel", "kind": "select_kernels"})
+                      {"target_agent": "kernel", "kind": "trace_analyze"})
     seq = await bus.append_and_seq(msg)
     assert seq >= 1
     assert msg.seq == seq

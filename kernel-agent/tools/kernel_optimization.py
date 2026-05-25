@@ -28,10 +28,12 @@ sys.path.pop(0)
 
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write JSON to ``path`` using a temp file then rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
         json.dump(data, tmp, indent=2, sort_keys=True)
@@ -41,18 +43,21 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
+    """Append one JSON object as a line to the given JSONL file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(data, sort_keys=True) + "\n")
 
 
 def append_log(log_path: Path, message: str) -> None:
+    """Append a log line to ``log_path`` (ensuring parent dirs exist)."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(message.rstrip() + "\n")
 
 
 def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
+    """Return the last ``limit`` lines of a log file, empty if missing."""
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -70,6 +75,7 @@ def update_status(
     started_at: str,
     error: str | None = None,
 ) -> None:
+    """Persist a status snapshot for the current run."""
     payload: dict[str, Any] = {
         "tool": "kernel_optimization",
         "run_id": run_id,
@@ -89,6 +95,7 @@ def update_status(
 
 
 def load_candidates(path: Path) -> list[dict[str, Any]]:
+    """Load kernel candidates from JSON, normalizing legacy shapes."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
         return payload
@@ -108,6 +115,7 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
 
 
 def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any]:
+    """Find a candidate by ``kernel_id`` (or name) or raise KeyError."""
     for candidate in candidates:
         if candidate.get("kernel_id") == kernel_id or candidate.get("name") == kernel_id:
             return candidate
@@ -130,6 +138,195 @@ def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
         or existing_path(str(candidate.get("test_harness_path") or ""))
         or any(existing_path(str(p)) for p in bench_files)
     )
+
+
+def _resolve_source_file(
+    llm_source: str,
+    candidate: dict[str, Any],
+    kernel_id: str,
+    log_path: Path | None = None,
+) -> str:
+    """Resolve the effective source file, preferring TraceLens (candidate).
+
+    TraceLens analyzes the trace and produces the authoritative
+    ``kernel_id → source_file`` mapping in ``kernel_candidates.json``.
+    The Orchestration LLM can also pass ``--source-file`` via payload,
+    but it occasionally confuses kernel IDs (e.g. picks fmoe ``k001``'s
+    source for fmha ``k003``) and supplies a path that no longer matches
+    the kernel being optimized. The legacy ``args.source_file or
+    candidate.source_file`` order let any LLM-supplied string silently
+    override TraceLens, which on DeepSeek-R1 routed an MHA kernel's
+    rewrite at ``fused_moe.py``.
+
+    Policy: candidate wins. If the LLM's path resolves to a different
+    absolute location than candidate's, emit a ``[source-override]``
+    warning to the run log so the discrepancy is visible in postmortem,
+    then return the candidate path. When candidate has no source_file
+    (legacy / synthetic fixtures), fall back to the LLM-supplied path.
+    """
+    cand_source = str((candidate or {}).get("source_file") or "").strip()
+    llm = str(llm_source or "").strip()
+    if not cand_source:
+        return llm
+    if llm and Path(cand_source) != Path(llm):
+        try:
+            differ = Path(cand_source).resolve(strict=False) != Path(llm).resolve(strict=False)
+        except (OSError, RuntimeError):
+            differ = True
+        if differ and log_path is not None:
+            append_log(
+                log_path,
+                f"[source-override] kernel_id={kernel_id} "
+                f"LLM passed source_file={llm!r} but TraceLens candidate resolves to "
+                f"{cand_source!r}; using TraceLens (source of truth)",
+            )
+    return cand_source
+
+
+# Kernel-name → benchmark-name priority patterns. Listed in priority order
+# (more specific kernel families first). Each entry pairs a kernel-name
+# regex with a priority-ordered list of benchmark-filename regexes; when
+# the kernel matches, benchmarks whose basename matches any of the
+# patterns are hoisted to the front of the candidate list (preserving the
+# pattern order). Patterns are intentionally conservative so a missing
+# kernel family degrades to "preserve original order" rather than picking
+# an off-topic benchmark.
+_BENCHMARK_PATTERNS: list[tuple["re.Pattern[str]", list["re.Pattern[str]"]]] = [
+    # Flash / multi-head attention (must come BEFORE paged-attn so a kernel
+    # name like ``fmha_v3_varlen_fwd`` does not accidentally match a generic
+    # ``attn`` rule that also hits ``test_pa.py``).
+    (
+        re.compile(r"(fmha|^mha|::mha|flash[_-]?attn|multi[_-]?head)", re.IGNORECASE),
+        [
+            re.compile(r"^(test|bench)_.*mha", re.IGNORECASE),
+            re.compile(r"^(test|bench)_.*flash.*attn", re.IGNORECASE),
+        ],
+    ),
+    # Paged attention (matches both ``paged_attn`` and ``paged_attention``)
+    (
+        re.compile(r"(paged[_-]?att(?:n|ention)|^pa_|::pa_)", re.IGNORECASE),
+        [
+            re.compile(r"^(test|bench)_pa\b", re.IGNORECASE),
+            re.compile(r"^(test|bench)_.*paged", re.IGNORECASE),
+        ],
+    ),
+    # MoE / fused-MoE
+    (
+        re.compile(r"(fmoe|fused[_-]?moe|::moe|^moe_)", re.IGNORECASE),
+        [re.compile(r"^(test|bench)_.*moe", re.IGNORECASE)],
+    ),
+    # GEMM / matmul / linear
+    (
+        re.compile(r"(gemm|matmul|^linear|::linear|_mm_)", re.IGNORECASE),
+        [
+            re.compile(r"^(test|bench)_.*gemm", re.IGNORECASE),
+            re.compile(r"^(test|bench)_.*matmul", re.IGNORECASE),
+        ],
+    ),
+    # RMSNorm / LayerNorm
+    (
+        re.compile(r"(rmsnorm|layernorm|_norm\b|norm$)", re.IGNORECASE),
+        [re.compile(r"^(test|bench)_.*norm", re.IGNORECASE)],
+    ),
+]
+
+
+def _match_benchmark_for_kernel(
+    kernel_name: str,
+    bench_files: list[Any],
+) -> list[str]:
+    """Reorder ``bench_files`` so semantically-matching benchmarks come first.
+
+    TraceLens populates ``candidate.benchmark_files`` with every test/bench
+    file it found under the kernel's repo, in an order driven by repo
+    enumeration rather than kernel semantics. On DeepSeek-R1 this surfaced
+    a real failure: the fmha kernel ``aiter::fmha_v3_varlen_fwd``'s
+    benchmark list was led by ``test_pa.py`` (PagedAttention), so the
+    legacy ``for bf in bench_files: ... break`` selector in
+    :func:`invoke_backend` picked a benchmark that doesn't exercise the
+    kernel — and whose 90-config × 3-replay default matrix stalled the
+    GEAK Step-5 profiling for hours.
+
+    Policy: scan :data:`_BENCHMARK_PATTERNS` in declared priority order;
+    for the first kernel-name regex that matches, sort the bench list so
+    items matching that family's bench patterns come first (within the
+    matched group, earlier patterns win). When no kernel pattern matches,
+    return the original order — never invent a preference.
+    """
+    existing = [p for p in (bench_files or []) if isinstance(p, str) and p]
+    if not existing:
+        return []
+    name = str(kernel_name or "")
+    for kernel_re, bench_res in _BENCHMARK_PATTERNS:
+        if not kernel_re.search(name):
+            continue
+
+        def _priority(path: str, _bench_res=bench_res) -> int:
+            base = Path(path).name
+            for idx, br in enumerate(_bench_res):
+                if br.search(base):
+                    return idx
+            return len(_bench_res)
+
+        return sorted(existing, key=_priority)
+    return existing
+
+
+def _profile_timeout_sec() -> int:
+    """Per-subprocess profiling timeout (seconds) for GEAK's Step 5.
+
+    The GEAK preprocessor (vendored ``minisweagent.preprocess``) runs the
+    rendered ``test_command`` under Metrix instrumentation with
+    ``num_replays=3`` and then captures a second baseline pass — neither
+    call carries a subprocess timeout. With a default-matrix benchmark
+    such as aiter's ``test_pa.py`` (2 dtypes × 5 head configs × 9 ctx_len
+    = 90 cases per replay), Step 5 can stall for hours and burn the entire
+    GEAK budget before any patch is attempted.
+
+    We bound this by injecting ``timeout <N>`` as the prefix of the
+    ``test_command`` we hand to GEAK. The benchmark subprocess SIGTERMs at
+    ``N`` seconds and returns exit 124, which Metrix surfaces as a normal
+    profiling failure; the preprocessor's existing ``except Exception``
+    handler logs a warning and continues to Step 6/7 instead of hanging.
+
+    Default 600s; override via ``KERNEL_OPT_PROFILE_TIMEOUT_SEC``. Floors
+    at 1 so a misconfigured ``0`` cannot disable the guard entirely.
+    """
+    try:
+        value = int(os.environ.get("KERNEL_OPT_PROFILE_TIMEOUT_SEC", "600"))
+    except (ValueError, TypeError):
+        return 600
+    return max(1, value)
+
+
+def _render_geak_test_command(
+    kernel_name: str,
+    bench_files: list[Any],
+    is_multigpu: bool,
+    num_gpus: int,
+    timeout_sec: int,
+) -> str:
+    """Render the ``--test-command`` GEAK receives, with timeout + match.
+
+    Picks the first existing ``test_*.py`` / ``bench*.py`` from the
+    semantically-ordered bench list, prefixes ``timeout <N>``, and wraps
+    multi-GPU collectives in ``torchrun --nproc_per_node=<num_gpus>`` so
+    GEAK's subprocess can ``init_process_group`` correctly. Returns ``""``
+    when no usable benchmark exists; the caller leaves
+    ``--test-command`` blank so GEAK falls back to its own discovery.
+    """
+    ordered = _match_benchmark_for_kernel(kernel_name, bench_files)
+    for bf in ordered:
+        path = Path(bf)
+        if not bf.endswith(".py") or not path.exists():
+            continue
+        name = path.name
+        if "test_" not in name and "bench" not in name:
+            continue
+        if is_multigpu and num_gpus >= 2:
+            return f"timeout {timeout_sec} torchrun --nproc_per_node={num_gpus} {bf}"
+        return f"timeout {timeout_sec} python {bf}"
+    return ""
 
 
 def parse_backends(backends: str) -> list[str]:
@@ -828,7 +1025,12 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     }
 
 
-def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
+def build_prompt(
+    candidate: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    backend: str | None = None,
+) -> str:
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
     if source_file and Path(str(source_file)).exists():
@@ -838,6 +1040,13 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     bench_files = candidate.get("benchmark_files") or []
     if isinstance(bench_files, str):
         bench_files = [bench_files]
+    # Sort by semantic match against the kernel name so the most-relevant
+    # benchmarks head the list GEAK reads (the prompt clips to ``[:8]``
+    # below, so an off-topic ``test_*.py`` would otherwise crowd out the
+    # right one on kernels with long bench listings).
+    bench_files = _match_benchmark_for_kernel(
+        str(candidate.get("name") or ""), bench_files
+    )
     is_multigpu = bool(candidate.get("is_multigpu"))
     # Resolve how many GPUs the executor will give this attempt: CLI override
     # wins, then candidate hint, then 1 (single-GPU compute kernel).
@@ -848,7 +1057,13 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
     kernel_metadata = build_kernel_metadata(candidate, args)
-    budget_min = int(getattr(args, "budget_minutes", 60) or 60)
+    # Quote the per-backend wall-clock so GEAK v3.2.0's LLM task-mode parser
+    # (mini.py:435 task_extracted_mode) infers the right mode (>=120min→full,
+    # else quick), instead of always seeing the OOB 60min default.
+    if backend == "geak":
+        budget_min = int(getattr(args, "geak_budget_min", 130) or 130)
+    else:
+        budget_min = int(getattr(args, "budget_minutes", 60) or 60)
     target_platform = (
         getattr(args, "target_platform", "") or _env_target_platform()
     )
@@ -896,15 +1111,17 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "  search inside the repo, scope to the repo root: `find <repo> -name ...`\n"
         "  or `rg ... <repo>`, NEVER `find /`.\n"
         "\n"
-        "GOAL & EARLY-EXIT:\n"
-        "- Target speedup: >= 1.50x on the dominant inference shape(s).\n"
-        f"- Hard wall-clock budget: ~{budget_min} minutes. If you reach >=1.50x with\n"
-        "  passing correctness BEFORE the budget expires, STOP immediately, write the\n"
-        "  final `optimization_report.md` with `speedup: X.XXx` and exit (don't keep\n"
-        "  squeezing for marginal gains).\n"
-        f"- Otherwise iterate up to minute {int(budget_min*0.85)}, then STOP iterating\n"
-        "  and finalize the report with your best so-far measured speedup. The runner\n"
-        "  will SIGTERM at minute "
+        "GOAL & TIME BUDGET:\n"
+        # GEAK v3.2.0 LLM-parses prompt for `--mode full` / `mode=quick` etc.
+        # (prompts.py:73-76 trigger list). Emit the explicit token so the
+        # parser locks in the right preset (yaml run.budgets.<mode>) instead
+        # of leaking off other prompt phrases like "quick micro-benchmark".
+        f"- Run mode: {'full' if budget_min >= 120 else 'quick'} "
+        f"(--mode {'full' if budget_min >= 120 else 'quick'}).\n"
+        f"- Hard wall-clock budget: ~{budget_min} minutes. Iterate up to minute "
+        f"{int(budget_min*0.85)},\n"
+        "  then STOP iterating and finalize the report with your best so-far measured\n"
+        "  speedup. The runner will SIGTERM at minute "
         f"{budget_min}; any in-flight work not on disk is lost.\n"
         "- Always print the final number in the form `speedup: X.XXx` (lowercase `x`)\n"
         "  at the END of `optimization_report.md` so the runner can extract it; if you\n"
@@ -1039,6 +1256,9 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         except Exception:
             full_report = ""
         if full_report:
+            from inference_optimizer.tracelens_md import strip_base64_data_urls
+
+            full_report = strip_base64_data_urls(full_report)
             rank = candidate.get("tracelens_pitem_rank")
             title = candidate.get("tracelens_pitem_title", "")
             if rank:
@@ -1073,9 +1293,6 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "```json",
         json.dumps(kernel_metadata, indent=2, sort_keys=True),
         "```",
-        "",
-        "GEAK configuration (ignored by non-GEAK backends):",
-        "- Use homogeneous mode. Set max_rounds to 5.",
         "",
         hardware_notes,
         hypothesis_block,
@@ -1266,10 +1483,10 @@ def invoke_backend(
     # GEAK needs more wall-clock than claude/codex: a single sub-agent task
     # already takes 5-10 min (baseline + LLM patch generation + per-patch
     # benchmark), and the orchestrator typically dispatches 4-9 tasks per
-    # round + a select_patch round at the end. Empirically 60 min lets
-    # individual sub-agents finish but consistently SIGTERMs the
-    # select_patch round (r38, r39 both fell back to per-task best_results
-    # salvage). 90 min is the new default; override via --geak-budget-min.
+    # round + a select_patch round at the end. 130 min is the default so
+    # the prompt-quoted budget triggers GEAK v3.2.0's mode=full path
+    # (yaml run.budgets.full.total_s=7200s + finalize_grace + kill_buffer);
+    # override via --geak-budget-min.
     if backend == "geak":
         budget_min = float(getattr(args, "geak_budget_min", 0)
                            or getattr(args, "budget_minutes", 60) or 60)
@@ -1294,26 +1511,29 @@ def invoke_backend(
             # at baseline measurement. Always pick a real existing test from
             # candidate.benchmark_files, prefixing with `torchrun` for the
             # multi-GPU path so collective init_process_group succeeds.
-            test_command = ""
+            #
+            # ``_render_geak_test_command`` adds two guards on top of the
+            # legacy ``for bf in bench_files: ... break`` selector:
+            #   1. semantically reorders ``bench_files`` by kernel name so
+            #      e.g. ``fmha_v3_varlen_fwd`` no longer picks ``test_pa.py``
+            #      ahead of ``test_mha.py`` just because TraceLens listed PA
+            #      first;
+            #   2. prefixes ``timeout <N>`` so Metrix-instrumented Step 5 in
+            #      GEAK's preprocessor cannot stall the whole GEAK budget on
+            #      a runaway no-arg benchmark (e.g. ``test_pa.py``'s 90-case
+            #      default matrix).
             cand_name = str((candidate or {}).get("name") or "")
             is_multigpu = (
                 bool((candidate or {}).get("is_multigpu"))
                 or kernel_name_implies_multigpu(cand_name)
             )
-            if is_multigpu and num_gpus >= 2:
-                for bf in bench_files:
-                    if bf.endswith(".py") and Path(bf).exists() and (
-                        "test_" in Path(bf).name or "bench" in Path(bf).name
-                    ):
-                        test_command = f"torchrun --nproc_per_node={num_gpus} {bf}"
-                        break
-            elif not is_multigpu:
-                for bf in bench_files:
-                    if bf.endswith(".py") and Path(bf).exists() and (
-                        "test_" in Path(bf).name or "bench" in Path(bf).name
-                    ):
-                        test_command = f"python {bf}"
-                        break
+            test_command = _render_geak_test_command(
+                kernel_name=cand_name,
+                bench_files=bench_files,
+                is_multigpu=is_multigpu,
+                num_gpus=num_gpus,
+                timeout_sec=_profile_timeout_sec(),
+            )
             previous_env = _apply_geak_env_overrides(args, prompt_file)
             try:
                 result = geak.submit(
@@ -1446,7 +1666,7 @@ def run_attempt(
     prompt_dir = run_dir / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
     prompt_file = prompt_dir / f"{attempt_id}.md"
-    prompt_file.write_text(build_prompt(candidate, args), encoding="utf-8")
+    prompt_file.write_text(build_prompt(candidate, args, backend=backend), encoding="utf-8")
 
     source_file = args.source_file or str(candidate.get("source_file") or "")
     started = time.time()
@@ -2243,12 +2463,12 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
-    # Goal threshold: 1.20x lets shape-specific 5-30% wins (claude r19 GEMM
-    # 1.32x, GEAK r39 rms_norm 1.18x, codex r25 GEMM 1.66x) through to
-    # human KEEP review. Below 1.20x is treated as noise / not worth the
-    # production risk and routed to NEEDS_REVIEW with reason. Originally
-    # 1.50 (overly strict — too many real wins fell through to PARTIAL).
-    KEEP_THRESHOLD = 1.20
+    # Goal threshold: 1.10x lets modest but real shape-specific wins
+    # (claude r19 GEMM 1.32x, GEAK r39 rms_norm 1.18x, codex r25 GEMM 1.66x)
+    # through to human KEEP review. Below 1.10x is treated as noise / not
+    # worth the production risk and routed to NEEDS_REVIEW with reason.
+    # Originally 1.50 (overly strict), then 1.20; lowered to 1.10 May 2026.
+    KEEP_THRESHOLD = 1.10
     if verification["micro_speedup"] < KEEP_THRESHOLD:
         reasons.append(
             f"speedup {verification['micro_speedup']:.3f}x below KEEP "
@@ -2296,12 +2516,19 @@ def main() -> int:
     parser.add_argument("--budget-minutes", type=float, default=60.0,
                         help="Per-attempt wall-clock budget for claude/codex "
                              "OOB backends. GEAK uses --geak-budget-min.")
-    parser.add_argument("--geak-budget-min", type=float, default=90.0,
+    # Default tracks $GEAK_RUN_MODE (exported by install.sh / env.sh):
+    # quick (yaml total_s=3600s) -> 70 min, full (yaml total_s=7200s) -> 130 min.
+    # Both sit above their yaml total_s + finalize_grace + kill_buffer + safety,
+    # so the prompt-quoted budget triggers the matching mode (mini.py:435).
+    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
+    parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
                         help="Per-attempt wall-clock budget for GEAK only "
-                             "(default 90 min; needed because GEAK runs "
-                             "per-task patch sub-agents serially + a final "
-                             "select_patch round, and 60 min consistently "
-                             "SIGTERMs the select_patch round).")
+                             "(default tracks $GEAK_RUN_MODE: full -> 130, "
+                             "quick -> 70; both aligned with yaml "
+                             "run.budgets.<mode>.total_s + finalize_grace + "
+                             "kill_buffer + safety so the prompt-quoted "
+                             "budget triggers the matching GEAK mode at "
+                             "mini.py:435 task_extracted_mode).")
     parser.add_argument("--micro-speedup", type=float, default=None)
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
@@ -2361,7 +2588,15 @@ def main() -> int:
                       started_at=started_at)
         candidates_path = Path(args.candidates_path) if args.candidates_path else run_dir / "kernel_candidates.json"
         candidate = find_candidate(load_candidates(candidates_path), args.kernel_id)
-        resolved_source = args.source_file or str(candidate.get("source_file") or "")
+        # TraceLens is the source of truth for kernel_id → source_file.
+        # ``_resolve_source_file`` overrides any LLM-supplied path that
+        # disagrees with ``candidate.source_file`` and logs the override,
+        # so a kernel-ID confusion at the Orchestration layer (e.g. fmoe
+        # k001's source attached to fmha k003) no longer routes GEAK's
+        # rewrite at the wrong file.
+        resolved_source = _resolve_source_file(
+            args.source_file, candidate, args.kernel_id, log_path
+        )
         args.source_file = resolved_source
         # Forward the candidate's repo root onto args so build_verification's
         # GEAK-worktree artifact recovery can map ``source_file`` (an

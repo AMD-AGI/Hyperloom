@@ -393,6 +393,21 @@ ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset({
 })
 ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 
+# Roofline-v2 C3: per-intent source allowlist override. PRUNE_BRANCH widens
+# to ``orchestration`` as well, because the ``roofline`` action (C4) produces
+# structured prune suggestions that the main Orchestration LLM consumes via
+# the rendered prompt (C5) and then forwards to the Coordinator. The other
+# two scheduling-police intents (FORCE_DISPATCH, ESCALATE_STRATEGY_CHANGE)
+# stay robustness-only — they are recovery-shaped intents that bypass normal
+# task accounting and shouldn't be reachable from optimisation-flow LLMs.
+#
+# Lookups fall through to ROBUSTNESS_ONLY_SOURCE_ALLOWLIST when an intent is
+# not listed here, so adding a new ROBUSTNESS_ONLY_INTENTS entry remains
+# robustness-only by default.
+_ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
+    IntentType.PRUNE_BRANCH: frozenset({"robustness", "orchestration"}),
+}
+
 
 # ---------------------------------------------------------------------------
 # SESSION_DIR path containment (DESIGN v0.6.1 §23 / §14.5).
@@ -433,6 +448,27 @@ SOURCE_FILE_ALLOWLIST: tuple[str, ...] = resolve_source_file_allowlist()
 # Field name-only allowlist: when the payload key is `source_file`, the
 # value may match SOURCE_FILE_ALLOWLIST instead of being session-rooted.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
+
+
+# Multi-node profile trace shared dirs. In multi-node runs, server pods
+# write torch traces to a wekafs path that the sandbox also mounts; that
+# path lives outside session_dir but must be referenceable by trace_dir
+# / main_trace_path / trace_input so kernel-agent input flows work. The
+# allowlist intentionally only covers prefixes mkdir'd by the sandbox
+# CLI under our namespace; arbitrary wekafs writes remain blocked.
+TRACE_PATH_ALLOWLIST: tuple[str, ...] = (
+    "/wekafs/hyperloom/profile-traces/",
+)
+
+# Subset of PATH_LIKE_FIELDS for which TRACE_PATH_ALLOWLIST is also
+# accepted (in addition to session_dir containment). Other path fields
+# such as workspace, output_dir, report_path remain strictly session-
+# rooted to preserve sandbox-isolation guarantees.
+TRACE_PATH_LIKE_FIELDS: frozenset[str] = frozenset({
+    "trace_dir",
+    "main_trace_path",
+    "trace_input",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -2095,6 +2131,15 @@ class PolicyGate:
         s = str(value)
         return any(s.startswith(p) for p in SOURCE_FILE_ALLOWLIST)
 
+    def _path_in_trace_allowlist(self, value: str) -> bool:
+        """Match a value against TRACE_PATH_ALLOWLIST prefixes.
+
+        Used only for trace-input-style fields in multi-node mode where
+        the shared profile dir lives on wekafs outside session_dir.
+        """
+        s = str(value)
+        return any(s.startswith(p) for p in TRACE_PATH_ALLOWLIST)
+
     def _validate_payload_paths(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any],
     ) -> None:
@@ -2134,12 +2179,22 @@ class PolicyGate:
             if key not in PATH_LIKE_FIELDS:
                 return
             if not self._path_under_session(node):
+                # Multi-node profile traces live on a shared wekafs path
+                # outside session_dir by design; allow only the specific
+                # trace-input fields, only against TRACE_PATH_ALLOWLIST.
+                if (
+                    key in TRACE_PATH_LIKE_FIELDS
+                    and self._path_in_trace_allowlist(node)
+                ):
+                    return
                 raise PolicyDenied(
                     f"role={role.name!r} {intent_type.value} payload field "
                     f"{key!r}={node!r} escapes session_dir={self.session_dir!s}",
                     rule="path_outside_session_dir",
                     hint=("emit paths verbatim from SharedState (e.g. "
-                          "last_profile_trace) or under SESSION_DIR"),
+                          "last_profile_trace) or under SESSION_DIR; "
+                          "multi-node trace fields may also resolve under "
+                          f"{list(TRACE_PATH_ALLOWLIST)!r}"),
                 )
 
         visit(payload, ())
@@ -2147,10 +2202,16 @@ class PolicyGate:
     def _validate_robustness_only(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any]
     ) -> None:
-        if role.name not in ROBUSTNESS_ONLY_SOURCE_ALLOWLIST:
+        # Roofline-v2 C3: per-intent source allowlist takes precedence; the
+        # generic ROBUSTNESS_ONLY_SOURCE_ALLOWLIST remains the default so
+        # FORCE_DISPATCH / ESCALATE_STRATEGY_CHANGE stay robustness-only.
+        allowed_sources = _ROBUSTNESS_ONLY_INTENT_SOURCES.get(
+            intent_type, ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
+        )
+        if role.name not in allowed_sources:
             raise PolicyDenied(
                 f"role={role.name!r} cannot emit {intent_type.value} "
-                f"(allowed: {sorted(ROBUSTNESS_ONLY_SOURCE_ALLOWLIST)!r})",
+                f"(allowed: {sorted(allowed_sources)!r})",
                 rule="robustness_only_source",
             )
         if intent_type == IntentType.PRUNE_BRANCH:
@@ -2177,5 +2238,7 @@ __all__ = [
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
     "SOURCE_FILE_ALLOWLIST",
+    "TRACE_PATH_ALLOWLIST",
+    "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",
 ]
