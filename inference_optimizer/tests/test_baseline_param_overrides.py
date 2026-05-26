@@ -1,4 +1,4 @@
-"""Baseline / validate_stack parameter override tests.
+"""Baseline parameter override tests.
 
 Pins the executor-boundary contract for the two Magpie leak-path
 recovery knobs that Orchestration drives via ``task.params``:
@@ -361,7 +361,7 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -395,7 +395,7 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -403,6 +403,50 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
     assert result["status"] == "succeeded"
     # Always-on default = the per-task workspace.
     assert captured["env"]["RESULT_DIR"] == str(output_dir)
+
+
+def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
+    """#210 fix (Deval, comment 8): the baseline executor's Magpie
+    subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH``
+    so Magpie's ``_resolve_default_inferencex_dir`` picks the same
+    InferenceX checkout Hyperloom's ``_inferencex_patcher`` patched.
+    Symmetric to the ``_grid_runner._run_magpie`` test in
+    test_p2_3_param_executors — both Magpie invocation sites must
+    set this env."""
+    monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/hyperloom/InferenceX")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    output_dir = tmp_path / "ws"
+    captured: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        captured["env"] = dict(kwargs.get("env") or {})
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == (
+        "/wekafs/hyperloom/InferenceX"
+    ), (
+        "MAGPIE_INFERENCEX_PATH must equal $INFERENCEX_PATH so Magpie "
+        "loads the patched checkout (#210 root cause)"
+    )
 
 
 def test_baseline_executor_rejects_bad_param(tmp_path):
@@ -426,7 +470,7 @@ def test_baseline_executor_rejects_bad_param(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -457,7 +501,7 @@ def test_baseline_executor_rejects_bad_result_dir(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))

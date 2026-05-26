@@ -1,0 +1,87 @@
+name: specialist
+family: creative
+cost_minutes_p50: 6.0
+cost_minutes_p75: 12.0
+expected_gain_pct: [0.0, 0.0]
+accuracy_risk: 0.0
+crash_risk: 0.0
+prerequisites:
+  - baseline
+requires_lanes:
+  - research_lane
+allowed_tools:
+  - emit_intent
+  - Read
+  - Grep
+  - Glob
+  - Bash
+  - Edit
+  - Write
+  - MultiEdit
+  - WebSearch
+  - WebFetch
+side_effects:
+  - workspace_write
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 8
+lease_ttl_sec: 1800
+description: "Dispatch an LLM specialist sub-agent on research_lane; reads KB / PR feed for the domain, optionally writes patches under runs/specialist/<task_id>/worktree/, emits one specialist_done intent."
+pipeline_phase: explore
+typical_runtime_min: 6.0
+applicable_when:
+  - "phase == 'EXPLORE'"
+# PR-A1 (Arbor dispatch into Hyperloom):
+#
+# ``specialist`` was a synthetic action in v0.8 M5 — the SpecialistRunner /
+# PolicyGate / phase-allowlist all knew about it, but no yaml meta existed,
+# so ``prompt_builder._section_action_catalogue`` rendered no entry for it.
+# The Orchestration LLM therefore never emitted ``delegate{action='specialist'}``
+# in any v0.8 run (verified empirically on a 12h DeepSeek-R1-0528 marathon:
+# ``storage/coordinator.db tasks`` had 0 rows of ``kind='specialist'``).
+#
+# This yaml flips the catalogue visibility; everything else (SpecialistRunner,
+# `_validate_specialist_dispatch`, phase R1) was already wired.
+#
+# Note: ``params.domain`` ∈ ``orchestrator.specialist_domains.SPECIALIST_DOMAIN_KEYS``
+# and ``params.gap_canonical_id`` are required; PolicyGate's
+# ``specialist_dispatch_source`` rule validates the payload before queue.
+params_schema:
+  domain:
+    type: string
+    description: |
+      Required. One of the six SpecialistDomain keys:
+      ``serving_specialist`` / ``kernel_switch_specialist`` / ``comm_specialist``
+      / ``compiler_specialist`` / ``system_specialist`` / ``pr_intel_specialist``.
+      Picks the KB sub-graph anchor, PR Monitor repo subset, and per-domain
+      prompt template (KB_design §3.5 §5).
+  gap_canonical_id:
+    type: string
+    description: |
+      Required. Stable id of the gap the specialist should investigate
+      (e.g. ``gap.framework.cuda_graph_inefficient.session-<sid>``). The
+      SpecialistRunner anchors its KB traverse + PR feed on this id; the
+      ``specialist_done.gap_canonical_id`` must match so Coordinator can
+      route the result back to the gap row in ``SharedState.gaps[]``.
+  gap_symptom:
+    type: string
+    description: |
+      Optional. Human-readable summary of the symptom (e.g. ``decode kernel
+      at 30% of HBM peak``) embedded into the specialist prompt to ground
+      its KB / PR search.
+  gap_layer:
+    type: string
+    description: |
+      Optional. Layer label (``kernel`` / ``framework`` / ``communication``
+      / …) used to pick KB anchor when ``params.kb_subgraph`` is empty.
+  gap_evidence:
+    type: object
+    description: |
+      Optional. Evidence dict forwarded verbatim into the prompt; typically
+      profile path + metrics extracted from the most recent
+      ``last_profile_trace``.
+  max_turns:
+    type: integer
+    description: |
+      Optional. Hard cap on LLM turns (default 8, hard ceiling 16). PolicyGate
+      R2 ``specialist_max_turns_excess`` rejects values outside (0, 16].

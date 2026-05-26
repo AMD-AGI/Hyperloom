@@ -1,0 +1,26 @@
+{
+  "framework": "sglang",
+  "repo_url": "https://github.com/sgl-project/sglang.git",
+  "work_dir": "/tmp/framework-agent/sglang-plan",
+  "baseline": {
+    "throughput": 1000.0,
+    "accuracy": 0.85,
+    "completed": "100/100"
+  },
+  "thresholds": {
+    "min_throughput_ratio": 1.05,
+    "max_accuracy_drop": 0.05
+  },
+  "candidate_refs": [],
+  "search_perf_prs": true,
+  "max_search_candidates": 3,
+  "primus_cortex": {
+    "base_url": "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local",
+    "timeout_sec": 10.0
+  },
+  "search_modes": ["primus_cortex"],
+  "gap_description": "improve sglang fp8 MoE attention on AMD ROCm MI300X",
+  "prepare_candidate_env": false,
+  "commands": {},
+  "outputs": {}
+}
