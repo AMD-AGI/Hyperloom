@@ -302,7 +302,7 @@ Hyperloom/
 │   ├── SKILL.md                          # Kernel Agent operation spec
 │   ├── tools/                            # TraceLens analysis, kernel optimization, patch apply
 │   │   └── backends/                     # GEAK/OOB submission (Ray-scheduled)
-│   ├── scripts/                          # Runtime setup scripts: install.sh, auth proxy, etc.
+│   ├── scripts/                          # Runtime setup scripts: install.sh, etc.
 │   └── tests/                            # Kernel Agent tool tests
 ├── critic-agent/                         # Critic-agent subprocess runtime (proposal review)
 ├── robustness-agent/                     # Robustness-agent subprocess runtime (health/RCA)
