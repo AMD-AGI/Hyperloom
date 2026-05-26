@@ -112,14 +112,13 @@ models:
     kernel_opt_backends: claude
     target_gpu: mi300x
 
-  # ── GLM 5 (FP8) — DISABLED 2026-05-11 ──
-  # Reason: InferenceX has no MI300X baseline for GLM-5; the ifx key resolves
-  # to glm5_fp8_mi355x.sh (MI355X 288GB script). Copying that script's
-  # --mem-fraction-static 0.85 + TP=16 single-instance breaks on MI300X
-  # (192GB HBM, MoRI 1P1D TP=8/8). Re-enable when either:
-  #   (a) InferenceX adds a glm5-fp8-mi300x-* entry in amd-master.yaml, or
-  #   (b) we patch ci to inject MI300X memory adjustment + MoRI launch flags
-  #       before the benchmark_script_section reaches the agent.
+  # ── GLM 5 (FP8) old single-node attempt — DISABLED 2026-05-11 ──
+  # The original disabled block below kept the MI355X inferenceX_key as a
+  # fallback for amd-master.yaml lookup. That approach surfaced the wrong
+  # benchmark script (MI355X --mem-fraction-static 0.85 + TP=16 single-
+  # instance) and OOM'd on MI300X 192GB. Replaced 2026-05-26 by the
+  # self-contained multi-node entry below; this block is kept only as a
+  # historical "do not re-enable" marker.
   # - inferenceX_key: glm5-fp8-mi355x-sglang
   #   inferenceX_api_name: GLM-5
   #   model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
@@ -129,6 +128,34 @@ models:
   #   tp: 16
   #   mode: remote
   #   rayjob_image: harbor.core42.primus-safe.amd.com/custom/sync/sglang:202604290707
+
+  # ── GLM 5 (FP8, MoE+MLA+NSA) multi-node — TP=16 across 2 MI300X nodes ──
+  # Pure Hyperloom-internal entry: InferenceX has no MI300X baseline for GLM-5,
+  # so this entry is self-contained (carries model_hf / image / framework /
+  # precision / conc / isl_osl_configs directly). orchestrator.py picks up the
+  # `synthesize_entry_from_ci_config()` path when inferenceX_key is absent.
+  # Multi-node TP=16 spreads the ~1.4TB FP8 weights to ~88GB/GPU, leaving
+  # ~75GB/GPU headroom for KV cache on MI300X 192GB cards (single-node TP=8
+  # OOMs — see the historical block above).
+  # Validated 2026-05-22 (session zai-org-GLM-5_20260522T070305Z_525d8a89):
+  #   baseline 527.50 → optimized 690.89 tok/s (+30.97%)
+  #   winning backend: --decode-attention-backend aiter
+  - key: glm5-multinode-fp8-mi300x-sglang
+    model_hf: zai-org/GLM-5
+    model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
+    image: lmsysorg/sglang:v0.5.11-rocm720-mi30x
+    framework: sglang
+    precision: fp8
+    conc: 64
+    isl_osl_configs:
+      - [1024, 1024]
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi300x
+    tp: 16
+    ep: 1
+    mode: remote
+    rayjob_image: harbor.core42.primus-safe.amd.com/custom/sync/sglang:202605190643
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang

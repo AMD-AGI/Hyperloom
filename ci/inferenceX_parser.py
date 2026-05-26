@@ -80,6 +80,59 @@ def get_latest_commit(repo_url: str, ref: str = "main") -> str:
     return result.stdout.split()[0] if result.stdout.strip() else ""
 
 
+def synthesize_entry_from_ci_config(model_cfg: dict) -> dict:
+    """Build an amd-master.yaml-style entry from a self-contained ci-config entry.
+
+    Used for Hyperloom-internal models that have no InferenceX baseline
+    (e.g., GLM-5 multi-node MI300X — InferenceX only publishes MI355X). The
+    returned dict matches the shape consumed by ``parse_model_entry()`` so the
+    existing ``merge_model_config()`` flow works unchanged.
+
+    Required fields in ``model_cfg``:
+      - ``model_hf``           HF repo (e.g., ``zai-org/GLM-5``)
+      - ``image``              container image tag (e.g., ``lmsysorg/sglang:v0.5.11-rocm720-mi30x``)
+      - ``framework``          ``sglang`` or ``vllm``
+      - ``precision``          ``fp8`` / ``fp4`` / ``bf16``
+      - ``conc``               concurrency cap
+      - ``isl_osl_configs``    list of ``[isl, osl]`` pairs
+    Optional:
+      - ``ep``                 default 1
+      - ``target_gpu``         default ``mi300x``
+      - ``tp``                 default 8
+
+    Caller is responsible for setting ``key`` on the ci-config entry so the
+    matrix filter and per-task identifier are unique.
+    """
+    isl_osl = model_cfg.get("isl_osl_configs") or [[1024, 1024]]
+    return {
+        "model": model_cfg.get("model_hf", ""),
+        "image": model_cfg.get("image", ""),
+        "model-prefix": (
+            model_cfg.get("key", "").split("-")[0]
+            if model_cfg.get("key") else ""
+        ),
+        "runner": model_cfg.get("target_gpu", "mi300x"),
+        "precision": model_cfg.get("precision", ""),
+        "framework": model_cfg.get("framework", "sglang"),
+        "multinode": model_cfg.get("mode") == "remote",
+        "scenarios": {
+            "fixed-seq-len": [
+                {
+                    "isl": pair[0],
+                    "osl": pair[1],
+                    "search-space": [{
+                        "tp": model_cfg.get("tp", 8),
+                        "ep": model_cfg.get("ep", 1),
+                        "conc-start": 4,
+                        "conc-end": model_cfg.get("conc", 64),
+                    }],
+                }
+                for pair in isl_osl
+            ],
+        },
+    }
+
+
 def parse_model_entry(entry: dict) -> dict:
     """Extract structured config from an amd-master.yaml model entry."""
     # Support both old format (seq-len-configs) and new format (scenarios.fixed-seq-len)

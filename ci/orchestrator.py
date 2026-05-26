@@ -28,6 +28,7 @@ from inferenceX_parser import (
     get_nfs_root,
     merge_model_config,
     resolve_var,
+    synthesize_entry_from_ci_config,
 )
 from report_generator import (
     build_model_result,
@@ -550,7 +551,11 @@ def main():
 
         ifx_script_contents: dict[str, str] = {}
         for model_cfg in model_list:
-            ifx_key = model_cfg["inferenceX_key"]
+            ifx_key = model_cfg.get("inferenceX_key", "")
+            if not ifx_key:
+                # Self-contained entry (no upstream InferenceX baseline). The
+                # agent constructs the server launch directly from the prompt.
+                continue
             script = find_benchmark_script(_tmpdir, ifx_key, scripts_path)
             ifx_scripts[ifx_key] = script
             if script:
@@ -564,9 +569,28 @@ def main():
     # Merge configs and fetch API data
     merged_models = []
     for model_cfg in model_list:
-        ifx_key = model_cfg["inferenceX_key"]
-        if ifx_key not in amd_master:
-            log.warning("Model %s not found in amd-master.yaml, skipping", ifx_key)
+        ifx_key = model_cfg.get("inferenceX_key", "")
+        entry_label = ifx_key or model_cfg.get("key", "<unnamed>")
+
+        if ifx_key and ifx_key in amd_master:
+            # Standard path: pull image/precision/framework/etc. from amd-master.yaml.
+            ifx_entry = amd_master[ifx_key]
+        elif model_cfg.get("model_hf") and model_cfg.get("image"):
+            # Self-contained Hyperloom-internal entry (no InferenceX baseline).
+            # Build a synthetic amd-master-style entry directly from ci-config
+            # fields so the rest of the merge flow works unchanged.
+            ifx_entry = synthesize_entry_from_ci_config(model_cfg)
+            log.info(
+                "Model %s: using self-contained ci-config entry "
+                "(no amd-master.yaml lookup)",
+                entry_label,
+            )
+        else:
+            log.warning(
+                "Model %s: inferenceX_key %r not in amd-master.yaml AND "
+                "ci-config entry lacks model_hf/image — skipping",
+                entry_label, ifx_key,
+            )
             continue
 
         api_name = model_cfg.get("inferenceX_api_name", "")
@@ -580,7 +604,7 @@ def main():
                 log.warning("Failed to fetch benchmarks for %s: %s", api_name, e)
 
         merged = merge_model_config(
-            model_cfg, amd_master[ifx_key], defaults, harbor_prefix, ifx_benchmarks)
+            model_cfg, ifx_entry, defaults, harbor_prefix, ifx_benchmarks)
         merged["benchmark_script"] = ifx_scripts.get(ifx_key)
         merged["benchmark_script_content"] = ifx_script_contents.get(ifx_key, "")
         if results_cfg.get("result_dir"):
