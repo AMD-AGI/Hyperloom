@@ -56,7 +56,7 @@ Run `<subcommand> --help` for the full flag set. **Do not invent flags.**
   `RAY_JOB_ENTRYPOINT` — auto-injected).
 * **Defaults** (omit when prompt is silent): `--workspace`→`$SAFE_WORKSPACE`,
   `--gpus-per-node`→`8`, `--display-name`→`$DISPLAY_NAME` else
-  `multi_node_<unix-ts>`, `--owner-id`→`$WORKLOAD_ID`.
+  generated (see `DISPLAY_NAME` section below), `--owner-id`→`$WORKLOAD_ID`.
 
 ### Map the user Environment block → CLI (do not re-ask)
 
@@ -110,13 +110,13 @@ setsid nohup inference_optimizer --verbose optimize \
 
 ### `DISPLAY_NAME` (SaFE workload create only)
 
-Only `create-rayjob` sets the SaFE workload name (`displayName` /
-`--display-name` / `$DISPLAY_NAME`). Rules from the admission webhook:
+Only `create-rayjob` sets the SaFE workload name. Resolution order:
 
-* Length **1–36**, lowercase letters, digits, hyphens only (`[a-z0-9-]`).
-* Must **start with a letter**, **end with alphanumeric**.
-
-Good: `hl-run-$(date +%m%d%H%M)`. Bad: `hyperloom-sglang-2node-20260522_022937` (too long / underscores).
+1. If `$DISPLAY_NAME` is set, use it as-is — do **not** pass `--display-name`.
+2. Otherwise generate one that satisfies the SaFE admission webhook:
+   length **1–36**, lowercase letters / digits / hyphens only (`[a-z0-9-]`),
+   start with a letter, end with alphanumeric. Good: `hl-run-$(date +%m%d%H%M)`.
+   Bad: `hyperloom-sglang-2node-20260522_022937` (too long / underscores).
 
 ### SaFE workload `phase` (source of truth)
 
@@ -221,14 +221,13 @@ After step 4 route all benchmark / OOB / Magpie traffic to
 * **ADDENDUM-16** (robustness LocalProbe is sandbox-scoped): the
   `robustness-agent` backend's `LocalProbeSource` family probes
   sandbox-local resources only — `ray status`, the inference server
-  health URL (`http://127.0.0.1:8888`), the auth-proxy URL
-  (`http://127.0.0.1:4002`), GPU / FD / disk / shm metrics, the local
-  log-error scanner, etc. On `--nodes >= 2` every one of those
-  resources lives in a separate Kubernetes pod (head pod / worker
-  pod / RayJob submitter, on a different subnet from the sandbox in
-  some clusters), so each probe surfaces as a HIGH-severity false
-  positive (`ray_head_dead`, `local_server_unreachable`,
-  `auth_proxy_unhealthy`, `gpu_memory_leaked`, ...). The CLI
+  health URL (`http://127.0.0.1:8888`), GPU / FD / disk / shm metrics,
+  the local log-error scanner, etc. On `--nodes >= 2` every one of
+  those resources lives in a separate Kubernetes pod (head pod /
+  worker pod / RayJob submitter, on a different subnet from the
+  sandbox in some clusters), so each probe surfaces as a HIGH-severity
+  false positive (`ray_head_dead`, `local_server_unreachable`,
+  `gpu_memory_leaked`, ...). The CLI
   auto-downgrades `--robustness-agent` to `--robustness-mock`
   (heartbeat-only) when `args.nodes >= 2` and prints a WARNING.
   Operators who want to suppress the WARNING pass `--robustness-mock`

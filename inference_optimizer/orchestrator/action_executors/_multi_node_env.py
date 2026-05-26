@@ -117,6 +117,20 @@ def ray_gcs_address_from_state() -> str:
     return ""
 
 
+def rayjob_id_from_state() -> str:
+    """Return the SaFE-allocated RayJob workload id, or ``""`` if absent.
+
+    Reads from the same ``$MULTI_NODE_STATE_FILE`` checkpoint that
+    ``inference_optimizer.multi_node create-rayjob`` writes after SaFE
+    returns. Used by call sites that need to scope per-RayJob shared
+    artefacts (e.g. profile-trace dir) when
+    ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` was not exported in-process —
+    typically when the optimizer was launched out of band from
+    ``cli._provision_multi_node_rayjob_stack``.
+    """
+    return str(_read_state().get("rayjob_id") or "").strip()
+
+
 def export_ray_address_to_os() -> None:
     """Set ``RAY_ADDRESS`` from multi_node state when running multi-node optimize."""
     if not is_multi_node():
@@ -243,4 +257,5 @@ __all__ = [
     "log_mn_banner",
     "magpie_remote_env",
     "ray_gcs_address_from_state",
+    "rayjob_id_from_state",
 ]
