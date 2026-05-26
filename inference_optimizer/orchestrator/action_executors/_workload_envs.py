@@ -241,15 +241,25 @@ def materialize_config_with_envs(
     rocr_env = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
     if rocr_env:
         envs["ROCR_VISIBLE_DEVICES"] = rocr_env
-    resolved_tp = int(envs.get("TP") or os.environ.get("TP") or 1)
+    tp_from_env = os.environ.get("TP", "").strip()
+    tp_from_yaml = envs.get("TP")
+    rocr_yaml = str(envs.get("ROCR_VISIBLE_DEVICES") or "").strip()
+    rocr_devices = [d.strip() for d in rocr_yaml.split(",") if d.strip()]
+    if tp_from_env:
+        resolved_tp = int(tp_from_env)
+    elif rocr_yaml and not tp_from_yaml:
+        # Derive TP from user-pinned GPU list when the YAML template
+        # doesn't set TP — avoids inheriting a stale TP from templates
+        # built for a different GPU count.
+        resolved_tp = len(rocr_devices)
+        envs["TP"] = resolved_tp
+    else:
+        resolved_tp = int(tp_from_yaml or 1)
     # Auto-clamp TP to the pod's visible GPU count. The shipped YAML defaults
     # to TP=8 (full DGX-style node), so a 4-GPU sandbox would otherwise launch
     # sglang/vllm with `--tensor-parallel-size=8` and crash with `HIP error:
-    # invalid device ordinal` (see optimizer_runs log when only GPU0-3 exist).
-    # The IR-1 preflight warns about this but the materializer used to honour
-    # the YAML default verbatim. We now clamp + log so baseline/profile/params
-    # all self-adapt to the available hardware without operator intervention.
-    # Override the clamp via $INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1.
+    # invalid device ordinal`. Override via
+    # $INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1.
     if os.environ.get("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "").strip() != "1":
         visible = _visible_gpu_count()
         if visible and resolved_tp > visible:
@@ -261,9 +271,7 @@ def materialize_config_with_envs(
                 resolved_tp, visible, visible,
             )
             resolved_tp = visible
-            envs["TP"] = visible
-    rocr_yaml = str(envs.get("ROCR_VISIBLE_DEVICES") or "").strip()
-    rocr_devices = [d.strip() for d in rocr_yaml.split(",") if d.strip()]
+    envs["TP"] = resolved_tp
     if not rocr_yaml or len(rocr_devices) < resolved_tp:
         derived = ",".join(str(i) for i in range(resolved_tp))
         if rocr_yaml and rocr_yaml != derived:

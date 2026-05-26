@@ -20,7 +20,6 @@ Both detectors short-circuit when the session is in ``closing_phase``
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,8 +28,6 @@ from ..sources.base import SourceData
 from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
-
-log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,7 +41,12 @@ class ProgressConfig:
     "unchanged" (matches the upstream ``min_keep_gain_pct`` convention).
     ``no_levers_min_minutes`` is the elapsed-time floor: below it we
     refuse to call the session "empty" because cold-start alone could
-    push past 30-40 min on a 671B FP8 model.
+    push past 30-40 min on a 671B FP8 model. The default 45.0 covers
+    typical single-node scenarios; multi-node + large-model setups
+    consume more wall-clock time for sglang cold start (10-15 min) +
+    baseline + profile + turnaround alone, so they should override
+    this via host-side config (e.g. inference_optimizer's
+    ``_build_robustness_options`` passes 60.0 when ``args.nodes >= 2``).
     """
 
     gain_window_ticks: int = 6
@@ -136,6 +138,15 @@ class ProgressDetector:
         cfg = self._config
         if len(self._gain_history) < cfg.gain_window_ticks:
             return None
+        # Plateau semantics require "explored but stalled". Before any
+        # candidate has been promoted onto the optimization_stack,
+        # cumulative_gain_validated is 0 by construction (baseline +
+        # profile alone fill the 6-tick window with zeros on multi-node
+        # cold start). Defer to ``no_levers_found`` which has the right
+        # elapsed/tick floors for the empty-stack case so the two
+        # B-family rules don't fire HIGH twice on the same condition.
+        if snap.optimization_stack_size == 0:
+            return None
         window = self._gain_history[-cfg.gain_window_ticks:]
         delta = max(window) - min(window)
         if delta > cfg.gain_epsilon_pct:
@@ -184,6 +195,25 @@ class ProgressDetector:
             # Validated gain exists even though stack count is 0 — odd
             # but not our problem; let it be.
             return None
+        # PR-B Fix 2 (M0): do not claim "no lever" while kernel_opt is
+        # in flight or its KEEP queue is waiting to integrate. Qwen3
+        # 20260522T093903Z burned a 4.13x KEEP because this signal only
+        # looked at optimization_stack_size + cumulative_gain.
+        if snap.kernel_opt_attempts_count > 0:
+            return None
+        if snap.has_keep_pending_integrate:
+            return None
+        # Multi-node defer (PR #239 followup 97318ee): sglang cold start
+        # (10-15 min) + baseline + profile + turnaround eats 35-50 min
+        # on large-model multi-node runs, during which stack_size==0 +
+        # cumulative_gain==0 are by-construction rather than diagnostic.
+        # Defer the symptom until any explore family has actually run
+        # (last_explore / last_backends / last_params / last_sweep
+        # populated). Repro: primus-claw-20260522034541-xkk9f turn=7
+        # fired HIGH 12 minutes before backends phase 1 actually
+        # started.
+        if not snap.explore_started:
+            return None
         if snap.elapsed_minutes < cfg.no_levers_min_minutes:
             return None
         if snap.tick < cfg.no_levers_min_ticks:
@@ -201,6 +231,8 @@ class ProgressDetector:
                 "tick": snap.tick,
                 "optimization_stack_size": 0,
                 "cumulative_gain_validated": snap.cumulative_gain_validated,
+                "kernel_opt_attempts_count": snap.kernel_opt_attempts_count,
+                "has_keep_pending_integrate": snap.has_keep_pending_integrate,
                 "min_observation_minutes": cfg.no_levers_min_minutes,
                 "min_observation_ticks": cfg.no_levers_min_ticks,
             },
