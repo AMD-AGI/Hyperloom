@@ -15,15 +15,15 @@
 #   3. InferenceX checkout: clone latest from upstream (no SHA pin yet),
 #      sets INFERENCEX_PATH for runtime
 #   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
-#      bring-up, Node/npm, TraceLens, GEAK, OOB and the auth-proxy. kernel-agent
-#      itself is the canonical owner of those — we just chain to it
-#      so users have a single entry point.
+#      bring-up, Node/npm, TraceLens, GEAK, OOB and CLI auth-file setup.
+#      kernel-agent itself is the canonical owner of those — we just
+#      chain to it so users have a single entry point.
 #
 # kernel-agent's install.sh owns Ray + ray start, TraceLens, GEAK, OOB
-# auth-proxy. inference_optimizer's install.sh owns Magpie / InferenceX
-# / the inference_optimizer Python package itself. The two are
-# composable: kernel-agent works standalone; inference_optimizer drags
-# kernel-agent in via this script.
+# CLI auth files. inference_optimizer's install.sh owns Magpie /
+# InferenceX / the inference_optimizer Python package itself. The two
+# are composable: kernel-agent works standalone; inference_optimizer
+# drags kernel-agent in via this script.
 
 set -euo pipefail
 
@@ -35,8 +35,8 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 
 # Single artefact root: everything writable defaults to $USER_DATA_PATH so
 # operators can monitor a run end-to-end by tailing one directory. Magpie
-# clone, source mirrors, generated env / GEAK config, and the pod-local
-# auth-proxy state all derive from $HYPERLOOM_RUNTIME_DIR.
+# clone, source mirrors, and generated env / GEAK config all derive from
+# $HYPERLOOM_RUNTIME_DIR.
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
@@ -64,7 +64,7 @@ Installs:
   - Magpie (cloned to $HYPERLOOM_RUNTIME_DIR/Magpie by default)
   - Detects/exports INFERENCEX_PATH
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
-    Node/npm, TraceLens, GEAK, OOB CLI, and the OOB auth-proxy.
+    Node/npm, TraceLens, GEAK, and OOB CLI auth.
   - Chains to framework-agent/scripts/install.sh for the `fa` CLI
     used by the `framework_pr` bandit arm at optimize-time.
     framework-agent is fully standalone; the chain just makes the
@@ -501,7 +501,7 @@ chain_kernel_agent() {
     warn "kernel-agent installer not found at $script"
     return 0
   fi
-  log "delegating ray + TraceLens + GEAK + OOB + auth-proxy to ${script}"
+  log "delegating ray + TraceLens + GEAK + OOB CLI auth to ${script}"
   export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_DIR HYPERLOOM_ROOT
   export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
   export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"

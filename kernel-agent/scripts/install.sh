@@ -192,10 +192,10 @@ CURSOR_API_KEY_VAL="${CURSOR_API_KEY:-}"
 CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh}"
 
 # Install everything by default. The previous lazy `--with-geak / --with-oob`
-# scheme caused recurring "OOB proxy not running, request errored, found
-# the missing service after the fact" issues — when the resident skill
-# triggered a kernel-opt that needed claude/codex but install.sh had only
-# brought up GEAK, the auth-proxy was missing and every CLI request 401'd.
+# scheme caused recurring "missing dependency discovered at request time"
+# issues — when the resident skill triggered a kernel-opt that needed
+# claude/codex but install.sh had only brought up GEAK, the CLI auth files
+# were missing and every request 401'd.
 # Per user direction: "kernel-agent skills do not differentiate, just install everything". The
 # old --with-* / --all-backends / --backend flags are accepted but no-op
 # for backwards compatibility with existing call sites.
@@ -212,8 +212,8 @@ Usage: install.sh [options]
 Always installs (no --with-* selectivity any more):
   ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
   Node.js/npm, GEAK CLI/config, OOB + claude/codex CLI auth,
-  LLM proxy env/auth, and the OOB auth-proxy on :4002
-  (via ensure_auth_proxy.sh).
+  and LLM gateway env/auth (claude/codex CLIs talk to the gateway
+  directly; the legacy auth-proxy on :4002 has been retired).
 
 Options:
   --check-only       Verify current environment, do not install
@@ -745,81 +745,48 @@ ensure_llm_auth_files() {
     return
   fi
   mkdir -p /root/.claude /root/.codex
+  # The Anthropic SDK appends /v1 itself, so strip a trailing /v1 from
+  # the OpenAI-style upstream URL when writing customApiUrl.
+  local _anthropic_url="${OOB_BASE_URL_VAL%/}"
+  _anthropic_url="${_anthropic_url%/v1}"
   cat > /root/.claude/config.json <<EOF
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
   "primaryApiKey": "${OOB_API_KEY_VAL}",
-  "customApiUrl": "${OOB_BASE_URL_VAL}"
+  "customApiUrl": "${_anthropic_url}"
 }
 EOF
   chmod 600 /root/.claude/config.json
-  # Codex 0.100.0 won't send Authorization to non-openai.com endpoints; the
-  # 4002 auth-proxy injects PROXY_AUTH_TOKEN instead. Writing OPENAI_API_KEY
-  # here would survive that injection but the gateway still rejects with
-  # "token not present" because codex never actually transmits the value.
-  # Keep the field empty so codex stays in apikey-mode without leaking the
-  # SaFE key into any client header.
+  # Codex 0.100.0 reads ~/.codex/auth.json before env and does not fall
+  # back when OPENAI_API_KEY is empty; write the real key for direct auth.
   cat > /root/.codex/auth.json <<EOF
 {
   "auth_mode": "apikey",
-  "OPENAI_API_KEY": ""
+  "OPENAI_API_KEY": "${OOB_API_KEY_VAL}"
 }
 EOF
   chmod 600 /root/.codex/auth.json
 }
 
-# Delegate to the standalone idempotent supervisor script. It handles the
-# port probe + curl probe + stuck-proxy restart cases. Sourcing it lets us
-# pick up its PROXY_*_BASE_URL exports for write_env_file.
-ensure_auth_proxy() {
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    return 0
-  fi
-  local script
-  script="$(dirname "$0")/ensure_auth_proxy.sh"
-  if [ ! -f "$script" ]; then
-    warn "ensure_auth_proxy.sh not found at $script"
-    return 0
-  fi
-  # Re-export the env vars the helper expects, then capture its KEY=VALUE
-  # output and source it back so PROXY_*_BASE_URL land in this shell.
-  local out
-  if ! out=$(
-    HYPERLOOM_ROOT="$HYPERLOOM_ROOT" \
-    OOB_BASE_URL="$OOB_BASE_URL_VAL" \
-    OOB_API_KEY="$OOB_API_KEY_VAL" \
-    bash "$script" 2>&1
-  ); then
-    warn "ensure_auth_proxy.sh failed; OOB requests may 401"
-    echo "$out" | sed 's/^/  /' >&2
-    return 0
-  fi
-  echo "$out" | sed 's/^/[ensure-auth-proxy] /'
-  while IFS='=' read -r key value; do
-    case "$key" in
-      PROXY_ANTHROPIC_BASE_URL) PROXY_ANTHROPIC_BASE_URL="$value" ;;
-      PROXY_OPENAI_BASE_URL)    PROXY_OPENAI_BASE_URL="$value" ;;
-    esac
-  done <<<"$out"
-}
-
 # Write a pod-local kernel-agent env file users should source so subsequent CLI calls
-# (and Ray workers via runtime_env) pick up the proxy-rewritten URLs.
+# (and Ray workers via runtime_env) pick up the upstream gateway URLs.
 write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
-  # ensure_auth_proxy.sh now always emits PROXY_*_BASE_URL on success
-  # (both the just-started and the healthy-noop branches). If we still don't
-  # have them, the supervisor either failed or OOB_BASE_URL was empty —
-  # either way the kernel-agent env would silently lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL,
-  # which is the exact failure mode that lets externally-preset upstream
-  # URLs leak into Claude/Codex CLIs and 401-hang the SDK. Warn loudly so
-  # the install operator notices instead of debugging at runtime.
-  if [ -z "${PROXY_ANTHROPIC_BASE_URL:-}" ] || [ -z "${PROXY_OPENAI_BASE_URL:-}" ]; then
-    warn "PROXY_*_BASE_URL not captured from ensure_auth_proxy.sh; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
-    warn "This means an externally-preset ANTHROPIC_BASE_URL will reach Claude CLI directly and hang on gateway 401"
+  # Warn loudly if OOB_BASE_URL is empty — kernel-agent env would silently
+  # lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL and CLIs would resort to whatever
+  # was in the operator's shell rc, defeating the point of this file.
+  if [ -z "${OOB_BASE_URL_VAL:-}" ]; then
+    warn "OOB_BASE_URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
+  fi
+  # Anthropic SDK appends /v1 itself, so strip a trailing /v1 from the
+  # OpenAI-style upstream URL when exporting ANTHROPIC_BASE_URL.
+  local _anthropic_url=""
+  if [ -n "${OOB_BASE_URL_VAL:-}" ]; then
+    _anthropic_url="${OOB_BASE_URL_VAL%/}"
+    _anthropic_url="${_anthropic_url%/v1}"
   fi
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
@@ -835,8 +802,8 @@ write_env_file() {
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
-    [ -n "${PROXY_ANTHROPIC_BASE_URL:-}" ] && echo "export ANTHROPIC_BASE_URL='${PROXY_ANTHROPIC_BASE_URL}'"
-    [ -n "${PROXY_OPENAI_BASE_URL:-}" ] && echo "export OPENAI_BASE_URL='${PROXY_OPENAI_BASE_URL}'"
+    [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
+    [ -n "${OOB_BASE_URL_VAL:-}" ] && echo "export OPENAI_BASE_URL='${OOB_BASE_URL_VAL}'"
     [ -n "${OOB_API_KEY_VAL}" ] && {
       echo "export SAFE_API_KEY='${OOB_API_KEY_VAL}'"
       echo "export ANTHROPIC_API_KEY='${OOB_API_KEY_VAL}'"
@@ -961,7 +928,6 @@ main() {
   ensure_geak
   ensure_rag_index
   ensure_oob
-  ensure_auth_proxy
   write_env_file
 
   report_status
