@@ -3585,15 +3585,12 @@ class Coordinator:
 
     # Note: main commit c900791 also ports the N22 keyword-implied
     # advice (``_record_keyword_implied_advice``,
-    # ``_registered_variants_for``) and N21 roofline-rerun denial
-    # (``_proposal_denial_for_roofline``). On this branch the
-    # equivalent functionality lives in:
-    #   * orchestrator/_analysis_keyword_map.py + PolicyGate's
-    #     ``analysis_keyword_advisory`` rule (F3-4 N22), and
-    #   * PolicyGate's ``roofline_saturation_advisory`` (F3-4 N21).
-    # The Coordinator-side helpers from main are therefore omitted
-    # here (they would also re-import the dropped backends.py /
-    # params.py grids —     # §1).
+    # ``_registered_variants_for``). On this branch the equivalent
+    # functionality lives in
+    # ``orchestrator/_analysis_keyword_map.py`` + PolicyGate's
+    # ``analysis_keyword_advisory`` rule. The Coordinator-side
+    # helpers from main are therefore omitted here (they would also
+    # re-import the dropped backends.py / params.py grids).
 
     # ==================================================================
     # Intent handling
@@ -7202,13 +7199,24 @@ class Coordinator:
             # profile + trace_analyze + analysis.md snapshot) anchored
             # on baseline. Idempotency-keyed via the fixed ``prelude``
             # reason so a resume after the baseline completion edge
-            # does not double-enqueue. The watermark check itself
-            # bootstraps from ``last_roofline_tput`` (initialised to 0
-            # in SharedState; set on roofline completion below).
+            # does not double-enqueue.
+            #
+            # Skip conditions:
+            # * baseline tput missing or invalid;
+            # * a roofline task is already in-flight (gate field set);
+            # * ``--no-force-roofline-after-baseline`` AND a prior
+            #   roofline already populated ``last_roofline_tput`` on
+            #   this state.json (resume edge).
+            already_have_roofline = (
+                float(self.shared_state.last_roofline_tput or 0.0) > 0
+            )
+            force_flag = bool(
+                getattr(self.shared_state, "force_roofline_after_baseline", True),
+            )
             if (
                 isinstance(tput, (int, float)) and tput > 0
                 and not (self.shared_state.auto_roofline_pending_task_id or "").strip()
-                and float(self.shared_state.last_roofline_tput or 0.0) <= 0
+                and (force_flag or not already_have_roofline)
             ):
                 try:
                     rl_task = await self._enqueue_internal_roofline_task(

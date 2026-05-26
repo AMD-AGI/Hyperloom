@@ -386,6 +386,12 @@ class SharedState:
     # ``framework_pr_scout`` sub_kind requires this. Operators opt out
     # via ``--no-framework-agent-enabled``.
     framework_agent_enabled: bool = True
+    # When True (the default) the Coordinator always enqueues the
+    # PRELUDE initial roofline once baseline completes. When False,
+    # the bootstrap is skipped if ``last_roofline_tput`` is already
+    # populated (resume edge), letting operators avoid a redundant
+    # roofline at the start of a continuation session.
+    force_roofline_after_baseline: bool = True
     # Cheap-rounds gain gate is opt-in — only locks ``kernel_opt`` when
     # the operator has tuned the thresholds for their workload.
     gain_driven_kernel_opt: bool = False

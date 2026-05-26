@@ -63,10 +63,7 @@ from .orchestrator.action_executors import (
 )
 from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
 from .orchestrator.action_executors.recover import recover_executor
-from .orchestrator.action_executors.roofline import (
-    make_roofline_executor,
-    make_roofline_stub_executor,
-)
+from .orchestrator.action_executors.roofline import make_roofline_executor
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
@@ -617,6 +614,15 @@ def _seed_shared_state(
         research_lane_capacity=research_lane_capacity,
         plateau_overrides=plateau_overrides,
         explore_overtime_kill_ratio=explore_overtime_kill_ratio,
+        force_roofline_after_baseline=bool(
+            getattr(args, "force_roofline_after_baseline", True),
+        ),
+        framework_agent_enabled=bool(
+            getattr(args, "framework_agent_enabled", True),
+        ),
+        gain_driven_kernel_opt=bool(
+            getattr(args, "gain_driven_kernel_opt", False),
+        ),
     )
     state.save(session_dir)
     return state
@@ -953,26 +959,15 @@ def _register_executors(
     for kind in _NOOP_KINDS_KERNEL_ONLY:
         coordinator.sub.register_executor(kind, _noop_prep)
 
-    # F1-3 (Roofline-v2 / ): the composite
-    # ``roofline`` action runs profile + trace_analyze atomically and
-    # surfaces analysis.md to the next orchestration tick. Gated by
-    # ``SharedState.use_roofline_composite`` (F0-10 toggle, default
-    # off): when the toggle is off we register the stub executor so a
-    # speculative ``propose_action{action='roofline'}`` returns
-    # ``status='succeeded' degraded=True`` instead of failing with
-    # ``no_executor`` — keeps PolicyGate's ``rule='no_executor'`` path
-    # exclusively for genuine misconfiguration. Flipping the toggle on
-    # (post-F1 smoke per plan §F1-6) swaps in the real executor.
-    if getattr(coordinator.shared_state, "use_roofline_composite", False):
-        coordinator.sub.register_executor(
-            "roofline",
-            make_roofline_executor(shared_state=coordinator.shared_state),
-        )
-    else:
-        coordinator.sub.register_executor(
-            "roofline",
-            make_roofline_stub_executor(shared_state=coordinator.shared_state),
-        )
+    # The composite ``roofline`` action runs profile + trace_analyze
+    # atomically and surfaces analysis.md to the next orchestration
+    # tick. Coordinator auto-enqueues it at PRELUDE and on every 10%
+    # gain watermark crossing; the executor is unconditionally
+    # registered.
+    coordinator.sub.register_executor(
+        "roofline",
+        make_roofline_executor(shared_state=coordinator.shared_state),
+    )
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
@@ -4488,63 +4483,25 @@ def _build_parser() -> argparse.ArgumentParser:
              "MCP servers into specialists. Default: None.",
     )
     # ------------------------------------------------------------------
-    # F1 / F2 / F3 integration toggles (default off).
-    #
-    # These flags scaffold the upcoming roofline-v2 (PR #288) +
-    # framework-agent (PR #280) integration. F0 lands them at default
-    # ``False`` so behaviour matches tag ``pre-roofline-merge``; each
-    # subsequent F-step (F1 / F2 / F3) flips one or more on after its
-    # smoke gate passes. See /{F1,F2,F3}_*.MD.
-    #
-    # Mirrored into ``SharedState.{use_roofline_composite,
-    # framework_agent_enabled, deny_direct_profile, gain_driven_kernel_opt,
-    # roofline_saturation_advisory}`` by the cli boot path so PolicyGate /
-    # Coordinator / prompt builders see consistent values.
+    # Integration toggles. The roofline composite + watermark-driven
+    # refresh path is unconditional now: roofline auto-fires at PRELUDE
+    # (after baseline) and on every 10% ``cumulative_gain_validated``
+    # crossing over ``last_roofline_tput``. The composite/deny toggles
+    # that gated the legacy single-step ``profile`` path are gone.
     # ------------------------------------------------------------------
-    # The three Roofline-v2 / framework-agent toggles default to ON.
-    # ``argparse.BooleanOptionalAction`` exposes both ``--flag`` (force
-    # on) and ``--no-flag`` (force off) so operators have a one-line
-    # opt-out for the legacy path. Env-var fallback uses ``"1"`` as
-    # the default, so ``ENV=0`` on a CI box also turns the flag off.
     def _env_default_on(env_var: str) -> bool:
         return os.environ.get(env_var, "1").strip() != "0"
 
-    opt.add_argument(
-        "--use-roofline-composite",
-        dest="use_roofline_composite",
-        action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE"),
-        help="(F1) Composite ``roofline`` action (atomic profile + "
-             "trace_analyze, produces analysis.md snapshot) is the "
-             "default analysis path. Pass ``--no-use-roofline-composite`` "
-             "(or env INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE=0) "
-             "to opt out and fall back to the separate ``profile`` "
-             "action.",
-    )
     opt.add_argument(
         "--framework-agent-enabled",
         dest="framework_agent_enabled",
         action=argparse.BooleanOptionalAction,
         default=_env_default_on("INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED"),
-        help="(F2) ``serving_specialist`` may invoke ``fa candidates`` "
+        help="``serving_specialist`` may invoke ``fa candidates`` "
              "and ``git fetch refs/pull/...`` via the "
-             "``framework_pr_scout`` sub_kind (PR #280 framework-agent). "
-             "On by default. Pass ``--no-framework-agent-enabled`` "
-             "(or env INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0) "
-             "to opt out.",
-    )
-    opt.add_argument(
-        "--deny-direct-profile",
-        dest="deny_direct_profile",
-        action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE"),
-        help="(F3 / N9) PolicyGate denies ``propose_action{profile}`` "
-             "while ``--use-roofline-composite`` is on, forcing the "
-             "LLM through the atomic ``roofline`` action so the "
-             "analysis.md cache + snapshot_id stay aligned. On by "
-             "default. Pass ``--no-deny-direct-profile`` (or env "
-             "INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE=0) to re-open "
-             "the legacy direct ``profile`` path for debugging.",
+             "``framework_pr_scout`` sub_kind. On by default. Pass "
+             "``--no-framework-agent-enabled`` (or env "
+             "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0) to opt out.",
     )
     opt.add_argument(
         "--gain-driven-kernel-opt",
@@ -4553,24 +4510,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.environ.get(
             "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT", "0",
         ).strip() == "1",
-        help="(F3 / N19c) Lock ``kernel_opt`` until the 3-round moving "
+        help="Lock ``kernel_opt`` until the 3-round moving "
              "average of ``last_explore_delta_gain_pct`` drops below "
              "epsilon (0.5%%). Prevents premature deep work while cheap "
              "exploration is still earning. Default off. Env: "
              "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT=1.",
     )
     opt.add_argument(
-        "--roofline-saturation-advisory",
-        dest="roofline_saturation_advisory",
-        action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_ROOFLINE_SATURATION_ADVISORY", "0",
-        ).strip() == "1",
-        help="(F3) Inject a ``Roofline Saturation Advisory`` section "
-             "into the orchestration prompt listing directions whose "
-             "saturation exceeds 80%%. Soft hint only — never hard-"
-             "rejects an LLM dispatch. Default off. Env: "
-             "INFERENCE_OPTIMIZER_ROOFLINE_SATURATION_ADVISORY=1.",
+        "--force-roofline-after-baseline",
+        dest="force_roofline_after_baseline",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_FORCE_ROOFLINE_AFTER_BASELINE"),
+        help="Always enqueue the PRELUDE roofline once baseline lands "
+             "(the default). Pass ``--no-force-roofline-after-baseline`` "
+             "to skip the initial roofline when a prior session has "
+             "already populated ``last_roofline_tput`` (resume edge). "
+             "Env: INFERENCE_OPTIMIZER_FORCE_ROOFLINE_AFTER_BASELINE=0.",
     )
     # ------------------------------------------------------------------
     # Fix E — per-variant explore overtime kill ratio.
