@@ -890,9 +890,11 @@ artifacts; the CLI clears stale `stop_reason` and `crash_count` before retrying.
 ## Robustness Monitor for Long Runs
 
 For runs > 5 min, start a monitor in its own `setsid nohup` process. It polls
-`state.json` every 5 min, exits on terminal `stop_reason` (`target_reached` /
-`no_more_leverage` / `time_exhausted` / `max_ticks`), and resumes via
-`--resume` when the optimizer dies unexpectedly.
+`state.json` every 5 min, exits without resuming when the session is terminal
+(any `stop_reason` in `STOP_REASON_VOCAB`, `phase=CLOSE`, or
+`reports/final.md` present — including failure sentinels like
+`baseline_failed`), and resumes via `--resume` only when the optimizer dies
+without those markers (unexpected crash).
 
 ```bash
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
@@ -938,16 +940,17 @@ The optimizer should:
 
 1. Establish or reuse `baseline_tput`.
 2. **Coordinator** auto-enqueues `roofline` (composite profile +
-  trace_analyze + analysis.md snapshot) on EXPLORE entry and KERNEL
-  entry when `--use-roofline-composite=true`. The LLM CANNOT propose
-  `roofline` — it is no longer in any phase allowlist. A fresh
-  roofline only re-fires when no snapshot exists, or when
-  `|cumulative_gain_validated - roofline_baseline_gain_at_snapshot|
-  > 10%`. When the toggle is off, EXPLORE runs no analysis at all and
-  KERNEL entry falls back to a plain auto-`profile`. Legacy LLM-
-  proposed `profile` is still allowed in EXPLORE / KERNEL as a manual
-  escape hatch (PolicyGate N9 denies it only when both
-  `--use-roofline-composite` and `--deny-direct-profile` are on).
+  trace_analyze + analysis.md snapshot) at the end of PRELUDE (after
+  baseline) and again whenever measured tput crosses the watermark
+  (`current_tput / last_roofline_tput >= 1.10`; compound 10% → 21% →
+  33% …). The LLM CANNOT propose `roofline` or `profile` — neither is
+  in any phase allowlist. While a roofline is pending,
+  `specialist` / `explore` / `kernel_opt` / `integrate` /
+  `deep_kernel_analysis` / `operator_tuning` / `vendor_kernel_config`
+  dispatches are blocked by PolicyGate
+  (`rule='specialist_wait_for_auto_roofline'`) until it lands.
+  `--force-roofline-after-baseline` (default on) controls whether the
+  PRELUDE roofline is unconditional.
 3. Run `select_kernels` once per trace/config and cache the result in
   `last_select_kernels`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
