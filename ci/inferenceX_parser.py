@@ -364,6 +364,22 @@ def merge_model_config(
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
         "inferenceX_key": model_cfg.get("inferenceX_key", ""),
         "rayjob_image": resolve_var(model_cfg.get("rayjob_image", "")),
+        # ── Per-entry Claw pluginId override ──
+        # Default behaviour (key absent in ci-config) → plugin_id=4 (legacy
+        # Hyperloom plugin, used by all existing entries). To opt a specific
+        # entry OUT of the plugin and have the agent talk to the Claw API
+        # without a pluginId in the body, set:
+        #     claw_plugin_id: null
+        # in the ci-config entry. (claw_client.send_message already omits the
+        # "pluginId" field from the JSON body when plugin_id is None.)
+        # Other integer values (e.g. claw_plugin_id: 5) switch to a different
+        # plugin — same hook used by the Inference A/B Test workflow via
+        # --plugin-id CLI override.
+        "claw_plugin_id": (
+            model_cfg["claw_plugin_id"]
+            if "claw_plugin_id" in model_cfg
+            else 4
+        ),
         # ── Hyperloom-skill knobs surfaced to prompt_template.md ──
         # `nodes` triggers the multinode Task-submission block when > 1.
         # `target_gain` / `max_hours` are forwarded as CLI flags to

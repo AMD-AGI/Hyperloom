@@ -319,8 +319,17 @@ def run_model(
         time.sleep(1)
 
         try:
-            claw.send_message(session_id, prompt)
-            log.info("Prompt sent to session %s", session_id)
+            # Per-entry plugin_id override (merged["claw_plugin_id"] defaults
+            # to 4 for entries that don't set it; null in ci-config opts the
+            # entry out of the Hyperloom plugin entirely — claw_client.
+            # send_message will omit the pluginId field from the JSON body
+            # when plugin_id is None).
+            entry_plugin_id = merged.get("claw_plugin_id", 4)
+            claw.send_message(session_id, prompt, plugin_id=entry_plugin_id)
+            log.info(
+                "Prompt sent to session %s (plugin_id=%s)",
+                session_id, entry_plugin_id,
+            )
         except Exception as e:
             log.error("Failed to send message to %s: %s", session_id, e)
             status_holder["status"] = "failed"
