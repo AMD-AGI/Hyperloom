@@ -1,4 +1,4 @@
-"""Optimization action catalogue (DESIGN v0.6 §16).
+"""Optimization action catalogue ().
 
 Layout:
 

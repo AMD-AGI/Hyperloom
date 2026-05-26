@@ -1,6 +1,6 @@
-"""CodexBackend — DESIGN v0.6 §7.3 / §14.3.
+"""CodexBackend
 
-Codex roles (only ``critic`` in v0.6) talk to GPT-style models via the
+Codex roles (only ``critic`` in the legacy release) talk to GPT-style models via the
 OpenAI SDK; per DESIGN §5.1.1 they're **no-tools by default**, so the
 intent transport is JSON-in-text:
 
@@ -115,7 +115,7 @@ def _extract_envelope(text: str) -> dict | None:
 
 @dataclass
 class CodexBackend:
-    """Production Codex backend (DESIGN v0.6 §14.3). Implements :class:`Backend`."""
+    """Production Codex backend (). Implements :class:`Backend`."""
 
     model: str = "gpt-5.4"
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
