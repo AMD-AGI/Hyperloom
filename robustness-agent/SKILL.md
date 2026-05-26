@@ -1,6 +1,6 @@
 ---
 name: robustness-agent
-description: Independent guardian daemon for Hyperloom inference optimization. Implements the inference_optimizer "robustness" reactor (DESIGN v0.6) so the Coordinator can call it as a Backend, plus a standalone loop for dev. Owns continuous health monitoring, RCA, and scheduling-police capabilities (kill_task / force_dispatch / prune_branch / escalate_strategy_change).
+description: Independent guardian daemon for Hyperloom inference optimization. Implements the inference_optimizer "robustness" reactor so the Coordinator can call it as a Backend, plus a standalone loop for dev. Owns continuous health monitoring, RCA, and scheduling-police capabilities (kill_task / force_dispatch / prune_branch / escalate_strategy_change).
 ---
 
 # Robustness Agent
