@@ -586,17 +586,13 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
     if not args.workspace:
         info(f"workspace derived from $SAFE_WORKSPACE: {workspace}")
 
-    # display_name resolution: --display-name > $DISPLAY_NAME env >
-    # generated `multi_node_<unix-ts>` fallback. Repeating create-rayjob
-    # reuses the same RayJob id once checkpointed (unless --recreate or the
-    # prior workload hit a terminal failure phase).
+    # display_name resolution: $DISPLAY_NAME env > --display-name > fallback.
     display_name = (
-        args.display_name
-        or os.environ.get("DISPLAY_NAME", "").strip()
+        os.environ.get("DISPLAY_NAME", "").strip()
+        or args.display_name
         or f"multi_node_{int(time.time())}"
     )
-    if not args.display_name:
-        info(f"displayName derived from {'$DISPLAY_NAME' if os.environ.get('DISPLAY_NAME') else 'auto-generated'}: {display_name}")
+    info(f"displayName: {display_name}")
 
     # session_id: read from $CLAW_SESSION_ID (Brain-injected at sandbox
     # start). When unset we skip the label so dev / local runs without
@@ -660,22 +656,17 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
             info(f"creating RayJob workload (workspace={workspace} nodes={args.nodes})")
             wid = safe.create_workload(body)
             info(f"workload created: {wid}")
+            _write_rayjob_meta(
+                wid=wid,
+                workspace=workspace,
+                session_id=session_id,
+                owner_id=owner_id,
+                display_name=display_name,
+                nodes=args.nodes,
+                gpus_per_node=args.gpus_per_node,
+            )
 
         _checkpoint_create_rayjob_state(wid=wid, workspace=workspace, args=args)
-        # Sidecar meta JSON under profile-traces/<wid>/. Carries
-        # session_id + owner_id + rayjob_id so operators can map the
-        # multi-node trace tree back to its Claw session without
-        # round-tripping SaFE. Best-effort; skipped when session_id
-        # is unset (see helper docstring).
-        _write_rayjob_meta(
-            wid=wid,
-            workspace=workspace,
-            session_id=session_id,
-            owner_id=owner_id,
-            display_name=display_name,
-            nodes=args.nodes,
-            gpus_per_node=args.gpus_per_node,
-        )
 
         head_pod_ip = ""
         if args.no_wait:
@@ -2049,7 +2040,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--display-name", default=None,
         help="Optional human-readable RayJob name (shows up in SaFE UI). "
-             "Resolution: --display-name > $DISPLAY_NAME env > "
+             "Resolution: $DISPLAY_NAME env > --display-name > "
              "auto-generated multi_node_<unix-ts>.",
     )
     sp.add_argument("--description", default=None)

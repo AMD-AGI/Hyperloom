@@ -498,8 +498,11 @@ def test_session_id_injects_primus_claw_label():
         **_BUILDER_MIN_KWARGS,
     )
     assert b["labels"].get("primus-claw/session-id") == "sess-123"
-    # Co-existing built-in label must still be present (regression guard).
-    assert b["labels"].get("primus-safe.amd.com/created-by") == "hyperloom-cli"
+    # No primus-safe.* labels are written by the builder (SaFE strips
+    # that namespace from caller input -- empty would be a no-op).
+    assert not any(
+        k.startswith("primus-safe.") for k in b["labels"]
+    )
 
 
 def test_session_id_omitted_skips_label():

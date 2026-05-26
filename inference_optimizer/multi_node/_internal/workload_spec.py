@@ -171,14 +171,15 @@ def build_rayjob_workload_body(
     env: dict[str, str] = _sanitize_extra_env(extra_env)
     env["RAY_JOB_ENTRYPOINT"] = _b64(_SUBMITTER_BLOCK_ENTRYPOINT)
 
-    # labels: caller-supplied first (sanitized), then brain-managed
-    # markers. ``primus-safe.amd.com/created-by`` lets operators find
-    # RayJob workloads created by this CLI. ``primus-claw/session-id``
-    # is injected (when provided) so Brain can correlate this RayJob
-    # with its parent sandbox session for GC / dashboard linking; the
-    # value comes from the sandbox env via the CLI layer.
+    # labels: caller-supplied first (sanitized), then the Brain
+    # correlation key. ``primus-claw/session-id`` is injected (when
+    # provided) so Brain can correlate this RayJob with its parent
+    # sandbox session for GC / dashboard linking; the value comes from
+    # the sandbox env via the CLI layer. SaFE-namespace labels are NOT
+    # written here -- SaFE strips ``primus-safe.amd.com/*`` from caller
+    # input on its way to the K8s RayJob CRD, so adding them would be a
+    # no-op (verified May 2026 against a live ``hl-glm5-...`` workload).
     labels = _sanitize_extra_labels(extra_labels)
-    labels["primus-safe.amd.com/created-by"] = "hyperloom-cli"
     if session_id:
         labels["primus-claw/session-id"] = session_id
 
