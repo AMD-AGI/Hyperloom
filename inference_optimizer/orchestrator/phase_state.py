@@ -134,7 +134,9 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # AND ``--deny-direct-profile`` are both on; the auto-profile
         # hook in :meth:`Coordinator._on_enter_kernel` already runs it
         # automatically in that fallback configuration).
-        "profile", "pmc_roofline",
+        # NOTE: ``pmc_roofline`` was retired (action + executor removed);
+        # do not re-add — see post-dict comment about ``roofline``.
+        "profile",
         # KERNEL_OWNED_ACTIONS from policy.py.
         "kernel_opt", "integrate", "deep_kernel_analysis",
         "operator_tuning", "vendor_kernel_config",
