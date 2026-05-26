@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .config import WebToolsConfig
+from .config import IMPLEMENTED_SEARCH_PROVIDERS, WebToolsConfig
 
 
 def build_tool_schemas(config: WebToolsConfig) -> list[dict[str, Any]]:
@@ -34,9 +34,9 @@ def build_tool_schemas(config: WebToolsConfig) -> list[dict[str, Any]]:
 
 
 def _search_usable(config: WebToolsConfig) -> bool:
-    """True when at least one configured search provider has an API key."""
+    """True when at least one implemented search provider has an API key."""
     return any(
-        config.has_search_api_key(name)
+        name in IMPLEMENTED_SEARCH_PROVIDERS and config.has_search_api_key(name)
         for name in config.search_provider_chain()
     )
 
