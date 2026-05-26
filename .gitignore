@@ -59,3 +59,13 @@ Thumbs.db
 inference_optimizer/remain_todo.md
 inference_optimizer/remain_issue.md
 inference_optimizer/remain_robustness_todo.md
+
+# F0/F1 integration: keep test baselines, dry-run merge maps, and
+# archived regression sweeps tracked.
+!docs/test-baselines/*.log
+!docs/integration/*.log
+!docs/integration/logs/*.log
+
+# claude files
+*.claude
+CLAUDE.md

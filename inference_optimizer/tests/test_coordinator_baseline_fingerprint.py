@@ -53,7 +53,10 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
-    coordinator.shared_state.action_scores = {}
+    """v0.8 §3.9 — scoreboard retired (KB_design §3.9 Inv-9.1). Helper
+    kept for back-compat with tests that used to clear the seeded
+    map; it's now a no-op."""
+    return None
 
 
 def _mk_baseline_task(params: dict, *, task_id: str = "t-fp-1") -> Task:
@@ -192,15 +195,14 @@ async def test_handle_unpromotable_non_baseline_omits_fingerprint(session_dir):
     _mute_action_scoring(c)
     try:
         task = Task(
-            task_id="t-be-fail",
-            kind="backends",
+            task_id="t-ex-fail",
+            kind="explore",
             state="queued",
             params={"benchmark_script": "sglang_mi300x.sh"},
-            idempotency_key="idem-be",
+            idempotency_key="idem-ex",
         )
         await c._handle_unpromotable_result(task, {"status": "failed"})
-        attempt = c.shared_state.backends_attempts[-1]
-        # We DO record an attempt for backends (it's in _AUDIT_ACTIONS).
+        attempt = c.shared_state.explore_attempts[-1]
         assert attempt["status"] == "failed"
         # But the fingerprint key isn't there — only baseline is wired.
         assert "fingerprint" not in attempt["extras"]
