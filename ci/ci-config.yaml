@@ -165,12 +165,15 @@ models:
     max_hours: 24
     random_range_ratio: 0.8
     rayjob_image: harbor.core42.primus-safe.amd.com/custom/sync/sglang:202605190643
-    # Opt this entry out of the Hyperloom plugin — the agent talks to
-    # Claw without a pluginId in the body. Aligns with weilei's manually-
-    # validated GLM-5 multi-node run on 5/22 where no plugin was involved.
-    # (Other multi-node / Hyperloom-plugin entries unaffected; they
-    # inherit the legacy default claw_plugin_id=4.)
-    claw_plugin_id: null
+    # NOTE: do NOT set `claw_plugin_id: null` here. We tried it in
+    # commit 3f14eee thinking weilei's manual GLM-5 run "didn't go through
+    # plugin" — but a Claw GUI manual session also defaults to plugin_id=4,
+    # so weilei was always using the Hyperloom plugin. Without a pluginId
+    # the sandbox doesn't load the Hyperloom plugin's tool bundle
+    # (Bash/Read/Write/Grep/etc.); the agent receives the prompt but has
+    # no tools to invoke, sits idle ~10 min, then the session times out
+    # with "agent=failed, 0 tool calls" (runs 26431077434 / 26431116688).
+    # Leave the field absent → inherits the legacy default plugin_id=4.
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang
