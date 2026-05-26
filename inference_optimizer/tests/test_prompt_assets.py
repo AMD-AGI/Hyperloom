@@ -68,10 +68,13 @@ def test_critic_md_is_rules_fragment():
     # 45 → 65 by N38 (the "primary per-proposal rule" section that
     # introduces the action_verdict_policy lookup as the canonical
     # source of truth — replaces having to hand-edit carve-out lists
-    # every time a new action class lands; see N38 docstring). Future
-    # bumps require equivalent justification (new mechanism, not just
-    # adding more action names to existing lists).
-    assert len(lines) <= 65, (
+    # every time a new action class lands; see N38 docstring), then
+    # 65 → 90 by issue #170 (Web verification — when/why/how to use the
+    # optional web_search / web_fetch tools and the mandatory source-
+    # citation rule; new mechanism, not just adding more action names).
+    # Future bumps require equivalent justification (new mechanism, not
+    # just adding more action names to existing lists).
+    assert len(lines) <= 90, (
         f"critic.md should be a concise fragment, got {len(lines)} non-empty lines"
     )
     assert "judge_bundle" in text
