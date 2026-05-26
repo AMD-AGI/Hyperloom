@@ -1,13 +1,13 @@
-"""ExploreExecutor — v0.8 M3 (KB_design §3.4 explore consolidation).
+"""ExploreExecutor — v0.8 M3.
 
-Merges the v0.6 ``backends`` / ``params`` / ``validate_stack`` actions
+Merges the legacy ``backends`` / ``params`` / ``validate_stack`` actions
 into one unified ``explore`` action:
 
 * one yaml meta (``actions/_meta/explore.yaml``),
 * one ledger (``SharedState.explore_search``, see ``shared_state.py``),
 * one executor (this module).
 
-Per-variant flow (KB_design §3.4 §4.1):
+Per-variant flow:
 
 1. canonical_fingerprint dedup against ``explore_search.tested``
    (rename-resistant; LLM/specialist/default_grid all collapse to the
@@ -78,7 +78,7 @@ from ._workload_envs import (
 log = logging.getLogger(__name__)
 
 
-# Per-variant KEEP threshold (KB_design §3.4 §4.1: "0.2% 阈值 + accuracy
+# Per-variant KEEP threshold ("0.2% 阈值 + accuracy
 # gate"). Looser than v0.6 backends (1.0%) and ``ParamsExecutor`` (0.5%)
 # because the inlined stack rebench acts as the second gate — even a
 # marginal +0.3% won't survive into ``optimization_stack`` unless the
@@ -195,7 +195,7 @@ class ExploreExecutor:
     """ActionRunner for the merged ``explore`` action.
 
     Subsumes the retired v0.6 ``backends`` / ``params`` /
-    ``validate_stack`` executors (KB_design §3.4 / KB_gaps/Dead-A).
+    ``validate_stack`` executors.
     Per-variant KEEP/REVERT gating plus an inlined per-KEEP stack
     rebench replace the standalone ``validate_stack`` step.
     """
@@ -220,8 +220,8 @@ class ExploreExecutor:
         self.keep_threshold_pct = float(keep_threshold_pct)
         self.stack_stable_threshold_pct = float(stack_stable_threshold_pct)
         # Stack-rebench can be disabled for unit tests / fast smoke runs.
-        # KB_design §3.4 §4.4 says the inlined rebench is the v0.8
-        # default; flipping this off recovers v0.6 behaviour.
+        # KB_design §3.4 §4.4 says the inlined rebench is the legacy
+        # default; flipping this off recovers behaviour.
         self.enable_stack_rebench = bool(enable_stack_rebench)
 
     async def __call__(self, ctx) -> dict[str, Any]:
@@ -346,7 +346,7 @@ class ExploreExecutor:
                 "error_class": "empty_grid",
                 "error": (
                     "explore: params.grid must be a non-empty list of variant "
-                    "dicts (see KB_design §3.4 §5.1). The Orchestration prompt "
+                    "dicts. The Orchestration prompt "
                     "should fill this from specialist proposals / "
                     "SharedState.discovered_flags / default_grid."
                 ),
@@ -401,7 +401,7 @@ class ExploreExecutor:
         seen_fps.discard("")
         name_index = dict(search.get("name_index") or {})
 
-        # Per-variant fingerprint (KB_design §3.4 Inv-4.2). We attach
+        # Per-variant fingerprint. We attach
         # the fingerprint as an attribute so the result loop doesn't
         # have to recompute. GridVariant.fingerprint already uses the
         # content-only hash; canonical_fingerprint is the same hash so
@@ -452,7 +452,7 @@ class ExploreExecutor:
         # ``stack_extra_args`` / ``stack_extra_envs`` carry the running
         # accumulation; after a KEEP they get extended with the KEEP'd
         # variant so the *next* variant in the same batch is benched on
-        # top of the freshest stack (KB_design §3.4 §4.1 step 2: "重新
+        # top of the freshest stack ("重新
         # 计算 base_extra_args 给后续 variant").
         stack_extra_args = base_extra_args
         stack_extra_envs = dict(base_extra_envs)
@@ -605,7 +605,7 @@ class ExploreExecutor:
                         else:
                             # No eval result emitted; KB_design §3.4 §7
                             # is silent on this exact case but we follow
-                            # the v0.6 BackendsExecutor convention of
+                            # the legacy BackendsExecutor convention of
                             # "no accuracy data => skip the gate" so
                             # high-risk flags without an eval don't get
                             # auto-rejected on a benign measurement gap.
@@ -849,7 +849,7 @@ class ExploreExecutor:
                 continue
             rejected_dedup[fp] = entry
 
-        # KB_gaps/Gap-08 / KB_design §3.13 M5 §5 step 7 — flat
+        # KB_gaps/Gap-08 / flat
         # per-variant outcomes for the Coordinator's per-variant T3
         # hook. Built from ``tested_update`` (this round only) plus
         # ``skipped_dup`` so KEEP / REVERT / FAILED / KEEP_UNSTABLE /
@@ -984,7 +984,7 @@ class ExploreExecutor:
             "losers": losers,
             "keep_unstable_in_stack": keep_unstable,
             "skipped_dup": skipped_dup,
-            # KB_gaps/Gap-08 — flat per-variant outcomes for T3.
+            # flat per-variant outcomes for T3.
             "per_variant_outcomes": per_variant_outcomes,
             "explore_search_update": search_update,
             "discovered_flags_update": None,

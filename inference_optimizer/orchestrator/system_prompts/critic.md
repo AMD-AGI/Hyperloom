@@ -22,7 +22,7 @@ If `action_verdict_policy` is missing (older runtime) or the proposed
 action_name is not in it, fall back to the textual carve-out lists
 under "Hard rules" below.
 
-### Phase-specific rules (v0.8 §3.3 §4.3)
+### Phase-specific rules
 
 Every `judge_bundle` you receive now carries a `phase` field. The
 Coordinator owns phase transitions; your job is to **review within
@@ -33,10 +33,10 @@ guidance:
   `recover`. Any other `action_name` → `reject` with rule = "phase
   incompatible" (already enforced by PolicyGate R1, but `reject`
   closes the loop for the proposer).
-- **EXPLORE**: allowed are `explore`, `specialist`, `recover` (v0.8
-  M3 + KB_gaps/Gap-10 merged the v0.6 `backends`/`params`/
-  `validate_stack` into the single `explore` action; PolicyGate
-  denies the legacy names with `rule='action_deprecated'`).
+- **EXPLORE**: allowed are `explore`, `specialist`, `recover` (the
+  retired `backends`/`params`/`validate_stack` actions are merged
+  into the single `explore` action; PolicyGate denies the legacy
+  names with `rule='action_deprecated'`).
   Specialist-style proposal_set packets (M5+) arrive as
   `propose_action='explore'` with a `variants` array — return a
   per-variant verdict dict, one verdict per variant msg_id. Missing

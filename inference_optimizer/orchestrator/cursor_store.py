@@ -1,4 +1,4 @@
-"""CursorStore — DESIGN v0.6 §17.3.
+"""CursorStore
 
 Per-agent ``last_processed_seq`` cursor. Single SQL UPSERT replaces the
 per-file tmp+rename pattern from v0.4. Combined with the tasks/events
