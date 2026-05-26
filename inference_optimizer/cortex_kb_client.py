@@ -22,6 +22,7 @@ Wire schema: ``cortex-kb-http-branch-b-2026-05-20.md`` (locked at
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -180,6 +181,49 @@ def attempt_canonical_id(cortex_session_id: str, task_id: str) -> str:
     sid = (cortex_session_id or "unknown").strip() or "unknown"
     tid = (task_id or "unknown").strip() or "unknown"
     return f"attempt.session-{sid}.task-{tid}"
+
+
+def _hash16(payload: str) -> str:
+    """Stable SHA-256 prefix used by lesson / pitfall canonical ids.
+
+    kg-usage-guide §7.4 specifies a 16-hex SHA-256 prefix derived from
+    the kind's identifying attrs. Both ``lesson`` and ``pitfall`` use
+    ``{statement|description}|sorted(cited_citation_ids)``; sharing one
+    helper keeps the two ids byte-compatible with anything else KB
+    consumers compute from the same recipe.
+    """
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def lesson_canonical_id(
+    statement: str,
+    cited_citation_ids: list[str] | None = None,
+) -> str:
+    """``lesson:{hash16(statement|sorted(cited_citation_ids))}`` — kg-usage-guide §7.4.
+
+    Idempotent across sessions: two reactor turns that emit the same
+    statement (with the same citation set) merge into one ``lesson``
+    point instead of duplicating rows. ``cited_citation_ids`` is
+    sorted before hashing so call-site ordering doesn't matter.
+    """
+    citations = sorted(str(c) for c in (cited_citation_ids or []))
+    payload = f"{statement or ''}|{','.join(citations)}"
+    return f"lesson:{_hash16(payload)}"
+
+
+def pitfall_canonical_id(
+    description: str,
+    cited_citation_ids: list[str] | None = None,
+) -> str:
+    """``pitfall:{hash16(description|sorted(cited_citation_ids))}`` — kg-usage-guide §7.4.
+
+    Same hashing scheme as :func:`lesson_canonical_id`; the prefix
+    differs so a duplicate description registered under both kinds
+    cannot accidentally merge.
+    """
+    citations = sorted(str(c) for c in (cited_citation_ids or []))
+    payload = f"{description or ''}|{','.join(citations)}"
+    return f"pitfall:{_hash16(payload)}"
 
 
 # ---------------------------------------------------------------------------
@@ -946,6 +990,270 @@ class CortexKBClient:
         self._enqueue(op="propose_point", payload=payload_for_ndjson, idempotency_key=idem)
         return {C.F_STATUS: "queued"}
 
+    # ==================================================================
+    # Fact-write surface — direct propose (kg-usage-guide §3.1 / §3.2)
+    #
+    # The methods below bypass the session/hypothesize/verify protocol
+    # and write **standalone fact points** (lesson / pitfall) plus the
+    # edges connecting them to experiments and source citations.
+    # They are designed for the case where hyperloom has already
+    # produced verified evidence locally (a KEEP / REVERT decision)
+    # and the surrounding "先猜后验" ritual would just be ceremony.
+    # ==================================================================
+    def propose_edge(
+        self,
+        *,
+        from_canonical_id: str,
+        to_canonical_id: str,
+        edge_type: str,
+        relation: str = "",
+        authority: str = C.AUTHORITY_EXPERIENTIAL,
+        attrs: Mapping[str, Any] | None = None,
+        evidence: list[str] | None = None,
+        source: str = C.SOURCE_AGENT_OBSERVATION,
+        idempotency_key: str | None = None,
+        prefer_sync: bool = True,
+    ) -> dict[str, Any]:
+        """``POST /v1/edges/propose`` — direct, session-less edge write.
+
+        Use this when both endpoints already exist as KB points and you
+        want to record a structural / causal / empirical / negation /
+        evolutionary relation between them without spinning up a
+        ``hypothesize → verify`` round-trip.
+
+        ``relation`` is folded into ``attrs.relation`` so the propose-
+        edge validator can pair it with ``edge_type`` (see kg-usage-
+        guide §7.3 for the 10 allowed pairings; omitting it is allowed
+        but downstream renderers lose a hint).
+
+        Resolves canonical_ids to int point ids before posting. On HTTP
+        failure falls back to NDJSON enqueue and returns
+        ``{"status": "queued"}``; on success returns
+        ``{"status": ..., "edge_id": "<int>"}``.
+        """
+        if not self.enabled:
+            return {C.F_STATUS: "skip_disabled"}
+        idem = (
+            idempotency_key
+            or f"propose_edge:{from_canonical_id}->{to_canonical_id}:{edge_type}"
+        )
+        merged_attrs = self._smoke_attrs(attrs)
+        if relation:
+            merged_attrs.setdefault("relation", relation)
+        ev_refs = self._evidence_refs(evidence) or [
+            {C.F_EV_KIND: C.EV_KIND_LOG,
+             C.F_EV_REF:  f"hyperloom:{from_canonical_id}->{to_canonical_id}"},
+        ]
+        ndjson_payload = {
+            "from_canonical_id": from_canonical_id,
+            "to_canonical_id":   to_canonical_id,
+            "edge_type":         edge_type,
+            "relation":          relation,
+            "authority":         authority,
+            "attrs":             dict(attrs or {}),
+            "evidence":          list(evidence or []),
+            "source":            source,
+        }
+        if prefer_sync:
+            try:
+                from_id = self._resolve_point_id(from_canonical_id)
+                to_id = self._resolve_point_id(to_canonical_id)
+                body: dict[str, Any] = {
+                    C.F_FROM_POINT:    from_id,
+                    C.F_TO_POINT:      to_id,
+                    C.F_EDGE_TYPE:     edge_type,
+                    C.F_AUTHORITY:     authority,
+                    C.F_ATTRS:         merged_attrs,
+                    C.F_EVIDENCE_REFS: ev_refs,
+                    C.F_PROVENANCE:    {
+                        **self._provenance(),
+                        C.F_PV_SOURCE: source,
+                    },
+                }
+                resp = self._post(C.PATH_PROPOSE_EDGE, body)
+                edge_id = resp.get("edge_id") or resp.get(C.F_PROMOTED_EDGE_ID)
+                status = str(resp.get(C.F_STATUS) or C.STATUS_AUTO_ACCEPTED)
+                self._audit_record(
+                    op="propose_edge", status=status,
+                    edge_type=edge_type, relation=relation,
+                    from_canonical=from_canonical_id,
+                    to_canonical=to_canonical_id,
+                    edge_id=str(edge_id or ""),
+                )
+                return {
+                    C.F_STATUS: status,
+                    "edge_id":  str(edge_id) if edge_id is not None else "",
+                }
+            except CortexKBError as exc:
+                log.info("propose_edge sync failed (%s); enqueueing NDJSON", exc)
+        self._audit_record(
+            op="propose_edge", status="queued",
+            edge_type=edge_type, relation=relation,
+            from_canonical=from_canonical_id,
+            to_canonical=to_canonical_id,
+        )
+        self._enqueue(
+            op="propose_edge", payload=ndjson_payload, idempotency_key=idem,
+        )
+        return {C.F_STATUS: "queued"}
+
+    def propose_lesson(
+        self,
+        *,
+        statement: str,
+        measured_impact: str,
+        applicable_models: list[str] | None = None,
+        applicable_hardware: list[str] | None = None,
+        cited_citation_ids: list[str] | None = None,
+        evidence: list[str] | None = None,
+        authority: str = C.AUTHORITY_EXPERIENTIAL,
+        extra_attrs: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        prefer_sync: bool = True,
+    ) -> dict[str, Any]:
+        """High-level wrapper writing a registered ``lesson`` fact point.
+
+        Canonical id is derived from ``statement`` + sorted
+        ``cited_citation_ids`` so two sessions that learn the same
+        thing converge on a single row (KB merge is new-wins shallow,
+        authority is only-up — exactly what we want).
+
+        Defaults to ``EXPERIENTIAL`` because the caller is supposed to
+        invoke this only after local verification (KEEP). Use
+        ``AUTHORITATIVE`` when seeding from upstream docs / release
+        notes.
+        """
+        cid = lesson_canonical_id(statement, cited_citation_ids)
+        attrs: dict[str, Any] = {
+            "statement":           statement,
+            "measured_impact":     measured_impact,
+            "applicable_models":   list(applicable_models or []),
+            "applicable_hardware": list(applicable_hardware or []),
+            "cited_citation_ids":  sorted(str(c) for c in (cited_citation_ids or [])),
+        }
+        if extra_attrs:
+            attrs.update(extra_attrs)
+        return self.propose_point(
+            canonical_id=cid,
+            kind=C.KIND_LESSON,
+            authority=authority,
+            attrs=attrs,
+            evidence=evidence,
+            idempotency_key=idempotency_key or f"propose_lesson:{cid}",
+            prefer_sync=prefer_sync,
+        )
+
+    def propose_pitfall(
+        self,
+        *,
+        description: str,
+        severity: str,
+        applicable_models: list[str] | None = None,
+        applicable_hardware: list[str] | None = None,
+        cited_citation_ids: list[str] | None = None,
+        evidence: list[str] | None = None,
+        authority: str = C.AUTHORITY_EXPERIENTIAL,
+        extra_attrs: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        prefer_sync: bool = True,
+    ) -> dict[str, Any]:
+        """High-level wrapper writing a registered ``pitfall`` fact point.
+
+        ``severity`` ∈ {``crash`` | ``regress`` | ``noop``} per
+        kg-usage-guide §7.4. Hyperloom's threshold (KB_design — plan
+        chapter for fact writes): crash/oom/hang map to ``crash``;
+        gain_pct ≤ -5% maps to ``regress``; anything weaker is NOT
+        written (signal/noise control). Callers should filter before
+        invoking this method.
+        """
+        cid = pitfall_canonical_id(description, cited_citation_ids)
+        attrs: dict[str, Any] = {
+            "description":         description,
+            "severity":            severity,
+            "applicable_models":   list(applicable_models or []),
+            "applicable_hardware": list(applicable_hardware or []),
+            "cited_citation_ids":  sorted(str(c) for c in (cited_citation_ids or [])),
+        }
+        if extra_attrs:
+            attrs.update(extra_attrs)
+        return self.propose_point(
+            canonical_id=cid,
+            kind=C.KIND_PITFALL,
+            authority=authority,
+            attrs=attrs,
+            evidence=evidence,
+            idempotency_key=idempotency_key or f"propose_pitfall:{cid}",
+            prefer_sync=prefer_sync,
+        )
+
+    def update_recipe(
+        self,
+        *,
+        model: str,
+        hardware: str,
+        best_config: Mapping[str, Any] | None = None,
+        best_throughput: float | None = None,
+        what_worked: list[Mapping[str, Any]] | None = None,
+        what_failed: list[Mapping[str, Any]] | None = None,
+        remaining_gaps: list[Mapping[str, Any]] | None = None,
+        pitfalls: list[Mapping[str, Any]] | None = None,
+        stack_fingerprint: Mapping[str, str] | None = None,
+        last_profiled: str = "",
+        sessions: list[Mapping[str, Any]] | None = None,
+        extra_attrs: Mapping[str, Any] | None = None,
+        authority: str = C.AUTHORITY_EXPERIENTIAL,
+        evidence: list[str] | None = None,
+        idempotency_key: str | None = None,
+        prefer_sync: bool = True,
+    ) -> dict[str, Any]:
+        """Merge fact fields into the (model, hardware) ``recipe`` anchor.
+
+        Wraps :meth:`propose_point` with ``kind="recipe"`` and the
+        canonical id ``recipe:{slug(model)}:{slug(hardware)}`` — the
+        same anchor T0 mints, so KB-merge semantics make this an
+        in-place update of the existing point.
+
+        Only non-``None`` arguments are written; unspecified keys are
+        left untouched on the server side (attrs is shallow-merged
+        new-wins). Recipe is the closest hyperloom analogue of Arbor's
+        ``Recipe`` dataclass — see kg-usage-guide §7.4 for the full
+        field shape.
+        """
+        cid = recipe_canonical_id(model, hardware)
+        attrs: dict[str, Any] = {
+            "model":    model,
+            "hardware": hardware,
+        }
+        if best_config is not None:
+            attrs["best_config"] = dict(best_config)
+        if best_throughput is not None:
+            attrs["best_throughput"] = float(best_throughput)
+        if what_worked is not None:
+            attrs["what_worked"] = [dict(e) for e in what_worked]
+        if what_failed is not None:
+            attrs["what_failed"] = [dict(e) for e in what_failed]
+        if remaining_gaps is not None:
+            attrs["remaining_gaps"] = [dict(e) for e in remaining_gaps]
+        if pitfalls is not None:
+            attrs["pitfalls"] = [dict(e) for e in pitfalls]
+        if stack_fingerprint is not None:
+            attrs["stack_fingerprint"] = dict(stack_fingerprint)
+        if last_profiled:
+            attrs["last_profiled"] = last_profiled
+        if sessions is not None:
+            attrs["sessions"] = [dict(s) for s in sessions]
+        if extra_attrs:
+            attrs.update(extra_attrs)
+        return self.propose_point(
+            canonical_id=cid,
+            kind=C.KIND_RECIPE,
+            authority=authority,
+            attrs=attrs,
+            evidence=evidence,
+            idempotency_key=idempotency_key or f"update_recipe:{cid}",
+            prefer_sync=prefer_sync,
+        )
+
     def hypothesize(
         self,
         *,
@@ -1330,6 +1638,8 @@ __all__ = [
     "CortexKBError",
     "attempt_canonical_id",
     "experiment_canonical_id",
+    "lesson_canonical_id",
     "parse_kb_error",
+    "pitfall_canonical_id",
     "recipe_canonical_id",
 ]
