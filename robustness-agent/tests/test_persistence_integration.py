@@ -76,6 +76,7 @@ def _ctx_with_tick(
     tick: int,
     *,
     cumulative_gain_validated: float = 0.0,
+    optimization_stack_size: int = 0,
 ) -> ReactorContext:
     return ReactorContext(
         tick_index=tick,
@@ -83,6 +84,7 @@ def _ctx_with_tick(
             session_id="sess-int",
             tick=tick,
             cumulative_gain_validated=cumulative_gain_validated,
+            optimization_stack_size=optimization_stack_size,
         ),
         inbox=[],
         now_unix=float(tick),
@@ -199,10 +201,17 @@ def test_ray_pending_starvation_needs_three_subprocesses(tmp_path: Path):
 def test_gain_plateau_history_survives_subprocess_restarts(
     tmp_path: Path,
 ):
-    # Feed a flat 3-tick window across 3 fresh classifiers.
+    # Feed a flat 3-tick window across 3 fresh classifiers. PR #239
+    # added a "stack_size == 0 -> defer to no_levers" early-return to
+    # ``_gain_plateau_symptom`` so the two B-family symptoms can't fire
+    # twice on the same condition; seed stack_size=1 here to exercise
+    # the post-promotion plateau path this test targets.
     for tick in (1, 2, 3):
         c, store = _fresh_classifier(tmp_path)
-        ctx = _ctx_with_tick(tick, cumulative_gain_validated=0.0)
+        ctx = _ctx_with_tick(
+            tick, cumulative_gain_validated=0.0,
+            optimization_stack_size=1,
+        )
         c.classify(SourceData(sources_used=["local"]), ctx)
         store.flush_atomic()
     # After three flat ticks the rolling window is full and delta is 0
@@ -210,7 +219,10 @@ def test_gain_plateau_history_survives_subprocess_restarts(
     c4, store4 = _fresh_classifier(tmp_path)
     syms = c4.classify(
         SourceData(sources_used=["local"]),
-        _ctx_with_tick(4, cumulative_gain_validated=0.0),
+        _ctx_with_tick(
+            4, cumulative_gain_validated=0.0,
+            optimization_stack_size=1,
+        ),
     )
     assert any(s.name == "gain_plateau" for s in syms)
 
