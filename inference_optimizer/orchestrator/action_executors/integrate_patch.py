@@ -8,7 +8,7 @@ KEEPs the patch (advances the optimization stack) or REVERTs it
 
 This is the orchestrator-side counterpart of Arbor's ``integrate`` step
 in the optimization loop. It is a **deterministic Python executor**
-(no LLM driver) — the only place in the v0.8 + PR-A2 design where
+(no LLM driver) — the only place in the legacy + PR-A2 design where
 ``git apply`` against framework_source_roots is allowed (Inv-5.1
 updated: specialists author patches into their isolated worktree;
 this executor is the single integration channel).

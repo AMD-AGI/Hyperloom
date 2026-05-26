@@ -1,4 +1,4 @@
-# Framework Agent — Sibling Skill (v0.7)
+# Framework Agent — Sibling Skill
 
 > **Purpose**: vllm/sglang source-layer optimisation companion for
 > `inference_optimizer`. Two protocols co-exist in this package:

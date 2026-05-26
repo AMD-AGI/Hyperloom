@@ -1,6 +1,6 @@
 """Coordinator-side handlers for Kernel-agent REQUEST kinds.
 
-DESIGN v0.6 §7.2 says the Kernel agent is responder-only: it answers
+ says the Kernel agent is responder-only: it answers
 Orchestration's ``request{target_agent='kernel', kind=...}`` with a
 ``response`` intent. In v0.6 this can happen two ways:
 
@@ -1548,7 +1548,7 @@ async def integrate_handler(
 ) -> HandlerResult:
     """Apply a kernel patch + re-baseline + KEEP/REVERT decision.
 
-    Mirrors DESIGN v0.6 §16 integrate action: apply an optimized kernel
+    Mirrors integrate action: apply an optimized kernel
     artifact, re-run the active Magpie baseline config, then KEEP only
     if the measured E2E throughput clears the threshold. Compiled kernels
     are backed up as source plus existing .so/.co/.hsaco artifacts before

@@ -1,6 +1,6 @@
 """Translate Symptoms into Coordinator Intents.
 
-The ladder has three tiers, matching DESIGN v0.6 §13.2 / §19.3:
+The ladder has three tiers, matching:
 
 1. **observe** — low severity: emit ``send_message(topic="observation")``
    so the orchestration agent has visibility but no pause is triggered.
