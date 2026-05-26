@@ -76,7 +76,7 @@ def build(
             When None (default) we consult the env var
             ``INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1`` so
             CLI / SDK / agent-action call sites converge through one
-            switch (KB_design §3.12 §7 step 5). Defaults to False —
+            switch. Defaults to False —
             transcripts are large and most dashboards prefer a path
             reference.
 
@@ -160,7 +160,7 @@ def build(
                                             session_dir, state, manifest, warnings,
                                         ),
                                         warnings)
-    # v0.8 §3.12 §4.3 — specialist sub-agent dispatch records. Built
+    # specialist sub-agent dispatch records. Built
     # from ``state.specialist_rounds`` + the on-disk transcripts so
     # capability_summary.specialist and specialist_runs always agree
     # (Inv-12.2 single source).
@@ -190,12 +190,12 @@ def build(
         "baseline":            baseline,
         "final":               final,
         "phase_timeline":      phase_timeline,
-        # v0.8 M2 — phase boundary segments with embedded action events
-        # (KB_design §3.12 §4 "phase_timeline upgrade"). Additive: v1
+        # phase boundary segments with embedded action events
+        #. Additive: v1
         # readers keep using ``phase_timeline`` (flat); v2 readers
         # prefer ``phase_segments``.
         "phase_segments":      phase_segments,
-        # v0.8 §3.12 §4.2 — top-level v1-reader alias: the flat
+        # top-level v1-reader alias: the flat
         # per-action timeline used to live under ``phase_timeline``
         # in v1. Mirrors the same list so an old reader picks it up
         # without code change.
@@ -205,8 +205,8 @@ def build(
         "oob_invocations":     oob_invocations,
         "kernel_lifecycle":    kernel_lifecycle,
         "param_search":        param_search,
-        # v0.8 §3.12 §5 — ``explore_search`` is the v2-native name for
-        # the merged ledger (KB_design §3.4). Mirror of
+        # ``explore_search`` is the v2-native name for
+        # the merged ledger. Mirror of
         # ``param_search`` so v2 readers can switch with a one-line
         # rename + v1 readers don't break.
         "explore_search":      param_search,
@@ -214,12 +214,12 @@ def build(
         "critic_robustness":   critic_robustness,
         "telemetry":           telemetry,
         "attribution":         attribution,
-        # v0.8 M1 — Cortex KB integration audit (KB_design §3.13 M1 §4
+        # Cortex KB integration audit (KB_design §3.13 M1 §4
         # "kb_provenance"). Added as a new top-level section rather than
         # bumping ``schema_version`` because every field is optional; the
         # v1 reader simply ignores it.
         "kb_provenance":       kb_provenance,
-        # v0.8 §3.12 §4.3 — specialist sub-agent dispatch records.
+        # specialist sub-agent dispatch records.
         "specialist_runs":     specialist_runs,
 
         "warnings":            warnings,

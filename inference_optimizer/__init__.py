@@ -1,6 +1,6 @@
 """Inference Optimizer v0.6 — single-mode 4-agent runtime.
 
-Roles (DESIGN v0.6 §7):
+Roles ():
 
 * Orchestration — proposes actions, delegates sub-agents, REQUESTs Kernel
 * Kernel        — owns 5 deep-kernel actions, responder-only via REQUEST/RESPONSE
