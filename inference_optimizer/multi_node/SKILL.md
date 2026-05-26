@@ -221,14 +221,13 @@ After step 4 route all benchmark / OOB / Magpie traffic to
 * **ADDENDUM-16** (robustness LocalProbe is sandbox-scoped): the
   `robustness-agent` backend's `LocalProbeSource` family probes
   sandbox-local resources only — `ray status`, the inference server
-  health URL (`http://127.0.0.1:8888`), the auth-proxy URL
-  (`http://127.0.0.1:4002`), GPU / FD / disk / shm metrics, the local
-  log-error scanner, etc. On `--nodes >= 2` every one of those
-  resources lives in a separate Kubernetes pod (head pod / worker
-  pod / RayJob submitter, on a different subnet from the sandbox in
-  some clusters), so each probe surfaces as a HIGH-severity false
-  positive (`ray_head_dead`, `local_server_unreachable`,
-  `auth_proxy_unhealthy`, `gpu_memory_leaked`, ...). The CLI
+  health URL (`http://127.0.0.1:8888`), GPU / FD / disk / shm metrics,
+  the local log-error scanner, etc. On `--nodes >= 2` every one of
+  those resources lives in a separate Kubernetes pod (head pod /
+  worker pod / RayJob submitter, on a different subnet from the
+  sandbox in some clusters), so each probe surfaces as a HIGH-severity
+  false positive (`ray_head_dead`, `local_server_unreachable`,
+  `gpu_memory_leaked`, ...). The CLI
   auto-downgrades `--robustness-agent` to `--robustness-mock`
   (heartbeat-only) when `args.nodes >= 2` and prints a WARNING.
   Operators who want to suppress the WARNING pass `--robustness-mock`

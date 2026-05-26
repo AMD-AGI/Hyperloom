@@ -421,8 +421,7 @@ class ActionLadder:
                     reason="gateway_auth_outage",
                     next_action_hint=(
                         "rotate $SAFE_API_KEY at https://llm.amd.com/ "
-                        "and re-export; the local auth_proxy is healthy "
-                        "(F3 silent) but the upstream key is revoked"
+                        "and re-export; the upstream gateway key is revoked"
                     ),
                     severity="high",
                 )
@@ -528,19 +527,6 @@ class ActionLadder:
                         f"budget on kernel_id={evidence.get('kernel_id', '?')}; "
                         f"extend --geak-budget-min above 90 OR prune this "
                         f"kernel from rotation"
-                    ),
-                    severity="high",
-                )
-            )
-        elif sym.name == "auth_proxy_unhealthy":
-            # F3: :4002 down → every OOB CLI returns 401.
-            intents.append(
-                build_escalate(
-                    reason="auth_proxy_unhealthy",
-                    next_action_hint=(
-                        "run $REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh "
-                        "(idempotent); kernel_opt / OOB attempts will keep "
-                        "failing with HTTP 401 until the proxy is back"
                     ),
                     severity="high",
                 )

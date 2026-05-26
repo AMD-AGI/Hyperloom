@@ -116,10 +116,9 @@ class ClaudeBackend:
     max_turns_default: int = 4
     enable_mcp_emit_intent: bool = True
     # Wall-clock cap for one ``run()`` call. The claude-agent-sdk shells
-    # out to the ``claude`` CLI which talks to the AMD auth-proxy; if the
-    # proxy is stopped/unreachable the subprocess can hang on TCP for
-    # minutes, stalling the orchestrator reactor and preventing the
-    # robustness pass from publishing ``auth_proxy_unhealthy``. 120s is
+    # out to the ``claude`` CLI which talks to the AMD primus-safe
+    # gateway; if the gateway is unreachable the subprocess can hang
+    # on TCP for minutes, stalling the orchestrator reactor. 120s is
     # well above a normal turn (~10–30s) but bounds the worst case.
     call_timeout_s: float = 120.0
 
