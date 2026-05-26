@@ -1,0 +1,123 @@
+"""Integration test: ``fa explore --execute`` against fake Primus + echo build/bench.
+
+The fake bench command writes a constant ``benchmark.json`` so the
+winner gate fires deterministically. The accuracy command does the
+same with ``accuracy.json``. ``prepare_candidate_env=false`` skips git
+worktree + venv creation so this test runs in seconds and on any
+machine (no GPU / git remote / network needed).
+
+Also asserts the KB hook auto-appends to
+``${FRAMEWORK_AGENT_KB_DIR}/<domain>/empirical_kb.md`` when
+``kb_domain`` is set.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _write_request(
+    tmp_path: Path,
+    *,
+    primus_base_url: str,
+    work_dir: Path,
+) -> Path:
+    """Materialise an ExploreRequest JSON for execute-mode integration."""
+    # Inline shell-friendly commands: echo a JSON blob into the
+    # well-known per-candidate paths used by the explorer's
+    # _evaluate_candidate step. Single-quoted JSON keeps the brace
+    # characters opaque to render_template's identifier regex.
+    bench_cmd = (
+        "python3 -c \"import json,sys; "
+        "open(sys.argv[1],'w').write(json.dumps({'throughput': 200.0, 'completed': '1/1'}))\" "
+        "{candidate_dir}/benchmark.json"
+    )
+    acc_cmd = (
+        "python3 -c \"import json,sys; "
+        "open(sys.argv[1],'w').write(json.dumps({'accuracy': 0.95}))\" "
+        "{candidate_dir}/accuracy.json"
+    )
+    req = {
+        "framework": "sglang",
+        "repo_url": "https://github.com/sgl-project/sglang.git",
+        "work_dir": str(work_dir),
+        "baseline": {"throughput": 100.0, "accuracy": 0.9, "completed": "1/1"},
+        "thresholds": {"min_throughput_ratio": 1.05, "max_accuracy_drop": 0.05},
+        "search_perf_prs": True,
+        "max_search_candidates": 1,
+        "primus_cortex": {"base_url": primus_base_url, "timeout_sec": 5.0},
+        "search_modes": ["primus_cortex"],
+        "prepare_candidate_env": False,
+        "kb_domain": "framework",
+        "commands": {
+            "benchmark": {"command": bench_cmd, "timeout_sec": 30, "required": True},
+            "accuracy": {"command": acc_cmd, "timeout_sec": 30, "required": True},
+        },
+        "outputs": {
+            "benchmark_json": "{candidate_dir}/benchmark.json",
+            "accuracy_json": "{candidate_dir}/accuracy.json",
+        },
+    }
+    path = tmp_path / "req.json"
+    path.write_text(json.dumps(req), encoding="utf-8")
+    return path
+
+
+def test_explore_execute_mock_winner_and_kb_append(
+    tmp_path: Path, fake_primus: str
+) -> None:
+    """``fa explore --execute`` picks the winner and auto-appends KB."""
+    work_dir = tmp_path / "work"
+    kb_root = tmp_path / "kb"
+    req_path = _write_request(tmp_path, primus_base_url=fake_primus, work_dir=work_dir)
+    summary_path = tmp_path / "summary.json"
+
+    env = dict(os.environ)
+    env["FRAMEWORK_AGENT_KB_DIR"] = str(kb_root)
+    env.pop("FRAMEWORK_AGENT_ROOT", None)
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "framework_agent.runtime.cli",
+            "explore",
+            "--execute",
+            "--request",
+            str(req_path),
+            "--out",
+            str(summary_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["mode"] == "execute"
+    assert summary["winner_ref"] == "PR:1"
+    assert summary["promotion_policy"] == "manual_only"
+    assert summary["kb_contribution"]["status"] == "appended"
+    assert summary["kb_contribution"]["domain"] == "framework"
+
+    cand = summary["candidates"][0]
+    assert cand["status"] == "succeeded"
+    assert cand["winner"] is True
+    assert cand["throughput"] == 200.0
+    assert cand["accuracy"] == 0.95
+    assert [c["name"] for c in cand["commands"]] == ["benchmark", "accuracy"]
+    assert all(c["returncode"] == 0 for c in cand["commands"])
+
+    kb_file = kb_root / "framework" / "empirical_kb.md"
+    assert kb_file.is_file()
+    text = kb_file.read_text(encoding="utf-8")
+    assert "sglang winner PR:1" in text
+    assert "throughput_ratio" in text
+    assert "source=`fa explore --execute`" in text
