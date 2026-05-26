@@ -34,8 +34,9 @@ canonical replacement is the merged `explore` action):
 
   - **PRELUDE**: `target_analysis`, `baseline`, `recover` only. Drive
     `baseline_tput > 0` so the Coordinator can advance to EXPLORE. Do
-    NOT propose `profile` / `kernel_opt` / explore-family actions
-    here — they will all be denied.
+    NOT propose `kernel_opt` / explore-family actions here — they will
+    all be denied. Roofline is auto-enqueued by the Coordinator after
+    baseline lands; you cannot propose it.
   - **EXPLORE**: `explore`, `specialist`, `integrate_patch`, `recover`.
     `profile` / `kernel_opt` / `sweep` / `report` are **denied**.
     Goal: stack KEEPs onto `optimization_stack` until the plateau
@@ -98,10 +99,10 @@ canonical replacement is the merged `explore` action):
     `=== Phase ===` block's `session_buffer_sec`) overrides every
     soft signal — when you see it nearing zero, prefer compact KEEPs
     (≤1 explore round) over deep specialist work.
-  - **KERNEL**: `profile` / `roofline` (single shot at phase entry),
-    the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`. Goal:
-    integrate KEEP'd kernel patches; the Coordinator exits to SWEEP
-    when a REVERT streak builds or the budget cap hits.
+  - **KERNEL**: the 5 KERNEL_OWNED_ACTIONS via REQUEST, and `recover`.
+    Goal: integrate KEEP'd kernel patches; the Coordinator exits to
+    SWEEP when a REVERT streak builds or the budget cap hits. Roofline
+    is auto-managed (not proposable); see "Roofline" below.
   - **SWEEP**: `sweep`, `recover`. Goal: validate `current_best` over a
     workload grid. Coordinator exits to CLOSE on `sweep_done`.
   - **CLOSE**: `report`, `session_breakdown`, `recover`. Coordinator
@@ -112,8 +113,8 @@ canonical replacement is the merged `explore` action):
 scoreboard. Pick the next action by reading facts in this order:
 (a) current phase + ``allowed_actions``,
 (b) gaps / KB sub-graph / recent winners / specialist proposal_set,
-(c) mandatory ordering (baseline first, profile before kernel_opt;
-``explore`` revalidates the stack inline so no separate rebench step),
+(c) mandatory ordering (baseline first; ``explore`` revalidates the
+stack inline so no separate rebench step),
 (d) phase_budget_remaining_pct as the "how urgent" signal.
 
 ### SESSION_DIR contract
@@ -173,37 +174,42 @@ on the next tick.
   `rule='phase_incompatible'`; the denial lands in your inbox as
   `policy_denied`. No score / cooldown gating beyond that — there
   is no scoreboard.
-* **NEVER propose `profile` directly when the roofline composite is
-  active.** Always propose `roofline` instead — its executor runs
-  profile + trace_analyze atomically and produces the snapshot
-  downstream actions (`explore` / `integrate_patch` / `kernel_opt`)
-  read. Direct `profile` proposes are hard-rejected by PolicyGate
-  rule `n9_deny_direct_profile_when_composite_on` (F3-1 N9) to
-  prevent the duplicate-profile waste pattern observed during the
-  Roofline-v2 roll-out.
+* **Never propose `profile` or `roofline`.** Both are auto-managed by
+  the Coordinator; neither appears in any phase's `allowed_actions`.
+  PolicyGate R1 will deny any attempt with `rule='phase_incompatible'`.
 
-### Roofline composite action (auto-managed — you cannot propose it)
+### Roofline (auto-managed — you cannot propose it)
 
-When the operator runs with `--use-roofline-composite=true` the
-`SharedState.use_roofline_composite` toggle is on and the Coordinator
-**automatically** runs the `roofline` action (profile + trace_analyze
-+ analysis.md snapshot) on **EXPLORE entry** and on **KERNEL entry**.
-You can NOT propose / delegate `roofline` yourself — it is not in
-any phase's `allowed_actions` set and PolicyGate R1 will deny any
-attempt with `rule='phase_incompatible'`.
+The Coordinator owns the roofline lifecycle. There is exactly **one**
+path; the legacy composite / direct-profile bifurcation has been
+removed.
 
-A fresh roofline only re-fires when the snapshot drifts (no snapshot
-yet, or `|cumulative_gain_validated - roofline_baseline_gain_at_snapshot|
-> 10%`); otherwise the existing snapshot is reused. On the first
-EXPLORE round, specialist dispatches are held by PolicyGate until the
-auto-roofline lands (denial `rule='specialist_wait_for_auto_roofline'`)
-— just retry the same delegate next tick.
+* **Initial roofline** runs at the end of PRELUDE, immediately after
+  baseline lands. It produces the `analysis.md` snapshot consumed by
+  EXPLORE / KERNEL downstream actions.
+* **Refresh roofline** auto-enqueues whenever a stack KEEP (explore
+  side) or a kernel `integrate` KEEP lifts measured tput past the
+  watermark — specifically when
+  `current_tput / last_roofline_tput >= 1.10` (compound: 10% → 21% →
+  33% → … of the most recent roofline measurement). After each
+  roofline lands, `last_roofline_tput` is rearmed at the new tput.
+* **Blocked dispatches while a roofline is pending.** Any in-flight
+  roofline (`SharedState.auto_roofline_pending_task_id` set) holds
+  back the following actions, which PolicyGate denies until the
+  roofline completes: `specialist`, `explore`, `kernel_opt`,
+  `integrate`, `deep_kernel_analysis`, `operator_tuning`,
+  `vendor_kernel_config`. Denial rule is
+  `specialist_wait_for_auto_roofline` (rule name retained across all
+  gated actions). Just retry the same intent next tick.
+* **Operator override.** `--force-roofline-after-baseline` (default
+  on) controls whether the PRELUDE-initial roofline fires
+  unconditionally; you do not interact with this flag at runtime.
 
-The SharedState dump grows an `analysis_md=...` line carrying the
+The SharedState dump carries an `analysis_md=...` line with the
 **full TraceLens `analysis.md`** between `=== TraceLens Analysis
-(snapshot #N, gain at snapshot = X.XX%) ===` bookends. With composite
-off, this line is absent and EXPLORE runs no analysis at all (KERNEL
-falls back to the legacy auto-profile path).
+(snapshot #N, gain at snapshot = X.XX%) ===` bookends. Always treat
+the most recent snapshot as the ground truth for bottleneck
+classification.
 
 The report uses `🔴` (P1 — critical) / `🟡` (P2 — secondary) / `🟢`
 (P1/P2 — opportunity) priority markers. **You MUST follow them**:

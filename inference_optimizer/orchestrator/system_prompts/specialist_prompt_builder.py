@@ -578,10 +578,9 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     if not isinstance(ev, dict) or not ev:
         rows.append(
             "(none — no fresh roofline snapshot has been recorded yet. "
-            "The Coordinator auto-enqueues `roofline` on EXPLORE / "
-            "KERNEL entry when `--use-roofline-composite=true`; if you "
-            "are seeing this, either the toggle is off OR the snapshot "
-            "is still in-flight.)"
+            "The Coordinator auto-enqueues `roofline` at the end of "
+            "PRELUDE and again after every 10% watermark crossing; if "
+            "you are seeing this, the snapshot is still in-flight.)"
         )
         return rows
 
