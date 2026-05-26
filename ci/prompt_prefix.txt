@@ -195,10 +195,12 @@ run will be reported as Failed regardless of what numbers you produced.
         # logs, kernel candidates/results, sweep outputs, traces, manifest.json,
         # state.json, every phase*/ dir, and any future audit files survive
         # sandbox cleanup. This catches:
-        #   * $RESULT_DIR/ci_metrics.json
-        #   * $RESULT_DIR/optimization_report.md
-        #   * $RESULT_DIR/<model>/<ts>/session_breakdown.json (V2 cli writes
-        #     this one level deeper than RESULT_DIR root)
+        #   * $RESULT_DIR/ci_metrics.json (agent-written, flat top-level)
+        #   * $RESULT_DIR/optimization_report.md (agent-written)
+        #   * $RESULT_DIR/session_breakdown.json (agent-written placeholder
+        #     summary; V2 cli writes the AUTHORITATIVE full version at
+        #     $USER_DATA_PATH/<model>/<ts>/session_breakdown.json which we
+        #     pull in below as session_breakdown_v2.json)
         #   * $RESULT_DIR/hyperloom_source_commit.txt + source_commits.json
         if cp -a "$RESULT_DIR/." "$PERSIST_DIR/"; then
           echo "[PERSIST] cp -a $RESULT_DIR/. -> $PERSIST_DIR/ succeeded"
@@ -209,6 +211,48 @@ run will be reported as Failed regardless of what numbers you produced.
       fi
       ;;
   esac
+  # V2 cli writes its OWN session_breakdown.json (with the full populated
+  # `phases[]` array, 30-50 KB) under
+  #   $USER_DATA_PATH/<model>/<ts>/session_breakdown.json
+  # (see optimize.log line "inference_optimizer.breakdown.exporter [INFO]
+  # session_breakdown: wrote …/session_breakdown.json (NNNNN bytes)").
+  # The PERSIST cp above only moved $RESULT_DIR, which contains the agent-
+  # written compact summary (~1 KB, phases[] empty placeholders). Pull the
+  # V2-written authoritative version too so the GHA artifact zip contains
+  # phase-level detail. Search USER_DATA_PATH first; fall back to the
+  # standard wekafs mount root.
+  V2_SESSION_ROOTS=()
+  [ -n "${USER_DATA_PATH:-}" ] && V2_SESSION_ROOTS+=("$USER_DATA_PATH")
+  [ -n "${UID_HEX:-}" ] && V2_SESSION_ROOTS+=("/hyperloom/users/$UID_HEX")
+  for _root in "${V2_SESSION_ROOTS[@]}"; do
+    [ -d "$_root" ] || continue
+    # V2 cli session dir = <root>/<model>/<ts>/, we want the most recent one
+    # whose session_breakdown.json is non-trivial (> 4 KB rules out the
+    # agent's placeholder). -mmin -720 (12h) guards against picking up an
+    # unrelated old session from a previous run on the same uid.
+    _v2_bd="$(find "$_root" -mindepth 3 -maxdepth 3 -name session_breakdown.json -size +4k -mmin -720 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)"
+    [ -z "$_v2_bd" ] && continue
+    _v2_sess="$(dirname "$_v2_bd")"
+    echo "[PERSIST V2] found populated breakdown: $_v2_bd ($(stat -c %s "$_v2_bd") bytes)"
+    # Don't clobber agent's session_breakdown.json — keep both: rename V2's
+    # version so post-CI tooling can prefer it but agent's contract file is
+    # still at the canonical path.
+    cp "$_v2_bd" "$PERSIST_SCAN_DIR/session_breakdown_v2.json" 2>/dev/null \
+      && echo "[PERSIST V2] copied to $PERSIST_SCAN_DIR/session_breakdown_v2.json"
+    # Also pull manifest.json + state.json + any phase* subdirs if V2
+    # produced them; these only exist when V2 reached its finalize step.
+    for _f in manifest.json state.json optimizer_runs.json; do
+      [ -f "$_v2_sess/$_f" ] && cp "$_v2_sess/$_f" "$PERSIST_SCAN_DIR/$_f" 2>/dev/null \
+        && echo "[PERSIST V2] copied $_f"
+    done
+    # Mirror the full V2 session dir under a sub-folder for forensic depth.
+    mkdir -p "$PERSIST_SCAN_DIR/v2_session"
+    cp -a "$_v2_sess/." "$PERSIST_SCAN_DIR/v2_session/" 2>/dev/null \
+      && echo "[PERSIST V2] mirrored full V2 session dir -> $PERSIST_SCAN_DIR/v2_session/"
+    break
+  done
+  unset _root _v2_bd _v2_sess _f V2_SESSION_ROOTS
+
   # Verify each Required Artifact appears SOMEWHERE under PERSIST_SCAN_DIR.
   # We use `find` because session_breakdown.json is nested under
   # <model>/<ts>/ (V2 cli writes it inside the session dir, not at
