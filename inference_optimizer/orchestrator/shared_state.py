@@ -1,4 +1,4 @@
-"""SharedState — DESIGN v0.6 §8.3 / §17.2.
+"""SharedState
 
 Persistent session-level state that all reactors read (via prompt injection)
 and that PolicyGate uses to enforce CORE_STATE_FIELDS guards.
@@ -8,7 +8,7 @@ Backed by JSON at ``$SESSION_DIR/state.json``. The file write is atomic
 The Coordinator is the **only** writer; LLM agents go through
 ``UPDATE_STATE`` intents which the Coordinator validates + persists.
 
-v0.6 fields:
+fields:
 
     session_id          str   — set by Coordinator at session creation
     model_name          str   — e.g. "meta-llama/Llama-3.1-8B-Instruct"
@@ -27,25 +27,25 @@ v0.6 fields:
     max_minutes         int   — wall-clock budget (0 = unlimited)
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
-                                `trace_analyze` REQUEST `trace_input` param
+                                `select_kernels` REQUEST `trace_input` param
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .scoring import (
-    ActionScore,
-    rank_top_k as _rank_top_k,
-    target_gap_multiplier as _target_gap_multiplier,
-)
+# the ``orchestrator.scoring`` module was retired; the
+# v0.6 ``ActionScore`` / ``rank_top_k`` / ``target_gap_multiplier``
+# imports below are gone. The LLM now decides by reading facts
+# (phase / gaps / KB), not by consuming a system-side priority
+# ranking. See ``Coordinator._compose_prompt`` for the replacement
+# fact set.
 
 
 def _now_iso() -> str:
@@ -88,6 +88,21 @@ _DEFAULT_ATTEMPTS_HISTORY = 20
 # prompt; older failures stay in the event log but drop from the prompt.
 _DEFAULT_LAST_FAILURES = 10
 
+# phase_history cap. There are only 5 phases in the line
+# (PRELUDE/EXPLORE/KERNEL/SWEEP/CLOSE) so 100 rows is wildly generous;
+# the only realistic path to hitting it is repeated escalate/recover
+# loops, which we'd want surfaced as a warning anyway. Cap is enforced
+# in :meth:`SharedState.record_phase_transition`.
+_PHASE_HISTORY_CAP = 100
+
+# gap ledger caps. ``_GAPS_MAX_ENTRIES`` bounds the
+# total list so a pathological session can't blow up state.json;
+# ``_GAPS_ATTEMPTS_HISTORY`` bounds the per-gap ``attempts`` list so even
+# a hot gap with 200 KEEP/REVERT events stays cheap to render. Both caps
+# are enforced inside :meth:`SharedState.upsert_gap`.
+_GAPS_MAX_ENTRIES = 50
+_GAPS_ATTEMPTS_HISTORY = 20
+
 # Set of action kinds that participate in the kernel-equivalent per-action
 # audit trail (Plan: SharedState audit-trail). Kernel-owned actions are
 # intentionally excluded — they already have richer dedicated structures
@@ -95,11 +110,12 @@ _DEFAULT_LAST_FAILURES = 10
 # rejected_kernel_*). Membership is consulted by Coordinator and renderer
 # helpers so adding a new audit action is a one-line change.
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
-    "baseline", "profile", "backends", "params", "sweep", "validate_stack",
-    # Roofline-v2 N10: roofline composite action audit so each
-    # invocation lands in `roofline_attempts` (counted by N7
-    # verify/audit scripts as roofline_action_count). See
-    # coordinator.py _AUDIT_ACTIONS for the matching counterpart.
+    "baseline", "profile", "sweep", "explore",
+    # F1-3 (Roofline-v2 / ) + N10: the composite
+    # ``roofline`` action runs profile + trace_analyze atomically.
+    # Audit each attempt so the prompt's RECENT ACTION ATTEMPTS block
+    # surfaces the snapshot id + analysis_md_path the executor produced
+    # (or the failure phase / error_class on the failure path).
     "roofline",
 })
 
@@ -109,20 +125,77 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 # know how to interpret the number (e.g. ``output_throughput`` vs raw
 # ``gain_pct`` vs ``validated_gain_pct``).
 _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
-    "baseline":       ("output_throughput", "output_throughput"),
-    "profile":        ("output_throughput", "output_throughput"),
-    # N10: roofline composite action — `snapshot_id` is the natural
-    # progress metric (each successful run produces a fresh snapshot).
-    "roofline":       ("snapshot_id",       "snapshot_id"),
-    "backends":       ("gain_pct",          "gain_pct"),
-    "params":         ("gain_pct",          "gain_pct"),
-    "sweep":          ("output_throughput", "output_throughput"),
-    "validate_stack": ("gain_pct",          "validated_gain_pct"),
+    "baseline": ("output_throughput", "output_throughput"),
+    "profile":  ("output_throughput", "output_throughput"),
+    "sweep":    ("output_throughput", "output_throughput"),
+    "explore":  ("best_gain_pct",     "gain_pct"),
+    # F1-3 + N10: ``roofline`` is an analysis composite, not a
+    # benchmark — its key metric is the monotonic snapshot id, not a
+    # throughput number.
+    "roofline": ("snapshot_id",       "snapshot_id"),
 }
+
+
+#: top-level state.json schema version. v0.6 did
+#: not write a value; ``from_dict`` treats an absent key as
+#: ``schema_version=1`` and runs the §3.10 §5.2 migration step,
+#: bumping to ``LATEST_STATE_SCHEMA_VERSION`` on the first save.
+LATEST_STATE_SCHEMA_VERSION: int = 2
+
+
+@dataclass
+class TraceAnalyzeSnapshot:
+    """Reference shape for ``SharedState.last_trace_analyze``.
+
+    placeholder added by ``F0_pre_merge.MD`` §9.
+    F1 will populate the canonical 11-field dict via
+    ``SharedState.record_trace_analyze`` (ported from main); this dataclass
+    serves as a typed reader on the consumer side via :meth:`from_dict`.
+
+    The on-disk shape stays a plain ``dict`` so the legacy ``state.json``
+    round-trip (Inv-10.1 fact-layer compatibility) keeps working.
+    """
+
+    trace_input: str = ""
+    candidates_path: str = ""
+    hot_kernels_top15: list[dict[str, Any]] = field(default_factory=list)
+    task_groups: list[dict[str, Any]] = field(default_factory=list)
+    reusable_native_kernel_ids: list[str] = field(default_factory=list)
+    trace_health_warnings: list[dict[str, Any]] = field(default_factory=list)
+    analysis_md_path: str = ""
+    analysis_md_text: str = ""
+    roofline_snapshot_id: int = 0
+    roofline_baseline_gain_at_snapshot: float = 0.0
+    ts: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "TraceAnalyzeSnapshot":
+        d = d or {}
+        return cls(
+            trace_input=str(d.get("trace_input") or ""),
+            candidates_path=str(d.get("candidates_path") or ""),
+            hot_kernels_top15=list(d.get("hot_kernels_top15") or []),
+            task_groups=list(d.get("task_groups") or []),
+            reusable_native_kernel_ids=list(
+                d.get("reusable_native_kernel_ids") or []
+            ),
+            trace_health_warnings=list(d.get("trace_health_warnings") or []),
+            analysis_md_path=str(d.get("analysis_md_path") or ""),
+            analysis_md_text=str(d.get("analysis_md_text") or ""),
+            roofline_snapshot_id=int(d.get("roofline_snapshot_id") or 0),
+            roofline_baseline_gain_at_snapshot=float(
+                d.get("roofline_baseline_gain_at_snapshot") or 0.0
+            ),
+            ts=str(d.get("ts") or ""),
+        )
 
 
 @dataclass
 class SharedState:
+    # versioned state.json schema. Bumped by the
+    # migration step in :meth:`from_dict` whenever a payload is
+    # loaded. Fresh sessions are born at the latest version.
+    schema_version: int = LATEST_STATE_SCHEMA_VERSION
     session_id: str = ""
     # Primus-Claw session UUID (when Hyperloom runs inside the claw
     # sandbox); empty when running standalone. Wired into the manifest +
@@ -137,44 +210,31 @@ class SharedState:
     model_class: str = ""
     framework: str = ""
     gpu_type: str = ""
+    # Workload metadata mirrored from manifest.json at session start
+    #. Used by:
+    #   * Coordinator._warm_specialist_params to populate
+    #     specialist task params so SpecialistPromptInputs renders
+    #     real hardware context in "## 2. HARDWARE CONTEXT" instead
+    #     of the dataclass defaults (which silently render TP=1 and
+    #     make comm_specialist self-veto with "TP=1 → cross-GPU
+    #     collectives non-actionable" even on TP=8 sessions).
+    #   * the per-tick orchestration prompt's SESSION CONTEXT block.
+    # Populated by ``cli._init_fresh_session`` from CLI flags / env;
+    # resumed sessions read them back from state.json verbatim and
+    # cli.py re-exports the env vars (TP/CONC/ISL/OSL/MAX_MODEL_LEN/
+    # PRECISION) so downstream executors see the same values the
+    # original run used. Zero / empty means "unspecified".
+    tp: int = 0
+    precision: str = ""
+    conc: int = 0
+    isl: int = 0
+    osl: int = 0
+    max_model_len: int = 0
     kernel_enabled: bool = True
-    # Framework-agent (fa) bandit-arm toggle. When False the
-    # ``framework_pr`` arm is unregistered + stripped from the orchestration
-    # prompt so the bandit can never pull it. Default True (fa is on by
-    # default; mirrors ``kernel_enabled``). Older state.json files lacking
-    # this field decode as True via the dataclass default — see
-    # ``SharedState.load``.
-    framework_enabled: bool = True
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
-    # N27 (May 2026): consecutive roofline-action failures since the
-    # last successful roofline. Bumped by Coordinator's
-    # ``_promote_to_shared_state`` (roofline branch) whenever the
-    # executor returns ``status=failed`` (covers profile sub-step
-    # failures, trace_analyze sub-step failures, and N26 auto-retry
-    # exhausted). Reset to 0 the moment a roofline succeeds (i.e.
-    # ``last_trace_analyze.analysis_md_text`` gets re-populated by
-    # the C1 recorder).
-    #
-    # Read by ``_sequence_denial_for_action``: once this reaches
-    # ``INFERENCE_OPTIMIZER_ROOFLINE_FAILURE_FALLBACK_THRESHOLD``
-    # (default 2), the roofline-required gate on
-    # ``backends`` / ``params`` / ``comm_optimization`` downgrades
-    # from PolicyDenied to PASS-with-advisory. That lets the LLM
-    # fall back to the pre-roofline default-grid behaviour rather
-    # than hard-looping on roofline forever (the empirical case is
-    # rocprofiler-sdk corner cases or splitter chunk-quality
-    # failures that can't be auto-recovered by N26).
-    #
-    # IMPORTANT: streak only bumps on the OUTER roofline action
-    # status -- N26 inner retry attempts are NOT counted here
-    # because they live inside a single roofline action's
-    # execution. Two outer roofline failures imply at least
-    # 3-4 trace_analyze attempts already happened (each outer call
-    # tried mixed -> retry to alternate mode via N26).
-    roofline_failure_streak: int = 0
     # N33 (May 2026): consecutive coordinator ticks in which nothing
     # happened that would advance the run -- i.e. no queued tasks, no
     # running tasks, no pending proposals (so no LLM proposal landed
@@ -187,12 +247,8 @@ class SharedState:
     # this exceeds ``INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS`` (default
     # 120 -- ~10 min at the 5s sleep used in prod), the loop calls
     # ``_enter_closing_phase`` to enqueue the final report instead of
-    # idling until the wall-clock deadline. This is the canonical
-    # remedy for "LLM has gone silent / refuses to propose anything
-    # actionable" cases that would otherwise burn the entire budget
-    # before the operator gets a report. Reset to 0 the moment we
-    # actually enter closing (the same field is the trigger, so we
-    # don't want the early-close to fire twice).
+    # idling until the wall-clock deadline. Reset to 0 the moment we
+    # actually enter closing.
     consecutive_silent_ticks: int = 0
     # Path to the YAML the baseline executor materialized with the operator's
     # workload envs (CONC/ISL/OSL/TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/...).
@@ -202,6 +258,14 @@ class SharedState:
     # downstream executors fall back to materializing the shipped YAML
     # against current process env when this is empty.
     baseline_config_path: str = ""
+    # Wall-clock seconds the baseline Magpie subprocess took to
+    # finish (success path only). Populated by Coordinator from the
+    # baseline executor's ``subprocess_runtime_sec`` and read by the
+    # ExploreExecutor to derive a per-variant overtime-kill deadline
+    # (``baseline_runtime_sec * SharedState.explore_overtime_kill_ratio``).
+    # Zero = "unset" → overtime kill is a no-op (variant uses the
+    # legacy timeout). Resume restores the value verbatim.
+    baseline_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
     # Full accepted configuration stack across action families. Each entry
     # records the incremental candidate that was accepted; current_best keeps
@@ -218,18 +282,21 @@ class SharedState:
     # entries (e.g. on resumed sessions) are treated as ``None``.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
     cumulative_gain: float = 0.0
-    # Cumulative gain measured by the `validate_stack` action — i.e. by
-    # actually re-baselining a fresh server with EVERY KEEP'd entry of
-    # ``optimization_stack`` applied. The plain ``cumulative_gain`` field
-    # only sums per-round gains (which do not compose linearly), so the
-    # validated number is what the final report quotes. Stays 0.0 until the
-    # first successful validate_stack run.
+    # Cumulative gain measured by re-baselining a fresh server with
+    # EVERY KEEP'd entry of ``optimization_stack`` applied end-to-end.
+    # The plain ``cumulative_gain`` field only sums per-round gains
+    # (which do not compose linearly), so the validated number is
+    # what the final report quotes. the
+    # rebench runs inline inside the merged ``explore`` action's
+    # per-KEEP loop; the standalone v0.6 ``validate_stack`` action
+    # is denied by PolicyGate. Stays 0.0 until the first KEEP
+    # cleared its inline rebench.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
     # Length of ``optimization_stack`` at the time of the last successful
-    # validate_stack run; used by the Coordinator to decide whether the
-    # current stack still matches the validated number, or whether a
-    # re-validation is required after new KEEPs landed.
+    # inline stack rebench; used by the Coordinator to decide whether
+    # the current stack still matches the validated number, or whether
+    # the TODO 4 stack-rebench guard should fire after new KEEPs landed.
     cumulative_gain_validated_stack_len: int = 0
     stop_reason: str = ""
     # Closing phase — set when the wall-clock deadline fires. While True,
@@ -238,6 +305,24 @@ class SharedState:
     closing_phase: bool = False
     closing_started_unix: float = 0.0
     closing_report_task_id: str = ""
+    # set to True at the END of the
+    # CLOSE phase 5-step sequencer (after step 5). cli.finally reads
+    # this to short-circuit its emergency ``session_breakdown.json``
+    # write so the sequencer's artifact isn't overwritten by a
+    # duplicate post-stop() pass. Resume clears it back to False so
+    # a subsequent resumed CLOSE can re-run the sequence (idempotent
+    # by design — every step uses fixed idempotency keys / set-once
+    # writes).
+    close_sequence_done: bool = False
+    # Auto-roofline gate (EXPLORE-entry): set to the task_id of the
+    # Coordinator-enqueued ``roofline`` task while it is pending. The
+    # field is read by ``_handle_delegate`` to block first-round
+    # specialist dispatches until the snapshot lands (so specialists
+    # have ``analysis.md`` ground truth to reason against), and is
+    # cleared by ``_promote_to_shared_state`` when that roofline task
+    # reaches a terminal state. Always defaults to "" on a fresh
+    # session; resume readers tolerate the field being absent.
+    auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
     pruned_families: list[str] = field(default_factory=list)
@@ -258,62 +343,76 @@ class SharedState:
     # Orchestration uses this to decide whether re-profiling would change the
     # hot-kernel distribution; identical args means the same trace.
     last_profile_args: str = ""
-    last_profile_pmc_summary: str = ""
-    last_profile_roofline: str = ""
-    last_profile_kernel_breakdown: str = ""
-    # Cached result of the most recent `trace_analyze` request keyed by
+    # Cached result of the most recent `select_kernels` request keyed by
     # `trace_input`. Coordinator short-circuits subsequent identical requests
     # so Orchestration does not waste budget re-analysing the same trace.
+    last_select_kernels: dict[str, Any] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # roofline-v2 placeholder fields (PR #288 integration).
+    #
+    # ``last_trace_analyze`` mirrors the canonical 11-field dict main's
+    # ``record_trace_analyze`` writes (see ``TraceAnalyzeSnapshot.from_dict``
+    # for the reader-side schema). F1 ports the writer; until then these
+    # stay default-empty and no consumer reads them.
+    #
+    # ``roofline_snapshot_id`` mirrors ``last_trace_analyze['roofline_snapshot_id']``
+    # at the top level for fast PolicyGate / Coordinator access (avoids the
+    # nested-dict lookup on hot paths).
+    #
+    # ``roofline_saturation_history`` is appended by F3-4's saturation
+    # advisory derivation; capped at 10 entries by the writer.
+    # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
-    # N31 (May 2026): freeze the FIRST successful roofline snapshot
-    # ("baseline" snapshot) so the final `report` can render a
-    # before/after Roofline Comparison section. The Coordinator writes
-    # this field on the first promotion of `roofline` and never updates
-    # it after -- subsequent rooflines (N31 gate exception, or future
-    # snapshot refreshes) only update ``last_trace_analyze``. Carries
-    # minimal fields needed by ``report.py``'s
-    # ``## Roofline Comparison`` section:
-    # * ``roofline_snapshot_id`` -- always 1 (the first)
-    # * ``analysis_md_path``     -- path to the on-disk analysis.md
-    # * ``trace_input``          -- which profile trace produced it
-    # * ``ts``                   -- when it was promoted
-    # We deliberately do NOT freeze ``analysis_md_text`` here -- the
-    # path is enough (report extracts the Executive Summary at render
-    # time) and the text can be hundreds of KB.
-    last_trace_analyze_baseline: dict[str, Any] = field(default_factory=dict)
-    # Roofline-v2 N19c (May 2026): "gain-driven kernel_opt unlock" +
-    # "flags-conditional roofline" replace the N14 counter-driven
-    # (>=2/>=2/>=3) hard requirements. Two new fields drive the gates.
+    roofline_snapshot_id: int = 0
+    roofline_saturation_history: list[dict[str, Any]] = field(default_factory=list)
+    # N27 — outer roofline failure counter. Bumped by
+    # ``Coordinator._promote_to_shared_state`` on every failed
+    # ``roofline`` task and reset to 0 on the next successful one.
+    # The per-phase fallback in commit 6078012 ("per-phase fallback
+    # when auto-roofline fails") already handles the EXPLORE-degraded
+    # / KERNEL-fall-back-to-profile behaviour main's N27 fallback
+    # threshold targets; the counter exists here for prompt-side
+    # visibility (the LLM sees how many outer attempts failed).
+    roofline_failure_streak: int = 0
+
+    # ------------------------------------------------------------------
+    # F1/F2/F3 integration toggles (default off).
     #
-    # `last_cheap_delta_gain` — delta_gain_pct of the last completed
-    # backends/params attempt vs SharedState.current_best (NOT vs
-    # baseline_tput; we care about marginal improvement from this round
-    # alone, not the cumulative gain). The Coordinator writes this in
-    # `_promote_to_shared_state` for task_kind in ("backends","params")
-    # using the same `gain_vs_cb` calculation it already does for
-    # promotion. None / 0.0 means "this round found no improvement",
-    # which is the signal N19 reads to unlock kernel_opt (cheap
-    # exhausted) and N21 reads to deny redundant roofline re-runs.
-    #
-    # `discovered_flags_at_last_snapshot` — frozen snapshot of
-    # `discovered_flags` at the moment a roofline action completes.
-    # The Coordinator writes this in `_promote_to_shared_state` for
-    # task_kind == "roofline" by deep-copying the current
-    # `discovered_flags`. N21 compares against the current
-    # `discovered_flags` to detect "flags unchanged since snapshot",
-    # in which case re-running roofline would produce a byte-equivalent
-    # trace (sglang launch args identical).
-    last_cheap_delta_gain: float | None = None
-    discovered_flags_at_last_snapshot: dict[str, Any] = field(default_factory=dict)
-    # Roofline-v2 N22: advisory messages from the PolicyGate's keyword-
-    # implied variant check. Each entry is a self-contained block of
-    # operator-facing text describing what the LLM missed and which
-    # analysis.md keyword triggered the advisory. Capped FIFO so a
-    # long-running session doesn't grow this list unbounded; the
-    # rendered orchestration prompt shows the most recent N (see
-    # prompt_builder._section_session_context's last_proposal_advice
-    # block). Empty = no outstanding advisories.
-    last_proposal_advice: list[str] = field(default_factory=list)
+    # Each is mirrored from the matching ``cli.py`` flag at session start.
+    # F0-8 + F0-10 leave them at False so behavior is identical to tag
+    # ``pre-roofline-merge``; subsequent F-steps flip individual toggles
+    # to ``True`` only after their smoke gates pass.
+    # ------------------------------------------------------------------
+    # The three Roofline-v2 / framework-agent toggles default to ON
+    # — RooflineExecutor is the canonical analysis path, framework-
+    # agent is wired by default, and PolicyGate's N9 rule denies the
+    # legacy ``profile`` propose path. Operators opt out via the
+    # matching ``--no-...`` CLI flags or env vars set to ``0``.
+    use_roofline_composite: bool = True
+    framework_agent_enabled: bool = True
+    deny_direct_profile: bool = True
+    # Cheap-rounds gain gate + saturation advisory stay opt-in
+    # (default off) — both lock kernel_opt / mutate the prompt only
+    # when the operator has tuned the thresholds for their workload.
+    gain_driven_kernel_opt: bool = False
+    roofline_saturation_advisory: bool = False
+    # Per-variant overtime kill multiplier for ExploreExecutor: when
+    # > 0 AND ``baseline_runtime_sec`` > 0, single-variant Magpie runs
+    # in the explore loop are killed once their wall-clock exceeds
+    # ``baseline_runtime_sec * explore_overtime_kill_ratio``. The
+    # variant is recorded with ``outcome='KILLED_OVERTIME'`` +
+    # ``runtime_sec`` + ``wall_clock_ratio_vs_baseline`` (no tput) so
+    # the orchestration LLM can distinguish "ran too slow → early
+    # kill" from "benchmark crashed / timed out at the hard cap".
+    # Mirrored from ``--explore-overtime-kill-ratio`` at session
+    # start. The stack-rebench step does NOT use this gate — only the
+    # initial single-variant run (kernel rationale: a stack already
+    # carrying multiple winners can legitimately take longer than the
+    # bare baseline, and rebench is small enough that the hard
+    # ``variant_timeout_sec`` is a sufficient backstop). Default 1.10
+    # (kill at +10 % over baseline wall-clock).
+    explore_overtime_kill_ratio: float = 1.10
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
@@ -332,9 +431,17 @@ class SharedState:
     # symmetry.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
+    # ``last_backends`` / ``last_params``
+    # / ``last_validate_stack`` are legacy resume-parity zombies: the
+    # legacy actions are denied at PolicyGate so new sessions never
+    # write to them, but the field shape must stay so a resumed v0.6
+    # ``state.json`` round-trips (Inv-10.1 fact-layer compatibility).
     last_backends: dict[str, Any] = field(default_factory=dict)
     last_params: dict[str, Any] = field(default_factory=dict)
     last_validate_stack: dict[str, Any] = field(default_factory=dict)
+    # merged explore action snapshot. Same
+    # schema as the other ``last_<action>`` mirrors.
+    last_explore: dict[str, Any] = field(default_factory=dict)
     # Roofline-v2 N10: composite roofline action audit snapshot +
     # rolling history. Mirrors the v0 per-action audit pattern (one
     # dict snapshot for "what was the most recent run", one capped
@@ -343,10 +450,18 @@ class SharedState:
     last_roofline: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
+    sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # ``backends_attempts`` /
+    # ``params_attempts`` / ``validate_stack_attempts`` are kept as
+    # zero-write resume-parity zombies for the same Inv-10.1 reason
+    # as the snapshot mirrors above.
     backends_attempts: list[dict[str, Any]] = field(default_factory=list)
     params_attempts: list[dict[str, Any]] = field(default_factory=list)
-    sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     validate_stack_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # explore audit log. Capped per _DEFAULT_ATTEMPTS_HISTORY.
+    explore_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # Roofline-v2 N10: per-tick roofline audit log (capped). Records the
+    # snapshot_id / analysis_md_path each successful invocation produced.
     roofline_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results, capped at
     # ``_DEFAULT_LAST_FAILURES``. Carries the rich failure context
@@ -382,23 +497,157 @@ class SharedState:
     # this to nudge Orch off the params plateau. Reset to 0 whenever
     # current_best advances.
     params_no_promote_streak: int = 0
-    # Persistent params DFS state. ParamsExecutor owns the search mechanics,
-    # Coordinator is still the only writer to state.json.
+    # DFS ledger (params / backends). Kept on the dataclass for
+    # legacy resume parity (Inv-10.1); sessions read ``explore_search``
+    # below. ``tested`` is keyed by content fingerprint so two variants
+    # with identical args + envs under different names collapse.
     params_search: dict[str, Any] = field(default_factory=dict)
-    # Persistent backends DFS state — same schema as ``params_search``
-    # (``schema_version`` / ``accepted`` / ``rejected`` / ``tested`` /
-    # ``name_index`` / ``cursor`` / ``last_round``). Owned by
-    # BackendsExecutor; Coordinator merges via
-    # :meth:`apply_backends_search_update` after each round and appends to
-    # ``accepted`` on promote (see :meth:`record_backends_accepted`).
-    #
-    # ``tested`` is keyed by **content fingerprint** (see
-    # :func:`variant_fingerprint`) so two variants with identical
-    # ``extra_sglang_args`` + ``extra_envs`` under different names collapse
-    # to the same row. ``name_index`` is a name → fingerprint map used by
-    # the executor's pre-filter to also reject explicit renames that the
-    # LLM might submit in a fresh ``params.grid``.
     backends_search: dict[str, Any] = field(default_factory=dict)
+    # unified explore ledger (KB_design §3.4 Inv-4.1 "single
+    # ledger"). Merges the legacy ``backends_search`` + ``params_search``
+    # ledgers into one persistent DFS state for the merged ``explore``
+    # action. ``tested`` is keyed by canonical_fingerprint (content-based,
+    # see ``action_executors._canonical_fingerprint``), same hashing as
+    # ``variant_fingerprint`` so the ledgers migrate losslessly.
+    #
+    # Schema (M3, may grow in M5/M6 with specialist provenance):
+    #
+    #   {
+    #     "schema_version": 1,
+    #     "tested": {
+    #       fingerprint: {name, extra_sglang_args, extra_envs, outcome,
+    #                     round_id, ts, gain_pct, tput, provenance,
+    #                     workload_signature}
+    #     },
+    #     "accepted": [
+    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #        gain_pct, stack_index, accepted_at_round, ts}
+    #     ],
+    #     "rejected": [
+    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #        reason, gain_pct, tput, round_id, ts}
+    #     ],
+    #     "winners_history": [
+    #       {round_id, variant_name, fingerprint, gain_pct,
+    #        extra_args, extra_envs}
+    #     ],
+    #     "discovered_flags": [
+    #       {flag, source, first_seen_round}
+    #     ],
+    #     "synergy_attempted": [["name1", "name2"], ...],
+    #     "domains_round_summary": [...],   # M5/M6 fills, M3 leaves []
+    #     "name_index": {name: fingerprint},
+    #     "cursor": int,
+    #     "last_round": {...},
+    #   }
+    #
+    # ``accepted`` outcomes include the inlined stack-rebench result —
+    # entries that landed in optimization_stack and survived the
+    # subsequent stack rebench. Items the rebench evicted live in
+    # ``rejected`` with ``reason='stack_unstable'``.
+    explore_search: dict[str, Any] = field(default_factory=dict)
+    # specialist sub-agent rolling state (KB_design §3.5 +
+    # §3.10 §4.1). Each entry summarises one EXPLORE round of specialist
+    # dispatch (M5: 1 entry per round; M6 grows to N when 6 domains run
+    # concurrently). Schema (per round):
+    #
+    #   {
+    #     "round_id": str,                 # explore-round-N
+    #     "dispatched_at": iso,
+    #     "completed_at": iso,
+    #     "domains": [domain_key, ...],
+    #     "parallelism": int,              # actual concurrent specialists
+    #     "tasks": [{task_id, domain, status, gap_canonical_id,
+    #                turns_used, workspace, transcript_path, done_path,
+    #                proposals_count, confidence}],
+    #     "proposals_total": int,
+    #     "proposals_kept": int,           # filled by Coordinator after
+    #                                      # explore round finishes
+    #     "proposals_rejected": int,
+    #     "proposals_skipped": int,
+    #     "kb_edge_ids": [str, ...],       # M5 simplified; M6 per-variant
+    #     "confidence_avg": float | None,
+    #     "domain_breakdown": {domain_key: {...}},
+    #     "notes": [str, ...],
+    #   }
+    specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
+    # Per-domain "empty proposal_set" streak. Reset on a non-empty
+    # specialist_done; Robustness reads this to escalate when a
+    # specialist domain consistently fails to produce ideas
+    #.
+    specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
+    # IR-7 — session_steward_specialist (honest self-stop). The
+    # Coordinator dispatches this domain on EXPLORE plateau and routes
+    # the recommendation:
+    #   * ``continue_explore``    — inject ``next_gap_canonical_id`` into
+    #                               gaps[], reset plateau counters once;
+    #                               sets ``steward_continuation_used``.
+    #   * ``advance_to_kernel``   — set pending_escalate_hint='skip_to_kernel'.
+    #   * ``stop_session``        — set_stop_reason('no_more_leverage').
+    last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
+    remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
+    steward_continuation_used: bool = False
+    # last specialist task snapshot (parity with other
+    # ``last_<action>`` mirrors; useful for the orchestration prompt
+    # to surface "last round's specialist outcome").
+    last_specialist: dict[str, Any] = field(default_factory=dict)
+    # PR-A7 (Arbor-into-Hyperloom) — per-specialist patch verdict
+    # ledger keyed by specialist task_id. The Critic role reviews a
+    # specialist's worktree patches before ``integrate_patch`` runs;
+    # values are entries from REVIEW_VERDICTS
+    # (``approve`` / ``reject`` / ``needs_review`` / ``advise`` /
+    # ``redirect``). PolicyGate's
+    # ``integrate_patch_requires_critic_verdict`` rule denies an
+    # integrate_patch delegate whose specialist_task_id is missing
+    # from this map OR carries a ``reject`` verdict — so a hostile
+    # / regressive patch never reaches the serving GPU. ``approve`` /
+    # ``advise`` allow integrate; ``needs_review`` / ``redirect``
+    # require explicit operator override via
+    # ``params.bypass_critic=True``.
+    specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
+    # PR-A8 (Arbor-into-Hyperloom) — intervention-mix ledger.
+    #
+    # Each entry: ``{change_type, action, task_id, ts, delta_pct}``.
+    # ``change_type`` ∈ {"config", "code_patch"}:
+    #   * "config"     — env-var / CLI-flag tweaks via the merged
+    #                    ``explore`` action (Arbor's "config agent").
+    #   * "code_patch" — specialist-authored source patch promoted via
+    #                    ``integrate_patch`` (Arbor's "code agent").
+    # The Robustness role consumes this ledger to detect consecutive
+    # config-only rounds and recommend escalating to a patch-authoring
+    # specialist next round.
+    intervention_mix: list[dict[str, Any]] = field(default_factory=list)
+    # PR-A8 — counts the *current* run of contiguous KEEPs whose
+    # change_type is ``config``. Resets to 0 every time a ``code_patch``
+    # KEEP lands. Robustness reads this via the per-tick prompt.
+    consecutive_config_only_rounds: int = 0
+    # PR-A8 — total specialist dispatches in the current EXPLORE entry.
+    # Reset on phase transition into a fresh EXPLORE. Robustness's
+    # storm detector fires when this crosses the configured cap
+    # without a single non-empty proposal_set in the same window.
+    explore_specialist_dispatched_count: int = 0
+    # research_lane capacity locked at session start
+    #. M5 default is 1 (single-specialist series);
+    # M6 raises to 6 (concurrent). PolicyGate denies mid-session
+    # mutation because it's listed in CORE_STATE_FIELDS.
+    research_lane_capacity: int = 1
+    # escalate_strategy_change carry-over field
+    #. The Coordinator's
+    # ``_handle_escalate_strategy_change`` writes the validated
+    # ``next_action_hint`` here so the phase_state machine can see it
+    # on the next ``compute_next_phase`` pass; the field is cleared
+    # by the Coordinator once the hint has been acted on (so the
+    # phase machine doesn't re-trigger on the same hint).
+    pending_escalate_hint: str = ""
+    # last cleared escalate hint (audit only). Useful for
+    # the breakdown to surface "we honored a llm_escalation here".
+    last_consumed_escalate_hint: str = ""
+    last_consumed_escalate_hint_ts: str = ""
+    # per-phase plateau threshold overrides locked at
+    # session start (CLI flags, KB_design §3.13 M7 §4). Empty dict
+    # means "use library defaults"; phase_state reads these fields
+    # for the dispatcher's phase-decision call.
+    plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id + patch_path + args. This
     # prevents Orchestration from spending hours re-validating the same patch
     # after repeated NEEDS_REVIEW/REVERT outcomes.
@@ -408,43 +657,162 @@ class SharedState:
     # run_optimization REVERTs and exhausted integrate attempts.
     rejected_kernel_ids: list[str] = field(default_factory=list)
 
-    # T1+T2 (search-space expansion) — see SKILL.md "Search-space expansion".
-    # Populated once per session by BackendsExecutor / ParamsExecutor on the
-    # first run after they AST-parse the live framework's server_args.py.
-    # Schema: {framework: {"backend_flags": [...], "param_flags": [...],
-    #                       "ts": iso, "source_path": str}}.
-    # The Orchestration prompt surfaces this so the LLM knows the full
-    # framework-version-correct flag namespace it can synthesize variants
-    # from (instead of being limited to the shipped DEFAULT_*_GRID).
+    # Search-space expansion ledger surfaced in the Orchestration
+    # prompt so the LLM sees the live framework's full flag namespace
+    # rather than the shipped seed grid. Schema:
+    # ``{framework: {"backend_flags": [...], "param_flags": [...],
+    # "ts": iso, "source_path": str}}``.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
-    # Rolling per-action winners log used for IR-26 dynamic idea generation.
-    # Each entry: {action, round_id, base_tput, winners: [{name, tput,
-    # gain_pct, extra_sglang_args, extra_envs}], best: {...}, ts}.
-    # Capped at 20 rows to keep prompt context bounded.
+    # Rolling per-action winners log (cap 20) used by IR-26 idea
+    # generation. Schema: ``{action, round_id, base_tput,
+    # winners: [{name, tput, gain_pct, extra_sglang_args, extra_envs}],
+    # best: {...}, ts}``.
     backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
-    # Set of synergy combo keys ("name1+name2+...") that have already been
-    # tested this session, so the IR-26 re-explore loop doesn't re-run the
-    # same combination after each new round of explore. Populated by
-    # BackendsExecutor when phase-2 combos run.
+    # Synergy combo keys (``"name1+name2+..."``) already tested this
+    # session — prevents re-running the same combination after each
+    # new explore round.
     synergy_attempted: list[str] = field(default_factory=list)
 
     # ---------------------------------------------------------------
-    # Action scoring (see orchestrator/scoring.py + plan
-    # action-scoring-in-shared-state). Coordinator seeds ``action_scores``
-    # once at session start from ActionRegistry + marathon priors and
-    # mutates it after every task completion. Each value is the raw dict
-    # returned by ``ActionScore.to_dict()`` so JSON serialization is
-    # transparent. Use :meth:`get_action_score` / :meth:`put_action_score`
-    # to round-trip via the typed dataclass.
-    action_scores: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # Monotonic Coordinator tick counter. Drives cooldown + aging math in
-    # scoring.py. Bumped once per Coordinator.run() / Coordinator.tick(n)
-    # iteration.
+    # the legacy ``action_scores`` decision system was retired.
+    # The Coordinator no longer maintains a per-action numeric
+    # priority; instead the Orchestration prompt surfaces facts
+    # (phase / gaps / KB sub-graphs / specialist proposal_set) and
+    # the LLM decides. Inv-9.1 forbids any system-side priority
+    # value. Legacy fields:
+    #
+    # * ``action_scores``         — dropped from the dataclass; resume
+    #                                migration logs + discards.
+    # * ``params_no_promote_streak`` — kept as a *read-only* hint for
+    #                                  M2 / legacy resume paths so
+    #                                  ``phase_state.exit_normal_explore``
+    #                                  fallback proxy keeps working;
+    #                                  not written by Coordinator.
+    #
+    # Monotonic Coordinator tick counter. Bumped once per
+    # ``Coordinator.run()`` / ``Coordinator.tick(n)`` iteration; kept
+    # so plateau / phase budget math has a stable monotonic anchor.
     tick: int = 0
+    # Monotonic per-session experiment counter. Bumped once per
+    # ``propose_action`` (T2) so :func:`experiment_canonical_id`
+    # produces a stable ``exp:{sid}:{iter:04d}`` aligned with the KB
+    # ``experiment`` kind schema.
+    session_iter_index: int = 0
     # Remaining gain-pct target gap (0.0 means "no target"). Coordinator
-    # refreshes this each prompt build when the run objective is
-    # ``gain_pct=N``. Drives ``scoring.target_gap_multiplier``.
+    # refreshes this when the run objective is ``gain_pct=N``. Kept
+    # because the prompt builder + breakdown rely on it for the
+    # "Mission progress" line (NOT a priority — pure fact).
     target_gap_pct: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Phase state machine fields
+    # ------------------------------------------------------------------
+    # ``phase`` is the run-level pipeline phase (PRELUDE / EXPLORE /
+    # KERNEL / SWEEP / CLOSE).  Coordinator is the only writer
+    # (PolicyGate adds it to CORE_STATE_FIELDS); LLM agents can read
+    # via prompt injection but cannot update_state. Empty string
+    # signals "phase machine not yet initialised" — Coordinator
+    # initialises on construction. legacy resume infers a value via
+    # :func:`phase_state.infer_phase_from_state`.
+    phase: str = ""
+    # ISO UTC timestamp the current phase was entered. Used by
+    # observability (breakdown.phase_segments) and the budget judge.
+    phase_started_ts: str = ""
+    # Monotonic-ish unix epoch matching ``phase_started_ts`` so the
+    # phase budget judge can compute elapsed seconds without
+    # re-parsing ISO strings every tick.
+    phase_started_unix: float = 0.0
+    # Append-only log of phase transitions; each row is built by
+    # :func:`phase_state.make_history_row` and conforms to KB_design
+    # §3.2 §6 (reason must be in ``PHASE_EXIT_REASONS``).  Capped at
+    # ``_PHASE_HISTORY_CAP`` so a runaway transition never bloats
+    # state.json (unlikely — there are only 5 phases — but defensive).
+    phase_history: list[dict[str, Any]] = field(default_factory=list)
+    # Wall-clock budget percentages per phase.
+    # Coordinator populates from CLI flags / defaults at construction
+    # time; persisted so resume picks up the exact split the original
+    # run used. Empty dict means "use library defaults".
+    phase_budget_pct: dict[str, float] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Cortex KB integration fields
+    # ------------------------------------------------------------------
+    # Coordinator-only writers. Listed in PolicyGate.CORE_STATE_FIELDS so
+    # any LLM ``update_state`` intent that touches these is denied
+    # (Inv-1 single writer). LLM consumers read them indirectly via
+    # prompt injection.
+    #
+    # ``cortex_session_id`` is the sid returned by the Cortex
+    # ``session begin`` call at T0. Empty string means either
+    # ``--degraded-kb`` was selected for this run or the session has not
+    # yet reached T0. Written **once** in PRELUDE; never overwritten.
+    cortex_session_id: str = ""
+    # T4 ``session commit`` payload snapshot: ``{"status": "committed",
+    # "promoted_edges": [...], "negation_edges": [...],
+    # "derived_summary_id": "..."}``. Empty dict until commit succeeds.
+    # Drives the ``breakdown.kb_provenance.commit`` section and the
+    # operator-visible "what survived this session" summary.
+    cortex_session_summary: dict[str, Any] = field(default_factory=dict)
+    # Tentative edge_ids created by T2 ``session hypothesize`` that have
+    # not yet been ``verify``-d by T3. Crash-recovery rule (KB_design
+    # §3.13 M1 §7 "resume"): on resume the Coordinator inspects this
+    # list and routes orphans through ``propose-edge + late_verified``
+    # rather than ``verify`` (avoids 404 from a stale edge that never
+    # made it past the NDJSON queue). Capped indirectly by the in-flight
+    # proposal count — proposals removed from ``pending_proposals`` also
+    # drop their edge_id here.
+    pending_kb_edges: list[dict[str, Any]] = field(default_factory=list)
+    # T0 snapshot of ``find-recipe`` raw output (CLI ``--format text``,
+    # one entry per recipe row). v0.8 M1 only **records** this — it is
+    # not yet injected into the orchestration prompt; that happens in M5
+    # specialist assembly. Kept as ``dict`` (parsed) so M5 can read
+    # without re-parsing. Empty dict on first-ever session for a
+    # (workload, hw) pair.
+    warm_start_recipe: dict[str, Any] = field(default_factory=dict)
+    # T0 snapshot of ``traps`` output (known pitfalls list). Same
+    # injection-deferral story as ``warm_start_recipe``.
+    warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
+    # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
+    # bypassed (``--degraded-kb``) or T0 failed.
+    warm_start_ts: str = ""
+
+    # ------------------------------------------------------------------
+    # structured gaps ledger (KB_design §3.3 /
+    # §3.5 / §3.9 §6). Replaces the proxy block (which derived
+    # decision input from ``last_action_failures`` +
+    # ``explore_search.winners_history``) with a structured, dedup'd
+    # list of unresolved bottlenecks. Coordinator is the sole writer
+    # (:meth:`Coordinator._refresh_gaps`); LLM agents read via
+    # prompt injection. Listed in :data:`policy.CORE_STATE_FIELDS` so
+    # any LLM ``update_state{changes={gaps: ...}}`` intent is denied.
+    #
+    # Refresh entry points:
+    #   1. baseline completion           — initial gap extraction
+    #   2. EXPLORE round KEEP/REVERT     — append to gap.attempts
+    #   3. Cortex traverse(issue_node)   — merge cross-session priors
+    #   4. specialist_done bookkeeping   — gap.attempts ← specialist
+    #
+    # Schema (per entry, KB_design §3.3 §4.2 / §3.5 §11):
+    #
+    #   {
+    #     "canonical_id": str,        # issue_node canonical from Cortex
+    #     "symptom":      str,        # human-readable: "MoE comm overhead"
+    #     "layer":        str,        # comm / kernel / framework / param
+    #     "severity":     str,        # high / medium / low
+    #     "domain_hint":  str,        # which specialist domain best fits
+    #     "source":       str,        # baseline / attempts / cortex
+    #     "first_seen_ts":     iso,
+    #     "last_updated_ts":   iso,
+    #     "attempts": [
+    #       {action, variant_name, outcome, gain_pct?, ts},
+    #       ...
+    #     ],
+    #   }
+    #
+    # ``attempts`` is capped at the most recent 20 per gap; the whole
+    # list is capped at :data:`_GAPS_MAX_ENTRIES` so a long session
+    # can't blow up state.json. Dedup is keyed by ``canonical_id``.
+    gaps: list[dict[str, Any]] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -465,22 +833,73 @@ class SharedState:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
+        # unified migration entry point. A v0.6 state.json
+        # has no top-level ``schema_version`` field; treat the absence as
+        # ``schema_version=1`` and run the §3.10 §5.2 field-mapping step.
+        # The function is idempotent (Inv-10.3): re-loading a v0.8
+        # state.json (``schema_version == LATEST_STATE_SCHEMA_VERSION``)
+        # short-circuits the migration logging without touching the
+        # fact-layer payload (Inv-10.1).
+        incoming_version = int(raw.get("schema_version") or 1)
+        needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
+        migration_events: list[str] = []
+
         # Filter to known fields so older / newer state.json shapes don't
         # crash. Unknown keys are dropped; missing keys fall back to defaults.
         known = {f for f in cls.__dataclass_fields__}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # Defensive: ``action_scores`` is supposed to be a dict-of-dict. If a
-        # corrupted state.json carries a non-dict entry, drop it instead of
-        # failing the whole load — the missing rows will be re-seeded on the
-        # next Coordinator.start().
-        if "action_scores" in filtered:
-            scores = filtered["action_scores"]
-            if isinstance(scores, dict):
-                filtered["action_scores"] = {
-                    str(k): v for k, v in scores.items() if isinstance(v, dict)
-                }
+        # drop the legacy scoreboard fields from the loaded
+        # dict. The dataclass no longer carries
+        # ``action_scores`` so it would be filtered out anyway; we
+        # also strip ``params_no_promote_streak`` /
+        # ``score_violation`` / ``cooldown_until_tick`` / ``streak_*``
+        # / ``locked_reason`` family explicitly so the ``warn`` mode
+        # gets a usable count. ``params_no_promote_streak`` is kept
+        # as a read-only fallback for legacy M2 plateau proxy when
+        # ``explore_search`` is empty; everything else is dropped.
+        _legacy_drop_fields = (
+            "action_scores",
+            "score_violation",
+            "cooldown_until_tick",
+            "locked_reason",
+            "ucb_bonus",
+            "aging_bonus",
+            "score_mult",
+            "effective_score",
+            "last_action_score_snapshot",
+        )
+        legacy_seen: list[tuple[str, int]] = []
+        for legacy in _legacy_drop_fields:
+            if legacy in raw:
+                payload = raw.get(legacy)
+                size = (
+                    len(payload) if isinstance(payload, (dict, list, str))
+                    else 1
+                )
+                legacy_seen.append((legacy, int(size)))
+            filtered.pop(legacy, None)
+        if legacy_seen:
+            mode = os.environ.get(
+                "INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", "drop",
+            ).strip().lower()
+            import logging as _logging
+            log = _logging.getLogger(__name__)
+            summary = ", ".join(f"{k}={n}" for k, n in legacy_seen)
+            migration_events.append(
+                f"§3.9 dropped scoreboard fields ({summary})"
+            )
+            if mode == "warn":
+                log.warning(
+                    "v0.8 §3.9: dropped legacy scoreboard fields from "
+                    "state.json (%s). set "
+                    "--legacy-action-scores=drop to silence this.",
+                    summary,
+                )
             else:
-                filtered["action_scores"] = {}
+                log.info(
+                    "v0.8 §3.9: dropped legacy scoreboard fields from "
+                    "state.json (%s).", summary,
+                )
         # Phase 7 of the dedup-by-fingerprint plan: migrate any v1
         # ``params_search`` ledger (where ``tested`` was keyed by display
         # name) to schema v2 (keyed by content fingerprint). Backends has
@@ -494,6 +913,103 @@ class SharedState:
         filtered["backends_search"] = cls._migrate_search_ledger(
             filtered.get("backends_search"), schema_target=1,
         )
+        # merge the legacy backends_search + params_search ledgers
+        # into the unified ``explore_search`` ledger.
+        # The merge is one-shot at load: subsequent ExploreExecutor runs
+        # only touch ``explore_search``; the legacy ledgers stay around
+        # (deprecated, read-only) so an emergency rollback to v0.6 still
+        # has its data. ``record_*_accepted`` / executor updates from the
+        # legacy backends/params executors continue to write to the old
+        # ledgers — the merge function is idempotent under repeated calls,
+        # so an interleaved v0.6 fallback + legacy resume picks up cleanly.
+        explore_before = filtered.get("explore_search") or {}
+        filtered["explore_search"] = cls._build_explore_search(
+            existing=filtered.get("explore_search"),
+            backends_search=filtered.get("backends_search"),
+            params_search=filtered.get("params_search"),
+            backend_winners_history=filtered.get("backend_winners_history"),
+            params_winner_history=filtered.get("params_winner_history"),
+            synergy_attempted=filtered.get("synergy_attempted"),
+        )
+        if needs_migration:
+            tested_before = (
+                len(explore_before.get("tested") or {})
+                if isinstance(explore_before, dict) else 0
+            )
+            tested_after = len(
+                filtered["explore_search"].get("tested") or {},
+            )
+            if tested_after > tested_before:
+                migration_events.append(
+                    "§3.4 merged backends_search/params_search → "
+                    f"explore_search (tested={tested_after})"
+                )
+
+        # fact-layer integrity check. ``strict``
+        # (the default) aborts when a fact-layer key was present in a
+        # *non-empty* legacy state.json but couldn't be loaded into
+        # the dataclass (caller dropped it / type mismatch). ``lenient``
+        # downgrades to WARNING and continues. Fresh sessions
+        # (``raw == {}``) skip the check entirely. Inv-10.1.
+        if needs_migration and raw:
+            mode = os.environ.get(
+                "INFERENCE_OPTIMIZER_MIGRATION_MODE", "strict",
+            ).strip().lower()
+            fact_layer_keys = (
+                "baseline_tput", "baseline_accuracy", "current_best",
+                "cumulative_gain", "cumulative_gain_validated",
+                "optimization_stack",
+                # IR-7 additions (steward); safe to lose on v0.6 → v0.8
+                # migration since the LLM treats missing assessment as
+                # "no priors".
+                "last_remaining_gaps_assessment",
+                "remaining_gaps_assessments",
+            )
+            missing: list[str] = []
+            for key in fact_layer_keys:
+                if key in raw and key not in filtered:
+                    missing.append(key)
+            if missing:
+                import logging as _logging
+                log = _logging.getLogger(__name__)
+                fmt = (
+                    "v0.8 §3.10: fact-layer field(s) %s present in "
+                    "state.json but not loaded into SharedState "
+                    "(Inv-10.1 violation)."
+                )
+                if mode == "lenient":
+                    log.warning(
+                        fmt + " --migration-mode=lenient → continuing.",
+                        ", ".join(missing),
+                    )
+                else:
+                    log.error(fmt, ", ".join(missing))
+                    raise ValueError(
+                        f"v0.8 §3.10 strict migration failed: fact-layer "
+                        f"field(s) {missing!r} lost. Re-run with "
+                        f"--migration-mode=lenient to continue."
+                    )
+
+        # bump schema_version once migrations finish.
+        # Idempotent: a payload already at the latest version
+        # short-circuits the helper at the top of this function.
+        filtered["schema_version"] = LATEST_STATE_SCHEMA_VERSION
+
+        # operator-visible migration log. ``strict``
+        # (default) is silent on info-level events but surfaces fatal
+        # fact-layer errors elsewhere (e.g. CLI bootstrap); ``lenient``
+        # downgrades any fact-layer error logged downstream. Here we
+        # only emit the migration summary so resume traces are
+        # self-describing.
+        if needs_migration:
+            import logging as _logging
+            log = _logging.getLogger(__name__)
+            event_str = "; ".join(migration_events) or "(no field changes)"
+            log.info(
+                "v0.8 §3.10: state.json migrated v%d → v%d. Events: %s",
+                incoming_version, LATEST_STATE_SCHEMA_VERSION, event_str,
+            )
+
         return cls(**filtered)
 
     @staticmethod
@@ -589,6 +1105,310 @@ class SharedState:
         out["schema_version"] = max(int(out.get("schema_version") or 0), schema_target)
         return out
 
+    @staticmethod
+    def _build_explore_search(
+        *,
+        existing: Any,
+        backends_search: Any,
+        params_search: Any,
+        backend_winners_history: Any,
+        params_winner_history: Any,
+        synergy_attempted: Any,
+    ) -> dict[str, Any]:
+        """Merge v0.6 backends_search + params_search into explore_search.
+
+        Idempotent: if ``existing`` already carries ``schema_version >= 1``
+        and the legacy ledgers haven't grown new fingerprints since the
+        last merge (tracked via ``existing.merged_from_legacy_sig``),
+        the call is a no-op other than re-stamping defensive defaults.
+
+        Conflict resolution:
+
+        * ``tested`` — union by fingerprint; outcome rank
+          ``KEEP > REVERT > SKIPPED`` wins the row.
+        * ``accepted`` — union by fingerprint; later entries win
+          (newer KEEPs reflect the latest evidence).
+        * ``rejected`` — union by fingerprint; entries already in
+          ``accepted`` are dropped (a re-promote supersedes a prior
+          reject).
+        * ``winners_history`` — append of legacy ``backend_winners_history``
+          + ``params_winner_history``, sorted by ``round_id`` / ``ts``.
+        * ``discovered_flags`` — empty in M3 (filled by M5 specialists).
+        * ``synergy_attempted`` — copied from legacy field.
+        * ``domains_round_summary`` — empty (M5/M6 fills).
+        """
+        from .action_executors._grid_runner import variant_fingerprint as _fp
+
+        existing = existing if isinstance(existing, dict) else {}
+        merged_sig = str(existing.get("merged_from_legacy_sig") or "")
+
+        # Legacy ledger normalization (already migrated to v2/v1 by
+        # _migrate_search_ledger so tested is fingerprint-keyed).
+        b = backends_search if isinstance(backends_search, dict) else {}
+        p = params_search if isinstance(params_search, dict) else {}
+
+        # Compose a cheap signature of the source ledgers so we can
+        # short-circuit when nothing changed since the last merge.
+        legacy_sig = json.dumps(
+            {
+                "b_tested": sorted(list((b.get("tested") or {}).keys())),
+                "p_tested": sorted(list((p.get("tested") or {}).keys())),
+                "b_accepted": len(b.get("accepted") or []),
+                "p_accepted": len(p.get("accepted") or []),
+                "b_rejected": len(b.get("rejected") or []),
+                "p_rejected": len(p.get("rejected") or []),
+            },
+            sort_keys=True, separators=(",", ":"),
+        )
+        if (
+            existing
+            and existing.get("schema_version")
+            and merged_sig == legacy_sig
+        ):
+            # Idempotent re-load with no upstream changes; preserve
+            # whatever ExploreExecutor wrote since the last merge.
+            existing.setdefault("tested", {})
+            existing.setdefault("accepted", [])
+            existing.setdefault("rejected", [])
+            existing.setdefault("winners_history", [])
+            existing.setdefault("discovered_flags", [])
+            existing.setdefault("synergy_attempted", [])
+            existing.setdefault("domains_round_summary", [])
+            existing.setdefault("name_index", {})
+            existing.setdefault("cursor", 0)
+            return existing
+
+        _RANK = {"KEEP": 3, "REVERT": 2, "SKIPPED": 1, "FAILED": 1,
+                 "KEEP_UNSTABLE": 2, "": 0}
+
+        def _outcome_for(entry: dict[str, Any]) -> str:
+            """Map a legacy ledger entry to the outcome vocabulary."""
+            outcome = str(entry.get("outcome") or "").upper().strip()
+            if outcome:
+                return outcome
+            # Legacy entries didn't stamp ``outcome``; infer from the
+            # bucket the entry sat in. Reject/accept buckets handled by
+            # caller via the explicit code paths below.
+            status = str(entry.get("status") or "").lower()
+            if status == "failed":
+                return "FAILED"
+            return "REVERT"
+
+        # tested: union by fingerprint with outcome-rank precedence.
+        tested: dict[str, dict[str, Any]] = {}
+        name_index: dict[str, str] = {}
+
+        def _ingest_tested(source: dict[str, Any], legacy_action: str) -> None:
+            src_tested = source.get("tested") or {}
+            if not isinstance(src_tested, dict):
+                return
+            for fp_key, entry in src_tested.items():
+                if not isinstance(entry, dict):
+                    continue
+                fp = (
+                    str(fp_key)
+                    if (isinstance(fp_key, str)
+                        and len(fp_key) == 16
+                        and all(c in "0123456789abcdef" for c in fp_key))
+                    else str(entry.get("fingerprint")
+                             or _fp(
+                                 str(entry.get("extra_sglang_args") or ""),
+                                 dict(entry.get("extra_envs") or {}),
+                             ))
+                )
+                outcome = _outcome_for(entry)
+                row = {
+                    "fingerprint": fp,
+                    "name": str(entry.get("name") or ""),
+                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_envs": dict(entry.get("extra_envs") or {}),
+                    "note": str(entry.get("note") or ""),
+                    "outcome": outcome,
+                    "round_id": str(entry.get("round_id") or ""),
+                    "ts": str(entry.get("ts") or ""),
+                    "gain_pct": entry.get("gain_pct"),
+                    "tput": entry.get("tput") or entry.get("output_throughput"),
+                    "provenance": str(entry.get("provenance")
+                                       or f"legacy:{legacy_action}"),
+                    "workload_signature": str(entry.get("workload_signature") or ""),
+                }
+                prev = tested.get(fp)
+                if prev is None or _RANK.get(outcome, 0) >= _RANK.get(
+                    str(prev.get("outcome") or ""), 0,
+                ):
+                    tested[fp] = row
+                if row["name"]:
+                    name_index[row["name"]] = fp
+
+        _ingest_tested(b, "backends")
+        _ingest_tested(p, "params")
+
+        # accepted: union by fingerprint, later entries win.
+        accepted_by_fp: dict[str, dict[str, Any]] = {}
+
+        def _ingest_accepted(source: dict[str, Any], legacy_action: str) -> None:
+            for entry in source.get("accepted") or []:
+                if not isinstance(entry, dict):
+                    continue
+                fp = str(entry.get("fingerprint") or _fp(
+                    str(entry.get("extra_sglang_args") or ""),
+                    dict(entry.get("extra_envs") or {}),
+                ))
+                row = {
+                    "fingerprint": fp,
+                    "name": str(entry.get("name") or ""),
+                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_envs": dict(entry.get("extra_envs") or {}),
+                    "note": str(entry.get("note") or ""),
+                    "gain_pct": entry.get("gain_pct"),
+                    "tput": entry.get("tput") or entry.get("output_throughput"),
+                    "stack_index": entry.get("stack_index"),
+                    "accepted_at_round": str(entry.get("accepted_at_round") or ""),
+                    "ts": str(entry.get("ts") or ""),
+                    "provenance": str(entry.get("provenance")
+                                       or f"legacy:{legacy_action}"),
+                }
+                accepted_by_fp[fp] = row
+                if row["name"]:
+                    name_index[row["name"]] = fp
+
+        _ingest_accepted(b, "backends")
+        _ingest_accepted(p, "params")
+        # Also pull from ``existing`` so a re-load preserves ExploreExecutor's
+        # own writes since the last merge.
+        for entry in existing.get("accepted") or []:
+            if not isinstance(entry, dict):
+                continue
+            fp = str(entry.get("fingerprint") or "")
+            if fp:
+                accepted_by_fp[fp] = dict(entry)
+
+        # rejected: union by fingerprint; drop fingerprints already in
+        # accepted (re-promote wins).
+        accepted_fps = set(accepted_by_fp.keys())
+        rejected_by_fp: dict[str, dict[str, Any]] = {}
+
+        def _ingest_rejected(source: dict[str, Any], legacy_action: str) -> None:
+            for entry in source.get("rejected") or []:
+                if not isinstance(entry, dict):
+                    continue
+                fp = str(entry.get("fingerprint") or _fp(
+                    str(entry.get("extra_sglang_args") or ""),
+                    dict(entry.get("extra_envs") or {}),
+                ))
+                if fp in accepted_fps:
+                    continue
+                row = {
+                    "fingerprint": fp,
+                    "name": str(entry.get("name") or ""),
+                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_envs": dict(entry.get("extra_envs") or {}),
+                    "note": str(entry.get("note") or ""),
+                    "reason": str(entry.get("reason") or "not_keep"),
+                    "gain_pct": entry.get("gain_pct"),
+                    "tput": entry.get("tput") or entry.get("output_throughput"),
+                    "round_id": str(entry.get("round_id") or ""),
+                    "ts": str(entry.get("ts") or ""),
+                    "provenance": str(entry.get("provenance")
+                                       or f"legacy:{legacy_action}"),
+                }
+                rejected_by_fp[fp] = row
+                if row["name"]:
+                    name_index[row["name"]] = fp
+
+        _ingest_rejected(b, "backends")
+        _ingest_rejected(p, "params")
+        for entry in existing.get("rejected") or []:
+            if not isinstance(entry, dict):
+                continue
+            fp = str(entry.get("fingerprint") or "")
+            if fp and fp not in accepted_fps:
+                rejected_by_fp[fp] = dict(entry)
+
+        # winners_history: append legacy lists + preserve any prior
+        # explore-side rows, then sort by (round_id, ts).
+        wh: list[dict[str, Any]] = []
+        for source_list, legacy_action in (
+            (backend_winners_history, "backends"),
+            (params_winner_history, "params"),
+            (existing.get("winners_history") or [], "explore"),
+        ):
+            if not isinstance(source_list, list):
+                continue
+            for entry in source_list:
+                if not isinstance(entry, dict):
+                    continue
+                fp_val = entry.get("fingerprint")
+                if not fp_val:
+                    fp_val = _fp(
+                        str(entry.get("extra_sglang_args") or ""),
+                        dict(entry.get("extra_envs") or {}),
+                    )
+                wh.append({
+                    "round_id": str(entry.get("round_id") or ""),
+                    "variant_name": str(entry.get("variant_name")
+                                          or entry.get("name") or ""),
+                    "fingerprint": str(fp_val),
+                    "gain_pct": entry.get("gain_pct"),
+                    "extra_args": str(entry.get("extra_args")
+                                       or entry.get("extra_sglang_args") or ""),
+                    "extra_envs": dict(entry.get("extra_envs") or {}),
+                    "provenance": str(entry.get("provenance")
+                                       or f"legacy:{legacy_action}"),
+                    "ts": str(entry.get("ts") or ""),
+                })
+
+        def _sort_key(row: dict[str, Any]) -> tuple[str, str]:
+            return (str(row.get("round_id") or ""), str(row.get("ts") or ""))
+
+        wh.sort(key=_sort_key)
+
+        # synergy_attempted: copy from legacy field; preserve any
+        # ExploreExecutor-side additions.
+        sa_raw = synergy_attempted if isinstance(synergy_attempted, list) else []
+        sa_set: set[tuple[str, ...]] = set()
+
+        def _normalize_combo(c: Any) -> tuple[str, ...] | None:
+            if isinstance(c, list):
+                items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
+                return items if items else None
+            if isinstance(c, str) and c.strip():
+                # Legacy synergy_attempted entries were "+"-joined strings.
+                parts = tuple(sorted(p for p in c.split("+") if p))
+                return parts if parts else None
+            return None
+
+        for c in sa_raw:
+            norm = _normalize_combo(c)
+            if norm:
+                sa_set.add(norm)
+        for c in existing.get("synergy_attempted") or []:
+            norm = _normalize_combo(c)
+            if norm:
+                sa_set.add(norm)
+
+        # discovered_flags: M3 leaves empty; preserve any existing rows.
+        df_existing = existing.get("discovered_flags") or []
+        df: list[dict[str, Any]] = [
+            d for d in df_existing if isinstance(d, dict)
+        ]
+
+        return {
+            "schema_version": 1,
+            "tested": tested,
+            "accepted": list(accepted_by_fp.values()),
+            "rejected": list(rejected_by_fp.values()),
+            "winners_history": wh,
+            "discovered_flags": df,
+            "synergy_attempted": [list(c) for c in sorted(sa_set)],
+            "domains_round_summary": list(existing.get("domains_round_summary") or []),
+            "name_index": name_index,
+            "cursor": len(tested),
+            "last_round": dict(existing.get("last_round") or {}),
+            # Sentinel so a re-load with unchanged legacy data short-circuits.
+            "merged_from_legacy_sig": legacy_sig,
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -669,6 +1489,192 @@ class SharedState:
             if not k.startswith(prefix)
         }
 
+    # ------------------------------------------------------------------
+    # stop_reason ENUM validator
+    # ------------------------------------------------------------------
+    def set_stop_reason(
+        self,
+        value: str,
+        *,
+        strict: bool | None = None,
+    ) -> str:
+        """Validated writer for :attr:`stop_reason`.
+
+        Inv-8.3 (stop_reason vocab closed): anything outside the
+        ``STOP_REASON_VOCAB`` in ``phase_state`` is mapped to
+        ``"unknown"`` in lenient mode (default) and emits a warning
+        so the breakdown can surface the migration. ``strict=True``
+        raises ``ValueError`` instead — used by the test path that
+        wants fail-fast behaviour.
+
+        ``strict`` defaults to the
+        ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON`` env var (``"1"`` /
+        ``"true"`` enables strict). The CLI flips the env on for
+        production runs once the vocab has been dogfooded.
+
+        Returns the value actually written (normalised + clipped to
+        the vocab).
+        """
+        from .phase_state import STOP_REASON_VOCAB, is_valid_stop_reason
+        text = str(value or "").strip()
+        if not text:
+            self.stop_reason = ""
+            return ""
+        if is_valid_stop_reason(text):
+            self.stop_reason = text
+            return text
+        if strict is None:
+            strict_env = os.environ.get(
+                "INFERENCE_OPTIMIZER_STRICT_STOP_REASON", "",
+            ).strip().lower()
+            strict = strict_env in ("1", "true", "yes")
+        if strict:
+            raise ValueError(
+                f"stop_reason={text!r} not in STOP_REASON_VOCAB "
+                f"({sorted(STOP_REASON_VOCAB)!r})"
+            )
+        # Lenient: map to "unknown" and surface a warning. Callers can
+        # still observe the original via the warnings log.
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "stop_reason=%r not in STOP_REASON_VOCAB; mapped to 'unknown' "
+            ". Set "
+            "INFERENCE_OPTIMIZER_STRICT_STOP_REASON=1 to fail-fast.",
+            text,
+        )
+        self.stop_reason = "unknown"
+        return "unknown"
+
+    # ------------------------------------------------------------------
+    # IR-7 — session steward assessment writer
+    # ------------------------------------------------------------------
+    _STEWARD_ASSESSMENT_HISTORY_CAP = 10
+
+    def record_steward_assessment(
+        self,
+        *,
+        recommendation: str,
+        next_gap_canonical_id: str,
+        remaining_potential_pct_estimate: float,
+        rationale: str,
+        task_id: str,
+        round_at_assessment: int,
+        source_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Stash a session_steward_specialist verdict on SharedState.
+
+        Returns the row that landed in ``last_remaining_gaps_assessment``
+        so the Coordinator can route on it immediately without
+        re-reading state. History capped at
+        :attr:`_STEWARD_ASSESSMENT_HISTORY_CAP` (drops oldest).
+        """
+        row = {
+            "ts": _now_iso(),
+            "recommendation": str(recommendation),
+            "next_gap_canonical_id": str(next_gap_canonical_id or ""),
+            "remaining_potential_pct_estimate": float(
+                remaining_potential_pct_estimate or 0.0
+            ),
+            "rationale": str(rationale or "")[:2000],
+            "task_id": str(task_id or ""),
+            "round_at_assessment": int(round_at_assessment or 0),
+        }
+        if source_payload is not None:
+            # Preserve the full payload (truncated to a manageable size)
+            # so the breakdown collector can dig deeper if needed.
+            row["source_payload_keys"] = sorted(source_payload.keys())
+        self.last_remaining_gaps_assessment = row
+        history = list(self.remaining_gaps_assessments or [])
+        history.append(row)
+        if len(history) > self._STEWARD_ASSESSMENT_HISTORY_CAP:
+            history = history[-self._STEWARD_ASSESSMENT_HISTORY_CAP:]
+        self.remaining_gaps_assessments = history
+        return row
+
+    # ------------------------------------------------------------------
+    # escalate hint plumbing
+    # ------------------------------------------------------------------
+    def set_pending_escalate_hint(self, hint: str) -> str:
+        """Stash the LLM-supplied hint for the next phase compute pass.
+
+        Returns the value actually written. Unknown hints are
+        silently dropped (Inv-8.2 — phase decisions only react to a
+        closed vocabulary; arbitrary robustness payloads should not
+        steer the state machine).
+        """
+        from .phase_state import is_valid_escalate_hint
+        text = str(hint or "").strip()
+        if text and not is_valid_escalate_hint(text):
+            return ""
+        self.pending_escalate_hint = text
+        return text
+
+    def consume_pending_escalate_hint(self) -> str:
+        """Pop the pending hint, recording the consumption in audit fields.
+
+        The phase machine calls this *after* it acted on the hint so
+        the next tick doesn't re-trigger the same transition. Returns
+        the hint that was cleared (empty string when nothing was
+        pending).
+        """
+        hint = (self.pending_escalate_hint or "").strip()
+        if not hint:
+            return ""
+        self.pending_escalate_hint = ""
+        self.last_consumed_escalate_hint = hint
+        self.last_consumed_escalate_hint_ts = _now_iso()
+        return hint
+
+    # ------------------------------------------------------------------
+    # phase machine writer (Coordinator-only, Inv-1 + Inv-8.1)
+    # ------------------------------------------------------------------
+    def record_phase_transition(
+        self,
+        *,
+        to_phase: str,
+        reason: str,
+        evidence: dict[str, Any] | None = None,
+        ts: str | None = None,
+        ts_unix: float | None = None,
+    ) -> dict[str, Any]:
+        """Append a phase_history row and atomically update ``phase`` fields.
+
+        The Coordinator calls this from ``_advance_phase_if_needed`` at
+        the end of each tick (also once during ``__init__`` for the
+        initial "phase_entered" row). LLM roles cannot reach this code
+        path — PolicyGate adds ``phase`` / ``phase_history`` to
+        :data:`policy.CORE_STATE_FIELDS`, so any ``update_state`` intent
+        touching them is rejected first.
+
+        Returns the inserted row (so callers don't have to re-read the
+        list to log it).
+        """
+        from datetime import datetime as _dt, timezone as _tz
+        import time as _time
+        # Lazy import to avoid an import-time cycle with the orchestrator
+        # package (phase_state itself imports nothing from SharedState).
+        from .phase_state import make_history_row
+
+        now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
+        now_unix = float(ts_unix if ts_unix is not None else _time.time())
+        row = make_history_row(
+            from_phase=self.phase or "",
+            to_phase=to_phase,
+            reason=reason,
+            evidence=evidence,
+            ts=now_ts,
+            ts_unix=now_unix,
+        )
+        history = list(self.phase_history or [])
+        history.append(row)
+        if len(history) > _PHASE_HISTORY_CAP:
+            history = history[-_PHASE_HISTORY_CAP:]
+        self.phase_history = history
+        self.phase = row["to_phase"]
+        self.phase_started_ts = now_ts
+        self.phase_started_unix = now_unix
+        return row
+
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         if not self.policy_denial_history:
             return ""
@@ -684,32 +1690,6 @@ class SharedState:
                 f"hint={str(r.get('hint') or '')[:140]!r}"
             )
         return "\n".join(lines)
-
-    def all_top_actions_policy_locked(self, registry: Any, *, top_k: int = 12) -> bool:
-        """True when every visible top-K action row carries a policy_loop lock."""
-        if not self.action_scores or registry is None:
-            return False
-        target_mult = _target_gap_multiplier(
-            target_gap_pct=float(self.target_gap_pct or 0.0),
-            cumulative_gain=float(self.cumulative_gain or 0.0),
-        )
-        rows = _rank_top_k(
-            self.action_scores,
-            registry,
-            tick=int(self.tick or 0),
-            target_gap_mult=target_mult,
-            k=int(top_k),
-            shared_state=self,  # N30: enable cheap-exhausted deep boost
-        )
-        if not rows:
-            return False
-        positive = [(n, eff, a) for n, eff, a in rows if eff > 0]
-        if not positive:
-            return False
-        return all(
-            str(a.locked_reason or "").startswith("policy_loop:")
-            for _, _, a in positive
-        )
 
     def increment_crash_count(self, by: int = 1) -> int:
         self.crash_count += by
@@ -1521,9 +2501,123 @@ class SharedState:
         self.last_action_failures = history
         return entry
 
-    def record_trace_analyze(self, payload: dict[str, Any],
+    def record_trace_analyze(
+        self,
+        payload: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """write the canonical 11-field ``last_trace_analyze`` dict.
+
+        Called by :class:`RooflineExecutor` (F1-2) after a successful
+        ``trace_analyze`` sub-step. Distinct from the legacy
+        :meth:`record_select_kernels` writer below, which writes a thinner
+        ``last_select_kernels`` schema for the ``select_kernels_handler``
+        path and stays in place for backward compatibility.
+
+        On every successful call, ``roofline_snapshot_id`` is read from the
+        previous ``last_trace_analyze`` and incremented by one — giving a
+        monotonic counter the orchestration prompt + N31 final-roofline
+        guard rely on. ``roofline_baseline_gain_at_snapshot`` captures
+        ``cumulative_gain_validated`` at write time so the prompt can
+        surface the gain delta since the report was taken.
+
+        ``analysis_md_text`` is read verbatim from
+        ``result['trace_report_path']``; OSErrors degrade silently to
+        empty text (the ``analysis_md_path`` field still lets a future
+        ``read_artifact`` intent re-fetch it on demand).
+
+        Cherry-picked from /wekafs/zgong/Hyperloom main @ c6f0a71
+        ``shared_state.py:1508`` ; verbatim except for the docstring tying
+        it to F1-1 / F1-2 of this branch's integration plan.
+        """
+        if not isinstance(result, dict):
+            return
+        trace_input = (
+            (payload or {}).get("trace_input")
+            or (payload or {}).get("trace_dir")
+            or ""
+        )
+        candidates_path = result.get("candidates_path") or ""
+        if not candidates_path:
+            artifacts = result.get("artifact_paths") or {}
+            if isinstance(artifacts, dict):
+                candidates_path = artifacts.get("kernel_candidates", "") or ""
+        hot = result.get("hot_kernels") or []
+        summary: list[dict[str, Any]] = []
+        reusable_ids: list[str] = []
+        for entry in hot[:15] if isinstance(hot, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            kid = entry.get("kernel_id")
+            reusable = bool(entry.get("reusable_native_kernel"))
+            summary.append({
+                "kernel_id": kid,
+                "name": entry.get("name"),
+                "gpu_pct": entry.get("gpu_pct"),
+                "bottleneck": entry.get("bottleneck"),
+                "arithmetic_intensity": entry.get("arithmetic_intensity"),
+                "source_file": entry.get("source_file"),
+                "reusable_native_kernel": reusable,
+                "recommended_backends": entry.get("recommended_backends") or [],
+                "recommended_actions": entry.get("recommended_actions") or [],
+            })
+            if reusable and kid:
+                reusable_ids.append(str(kid))
+
+        raw_warnings = result.get("trace_health_warnings") or []
+        warnings_cleaned: list[dict[str, Any]] = []
+        if isinstance(raw_warnings, list):
+            for entry in raw_warnings:
+                if isinstance(entry, dict) and entry.get("code"):
+                    warnings_cleaned.append(dict(entry))
+
+        # Monotonic snapshot counter: read previous value + 1.
+        prev_snapshot_id = 0
+        if isinstance(self.last_trace_analyze, dict):
+            prev_raw = self.last_trace_analyze.get("roofline_snapshot_id")
+            if isinstance(prev_raw, int):
+                prev_snapshot_id = prev_raw
+        snapshot_id = prev_snapshot_id + 1
+
+        analysis_md_path = result.get("trace_report_path") or ""
+        analysis_md_text = ""
+        if analysis_md_path:
+            try:
+                # No truncation: typical analysis.md is 10-20 KB, worst
+                # case ~200 KB — well within the 200K-token orchestration
+                # context budget.
+                analysis_md_text = Path(analysis_md_path).read_text(
+                    encoding="utf-8", errors="replace",
+                )
+            except (OSError, ValueError):
+                analysis_md_text = ""
+
+        task_groups = result.get("task_groups") or []
+        if not isinstance(task_groups, list):
+            task_groups = []
+
+        self.last_trace_analyze = {
+            "trace_input": str(trace_input),
+            "candidates_path": str(candidates_path),
+            "hot_kernels_top15": summary,
+            "task_groups": task_groups,
+            "reusable_native_kernel_ids": reusable_ids,
+            "trace_health_warnings": warnings_cleaned,
+            "analysis_md_path": str(analysis_md_path),
+            "analysis_md_text": analysis_md_text,
+            "roofline_snapshot_id": snapshot_id,
+            "roofline_baseline_gain_at_snapshot": float(
+                self.cumulative_gain_validated,
+            ),
+            "ts": _now_iso(),
+        }
+        # Mirror the snapshot id at the top level so PolicyGate /
+        # Coordinator can read it without the nested-dict lookup.
+        self.roofline_snapshot_id = snapshot_id
+
+    def record_select_kernels(self, payload: dict[str, Any],
                               result: dict[str, Any]) -> None:
-        """Cache the latest trace_analyze output keyed by trace_input.
+        """Cache the latest select_kernels output keyed by trace_input.
 
         We persist a wider window than the prompt-visible top5 so that when
         the very top GPU consumers are vendor-binary kernels (Tensile / CK)
@@ -1598,78 +2692,43 @@ class SharedState:
                 if isinstance(entry, dict) and entry.get("code"):
                     warnings_cleaned.append(dict(entry))
 
-        # Roofline-v2 C1: surface the TraceLens analysis.md full text on
-        # SharedState so the downstream ``roofline`` action (added in C4)
-        # can read the per-category bottleneck breakdown without re-hitting
-        # the filesystem on every tick, and so Orchestration can ground
-        # PRUNE_BRANCH / propose_action decisions on the actual report.
-        #
-        # Snapshot accounting (snapshot_id + baseline_gain_at_snapshot)
-        # lets the prompt show "report taken at gain=X%" and lets the
-        # re-profile guidance trigger when ``cumulative_gain_validated``
-        # has moved by ≥3% since the snapshot was taken. The counter
-        # lives inside ``last_trace_analyze`` (not as a new top-level
-        # field) so we do not widen the SharedState surface — every
-        # call reads the previous snapshot_id and bumps it by one.
-        prev_snapshot_id = 0
-        if isinstance(self.last_trace_analyze, dict):
-            prev_raw = self.last_trace_analyze.get("roofline_snapshot_id")
-            if isinstance(prev_raw, int):
-                prev_snapshot_id = prev_raw
-        snapshot_id = prev_snapshot_id + 1
-
-        analysis_md_path = result.get("trace_report_path") or ""
-        analysis_md_text = ""
-        if analysis_md_path:
-            try:
-                # Decision A3: no truncation — typical analysis.md is
-                # 10-20 KB, worst-case (long-ISL Case A-D) ~200 KB; even
-                # 100+ ticks against a 200 KB cached report stays well
-                # within the 200K-token Orchestration context budget once
-                # ``_format_roofline_decision`` (C5) replaces verbatim
-                # injection with the structured roofline-action output.
-                analysis_md_text = Path(analysis_md_path).read_text(
-                    encoding="utf-8", errors="replace",
-                )
-            except (OSError, ValueError):
-                # Degrade silently — empty text signals "no report
-                # available" to downstream prompt rendering, and the
-                # ``analysis_md_path`` field still lets a future
-                # read_artifact intent fetch it on demand.
-                analysis_md_text = ""
-
-        # PR-G: propagate ``task_groups`` from the handler result so the
-        # multi-KEEP integrate queue's source-of-truth lookups stay in
-        # sync with what ``_batch_kernel_candidates`` dispatched.
+        # 893bc6f: propagate ``task_groups`` from the handler result so
+        # the multi-KEEP integrate queue's source-of-truth lookups stay
+        # in sync with what ``_batch_kernel_candidates`` dispatched.
         # Without this, ``untried_hot_reusable_kernels()`` and
         # ``next_pending_keep_kernel_id()`` see ``task_groups=[]`` and
-        # fall through to per-kernel logic -- e.g. for
-        # ``primary=k004 kids=[k003,k004]`` they treat k003 as an
+        # fall through to per-kernel logic — e.g. for
+        # ``primary=k004 kids=[k003, k004]`` they treat k003 as an
         # untried independent kernel even though dispatching k004
-        # already covered the same AST function. The LLM then proposes
-        # a second ``run_optimization`` batch for k001/k003/..., wastes
-        # GEAK->Claude->Codex wall-clock on kernels that share patches
-        # with what the prior batch already produced
-        # (Qwen3-30B-A3B-Base session 20260523T035235Z saw this with
-        # k001/k003/k005 spinning up after k002/k004/k009 retired).
+        # already covered the same AST function.
         task_groups = result.get("task_groups") or []
         if not isinstance(task_groups, list):
             task_groups = []
-        self.last_trace_analyze = {
+        # F1-1: ``record_trace_analyze`` is the canonical writer for
+        # the 11-field ``last_trace_analyze`` (snapshot_id /
+        # analysis_md_text / baseline_gain_at_snapshot / …). This
+        # legacy ``record_select_kernels`` writer stays in place for
+        # backwards-compatible callers and only mirrors the slim
+        # ``last_select_kernels`` schema; task_groups is added so the
+        # downstream lookups behave identically regardless of which
+        # path populated SharedState.
+        cached = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "hot_kernels_top15": summary,
             "task_groups": task_groups,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,
-            "analysis_md_path": str(analysis_md_path),
-            "analysis_md_text": analysis_md_text,
-            "roofline_snapshot_id": snapshot_id,
-            "roofline_baseline_gain_at_snapshot": float(
-                self.cumulative_gain_validated,
-            ),
             "ts": _now_iso(),
         }
+        self.last_select_kernels = cached
+        # Main M4 main merge: ``last_trace_analyze`` is the canonical
+        # post-rename name (RooflineExecutor / `record_trace_analyze`
+        # writes a richer schema there, but the legacy
+        # ``record_select_kernels`` writer must also mirror its slim
+        # schema into ``last_trace_analyze`` so the policy gate's cache
+        # lookup (which prefers the canonical field) finds the entry.
+        self.last_trace_analyze = dict(cached)
 
     def record_sweep(self, result: dict[str, Any]) -> None:
         if not isinstance(result, dict):
@@ -1696,143 +2755,400 @@ class SharedState:
             "workspace": result.get("workspace", ""),
         }
 
-    def push_params_winner(
-        self,
-        *,
-        action: str,
-        variant_name: str,
-        tput: float,
-        gain_pct: float,
-        extra_sglang_args: str | None = None,
-        extra_envs: dict[str, Any] | None = None,
-        max_history: int = 10,
-    ) -> None:
-        """Append one round's winner to the rolling history buffer.
+    # ------------------------------------------------------------------
+    # specialist round bookkeeping
+    # ------------------------------------------------------------------
+    def record_specialist_round(self, entry: dict[str, Any]) -> None:
+        """Append one round summary to ``specialist_rounds``.
 
-        ``extra_sglang_args`` + ``extra_envs`` (when provided) are folded
-        into the row as ``fingerprint`` so the cross-round
-        :meth:`consistent_winner` detector and the IR-26 idea generator
-        see content identity, not just the display name. Old callers
-        passing only ``variant_name`` still work (fingerprint = empty).
+        Coordinator calls this once all dispatched specialists in a
+        round have terminated (either via specialist_done or empty
+        synthesise). Idempotent on ``round_id``: a re-record with the
+        same id overwrites the latest entry rather than duplicating.
         """
-        from .action_executors._grid_runner import variant_fingerprint
-        fp = (
-            variant_fingerprint(extra_sglang_args, extra_envs)
-            if (extra_sglang_args is not None or extra_envs is not None)
-            else ""
-        )
-        self.params_winner_history.append({
-            "action": action,
-            "variant_name": variant_name,
-            "tput": float(tput) if tput is not None else 0.0,
-            "gain_pct": float(gain_pct) if gain_pct is not None else 0.0,
-            "fingerprint": fp,
-            "ts": _now_iso(),
-        })
-        if len(self.params_winner_history) > max_history:
-            self.params_winner_history = self.params_winner_history[-max_history:]
+        if not isinstance(entry, dict) or not entry:
+            return
+        round_id = str(entry.get("round_id") or "").strip()
+        if not round_id:
+            self.specialist_rounds.append(dict(entry))
+            return
+        existing = self.specialist_rounds
+        for i, prev in enumerate(existing):
+            if isinstance(prev, dict) and str(prev.get("round_id") or "") == round_id:
+                existing[i] = dict(entry)
+                return
+        existing.append(dict(entry))
 
-    def consistent_winner(self, *, lookback: int = 3,
-                          min_appearances: int = 2,
-                          min_avg_gain_pct: float = 0.3) -> dict[str, Any] | None:
-        """Detect a variant_name that consistently wins across recent rounds.
+    def bump_specialist_domain_empty_streak(
+        self, domain: str, *, empty: bool,
+    ) -> int:
+        """Increment / reset the per-domain empty-proposal streak.
 
-        Returns the winning variant's most-recent record (so callers can
-        promote it) or ``None`` if no variant qualifies.
+        Returns the new streak value (0 when reset). The streak
+        threshold for escalation is read by Robustness from
+        ``KB_design §3.9`` and is not encoded here.
         """
-        if len(self.params_winner_history) < min_appearances:
+        d = str(domain or "").strip() or "unknown"
+        if empty:
+            self.specialist_domain_empty_streak[d] = int(
+                self.specialist_domain_empty_streak.get(d, 0) or 0
+            ) + 1
+        else:
+            self.specialist_domain_empty_streak[d] = 0
+        return self.specialist_domain_empty_streak[d]
+
+    # ------------------------------------------------------------------
+    # gaps ledger helpers
+    # ------------------------------------------------------------------
+    def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
+        """Return the gap entry matching ``canonical_id`` (or ``None``).
+
+        Coordinator's :meth:`_warm_specialist_params` calls this to
+        attach ``gap_symptom`` / ``gap_layer`` / ``gap_attempts`` onto
+        a specialist task before dispatch.
+        """
+        if not canonical_id:
             return None
-        recent = self.params_winner_history[-lookback:]
-        from collections import Counter
-        counts = Counter(w["variant_name"] for w in recent if w.get("variant_name"))
-        for name, n in counts.most_common():
-            if n < min_appearances:
-                continue
-            picks = [w for w in recent if w.get("variant_name") == name]
-            avg_gain = sum(w["gain_pct"] for w in picks) / len(picks)
-            if avg_gain >= min_avg_gain_pct:
-                # Return the most-recent record for this winner so caller
-                # can lift its tput / extra_sglang_args into current_best.
-                return picks[-1]
+        cid = str(canonical_id)
+        for gap in self.gaps:
+            if isinstance(gap, dict) and str(gap.get("canonical_id") or "") == cid:
+                return gap
         return None
 
-    def apply_params_search_update(self, update: dict[str, Any]) -> None:
-        """Merge a ParamsExecutor search update into persistent state."""
-        if not isinstance(update, dict):
+    def upsert_gap(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Insert or update one gap row, keyed by ``canonical_id``.
+
+        Merges ``attempts`` (existing + incoming, capped at the most
+        recent :data:`_GAPS_ATTEMPTS_HISTORY` rows by ``ts``). Updates
+        ``last_updated_ts`` to ``now``; preserves the original
+        ``first_seen_ts`` when present.
+
+        Coordinator-only writer (Inv-1 single-writer + PolicyGate
+        ``CORE_STATE_FIELDS`` lock). Returns the merged entry so the
+        caller can keep working with the canonical row.
+        """
+        if not isinstance(entry, dict):
+            return {}
+        cid = str(entry.get("canonical_id") or "").strip()
+        if not cid:
+            return {}
+        now = _now_iso()
+        existing = self.find_gap(cid)
+        if existing is None:
+            merged: dict[str, Any] = {
+                "canonical_id":    cid,
+                "symptom":         str(entry.get("symptom") or ""),
+                "layer":           str(entry.get("layer") or ""),
+                "severity":        str(entry.get("severity") or "medium"),
+                "domain_hint":     str(entry.get("domain_hint") or ""),
+                "source":          str(entry.get("source") or ""),
+                "first_seen_ts":   str(entry.get("first_seen_ts") or now),
+                "last_updated_ts": now,
+                "attempts":        list(entry.get("attempts") or []),
+            }
+            # Trim attempts to the cap to be safe.
+            if len(merged["attempts"]) > _GAPS_ATTEMPTS_HISTORY:
+                merged["attempts"] = merged["attempts"][-_GAPS_ATTEMPTS_HISTORY:]
+            self.gaps.append(merged)
+        else:
+            # Field-wise merge: incoming non-empty values win except
+            # for ``first_seen_ts`` (preserve oldest).
+            for key in ("symptom", "layer", "severity", "domain_hint", "source"):
+                incoming = entry.get(key)
+                if incoming:
+                    existing[key] = str(incoming)
+            existing.setdefault("first_seen_ts", str(entry.get("first_seen_ts") or now))
+            existing["last_updated_ts"] = now
+            incoming_attempts = list(entry.get("attempts") or [])
+            if incoming_attempts:
+                merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
+                # Capped tail; the cap dominates ordering — callers
+                # supply newest-last lists which is the convention used
+                # everywhere else (e.g. ``last_action_failures``).
+                if len(merged_attempts) > _GAPS_ATTEMPTS_HISTORY:
+                    merged_attempts = merged_attempts[-_GAPS_ATTEMPTS_HISTORY:]
+                existing["attempts"] = merged_attempts
+            merged = existing
+        # Enforce the global cap. We trim oldest (by last_updated_ts when
+        # available, falling back to insertion order). Trimming runs after
+        # the upsert so the just-touched gap is always retained.
+        if len(self.gaps) > _GAPS_MAX_ENTRIES:
+            keep_cid = cid
+            others = [g for g in self.gaps if g is not merged]
+
+            def _sort_key(g: dict[str, Any]) -> str:
+                return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
+
+            others.sort(key=_sort_key)
+            keep_count = _GAPS_MAX_ENTRIES - 1
+            others = others[-keep_count:] if keep_count > 0 else []
+            self.gaps = others + [merged]
+            del keep_cid  # silence linters when the local isn't used elsewhere
+        return merged
+
+    def append_gap_attempt(
+        self,
+        canonical_id: str,
+        attempt: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Append one attempt row to an existing gap.
+
+        Returns the updated gap entry or ``None`` when the gap is not
+        known yet (caller may decide to ``upsert_gap`` with a freshly
+        synthesised symptom in that case).
+        """
+        gap = self.find_gap(canonical_id)
+        if gap is None:
+            return None
+        attempts = list(gap.get("attempts") or [])
+        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or _now_iso())})
+        if len(attempts) > _GAPS_ATTEMPTS_HISTORY:
+            attempts = attempts[-_GAPS_ATTEMPTS_HISTORY:]
+        gap["attempts"] = attempts
+        gap["last_updated_ts"] = _now_iso()
+        return gap
+
+    def replace_gaps(self, entries: list[dict[str, Any]]) -> None:
+        """Bulk-replace ``gaps`` with a fresh dedup'd list.
+
+        Used by :meth:`Coordinator._refresh_gaps` when the rebuild
+        wants to discard stale rows wholesale (e.g. after a Cortex
+        traverse returned a new canonical set). Idempotent.
+        """
+        if not isinstance(entries, list):
             return
-        self.params_search = dict(update)
+        dedup: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            cid = str(entry.get("canonical_id") or "").strip()
+            if not cid:
+                continue
+            if cid not in dedup:
+                order.append(cid)
+            dedup[cid] = dict(entry)
+        # Apply the per-entry cap on attempts.
+        new_list: list[dict[str, Any]] = []
+        for cid in order:
+            row = dedup[cid]
+            attempts = list(row.get("attempts") or [])
+            if len(attempts) > _GAPS_ATTEMPTS_HISTORY:
+                attempts = attempts[-_GAPS_ATTEMPTS_HISTORY:]
+            row["attempts"] = attempts
+            new_list.append(row)
+        if len(new_list) > _GAPS_MAX_ENTRIES:
+            new_list = new_list[-_GAPS_MAX_ENTRIES:]
+        self.gaps = new_list
 
-    def apply_backends_search_update(self, update: dict[str, Any]) -> None:
-        """Merge a BackendsExecutor search update into persistent state.
+    def record_intervention(
+        self,
+        *,
+        change_type: str,
+        action: str,
+        task_id: str = "",
+        delta_pct: float | None = None,
+    ) -> None:
+        """PR-A8 (Arbor-into-Hyperloom): append one entry to the
+        intervention-mix ledger and update ``consecutive_config_only_rounds``.
 
-        Mirror of :meth:`apply_params_search_update`. Coordinator calls
-        this once per backends round from
-        :meth:`Coordinator._promote_to_shared_state`. ``accepted`` writes
-        are NOT performed here — the executor only reports
-        ``tested`` / ``rejected`` / ``last_round`` increments;
-        :meth:`record_backends_accepted` is the single writer for
-        ``accepted`` (called by Coordinator on promote).
+        ``change_type`` is normalised to lowercase. Unknown values
+        ("kernel", "noop", ...) are still appended (the ledger is
+        descriptive); the consecutive-config counter only advances on
+        explicit ``"config"`` values and resets on ``"code_patch"``.
+        """
+        ct = str(change_type or "").strip().lower()
+        entry = {
+            "change_type": ct,
+            "action": str(action or ""),
+            "task_id": str(task_id or ""),
+            "delta_pct": delta_pct,
+            "ts": _now_iso(),
+        }
+        self.intervention_mix.append(entry)
+        if ct == "config":
+            self.consecutive_config_only_rounds = (
+                int(self.consecutive_config_only_rounds or 0) + 1
+            )
+        elif ct == "code_patch":
+            self.consecutive_config_only_rounds = 0
+
+    def bump_specialist_dispatched(self, n: int = 1) -> int:
+        """PR-A8: increment the per-EXPLORE specialist dispatch counter.
+
+        Returns the post-increment value so callers can act on it
+        inline (e.g. a robustness storm threshold).
+        """
+        self.explore_specialist_dispatched_count = (
+            int(self.explore_specialist_dispatched_count or 0) + int(n)
+        )
+        return self.explore_specialist_dispatched_count
+
+    def reset_specialist_dispatched(self) -> None:
+        """PR-A8: zero the per-EXPLORE specialist dispatch counter.
+
+        Called by Coordinator on phase transition into a fresh
+        EXPLORE entry.
+        """
+        self.explore_specialist_dispatched_count = 0
+
+    def record_specialist_patch_verdict(
+        self, specialist_task_id: str, verdict: str,
+    ) -> None:
+        """PR-A7 (Arbor-into-Hyperloom): record the Critic's verdict on a
+        specialist's worktree patches.
+
+        Idempotent: a later verdict overwrites an earlier one (the
+        Critic may produce a revised verdict after a needs_review
+        round-trip). Empty / falsy ``verdict`` clears the entry; this
+        is how an operator forces a re-review by deleting the prior
+        decision.
+        """
+        sid = str(specialist_task_id or "").strip()
+        if not sid:
+            return
+        v = str(verdict or "").strip().lower()
+        if not v:
+            self.specialist_patch_verdicts.pop(sid, None)
+            return
+        self.specialist_patch_verdicts[sid] = v
+
+    def get_specialist_patch_verdict(
+        self, specialist_task_id: str,
+    ) -> str:
+        """PR-A7: return the recorded patch verdict, or empty string
+        when no critic decision is on record yet."""
+        sid = str(specialist_task_id or "").strip()
+        if not sid:
+            return ""
+        return self.specialist_patch_verdicts.get(sid, "") or ""
+
+    def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
+        """Snapshot the most recent specialist task (parity with last_*)."""
+        if isinstance(snapshot, dict):
+            self.last_specialist = dict(snapshot)
+
+    def apply_explore_search_update(self, update: dict[str, Any]) -> None:
+        """Merge an ExploreExecutor search update into persistent state.
+
+        v0.8 M3. The executor returns a ledger
+        increment containing ``tested`` (full fingerprint-keyed map),
+        ``rejected`` (list), ``winners_history`` increment,
+        ``synergy_attempted`` increment, ``last_round``, etc. The
+        executor never writes ``accepted`` directly —
+        :meth:`record_explore_accepted` is the single writer for that
+        bucket (Coordinator calls it on promote).
         """
         if not isinstance(update, dict):
             return
-        # Preserve any ``accepted`` we already promoted: the executor's
-        # update only touches tested/rejected/last_round; overwriting
-        # ``accepted`` from a fresh round would lose history.
-        prior_accepted = list(
-            (self.backends_search or {}).get("accepted") or []
+        prior = self.explore_search if isinstance(self.explore_search, dict) else {}
+        merged = dict(prior)
+        merged["schema_version"] = int(update.get("schema_version") or 1)
+        merged["tested"] = dict(update.get("tested") or prior.get("tested") or {})
+        merged["rejected"] = list(update.get("rejected") or prior.get("rejected") or [])
+        merged["name_index"] = dict(
+            update.get("name_index") or prior.get("name_index") or {}
         )
-        merged = dict(update)
-        if "accepted" not in update or not update.get("accepted"):
-            merged["accepted"] = prior_accepted
-        self.backends_search = merged
+        merged["cursor"] = int(update.get("cursor") or len(merged["tested"]))
+        merged["last_round"] = dict(update.get("last_round") or {})
+        # Append-only history fields — merge instead of overwrite.
+        wh = list(prior.get("winners_history") or [])
+        for entry in update.get("winners_history") or []:
+            if isinstance(entry, dict):
+                wh.append(dict(entry))
+        merged["winners_history"] = wh
+        sa: set[tuple[str, ...]] = set()
+        for src in (prior.get("synergy_attempted"), update.get("synergy_attempted")):
+            for c in src or []:
+                if isinstance(c, list):
+                    items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
+                    if items:
+                        sa.add(items)
+                elif isinstance(c, str) and c:
+                    items = tuple(sorted(c.split("+")))
+                    if items:
+                        sa.add(items)
+        merged["synergy_attempted"] = [list(c) for c in sorted(sa)]
+        merged["discovered_flags"] = list(
+            update.get("discovered_flags") or prior.get("discovered_flags") or []
+        )
+        merged["domains_round_summary"] = list(
+            update.get("domains_round_summary")
+            or prior.get("domains_round_summary") or []
+        )
+        # Preserve any accepted bucket from prior runs; executor never
+        # writes accepted directly (record_explore_accepted does).
+        merged["accepted"] = list(prior.get("accepted") or [])
+        # Drop the merged_from_legacy_sig sentinel on each update so a
+        # subsequent SharedState load re-runs the legacy union (defensive
+        # against an interleaved v0.6 fallback session writing into the
+        # old ledgers between save/load cycles).
+        merged.pop("merged_from_legacy_sig", None)
+        self.explore_search = merged
 
-    def record_backends_accepted(self, variant: dict[str, Any]) -> None:
-        """Append one promoted variant to ``backends_search.accepted``.
+    def record_explore_accepted(self, variant: dict[str, Any]) -> None:
+        """Append one promoted variant to ``explore_search.accepted``.
 
-        Called by Coordinator after a backends winner is lifted to
-        ``current_best``. Dedupes by ``fingerprint`` (computed on the fly
-        if absent) so repeated promotes of the same content don't bloat
-        the list. Also removes a matching entry from ``rejected`` so a
-        previously-rejected variant that later won doesn't appear in
-        both buckets.
+        Called by Coordinator after an explore winner survives both the
+        per-variant KEEP gate and the inlined stack rebench. Dedupes by
+        ``fingerprint`` so repeated promotes of the same content don't
+        bloat the list; also removes a matching entry from
+        ``rejected`` so a previously-rejected variant that later
+        promotes doesn't appear in both buckets.
         """
         if not isinstance(variant, dict) or not variant:
             return
-        from .action_executors._grid_runner import variant_fingerprint
+        from .action_executors._canonical_fingerprint import canonical_fingerprint
         args = str(
             variant.get("candidate_extra_sglang_args")
             or variant.get("extra_sglang_args") or ""
         )
         envs = dict(variant.get("extra_envs") or {})
-        fp = str(variant.get("fingerprint") or variant_fingerprint(args, envs))
+        fp = str(variant.get("fingerprint") or canonical_fingerprint(args, envs))
         entry = {
+            "fingerprint": fp,
             "name": str(variant.get("name") or ""),
             "extra_sglang_args": args,
             "extra_envs": envs,
             "note": str(variant.get("note") or ""),
-            "fingerprint": fp,
             "tput": variant.get("output_throughput") or variant.get("tput"),
             "gain_pct": variant.get("gain_pct"),
+            "stack_index": variant.get("stack_index"),
+            "accepted_at_round": str(variant.get("accepted_at_round") or ""),
+            "ts": str(variant.get("ts") or _now_iso()),
+            "provenance": str(variant.get("provenance") or "llm_direct"),
         }
-        search = dict(self.backends_search or {})
+        search = dict(self.explore_search or {})
         search.setdefault("schema_version", 1)
-        accepted = list(search.get("accepted") or [])
         accepted = [
-            v for v in accepted
+            v for v in (search.get("accepted") or [])
             if not (isinstance(v, dict) and v.get("fingerprint") == fp)
         ]
         accepted.append(entry)
         search["accepted"] = accepted
-        rejected = [
+        search["rejected"] = [
             v for v in (search.get("rejected") or [])
             if not (isinstance(v, dict) and v.get("fingerprint") == fp)
         ]
-        search["rejected"] = rejected
         name_index = dict(search.get("name_index") or {})
         if entry["name"]:
             name_index[entry["name"]] = fp
         search["name_index"] = name_index
-        self.backends_search = search
+        # Append a winners_history row so plateau judges can read this
+        # without crawling the optimization_stack.
+        wh = list(search.get("winners_history") or [])
+        wh.append({
+            "round_id": entry["accepted_at_round"],
+            "variant_name": entry["name"],
+            "fingerprint": fp,
+            "gain_pct": entry["gain_pct"],
+            "extra_args": args,
+            "extra_envs": envs,
+            "provenance": entry["provenance"],
+            "ts": entry["ts"],
+        })
+        search["winners_history"] = wh
+        self.explore_search = search
 
     # ------------------------------------------------------------------
     # T1/T2 — search-space expansion bookkeeping
@@ -1847,7 +3163,8 @@ class SharedState:
     ) -> None:
         """Persist the AST-discovered flag list for a framework.
 
-        Called by BackendsExecutor / ParamsExecutor when they first run
+        Called by ExploreExecutor (and historically by the legacy
+        BackendsExecutor / ParamsExecutor) when they first run
         ``discover_*_flags()`` on a fresh session. The Orchestration prompt
         surfaces the union so the LLM can synthesize new GridVariant
         candidates that the shipped DEFAULT_*_GRID may not cover.
@@ -1929,196 +3246,30 @@ class SharedState:
                 self.backend_winners_history[-max_history:]
             )
 
-    def mark_synergy_attempted(self, combo_names: list[str]) -> None:
-        """Record one synergy combo as already tested.
-
-        ``combo_names`` is a list of GridVariant.name members ordered by
-        the synergy group; the canonical key is ``"+".join(sorted(names))``
-        so the same set isn't double-counted regardless of input order.
-        """
-        if not combo_names:
-            return
-        key = "+".join(sorted(str(n) for n in combo_names if n))
-        if not key:
-            return
-        if key in self.synergy_attempted:
-            return
-        self.synergy_attempted.append(key)
-        if len(self.synergy_attempted) > 100:
-            self.synergy_attempted = self.synergy_attempted[-100:]
-
-    def is_synergy_attempted(self, combo_names: list[str]) -> bool:
-        if not combo_names:
-            return False
-        key = "+".join(sorted(str(n) for n in combo_names if n))
-        return bool(key) and key in self.synergy_attempted
-
     # ------------------------------------------------------------------
-    # Action scoring (see orchestrator/scoring.py)
+    # scoring helpers removed
     # ------------------------------------------------------------------
-    def get_action_score(self, name: str) -> ActionScore | None:
-        raw = self.action_scores.get(name)
-        if not isinstance(raw, dict):
-            return None
-        return ActionScore.from_dict(raw)
-
-    def put_action_score(self, name: str, score: ActionScore) -> None:
-        """Persist an ``ActionScore`` instance back into the raw dict map."""
-        if not name:
-            return
-        self.action_scores[name] = score.to_dict()
-
-    def all_action_scores(self) -> dict[str, ActionScore]:
-        out: dict[str, ActionScore] = {}
-        for name, raw in self.action_scores.items():
-            if isinstance(raw, dict):
-                out[name] = ActionScore.from_dict(raw)
-        return out
-
+    # The v0.6 ``get_action_score`` / ``put_action_score`` /
+    # ``all_action_scores`` / ``to_action_scores_summary`` API has
+    # been retired. The LLM no longer consumes a system-side priority;
+    # decisions are based on facts (phase / gaps / KB / specialist
+    # rounds). ``increment_tick`` stays — it's a pure monotonic
+    # counter used by plateau / phase budget math.
     def increment_tick(self) -> int:
         """Bump the Coordinator tick counter and return the new value."""
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
-    def to_action_scores_summary(
-        self,
-        *,
-        registry: Any,
-        top_k: int = 12,
-    ) -> str:
-        """Render the per-tick `Action scores` block consumed by the
-        Orchestration prompt.
+    def increment_session_iter_index(self) -> int:
+        """Bump the per-session experiment iter counter and return it."""
+        self.session_iter_index = int(self.session_iter_index or 0) + 1
+        return self.session_iter_index
 
-        The block is a header + one row per action (sorted by eff_score desc),
-        followed by a single ``locked: ...`` summary row listing any
-        cooldown / locked rows present in the registry but pushed below
-        positive scores. The renderer is deliberately compact — the LLM only
-        needs name + eff_score + a few diagnostics to pick a next action.
-
-        ``registry`` is an ``ActionRegistry`` (kept untyped here to avoid a
-        circular import: shared_state already imports scoring which itself
-        imports ActionRegistry / ActionMetadata).
-        """
-        if not self.action_scores:
-            return (
-                f"=== Action scores (top 0 by eff_score, tick={self.tick}) ===\n"
-                "(no scores seeded)"
-            )
-        target_mult = _target_gap_multiplier(
-            target_gap_pct=float(self.target_gap_pct or 0.0),
-            cumulative_gain=float(self.cumulative_gain or 0.0),
-        )
-        rows = _rank_top_k(
-            self.action_scores,
-            registry,
-            tick=int(self.tick or 0),
-            target_gap_mult=target_mult,
-            k=int(top_k),
-            shared_state=self,  # N30: enable cheap-exhausted deep boost
-        )
-        # B' (May 2026, follow-up to N30): per-row actionability tag
-        # so the LLM can tell at a glance whether the top eff_score
-        # row is something it can ``propose_action`` (cheap / analysis
-        # actions) or needs to emit as a ``request`` (kernel-owned
-        # deep actions like deep_kernel_analysis / operator_tuning /
-        # kernel_opt / integrate / vendor_kernel_config). Pre-B' the
-        # ranking just listed names, so when N30's boost surfaced two
-        # kernel-owned rows above kernel_opt (rank 1 + 2 unreachable
-        # via propose), the LLM tended to skip all the way down to a
-        # familiar shallow row like params (rank 6) instead of
-        # picking kernel_opt (rank 3, the top REQUEST-actionable
-        # deep choice).
-        from .policy import KERNEL_OWNED_ACTIONS as _KERNEL_OWNED
-        # Kernel-owned actions get an explicit "REQUEST kind=..." tag
-        # so the LLM sees the propose path next to the score.
-        _REQUEST_KIND_BY_ACTION = {
-            "kernel_opt": "run_optimization",
-            "integrate": "integrate",
-            "deep_kernel_analysis": "deep_kernel_analysis",
-            "operator_tuning": "operator_tuning",
-            "vendor_kernel_config": "vendor_kernel_config",
-        }
-        lines: list[str] = [
-            f"=== Action scores (top {len(rows)} by eff_score, tick={self.tick}) ==="
-        ]
-        # B': surface the cheap-exhausted state as a header note so
-        # the LLM understands why the deep rows just jumped 6+ points
-        # in eff_score this tick. Pure informational -- no MUST/SHALL
-        # prescriptions; the scoreboard already encodes the priority.
-        try:
-            from .scoring import _is_cheap_exhausted as _scoring_cheap_exhausted
-            if _scoring_cheap_exhausted(self):
-                lines.append(
-                    "  (cheap_exploration_exhausted=True; N30 boost "
-                    "applied to deep-family rows so deep actions reflect "
-                    "their post-cheap priority)"
-                )
-        except ImportError:
-            pass
-        locked_rows: list[tuple[str, str]] = []
-        # B': remember the highest-eff_score actionable row so we can
-        # mark it with a trailing "← top actionable" hint. We compute
-        # this in a first pass so the hint is correct even when the
-        # raw top rows are kernel-owned (LLM must REQUEST those, not
-        # propose them).
-        def _is_actionable(name: str, locked: str | None, cd: int) -> bool:
-            if locked or cd > 0:
-                return False
-            # All actions are actionable from LLM's point of view --
-            # kernel-owned via REQUEST, others via propose_action.
-            # "Top actionable" means top by eff_score among unlocked,
-            # uncooldown'd rows.
-            return True
-        top_actionable_name: str | None = None
-        top_actionable_eff = float("-inf")
-        for name, eff, a in rows:
-            cd_remaining = max(0, int(a.cooldown_until_tick) - int(self.tick or 0))
-            if eff < 0:
-                continue  # _LOCKED_SCORE
-            if not _is_actionable(name, a.locked_reason or None, cd_remaining):
-                continue
-            if eff > top_actionable_eff:
-                top_actionable_eff = eff
-                top_actionable_name = name
-        for name, eff, a in rows:
-            cd_remaining = max(0, int(a.cooldown_until_tick) - int(self.tick or 0))
-            age = (
-                (int(self.tick or 0) - int(a.last_run_tick))
-                if int(a.last_run_tick) >= 0
-                else int(self.tick or 0) + 1
-            )
-            tag = ""
-            if a.locked_reason:
-                tag = f"   [locked: {a.locked_reason}]"
-                locked_rows.append((name, a.locked_reason))
-            elif cd_remaining > 0:
-                tag = f"   [cooldown {cd_remaining}]"
-            else:
-                # B' actionability tag (only on unlocked / unconcooldown'd
-                # rows; locked / cooldown'd take precedence above).
-                if name in _KERNEL_OWNED:
-                    kind = _REQUEST_KIND_BY_ACTION.get(name, name)
-                    tag = f"   [REQUEST: kernel-owned, kind={kind}]"
-                else:
-                    tag = "   [propose_action]"
-            # B': append "← top actionable" to the highest-scoring
-            # unlocked row so LLM doesn't have to scan two columns to
-            # find what it should propose this tick.
-            if name == top_actionable_name and eff > 0:
-                tag = tag + "  ← top actionable"
-            eff_display = "  N/A" if eff < 0 else f"{eff:.2f}"
-            lines.append(
-                f"  eff={eff_display:>5} base={a.base_score:.2f} "
-                f"mult={a.score_mult:.2f} "
-                f"runs={a.runs} keeps={a.keeps} disc={a.discards} "
-                f"cd={cd_remaining} age={age}   {name}{tag}"
-            )
-        if locked_rows:
-            lines.append(
-                "locked: "
-                + ", ".join(f"{n}({r})" for n, r in sorted(locked_rows))
-            )
-        return "\n".join(lines)
+    # Note: main commit 8e69732 also ports ``to_action_scores_summary``
+    # — a render helper for the legacy ``Action scores`` prompt block.
+    # KB_design §3.9 retired the scoreboard on this branch (see
+    # the retired-features list §4), so the helper
+    # has no live consumer and is intentionally omitted.
 
     def append_stack_gain_entry(
         self,
@@ -2222,12 +3373,15 @@ class SharedState:
         return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP has landed since the last validate_stack.
+        """True iff a new KEEP has landed since the last inline stack rebench.
 
-        Used by Coordinator to surface the ``validate_stack required`` TODO
-        in the per-tick checklist. The check is purely on stack *length*:
-        every successful validate_stack records ``cumulative_gain_validated_stack_len``,
-        so a longer stack means at least one new KEEP came in.
+        Used by Coordinator to surface the TODO 4 ``stack rebench
+        required`` guard in the per-tick checklist. The check is purely
+        on stack *length*: every successful inline rebench (v0.8 M3
+        explore per-KEEP loop) records
+        ``cumulative_gain_validated_stack_len``, so a longer stack means
+        at least one new KEEP (e.g. from ``integrate``) came in without
+        an end-to-end revalidation.
         """
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
 
@@ -2253,7 +3407,8 @@ class SharedState:
             validated_age = f" (ts={self.cumulative_gain_validated_ts})"
         unvalidated = self.optimization_stack_has_unvalidated_keeps()
         unvalidated_tag = (
-            " ⚠ stack changed since last validate_stack — RUN validate_stack"
+            " ⚠ stack changed since last rebench — RUN `explore` "
+            "(per-KEEP stack rebench is inlined)"
             if unvalidated else ""
         )
         return (
@@ -2275,6 +3430,274 @@ class SharedState:
             f"tput={self.current_best.get('tput','?')} "
             f"variant={self.current_best.get('variant_name','?')}"
         )
+
+    def to_phase_status_summary(
+        self,
+        *,
+        budget_pct: dict[str, float] | None = None,
+        now_unix: float | None = None,
+    ) -> str:
+        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3).
+
+        The Coordinator pipes this into every agent's per-tick prompt.
+        Output stays compact (≤ 5 lines) because every reactor reads
+        it; we keep the human-readable form here and let
+        :func:`phase_state.phase_budget_remaining_seconds` carry the
+        budget math.
+
+        When in EXPLORE, an extra ``force_exit`` line surfaces how much
+        runway is left before the HARD force-exit gate (IR-6) fires.
+        """
+        from .phase_state import (
+            DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+            DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+            PHASE_EXPLORE,
+            allowed_actions_for,
+            normalize_budget_pct,
+            phase_budget_remaining_seconds,
+            phase_elapsed_seconds,
+            session_remaining_seconds,
+        )
+
+        phase = (self.phase or "").strip().upper() or "UNSET"
+        elapsed = int(phase_elapsed_seconds(self, now_unix=now_unix))
+        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
+        budget_pct_for_phase = budget.get(phase, 0.0)
+        remaining = phase_budget_remaining_seconds(
+            self, budget_pct=budget, now_unix=now_unix,
+        )
+        budget_line: str
+        if remaining is None:
+            budget_line = (
+                f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; "
+                f"no per-phase cap)"
+            )
+        else:
+            budget_line = (
+                f"budget    : pct={budget_pct_for_phase:.2f} "
+                f"elapsed_sec={elapsed} remaining_sec={int(remaining)}"
+            )
+        allowed = allowed_actions_for(phase)
+        allowed_line = (
+            f"allowed   : {', '.join(allowed) if allowed else '(none)'}"
+        )
+        lines = [
+            f"phase     : {phase}",
+            f"entered   : {self.phase_started_ts or '(unset)'}",
+            budget_line,
+            allowed_line,
+        ]
+        # EXPLORE-only: show distance to HARD force-exit (IR-6) so the
+        # LLM has a deterministic countdown alongside the soft budget.
+        if phase == PHASE_EXPLORE:
+            overrides = self.plateau_overrides or {}
+            hours_thresh = float(overrides.get(
+                "force_exit_hours_remaining",
+                DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+            ))
+            pct_thresh = float(overrides.get(
+                "force_exit_budget_pct",
+                DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+            ))
+            session_remaining = session_remaining_seconds(
+                self, now_unix=now_unix,
+            )
+            session_buffer = (
+                int(session_remaining - hours_thresh * 3600.0)
+                if session_remaining is not None else None
+            )
+            if remaining is not None and budget_pct_for_phase > 0:
+                mm = float(self.max_minutes or 0)
+                phase_total_sec = mm * 60.0 * budget_pct_for_phase
+                phase_remaining_pct = (
+                    remaining / phase_total_sec if phase_total_sec > 0 else 0.0
+                )
+            else:
+                phase_remaining_pct = None
+            force_line = (
+                f"force_exit: hours_thresh={hours_thresh:.1f}h "
+                f"pct_thresh={pct_thresh:.2f}"
+            )
+            if session_buffer is not None:
+                force_line += f" session_buffer_sec={session_buffer}"
+            if phase_remaining_pct is not None:
+                force_line += (
+                    f" phase_remaining_pct={phase_remaining_pct:.3f}"
+                )
+            lines.append(force_line)
+        return "\n".join(lines)
+
+    def to_phase_budget_telemetry(
+        self,
+        *,
+        budget_pct: dict[str, float] | None = None,
+        now_unix: float | None = None,
+    ) -> str:
+        """Render the per-phase budget telemetry block for Robustness.
+
+        Lists each phase that appears in ``phase_history`` plus the
+        current phase. Each line shows ``phase: elapsed=Xs cap=Ys (Z%)``
+        so Robustness can spot a phase that's blown past its budget.
+        """
+        from .phase_state import (
+            DEFAULT_PHASE_BUDGET_PCT,
+            normalize_budget_pct,
+            phase_elapsed_seconds,
+        )
+
+        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
+        # Aggregate elapsed per phase using phase_history.
+        elapsed_per_phase: dict[str, float] = {}
+        history = self.phase_history or []
+        for idx, row in enumerate(history):
+            if not isinstance(row, dict):
+                continue
+            phase = str(row.get("to_phase") or "").upper()
+            entered = float(row.get("ts_unix") or 0.0)
+            if not phase or entered <= 0:
+                continue
+            if idx + 1 < len(history) and isinstance(history[idx + 1], dict):
+                exited = float(history[idx + 1].get("ts_unix") or entered)
+            else:
+                # Currently-active segment — measure to now.
+                elapsed_now = phase_elapsed_seconds(self, now_unix=now_unix)
+                exited = entered + elapsed_now
+            elapsed_per_phase[phase] = (
+                elapsed_per_phase.get(phase, 0.0) + max(0.0, exited - entered)
+            )
+        if not elapsed_per_phase:
+            return "(no phase history yet)"
+        mm = float(self.max_minutes or 0.0)
+        total_budget_sec = mm * 60.0
+        lines: list[str] = []
+        # Stable order — by PHASE_INDEX so the operator sees the chain.
+        for phase in ("PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+            if phase not in elapsed_per_phase:
+                continue
+            elapsed = elapsed_per_phase[phase]
+            pct = budget.get(phase, DEFAULT_PHASE_BUDGET_PCT.get(phase, 0.0))
+            cap_sec = total_budget_sec * pct if total_budget_sec > 0 else 0.0
+            used_pct = (elapsed / cap_sec * 100.0) if cap_sec > 0 else 0.0
+            cap_line = f"cap={int(cap_sec)}s" if cap_sec > 0 else "cap=unlimited"
+            lines.append(
+                f"  {phase}: elapsed={int(elapsed)}s {cap_line} used={used_pct:.0f}%"
+            )
+        return "\n".join(lines) or "(no phase history yet)"
+
+    def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
+        """Render T0 warm-start snapshot for Orchestration prompt injection.
+
+        Produces a compact block fed into ``Coordinator._compose_prompt``'s
+        ``=== Warm start ===`` section (v0.8 §3.3 §4.1). Returns empty
+        string when both ``warm_start_recipe`` and ``warm_start_pitfalls``
+        are absent (M1 ``--degraded-kb`` mode / first-ever session for a
+        (workload, hw) pair).
+
+        Lines are capped so a recipe blob never bloats the prompt; the
+        full JSON snapshot lives at
+        ``runtime/cortex/.kb_warm.json`` / ``.kb_pitfalls.json`` for any
+        agent willing to Read it directly.
+        """
+        recipe = self.warm_start_recipe or {}
+        pitfalls = self.warm_start_pitfalls or []
+        if not recipe and not pitfalls:
+            return ""
+        out: list[str] = []
+        workload = str(recipe.get("workload") or "") if isinstance(recipe, dict) else ""
+        hw = str(recipe.get("hw") or "") if isinstance(recipe, dict) else ""
+        if workload or hw:
+            out.append(f"recipe: workload={workload or '?'} hw={hw or '?'}")
+        raw = str(recipe.get("raw") or "") if isinstance(recipe, dict) else ""
+        # Trim recipe raw text — at most 5 lines, 240 chars each.
+        if raw.strip():
+            kept = 0
+            for line in raw.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                out.append(f"  · {stripped[:240]}")
+                kept += 1
+                if kept >= 5:
+                    break
+            if kept == 0:
+                out.append("  · (recipe present but text was empty)")
+        else:
+            out.append("  · (no recipe text — first session for this workload/hw)")
+        if pitfalls:
+            out.append(f"pitfalls ({len(pitfalls)}):")
+            for entry in pitfalls[:5]:
+                if not isinstance(entry, dict):
+                    continue
+                snippet = str(entry.get("raw") or entry.get("symptom") or "")
+                if not snippet.strip():
+                    continue
+                first_line = snippet.splitlines()[0].strip()
+                out.append(f"  · {first_line[:240]}")
+        if max_lines and len(out) > max_lines:
+            out = out[:max_lines]
+            out.append(f"  · (truncated to {max_lines} lines; "
+                       f"see runtime/cortex/.kb_warm.json for full snapshot)")
+        return "\n".join(out)
+
+    def to_gaps_summary(self, *, max_entries: int = 10) -> str:
+        """Render :attr:`gaps` for Orchestration / specialist prompt injection.
+
+        KB_design §3.3 / §3.5: surfaces the structured gap list that
+        replaced the legacy ``last_action_failures`` proxy. Returns an
+        empty string when ``gaps`` is empty so callers can skip the
+        whole section header on cold-start sessions.
+
+        Format (per row):
+
+            - <canonical_id> [<layer>/<severity>] <symptom>
+                attempts=N last=<action:outcome>
+
+        Capped at ``max_entries`` newest rows (sorted by
+        ``last_updated_ts``) to keep the prompt section bounded —
+        long sessions occasionally accumulate dozens of gaps; the
+        full list still lives in ``state.json`` for resume.
+        """
+        if not self.gaps:
+            return ""
+        # Newest first by last_updated_ts (falling back to first_seen_ts
+        # / insertion order to keep deterministic for tests).
+        ordered = list(self.gaps)
+        ordered.sort(
+            key=lambda g: str(
+                g.get("last_updated_ts") or g.get("first_seen_ts") or "",
+            ),
+            reverse=True,
+        )
+        rows: list[str] = []
+        for gap in ordered[:max_entries]:
+            if not isinstance(gap, dict):
+                continue
+            cid = str(gap.get("canonical_id") or "?")
+            layer = str(gap.get("layer") or "?")
+            severity = str(gap.get("severity") or "?")
+            symptom = str(gap.get("symptom") or "").replace("\n", " ").strip()
+            if len(symptom) > 200:
+                symptom = symptom[:197] + "..."
+            attempts = gap.get("attempts") or []
+            attempt_n = len(attempts) if isinstance(attempts, list) else 0
+            last_tag = ""
+            if isinstance(attempts, list) and attempts:
+                last = attempts[-1]
+                if isinstance(last, dict):
+                    last_tag = (
+                        f" last={last.get('action','?')}:"
+                        f"{last.get('outcome','?')}"
+                    )
+            rows.append(
+                f"  - {cid} [{layer}/{severity}] {symptom}\n"
+                f"      attempts={attempt_n}{last_tag}"
+            )
+        if len(ordered) > max_entries:
+            rows.append(
+                f"  · (+{len(ordered) - max_entries} older gaps elided; "
+                f"see state.json `gaps[]`)"
+            )
+        return "\n".join(rows)
 
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
@@ -2299,10 +3722,41 @@ class SharedState:
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
-            f"last_profile_roofline={self.last_profile_roofline or '(none)'}",
-            f"last_profile_kernel_breakdown={self.last_profile_kernel_breakdown or '(none)'}",
+            f"last_select_kernels={self._format_last_select_kernels()}",
+            # Main M4 main merge: ``last_trace_analyze`` mirrors the
+            # canonical post-rename name; both keys carry the same
+            # slim cache schema, so we render both lines for backward
+            # compatibility with prompt-format-stable tests on either
+            # side (legacy regression_locks expects `last_trace_analyze=`).
             f"last_trace_analyze={self._format_last_trace_analyze()}",
-            f"analysis_md={self._format_analysis_md_full()}",
+            # F1-4 (Roofline-v2 /  F1): when the
+            # roofline composite toggle is on, surface the full TraceLens
+            # ``analysis.md`` (snapshot id + gain in the bookend header)
+            # so the orchestration LLM grounds propose_action decisions
+            # in the actual report. Toggle stays default-off through F1
+            # so the legacy ``last_select_kernels`` summary remains the
+            # single source of TraceLens-derived state for existing
+            # sessions; F1-6 flips the default once smoke clears.
+            *(
+                [f"analysis_md={self._format_analysis_md_full()}"]
+                if getattr(self, "use_roofline_composite", False)
+                else []
+            ),
+            # Roofline saturation soft advisory. The helper
+            # returns "" when the toggle is off, when no roofline has
+            # run yet, or when no direction crossed the saturation
+            # threshold — so the prompt section is entirely absent in
+            # the common case.
+            *(
+                [_advisory]
+                if (_advisory := self._format_roofline_saturation_advisory())
+                else []
+            ),
+            # the streak counter is a *fact* the LLM may
+            # read (KEEP/REVERT counts are explicitly allowed per
+            # Inv-9.1); only system-side *priorities* (action_scores)
+            # were removed. The plateau judges also consume this on
+            # legacy resume sessions when ``explore_search`` is empty.
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"params_search={self._format_params_search()}",
             f"backends_search={self._format_backends_search()}",
@@ -2328,12 +3782,10 @@ class SharedState:
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
             f"last_profile={self._format_attempt(self.last_profile)}",
-            f"last_backends={self._format_attempt(self.last_backends)}",
-            f"last_params={self._format_attempt(self.last_params)}",
-            f"last_validate_stack={self._format_attempt(self.last_validate_stack)}",
+            f"last_explore={self._format_attempt(self.last_explore)}",
+            f"last_sweep={self._format_attempt(self.last_sweep)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
-            f"last_proposal_advice={self._format_last_proposal_advice()}",
             f"tick={int(self.tick or 0)}  "
             f"target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"stop_reason={self.stop_reason or '(none)'}",
@@ -2347,24 +3799,6 @@ class SharedState:
     # Audit-trail renderers (kernel-parity per-action attempts + global
     # failure log). Compact one-liners so the prompt stays readable.
     # ------------------------------------------------------------------
-    def _format_last_proposal_advice(self) -> str:
-        """N22: render the FIFO of keyword-implied variant advisories
-        so the orchestration LLM sees them on the next tick and can
-        extend its variants list. Empty list -> '(none)' so the prompt
-        stays consistent across ticks (LLM doesn't have to guess
-        whether the field even exists). Each entry is a multi-line
-        block; we join with a blank line for readability and prepend
-        the index so the LLM can reference them by number."""
-        advisories = self.last_proposal_advice or []
-        if not advisories:
-            return "(none)"
-        lines = [""]
-        for i, msg in enumerate(advisories, 1):
-            lines.append(f"--- advisory #{i} ---")
-            lines.append(str(msg))
-            lines.append("")
-        return "\n".join(lines)
-
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
         """Render one ``last_<action>`` snapshot or attempts[-1] entry."""
@@ -2453,93 +3887,16 @@ class SharedState:
         ] or "(none)"
 
     def _format_discovered_flags(self) -> str:
-        """Roofline-v2 N4: layered Z-scheme rendering of discovered flags.
-
-        Before N4 this method emitted only the per-framework count
-        summary (``sglang:backend=42/param=58, ...``). The 58 real
-        flag names were never visible to the main LLM, which left
-        flag selection to either prior knowledge (hallucination risk)
-        or implicit pattern-matching against ``params_search.tested``
-        fingerprints. Both routes are documented failure modes in
-        design §6.1.
-
-        N4 renders every discovered flag grouped by
-        ``<framework>.<action_kind>`` with a per-flag ``tested``
-        status tag derived from cross-referencing
-        ``params_search.tested`` / ``backends_search.tested``:
-
-        * ``[untested]`` — no fingerprint in tested[] contains this flag
-        * ``[tested: ±X.XX%]`` — exactly one variant tried, surface its gain
-        * ``[tested N vars, best ±X.XX%]`` — multiple variants tried
-
-        The status tags let the main LLM pick "untested + matches
-        bottleneck" flags directly (per §8.7 orchestration prompt
-        guidance) without needing to reverse-engineer the tested
-        ledger fingerprints.
-
-        Empty input degrades to the v0 placeholder message; missing
-        framework entries / non-dict children skip silently so a
-        malformed dict cannot crash the renderer.
-        """
         if not self.discovered_flags:
             return "(none — first backends/params round will populate)"
-        out_lines: list[str] = []
+        parts: list[str] = []
         for fw, entry in sorted(self.discovered_flags.items()):
             if not isinstance(entry, dict):
                 continue
-            for action_kind, key in (
-                ("backends", "backend_flags"),
-                ("params", "param_flags"),
-            ):
-                flags = entry.get(key) or []
-                if not isinstance(flags, (list, tuple)) or not flags:
-                    continue
-                out_lines.append(
-                    f"  {fw}.{action_kind} ({len(flags)} flags):"
-                )
-                for flag in sorted(str(f) for f in flags):
-                    tag = self._tested_tag_for_flag(flag, action_kind)
-                    out_lines.append(f"    {flag:42s} {tag}")
-        if not out_lines:
-            return "(none)"
-        return "\n" + "\n".join(out_lines)
-
-    def _tested_tag_for_flag(self, flag: str, action_kind: str) -> str:
-        """Cross-reference ``params_search.tested`` / ``backends_search.tested``
-        for variants whose extra_sglang_args contains ``flag`` and surface
-        the gain summary.
-
-        ``flag`` is a CLI-style string like ``--enable-two-batch-overlap``.
-        Matching is substring containment in ``extra_sglang_args`` —
-        accurate enough to catch the common case (single-flag variant)
-        and the multi-flag case (synergy combo includes this flag).
-        """
-        if action_kind == "params":
-            search = self.params_search or {}
-        elif action_kind == "backends":
-            search = self.backends_search or {}
-        else:
-            return "[untested]"
-        tested = search.get("tested") if isinstance(search, dict) else None
-        if not isinstance(tested, dict) or not tested:
-            return "[untested]"
-        matched_gains: list[float] = []
-        for snap in tested.values():
-            if not isinstance(snap, dict):
-                continue
-            args = str(snap.get("extra_sglang_args") or "")
-            if not args or flag not in args:
-                continue
-            gain = snap.get("gain_pct")
-            if isinstance(gain, (int, float)):
-                matched_gains.append(float(gain))
-        if not matched_gains:
-            return "[untested]"
-        n = len(matched_gains)
-        best = max(matched_gains)
-        if n == 1:
-            return f"[tested: {best:+.2f}%]"
-        return f"[tested {n} vars, best {best:+.2f}%]"
+            n_b = len(entry.get("backend_flags") or [])
+            n_p = len(entry.get("param_flags") or [])
+            parts.append(f"{fw}:backend={n_b}/param={n_p}")
+        return ", ".join(parts) or "(none)"
 
     @staticmethod
     def _format_variant_line(entry: dict[str, Any]) -> str:
@@ -2581,9 +3938,10 @@ class SharedState:
         ``params_search.accepted`` is built from ``_variant_to_dict()`` and
         does NOT persist ``gain_pct``; the matching ``tested[fingerprint]``
         entry does. ``backends_search.accepted`` already stamps gain on
-        promote (see :meth:`record_backends_accepted`), so this is a no-op
-        there. Pulling the value across at render time keeps the renderer
-        symmetric and avoids a second writer for accepted entries.
+        promote (legacy ledger written via resume migration only), so
+        this is a no-op there. Pulling the value across at render time
+        keeps the renderer symmetric and avoids a second writer for
+        accepted entries.
         """
         if (
             entry.get("gain_pct") is not None
@@ -2706,20 +4064,156 @@ class SharedState:
             )
         return parts or "(none)"
 
+    @staticmethod
+    def _strip_base64_data_urls(text: str) -> str:
+        """Drop base64 image payloads before prompt injection.
+
+        TraceLens ``analysis.md`` embeds charts as
+        ``![alt](data:image/png;base64,...)`` data URLs that can balloon
+        the section to hundreds of KB of opaque noise. Stripping is
+        in-memory only; the on-disk file stays intact for operators.
+
+        Cherry-picked from main alongside F1-2 (RooflineExecutor); the
+        helper module ``inference_optimizer/tracelens_md.py`` lands in
+        the same commit.
+        """
+        if not text:
+            return text or ""
+        from inference_optimizer.tracelens_md import strip_base64_data_urls
+        return strip_base64_data_urls(text)
+
+    def _format_analysis_md_full(self) -> str:
+        """F1-4 (Roofline-v2 N5): inject TraceLens analysis.md verbatim.
+
+        Roofline composite design §6.1 mandates that analysis.md is
+        handed to the orchestration LLM verbatim — no truncation, no
+        sub-agent interpretation layer. The full report renders between
+        ``=== TraceLens Analysis ... ===`` bookends so the LLM can
+        syntactically distinguish report content from surrounding
+        SharedState dump lines.
+
+        Header carries ``snapshot=N`` + ``gain at snapshot=X.XX%`` so
+        the LLM (and the orchestration.md re-profile guidance landed in
+        F1-5) can detect "report is stale, gain has moved by ≥3% since
+        snapshot" without parsing the body.
+
+        Render modes:
+          * cache empty / ``analysis_md_text`` missing → one-line hint
+            asking the LLM to propose ``roofline``.
+          * cache populated → full report between bookends.
+
+        Cherry-picked from /wekafs/zgong/Hyperloom main @ c6f0a71
+        ``shared_state.py:2772`` ; the N27 fallback-mode branch is
+        omitted because PolicyGate fallback (F3) is not yet on this
+        branch — the simpler default-hint message stands in until F3.
+        """
+        cached = self.last_trace_analyze or {}
+        md_text = cached.get("analysis_md_text") or ""
+        if not md_text:
+            return (
+                "(no TraceLens snapshot yet — propose `roofline` to "
+                "produce one; roofline is a composite action that "
+                "runs profile + trace_analyze atomically)"
+            )
+        md_text = self._strip_base64_data_urls(md_text)
+        snap = cached.get("roofline_snapshot_id", "?")
+        gain = cached.get("roofline_baseline_gain_at_snapshot", 0.0)
+        try:
+            gain_str = f"{float(gain):.2f}"
+        except (TypeError, ValueError):
+            gain_str = "?"
+        return (
+            f"\n=== TraceLens Analysis (snapshot #{snap}, "
+            f"gain at snapshot = {gain_str}%) ===\n"
+            f"{md_text}\n"
+            f"=== End TraceLens Analysis ===\n"
+        )
+
+    def _format_roofline_saturation_advisory(self) -> str:
+        """F3-4 (Roofline-v2 /  F3): render a
+        soft 'diminishing returns' advisory for directions whose
+        saturation in the latest snapshot is at or above the threshold.
+
+        Returns the empty string when:
+
+        * the toggle ``roofline_saturation_advisory`` is off, or
+        * ``roofline_saturation_history`` is empty (no roofline run
+          yet), or
+        * no direction in the latest snapshot crossed the threshold.
+
+        This is **soft**: the advisory only flags the cost-vs-reward
+        trade-off; it never tells the LLM to stop dispatching toward
+        that direction. PolicyGate has no companion hard-gating rule
+        (deliberate decision per
+        ``F3_policygate_advisory.MD`` §2 — a
+        single noisy trace must not permanently close a direction).
+
+        Threshold + per-direction labels are pulled from
+        ``inference_optimizer.orchestrator.roofline_snapshot`` so the
+        producer (RooflineExecutor) and consumer (this renderer) share
+        one source of truth.
+        """
+        if not getattr(self, "roofline_saturation_advisory", False):
+            return ""
+        history = list(getattr(self, "roofline_saturation_history", []) or [])
+        if not history:
+            return ""
+        last = history[-1]
+        if not isinstance(last, dict):
+            return ""
+        from inference_optimizer.orchestrator.roofline_snapshot import (
+            SATURATION_ADVISORY_THRESHOLD_PCT,
+            _SATURATION_LABEL_MAP,
+        )
+        sat_lines: list[str] = []
+        for direction in _SATURATION_LABEL_MAP:
+            try:
+                pct = float(last.get(direction, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if pct >= SATURATION_ADVISORY_THRESHOLD_PCT:
+                sat_lines.append(f"  - {direction}: {pct:.1f}% saturated")
+        if not sat_lines:
+            return ""
+        snap_id = last.get("snapshot_id", "?")
+        return (
+            f"=== Roofline Saturation Advisory (snapshot #{snap_id}) ===\n"
+            f"The following directions are at or above "
+            f"{SATURATION_ADVISORY_THRESHOLD_PCT:.0f}% saturation; further\n"
+            "work in these areas typically yields diminishing returns. You\n"
+            "MAY still dispatch into them when you have a specific hypothesis\n"
+            "(e.g. an upstream PR or a known refactor) — this is a soft hint,\n"
+            "not a hard rule.\n"
+            + "\n".join(sat_lines) + "\n"
+            "=== End Saturation Advisory ==="
+        )
+
+    def _format_last_select_kernels(self) -> str:
+        return self._format_select_kernels_blob(self.last_select_kernels)
+
     def _format_last_trace_analyze(self) -> str:
-        if not self.last_trace_analyze:
+        # Main M4 renamed ``select_kernels`` → ``trace_analyze`` and the
+        # back-compat path ships the same dict shape under both keys; on
+        # this branch ``last_trace_analyze`` is populated alongside
+        # ``last_select_kernels`` for resume + v0.6 prompt-format parity.
+        # Prefer ``last_trace_analyze`` (canonical post-M4), fall back to
+        # ``last_select_kernels`` (legacy writer) so tests that seed only
+        # one of the two keys still render meaningfully.
+        blob = self.last_trace_analyze or self.last_select_kernels
+        return self._format_select_kernels_blob(blob)
+
+    def _format_select_kernels_blob(self, blob: dict[str, Any] | None) -> str:
+        if not blob:
             return "(none)"
         ids = [
             str(e.get("kernel_id"))
-            for e in self.last_trace_analyze.get("hot_kernels_top15", [])
+            for e in blob.get("hot_kernels_top15", [])
             if isinstance(e, dict) and e.get("kernel_id")
         ]
-        reusable = list(
-            self.last_trace_analyze.get("reusable_native_kernel_ids", [])
-        )
+        reusable = list(blob.get("reusable_native_kernel_ids", []))
         base = (
-            f"trace={self.last_trace_analyze.get('trace_input','?')} "
-            f"candidates_path={self.last_trace_analyze.get('candidates_path','?')} "
+            f"trace={blob.get('trace_input','?')} "
+            f"candidates_path={blob.get('candidates_path','?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
         # T3 / T4 finishing-touches: when TraceLens emitted a routing
@@ -2732,7 +4226,7 @@ class SharedState:
         # and omit the suffix entirely in the steady-state (no
         # warnings) so existing prompt-format-stable tests don't see
         # gratuitous additions.
-        warnings = self.last_trace_analyze.get("trace_health_warnings") or []
+        warnings = blob.get("trace_health_warnings") or []
         if not warnings:
             return base
         rendered: list[str] = []
@@ -2751,128 +4245,6 @@ class SharedState:
             else:
                 rendered.append(code)
         return f"{base} warnings=[{'; '.join(rendered)}]"
-
-    @staticmethod
-    def _strip_base64_data_urls(text: str) -> str:
-        """Roofline-v2 N11: replace `data:image/...;base64,...` blobs.
-
-        GPU-empirical context (DeepSeek-R1 session 16:06-02:00 of
-        2026-05-19): TraceLens analysis.md embeds a "Performance
-        Improvement" chart as a base64 PNG data URL inside a markdown
-        image (`![alt](data:image/png;base64,iVBOR...)`). For the R1
-        report the single line clocks in at 184530 chars / 184.5 KB
-        — i.e. 92% of the 200 KB analysis.md is base64 noise. The
-        main Orchestration LLM cannot see PNG pixels through base64,
-        so injecting it wholesale dilutes the prompt and obscures
-        the high-signal 🔴 P1 / 🟢 P1 recommendation sections (~16 KB
-        of pure text) that drive the entire roofline-v2 decision
-        loop.
-
-        This helper replaces every `data:image/...;base64,<payload>`
-        URL inside a markdown image with a short placeholder that
-        preserves the alt-text for context but drops the payload.
-        It is intentionally **not** TraceLens-specific — any
-        future report format that uses base64 data URLs gets the
-        same treatment automatically.
-
-        The strip is read-only relative to the source analysis.md
-        file on disk; only the in-memory string injected into the
-        LLM prompt is modified. The on-disk file remains intact for
-        operator inspection.
-        Implementation lives in ``inference_optimizer.tracelens_md``.
-        """
-        from inference_optimizer.tracelens_md import strip_base64_data_urls
-
-        return strip_base64_data_urls(text)
-
-    def _format_analysis_md_full(self) -> str:
-        """Roofline-v2 N5: inject TraceLens analysis.md verbatim into
-        the main Orchestration prompt.
-
-        This is the "directly give the report to the orchestrator"
-        contract the TraceLens team mandated and v1 violated by
-        introducing a sub-agent interpretation layer (see design §6.1).
-        The full report is read as-is — no truncation, no
-        reformatting, no markdown wrapper — so the main LLM sees the
-        same Executive Summary / Top Operations / Recommendations
-        sections a human engineer would consume.
-
-        Snapshot-stable: the underlying ``analysis_md_text`` only
-        changes when a new ``roofline`` action completes
-        (``record_trace_analyze`` overwrites the cache). Within one
-        snapshot every tick produces identical SECTION-B prompt
-        content, which is what lets Claude Code automatic prompt
-        caching (N6) cache this section verbatim across ticks. See
-        design §5.1.
-
-        Render modes:
-
-        * **No cache** (`last_trace_analyze` empty or
-          ``analysis_md_text`` missing) — emit a one-line hint asking
-          the LLM to propose `roofline`. Bookends absent so the
-          surrounding prompt summary stays compact when there's no
-          report to render.
-        * **Cache populated** — emit the full report between explicit
-          `=== TraceLens Analysis ... ===` bookends so the LLM can
-          syntactically distinguish report-content from surrounding
-          SharedState dump lines.
-
-        The header line includes ``snapshot=N`` and
-        ``gain_at_snapshot=X.XX%`` so the LLM can detect "report is
-        stale; gain has moved by ≥3% since snapshot" without parsing
-        the body. The re-profile guidance in orchestration.md
-        references these two fields directly.
-        """
-        cached = self.last_trace_analyze or {}
-        md_text = cached.get("analysis_md_text") or ""
-        if not md_text:
-            # N27: when the coordinator's roofline-required gate has
-            # already downgraded to fallback (roofline failed >= N
-            # consecutive times and the gate stamped
-            # ``fallback_mode_active=True`` on the otherwise-empty
-            # last_trace_analyze), tell the LLM it's in degraded
-            # mode and grid-tuning actions are unlocked WITHOUT
-            # analysis.md guidance. The LLM should still re-propose
-            # `roofline` when it suspects the upstream issue cleared
-            # (success resets the streak), but in the meantime
-            # backends/params/comm_optimization will pass-through and
-            # use the executor's default full grid (i.e. pre-roofline
-            # behaviour).
-            if cached.get("fallback_mode_active"):
-                streak = cached.get("fallback_after_failures", "?")
-                threshold = cached.get("fallback_threshold", "?")
-                return (
-                    f"(no TraceLens snapshot yet — N27 FALLBACK MODE: "
-                    f"roofline failed {streak} consecutive times "
-                    f"(>= threshold {threshold}); "
-                    "`backends` / `params` / `comm_optimization` are "
-                    "UNLOCKED and will run the executor's full default "
-                    "grid without analysis.md-driven N20-A subset / N22 "
-                    "advisory. Re-propose `roofline` whenever you think "
-                    "the upstream profile/trace issue may have cleared — "
-                    "success resets the streak and restores roofline-"
-                    "driven variant selection.)"
-                )
-            return (
-                "(no TraceLens snapshot yet — propose `roofline` to "
-                "produce one; roofline is a composite action that "
-                "runs profile + trace_analyze atomically)"
-            )
-        # N11: strip base64 image payloads before injection so the
-        # prompt is not 92% noise (see _strip_base64_data_urls).
-        md_text = self._strip_base64_data_urls(md_text)
-        snap = cached.get("roofline_snapshot_id", "?")
-        gain = cached.get("roofline_baseline_gain_at_snapshot", 0.0)
-        try:
-            gain_str = f"{float(gain):.2f}"
-        except (TypeError, ValueError):
-            gain_str = "?"
-        return (
-            f"\n=== TraceLens Analysis (snapshot #{snap}, "
-            f"gain at snapshot = {gain_str}%) ===\n"
-            f"{md_text}\n"
-            f"=== End TraceLens Analysis ===\n"
-        )
 
     def _format_last_sweep(self) -> str:
         if not self.last_sweep:

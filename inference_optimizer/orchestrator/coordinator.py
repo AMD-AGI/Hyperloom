@@ -1,4 +1,4 @@
-"""Coordinator — DESIGN v0.6 §7.5 / §21 main loop.
+"""Coordinator main loop.
 
 The Coordinator is the **protocol manager** (not a decision-maker). It owns:
 
@@ -16,8 +16,8 @@ The Coordinator is the **protocol manager** (not a decision-maker). It owns:
 * persists / routes intents (REQUEST/RESPONSE/REVIEW_VERDICT/etc.)
 * for delegated tasks: enqueues into TaskRegistry and pumps SubAgentRunner
 
-Everything else (real backends, accuracy gate, scheduler scoring,
-checkpoint cadence) lands in P0-5 and beyond.
+Everything else (real backends, accuracy gate, phase machine, checkpoint
+cadence) lands in P0-5 and beyond.
 """
 
 from __future__ import annotations
@@ -36,6 +36,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from ..cortex_kb_client import (
+    CortexKBClient,
+    CortexKBError,
+    attempt_canonical_id,
+    experiment_canonical_id,
+)
+from . import phase_state as _phase_state
 from ..paths import db_path_for, make_session_dir
 from ..storage.connection import SqliteConnection
 from .action_registry import ActionRegistry
@@ -46,7 +53,6 @@ from .intent_parser import Intent, IntentType, NoIntentEmitted
 from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
-from .pmc_workload_params import derive_pmc_roofline_params_from_config
 from .policy import (
     KILL_TASK_SOURCE_ALLOWLIST,
     PolicyDenied,
@@ -54,13 +60,20 @@ from .policy import (
     REQUEST_ROUTING,
     REVIEW_VERDICT_SOURCE_ALLOWLIST,
     ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
+    SPECIALIST_FROM_AGENT_PREFIX,
 )
-from .resource_lock import ResourceLockManager, SqliteLeaseBackend
+from .resource_lock import (
+    LaneBusy,
+    LaneFull,
+    Lease,
+    ResourceLockManager,
+    SqliteLeaseBackend,
+    _expand_lanes,
+)
 from .shared_state import SharedState
-from .sub_agent_runner import SubAgentRunner
+from .sub_agent_runner import SubAgentResult, SubAgentRunner
 from .task_registry import Task, TaskRegistry
 from .action_executors.benchmark_result import is_valid_measurement
-from . import scoring as _scoring
 from .system_prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     NO_KERNEL_ENABLED_ACTIONS,
@@ -77,10 +90,10 @@ log = logging.getLogger(__name__)
 # stay outside this set — they have richer bespoke recorders
 # (record_kernel_opt / record_kernel_integrate_result).
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
-    "baseline", "profile", "backends", "params", "sweep", "validate_stack",
-    # Roofline-v2 N10: roofline composite action enters the audit set
-    # so each invocation is visible in `roofline_attempts` (the same
-    # pattern used by N7's verify/audit scripts to count snapshots).
+    "baseline", "profile", "sweep", "explore",
+    # F1-3 + N10: see shared_state._AUDIT_ACTIONS for the rationale.
+    # The composite roofline action runs profile + trace_analyze
+    # atomically; each invocation is visible in `roofline_attempts`.
     "roofline",
 })
 
@@ -115,29 +128,15 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "disable_run_eval",
 )
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
-_VALIDATE_STACK_FAIL_THRESHOLD: int = 10
 
-
-def _cheap_exhausted_epsilon() -> float:
-    """Marginal-gain threshold below which a cheap-action round is
-    considered "exhausted" for N19c kernel_opt unlock + N21 roofline
-    redenial. Default 0.3% sits comfortably above the empirical noise
-    floor (~0.1% session-to-session jitter on a stable workload) but
-    below the smallest typical real cheap-action gain (~0.5%). Override
-    via INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON env, e.g.
-    "0.1" for low-noise workloads or "1.0" to require a substantial
-    cheap-action win before declaring exhaustion.
-    """
-    raw = os.environ.get(
-        "INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON", "",
-    ).strip()
-    if not raw:
-        return 0.3
-    try:
-        v = float(raw)
-        return v if v >= 0.0 else 0.3
-    except ValueError:
-        return 0.3
+# IR-7 — closed enum of session_steward_specialist recommendations.
+# Any value outside this set is coerced to ``stop_session`` in
+# :meth:`Coordinator._route_steward_verdict` (defense in depth — the
+# LLM can write any string but only the enum drives a phase-routing
+# change).
+_STEWARD_RECS: frozenset[str] = frozenset({
+    "continue_explore", "advance_to_kernel", "stop_session",
+})
 
 
 def effective_closing_grace_sec(
@@ -181,6 +180,28 @@ def _resolve_silent_ticks_closing_threshold() -> int:
     return v if v >= 0 else 120
 
 
+def _parse_iso_unix(ts: str) -> float:
+    """Parse an ISO 8601 UTC timestamp into unix seconds.
+
+    Returns ``0.0`` on any parse failure so callers can treat a missing
+    timestamp as "no information"; never raises. Used by the
+    stale-specialist scanner to compute task-running duration without
+    plumbing a separate ``started_unix`` column through TaskRegistry.
+    """
+    s = (ts or "").strip()
+    if not s:
+        return 0.0
+    try:
+        # ``fromisoformat`` accepts microsecond / timezone-aware strings.
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if dt.tzinfo is None:
+        # Treat naive timestamps as UTC for consistency with _now_iso().
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 def _summarize_failed_variants(
     all_results: Any, *, max_entries: int = 10,
 ) -> list[dict[str, Any]]:
@@ -190,20 +211,17 @@ def _summarize_failed_variants(
     extra_sglang_args}, ...]`` so the audit-trail extras can carry
     per-variant failure context without ballooning the prompt context.
 
-    Why this exists: backends / params executors run a multi-variant
-    grid via ``run_grid`` and reduce it to one ``record_action_attempt``
-    entry (1 task = 1 attempt, by Coordinator design). Before this
-    helper the only place a failed variant landed was the
-    ``all_results`` blob inside the raw delegated_result and the
-    ``rejected`` list inside ``backends_search`` / ``params_search``;
-    neither surface bubbles up into ``last_<action>`` /
-    ``<action>_attempts``. The LLM critic prompt assembled from
+    Why this exists: explore / sweep executors run a multi-variant grid
+    via ``run_grid`` and reduce it to one ``record_action_attempt`` entry
+    (1 task = 1 attempt, by Coordinator design). Before this helper the
+    only place a failed variant landed was the ``all_results`` blob
+    inside the raw delegated_result; the LLM prompt assembled from
     SharedState therefore could not see prior silent aborts and might
     keep re-proposing the same variant on the next round.
 
     Truncation: at most ``max_entries`` failed rows so a runaway grid
-    can't bloat attempts_history. ``error_excerpt`` is capped at
-    400 chars (smaller than the per-entry 2000-char cap used by
+    can't bloat attempts_history. ``error_excerpt`` is capped at 400
+    chars (smaller than the per-entry 2000-char cap used by
     ``_write_variant_abort_marker`` because this lives inside a
     promptable audit trail, not on-disk forensics).
     """
@@ -332,6 +350,53 @@ class PendingProposal:
     payload: dict[str, Any]
     decided: bool = False
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
+    # tentative_edge_id returned by Cortex T2
+    # ``session hypothesize``.
+    # Empty when T2 failed sync and went to NDJSON; T3 then falls back
+    # to ``propose-edge + late_verified`` rather than ``verify``.
+    #
+    # Back-compat surface: when the proposal is a multi-variant
+    # ``explore`` grid, this field carries the
+    # *representative* edge_id (first variant) so the legacy T3 hook
+    # — which still verifies one edge per proposal — keeps working.
+    # The full per-variant map lives in :attr:`kb_edge_ids` below;
+    # Gap-08 will extend T3 to iterate that map.
+    kb_edge_id: str = ""
+    # The experiment canonical_id minted at T2
+    # (``exp:{sid}:{session_iter_index:04d}``). Stored on the proposal
+    # so the T3 verify path can still emit a ``propose-edge`` even when
+    # the sync hypothesize failed.
+    kb_opt_canonical: str = ""
+    # Monotonic experiment iter index assigned at T2 (mirrors
+    # ``SharedState.session_iter_index``). Per-variant grids reuse this
+    # parent iter and append ``.variant-{name}`` to the canonical_id.
+    experiment_iter_index: int = 0
+    # per-variant edge_ids minted
+    # by ``_cortex_t2_hook`` when the proposal is an ``explore``
+    # action with a non-empty ``params.grid``. Keyed by variant
+    # name; empty dict for non-grid proposals (kernel_opt / integrate
+    # / etc.). The explore executor reads each variant's
+    # ``kb_edge_id`` via :meth:`_materialize_approved_proposal`
+    # stamping, so cross-session KB queries can locate the exact
+    # variant that confirmed / refuted a hypothesis (instead of the
+    # M3 per-proposal aggregate).
+    kb_edge_ids: dict[str, str] = field(default_factory=dict)
+    # per-variant opt_canonical
+    # ids parallel to :attr:`kb_edge_ids`. Stored separately so the
+    # T3 hook can rebuild ``propose-edge`` fallbacks per variant
+    # (Gap-08) even when the synchronous T2 hypothesize failed.
+    kb_opt_canonicals: dict[str, str] = field(default_factory=dict)
+    # per-variant verdicts
+    # surfaced by the Critic agent's batch review (``verdict_map``).
+    # Keyed by variant_name, value carries ``{verdict, rationale}``.
+    # Empty for single-verdict (kernel_opt / integrate / report /
+    # ...) proposals; the Coordinator's ``_handle_verdict_map`` writer
+    # filters the grid down to the ``approve`` subset before
+    # materializing the explore task and fires KB ``refuted`` for
+    # every reject (so the Cortex view captures the
+    # critic-rejected edge in addition to the KEEP/REVERT
+    # signal the explore executor produces).
+    verdict_map: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -344,40 +409,6 @@ class CoordinatorState:
     """
 
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
-
-
-# Default for N27 roofline-failure fallback. Two consecutive OUTER
-# roofline failures (= 3-4 inner trace_analyze attempts thanks to
-# N26 retry) before the gate downgrades. Tuned conservatively so a
-# transient rocprofiler-sdk / network blip doesn't immediately drop
-# the LLM into the no-analysis-md grid; raise via env to be more
-# tolerant of flaky upstream profilers, lower to 1 when operating
-# in a known-broken environment.
-_ROOFLINE_FALLBACK_THRESHOLD_DEFAULT = 2
-_ROOFLINE_FALLBACK_THRESHOLD_ENV = (
-    "INFERENCE_OPTIMIZER_ROOFLINE_FAILURE_FALLBACK_THRESHOLD"
-)
-
-
-def _resolve_roofline_fallback_threshold() -> int:
-    """Read N27 fallback threshold from env, with safe defaulting.
-
-    Negative / zero / unparseable values fall back to the default
-    (2). The threshold is read on every gate check rather than
-    cached because operator tools sometimes mutate env between
-    ticks (e.g. ``recover`` action twiddling INFERENCE_OPTIMIZER_*
-    knobs); the cost is one env lookup per denied propose.
-    """
-    raw = os.environ.get(_ROOFLINE_FALLBACK_THRESHOLD_ENV, "").strip()
-    if not raw:
-        return _ROOFLINE_FALLBACK_THRESHOLD_DEFAULT
-    try:
-        value = int(raw)
-    except ValueError:
-        return _ROOFLINE_FALLBACK_THRESHOLD_DEFAULT
-    if value < 1:
-        return _ROOFLINE_FALLBACK_THRESHOLD_DEFAULT
-    return value
 
 
 class Coordinator:
@@ -397,10 +428,58 @@ class Coordinator:
         bus_class: type[MessageBus] = MessageBus,
         compare_against_gpu: str | None = None,
         model_class: str | None = None,
+        cortex_kb: CortexKBClient | None = None,
+        phase_budget_pct: dict[str, float] | None = None,
+        knowledge_plane: Any = None,
     ):
-        """Wire core coordinator dependencies and runtime configuration."""
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
+        # Cortex KB client.  When
+        # ``None`` (legacy cli path or ``--degraded-kb``) all T2/T3/T4
+        # hooks become no-ops; the rest of the Coordinator behaves
+        # identically to v0.6.  The client itself is stateless apart
+        # from the per-session NDJSON queue, so it can be shared across
+        # threads (the Coordinator is single-event-loop anyway).
+        self.cortex_kb: CortexKBClient | None = cortex_kb
+        # KnowledgePlane facade.
+        # When non-None, ``_handle_delegate`` pre-warms ``pr_feed`` +
+        # ``kb_subgraph`` for ``delegate{action='specialist'}`` tasks
+        # before enqueue, so the SpecialistRunner prompt assembly sees
+        # the latest knowledge.  ``None`` keeps the legacy code path
+        # (no warmup; specialist still runs but sees empty knowledge
+        # surface).
+        self.knowledge_plane: Any = knowledge_plane
+        # phase budget percentages (KB_design §3.8 §5.3 +
+        # §3.13 M2 §7). ``None`` means library defaults; CLI flags
+        # populate this dict from ``--max-minutes-<phase>-pct``. We
+        # normalise once at construction so downstream judges can
+        # rely on a complete dict.
+        self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(
+            phase_budget_pct
+        )
+        # specialist stale scan threshold (seconds).
+        # M5 wires real specialist sub-agents; M2 only ships the
+        # scanner so the Robustness prompt block lights up the moment
+        # M5 lands. Env override mirrors the rest of the knobs.
+        try:
+            self._specialist_stale_sec: float = max(
+                0.0,
+                float(os.environ.get(
+                    "INFERENCE_OPTIMIZER_SPECIALIST_STALE_SEC", "600",
+                )),
+            )
+        except ValueError:
+            self._specialist_stale_sec = 600.0
+        # opt-out switch for
+        # the legacy ``params_no_promote_streak`` plateau proxy.
+        # When set, ``compute_next_phase`` skips the m2_proxy branch
+        # entirely; legacy resume sessions without signals fall
+        # through to the wall-clock budget exhaustion exit.
+        self._legacy_plateau_proxy_disabled: bool = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY", "",
+            ).strip().lower() in ("1", "true", "yes")
+        )
         # External-SKILL-driven configuration. Both replace the deleted
         # `setup` / `classify` orchestration actions: the SKILL caller is
         # expected to supply --model-class (or MODEL_CLASS env) and
@@ -439,6 +518,20 @@ class Coordinator:
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        # sync research_lane capacity from SharedState into
+        # the lane_capacity table. CLI/manifest
+        # flow already pinned the value onto SharedState at session
+        # start; this propagates it into the SQLite source of truth so
+        # ``acquire_many`` honours the operator-set cap. Idempotent:
+        # the default is already 1 from ``ensure_schema``; we only
+        # overwrite when the operator picked something non-default.
+        try:
+            from ..storage.schema import set_lane_capacity as _set_lane_capacity
+            cap = int(self.shared_state.research_lane_capacity or 0)
+            if cap >= 0:
+                _set_lane_capacity(self.db.raw, "research_lane", cap)
+        except Exception:  # noqa: BLE001 — non-fatal; default seed wins
+            log.exception("failed to sync research_lane_capacity to leases DB")
         # `strict_paths` defers to the env flag (CLI flips this on for
         # production; tests omit the env so the path check stays off and
         # legacy `/tmp/<fixture>` payload values still pass).
@@ -463,7 +556,6 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
-        self._validate_stack_gate_skip_warned: bool = False
 
         # Per-agent consecutive ``BackendError`` streak. Successful turns
         # reset the counter for that agent; a streak crossing
@@ -529,17 +621,14 @@ class Coordinator:
             r for r in _CANONICAL_ORDER if r in self.role_registry
         )
 
-        # Action registry + per-action scoring (see orchestrator/scoring.py
-        # and the plan ``action-scoring-in-shared-state``). The registry is
-        # cheap to load — a handful of small yaml files — so we eagerly load
-        # it once and use the in-memory copy to both seed scores and render
-        # the per-tick scoreboard. A load failure falls back to ``None``;
-        # downstream callers handle a missing registry gracefully.
+        # Action registry — small yaml catalogue used by PolicyGate /
+        # prompt rendering to map action_name → metadata (phase, family,
+        # pipeline_phase). A load failure falls back to ``None``; downstream
+        # callers handle a missing registry gracefully.
         try:
             self.action_registry: ActionRegistry | None = ActionRegistry().load()
         except Exception:  # noqa: BLE001 — defensive; missing yaml shouldn't kill the run.
-            log.exception("Coordinator: failed to load ActionRegistry; "
-                          "scoring will be disabled this session.")
+            log.exception("Coordinator: failed to load ActionRegistry.")
             self.action_registry = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: float | None = None
@@ -547,15 +636,24 @@ class Coordinator:
         # Latest objective wired by ``Coordinator.run()``. Used by
         # ``_compose_prompt`` to refresh ``shared_state.target_gap_pct`` on
         # every Orchestration tick. None outside a run (e.g. bounded tick()
-        # tests) and the scoreboard renderer falls back to multiplier=1.0.
+        # tests).
         self._current_objective: Objective | None = None
 
-        # Resume detection runs BEFORE we seed action_scores so a fresh
-        # session is not misdetected as a resume (seeding writes state.json
-        # which the resume probe treats as evidence of an existing session).
         self._resumed_from = self._detect_resume_state()
-        # Seed per-action scoring now that resume status is locked in.
-        self._ensure_action_scores_seeded()
+        # initialise phase machine. Fresh session enters
+        # PRELUDE; resume from v0.6 (no phase field) infers a phase via
+        # :func:`phase_state.infer_phase_from_state`.  Always idempotent:
+        # second construction on the same session_dir is a no-op.
+        self._ensure_phase_initialised()
+        # Cortex T0 defensive fallback. The cli
+        # is the canonical T0 entry point (fail-fast banner +
+        # sys.exit on Cortex outage); this hook only fires for
+        # SDK / integration-test callers that constructed the
+        # Coordinator directly. No-op when cortex_kb is None /
+        # disabled / sid already set. Best-effort: helper logs a
+        # warning + leaves warm_start empty on Cortex failure rather
+        # than crashing the long-running reactor.
+        self._ensure_cortex_t0_anchored()
 
     # ==================================================================
     # Resume
@@ -599,9 +697,21 @@ class Coordinator:
         verdict_by_target: dict[str, str] = {}
         for v in verdicts:
             target = v.payload.get("target_proposal_msg_id")
-            if target:
-                verdict_by_target[target] = v.payload.get("verdict", "")
-                decided_ids.add(target)
+            if not target:
+                continue
+            # ``_handle_verdict_map`` always
+            # mirrors a *summary* ``verdict`` alongside the per-
+            # variant ``verdict_map`` so this rebuild stays
+            # backward-compatible. A verdict_map-only event with no
+            # summary string still marks the proposal as decided
+            # (the Critic spoke on every variant, no further round
+            # needed) — we synthesise a ``needs_review`` placeholder
+            # so the prompt's /status surface still shows something.
+            summary = v.payload.get("verdict") or ""
+            if not summary and isinstance(v.payload.get("verdict_map"), dict):
+                summary = "needs_review"
+            verdict_by_target[target] = summary
+            decided_ids.add(target)
         for d in decisions:
             if d.payload.get("kind") == "approved_proposal":
                 # The coordinator stores task_id, not the original proposal_msg_id,
@@ -664,174 +774,1493 @@ class Coordinator:
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
+        # T4 anchor. Drains the
+        # NDJSON queue (timeout 60s) then commits the Cortex session.
+        # Failures are recorded on SharedState.stop_reason so the
+        # operator sees ``cortex_drain_failed`` / ``cortex_commit_failed``
+        # in the final summary; the SQLite close still runs so we don't
+        # leak fds.
+        await self._cortex_t4_hook()
         self.db.close()
 
-    # ==================================================================
-    # Action scoring
-    # ==================================================================
-    def _score_action_keep(self, action_name: str, *, gain_pct: float) -> None:
-        """Apply a KEEP score update for one action and persist."""
-        raw = self.shared_state.action_scores.get(action_name)
-        if not isinstance(raw, dict):
-            return
-        a = _scoring.ActionScore.from_dict(raw)
-        _scoring.apply_keep(
-            a,
-            gain_pct=float(gain_pct or 0.0),
-            tick=int(self.shared_state.tick or 0),
-            action_name=action_name,
-        )
-        self.shared_state.action_scores[action_name] = a.to_dict()
+    async def _cortex_t4_hook(self) -> None:
+        """T4 — drain NDJSON pending + ``session commit``.
 
-    def _score_action_discard(self, action_name: str) -> None:
-        """Deprecated thin wrapper — prefer :meth:`_score_action_failure` or
-        :meth:`_score_action_no_promote` so the streak counter for each
-        pathology evolves independently. Retained for archived call sites
-        that don't yet distinguish the two.
+        Called from :meth:`stop` once the reactor / dispatcher loops
+        have torn down. Idempotent: a second invocation with an empty
+        queue + already-committed session is a no-op (cortex-kb commit
+        is itself idempotent for a given sid).
+
+        when the CLOSE phase
+        sequencer ran (``close_sequence_done=True``), steps 3 + 4
+        already drained + committed. We early-return so the hook is
+        a no-op in that case (and ``cortex_session_summary`` already
+        on SharedState is the authoritative one).
         """
-        self._score_action_failure(action_name)
-
-    def _score_action_failure(self, action_name: str) -> None:
-        """Streak-aware penalty for a task that returned failed/error."""
-        raw = self.shared_state.action_scores.get(action_name)
-        if not isinstance(raw, dict):
+        if self.cortex_kb is None or not self.cortex_kb.enabled:
             return
-        a = _scoring.ActionScore.from_dict(raw)
-        _scoring.apply_failure(
-            a,
-            tick=int(self.shared_state.tick or 0),
-            action_name=action_name,
-        )
-        self.shared_state.action_scores[action_name] = a.to_dict()
-
-    def _score_action_no_promote(self, action_name: str) -> None:
-        """Streak-aware penalty for a task that succeeded but did not
-        promote ``current_best``. Tracked on a streak distinct from
-        :meth:`_score_action_failure` so diagnostics can distinguish a
-        crashing action from a stalled one.
-        """
-        raw = self.shared_state.action_scores.get(action_name)
-        if not isinstance(raw, dict):
+        if getattr(self.shared_state, "close_sequence_done", False):
+            # CLOSE phase sequencer already ran steps 3 + 4 inline; nothing
+            # left for stop() to do here.
             return
-        a = _scoring.ActionScore.from_dict(raw)
-        _scoring.apply_no_promote(
-            a,
-            tick=int(self.shared_state.tick or 0),
-            action_name=action_name,
-        )
-        self.shared_state.action_scores[action_name] = a.to_dict()
-
-    def _score_action_lock(self, action_name: str, reason: str) -> None:
-        raw = self.shared_state.action_scores.get(action_name)
-        if not isinstance(raw, dict):
+        sid = (self.shared_state.cortex_session_id or "").strip()
+        if not sid:
             return
-        a = _scoring.ActionScore.from_dict(raw)
-        if not a.locked_reason:
-            _scoring.apply_lock(a, reason)
-            self.shared_state.action_scores[action_name] = a.to_dict()
-
-    def _apply_action_score_update(
-        self,
-        task_kind: str,
-        result: dict[str, Any],
-        *,
-        promoted: bool | None = None,
-        gain_vs_cb: float | None = None,
-    ) -> None:
-        """Single hook called by ``_promote_to_shared_state`` once the
-        existing task-kind branch has decided whether to promote / lift.
-
-        ``promoted`` and ``gain_vs_cb`` are only meaningful for the
-        ``backends`` / ``params`` / ``sweep`` family; other branches pass
-        ``None`` and the helper decides what to do from ``task_kind`` alone.
-
-        The helper is a no-op when ``action_scores`` has not been seeded
-        (e.g. early sessions where ActionRegistry failed to load).
-        """
-        if not self.shared_state.action_scores:
-            return
-        if not task_kind:
-            return
-        if task_kind == "baseline":
-            # Treated as a gate; do not score it. baseline_failure_streak
-            # already tracks repeated failures.
-            return
-        status = ""
-        error_class = None
-        if isinstance(result, dict):
-            status = str(result.get("status") or "")
-            error_class = result.get("error_class")
-        failed = status in {"failed", "error"} or bool(error_class)
-        if task_kind in {"profile", "pmc_roofline", "validate_stack"}:
-            if failed:
-                self._score_action_failure(task_kind)
-            else:
-                self._score_action_keep(task_kind, gain_pct=0.0)
-            return
-        if task_kind in {"backends", "params", "sweep", "framework_pr"}:
-            if failed:
-                self._score_action_failure(task_kind)
-            elif promoted:
-                self._score_action_keep(
-                    task_kind, gain_pct=float(gain_vs_cb or 0.0),
-                )
-            else:
-                self._score_action_no_promote(task_kind)
-            # Lock the grid when it is fully exhausted so the LLM sees
-            # the row as unavailable. Only applies to params today
-            # (the only family with a deterministic exhaustion check).
-            if task_kind == "params" and self._params_grid_exhausted():
-                self._score_action_lock("params", "grid_exhausted")
-            return
-        # Fallback for any future deep / support action that doesn't have
-        # explicit promote semantics — split on result.status so the
-        # failure streak still gets exercised.
-        if failed:
-            self._score_action_failure(task_kind)
-        else:
-            self._score_action_keep(task_kind, gain_pct=0.0)
-
-    def _ensure_action_scores_seeded(self) -> None:
-        """Populate ``shared_state.action_scores`` once per session.
-
-        Idempotent: if any scores are already present (resume case) we skip.
-        Otherwise we seed from the action registry, biased by ``model_class``
-        marathon priors (default ``moe_mla`` when classify hasn't run yet).
-        Persistence is best-effort: any save failure is logged but does not
-        block construction.
-        """
-        if self.action_registry is None:
-            return
-        if self.shared_state.action_scores:
-            return
-        kernel_enabled = "kernel" in self.role_registry
-        enabled = FULL_ENABLED_ACTIONS if kernel_enabled else NO_KERNEL_ENABLED_ACTIONS
-        # Strip framework_pr when the framework-agent toggle is off so the
-        # scoreboard never surfaces an arm the bandit cannot pull. Defaults
-        # to True for older state.json files (see SharedState.framework_enabled).
-        if not getattr(self.shared_state, "framework_enabled", True):
-            enabled = tuple(a for a in enabled if a != "framework_pr")
-        model_class = (self.shared_state.model_class or "moe_mla").strip()
+        # 1. Drain async queue. NDJSON drains *can* take meaningful time
+        #    when Cortex was unreachable mid-run; 60s is the documented
+        #    upper bound.
         try:
-            seeded = _scoring.seed_action_scores(
-                self.action_registry,
-                model_class=model_class,
-                enabled=enabled,
+            drain_report = self.cortex_kb.drain_pending(timeout_sec=60.0)
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("cortex T4 drain_pending failed")
+            if not self.shared_state.stop_reason:
+                self.shared_state.set_stop_reason("cortex_drain_failed")
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.exception("cortex T4 SharedState.save after drain failed")
+            return
+        if drain_report.get("remaining", 0) > 0:
+            log.warning(
+                "cortex T4 drain incomplete: %s remaining; commit will reflect "
+                "queued state. flusher daemon should drain on next pickup.",
+                drain_report,
             )
+            if not self.shared_state.stop_reason:
+                self.shared_state.set_stop_reason("cortex_drain_failed")
+        # 2. Commit (sync). On failure we record commit_failed so resume
+        #    can re-attempt; we do NOT delete cortex_session_id so the
+        #    next coordinator wake-up picks up the same sid.
+        try:
+            summary = self.cortex_kb.session_commit(sid)
+        except CortexKBError as exc:
+            log.warning("cortex T4 session_commit failed: %s", exc)
+            if not self.shared_state.stop_reason:
+                self.shared_state.set_stop_reason("cortex_commit_failed")
+            summary = {"status": "commit_failed", "error": str(exc)[:512]}
+        self.shared_state.cortex_session_summary = dict(summary)
+        try:
+            self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
+            log.exception("cortex T4 SharedState.save after commit failed")
+
+    # ==================================================================
+    # phase state machine
+    # ==================================================================
+    def _ensure_phase_initialised(self) -> None:
+        """Set ``phase`` + persist ``phase_budget_pct`` once per session.
+
+        Idempotent: resume / re-construction skips both writes when the
+        phase machine has already been initialised. Persists immediately
+        so a crash between construction and the first tick still leaves
+        a usable phase_history.
+        """
+        state = self.shared_state
+        # Phase budget always normalised so the judge has a complete map.
+        # Persisted regardless because the operator-passed CLI flags need
+        # to land in state.json for resume parity.
+        if not state.phase_budget_pct:
+            state.phase_budget_pct = dict(self._phase_budget_pct)
+        current = (state.phase or "").strip().upper()
+        if current in _phase_state.PHASE_NAMES:
+            # Already initialised. Keep CLI-side budget override the
+            # latest authoritative value.
+            state.phase_budget_pct = dict(self._phase_budget_pct)
+            try:
+                state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: save after phase budget refresh failed")
+            return
+        # Fresh OR legacy resume.
+        if self._resumed_from.get("is_resume"):
+            inferred, evidence = _phase_state.infer_phase_from_state(state)
+            reason = "resumed_from_v06_inferred"
+            evidence = {**evidence, "resume_path": True}
+        else:
+            inferred = _phase_state.PHASE_PRELUDE
+            reason = "phase_entered"
+            evidence = {"trigger": "fresh_session"}
+        state.record_phase_transition(
+            to_phase=inferred,
+            reason=reason,
+            evidence=evidence,
+        )
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: save after phase init failed")
+
+    def _ensure_cortex_t0_anchored(self) -> None:
+        """v0.8 KB_gaps/Gap-12 — defensive T0 anchor for SDK callers.
+
+        The cli is the canonical T0 entry point (see
+        ``cli._bootstrap_cortex_kb``); it runs T0 *before* the
+        Coordinator is constructed and threads the resulting
+        :class:`CortexKBClient` (with its sid + warm_start already on
+        SharedState) into our constructor. This method is a *fallback*
+        — it does the same T0 ritual when an SDK / integration-test
+        caller constructs a :class:`Coordinator` directly without the
+        cli plumbing.
+
+        The hook is intentionally narrow:
+
+        * Skip when ``cortex_kb`` is ``None`` (legacy callers
+          who don't even pass a client).
+        * Skip when ``cortex_kb.enabled is False`` (``--degraded-kb``).
+        * Skip when ``shared_state.cortex_session_id`` is already
+          non-empty (the cli already ran T0, or a resume picked up
+          the prior sid).
+
+        On Cortex failure (``CortexKBError`` / binary missing),
+        :func:`run_t0_anchor` with ``fail_fast=False`` logs a warning
+        and leaves warm_start empty — the Coordinator never blocks
+        its boot on Cortex availability when it's running outside
+        cli's fail-fast contract.
+        """
+        client = self.cortex_kb
+        if client is None or not getattr(client, "enabled", False):
+            return
+        state = self.shared_state
+        if (state.cortex_session_id or "").strip():
+            # Either cli already T0'd or resume picked up the sid.
+            # The helper's `skipped_already` short-circuit would
+            # behave the same, but we gate up here so we don't even
+            # import the helper for the common cli path.
+            return
+        # Derive workload / hw from SharedState (cli has the same
+        # fallback chain, but SDK callers are expected to seed
+        # ``model_name`` + ``gpu_type`` themselves before
+        # constructing the Coordinator).
+        workload = (
+            getattr(state, "model_name", "") or "unknown_model"
+        )
+        hw = getattr(state, "gpu_type", "") or "unknown_gpu"
+        extra_attrs = {
+            "framework":   getattr(state, "framework", "") or "",
+            "model_class": getattr(state, "model_class", "") or "",
+            "claw_session_id": getattr(state, "claw_session_id", "") or "",
+            "boot_origin": "coordinator_fallback",
+        }
+        try:
+            from .cortex_t0 import run_t0_anchor
+            run_t0_anchor(
+                client,
+                state,
+                workload=workload,
+                hw=hw,
+                extra_attrs=extra_attrs,
+                fail_fast=False,
+                session_dir=self.session_dir,
+                save_state=True,
+            )
+        except Exception:  # noqa: BLE001 — defensive; helper is itself best-effort
             log.exception(
-                "Coordinator: scoring.seed_action_scores failed; "
-                "action_scores stay empty for this session.",
+                "Coordinator T0 fallback: run_t0_anchor raised "
+                "(workload=%s, hw=%s); warm_start stays empty",
+                workload, hw,
+            )
+
+    def _kernel_enabled(self) -> bool:
+        # Mirror the persisted ``kernel_enabled`` flag — CLI's
+        # ``--no-kernel`` removes the kernel role; resume picks the
+        # value from state.json.
+        return "kernel" in self.role_registry and bool(
+            getattr(self.shared_state, "kernel_enabled", True)
+        )
+
+    async def _advance_phase_if_needed(self) -> None:
+        """Scan exit conditions and transition phase at most once per tick.
+
+        Priority order is encoded in :func:`phase_state.compute_next_phase`:
+        ``abort > exit_terminal > exit_normal`` (Inv-8.2).  When a
+        transition fires we:
+
+        1. Append a phase_history row (built via
+           :meth:`SharedState.record_phase_transition`).
+        2. Mirror the transition onto the bus as an ``event`` so resume
+           replays it and Cortex-side observers (M5+) see it.
+        3. Save state.json atomically so a crash between two ticks
+           doesn't lose the boundary.
+        """
+        state = self.shared_state
+        next_phase = _phase_state.compute_next_phase(
+            state,
+            kernel_enabled=self._kernel_enabled(),
+            budget_pct=self._phase_budget_pct,
+            disable_legacy_proxy=self._legacy_plateau_proxy_disabled,
+        )
+        if next_phase is None:
+            # IR-7 — on plateau but no steward verdict yet,
+            # compute_next_phase returns None and we enqueue the
+            # steward here. The dispatcher's normal loop picks it up;
+            # the next tick will see the verdict and route accordingly.
+            await self._maybe_enqueue_steward()
+            return
+        target, reason, evidence = next_phase
+        if target == (state.phase or "").upper():
+            return  # already there
+        prior = state.phase
+        # when the transition was driven by an escalate
+        # hint, consume it so the next tick re-evaluates against
+        # fresh signals. The phase_state module
+        # already wrote the hint into ``evidence["hint"]`` if it
+        # mattered, so this is just a cleanup step.
+        if isinstance(evidence, dict) and (
+            evidence.get("evidence") == "llm_escalation"
+            or "hint" in evidence
+        ):
+            state.consume_pending_escalate_hint()
+        # When a terminal transition (target=CLOSE) fires from a
+        # vocab stop_reason that isn't already on the state, mirror
+        # it onto state.stop_reason via the ENUM-validated writer so
+        # the next run() tick winds the loop down (KB_design §3.8
+        # §6 + §3.13 M7 §5.3 skip_to_close path).
+        if (
+            target == _phase_state.PHASE_CLOSE
+            and isinstance(evidence, dict)
+            and evidence.get("terminal")
+            and reason
+            and _phase_state.is_valid_stop_reason(reason)
+            and not state.stop_reason
+        ):
+            state.set_stop_reason(reason)
+        state.record_phase_transition(
+            to_phase=target,
+            reason=reason,
+            evidence=evidence,
+        )
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: save after phase transition failed")
+        log.info(
+            "Coordinator.phase: %s → %s (reason=%s)",
+            prior or "<unset>", target, reason,
+        )
+        try:
+            await self.bus.append_and_seq(Message.new(
+                "coordinator", "*", "event",
+                {
+                    "kind":       "phase_transition",
+                    "from_phase": prior or "",
+                    "to_phase":   target,
+                    "reason":     reason,
+                    "evidence":   evidence,
+                },
+            ))
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: phase_transition event bus write failed")
+        # phase-entry side effects (KB_gaps/Gap-02 PR 5.4 +
+        # follow-up Gap-04 / Gap-05 / Gap-06). Side effects are
+        # *additive* — failures inside a hook are logged but never
+        # roll back the transition. Keeping the dispatch table inside
+        # ``_on_phase_entered`` so the per-phase branches stay together
+        # and future phase entries (KERNEL auto-profile, SWEEP grid,
+        # CLOSE sequencer) only need one new branch each.
+        try:
+            await self._on_phase_entered(from_phase=prior or "", to_phase=target)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: _on_phase_entered hook failed")
+
+    async def _on_phase_entered(self, *, from_phase: str, to_phase: str) -> None:
+        """Fire per-phase entry side effects.
+
+        Pure dispatcher: each branch is a thin wrapper around a
+        ``_on_enter_<phase>`` method. Hooks are infallible from the
+        caller's perspective (callers should not need to wrap them in
+        try/except — the dispatcher itself catches and logs).
+
+        Currently wired:
+
+        * ``EXPLORE`` — pre-warm PR feed across every specialist domain
+. The first specialist
+          dispatch after EXPLORE entry then sees a populated cache
+          rather than a cold ``pr_monitor`` fetch.
+        * ``KERNEL`` — auto-enqueue ``profile`` so KERNEL phase always
+          has a fresh ``last_profile_trace`` for ``select_kernels``
+. Idempotent
+          via a fixed-suffix idempotency_key; skipped on resume when
+          a trace already exists or when ``--no-kernel``.
+        * ``SWEEP`` — auto-enqueue ``sweep`` with a recipe-driven
+          (or defaults-driven) grid so SWEEP doesn't degrade to
+          "LLM 自觉发 sweep".
+          Same idempotency contract as KERNEL.
+        * ``CLOSE`` — run the 5-step closing sequencer (report →
+          session_breakdown → NDJSON drain → Cortex commit → mark
+          done; KB_design §3.2 §5.5 + KB_gaps/Gap-06). Sets the
+          ``state.close_sequence_done`` flag so ``cli.finally``
+          short-circuits its emergency breakdown write.
+
+        All four phases with side effects are wired. Hook additions
+        for new phases should slot into this dispatcher table.
+        """
+        target = (to_phase or "").upper()
+        if target == _phase_state.PHASE_EXPLORE:
+            await self._on_enter_explore(from_phase=from_phase)
+        elif target == _phase_state.PHASE_KERNEL:
+            await self._on_enter_kernel(from_phase=from_phase)
+        elif target == _phase_state.PHASE_SWEEP:
+            await self._on_enter_sweep(from_phase=from_phase)
+        elif target == _phase_state.PHASE_CLOSE:
+            await self._on_enter_close(from_phase=from_phase)
+
+    async def _on_enter_explore(self, *, from_phase: str) -> None:
+        """warm the PR feed across every
+        specialist domain on EXPLORE entry.
+
+        Two responsibilities:
+
+        1. Warm ``KnowledgePlane.pr_feed`` across all specialist
+           domains so subsequent ``_warm_specialist_params`` calls hit
+           the cache. Best-effort: any failure is logged + the run
+           continues. A downstream specialist dispatch still calls
+           :meth:`KnowledgePlane.pr_feed_warm` individually
+           (``_handle_delegate`` → ``_warm_specialist_params``), so even
+           a hard failure here only loses the upfront cache-priming.
+
+        2. Auto-enqueue a ``roofline`` task when
+           ``--use-roofline-composite`` is on and the snapshot is
+           missing or stale (see :meth:`_needs_fresh_roofline`). The
+           task id is stashed on
+           :attr:`SharedState.auto_roofline_pending_task_id` so
+           ``_handle_delegate`` can block first-round specialist
+           dispatches until the snapshot lands — specialists need
+           the analysis.md to be useful.
+
+        The aggregated warnings end up on
+        :attr:`KnowledgePlane.last_warnings`; the breakdown collector
+ can surface them next to the session-level
+        ``pr_monitor`` status.
+        """
+        plane = self.knowledge_plane
+        if plane is not None:
+            try:
+                results = plane.pr_feed_warm_all_domains()
+                total_prs = sum(len(prs) for prs, _w in results.values())
+                log.info(
+                    "EXPLORE entry (from=%s): warmed pr_feed across %d "
+                    "domains (total PRs cached=%d)",
+                    from_phase or "<unknown>", len(results), total_prs,
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.warning(
+                    "EXPLORE entry: pr_feed_warm_all_domains failed: %r", exc,
+                )
+
+        # Auto-roofline on EXPLORE entry — only when composite is on
+        # AND a fresh snapshot is needed (gain-only freshness gate).
+        if self._needs_fresh_roofline():
+            try:
+                task = await self._enqueue_internal_roofline_task(
+                    reason="explore_entry",
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception(
+                    "EXPLORE entry: failed to enqueue auto-roofline: %r", exc,
+                )
+                self._record_phase_entry_evidence(
+                    auto_roofline_error=repr(exc)[:240],
+                )
+                return
+            self.shared_state.auto_roofline_pending_task_id = task.task_id
+            log.info(
+                "EXPLORE entry (from=%s): auto-enqueued roofline task=%s",
+                from_phase or "<unknown>", task.task_id,
+            )
+            self._record_phase_entry_evidence(
+                auto_roofline_enqueued=True,
+                auto_roofline_task_id=task.task_id,
+            )
+
+    async def _on_enter_kernel(self, *, from_phase: str) -> None:
+        """auto-enqueue analysis anchor on KERNEL entry.
+
+        "进入 KERNEL 即跑一次 ``profile``
+        (固定动作, 不需要 LLM propose). 该次 profile 写入
+        ``last_profile_trace``, 锚定 KERNEL 阶段所有 ``select_kernels``
+        的 trace_input." Without this, the LLM has to remember to
+        propose profile itself; missing it would silently block every
+        subsequent ``select_kernels`` / ``kernel_opt`` (sequence gate
+        denies them when ``last_profile_trace == ""``).
+
+        Toggle-aware fork:
+
+        * ``--use-roofline-composite=True``: enqueue ``roofline``
+          (composite profile + trace_analyze + analysis.md snapshot)
+          when :meth:`_needs_fresh_roofline` returns True; skip with
+          ``auto_roofline_skipped='fresh_snapshot'`` otherwise. The
+          KERNEL LLM gets a fresh ``analysis.md`` aligned with the
+          stack's current gain instead of an EXPLORE-end snapshot.
+        * ``--use-roofline-composite=False``: legacy auto-profile
+          path — enqueue ``profile`` if ``last_profile_trace`` is
+          empty, skip otherwise.
+
+        Skipped when:
+
+        * ``--no-kernel`` (defense in depth: ``compute_next_phase``
+          should already route to SWEEP, but a corrupt resume might
+          still land us here).
+
+        Idempotent via phase-scoped idempotency keys so a phase flap
+        (which Inv-2.1 monotonic guard forbids in practice, but we
+        still defend against) doesn't double-enqueue.
+
+        After enqueue, mutates ``phase_history[-1].evidence`` to
+        record ``auto_{roofline,profile}_enqueued=True`` so the
+        breakdown collector (KB_design §3.12 §4 / KB_gaps/Gap-04
+        acceptance criterion 3) can verify the hook fired.
+        """
+        state = self.shared_state
+        if not self._kernel_enabled():
+            # Should not happen — compute_next_phase routes
+            # --no-kernel runs straight EXPLORE → SWEEP. Defensive log:
+            log.info(
+                "KERNEL entry hook fired with kernel_enabled=False "
+                "(from=%s); skipping auto-analysis",
+                from_phase or "<unknown>",
             )
             return
-        if not seeded:
+
+        # Roofline composite path — toggle-driven.
+        if bool(getattr(state, "use_roofline_composite", False)):
+            if not self._needs_fresh_roofline():
+                log.info(
+                    "KERNEL entry hook (from=%s): roofline snapshot fresh "
+                    "(gain drift within %.1f%%); skipping auto-roofline",
+                    from_phase or "<unknown>", self._ROOFLINE_GAIN_DRIFT_PCT,
+                )
+                self._record_phase_entry_evidence(
+                    auto_roofline_skipped="fresh_snapshot",
+                )
+                return
+            try:
+                task = await self._enqueue_internal_roofline_task(
+                    reason="kernel_phase_entry",
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception(
+                    "KERNEL entry hook: failed to enqueue auto-roofline: %r",
+                    exc,
+                )
+                self._record_phase_entry_evidence(
+                    auto_roofline_error=repr(exc)[:240],
+                )
+                return
+            log.info(
+                "KERNEL entry (from=%s): auto-enqueued roofline task=%s",
+                from_phase or "<unknown>", task.task_id,
+            )
+            self._record_phase_entry_evidence(
+                auto_roofline_enqueued=True,
+                auto_roofline_task_id=task.task_id,
+            )
             return
-        self.shared_state.action_scores = seeded
+
+        # Legacy auto-profile path (composite off).
+        if (state.last_profile_trace or "").strip():
+            log.info(
+                "KERNEL entry hook (from=%s): last_profile_trace already "
+                "set; skipping auto-profile (resume path)",
+                from_phase or "<unknown>",
+            )
+            self._record_phase_entry_evidence(auto_profile_skipped="trace_exists")
+            return
+        try:
+            task = await self._enqueue_internal_profile_task(
+                reason="kernel_phase_entry",
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception(
+                "KERNEL entry hook: failed to enqueue auto-profile: %r", exc,
+            )
+            self._record_phase_entry_evidence(auto_profile_error=repr(exc)[:240])
+            return
+        log.info(
+            "KERNEL entry (from=%s): auto-enqueued profile task=%s",
+            from_phase or "<unknown>", task.task_id,
+        )
+        self._record_phase_entry_evidence(
+            auto_profile_enqueued=True,
+            auto_profile_task_id=task.task_id,
+        )
+
+    async def _enqueue_internal_profile_task(
+        self, *, reason: str,
+    ) -> Task:
+        """Build + enqueue a Coordinator-internal ``profile`` task.
+
+        Used by :meth:`_on_enter_kernel` and any
+        future phase entry that needs a deterministic profile anchor.
+        Routes through :meth:`TaskRegistry.create_or_return_existing`
+        so the standard dispatcher / audit / lease machinery applies
+        unchanged — the only thing this method is responsible for is
+        building a coherent params dict + a stable idempotency_key.
+
+        Params seeded:
+
+        * ``source='coordinator_internal'`` so downstream consumers
+          (breakdown collector, robustness alerting) can distinguish
+          auto-enqueued from LLM-proposed profiles.
+        * ``reason`` mirrored verbatim into the task params and the
+          idempotency_key suffix so a re-entry to KERNEL (defended
+          against by Inv-2.1 but possible in tests) deduplicates.
+        * ``base_extra_args`` from current_best (consistent with the
+          existing ``_materialize_approved_proposal`` profile branch).
+
+        Idempotency key: ``internal-profile-<reason>`` (phase-scoped;
+        ``reason`` is currently only ``"kernel_phase_entry"`` but the
+        suffix slot is reserved for future phase entries that might
+        also need a profile).
+
+        Config selection: we deliberately do NOT pass
+        ``state.baseline_config_path`` here. ProfileExecutor's
+        ``_resolve_default_config`` picks ``profile_sglang.yaml`` /
+        ``profile_vllm.yaml`` — the YAMLs that actually carry
+        ``profiler.torch_profiler.enabled: true`` so Magpie writes
+        the ``.trace.json.gz`` files downstream consumers
+        (``select_kernels`` / ``trace_analyze``) need. Passing the
+        baseline yaml here silently disables the torch profiler
+        (the materializer's ``is_profile`` heuristic reads the
+        YAML's profiler flag) and the executor ends with
+        ``error_class=no_trace_files``. Workload contract still
+        flows correctly via ``materialize_config_with_envs`` reading
+        CONC / ISL / OSL / TP / PRECISION / MAX_MODEL_LEN from env
+        vars regardless of which YAML it starts from.
+
+        Returns the freshly-created (or returned-existing) Task. The
+        caller can read ``task.task_id`` for logging or the
+        ``phase_history`` evidence stamp.
+        """
+        state = self.shared_state
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": str(reason),
+        }
+        cb = state.current_best or {}
+        if isinstance(cb, dict):
+            cb_args = str(cb.get("extra_sglang_args") or "")
+            if cb_args:
+                params["base_extra_args"] = cb_args
+        # Last-baseline benchmark_script feeds the executor's preflight
+        # path when set; falling back to the default is fine when not.
+        last_bl = state.last_baseline or {}
+        if isinstance(last_bl, dict):
+            bs = str(last_bl.get("benchmark_script") or "").strip()
+            if bs:
+                params["benchmark_script"] = bs
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="profile",
+            params=params,
+            idempotency_key=f"internal-profile-{reason}",
+        )
+        if was_existing:
+            log.info(
+                "internal-profile task already exists (idempotent: "
+                "task_id=%s, state=%s)",
+                task.task_id, task.state,
+            )
+        return task
+
+    # ------------------------------------------------------------------
+    # Auto-roofline — Coordinator-side dispatch on EXPLORE/KERNEL entry
+    # (replaces F3-3 / N31 final-roofline-on-CLOSE; gain-only freshness)
+    # ------------------------------------------------------------------
+    _ROOFLINE_GAIN_DRIFT_PCT: float = 10.0   # %  (gain drift threshold)
+
+    def _needs_fresh_roofline(self) -> bool:
+        """Return True iff a fresh ``roofline`` task should be enqueued.
+
+        Gate policy (gain-only, no time component):
+
+        * ``use_roofline_composite`` toggle off → always False (legacy
+          path; EXPLORE skips analysis entirely, KERNEL still runs the
+          plain ``auto_profile`` fallback in :meth:`_on_enter_kernel`).
+        * ``last_trace_analyze`` missing / ``analysis_md_text`` empty
+          → True (no snapshot at all).
+        * ``abs(cumulative_gain_validated -
+          last_trace_analyze.roofline_baseline_gain_at_snapshot)``
+          exceeds :attr:`_ROOFLINE_GAIN_DRIFT_PCT` percentage points
+          → True (existing snapshot is too stale relative to the
+          stack's progress).
+        * Otherwise → False (snapshot is still representative).
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "use_roofline_composite", False)):
+            return False
+        last_ta = state.last_trace_analyze or {}
+        if not isinstance(last_ta, dict):
+            last_ta = {}
+        if not last_ta or not last_ta.get("analysis_md_text"):
+            return True
+        try:
+            snap_gain = float(
+                last_ta.get("roofline_baseline_gain_at_snapshot") or 0.0
+            )
+        except (TypeError, ValueError):
+            snap_gain = 0.0
+        try:
+            cur_gain = float(state.cumulative_gain_validated or 0.0)
+        except (TypeError, ValueError):
+            cur_gain = 0.0
+        return abs(cur_gain - snap_gain) > self._ROOFLINE_GAIN_DRIFT_PCT
+
+    async def _enqueue_internal_roofline_task(self, *, reason: str) -> Task:
+        """Build + enqueue a Coordinator-internal ``roofline`` task.
+
+        Mirrors :meth:`_enqueue_internal_profile_task` but for the
+        composite ``roofline`` action (profile + trace_analyze + analysis.md
+        snapshot). The LLM no longer has propose_action permission for
+        ``roofline`` (removed from ``PHASE_ALLOWED_ACTIONS``); this is
+        the only path that fires it.
+
+        Idempotency key: ``internal-roofline-<reason>`` — phase-scoped
+        so a re-entry (Inv-2.1 forbids in production but resume edges
+        may reach here twice) dedups via the existing task.
+
+        Config selection: we deliberately do NOT pass
+        ``state.baseline_config_path`` here. The composite action's
+        profile sub-step is :class:`ProfileExecutor`, whose
+        ``_resolve_default_config`` picks ``profile_sglang.yaml`` /
+        ``profile_vllm.yaml`` — the YAMLs that actually carry
+        ``profiler.torch_profiler.enabled: true`` so Magpie writes the
+        ``.trace.json.gz`` files ``trace_analyze`` consumes. Passing
+        the baseline yaml here silently disables the torch profiler
+        and the sub-step ends with ``error_class=no_trace_files``.
+        Workload contract (CONC / ISL / OSL / TP / PRECISION /
+        MAX_MODEL_LEN) still flows correctly because
+        ``materialize_config_with_envs`` re-applies the env vars
+        regardless of which YAML the executor starts from.
+        """
+        state = self.shared_state
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": str(reason),
+        }
+        cb = state.current_best or {}
+        if isinstance(cb, dict):
+            cb_args = str(cb.get("extra_sglang_args") or "")
+            if cb_args:
+                params["base_extra_args"] = cb_args
+        last_bl = state.last_baseline or {}
+        if isinstance(last_bl, dict):
+            bs = str(last_bl.get("benchmark_script") or "").strip()
+            if bs:
+                params["benchmark_script"] = bs
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="roofline",
+            params=params,
+            idempotency_key=f"internal-roofline-{reason}",
+        )
+        if was_existing:
+            log.info(
+                "internal-roofline task already exists (idempotent: "
+                "task_id=%s, state=%s)",
+                task.task_id, task.state,
+            )
+        return task
+
+    async def _auto_roofline_pending_denial(self) -> "PolicyDenied | None":
+        """Return a ``PolicyDenied`` when an EXPLORE-entry auto-roofline
+        task is still in-flight; ``None`` otherwise.
+
+        Specialist dispatches block on this so first-round specialists
+        always see the ``analysis.md`` snapshot in their prompt's
+        ROOFLINE EVIDENCE section. The field is set by
+        :meth:`_on_enter_explore` and cleared in
+        :meth:`_promote_to_shared_state` once the task lands.
+        """
+        from .task_registry import TaskNotFound
+        pending_id = (
+            self.shared_state.auto_roofline_pending_task_id or ""
+        ).strip()
+        if not pending_id:
+            return None
+        try:
+            pending = await self.tasks.get(pending_id)
+        except TaskNotFound:
+            # Task got purged (resume edge / corrupt state) — clear
+            # the field and let the dispatch through; we never want a
+            # corrupted pointer to permanently block specialists.
+            self.shared_state.auto_roofline_pending_task_id = ""
+            return None
+        terminal_states = {"succeeded", "failed", "cancelled", "needs_manual_review"}
+        if pending.state in terminal_states:
+            # Race: the promote path hasn't cleared the field yet.
+            # Clear it here so subsequent dispatches go through.
+            self.shared_state.auto_roofline_pending_task_id = ""
+            return None
+        return PolicyDenied(
+            (
+                f"delegate{{action_name='specialist'}} waits for the "
+                f"auto-enqueued roofline task {pending_id!r} "
+                f"(state={pending.state!r}) — first-round specialists "
+                f"need the analysis.md snapshot."
+            ),
+            rule="specialist_wait_for_auto_roofline",
+            hint=(
+                "The Coordinator auto-enqueued a `roofline` task on "
+                "EXPLORE entry; re-emit the same specialist delegate "
+                "next tick (TaskRegistry will dedupe by content "
+                "fingerprint) once the roofline result lands."
+            ),
+        )
+
+    def _record_phase_entry_evidence(self, **kvs: Any) -> None:
+        """Merge ``kvs`` into the latest ``phase_history`` row's
+        ``evidence`` dict.
+
+        Used by phase-entry hooks (Gap-04 / future Gap-05/06) to
+        record what the hook actually did *after* the transition row
+        was already committed by ``record_phase_transition``. Pure
+        in-memory mutation + a single state.save; SharedState
+        ``phase_history`` is a list of dicts so the reference held
+        by ``self.shared_state.phase_history[-1]`` is the live row.
+
+        No-op when ``phase_history`` is empty (defensive).
+        """
+        history = self.shared_state.phase_history or []
+        if not history:
+            return
+        row = history[-1]
+        if not isinstance(row, dict):
+            return
+        evidence = row.get("evidence")
+        if not isinstance(evidence, dict):
+            evidence = {}
+            row["evidence"] = evidence
+        for k, v in kvs.items():
+            evidence[k] = v
         try:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             log.exception(
-                "Coordinator: failed to persist seeded action_scores",
+                "phase entry evidence: SharedState.save failed for kvs=%r",
+                kvs,
+            )
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.2 §5.4 + SWEEP phase auto-dispatch
+    # ------------------------------------------------------------------
+    async def _on_enter_sweep(self, *, from_phase: str) -> None:
+        """Auto-enqueue a ``sweep`` task on SWEEP entry.
+
+        SWEEP must "自动构造 sweep grid (来自
+        SKILL.md 默认 grid + Cortex ``recipe.sweep_grid`` 字段, 后者
+        优先), 自动 enqueue ``sweep`` action". Without this hook the
+        phase degrades to "LLM 自觉发 sweep" — and if ``max_minutes``
+        runs out before the LLM proposes, ``_enter_closing_phase``
+        force-enqueues report and the run finishes with zero sweep
+        coverage. Operators lose the cross-workload validation that
+        SWEEP exists to provide (§3.2 §5.4 first paragraph).
+
+        Idempotent via ``idempotency_key='internal-sweep-phase_entry'``:
+        a re-entry (defended against by Inv-2.1 in production, but
+        possible in tests / operator scripts) reuses the existing
+        task instead of duplicating.
+
+        After enqueue, stamps ``phase_history[-1].evidence`` with
+        ``auto_sweep_enqueued=True`` + ``auto_sweep_task_id`` +
+        ``auto_sweep_grid_source`` + ``auto_sweep_combos`` so the
+        breakdown collector can verify the hook
+        fired and which grid source was used.
+
+        Singleton enforcement: PolicyGate's
+        ``sweep_phase_singleton`` rule denies any LLM-emitted
+        ``delegate{action_name='sweep'}`` or
+        ``propose_action{action_name='sweep'}`` once this hook has
+        stamped ``evidence.auto_sweep_task_id`` for the active SWEEP
+        phase. Two concurrent sweep tasks would race for the same 8
+        GPUs and the same TCP port, crashing both vllm engines on
+        init (``HSA_STATUS_ERROR_OUT_OF_RESOURCES``) and producing
+        zero workload-curve coverage. The rule self-clears at
+        SWEEP→CLOSE because phase_history[-1] turns over. Operator
+        debug override: ``params.bypass_sweep_singleton=True`` on
+        the LLM intent payload.
+        """
+        state = self.shared_state
+        try:
+            task = await self._enqueue_internal_sweep_task(
+                reason="phase_entry",
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception(
+                "SWEEP entry hook: failed to enqueue auto-sweep: %r", exc,
+            )
+            self._record_phase_entry_evidence(auto_sweep_error=repr(exc)[:240])
+            return
+        # The params dict carries the chosen grid + source so we can
+        # mirror them onto the phase_history evidence without
+        # re-running the recipe lookup.
+        grid_source = str(task.params.get("source") or "")
+        isl_osl = task.params.get("isl_osl_configs") or []
+        conc_values = task.params.get("conc_values") or []
+        # Combos = |conc_values| × |isl_osl_configs| (sweep executor
+        # fans out CONC × (ISL,OSL)).
+        combos = int(len(conc_values)) * int(len(isl_osl)) if (
+            conc_values and isl_osl
+        ) else 0
+        log.info(
+            "SWEEP entry (from=%s): auto-enqueued sweep task=%s "
+            "(grid_source=%s, combos=%d)",
+            from_phase or "<unknown>", task.task_id, grid_source, combos,
+        )
+        self._record_phase_entry_evidence(
+            auto_sweep_enqueued=True,
+            auto_sweep_task_id=task.task_id,
+            auto_sweep_grid_source=grid_source,
+            auto_sweep_combos=combos,
+        )
+
+    async def _enqueue_internal_sweep_task(
+        self, *, reason: str,
+    ) -> Task:
+        """Build + enqueue a Coordinator-internal ``sweep`` task.
+
+        Mirrors the Gap-04 :meth:`_enqueue_internal_profile_task`
+        contract: ``source='coordinator_internal'``, ``reason``
+        verbatim into the idempotency_key suffix, ``config_path`` /
+        ``base_extra_args`` inherited from SharedState so the sweep
+        executor honours the workload contract + current_best
+        configuration.
+
+        Grid source priority:
+
+        1. ``state.warm_start_recipe.sweep_grid`` — Cortex-recorded
+           grid from a prior session for this (model, gpu) combo.
+        2. SKILL.md defaults (``sweep.DEFAULT_CONC_VALUES`` /
+           ``DEFAULT_ISL_OSL`` / ``DEFAULT_NUM_PROMPTS_FACTOR``).
+
+        Idempotency key: ``internal-sweep-<reason>``.
+
+        Returns the freshly-created (or returned-existing) Task. The
+        caller reads ``task.task_id`` + ``task.params['source']`` for
+        logging / evidence stamping.
+        """
+        state = self.shared_state
+        grid_params = self._build_sweep_params_from_recipe(state)
+        params: dict[str, Any] = {
+            "source": grid_params["source"],
+            "reason": str(reason),
+            "conc_values":      list(grid_params["conc_values"]),
+            "isl_osl_configs":  list(grid_params["isl_osl_configs"]),
+            "num_prompts_factor": int(grid_params["num_prompts_factor"]),
+        }
+        if state.baseline_config_path:
+            params["config_path"] = state.baseline_config_path
+        cb = state.current_best or {}
+        if isinstance(cb, dict):
+            cb_args = str(cb.get("extra_sglang_args") or "")
+            if cb_args:
+                params["base_extra_args"] = cb_args
+        # Mirror the last-baseline benchmark_script when present so a
+        # sweep run that re-launches sglang/vllm uses the same shell
+        # wrapper as baseline (matches Gap-04 _enqueue_internal_profile_task).
+        last_bl = state.last_baseline or {}
+        if isinstance(last_bl, dict):
+            bs = str(last_bl.get("benchmark_script") or "").strip()
+            if bs:
+                params["benchmark_script"] = bs
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="sweep",
+            params=params,
+            idempotency_key=f"internal-sweep-{reason}",
+        )
+        if was_existing:
+            log.info(
+                "internal-sweep task already exists (idempotent: "
+                "task_id=%s, state=%s)", task.task_id, task.state,
+            )
+        return task
+
+    @staticmethod
+    def _build_sweep_params_from_recipe(state: SharedState) -> dict[str, Any]:
+        """Pick a sweep grid: Cortex recipe first, defaults fallback.
+
+        "来自 SKILL.md 默认 grid + Cortex
+        ``recipe.sweep_grid`` 字段, 后者优先". The recipe lookup is
+        defensive — at the time of writing the Cortex T0 response is
+        still free-text under ``warm_start_recipe.raw``; a future
+        Cortex schema PR (§3.14 R-13) will add a structured
+        ``sweep_grid`` field. This helper accepts either:
+
+        * ``warm_start_recipe['sweep_grid'] = {conc_values: [...],
+          isl_osl_configs: [...], num_prompts_factor: int}`` — direct
+          structured form (preferred when it arrives).
+        * Anything else → defaults.
+
+        Returns a dict with keys ``source`` / ``conc_values`` /
+        ``isl_osl_configs`` / ``num_prompts_factor``. ``source`` is
+        one of ``cortex_recipe`` / ``skill_md_default`` so downstream
+        observability (breakdown.sweep.grid_source) can tell which
+        path won.
+
+        Defensive against malformed recipe entries:
+
+        * Non-dict ``warm_start_recipe`` → defaults.
+        * Non-dict ``sweep_grid`` → defaults.
+        * ``conc_values`` not a non-empty list → fall back to the
+          SKILL.md default for that single field.
+        * Same for ``isl_osl_configs``.
+        * ``num_prompts_factor`` not a positive int → default.
+
+        (Per-field fallback rather than all-or-nothing lets a recipe
+        that only overrides one dimension still benefit from the
+        defaults for the others.)
+        """
+        from .action_executors.sweep import (
+            DEFAULT_CONC_VALUES,
+            DEFAULT_ISL_OSL,
+            DEFAULT_NUM_PROMPTS_FACTOR,
+        )
+
+        recipe = getattr(state, "warm_start_recipe", None)
+        sweep_grid = None
+        if isinstance(recipe, dict):
+            sg = recipe.get("sweep_grid")
+            if isinstance(sg, dict):
+                sweep_grid = sg
+
+        def _coerce_int_list(value: Any) -> list[int] | None:
+            if not isinstance(value, list) or not value:
+                return None
+            out: list[int] = []
+            for v in value:
+                try:
+                    out.append(int(v))
+                except (TypeError, ValueError):
+                    return None
+            return out if out else None
+
+        def _coerce_isl_osl_list(value: Any) -> list[str] | None:
+            if not isinstance(value, list) or not value:
+                return None
+            out: list[str] = []
+            for v in value:
+                # Accept either "<ISL>:<OSL>" strings or [isl, osl] pairs.
+                if isinstance(v, str) and ":" in v:
+                    out.append(v)
+                    continue
+                if (
+                    isinstance(v, (list, tuple)) and len(v) == 2
+                    and all(isinstance(x, (int, str)) for x in v)
+                ):
+                    out.append(f"{int(v[0])}:{int(v[1])}")
+                    continue
+                return None
+            return out if out else None
+
+        conc_values: list[int] = list(DEFAULT_CONC_VALUES)
+        isl_osl_configs: list[str] = list(DEFAULT_ISL_OSL)
+        num_prompts_factor: int = int(DEFAULT_NUM_PROMPTS_FACTOR)
+        used_recipe = False
+
+        if sweep_grid is not None:
+            cv = _coerce_int_list(sweep_grid.get("conc_values"))
+            if cv is not None:
+                conc_values = cv
+                used_recipe = True
+            io = _coerce_isl_osl_list(sweep_grid.get("isl_osl_configs"))
+            if io is not None:
+                isl_osl_configs = io
+                used_recipe = True
+            npf_raw = sweep_grid.get("num_prompts_factor")
+            try:
+                npf = int(npf_raw) if npf_raw is not None else None
+            except (TypeError, ValueError):
+                npf = None
+            if npf is not None and npf > 0:
+                num_prompts_factor = npf
+                used_recipe = True
+            if not used_recipe:
+                log.warning(
+                    "sweep recipe present but unusable (no recognisable "
+                    "fields); falling back to SKILL.md defaults"
+                )
+
+        return {
+            "source": "cortex_recipe" if used_recipe else "skill_md_default",
+            "conc_values":        conc_values,
+            "isl_osl_configs":    isl_osl_configs,
+            "num_prompts_factor": num_prompts_factor,
+        }
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.2 §5.5 + CLOSE phase 5-step sequencer
+    # ------------------------------------------------------------------
+    # Class-level timeouts for the CLOSE sequencer's wait-for-task
+    # polls. Class attributes (rather than constants in the method)
+    # so tests can override per-instance with small values without
+    # patching method internals. Production defaults match KB_design
+    # §3.2 §5.5: report ≤ 10 min (matches ``BaselineExecutor`` cap);
+    # session_breakdown ≤ 5 min (tiny report, lots of headroom).
+    CLOSE_REPORT_TIMEOUT_SEC: float = 600.0
+    CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC: float = 300.0
+    CLOSE_NDJSON_DRAIN_TIMEOUT_SEC: float = 60.0
+
+    async def _on_enter_close(self, *, from_phase: str) -> None:
+        """CLOSE phase 5-step sequencer.
+
+        Runs the fixed order the design contract requires:
+
+        1. ``report``                — generate markdown / json report
+        2. ``session_breakdown``     — write ``session_breakdown.json``
+        3. NDJSON drain              — flush async Cortex queue
+        4. Cortex ``session commit`` — promote hypothesize edges
+        5. mark ``close_sequence_done``
+
+        Each step records a row under
+        ``phase_history[-1].evidence.close_steps`` so the breakdown
+        collector (and operators) can verify the sequence completed.
+        Steps are best-effort: a failure in any step stamps
+        ``status='failed' / 'timeout'`` evidence but does not abort
+        the remaining steps. Step 5 always runs (so the cli.finally
+        short-circuit is consistent even when steps 1-4 partly
+        failed).
+
+        Idempotence: report / session_breakdown enqueue uses fixed
+        idempotency_keys (``internal-report-close_phase_entry`` /
+        ``internal-session_breakdown-close_phase_entry``) so a phase
+        re-entry (Inv-2.1 forbids in production, but resume from a
+        crash mid-sequencer counts) reuses existing tasks. NDJSON
+        drain + Cortex commit are themselves idempotent for a given
+        sid.
+
+        The sequencer runs INLINE inside the hook — it doesn't wait
+        for the reactor / dispatcher tick boundary. Steps 1 and 2
+        enqueue tasks then poll ``_wait_for_task_terminal`` until the
+        dispatcher (which the same Coordinator.run() loop drives)
+        picks them up and finishes. Step 3 + 4 call the cortex_kb
+        client synchronously. Step 5 is a single SharedState write.
+        """
+        log.info("CLOSE entered (from=%s); starting 4-step close sequence",
+                 from_phase or "<unknown>")
+        await self._record_close_step("sequencer_started", status="running")
+
+        # CLOSE-entry auto-roofline (former N31) was deleted in favour
+        # of the EXPLORE-entry / KERNEL-entry hooks; the gain-only
+        # freshness gate (:meth:`_needs_fresh_roofline`) keeps the
+        # snapshot aligned with ``cumulative_gain_validated`` without
+        # paying the cost a third time on CLOSE.
+
+        # ---------------- Step 1: report ----------------
+        try:
+            report_task = await self._enqueue_internal_report_task(
+                reason="close_phase_entry",
+            )
+            terminal_state = await self._wait_for_task_terminal(
+                report_task.task_id,
+                timeout_sec=self.CLOSE_REPORT_TIMEOUT_SEC,
+            )
+            if terminal_state in {"succeeded", None}:
+                await self._record_close_step(
+                    "report", status="done",
+                    task_id=report_task.task_id,
+                )
+            else:
+                await self._record_close_step(
+                    "report", status="failed",
+                    task_id=report_task.task_id,
+                    detail=f"task_state={terminal_state!r}",
+                )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("CLOSE step 1 (report) failed")
+            await self._record_close_step(
+                "report", status="failed", detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 2: session_breakdown ----------------
+        try:
+            bd_task = await self._enqueue_internal_session_breakdown_task(
+                reason="close_phase_entry",
+            )
+            terminal_state = await self._wait_for_task_terminal(
+                bd_task.task_id,
+                timeout_sec=self.CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC,
+            )
+            if terminal_state in {"succeeded", None}:
+                await self._record_close_step(
+                    "session_breakdown", status="done",
+                    task_id=bd_task.task_id,
+                )
+            else:
+                await self._record_close_step(
+                    "session_breakdown", status="failed",
+                    task_id=bd_task.task_id,
+                    detail=f"task_state={terminal_state!r}",
+                )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("CLOSE step 2 (session_breakdown) failed")
+            await self._record_close_step(
+                "session_breakdown", status="failed",
+                detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 3: NDJSON drain ----------------
+        if self.cortex_kb is not None and self.cortex_kb.enabled:
+            try:
+                drain_report = self.cortex_kb.drain_pending(
+                    timeout_sec=self.CLOSE_NDJSON_DRAIN_TIMEOUT_SEC,
+                )
+                remaining = int(drain_report.get("remaining", 0))
+                if remaining > 0:
+                    await self._record_close_step(
+                        "ndjson_drain",
+                        status="incomplete",
+                        detail=f"remaining={remaining}",
+                    )
+                else:
+                    await self._record_close_step(
+                        "ndjson_drain", status="done",
+                    )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception("CLOSE step 3 (NDJSON drain) failed")
+                await self._record_close_step(
+                    "ndjson_drain", status="failed",
+                    detail=repr(exc)[:240],
+                )
+        else:
+            await self._record_close_step("ndjson_drain", status="skipped")
+
+        # ---------------- Step 4: Cortex session commit ----------------
+        sid = (self.shared_state.cortex_session_id or "").strip()
+        if (
+            self.cortex_kb is not None
+            and self.cortex_kb.enabled
+            and sid
+            and not self.shared_state.cortex_session_summary
+        ):
+            try:
+                summary = self.cortex_kb.session_commit(sid)
+                self.shared_state.cortex_session_summary = dict(summary)
+                await self._record_close_step("cortex_commit", status="done")
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception("CLOSE step 4 (Cortex commit) failed")
+                # Match _cortex_t4_hook's failure semantics so
+                # observability is consistent across the two paths.
+                self.shared_state.cortex_session_summary = {
+                    "status": "commit_failed",
+                    "error":  str(exc)[:512],
+                }
+                if not self.shared_state.stop_reason:
+                    self.shared_state.set_stop_reason("cortex_commit_failed")
+                await self._record_close_step(
+                    "cortex_commit", status="failed",
+                    detail=repr(exc)[:240],
+                )
+        else:
+            # No Cortex wired / already committed / no sid → skip without
+            # error. ``cortex_t4_hook`` (Coordinator.stop) also skips.
+            await self._record_close_step("cortex_commit", status="skipped")
+
+        # ---------------- Step 5: mark done ----------------
+        self.shared_state.close_sequence_done = True
+        # phase-machine CLOSE path must set
+        # ``stop_reason`` so the main run loop's outer check
+        # (Coordinator.run line ~1936) terminates the run on the next
+        # tick. Without this the sequencer completes, writes the
+        # report + breakdown, and the loop keeps ticking forever
+        # (orchestration re-proposing report, robustness re-emitting
+        # alerts, Cortex returning 409 on the committed session).
+        # The wall-clock deadline path (``_enter_closing_phase``) sets
+        # ``time_exhausted`` from the loop body (line ~1971); both
+        # paths converge on the same vocab term per
+        # ``STOP_REASON_VOCAB``. The ``not stop_reason`` guard
+        # preserves Step 4's ``cortex_commit_failed`` setter.
+        if not self.shared_state.stop_reason:
+            self.shared_state.set_stop_reason("time_exhausted")
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "CLOSE step 5 (close_sequence_done save) failed; cli.finally "
+                "will still write a safety-net breakdown"
+            )
+        await self._record_close_step("done", status="done")
+        log.info("CLOSE 5-step sequencer complete")
+
+    async def _enqueue_internal_report_task(
+        self, *, reason: str,
+    ) -> Task:
+        """Build + enqueue a Coordinator-internal ``report`` task.
+
+        Mirrors :meth:`_enqueue_internal_profile_task` /
+        :meth:`_enqueue_internal_sweep_task` shape. Idempotency_key
+        ``internal-report-<reason>``.
+
+        Reuses ``state.closing_report_task_id`` when set so the
+        wall-clock deadline path (``_enter_closing_phase``) and the
+        CLOSE phase sequencer don't race to insert two report tasks
+        with different ids. When the wall-clock path enqueued first,
+        the sequencer simply waits for that task instead.
+        """
+        existing_id = (self.shared_state.closing_report_task_id or "").strip()
+        if existing_id:
+            try:
+                task = await self.tasks.get(existing_id)
+                log.info(
+                    "internal-report task already enqueued by wall-clock "
+                    "deadline path (task_id=%s, state=%s); sequencer will "
+                    "wait for it", task.task_id, task.state,
+                )
+                return task
+            except Exception:  # noqa: BLE001 — TaskNotFound + friends
+                # Stale id (resume from a wiped-tasks-table session); fall
+                # through to fresh enqueue.
+                pass
+
+        params: dict[str, Any] = {
+            "source":         "coordinator_internal",
+            "reason":         str(reason),
+            "session_dir":    str(self.session_dir),
+            "max_highlights": 50,
+        }
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="report",
+            params=params,
+            idempotency_key=f"internal-report-{reason}",
+            requires_lanes=[],
+            allowed_tools=["Read"],
+            side_effects=["writes_results"],
+            lease_ttl_sec=120,
+        )
+        # Mirror onto state for back-compat with the existing wall-clock
+        # path inspectors (``closing_report_task_id`` is also used by
+        # robustness alerting + breakdown summary lines).
+        if not self.shared_state.closing_report_task_id:
+            self.shared_state.closing_report_task_id = task.task_id
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "internal-report: closing_report_task_id save failed"
+                )
+        if was_existing:
+            log.info(
+                "internal-report task reused (idempotent: task_id=%s, "
+                "state=%s)", task.task_id, task.state,
+            )
+        return task
+
+    async def _enqueue_internal_steward_task(
+        self, *, reason: str,
+    ) -> "Task | None":
+        """IR-7 — enqueue a Coordinator-owned session_steward_specialist task.
+
+        Mirrors :meth:`_enqueue_internal_report_task` shape, with two
+        differences:
+
+        * ``kind='specialist'`` (the standard SpecialistRunner path
+          handles the LLM dispatch + worktree-less subprocess);
+        * idempotency key includes the current EXPLORE round id so
+          repeated calls within the same round collapse to one task,
+          while a new plateau in a later round can dispatch fresh.
+
+        Bypasses PolicyGate the same way ``closing_report_task`` does
+        (Coordinator-internal callers don't go through the
+        propose/delegate validation path). LLM-side proposals of
+        ``assess_remaining_gaps`` are throttled separately by
+        :meth:`_assess_remaining_gaps_throttle_denial`.
+
+        Returns ``None`` when a task already exists in the registry
+        with the same idempotency key (whether queued / running /
+        succeeded). The caller (``_maybe_enqueue_steward``) treats
+        ``None`` as "nothing to do this tick".
+        """
+        round_id = int(
+            (self.shared_state.explore_search or {}).get("cursor") or 0
+        )
+        idempotency_key = f"internal-steward-round{round_id}"
+        # Avoid re-enqueueing if a steward verdict already landed in
+        # this round (paranoia — wants_steward_assessment should have
+        # returned False, but defense-in-depth).
+        last = self.shared_state.last_remaining_gaps_assessment or {}
+        if isinstance(last, dict) and last.get(
+            "round_at_assessment"
+        ) == round_id and last.get("recommendation"):
+            return None
+        params: dict[str, Any] = {
+            "domain": "session_steward_specialist",
+            "gap_canonical_id": f"gap.steward.round{round_id}",
+            "gap_symptom": (
+                "EXPLORE plateau triggered; assess remaining leverage "
+                "and recommend continue_explore / advance_to_kernel / "
+                "stop_session."
+            ),
+            "gap_layer": "session_strategy",
+            "max_turns": 8,
+            "source": "coordinator_internal",
+            "reason": str(reason),
+        }
+        # Warm the specialist params the same way the LLM-dispatch path
+        # does so the prompt sees real hardware + workload context.
+        await self._warm_specialist_params(params)
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=["research_lane"],
+                allowed_tools=[
+                    "emit_intent", "Read", "Grep", "Glob", "Bash",
+                    "WebSearch", "WebFetch",
+                ],
+                side_effects=["workspace_write"],
+                lease_ttl_sec=1800,
+            )
+        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+            log.exception(
+                "internal-steward: enqueue failed (round=%d)", round_id,
+            )
+            return None
+        if was_existing:
+            log.info(
+                "internal-steward task reused (task_id=%s, state=%s)",
+                task.task_id, task.state,
+            )
+        else:
+            log.info(
+                "internal-steward dispatched: task_id=%s round=%d "
+                "reason=%s",
+                task.task_id, round_id, reason,
+            )
+        return task
+
+    async def _maybe_enqueue_steward(self) -> None:
+        """IR-7 — enqueue a steward task when phase_state says we need one.
+
+        Called from ``_advance_phase_if_needed`` after
+        ``compute_next_phase`` returns ``None``. The helper is pure
+        sugar over :meth:`_enqueue_internal_steward_task` + the
+        phase_state predicate.
+        """
+        try:
+            wants = _phase_state.wants_steward_assessment(
+                self.shared_state,
+                budget_pct=self._phase_budget_pct,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("steward: wants_steward_assessment failed")
+            return
+        if not wants:
+            return
+        await self._enqueue_internal_steward_task(
+            reason="coordinator_plateau",
+        )
+
+    async def _enqueue_internal_session_breakdown_task(
+        self, *, reason: str,
+    ) -> Task:
+        """Build + enqueue a Coordinator-internal ``session_breakdown``
+        task.
+
+        Same idempotency contract as the report helper. The
+        ``session_breakdown`` action is already registered in cli's
+        ``_REAL_EXECUTORS_FULL`` (action_executors/session_breakdown.py),
+        so the standard dispatcher picks it up without special-casing.
+        """
+        params: dict[str, Any] = {
+            "source":      "coordinator_internal",
+            "reason":      str(reason),
+            "session_dir": str(self.session_dir),
+        }
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="session_breakdown",
+            params=params,
+            idempotency_key=f"internal-session_breakdown-{reason}",
+            requires_lanes=[],
+            allowed_tools=["Read"],
+            side_effects=["writes_results"],
+            lease_ttl_sec=120,
+        )
+        if was_existing:
+            log.info(
+                "internal-session_breakdown task reused (idempotent: "
+                "task_id=%s, state=%s)", task.task_id, task.state,
+            )
+        return task
+
+    async def _wait_for_task_terminal(
+        self, task_id: str, *, timeout_sec: float,
+    ) -> str | None:
+        """Poll the TaskRegistry until ``task_id`` reaches a terminal
+        state, with a wall-clock timeout.
+
+        Returns the final ``task.state`` (``"succeeded"`` / ``"failed"``
+        / ``"cancelled"`` / ``"needs_manual_review"``) or ``None`` on
+        timeout (caller treats None as a soft "let's not block on this
+        forever" — the CLOSE sequencer records ``status='timeout'``).
+
+        Polling interval is 100ms — small relative to typical report /
+        session_breakdown wall time (5-30s); large enough to not
+        thrash sqlite under contention.
+        """
+        from .task_registry import TaskNotFound
+
+        deadline = asyncio.get_event_loop().time() + max(0.0, float(timeout_sec))
+        poll_interval = 0.1
+        terminal = {"succeeded", "failed", "cancelled", "needs_manual_review"}
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                task = await self.tasks.get(task_id)
+            except TaskNotFound:
+                return None
+            if task.state in terminal:
+                return task.state
+            await asyncio.sleep(poll_interval)
+        return None
+
+    async def _record_close_step(
+        self,
+        step: str,
+        *,
+        status: str,
+        task_id: str = "",
+        detail: str = "",
+    ) -> None:
+        """Append one row to ``phase_history[-1].evidence.close_steps``.
+
+        Concrete row shape::
+
+            {"step": "report", "status": "done",
+             "task_id": "abc123", "detail": "",
+             "ts": "2026-..."}
+
+        Best-effort: a malformed phase_history row (missing dict /
+        non-list close_steps) gets a fresh structure installed; a
+        SharedState.save failure is logged but doesn't abort the
+        sequencer. Mirrors the contract of
+        :meth:`_record_phase_entry_evidence` but persists per-step
+        rather than per-hook.
+        """
+        history = self.shared_state.phase_history or []
+        if not history:
+            return
+        row = history[-1]
+        if not isinstance(row, dict):
+            return
+        evidence = row.get("evidence")
+        if not isinstance(evidence, dict):
+            evidence = {}
+            row["evidence"] = evidence
+        steps = evidence.get("close_steps")
+        if not isinstance(steps, list):
+            steps = []
+            evidence["close_steps"] = steps
+        entry: dict[str, Any] = {
+            "step":   step,
+            "status": status,
+            "ts":     datetime.now(timezone.utc).isoformat(),
+        }
+        if task_id:
+            entry["task_id"] = task_id
+        if detail:
+            entry["detail"] = detail
+        steps.append(entry)
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "close_step save failed for step=%r status=%r", step, status,
             )
 
     # ==================================================================
@@ -856,6 +2285,8 @@ class Coordinator:
             for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
+            # phase machine advance at tick boundary.
+            await self._advance_phase_if_needed()
 
     # ==================================================================
     # Long-run interface (DESIGN §9 + §21)
@@ -929,9 +2360,9 @@ class Coordinator:
         try:
             while not stop_reason:
                 tick_n += 1
-                # Bump the persistent tick counter — drives cooldown / aging
-                # math in orchestrator/scoring.py. Persisted on the next
-                # save() (after _promote_to_shared_state or stop).
+                # Bump the persistent tick counter — drives phase / plateau
+                # math. Persisted on the next save() (after
+                # _promote_to_shared_state or stop).
                 self.shared_state.increment_tick()
                 in_closing = self.shared_state.closing_phase
                 # Run one reactor + dispatcher pass. During closing, skip
@@ -943,6 +2374,11 @@ class Coordinator:
                         await self._reactor_pass(name)
                 if not self._stop.is_set():
                     await self._pump_dispatcher_once()
+                # phase machine advance at tick boundary.
+                # Runs even when ``in_closing`` so CLOSE phase still gets
+                # recorded into phase_history when the final breakdown
+                # writer transitions us in.
+                await self._advance_phase_if_needed()
 
                 # N33: bump ``consecutive_silent_ticks`` when the post-
                 # tick state shows nothing in flight (no queued / running
@@ -1072,7 +2508,7 @@ class Coordinator:
         finally:
             if self.shared_state.closing_phase:
                 self.shared_state.closing_phase = False
-            self.shared_state.stop_reason = stop_reason or "unknown"
+            self.shared_state.set_stop_reason(stop_reason or "unknown")
             self.shared_state.save(self.session_dir)
             log.info(
                 "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
@@ -1095,7 +2531,19 @@ class Coordinator:
         return self.shared_state.stop_reason
 
     async def _has_no_more_leverage(self) -> bool:
-        """Return True when automated params/backend/kernel levers are exhausted."""
+        """Return True when automated explore/kernel levers are exhausted.
+
+        v0.8 plateau judgment lives in :mod:`phase_state`; this helper
+        is the safety-net check the closing-phase path consults before
+        winding the session down. We require:
+
+        1. baseline + current_best present (otherwise we are still in
+           PRELUDE / never finished a round)
+        2. no pending proposals or queued / running tasks
+        3. ``params_no_promote_streak >= 5`` (proxy still used as
+           the cross-phase plateau hint; see KB_gaps/Gap-15)
+        4. every reusable kernel_id is rejected.
+        """
         if self.shared_state.baseline_tput <= 0:
             return False
         if not self.shared_state.current_best:
@@ -1104,80 +2552,9 @@ class Coordinator:
             return False
         if await self.tasks.queued() or await self.tasks.running():
             return False
-
-        if self.shared_state.params_no_promote_streak < 5 and not self._params_grid_exhausted():
+        if self.shared_state.params_no_promote_streak < 5:
             return False
-        if not self._params_grid_exhausted():
-            return False
-        # Phase 4 of the dedup-by-fingerprint plan: backends has parity
-        # with params here. Don't switch off explore until BOTH ledgers
-        # have run out of fresh fingerprints — otherwise a brief params
-        # plateau prematurely shuts down the (still productive)
-        # backends search.
-        if not self._backends_grid_exhausted():
-            return False
-        if (
-            self.action_registry is not None
-            and self.shared_state.all_top_actions_policy_locked(
-                self.action_registry,
-            )
-        ):
-            return True
         return self._all_reusable_kernels_rejected()
-
-    def _params_grid_exhausted(self) -> bool:
-        search = self.shared_state.params_search or {}
-        if not isinstance(search, dict) or not search:
-            return False
-        try:
-            from .action_executors.params import DEFAULT_PARAMS_GRID
-            grid_size = len(DEFAULT_PARAMS_GRID)
-        except Exception:  # noqa: BLE001
-            grid_size = 0
-        tested = search.get("tested") or {}
-        tested_count = len(tested) if isinstance(tested, dict) else 0
-        cursor = int(search.get("cursor") or 0)
-        rejected_count = len(search.get("rejected") or [])
-        if grid_size <= 0:
-            return bool(search.get("params_search_exhausted"))
-        return (
-            tested_count >= grid_size
-            or cursor >= grid_size
-            or rejected_count >= grid_size
-        )
-
-    def _backends_grid_exhausted(self) -> bool:
-        """Backends-side parity of :meth:`_params_grid_exhausted`.
-
-        Returns True when ``backends_search.tested`` has covered the
-        default seed grid (either by count or by the executor's own
-        ``backends_search_exhausted`` flag from the last round). An
-        unseeded ledger returns False — Orch hasn't run backends yet,
-        so it isn't "exhausted", it's simply unexplored.
-        """
-        search = self.shared_state.backends_search or {}
-        if not isinstance(search, dict) or not search:
-            return False
-        # The executor stamps this on its last round when no fresh
-        # fingerprint survived dedup — trust it when present.
-        if search.get("backends_search_exhausted"):
-            return True
-        try:
-            from .action_executors.backends import DEFAULT_BACKENDS_GRID
-            grid_size = len(DEFAULT_BACKENDS_GRID)
-        except Exception:  # noqa: BLE001
-            grid_size = 0
-        tested = search.get("tested") or {}
-        tested_count = len(tested) if isinstance(tested, dict) else 0
-        cursor = int(search.get("cursor") or 0)
-        rejected_count = len(search.get("rejected") or [])
-        if grid_size <= 0:
-            return False
-        return (
-            tested_count >= grid_size
-            or cursor >= grid_size
-            or rejected_count >= grid_size
-        )
 
     async def _enter_closing_phase(self, *, grace_sec: float) -> float:
         """Enter report-flush phase after the wall-clock deadline.
@@ -1210,77 +2587,6 @@ class Coordinator:
             log.exception(
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )
-
-        # N31 (May 2026): if the session has accumulated validated
-        # gain but only the baseline roofline snapshot exists, enqueue
-        # a final ``roofline`` task BEFORE the closing report so the
-        # report's ``## Roofline Comparison`` section can render a
-        # real before/after view of the hot-kernel distribution.
-        #
-        # Skip when:
-        # * cumulative_gain_validated <= 0 (no real improvement to
-        #   compare against -- the latest snapshot IS the final view)
-        # * optimization_stack empty (same reason)
-        # * roofline_snapshot_id >= 2 already (a snapshot has been
-        #   captured post-optimization, no need for another)
-        # * stop_reason set (the run aborted before getting here;
-        #   running an expensive ~20min roofline before report would
-        #   delay the diagnostic the operator is waiting for)
-        # Honors the same N31 exception in ``_proposal_denial_for_
-        # roofline`` so the LLM and Coordinator agree on when a
-        # post-optimization snapshot is wanted.
-        cached_final = self.shared_state.last_trace_analyze or {}
-        snap_id = cached_final.get("roofline_snapshot_id", 0)
-        validated_gain = float(
-            self.shared_state.cumulative_gain_validated or 0.0
-        )
-        stack_len = len(self.shared_state.optimization_stack or [])
-        want_final_roofline = (
-            isinstance(snap_id, int) and snap_id == 1
-            and validated_gain > 0.0
-            and stack_len >= 1
-            and not (self.shared_state.stop_reason or "").strip()
-        )
-        if want_final_roofline:
-            roofline_key = (
-                f"closing-roofline-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
-            )
-            try:
-                roofline_task, _ = await self.tasks.create_or_return_existing(
-                    kind="roofline",
-                    params={
-                        "session_dir": str(self.session_dir),
-                        "notes": (
-                            "N31 closing-phase final snapshot for the "
-                            "Roofline Comparison report section "
-                            "(post-optimization vs baseline)."
-                        ),
-                    },
-                    idempotency_key=roofline_key,
-                    requires_lanes=["profile_lane"],
-                    allowed_tools=[],
-                    side_effects=["writes_results"],
-                    lease_ttl_sec=int(grace_sec),
-                )
-                log.info(
-                    "Coordinator: N31 enqueued final roofline task=%s "
-                    "(validated_gain=%.2f%%, stack_len=%d) before report",
-                    roofline_task.task_id, validated_gain, stack_len,
-                )
-                await self.bus.append_and_seq(Message.new(
-                    "coordinator", "*", "event",
-                    {
-                        "kind": "n31_final_roofline_enqueued",
-                        "task_id": roofline_task.task_id,
-                        "validated_gain": validated_gain,
-                        "stack_len": stack_len,
-                    },
-                ))
-            except Exception:  # noqa: BLE001
-                log.exception(
-                    "Coordinator: N31 final roofline enqueue failed; "
-                    "report will fall through to single-snapshot mode",
-                )
 
         idempotency_key = (
             f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
@@ -1327,7 +2633,7 @@ class Coordinator:
         }
 
     def _all_reusable_kernels_rejected(self) -> bool:
-        select = self.shared_state.last_trace_analyze or {}
+        select = self.shared_state.last_select_kernels or {}
         reusable = {
             str(k) for k in (select.get("reusable_native_kernel_ids") or [])
             if k
@@ -1445,6 +2751,49 @@ class Coordinator:
                 },
             )
 
+    async def _scan_stale_specialists(self) -> list[dict[str, Any]]:
+        """Return TaskRegistry rows for ``kind='specialist'`` tasks whose
+        wall-clock running duration exceeds ``self._specialist_stale_sec``.
+
+        Wired through ``_compose_prompt`` so Robustness can decide to
+        emit ``kill_task``. v0.8 §3.3 §4.4 contract; M5 lands the actual
+        ``specialist`` task kind so the registry stays empty until then —
+        the scanner returns ``[]`` and Robustness shows ``count=0``.
+
+        Each row is ``{"task_id": str, "running_seconds": float,
+        "kind": "specialist"}`` (a deliberately small projection so the
+        prompt block stays narrow). Failures (registry unreachable, etc.)
+        return ``[]`` and log; **never** raise — the prompt assembly
+        cannot block on an audit query.
+        """
+        try:
+            running = await self.tasks.running()
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: tasks.running() failed during stale scan")
+            return []
+        if not running:
+            return []
+        stale: list[dict[str, Any]] = []
+        now_unix = time.time()
+        for t in running:
+            if (t.kind or "").strip() != "specialist":
+                continue
+            # ``updated_at`` is the last state-transition timestamp; for a
+            # ``running`` task that's when the dispatcher promoted it
+            # (no later transition touches ``updated_at`` until
+            # completion). Parse it as the start of the running window.
+            started_unix = _parse_iso_unix(t.updated_at)
+            if started_unix <= 0:
+                continue
+            running_sec = max(0.0, now_unix - started_unix)
+            if running_sec >= self._specialist_stale_sec:
+                stale.append({
+                    "task_id":         t.task_id,
+                    "kind":            t.kind,
+                    "running_seconds": running_sec,
+                })
+        return stale
+
     async def _compose_prompt(self, agent_name: str) -> str:
         """v0.6 §8.3 prompt: SharedState summary + inbox tail.
 
@@ -1466,13 +2815,26 @@ class Coordinator:
         # with PolicyGate's path-containment guard.
         sections.append(f"SESSION_DIR={self.session_dir}")
 
-        # 0a. Mission progress (Orchestration only). Phase 2 — this is the
-        # *outcome-shaped* projection of SharedState (raw vs validated
-        # gain, time spent vs budget, validate_stack staleness) that the
-        # decision framework in the system prompt expects to see at the
-        # very top of every tick. Crucially, it surfaces the
-        # ``validate_stack required`` signal *before* the verbose
-        # SharedState dump so the LLM doesn't miss it.
+        # per-tick phase block injected for **every** agent.
+        # Comes high in the prompt (right after SESSION_DIR) because R1
+        # rejection is driven by the current phase; the LLM should see
+        # phase context before anything else.
+        try:
+            phase_block = self.shared_state.to_phase_status_summary(
+                budget_pct=self._phase_budget_pct,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("Coordinator: phase status summary failed")
+            phase_block = ""
+        if phase_block:
+            sections.append("=== Phase ===")
+            sections.append(phase_block)
+
+        # 0a. Mission progress (Orchestration only). Outcome-shaped
+        # projection of SharedState (raw vs validated gain, time spent
+        # vs budget, optimization-stack rebench freshness) shown before
+        # the verbose SharedState dump so the LLM cannot miss the
+        # ``stack rebench required`` signal (v0.8 M3 / KB_gaps/Gap-10).
         if agent_name == "orchestration":
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
@@ -1532,16 +2894,49 @@ class Coordinator:
                     "by the deadline."
                 )
 
+        # Time budget — emitted for **every** agent that needs it. Robustness
+        # consumes it to fire the ``deadline_imminent`` signal that escalates
+        # to a ``delegate(report)`` wind-down; Orchestration uses it as a
+        # heads-up so it stops proposing fresh explore rounds when the
+        # deadline is close. Kernel and Critic ignore the section; their
+        # prompt parsers don't subscribe to it.
+        if (
+            agent_name in ("orchestration", "robustness")
+            and self._run_deadline is not None
+            and self._run_started_monotonic is not None
+        ):
+            remaining_min = max(
+                0.0, (self._run_deadline - time.monotonic()) / 60.0,
+            )
+            elapsed_min = (
+                time.monotonic() - self._run_started_monotonic
+            ) / 60.0
+            budget_min = self.shared_state.max_minutes or 0
+            sections.append("=== Time budget ===")
+            sections.append(
+                f"elapsed={elapsed_min:.1f}min  remaining={remaining_min:.1f}min  "
+                f"budget={budget_min}min  "
+                f"closing_phase={self.shared_state.closing_phase}"
+            )
+            if (
+                agent_name == "orchestration"
+                and remaining_min <= 5.0
+                and not self.shared_state.closing_phase
+            ):
+                sections.append(
+                    "WARNING: < 5 min remaining. Prefer `report` next; new "
+                    "`explore` rounds (which inline the stack rebench) "
+                    "will likely be cut by the deadline."
+                )
+
         # 1. Shared session state — gives the agent goal + progress context
         # even on tick 1 when the inbox is empty.
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
         if agent_name == "orchestration":
-            # Refresh target_gap_pct from the live objective so the rendered
-            # scoreboard reflects the *current* remaining gap (objective is
-            # already cached on the Coordinator after Coordinator.run set
-            # the budget). Non-``gain_pct`` objectives leave the value at 0
-            # which maps to a 1.0 multiplier inside scoring.target_gap_multiplier.
+            # ``target_gap_pct`` is a *fact* (how much gain is still
+            # needed for ``--target-gain``). Refresh so the prompt's
+            # Mission-progress line stays current.
             obj = getattr(self, "_current_objective", None)
             obj_kind = getattr(obj, "kind", "") if obj is not None else ""
             if obj_kind == "gain_pct":
@@ -1552,15 +2947,6 @@ class Coordinator:
                 )
             else:
                 self.shared_state.target_gap_pct = 0.0
-            if (
-                self.action_registry is not None
-                and self.shared_state.action_scores
-            ):
-                sections.append(
-                    self.shared_state.to_action_scores_summary(
-                        registry=self.action_registry, top_k=12,
-                    )
-                )
             denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
             if denial_summary:
                 sections.append(denial_summary)
@@ -1568,6 +2954,67 @@ class Coordinator:
             if required_step:
                 sections.append("=== Execution checklist (Coordinator-enforced) ===")
                 sections.append(required_step)
+
+        # Cortex T0 warm-start snapshot + structured
+        # gaps[] ledger injected into the Orchestration
+        # prompt. ``kb_digest`` was retired upstream (origin/main commit
+        # befbd1381814 — removed the hardcoded marathon path), so this
+        # block is the replacement: a structured per-session
+        # snapshot the DECISION FRAMEWORK consumes directly.
+        if agent_name == "orchestration":
+            try:
+                warm_block = self.shared_state.to_warm_start_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: warm_start_summary failed")
+                warm_block = ""
+            if warm_block:
+                sections.append("=== Warm start (Cortex T0) ===")
+                sections.append(warm_block)
+            try:
+                gaps_block = self.shared_state.to_gaps_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: gaps_summary failed")
+                gaps_block = ""
+            if gaps_block:
+                sections.append("=== Current gaps ===")
+                sections.append(gaps_block)
+
+        # Robustness gets a phase budget telemetry +
+        # specialist health block so it can fire the medium-severity
+        # alerts described in the role prompt.
+        if agent_name == "robustness":
+            try:
+                budget_block = self.shared_state.to_phase_budget_telemetry(
+                    budget_pct=self._phase_budget_pct,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: phase budget telemetry failed")
+                budget_block = ""
+            if budget_block:
+                sections.append("=== Phase budget telemetry ===")
+                sections.append(budget_block)
+            try:
+                stale = await self._scan_stale_specialists()
+                running = await self.tasks.running()
+                specialist_running = sum(
+                    1 for t in (running or [])
+                    if (t.kind or "").strip() == "specialist"
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: specialist health scan failed")
+                stale, specialist_running = [], 0
+            stale_lines = [
+                f"  - task_id={row['task_id']} running_sec={int(row['running_seconds'])}"
+                for row in stale
+            ]
+            sections.append("=== Specialist health ===")
+            sections.append(
+                f"running={specialist_running} stale={len(stale)} "
+                f"stale_threshold_sec={int(self._specialist_stale_sec)}"
+            )
+            if stale_lines:
+                sections.append("stale specialists (consider kill_task):")
+                sections.extend(stale_lines)
 
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
@@ -1640,33 +3087,34 @@ class Coordinator:
     def _required_next_step(self) -> str:
         """Return the coordinator-enforced next step, or empty if flexible.
 
-        The Orchestration prompt says baseline -> profile -> trace_analyze,
-        but the LLM can still skip to backends/params. This guard makes that
-        sequence deterministic and visible in the prompt every tick.
+        The Orchestration prompt says baseline -> profile -> analyze ->
+        kernel_opt -> integrate -> validate_stack, but the LLM can still
+        skip ahead. This guard makes that sequence deterministic and
+        visible in the prompt every tick.
 
-        Pipeline (after the v2 rename of ``select_kernels`` to
-        ``trace_analyze``, the deletion of the in-loop ``setup`` /
-        ``classify`` actions, the deletion of the PMC hard-gate, and
-        the deletion of the action-layer ``trace_analyze`` hard-gate
-        — ``trace_analyze`` is now only enforced as a prerequisite for
-        ``run_optimization`` REQUESTs at the request layer, never for
-        explore actions like ``params`` / ``backends`` / ``sweep`` /
-        ``report``):
+        Pipeline (the ``analyze`` step sits between profile and integrate
+        so the TraceLens ``analysis.md`` contract is honored before
+        kernel_opt fires. The TODO is purely guidance —
+        `_sequence_denial_for_action` still does NOT block explore actions
+        (params/backends/sweep) on a stale `last_select_kernels` cache;
+        that demoted gate stays demoted. Only
+        `_sequence_denial_for_request` enforces it for `run_optimization`
+        REQUESTs, as before):
 
             TODO 0  target_analysis  (only when --compare-against-gpu set)
             TODO 1  baseline
             TODO 2  profile          (kernel mode only)
-            TODO 3  analyze          (kernel mode only, when
-                                      last_profile_trace is fresh but
-                                      last_trace_analyze is stale)
-            TODO 4  integrate        (kernel mode only, after kernel_opt KEEP)
-            TODO 5  validate_stack   (when unvalidated KEEPs landed)
+            TODO 3  integrate        (kernel mode only, after kernel_opt KEEP)
+            TODO 4  stack rebench    (when unvalidated KEEPs landed)
 
-        ``validate_stack`` precedence is critical: once at least one KEEP
-        has been added to ``optimization_stack`` since the last successful
-        ``validate_stack``, skipping it would let the LLM keep stacking
-        per-round gains that don't compose linearly and therefore over-
-        report ``cumulative_gain`` in the final report.
+        The stack-rebench TODO is critical: once at least one KEEP has
+        been added to ``optimization_stack`` since the last rebench,
+        skipping it would let the LLM keep stacking per-round gains
+        that don't compose linearly and therefore over-report
+        ``cumulative_gain`` in the final report. v0.8 M3 + KB_gaps/Gap-10
+        inlined the rebench into ``explore`` (the legacy standalone
+        ``validate_stack`` action is denied at PolicyGate), so the
+        TODO surfaces with a "propose explore" hint.
         """
         if self.shared_state.stop_reason:
             return ""
@@ -1695,16 +3143,11 @@ class Coordinator:
             )
         # Profile / analyze / integrate guards only apply when the kernel
         # agent is alive — no-kernel runs have no way to service the
-        # request and the mandate would be meaningless. Two related
-        # gates are NOT surfaced here:
-        # * ``pmc_roofline`` is opt-in advisory enrichment for
-        #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
-        #   never a prerequisite for any other action.
-        # * ``trace_analyze`` (v2 rename of ``select_kernels``) is a
-        #   prerequisite ONLY for ``run_optimization`` REQUESTs
-        #   (enforced in ``_sequence_denial_for_request``); it is NOT
-        #   a prerequisite for ``params`` / ``backends`` / ``sweep`` /
-        #   ``report`` (the action-layer hard-gate stays demoted).
+        # request and the mandate would be meaningless.
+        # ``select_kernels`` is a prerequisite ONLY for
+        # ``run_optimization`` REQUESTs (enforced in
+        # ``_sequence_denial_for_request``); the action-layer hard-gate
+        # stays demoted (explore actions are not blocked).
         if "kernel" in self.role_registry:
             if not self.shared_state.last_profile_trace:
                 return (
@@ -1718,31 +3161,22 @@ class Coordinator:
             # only -- explore actions (params/backends/sweep/report) are
             # not blocked; only run_optimization is hard-gated on the
             # same cache by `_sequence_denial_for_request`.
-            cached = self.shared_state.last_trace_analyze or {}
+            cached = self.shared_state.last_select_kernels or {}
             current_trace = self.shared_state.last_profile_trace
             cache_matches_trace = (
                 isinstance(cached, dict)
                 and cached.get("trace_input") == current_trace
             )
             if not cache_matches_trace:
-                # v2: select_kernels was renamed trace_analyze and folded
-                # into the `roofline` composite action so it always runs
-                # atomically with `profile`. A bare profile (without
-                # roofline) is N9-blocked at propose-time, so reaching
-                # this branch implies the operator manually advanced
-                # last_profile_trace -- in which case the right recovery
-                # is to propose `roofline` (composite) rather than emit a
-                # legacy select_kernels REQUEST.
                 return (
-                    "TODO 3/5: roofline snapshot is required now. "
-                    f"last_profile_trace={current_trace!r} but "
-                    "last_trace_analyze is empty/stale; TraceLens has "
-                    "not yet produced analysis.md for this trace. "
-                    "Propose/delegate `roofline` (composite action that "
-                    "runs profile + trace_analyze atomically) so the "
-                    "snapshot is refreshed. Do NOT propose kernel_opt "
-                    "/ run_optimization / integrate until this cache "
-                    "populates."
+                    "TODO 3/5: analyze is required now. last_profile_trace "
+                    f"={current_trace!r} but last_select_kernels is "
+                    "empty/stale; TraceLens has not yet produced "
+                    "analysis.md for this trace. Emit "
+                    "request{target_agent='kernel', kind='select_kernels', "
+                    "params={trace_input: <last_profile_trace>, top_k: 10}}. "
+                    "Do NOT propose kernel_opt / run_optimization / "
+                    "integrate until this cache populates."
                 )
             pending_kid = self._kernel_opt_keep_pending()
             if pending_kid:
@@ -1752,9 +3186,8 @@ class Coordinator:
                     "patch has not been integrated into optimization_stack. "
                     "Emit request{target_agent='kernel', kind='integrate', "
                     f"params={{kernel_id: {pending_kid!r}}} (or "
-                    "propose/delegate `integrate` / `recover` / "
-                    "`validate_stack` / `report`) before any further "
-                    "explore."
+                    "propose/delegate `integrate` / `recover` / `report`) "
+                    "before any further explore."
                 )
             # PR-C TODO 4a/5: hot-kernel must-try gate. Surfaces the
             # untried hot reusable kernel queue so Orchestration knows
@@ -1789,30 +3222,18 @@ class Coordinator:
                         "empty."
                     )
         if self.shared_state.optimization_stack_has_unvalidated_keeps():
-            if self._validate_stack_gate_skipped():
-                return (
-                    "TODO 5/5: validate_stack RECOMMENDED but not required. "
-                    f"The last {_VALIDATE_STACK_FAIL_THRESHOLD} validate_stack "
-                    "attempts failed in a row, so the mandatory gate is "
-                    "dropped and other actions are unlocked. "
-                    "cumulative_gain_validated will stay stale "
-                    f"(validated_at_len="
-                    f"{self.shared_state.cumulative_gain_validated_stack_len} "
-                    f"vs stack_len={len(self.shared_state.optimization_stack)}) "
-                    "until a validate_stack succeeds — fix the underlying "
-                    "failure (check workload_envs / TP / GPU visibility) and "
-                    "re-emit `validate_stack` when ready."
-                )
             return (
-                "TODO 5/5: validate_stack required. New KEEP'd entries have "
-                "landed on optimization_stack since the last validate_stack run "
+                "TODO 4/4: stack rebench required. New KEEP'd entries have "
+                "landed on optimization_stack since the last rebench "
                 f"(stack_len={len(self.shared_state.optimization_stack)}, "
                 f"validated_at_len="
                 f"{self.shared_state.cumulative_gain_validated_stack_len}). "
-                "Propose/delegate only `validate_stack` until "
-                "cumulative_gain_validated reflects the current stack. "
-                "Per-round gains do NOT compose linearly — the final report "
-                "quotes the validated number, so this is the only honest gain."
+                "Propose/delegate `explore` — its per-KEEP stack rebench "
+                "is inlined and updates cumulative_gain_validated as a "
+                "side effect. "
+                "Per-round gains do NOT compose linearly — the final "
+                "report quotes the validated number, so this is the only "
+                "honest gain."
             )
         # TODO 5/5 (current_best path): params/backends can advance
         # ``current_best.tput`` without populating ``optimization_stack``
@@ -1923,43 +3344,96 @@ class Coordinator:
             hint=hint,
         )
 
-    def _validate_stack_gate_skipped(self) -> bool:
-        """Drop the mandatory ``validate_stack`` gate after
-        ``_VALIDATE_STACK_FAIL_THRESHOLD`` consecutive failures.
+    def _assess_remaining_gaps_throttle_denial(
+        self,
+    ) -> PolicyDenied | None:
+        """IR-7 — throttle LLM-initiated ``assess_remaining_gaps``.
 
-        Walks ``validate_stack_attempts`` from the tail; a single
-        ``status="succeeded"`` resets the streak. Returns ``True`` once
-        the threshold is reached, emitting one ``log.warning`` on the
-        transition (subsequent ticks return ``True`` silently).
+        Coordinator-internal dispatches bypass this rule (they go via
+        :meth:`_enqueue_internal_steward_task` directly into
+        TaskRegistry). The LLM may also propose ``assess_remaining_gaps``
+        when it believes plateau is near, but back-to-back proposals
+        within ``INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC``
+        (default 1800) are denied to keep the dispatch budget bounded.
+
+        Issue-A guard (KB cold-start regression): the action's
+        ``actions/assess_remaining_gaps.md`` md preconditions
+        (``phase == 'EXPLORE'`` AND ``len(optimization_stack) >= 3``)
+        were previously documented but not enforced — letting the LLM
+        propose steward as the very first action after baseline (when
+        KB priors are missing) and route the session into
+        ``no_more_leverage`` before any real exploration. We now deny
+        the proposal until at least three stack entries have landed,
+        so the steward can only fire on a real plateau judgment (which
+        Coordinator-internal dispatch already gates on signals).
         """
-        attempts = list(self.shared_state.validate_stack_attempts or [])
-        consecutive_failures = 0
-        last_failure: dict[str, Any] | None = None
-        for entry in reversed(attempts):
-            if not isinstance(entry, dict):
-                break
-            if entry.get("status") == "succeeded":
-                break
-            consecutive_failures += 1
-            if last_failure is None:
-                last_failure = entry
-        if consecutive_failures < _VALIDATE_STACK_FAIL_THRESHOLD:
-            self._validate_stack_gate_skip_warned = False
-            return False
-        if not self._validate_stack_gate_skip_warned:
-            err_class = (last_failure or {}).get("error_class") or "unknown"
-            err_excerpt = (last_failure or {}).get("error_excerpt") or ""
-            log.warning(
-                "validate_stack gate SKIPPED after %d consecutive failures "
-                "(>= threshold %d). Other actions are now allowed; "
-                "cumulative_gain_validated will remain stale until a "
-                "validate_stack succeeds. Last failure: "
-                "error_class=%r error_excerpt=%r.",
-                consecutive_failures, _VALIDATE_STACK_FAIL_THRESHOLD,
-                err_class, err_excerpt,
+        phase = (
+            getattr(self.shared_state, "phase", "") or ""
+        ).strip().upper()
+        if phase != "EXPLORE":
+            return PolicyDenied(
+                f"action='assess_remaining_gaps' denied: phase={phase!r} "
+                f"(steward is EXPLORE-only; see actions/"
+                f"assess_remaining_gaps.md preconditions)",
+                rule="assess_remaining_gaps_phase",
+                hint=(
+                    "Steward dispatch is gated to EXPLORE. Continue "
+                    "the current phase or wait for the Coordinator's "
+                    "internal plateau judge to fire on EXPLORE entry."
+                ),
             )
-            self._validate_stack_gate_skip_warned = True
-        return True
+        stack_len = len(getattr(self.shared_state, "optimization_stack", []) or [])
+        if stack_len < 3:
+            return PolicyDenied(
+                f"action='assess_remaining_gaps' denied: "
+                f"len(optimization_stack)={stack_len} < 3 "
+                f"(steward needs material to assess; see actions/"
+                f"assess_remaining_gaps.md preconditions)",
+                rule="assess_remaining_gaps_min_stack",
+                hint=(
+                    "Run more EXPLORE rounds (specialist / params / "
+                    "backends) until at least 3 stack entries have "
+                    "promoted; the Coordinator's internal plateau "
+                    "judge will enqueue the steward on its own when "
+                    "v0.8 signals indicate exhaustion."
+                ),
+            )
+        last = self.shared_state.last_remaining_gaps_assessment or {}
+        if not isinstance(last, dict):
+            return None
+        last_ts = str(last.get("ts") or "").strip()
+        if not last_ts:
+            return None
+        try:
+            from datetime import datetime, timezone
+            ts_dt = datetime.fromisoformat(last_ts)
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+            now_dt = datetime.now(timezone.utc)
+            elapsed = (now_dt - ts_dt).total_seconds()
+        except (ValueError, TypeError):
+            return None
+        try:
+            min_interval = float(os.environ.get(
+                "INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC",
+                "1800",
+            ))
+        except (TypeError, ValueError):
+            min_interval = 1800.0
+        if elapsed < min_interval:
+            return PolicyDenied(
+                f"action='assess_remaining_gaps' denied: throttled "
+                f"(last assessment {elapsed:.0f}s ago, min interval "
+                f"{int(min_interval)}s)",
+                rule="assess_remaining_gaps_throttle",
+                hint=(
+                    "Last steward assessment was recent. Wait for the "
+                    "Coordinator to enqueue the next internal steward "
+                    "on plateau, OR continue running variants until "
+                    "the throttle window elapses."
+                ),
+            )
+        return None
 
     def _sequence_denial_for_action(
         self,
@@ -1969,30 +3443,29 @@ class Coordinator:
         """Reject orchestration action/delegate attempts that skip required steps.
 
         Phase 2 addition: once optimization_stack has unvalidated KEEPs,
-        the only allowed actions are ``validate_stack`` itself, ``recover``,
-        and ``report`` (the last only when stop_reason is set, which we
-        already short-circuit above). Everything else is denied with a
-        ``validate_stack_required`` rule so Orchestration sees the
-        ``policy_denied`` and self-corrects on the next tick.
+        the next ``explore`` round must carry the inlined stack rebench
+        (PolicyGate rule ``stack_rebench_required``). The legacy
+        ``validate_stack`` standalone action was retired in the legacy release; this
+        function now only enforces the cross-action ordering (target_analysis
+        before baseline, baseline before everything else, baseline
+        self-loop guard, profile/integrate kernel-agent guards).
 
         ``proposed_params`` is the ``intent.payload["params"]`` dict
         (propose_action / delegate path). Currently only consumed by
         the baseline self-loop guard above, but the kwarg signature is
-        kept open so other per-action stop-losses (e.g. params/backends
-        loop guards) can plug in without further call-site churn.
+        kept open so other per-action stop-losses can plug in without
+        further call-site churn.
         """
         action = str(action_name or "").strip()
+        # the legacy
+        # ``backends`` / ``params`` / ``validate_stack`` names are
+        # already denied by PolicyGate with ``rule='action_deprecated'``
+        # before reaching this function, so they intentionally do not
+        # appear in the sequence-gate allow-list.
         sequence_actions = {
             "target_analysis",
-            "baseline", "profile", "pmc_roofline",
-            "roofline",
-            "backends", "params", "sweep", "report",
-            "integrate", "validate_stack",
-            # Roofline-v2 N3: comm_optimization joins so the roofline-
-            # required gate below can catch its propose. (kernel_opt
-            # is kernel-owned + routed through _sequence_denial_for_request,
-            # not here.)
-            "comm_optimization",
+            "baseline", "profile", "roofline",
+            "sweep", "report", "integrate", "explore",
         }
         if action not in sequence_actions:
             return None
@@ -2042,128 +3515,30 @@ class Coordinator:
             self_loop = self._baseline_self_loop_denial(proposed_params)
             if self_loop is not None:
                 return self_loop
-        # Roofline-v2 N21 (May 2026): a roofline proposal is denied
-        # when discovered_flags has NOT changed since the previous
-        # snapshot. Re-running the composite roofline action in that
-        # state would launch sglang with byte-identical args, produce
-        # a byte-equivalent trace, and emit an analysis.md whose hot
-        # kernel distribution is mathematically identical to the
-        # cached one — burning ~20-35min of wall-clock for zero new
-        # information. The "flags didn't change" signal is itself
-        # produced upstream by the cheap-action grid runner writing
-        # `last_cheap_delta_gain ~= 0` (no variant beat current_best,
-        # so no new flag was promoted), so this gate is the symmetric
-        # complement of the N19c kernel_opt unlock — together they
-        # implement the user's roofline-driven flow:
-        #   - flags changed (cheap found gain) -> roofline allowed
-        #     (snapshot will differ + tells LLM what to try next)
-        #   - flags unchanged (cheap exhausted) -> roofline denied,
-        #     hint to propose backends/params (try the other cheap
-        #     lever) or request kernel_opt (unlocked by N19c)
-        #
-        # The very first roofline (snapshot_id absent) is always
-        # allowed — that's the baseline analysis snapshot. The gate
-        # only fires from the 2nd roofline onward.
-        if action == "roofline":
-            denied = self._proposal_denial_for_roofline()
-            if denied is not None:
-                return denied
-        # Roofline-v2 N22 (May 2026): non-blocking keyword-implied
-        # variant check. When the LLM proposes backends/params with a
-        # variants subset (N20-A surface), compare the proposed list
-        # against the variants implied by analysis.md keywords (e.g.
-        # mentioning "torch.compile" implies torch_compile_on). If
-        # any implied variant is missing, RECORD an advisory into
-        # shared_state.last_proposal_advice (the next-tick prompt will
-        # render it). DO NOT deny — the LLM keeps agency; the advisory
-        # surfaces in the audit log + next prompt so the LLM corrects
-        # on the follow-up cheap-action propose.
-        if action in {"backends", "params"} and proposed_params:
-            self._record_keyword_implied_advice(action, proposed_params)
         # Profile / integrate guards only apply when kernel agent is in
-        # the role registry — no-kernel mode skips them. Two related gates
-        # are intentionally NOT enforced at the action layer:
-        # * ``pmc_roofline`` is opt-in advisory enrichment for
-        #   ``kernel_opt`` via ``HYPERLOOM_ENABLE_PMC_ROOFLINE=1`` and
-        #   never blocks any other action. A platform that cannot run
-        #   rocprof must not deadlock the explore / kernel pipeline.
-        # * ``trace_analyze`` is enforced at the REQUEST layer
-        #   (``_sequence_denial_for_request``) for ``run_optimization``
-        #   only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
-        #   never gated on a fresh ``last_trace_analyze`` cache — those
-        #   actions don't need kernel candidates to make progress.
-        # Roofline-v2 N9: hard-block direct LLM propose of `profile`.
-        # Rationale (GPU-empirical, see design §6.5 N9 amendment):
-        # N3 left `profile` as a permitted-but-deprecated direct propose
-        # path via prompt hint. Qwen3-32B GPU run showed the LLM falls
-        # back to v0 training-distribution behaviour and proposes
-        # `profile` directly, which then forces `roofline` to redo the
-        # profile internally — wasting ~10 min wall-clock/session.
-        # N9 blocks the direct LLM proposal; `profile_executor` is
-        # still invoked by `RooflineExecutor._wrap_profile_ctx +
-        # _call_profile_sub_step` (does NOT pass through this gate
-        # because that path bypasses SubAgentRunner's intent layer
-        # entirely — see action_executors/roofline.py).
-        #
-        # Escape hatch: ``INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE=1``
-        # restores N3 soft-hint behaviour for:
-        # (a) debug sessions where an operator wants to manually drive
-        #     profile + trace_analyze in two steps;
-        # (b) robustness recovery paths that may need to force-reprofile
-        #     when roofline's atomic semantics get in the way;
-        # (c) v2.1 subset-retry feature (deferred).
-        _direct_profile_allowed = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE", "",
-            ).strip().lower() in {"1", "true", "yes", "on"}
-        )
-        if action == "profile" and not _direct_profile_allowed:
-            return PolicyDenied(
-                "action='profile' denied: use `roofline` instead "
-                "(composite action that runs profile + trace_analyze "
-                "atomically; design/roofline-v2.md §6.5 N9)",
-                rule="execution_order",
-                hint=(
-                    "propose/delegate `roofline` — the composite action "
-                    "internally invokes profile_executor as sub-step 1 "
-                    "and trace_analyze_handler as sub-step 2, producing "
-                    "a fresh TraceLens snapshot atomically. Direct "
-                    "`profile` propose duplicates the work and is "
-                    "blocked. Set INFERENCE_OPTIMIZER_ALLOW_DIRECT_PROFILE=1 "
-                    "to bypass for debug/recovery."
-                ),
-            )
+        # the role registry — no-kernel mode skips them.
+        # ``select_kernels`` is enforced at the REQUEST layer
+        # (``_sequence_denial_for_request``) for ``run_optimization``
+        # only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
+        # never gated on a fresh ``last_select_kernels`` cache — those
+        # actions don't need kernel candidates to make progress.
         if "kernel" in self.role_registry:
-            # Roofline-v2 N3+N9: `roofline` composite action internally
-            # runs profile as its first sub-step (via direct executor
-            # call, not via SubAgentRunner — so it bypasses the N9 gate
-            # above). The pre-existing "profile must run first" gate
-            # must therefore exempt `roofline` so the LLM has a way to
-            # ever produce last_profile_trace. `profile` itself remains
-            # in the exempt set so the escape-hatch + Robustness paths
-            # still work.
             if (
                 self.shared_state.baseline_tput > 0
                 and not self.shared_state.last_profile_trace
-                and action not in {"profile", "roofline", "validate_stack"}
+                and action != "profile"
             ):
                 return PolicyDenied(
                     f"action={action!r} denied: profile must run before {action!r}",
                     rule="execution_order",
-                    hint=(
-                        "propose/delegate `roofline` (composite action that "
-                        "runs profile + trace_analyze atomically); "
-                        "last_profile_trace is empty"
-                    ),
+                    hint="propose/delegate `profile`; last_profile_trace is empty",
                 )
             # integrate gate: kernel_opt KEEP awaiting integrate. Allow
-            # integrate / validate_stack / report through; recover is not
-            # in `sequence_actions` and therefore already bypasses this
+            # integrate / report through; recover is not in
+            # ``sequence_actions`` and therefore already bypasses this
             # function (no-op early return).
             pending_kid = self._kernel_opt_keep_pending()
-            if pending_kid and action not in {
-                "integrate", "validate_stack", "report",
-            }:
+            if pending_kid and action not in {"integrate", "report"}:
                 return PolicyDenied(
                     f"action={action!r} denied: integrate must run first",
                     rule="execution_order",
@@ -2174,179 +3549,71 @@ class Coordinator:
                         f"{pending_kid!r}}}}} before any further explore"
                     ),
                 )
-            # PR-C: hot-kernel report-gate. Block ``report`` when any
-            # reusable hot kernel with gpu_pct >= 3% has not yet been
-            # tried (and is not rejected / integrated). Prevents the
-            # log1 (164910Z) failure mode where tick=8 -> report_emitted
-            # with k001=24% / k002=37% / k004=9.7% untouched.
-            #
-            # Allowed through the gate:
-            #   - kernel_opt request itself (handled at request layer)
-            #   - integrate / validate_stack (still need to drain prior
-            #     KEEPs; the integrate-pending gate above already
-            #     handles ordering)
-            #   - recover (not in sequence_actions, bypasses entirely)
-            # Blocked:
-            #   - report -- the LLM cannot declare the session done
-            #     while a meaningful kernel lever exists.
-            # The hot_kernel_unfinished rule only fires when
-            # ``run_optimization`` is actually dispatchable -- otherwise
-            # N19c will reject the LLM's resulting request and we'd
-            # deadlock the LLM between two opposing gates (death-spiral
-            # observed on 20260523T014653Z).
-            if action == "report" and self._kernel_opt_unlocked():
-                untried = self.shared_state.untried_hot_reusable_kernels()
-                if untried:
-                    untried_str = ", ".join(untried)
-                    return PolicyDenied(
-                        f"action='report' denied: untried hot reusable "
-                        f"kernels still present ({untried_str})",
-                        rule="hot_kernel_unfinished",
-                        hint=(
-                            "Every reusable hot kernel with gpu_pct >= 3% "
-                            "must get at least one kernel_opt attempt (or "
-                            "be retired via REVERT / max_failures) before "
-                            f"the session may end. Pending: {untried_str}. "
-                            "Emit request{target_agent='kernel', "
-                            "kind='run_optimization', "
-                            "params={candidates_path=<from "
-                            "last_trace_analyze>}} so the batch fans out "
-                            "across the queue. Threshold overrides: "
-                            "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT / "
-                            "HYPERLOOM_KERNEL_OPT_GATE_TOP_N."
-                        ),
-                    )
-        # validate_stack precedence — once new KEEPs are stacked we must
-        # rebench before any further explore / report. We allow:
-        #   - validate_stack itself
-        #   - baseline (ad-hoc re-baseline is still okay; rare)
-        # and deny the rest, unless validate_stack has hit its consecutive
-        # failure cap (``_validate_stack_gate_skipped``).
-        if (
-            self.shared_state.optimization_stack_has_unvalidated_keeps()
-            and action not in {"validate_stack", "baseline"}
-            and not self._validate_stack_gate_skipped()
-        ):
-            return PolicyDenied(
-                f"action={action!r} denied: validate_stack required first",
-                rule="validate_stack_required",
-                hint=(
-                    "optimization_stack has KEEPs that have not been "
-                    "validated end-to-end; propose/delegate `validate_stack` "
-                    "before any further explore or report"
-                ),
-            )
-        # Roofline-v2 N3: 3 propose-path optimization actions require a
-        # fresh roofline snapshot (i.e. last_trace_analyze.analysis_md_text
-        # is populated). See design/roofline-v2.md §6.5 / §8.5. This is
-        # what makes the `roofline` composite action a real prerequisite —
-        # without this gate the LLM could go straight from baseline to
-        # params and never see analysis.md.
+        # PR-C (0270b67) + c900791 yield-to-N19c: hot-kernel report-gate.
+        # Block ``report`` when any reusable hot kernel with gpu_pct >=
+        # 3% has not yet been tried (and is not rejected / integrated).
+        # Prevents the log1 (164910Z) failure mode where tick=8 ->
+        # report_emitted with k001=24% / k002=37% / k004=9.7% untouched.
         #
-        # Why these three specifically (on the propose path):
-        # * backends / params  — flag-tuning actions whose decisions
-        #   benefit most from knowing the bottleneck distribution.
-        # * comm_optimization  — only worth running when comm shows up
-        #   as a real bottleneck in the report.
-        # NOT in this list:
-        # * kernel_opt         — KERNEL_OWNED_ACTIONS path: routed via
-        #   _sequence_denial_for_request (REQUEST kind="run_optimization")
-        #   which has its own analysis_md_text check.
-        # * sweep              — frontier sweep across CONC/ISL/OSL, not
-        #   kernel-bottleneck-driven.
-        # * validate_stack     — measurement, not exploration.
-        # * report             — closing artefact.
-        # * integrate          — handles KEEP'd kernel_opt outputs.
-        # * roofline           — the prerequisite producer itself.
-        _ROOFLINE_REQUIRED_ACTIONS = {
-            "backends", "params", "comm_optimization",
-        }
-        if action in _ROOFLINE_REQUIRED_ACTIONS:
-            cached = self.shared_state.last_trace_analyze or {}
-            if not cached.get("analysis_md_text"):
-                # N27: when roofline has failed enough consecutive
-                # times that retrying is unlikely to help (default
-                # threshold = 2 outer failures; each outer call
-                # already exhausted N26's inner retry, so streak=2
-                # means roughly 3-4 trace_analyze attempts already
-                # happened), downgrade the gate from PolicyDenied to
-                # PASS-with-advisory. The LLM falls back to the
-                # pre-roofline default grid behaviour rather than
-                # hard-looping on roofline forever.
-                #
-                # Design intent (operator):
-                #   "有roofline依赖roofline去选参数, roofline如果异常,
-                #    就回到之前的选择方式, 不会导致程序完全跑不了"
-                #
-                # The threshold is env-overridable so operators with
-                # a known-broken rocprofiler can lower it to 1 (fall
-                # back after the very first failure) and operators
-                # with flaky upstream profilers can raise it.
-                fallback_threshold = _resolve_roofline_fallback_threshold()
-                streak = int(
-                    getattr(self.shared_state, "roofline_failure_streak", 0)
-                    or 0
-                )
-                if streak >= fallback_threshold:
-                    # Stamp the LAST trace_analyze (which may be empty
-                    # dict pre-first-attempt) with a fallback marker
-                    # the prompt builder reads to swap the "propose
-                    # roofline first" line for "roofline failed N
-                    # times -- running without analysis.md guidance".
-                    last_ta = self.shared_state.last_trace_analyze or {}
-                    last_ta["fallback_mode_active"] = True
-                    last_ta["fallback_after_failures"] = streak
-                    last_ta["fallback_threshold"] = fallback_threshold
-                    self.shared_state.last_trace_analyze = last_ta
-                    # Push a one-shot advisory the LLM will see on the
-                    # NEXT tick so it knows it's in degraded mode.
-                    # FIFO cap (5) is enforced by SharedState.
-                    advice = (
-                        f"[N27 fallback] roofline failed "
-                        f"{streak} consecutive times (>= threshold "
-                        f"{fallback_threshold}); unlocking "
-                        f"{sorted(_ROOFLINE_REQUIRED_ACTIONS)!r} so "
-                        "the run can make progress without "
-                        "analysis.md guidance. N20-A variants subset "
-                        "advice + N22 keyword advisory are NATURALLY "
-                        "degraded (no analysis.md keyword to match), "
-                        "so falling through to the executor's default "
-                        "full grid is correct here. Re-propose "
-                        "`roofline` whenever you think the upstream "
-                        "issue may have cleared -- success resets the "
-                        "streak and restores roofline-driven "
-                        "variant selection."
-                    )
-                    existing_advice = (
-                        getattr(self.shared_state, "last_proposal_advice", [])
-                        or []
-                    )
-                    if advice not in existing_advice:
-                        existing_advice = list(existing_advice) + [advice]
-                        # FIFO cap matches SharedState (max 5 entries).
-                        self.shared_state.last_proposal_advice = (
-                            existing_advice[-5:]
-                        )
-                    return None  # fallthrough -- gate downgraded
+        # Allowed through the gate:
+        #   - kernel_opt request itself (handled at request layer)
+        #   - integrate (still needs to drain prior KEEPs; the
+        #     integrate-pending gate above already handles ordering)
+        #   - recover (not in sequence_actions, bypasses entirely)
+        # Blocked:
+        #   - report -- the LLM cannot declare the session done
+        #     while a meaningful kernel lever exists.
+        #
+        # The hot_kernel_unfinished rule only fires when
+        # ``run_optimization`` is actually dispatchable; otherwise N19c
+        # would reject the LLM's resulting request and we'd deadlock
+        # the LLM between two opposing gates (death-spiral observed on
+        # 20260523T014653Z — see c900791).
+        if action == "report" and self._kernel_opt_unlocked():
+            untried = self.shared_state.untried_hot_reusable_kernels()
+            if untried:
+                untried_str = ", ".join(untried)
                 return PolicyDenied(
-                    f"action={action!r} denied: roofline must run first "
-                    "(no cached TraceLens analysis.md)",
-                    rule="execution_order",
+                    f"action='report' denied: untried hot reusable "
+                    f"kernels still present ({untried_str})",
+                    rule="hot_kernel_unfinished",
                     hint=(
-                        "propose/delegate `roofline` (composite action that "
-                        "internally runs profile + trace_analyze). Do NOT "
-                        "call profile / trace_analyze separately — roofline "
-                        "atomically produces the snapshot all 4 optimisation "
-                        f"actions ({sorted(_ROOFLINE_REQUIRED_ACTIONS)!r}) "
-                        "depend on. After "
-                        f"{_resolve_roofline_fallback_threshold()} "
-                        "consecutive roofline failures the N27 fallback "
-                        "kicks in and these actions unlock automatically; "
-                        "you've had "
-                        f"{int(getattr(self.shared_state, 'roofline_failure_streak', 0) or 0)} "
-                        "so far."
+                        "Every reusable hot kernel with gpu_pct >= 3% "
+                        "must get at least one kernel_opt attempt (or "
+                        "be retired via REVERT / max_failures) before "
+                        f"the session may end. Pending: {untried_str}. "
+                        "Emit request{target_agent='kernel', "
+                        "kind='run_optimization', "
+                        "params={candidates_path=<from "
+                        "last_trace_analyze>}} so the batch fans out "
+                        "across the queue. Threshold overrides: "
+                        "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT / "
+                        "HYPERLOOM_KERNEL_OPT_GATE_TOP_N."
                     ),
                 )
+        # stack-rebench precedence. Once a
+        # KEEP lands on optimization_stack we want the next action
+        # that touches the stack to also revalidate it. The merged
+        # ``explore`` action carries an *inlined* per-KEEP stack
+        # rebench, so we allow it through
+        # alongside ``baseline`` (ad-hoc re-baseline) and ``report``
+        # (the wind-down). ``validate_stack`` itself is now denied at
+        # the PolicyGate boundary with ``rule='action_deprecated'``,
+        # so it can no longer be the recovery action.
+        if (
+            self.shared_state.optimization_stack_has_unvalidated_keeps()
+            and action not in {"explore", "baseline", "report"}
+        ):
+            return PolicyDenied(
+                f"action={action!r} denied: stack rebench required first",
+                rule="stack_rebench_required",
+                hint=(
+                    "optimization_stack has KEEPs that have not been "
+                    "re-validated end-to-end; propose/delegate "
+                    "`explore` (its per-KEEP stack rebench is "
+                    "inlined) or `report` before any further action"
+                ),
+            )
         return None
 
     def _sequence_denial_for_request(
@@ -2357,11 +3624,18 @@ class Coordinator:
         req_kind = str(kind or "").strip()
         if target != "kernel" or self.shared_state.stop_reason:
             return None
-        # trace_analyze is the prerequisite request itself. It is also used
-        # directly by tests/tools that pass an explicit trace_input, so allow it
-        # through; later backends/params/sweep are guarded until the result is
-        # cached in SharedState.
-        if req_kind == "trace_analyze":
+        # select_kernels / trace_analyze IS the prerequisite request: it
+        # produces ``last_select_kernels`` / ``last_trace_analyze`` cache
+        # the rest of the chain consults. It is also used directly by
+        # tests / tools passing an explicit ``trace_input``, so allow it
+        # through; later backends/params/sweep are guarded until the
+        # result is cached in SharedState. (Main M4 renamed
+        # ``select_kernels`` → ``trace_analyze``; on this branch both
+        # request kinds dispatch to the same handler via the
+        # back-compat alias in ``kernel_request_handlers.py``, so the
+        # allowlist must accept both names to keep this carve-out
+        # working under both pre- and post-rename test surfaces.)
+        if req_kind in ("select_kernels", "trace_analyze"):
             return None
         if get_handler(req_kind) is None:
             return None
@@ -2375,458 +3649,111 @@ class Coordinator:
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: profile must run first",
                 rule="execution_order",
-                hint=(
-                    "propose/delegate `roofline` (composite action that "
-                    "runs profile + trace_analyze atomically) before "
-                    "trace_analyze/run_optimization"
-                ),
+                hint="propose/delegate `profile` before select_kernels/run_optimization",
             )
-        select = self.shared_state.last_trace_analyze or {}
+        # Main M4 renamed the cache field from ``last_select_kernels`` to
+        # ``last_trace_analyze``; this branch populates BOTH (legacy +
+        # canonical) on each handler success, but tests and external
+        # callers may seed only the canonical one. Accept either as the
+        # prerequisite cache.
+        select = (
+            self.shared_state.last_trace_analyze
+            or self.shared_state.last_select_kernels
+            or {}
+        )
         needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
-        if needs_select and req_kind != "trace_analyze":
+        if needs_select and req_kind not in ("select_kernels", "trace_analyze"):
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: trace_analyze must run first",
                 rule="execution_order",
-                hint=(
-                    "propose/delegate `roofline` (preferred — composite "
-                    "action) or emit request kind='trace_analyze' for "
-                    "last_profile_trace (legacy path)"
-                ),
+                hint="emit request kind='trace_analyze' for last_profile_trace",
             )
-        # Roofline-v2 N19c (May 2026, GPU+empirical-history evidence-driven):
-        # kernel_opt unlock is now GAIN-DRIVEN, not counter-driven (N14).
-        # The previous N14 enforcement (backends_attempts >= 2 AND
-        # params_attempts >= 2 AND snapshot_id >= 3) wasted hours on
-        # workloads where the first cheap round already exhausted the
-        # leverage:
-        #
-        # * R1 N12 (10h, 12 tasks)  : cumulative_gain = 0.81%,
-        #   ~0.07%/round avg — N14 would force 2x more cheap rounds
-        #   on top, ~3h wasted.
-        # * Qwen3 N18b today        : params_2 base_tput=0.0 (no new
-        #   variant beat current_best) — flags didn't change, so re-
-        #   rooflining would produce a byte-equivalent trace, AND
-        #   continuing to backends_2 + roofline_3 is pure waste because
-        #   the cheap-action search space is already exhausted.
-        # * 202 historical reports  : 165 sessions (82%) had no clear
-        #   single-action winner > 0.5% — N14 would burn 2+h of cheap
-        #   exploration on each of those sessions before unlocking
-        #   kernel_opt, where the actual leverage lives (top session
-        #   qwen1-5-7b got 66.56% all from kernel_opt).
-        #
-        # New rule (replaces N14):
-        #   kernel_opt UNLOCK iff:
-        #     snapshot_id >= 1                  (baseline + 1 roofline done)
-        #     AND last_cheap_delta_gain < EPS   (last cheap round exhausted)
-        #
-        # EPS default = 0.3% (above the empirical noise floor ~0.1% but
-        # below the smallest typical real gain ~0.5%; override via
-        # INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON env). If no cheap
-        # round has run yet, last_cheap_delta_gain is None and we
-        # require at least one cheap attempt (backends OR params) to
-        # have been recorded — otherwise the LLM could jump straight
-        # to kernel_opt from baseline without learning anything from
-        # the flag space.
-        #
-        # Escape hatch: INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1
-        # restores pre-N13 behaviour (snapshot_id >= 1 only, no cheap
-        # exhaustion check). Use cases: v0 baseline comparison;
-        # workloads known to have no leverage in cheap actions;
-        # debug / unit-test paths.
-        if req_kind == "run_optimization" and not self._allow_early_kernel_opt():
-            snapshot_id = (
-                (self.shared_state.last_trace_analyze or {}).get(
-                    "roofline_snapshot_id", 0
-                )
-            )
-            backends_attempts = len(self.shared_state.backends_attempts or [])
-            params_attempts = len(self.shared_state.params_attempts or [])
-            any_cheap_attempt = backends_attempts + params_attempts >= 1
-            last_delta = self.shared_state.last_cheap_delta_gain
-            eps = _cheap_exhausted_epsilon()
-
-            missing: list[str] = []
-            if not isinstance(snapshot_id, int) or snapshot_id < 1:
-                missing.append(
-                    f"snapshot_id={snapshot_id} (need >= 1; "
-                    "propose `roofline` to capture the baseline snapshot)"
-                )
-            if not any_cheap_attempt:
-                missing.append(
-                    "no cheap exploration yet (need >= 1 backends OR params "
-                    "attempt; propose one before kernel_opt so the search "
-                    "space is at least probed)"
-                )
-            elif last_delta is None:
-                # Cheap attempts exist but no delta recorded — this is a
-                # legacy / corrupted state.json situation. Reject defensively;
-                # the operator can re-run a cheap action to populate the field.
-                missing.append(
-                    "last_cheap_delta_gain not recorded; re-run a cheap "
-                    "action (backends/params) so the gate can read the "
-                    "marginal-gain signal"
-                )
-            elif last_delta >= eps:
-                missing.append(
-                    f"last_cheap_delta_gain={last_delta:.3f}% "
-                    f">= EPSILON={eps:.3f}% (cheap exploration still finding "
-                    "gain; continue with another backends/params round, "
-                    "then re-evaluate)"
-                )
-            if missing:
-                return PolicyDenied(
-                    f"request kind={req_kind!r} denied: "
-                    f"kernel_opt requires either (a) cheap exploration "
-                    f"exhausted (last_cheap_delta_gain < {eps:.3f}%), or "
-                    f"(b) escape hatch enabled; missing: "
-                    f"{', '.join(missing)}",
-                    rule="execution_order",
-                    hint=(
-                        "Per design/roofline-v2.md §6.5.3 (N19c, replaces "
-                        "N14 counter-driven), kernel_opt unlocks as soon "
-                        "as cheap-action exploration stops finding "
-                        "marginal gain (delta vs current_best < EPSILON, "
-                        "default 0.3%, override via "
-                        "INFERENCE_OPTIMIZER_CHEAP_EXHAUSTED_EPSILON). "
-                        "If you just ran a cheap round that did improve "
-                        "current_best, run it again or switch to the "
-                        "other cheap action (backends<->params) until "
-                        "marginal gain settles. The roofline snapshot "
-                        "you have is enough — N21 will deny re-running "
-                        "roofline as long as discovered_flags hasn't "
-                        "changed since the last snapshot. Override with "
-                        "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1 "
-                        "for debug / v0-baseline-comparison paths."
-                    ),
-                )
+        # Note (c900791): main also gates ``run_optimization`` here on a
+        # gain-driven N19c rule (snapshot_id >= 1 + cheap-attempt
+        # recorded + last_cheap_delta_gain < EPSILON). On this branch
+        # the equivalent lives in PolicyGate as
+        # ``_validate_gain_driven_kernel_opt`` (F3-5 N19c, reads
+        # ``gain_per_stack_entry`` instead of v0.6
+        # backends_attempts/params_attempts/last_cheap_delta_gain), so
+        # the Coordinator-side gate is intentionally omitted here.
         return None
 
     @staticmethod
     def _allow_early_kernel_opt() -> bool:
-        """N13 escape hatch — `INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1`
-        restores pre-N13 behaviour (no cheap-action prerequisites)."""
+        """Escape hatch — ``INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT=1``
+        opens the kernel_opt request gate unconditionally (skips both
+        the snapshot check and the gain-driven N19c check). Used by
+        v0-baseline-comparison flows and unit tests."""
         return os.environ.get(
             "INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "",
         ).strip().lower() in {"1", "true", "yes", "on"}
 
     def _kernel_opt_unlocked(self) -> bool:
-        """Return True when ``run_optimization`` can actually be
-        dispatched right now -- i.e. N19c's cheap-exhausted gate is
-        either satisfied or explicitly bypassed via the escape hatch.
+        """Return True when ``run_optimization`` is actually dispatchable
+        right now — i.e. when the hot-kernel report-gate (PR-C) should
+        fire and the LLM should be pushed toward kernel_opt.
 
-        PR-C TODO 4a / hot_kernel_unfinished gate uses this to avoid
-        a death-spiral with N19c: if N19c is still demanding more
-        cheap exploration (last_cheap_delta_gain >= EPSILON), forcing
-        the LLM to propose ``run_optimization`` only racks up
-        ``execution_order`` PolicyDenied counters until policy_loop
-        kills the session (Qwen3-30B-A3B-Base 20260523T014653Z died
-        at tick=14 this way: TODO 4a said "must kernel_opt", N19c
-        said "must finish cheap first", LLM oscillated for 10 ticks
-        and hit the auto-stop streak).
+        Mirrors PolicyGate's F3-5 N19c ``_validate_gain_driven_kernel_opt``
+        check so the two gates never disagree. Without this yield-to-N19c
+        on the Coordinator side the LLM oscillates between
+        ``hot_kernel_unfinished`` (PR-C, deny report) and
+        ``n19c_gain_driven_kernel_opt`` (PolicyGate, deny kernel_opt
+        proposal) until ``policy_loop`` auto-stops the session
+        (Qwen3-30B-A3B-Base 20260523T014653Z died this way at tick=14).
 
-        The gate is open in any of:
-          * escape hatch env set
-          * ``snapshot_id >= 1`` AND at least one cheap attempt has
-            been recorded AND ``last_cheap_delta_gain`` is set AND
-            below ``_cheap_exhausted_epsilon()``
-
-        When closed, callers should:
-          * NOT surface TODO 4a (don't push LLM to propose kernel_opt)
-          * NOT deny `report` on the hot_kernel_unfinished rule
-        Both behaviours let the LLM keep exploring cheap actions, and
-        once cheap exhausts, the gate reopens and PR-C re-activates.
+        The gate is open when ANY of the following hold:
+          * escape hatch env set;
+          * the gain-driven N19c toggle is off (legacy F3 default);
+          * the last ``_N19C_HISTORY_WINDOW`` cheap-round deltas in
+            ``gain_per_stack_entry`` average below the F3-5 epsilon
+            (i.e. cheap exploration has actually plateaued).
         """
         if self._allow_early_kernel_opt():
             return True
-        ta = self.shared_state.last_trace_analyze or {}
+        ss = self.shared_state
+        ta = ss.last_trace_analyze or {}
         snapshot_id = ta.get("roofline_snapshot_id", 0)
         if not isinstance(snapshot_id, int) or snapshot_id < 1:
             return False
-        backends_attempts = len(self.shared_state.backends_attempts or [])
-        params_attempts = len(self.shared_state.params_attempts or [])
-        if backends_attempts + params_attempts < 1:
-            return False
-        last_delta = self.shared_state.last_cheap_delta_gain
-        if last_delta is None:
-            return False
+        if not bool(getattr(ss, "gain_driven_kernel_opt", False)):
+            # F3-5 toggle off → mirror PolicyGate's early-return; gate
+            # is considered open once a roofline snapshot exists.
+            return True
         try:
-            eps = _cheap_exhausted_epsilon()
-        except Exception:  # noqa: BLE001
-            eps = 0.3
-        return float(last_delta) < float(eps)
-
-    def _record_keyword_implied_advice(
-        self,
-        action_name: str,
-        proposed_params: dict[str, Any],
-    ) -> None:
-        """N22: advisory-only check that the LLM's proposed `variants`
-        list includes every variant implied by analysis.md keywords.
-
-        Non-blocking: missing variants are surfaced as an advisory
-        appended to `shared_state.last_proposal_advice` (rendered into
-        the next-tick orchestration prompt). The LLM keeps agency and
-        the proposal still goes through.
-
-        Skipped when:
-        * `variants` field is absent / empty (LLM chose full default
-          grid — the catalogue intent is to be inclusive, no advisory
-          needed).
-        * analysis.md cached text is missing (no snapshot yet, or
-          using legacy code path).
-        * `available_variants` cannot be resolved (e.g. test fixture
-          without registered grids).
-        """
-        from ._analysis_keyword_map import (
-            extract_required_variants_from_analysis,
-            format_missing_variants_advice,
-        )
-        proposed_variants = proposed_params.get("variants") or []
-        if not isinstance(proposed_variants, list) or not proposed_variants:
-            return
-        proposed_str = [str(v).strip() for v in proposed_variants
-                        if isinstance(v, str) and str(v).strip()]
-        if not proposed_str:
-            return
-        analysis_text = (
-            (self.shared_state.last_trace_analyze or {}).get(
-                "analysis_md_text", ""
-            )
-            or ""
-        )
-        if not analysis_text:
-            return
-        # Resolve the registered grid for the current framework so we
-        # narrow keyword-implied variants to ones the executor can
-        # actually run (an SGLang-only variant shouldn't surface on a
-        # vLLM session).
-        available = self._registered_variants_for(action_name)
-        if not available:
-            return
-        required, matches = extract_required_variants_from_analysis(
-            analysis_text, available,
-        )
-        advice = format_missing_variants_advice(
-            proposed_str, required, matches, action_name=action_name,
-        )
-        if advice:
-            # Cap FIFO at 5 most-recent advisories so a long session
-            # doesn't grow this list unbounded; the prompt only
-            # renders the latest few anyway.
-            history = list(self.shared_state.last_proposal_advice or [])
-            history.append(advice)
-            if len(history) > 5:
-                history = history[-5:]
-            self.shared_state.last_proposal_advice = history
-
-    def _registered_variants_for(self, action_name: str) -> list[str]:
-        """Return the names of the registered grid variants for the
-        given action + current framework. Used by the N22 keyword
-        advisory to narrow keyword-implied variants to ones the
-        executor can actually run. Returns [] when the framework can't
-        be resolved (defensive — N22 advisory will skip)."""
-        try:
-            framework = (
-                os.environ.get("FRAMEWORK", "") or "sglang"
-            ).strip().lower()
-            if action_name == "backends":
-                from .action_executors.backends import (
-                    DEFAULT_BACKENDS_GRID,
-                    DEFAULT_VLLM_BACKENDS_GRID,
-                )
-                grid = (
-                    DEFAULT_VLLM_BACKENDS_GRID if "vllm" in framework
-                    else DEFAULT_BACKENDS_GRID
-                )
-            elif action_name == "params":
-                from .action_executors.params import (
-                    DEFAULT_PARAMS_GRID,
-                    DEFAULT_VLLM_PARAMS_GRID,
-                )
-                grid = (
-                    DEFAULT_VLLM_PARAMS_GRID if "vllm" in framework
-                    else DEFAULT_PARAMS_GRID
-                )
-            else:
-                return []
-            return [v.name for v in grid]
-        except Exception:  # noqa: BLE001 - defensive, advisory is best-effort
-            return []
-
-    def _proposal_denial_for_roofline(self) -> PolicyDenied | None:
-        """N21: deny re-running roofline when discovered_flags hasn't
-        changed since the previous snapshot. See the call site in
-        `_sequence_denial_for_action` for the rationale.
-
-        Returns None (allow) when:
-        * No snapshot exists yet (this is the first roofline -> always
-          let it run to capture the baseline analysis).
-        * `INFERENCE_OPTIMIZER_FORCE_ROOFLINE_RERUN=1` escape hatch is
-          set (operator debugging / regression-pinning a known trace).
-        * `discovered_flags` actually differs from the frozen snapshot
-          (some cheap action promoted a new flag — sglang launch args
-          will change, so the new trace will differ).
-
-        Returns PolicyDenied when flags are unchanged AND a prior
-        snapshot exists. The hint points the LLM at the two productive
-        alternatives.
-        """
-        if os.environ.get(
-            "INFERENCE_OPTIMIZER_FORCE_ROOFLINE_RERUN", "",
-        ).strip().lower() in {"1", "true", "yes", "on"}:
-            return None
-        snapshot = self.shared_state.last_trace_analyze or {}
-        snapshot_id = snapshot.get("roofline_snapshot_id", 0)
-        if not isinstance(snapshot_id, int) or snapshot_id < 1:
-            # First roofline — always allowed.
-            return None
-        # N31 (May 2026): post-optimization "before/after" exception.
-        # When the session has actually accumulated validated gain
-        # (``cumulative_gain_validated > 0`` AND
-        # ``optimization_stack`` non-empty) but only one roofline
-        # snapshot exists, the kernel rewrites + integrate changes
-        # have shifted the hot-kernel distribution AND a fresh
-        # snapshot is required for the final ``## Roofline
-        # Comparison`` report section. Allow a single re-roofline
-        # (snapshot_id == 1 -> snapshot_id == 2) regardless of whether
-        # discovered_flags changed -- the gain itself is the signal
-        # that the analysis.md needs refreshing.
-        #
-        # This does NOT re-open cheap exploration loops: the gate
-        # exception only fires once per session (snapshot_id == 1
-        # check + stack-non-empty + validated gain). Subsequent
-        # rooflines hit the regular flags-changed check.
-        validated_gain = float(
-            self.shared_state.cumulative_gain_validated or 0.0
-        )
-        stack_len = len(self.shared_state.optimization_stack or [])
-        if (
-            snapshot_id == 1
-            and validated_gain > 0.0
-            and stack_len >= 1
-        ):
-            return None  # N31: allow the final "after" snapshot
-        current = self.shared_state.discovered_flags or {}
-        frozen = self.shared_state.discovered_flags_at_last_snapshot or {}
-        if self._flags_equivalent(current, frozen):
-            return PolicyDenied(
-                f"action='roofline' denied: discovered_flags unchanged "
-                f"since snapshot #{snapshot_id}; a re-run would produce "
-                f"a byte-equivalent trace and identical analysis.md "
-                f"(sglang launch args derive from discovered_flags). "
-                f"Wasted wall-clock budget ~20-35min.",
-                rule="execution_order",
-                hint=(
-                    "Per design/roofline-v2.md §6.5.3 (N19c+N21), "
-                    "roofline only makes sense when at least one new "
-                    "cheap-action flag has been applied since the last "
-                    "snapshot. Two productive next moves: "
-                    "(a) propose the OTHER cheap action (if last was "
-                    "`backends`, try `params`, or vice versa) to keep "
-                    "exploring the flag space, OR (b) if both cheap "
-                    "lanes are exhausted (last_cheap_delta_gain<EPSILON), "
-                    "the kernel_opt REQUEST is already unlocked (N19c) "
-                    "— go straight to kernel optimisation. Override "
-                    "this gate with "
-                    "INFERENCE_OPTIMIZER_FORCE_ROOFLINE_RERUN=1 for "
-                    "debug / regression-pinning."
-                ),
-            )
-        return None
-
-    @staticmethod
-    def _flags_equivalent(
-        a: dict[str, Any], b: dict[str, Any],
-    ) -> bool:
-        """Compare two `discovered_flags` dicts for N21 equivalence.
-
-        The schema is two-level: framework -> {backend_flags: [...],
-        param_flags: [...], source_path: str, ...}. We compare only the
-        sets of backend_flags + param_flags per framework — source_path
-        and other metadata fields are infrastructural and shouldn't
-        gate roofline re-runs.
-        """
-        if not isinstance(a, dict) or not isinstance(b, dict):
-            return a == b
-        if set(a.keys()) != set(b.keys()):
+            from .policy import PolicyGate as _PolicyGate
+            window = _PolicyGate._N19C_HISTORY_WINDOW
+            epsilon = _PolicyGate._N19C_EPSILON_PCT
+        except Exception:  # noqa: BLE001 — defensive, fall back to F3-5 defaults
+            window, epsilon = 3, 0.5
+        history = list(getattr(ss, "gain_per_stack_entry", []) or [])
+        deltas: list[float] = []
+        for entry in reversed(history):
+            if isinstance(entry, dict):
+                d = entry.get("delta_pct")
+                if isinstance(d, (int, float)):
+                    deltas.append(float(d))
+            if len(deltas) >= window:
+                break
+        if len(deltas) < window:
             return False
-        for fw in a:
-            av = a.get(fw) or {}
-            bv = b.get(fw) or {}
-            if not isinstance(av, dict) or not isinstance(bv, dict):
-                if av != bv:
-                    return False
-                continue
-            for key in ("backend_flags", "param_flags"):
-                aval = set(av.get(key) or [])
-                bval = set(bv.get(key) or [])
-                if aval != bval:
-                    return False
-        return True
+        return (sum(deltas) / float(len(deltas))) < float(epsilon)
 
-    @staticmethod
-    def _pmc_roofline_enabled() -> bool:
-        return os.environ.get("HYPERLOOM_ENABLE_PMC_ROOFLINE", "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
-
-    @staticmethod
-    def _pmc_roofline_force() -> bool:
-        return os.environ.get("HYPERLOOM_PMC_ROOFLINE_FORCE", "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
-
-    def _build_pmc_roofline_params(self) -> dict[str, Any] | None:
-        """Build pmc_roofline task params from the materialized Magpie YAML."""
-        config_path = self.shared_state.baseline_config_path
-        if not config_path:
-            log.info("PMC roofline enabled but baseline_config_path is empty")
-            return None
-        derived = derive_pmc_roofline_params_from_config(
-            config_path,
-            framework=self.shared_state.framework,
-            model_path=self.shared_state.model_path,
-            gpu_type=self.shared_state.gpu_type,
-            output_dir=str(Path(self.session_dir) / "runs" / "pmc_roofline" / "auto"),
-        )
-        return derived
-
-    async def _maybe_enqueue_pmc_roofline(self) -> None:
-        if not self._pmc_roofline_enabled():
-            return
-        if self.shared_state.last_profile_roofline and not self._pmc_roofline_force():
-            return
-        params = self._build_pmc_roofline_params()
-        if not params:
-            return
-        key_src = "|".join([
-            self.shared_state.last_profile_trace or "",
-            self.shared_state.baseline_config_path or "",
-            str(params.get("profile_mode") or ""),
-        ])
-        key = hashlib.sha256(key_src.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        task = await self.tasks.create(
-            kind="pmc_roofline",
-            params=params,
-            idempotency_key=f"auto-pmc-roofline-{key}",
-            requires_lanes=["profile_lane"],
-            lease_ttl_sec=1800,
-        )
-        await self.bus.append_and_seq(Message.new(
-            "coordinator", "*", "event",
-            {
-                "kind": "task_queued",
-                "task_id": task.task_id,
-                "source": "coordinator_auto_pmc_roofline",
-                "action": "pmc_roofline",
-            },
-        ))
+    # Note: main commit c900791 also ports the N22 keyword-implied
+    # advice (``_record_keyword_implied_advice``,
+    # ``_registered_variants_for``) and N21 roofline-rerun denial
+    # (``_proposal_denial_for_roofline``). On this branch the
+    # equivalent functionality lives in:
+    #   * orchestrator/_analysis_keyword_map.py + PolicyGate's
+    #     ``analysis_keyword_advisory`` rule (F3-4 N22), and
+    #   * PolicyGate's ``roofline_saturation_advisory`` (F3-4 N21).
+    # The Coordinator-side helpers from main are therefore omitted
+    # here (they would also re-import the dropped backends.py /
+    # params.py grids —     # §1).
 
     # ==================================================================
     # Intent handling
     # ==================================================================
     async def _handle_intent(self, source: str, intent: Intent) -> None:
-        """Validate policy, then dispatch the intent to the appropriate handler."""
         try:
             self.policy.validate_intent(source, intent)
         except PolicyDenied as denied:
@@ -2858,6 +3785,18 @@ class Coordinator:
             await self._handle_alert(source, intent)
         elif it == IntentType.UPDATE_STATE:
             await self._handle_update_state(source, intent)
+        elif it == IntentType.SPECIALIST_DONE:
+            # v0.8 §3.5 §10 + terminal intent of a
+            # specialist task. PolicyGate R3 has already validated the
+            # ``from_agent='specialist:<task_id>'`` prefix + payload
+            # schema + gap/domain match; the handler only does
+            # bookkeeping.  The current SpecialistRunner architecture
+            # captures the done intent inside the runner instead of
+            # routing it via the bus, so this branch is mostly
+            # defense-in-depth + future-proofing (an out-of-band path
+            # — e.g. an operator script replaying a transcript — still
+            # converges on the same handler).
+            await self._handle_specialist_done(source, intent)
         else:
             # ASK_QUESTION / ANSWER / UPDATE_PERSONA — record for replay
             await self._record_observation(
@@ -2870,7 +3809,6 @@ class Coordinator:
     # PROPOSE_ACTION + REVIEW_VERDICT
     # ------------------------------------------------------------------
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
-        """Persist a proposed action, gate it, and enqueue for Critic review."""
         action_name = intent.payload["action_name"]
         # Pruned-family check reads from persistent SharedState so resume
         # after crash still respects the prune.
@@ -2893,47 +3831,774 @@ class Coordinator:
             priority=1,
         )
         await self.bus.append_and_seq(msg)
-        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+        pending = PendingProposal(
             proposal_msg_id=msg.msg_id,
             from_agent=source,
             action_name=action_name,
             predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
             payload=dict(intent.payload),
         )
+        # T2 anchor: mint optimization_node + hypothesize edge.
+        # Best-effort + isolated so a KB hiccup never blocks the
+        # Critic-review pipeline (Inv-6.2 + KB_design §3.13 M1 §5.2).
+        await self._cortex_t2_hook(pending)
+        self.state.pending_proposals[msg.msg_id] = pending
+
+    async def _cortex_t2_hook(self, pending: PendingProposal) -> None:
+        """Mint optimization_node + hypothesize edge(s) for a propose_action.
+
+        Two paths:
+
+        * **explore + grid** (v0.8 KB_gaps/Gap-07 + KB_design §3.13 M5
+          §5 step 6): mints one optimization_node + one hypothesize
+          edge **per variant**, populating :attr:`PendingProposal.kb_edge_ids`
+          + :attr:`kb_opt_canonicals` keyed by variant name. The
+          representative variant (first one with a non-empty edge_id)
+          also lands on the legacy :attr:`kb_edge_id` /
+          :attr:`kb_opt_canonical` fields so the existing T3 hook
+          (per-proposal) keeps working until Gap-08 upgrades it.
+        * **non-grid** (kernel_opt / integrate / sweep / profile /
+          legacy backends / params): single optimization_node + single
+          hypothesize edge — identical to the legacy M1 behaviour.
+
+        Best-effort: every Cortex KB failure is downgraded to an NDJSON
+        enqueue by the client itself; partial failures within a
+        per-variant batch are logged but don't poison the other
+        variants in the same proposal.
+
+        Gap-anchor selection:
+        :meth:`_resolve_issue_canonical` consults
+        ``payload.gap_canonical_id`` and ``payload.params.gap_canonical_id``
+        before falling back to the M1 ``recipe_canonical_id``
+        anchor. Once Gap-09 lands the gaps[] ledger, the per-gap
+        canonical id will also be looked up here.
+        """
+        if self.cortex_kb is None or not self.cortex_kb.enabled:
+            return
+        sid = (self.shared_state.cortex_session_id or "").strip()
+        if not sid:
+            return
+
+        # Detect the per-variant path (v0.8 explore + grid).
+        params = pending.payload.get("params") or {}
+        grid = params.get("grid") if isinstance(params, dict) else None
+        if (
+            pending.action_name == "explore"
+            and isinstance(grid, list)
+            and grid
+        ):
+            await self._cortex_t2_hook_per_variant(pending, sid=sid, grid=grid)
+        else:
+            await self._cortex_t2_hook_single(pending, sid=sid)
+
+    async def _cortex_t2_hook_single(
+        self, pending: PendingProposal, *, sid: str,
+    ) -> None:
+        """Single optimization_node + single hypothesize edge.
+
+        v0.8 M1 path — preserved verbatim for non-grid proposals
+        (kernel_opt / integrate / sweep / profile / legacy
+        backends / params). Per-variant grid proposals route through
+        :meth:`_cortex_t2_hook_per_variant` instead.
+        """
+        iter_idx = self.shared_state.increment_session_iter_index()
+        pending.experiment_iter_index = iter_idx
+        opt_canonical = experiment_canonical_id(sid, iter_idx)
+        gap_canonical = self._resolve_issue_canonical(pending)
+        try:
+            self.cortex_kb.propose_point(
+                canonical_id=opt_canonical,
+                kind="experiment",
+                authority="HYPOTHESIZED",
+                attrs={
+                    "session_id":          sid,
+                    "iter_index":          iter_idx,
+                    "action":              pending.action_name,
+                    "from_agent":          pending.from_agent,
+                    "predicted_gain_pct":  pending.predicted_gain_pct,
+                    "proposal_msg_id":     pending.proposal_msg_id,
+                },
+                evidence=[f"log:proposal-{pending.proposal_msg_id}"],
+            )
+        except CortexKBError as exc:  # defensive (client already swallows)
+            log.warning("cortex T2 propose_point failed: %s", exc)
+        pending.kb_opt_canonical = opt_canonical
+        try:
+            outcome = self.cortex_kb.hypothesize(
+                sid=sid,
+                from_canonical=gap_canonical,
+                to_canonical=opt_canonical,
+                edge_type="hypothetical",
+                reason=str(pending.payload.get("reasoning") or "")[:512],
+                attrs={
+                    "role":   pending.from_agent,
+                    "action": pending.action_name,
+                    "proposal_msg_id": pending.proposal_msg_id,
+                    # phase provenance on every edge so
+                    # cross-session reachability queries can filter
+                    # by phase.
+                    "phase":  (self.shared_state.phase or "").upper() or "UNKNOWN",
+                },
+                evidence=[f"log:proposal-{pending.proposal_msg_id}"],
+            )
+        except CortexKBError as exc:
+            log.warning("cortex T2 hypothesize failed: %s", exc)
+            outcome = {}
+        edge_id = str(outcome.get("tentative_edge_id") or "").strip()
+        pending.kb_edge_id = edge_id
+        self._append_pending_kb_edge_row({
+            "proposal_msg_id": pending.proposal_msg_id,
+            "opt_canonical":   opt_canonical,
+            "gap_canonical":   gap_canonical,
+            "edge_id":         edge_id,
+            "action":          pending.action_name,
+            "ts":              datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+
+    async def _cortex_t2_hook_per_variant(
+        self,
+        pending: PendingProposal,
+        *,
+        sid: str,
+        grid: list[Any],
+    ) -> None:
+        """Per-variant T2: one optimization_node + one hypothesize edge
+        per ``grid[i]``.
+
+        KB_design §3.13 M5 §5 step 6 / KB_gaps/Gap-07.
+        ``pending.kb_edge_ids`` / ``kb_opt_canonicals`` are populated
+        keyed by variant name. The legacy single-id fields
+        (``kb_edge_id`` / ``kb_opt_canonical``) carry the
+        *representative* variant's ids so the existing per-proposal
+        T3 hook continues to work until Gap-08 ships the per-variant
+        verify path.
+
+        Partial failures: a per-variant exception is logged and that
+        variant is skipped — other variants in the same proposal
+        still mint successfully. Variants without a ``name`` are
+        skipped (canonical id requires one).
+        """
+        gap_canonical = self._resolve_issue_canonical(pending)
+        phase = (self.shared_state.phase or "").upper() or "UNKNOWN"
+        reason = str(pending.payload.get("reasoning") or "")[:512]
+        ts_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        variant_edges: dict[str, str] = {}
+        variant_canonicals: dict[str, str] = {}
+        if pending.experiment_iter_index <= 0:
+            pending.experiment_iter_index = (
+                self.shared_state.increment_session_iter_index()
+            )
+        parent_exp_canonical = experiment_canonical_id(
+            sid, pending.experiment_iter_index,
+        )
+        # Anchor the registered ``experiment`` parent once (idempotent).
+        # Variants below pin to it via ``.variant-{name}`` canonical
+        # suffix on the unregistered ``optimization_node`` kind.
+        try:
+            self.cortex_kb.propose_point(
+                canonical_id=parent_exp_canonical,
+                kind="experiment",
+                authority="HYPOTHESIZED",
+                attrs={
+                    "session_id":         sid,
+                    "iter_index":         pending.experiment_iter_index,
+                    "action":             pending.action_name,
+                    "from_agent":         pending.from_agent,
+                    "predicted_gain_pct": pending.predicted_gain_pct,
+                    "proposal_msg_id":    pending.proposal_msg_id,
+                    "phase":              phase,
+                    "variants":           len(grid),
+                },
+                evidence=[f"log:proposal-{pending.proposal_msg_id}"],
+            )
+        except CortexKBError as exc:
+            log.warning("propose_point parent experiment failed: %s", exc)
+        for variant in grid:
+            if not isinstance(variant, dict):
+                continue
+            variant_name = str(variant.get("name") or "").strip()
+            if not variant_name:
+                # Skip nameless variants — the executor itself rejects
+                # them downstream, so we don't even mint a phantom edge.
+                continue
+            opt_canonical = f"{parent_exp_canonical}.variant-{variant_name}"
+            # 1. optimization_node per variant.
+            try:
+                self.cortex_kb.propose_point(
+                    canonical_id=opt_canonical,
+                    kind="optimization_node",
+                    authority="HYPOTHESIZED",
+                    attrs={
+                        "action":              pending.action_name,
+                        "from_agent":          pending.from_agent,
+                        "predicted_gain_pct":  pending.predicted_gain_pct,
+                        "proposal_msg_id":     pending.proposal_msg_id,
+                        "variant_name":        variant_name,
+                        "extra_sglang_args":   str(
+                            variant.get("extra_sglang_args")
+                            or variant.get("extra_args") or ""
+                        ),
+                        "extra_envs":          dict(
+                            variant.get("extra_envs") or {}
+                        ),
+                        # ``provenance`` was stamped by explore.py's
+                        # parser (``default_grid`` / ``llm_direct`` /
+                        # ``specialist:<domain>``); record it so KB
+                        # consumers can answer "did this variant come
+                        # from a specialist?".
+                        "provenance":          str(
+                            variant.get("provenance") or "llm_direct"
+                        ),
+                    },
+                    evidence=[
+                        f"log:proposal-{pending.proposal_msg_id}",
+                        f"variant:{variant_name}",
+                    ],
+                )
+            except CortexKBError as exc:
+                log.warning(
+                    "cortex T2 propose_point failed for variant=%s: %s",
+                    variant_name, exc,
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception(
+                    "cortex T2 propose_point unexpected error for variant=%s: %r",
+                    variant_name, exc,
+                )
+            variant_canonicals[variant_name] = opt_canonical
+
+            # 2. hypothesize edge per variant.
+            try:
+                outcome = self.cortex_kb.hypothesize(
+                    sid=sid,
+                    from_canonical=gap_canonical,
+                    to_canonical=opt_canonical,
+                    edge_type="hypothetical",
+                    reason=reason,
+                    attrs={
+                        "role":             pending.from_agent,
+                        "action":           pending.action_name,
+                        "proposal_msg_id":  pending.proposal_msg_id,
+                        "variant_name":     variant_name,
+                        "provenance":       str(
+                            variant.get("provenance") or "llm_direct"
+                        ),
+                        "phase":            phase,
+                    },
+                    evidence=[
+                        f"log:proposal-{pending.proposal_msg_id}",
+                        f"variant:{variant_name}",
+                    ],
+                )
+            except CortexKBError as exc:
+                log.warning(
+                    "cortex T2 hypothesize failed for variant=%s: %s",
+                    variant_name, exc,
+                )
+                outcome = {}
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception(
+                    "cortex T2 hypothesize unexpected error for variant=%s: %r",
+                    variant_name, exc,
+                )
+                outcome = {}
+            edge_id = str(outcome.get("tentative_edge_id") or "").strip()
+            variant_edges[variant_name] = edge_id
+
+        # Stash on PendingProposal for downstream consumers
+        # (``_materialize_approved_proposal`` stamps these into the
+        # grid; Gap-08 T3 will iterate the map).
+        pending.kb_opt_canonicals = variant_canonicals
+        pending.kb_edge_ids = variant_edges
+        # Representative legacy fields — first variant with a non-empty
+        # edge_id wins. Falls back to first variant when every edge
+        # failed (legacy T3 path treats empty edge_id as "late propose-edge
+        # fallback" anyway).
+        rep_name = next(
+            (n for n, eid in variant_edges.items() if eid),
+            next(iter(variant_edges), ""),
+        )
+        if rep_name:
+            pending.kb_edge_id = variant_edges.get(rep_name, "")
+            pending.kb_opt_canonical = variant_canonicals.get(rep_name, "")
+
+        # Record a single pending_kb_edges row for back-compat with the
+        # existing T3 hook. The full per-variant maps live in the
+        # ``variant_edges`` / ``variant_canonicals`` extension fields
+        # so Gap-08 can iterate without a schema bump.
+        self._append_pending_kb_edge_row({
+            "proposal_msg_id":    pending.proposal_msg_id,
+            "opt_canonical":      pending.kb_opt_canonical,
+            "gap_canonical":      gap_canonical,
+            "edge_id":            pending.kb_edge_id,
+            "action":             pending.action_name,
+            "variant_edges":      dict(variant_edges),
+            "variant_canonicals": dict(variant_canonicals),
+            "ts":                 ts_iso,
+        })
+
+    def _append_pending_kb_edge_row(self, row: dict[str, Any]) -> None:
+        """Append to ``shared_state.pending_kb_edges`` + persist.
+
+        Centralised so both T2 paths (single + per-variant) share the
+        same capping / save-error semantics.
+        """
+        pending_edges = list(self.shared_state.pending_kb_edges or [])
+        pending_edges.append(row)
+        # Cap to a reasonable size so resume doesn't pay quadratic costs.
+        if len(pending_edges) > 256:
+            pending_edges = pending_edges[-256:]
+        self.shared_state.pending_kb_edges = pending_edges
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive; T2 must not crash.
+            log.exception("cortex T2 SharedState.save failed")
+
+    def _resolve_issue_canonical(self, pending: PendingProposal) -> str:
+        """Find the issue_node canonical_id this proposal addresses.
+
+        Priority:
+
+        1. ``pending.payload['gap_canonical_id']`` — explicit
+           top-level gap reference (set by Orchestration when it
+           routes a specialist proposal to a known gap).
+        2. ``pending.payload['params']['gap_canonical_id']`` — same
+           thing under ``params`` (where most other proposal fields
+           live).
+        3. Fallback: :meth:`_gap_anchor_canonical_id` — the M1
+           ``workload.<model>.<gpu>`` anchor. Gap-09 will plug
+           ``SharedState.gaps[i].canonical_id`` (matched by domain
+           / phase) into this fallback once the field lands.
+        """
+        payload = pending.payload or {}
+        explicit_top = str(payload.get("gap_canonical_id") or "").strip()
+        if explicit_top:
+            return explicit_top
+        params = payload.get("params") or {}
+        if isinstance(params, dict):
+            explicit_params = str(params.get("gap_canonical_id") or "").strip()
+            if explicit_params:
+                return explicit_params
+        return self._gap_anchor_canonical_id()
+
+    def _gap_anchor_canonical_id(self) -> str:
+        """M1 placeholder for the gap anchor.
+
+        Per "M1 simplification — use
+        ``workload_node.canonical_id`` as the from side of every
+        hypothesize edge". M5 specialist framework will introduce real
+        ``issue_node`` anchors keyed by gap descriptors. Centralising
+        the derivation here keeps the migration to M5 a single-line
+        change.
+        """
+        from ..cortex_kb_client import recipe_canonical_id
+        workload = self.shared_state.model_name or "unknown_model"
+        hw = self.shared_state.gpu_type or "unknown_gpu"
+        return recipe_canonical_id(workload, hw)
+
+    def _pop_pending_kb_edge(self, proposal_msg_id: str) -> dict[str, Any] | None:
+        """Remove + return the pending edge entry for a proposal_msg_id.
+
+        Used by T3 (KEEP/REVERT) to confirm or refute the matching
+        hypothetical edge. ``None`` when the entry is missing (resume
+        from a stale state.json, or the T2 hook was skipped).
+        """
+        edges = list(self.shared_state.pending_kb_edges or [])
+        found: dict[str, Any] | None = None
+        rest: list[dict[str, Any]] = []
+        for row in edges:
+            if not isinstance(row, dict):
+                continue
+            if found is None and row.get("proposal_msg_id") == proposal_msg_id:
+                found = row
+            else:
+                rest.append(row)
+        if found is None:
+            return None
+        self.shared_state.pending_kb_edges = rest
+        return found
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
+        """Route a Critic ``review_verdict`` to the per-variant or
+        legacy single-verdict handler.
+
+        v0.8 KB_gaps/Gap-11: the
+        intent_parser already validated that exactly one of
+        ``verdict`` / ``verdict_map`` is present. We branch on
+        ``verdict_map`` first so the batch Explore path takes
+        precedence; everything else (kernel_opt / integrate /
+        report / specialist dispatch) falls through to the legacy
+        single-verdict path.
+        """
         target = intent.payload["target_proposal_msg_id"]
-        verdict = intent.payload["verdict"]
         pending = self.state.pending_proposals.get(target)
+        verdict_map = intent.payload.get("verdict_map")
+        single_verdict = intent.payload.get("verdict")
         if pending is None:
             await self._record_observation(
                 "coordinator", "observation",
-                {"kind": "verdict_for_unknown_proposal", "target": target, "verdict": verdict},
+                {
+                    "kind":         "verdict_for_unknown_proposal",
+                    "target":       target,
+                    "verdict":      single_verdict or "",
+                    "verdict_map":  bool(verdict_map),
+                },
             )
             return
+        if isinstance(verdict_map, dict) and verdict_map:
+            await self._handle_verdict_map(
+                source=source,
+                pending=pending,
+                verdict_map=verdict_map,
+                rationale=str(intent.payload.get("reasoning") or ""),
+            )
+            return
+        await self._handle_single_verdict(
+            source=source,
+            pending=pending,
+            verdict=str(single_verdict or ""),
+            reasoning=str(intent.payload.get("reasoning") or ""),
+        )
+
+    async def _handle_single_verdict(
+        self,
+        *,
+        source: str,
+        pending: "PendingProposal",
+        verdict: str,
+        reasoning: str,
+    ) -> None:
+        """Legacy v0.6 single-verdict handler.
+
+        Used for one-proposal reviews (kernel_opt / integrate /
+        report / specialist dispatch / any non-grid action). The
+        ``approve`` branch materialises the whole proposal as-is.
+
+        PR-A7 (Arbor-into-Hyperloom) adds the integrate_patch critic
+        gate: when the pending proposal is an ``integrate_patch`` for
+        a specialist whose patches the Critic just reviewed, the
+        verdict is mirrored onto ``SharedState.specialist_patch_verdicts``
+        so PolicyGate's ``integrate_patch_requires_critic_verdict``
+        rule can read it on the next delegate. Same mirror runs for a
+        verdict targeting the specialist itself, so an orchestrator
+        can review a specialist's patches by proposing the underlying
+        ``specialist`` action and reading the resulting verdict.
+        """
         pending.decided = True
         pending.verdict = verdict
-        # Mirror the verdict onto the bus so the original proposer's reactor
-        # picks it up next tick.
         await self.bus.append_and_seq(Message.new(
             source, pending.from_agent, "review_verdict",
-            {"target_proposal_msg_id": target, "verdict": verdict,
-             "reasoning": intent.payload.get("reasoning", "")},
+            {
+                "target_proposal_msg_id": pending.proposal_msg_id,
+                "verdict":                verdict,
+                "reasoning":              reasoning,
+            },
             priority=0 if verdict == "reject" else 1,
-            in_reply_to=target,
+            in_reply_to=pending.proposal_msg_id,
         ))
+        # PR-A7: mirror specialist / integrate_patch verdicts onto
+        # SharedState so PolicyGate's integrate_patch gate can
+        # consult them on the next tick.
+        try:
+            pa_params = pending.payload.get("params") or {}
+        except AttributeError:
+            pa_params = {}
+        sid_candidate = ""
+        if pending.action_name == "integrate_patch":
+            sid_candidate = str(
+                pa_params.get("specialist_task_id") or ""
+            ).strip()
+        elif pending.action_name == "specialist":
+            # A critic verdict on the specialist proposal itself is
+            # treated as the verdict on the patches that specialist
+            # will (or did) produce — the specialist's task_id is the
+            # natural key.
+            sid_candidate = str(pending.task_id or "").strip()
+        if sid_candidate and verdict:
+            try:
+                self.shared_state.record_specialist_patch_verdict(
+                    sid_candidate, verdict,
+                )
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — best-effort mirror
+                log.exception(
+                    "PR-A7: failed to mirror critic verdict for "
+                    "specialist task=%s", sid_candidate,
+                )
         if verdict == "approve":
             await self._materialize_approved_proposal(pending)
 
-    async def _materialize_approved_proposal(self, pending: PendingProposal) -> None:
+    async def _handle_verdict_map(
+        self,
+        *,
+        source: str,
+        pending: "PendingProposal",
+        verdict_map: dict[str, dict[str, Any]],
+        rationale: str,
+    ) -> None:
+        """v0.8 KB_gaps/Gap-11 per-variant Critic verdict handler.
+
+        Splits a batch ``verdict_map`` into approved / rejected
+        partitions and:
+
+        1. Pins the full map on the :class:`PendingProposal` so
+           subsequent reactor passes (resume rebuild,
+           ``decided`` checks) can see the per-variant decisions
+           without re-parsing the bus.
+        2. Mirrors the map back onto the bus as a single
+           ``review_verdict`` event carrying both the per-variant
+           detail *and* a summary single ``verdict`` (``approve``
+           when any variant survived; ``reject`` when all are
+           rejected; ``needs_review`` otherwise) so legacy
+           consumers (resume's verdict_by_target rebuild,
+           breakdown.kb_writes_summary) keep their meaning.
+        3. Fires KB ``refuted`` for every rejected variant via
+           :meth:`_cortex_t3_critic_rejected` (Gap-11 §5.4) — the
+           critic's reject is itself negative KB evidence; we
+           don't need to wait for explore to run.
+        4. Materialises an ``explore`` task whose ``grid`` is the
+           approved subset (passes the names down via
+           :meth:`_materialize_approved_proposal`).
+
+        Non-``explore`` proposals never reach this method
+        (``_handle_review_verdict`` routes them through the legacy
+        single-verdict path); we still defend against operator
+        misuse by short-circuiting with an observation when
+        somehow we land here on a non-grid proposal.
+        """
+        if pending.action_name != "explore":
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind":             "verdict_map_for_non_explore",
+                    "target":           pending.proposal_msg_id,
+                    "action_name":      pending.action_name,
+                    "variants_in_map":  sorted(verdict_map.keys()),
+                },
+            )
+            return
+
+        # Index the proposal's original grid by variant_name so we can
+        # (a) drop ``verdict_map`` keys that don't match a real
+        # variant, (b) carry the variant's payload (extra_args,
+        # extra_envs, ...) through to the materialised task, and
+        # (c) report a structured "unknown_variants" observation
+        # for the operator audit log.
+        original_grid: list[dict[str, Any]] = []
+        raw_grid = (pending.payload.get("params") or {}).get("grid")
+        if isinstance(raw_grid, list):
+            for v in raw_grid:
+                if isinstance(v, dict) and v.get("name"):
+                    original_grid.append(v)
+        original_names = {str(v.get("name")): v for v in original_grid}
+        approved_names: list[str] = []
+        rejected: list[tuple[str, str]] = []
+        unknown: list[str] = []
+        for vname, entry in verdict_map.items():
+            name = str(vname)
+            sub_verdict = str((entry or {}).get("verdict") or "").strip()
+            sub_rationale = str((entry or {}).get("rationale") or "")
+            if name not in original_names:
+                unknown.append(name)
+                continue
+            if sub_verdict == "approve":
+                approved_names.append(name)
+            elif sub_verdict == "reject":
+                rejected.append((name, sub_rationale))
+            # ``redirect`` / ``advise`` / ``needs_review`` neither
+            # land in the executor grid nor fire a KB refute — they
+            # surface in the audit log via the bus mirror below.
+
+        summary_verdict = (
+            "approve" if approved_names
+            else "reject" if rejected and not approved_names
+            else "needs_review"
+        )
+
+        # 1. Pin on the pending proposal.
+        pending.decided = True
+        pending.verdict = summary_verdict
+        pending.verdict_map = {
+            str(k): dict(v) if isinstance(v, dict) else {"verdict": str(v)}
+            for k, v in verdict_map.items()
+        }
+
+        # 2. Bus mirror — single event carrying the full map AND a
+        #    summary verdict so legacy consumers keep working.
+        await self.bus.append_and_seq(Message.new(
+            source, pending.from_agent, "review_verdict",
+            {
+                "target_proposal_msg_id": pending.proposal_msg_id,
+                "verdict":                summary_verdict,
+                "verdict_map":            pending.verdict_map,
+                "approved_variants":      sorted(approved_names),
+                "rejected_variants":      sorted(n for n, _ in rejected),
+                "unknown_variants":       sorted(unknown),
+                "reasoning":              rationale,
+            },
+            priority=0 if summary_verdict == "reject" else 1,
+            in_reply_to=pending.proposal_msg_id,
+        ))
+
+        # 3. KB refuted for critic-rejected variants (Gap-11 §5.4).
+        for vname, sub_rationale in rejected:
+            try:
+                await self._cortex_t3_critic_rejected(
+                    pending=pending,
+                    variant_name=vname,
+                    rationale=sub_rationale,
+                )
+            except Exception:  # noqa: BLE001 — best-effort KB write
+                log.exception(
+                    "cortex T3 critic-rejected failed for proposal=%s "
+                    "variant=%s", pending.proposal_msg_id, vname,
+                )
+
+        # 4. Materialise only the approved subset.
+        if approved_names:
+            await self._materialize_approved_proposal(
+                pending,
+                approved_variant_names=set(approved_names),
+            )
+        else:
+            # Whole grid rejected — observation only; downstream
+            # plateau judges + breakdown reads the bus mirror to
+            # surface "critic rejected K of K".
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind":              "verdict_map_all_rejected",
+                    "target":            pending.proposal_msg_id,
+                    "rejected_variants": sorted(n for n, _ in rejected),
+                    "unknown_variants":  sorted(unknown),
+                },
+            )
+
+    async def _cortex_t3_critic_rejected(
+        self,
+        *,
+        pending: "PendingProposal",
+        variant_name: str,
+        rationale: str,
+    ) -> None:
+        """KB ``refuted`` mirror for a critic-rejected variant.
+
+        KB_gaps/Gap-11 §5.4: when the Critic rejects a variant at
+        the verdict_map stage we record an immediate ``verify``
+        with ``outcome='refuted'`` on the matching T2 edge so the
+        Cortex view distinguishes "critic refused" from "executor
+        ran and failed". Depends on Gap-07's per-variant
+        ``kb_edge_ids`` map — a noop when the proposal predates
+        the T2 hook (no edge to refute).
+        """
+        if not variant_name:
+            return
+        edge_id = (pending.kb_edge_ids or {}).get(variant_name) or ""
+        if not edge_id:
+            # No per-variant edge — Gap-07 didn't fire (e.g. --no-
+            # cortex, or T2 hook was skipped). Skip; the explore
+            # executor never runs this variant either, so there's
+            # nothing to refute.
+            return
+        cortex = getattr(self, "cortex_kb", None)
+        if cortex is None or not getattr(cortex, "enabled", False):
+            return
+        sid = (self.shared_state.cortex_session_id or "").strip()
+        if not sid:
+            return
+        try:
+            cortex.verify(
+                sid=sid,
+                edge_id=edge_id,
+                outcome="refuted",
+                evidence=[
+                    f"proposal:{pending.proposal_msg_id}",
+                    f"variant:{variant_name}",
+                    "stage:critic",
+                    (f"rationale:{rationale[:200]}" if rationale else "rationale:none"),
+                ],
+                promote_authority=None,
+                idempotency_key=(
+                    f"verify_critic_reject:{sid}:{edge_id}:{variant_name}"
+                ),
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "cortex T3 critic-rejected verify failed for variant=%s",
+                variant_name,
+            )
+
+    async def _materialize_approved_proposal(
+        self,
+        pending: PendingProposal,
+        *,
+        approved_variant_names: set[str] | None = None,
+    ) -> None:
         """Promote an approved proposal into a TaskRegistry entry.
 
         For grid-style executors (backends / params / sweep) we inject the
         current best throughput as ``base_tput`` so they can compute
         gain%; otherwise the runner's default of 0.0 makes
         best_gain_pct uninformative (DESIGN §16 baseline_tput parameter).
+
+        ``approved_variant_names`` (v0.8 KB_gaps/Gap-11): when set,
+        filter the ``explore`` grid down to the named subset before
+        materialising. Used by the per-variant Critic verdict_map
+        path so a 4-variant proposal with 2 approved + 2 rejected
+        dispatches only the 2 approved variants to the executor.
+        ``None`` (legacy single-verdict path) keeps the full grid.
         """
         params = dict(pending.payload.get("params") or {})
+        # stamp per-variant kb_edge_id into the
+        # grid so the explore executor (which already reads
+        # ``variant.get("kb_edge_id")``) can carry the id through to
+        # the result rows the ledger writer + T3 hook will consume.
+        # No-op when the proposal isn't ``explore`` or when the T2
+        # hook didn't populate the map (e.g. ``--degraded-kb`` runs).
+        if (
+            pending.action_name == "explore"
+            and isinstance(params.get("grid"), list)
+        ):
+            stamped_grid: list[dict[str, Any]] = []
+            for variant in params["grid"]:
+                if not isinstance(variant, dict):
+                    # v0.8 KB_gaps/Gap-11: non-dict slots can't carry
+                    # a name, so they are *always* dropped when a
+                    # variant filter is in effect (no way to match
+                    # them); pass-through otherwise so legacy
+                    # callers keep working.
+                    if approved_variant_names is None:
+                        stamped_grid.append(variant)
+                    continue
+                vname = str(variant.get("name") or "").strip()
+                # drop variants the Critic
+                # rejected before they ever hit the executor.
+                if (
+                    approved_variant_names is not None
+                    and vname not in approved_variant_names
+                ):
+                    continue
+                variant_copy = dict(variant)
+                if pending.kb_edge_ids:
+                    edge_id = pending.kb_edge_ids.get(vname, "")
+                    if edge_id and not variant_copy.get("kb_edge_id"):
+                        variant_copy["kb_edge_id"] = edge_id
+                stamped_grid.append(variant_copy)
+            params["grid"] = stamped_grid
+            # Audit hint for the executor: how many variants the
+            # Critic filtered. Useful for the breakdown to surface
+            # "critic_filtered_count" alongside the explore round
+            # row without re-walking the bus.
+            if approved_variant_names is not None:
+                original_grid_len = len(
+                    [
+                        v for v in (pending.payload.get("params") or {}).get("grid", [])
+                        if isinstance(v, dict)
+                    ]
+                )
+                params["critic_filtered_count"] = max(
+                    0, original_grid_len - len(approved_variant_names),
+                )
         cb = self.shared_state.current_best or {}
         cb_args = (
             str(cb.get("extra_sglang_args") or "")
@@ -2944,60 +4609,7 @@ class Coordinator:
             # stamp it onto the task so the post-task promotion records the
             # server config that produced this trace.
             params.setdefault("base_extra_args", cb_args)
-        if pending.action_name in ("backends", "params", "sweep"):
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
-                else self.shared_state.baseline_tput
-            params.setdefault("base_tput", float(base or 0.0))
-            params.setdefault("base_extra_args", cb_args)
-            # Plumb baseline's materialized YAML so variant runs honor the
-            # same workload contract (CONC/ISL/OSL/TP/etc.) baseline ran.
-            # Without this each variant would re-render from the shipped
-            # YAML's smoke defaults and produce ~10x lower throughput.
-            # `setdefault` lets the proposer override (e.g. profile re-uses
-            # this path too, or a deliberate cross-workload sweep).
-            if self.shared_state.baseline_config_path:
-                params.setdefault(
-                    "config_path", self.shared_state.baseline_config_path
-                )
-            # T2 — pass the cumulative synergy_attempted set so backends
-            # phase-2 doesn't re-test the same combo across rounds, and
-            # cap each round at 5 phase-1 variants (parity with `params`).
-            # The ``backends_search`` ledger (Phase 2 of the dedup-by-
-            # fingerprint plan) covers everything ``tested_variant_names``
-            # used to provide and more: it records ALL tested variants
-            # (not just winners), and is consulted for both the default
-            # grid and LLM-supplied ``params.grid``.
-            if pending.action_name == "backends":
-                params.setdefault(
-                    "synergy_attempted",
-                    list(self.shared_state.synergy_attempted),
-                )
-                params.setdefault("max_candidates_per_round", 5)
-                params.setdefault("max_synergy_combos", 4)
-                params.setdefault(
-                    "backends_search", self.shared_state.backends_search,
-                )
-            if pending.action_name == "params":
-                params.setdefault("params_search", self.shared_state.params_search)
-                # Long runs should advance the search incrementally while
-                # still covering the params grid quickly enough to compete
-                # with kernel work. Direct runner calls/tests can still pass
-                # 0 to run the full grid.
-                params.setdefault("max_candidates_per_round", 5)
-                if isinstance(cb, dict) and cb.get("variant_name"):
-                    params.setdefault("base_variant_name", str(cb["variant_name"]))
-        if pending.action_name == "framework_pr":
-            # Plumb the context the framework_pr arm needs from SharedState
-            # so the executor stays stateless. ``base_tput`` is the gate
-            # the arm compares PR-applied throughput against (KEEP only if
-            # delta_pct >= min_gain_pct); ``base_extra_args`` keeps the
-            # sub-baseline server flags identical to current_best so we
-            # measure the PR effect, not a flag regression. ``framework``
-            # / ``gpu_type`` / ``model_class`` feed the gap composer
-            # (replaces the legacy hand-typed ``--framework-gap`` flag).
-            # ``last_profile_kernel_breakdown`` enriches the composer
-            # with a bottleneck keyword when a recent profile is on disk.
+        if pending.action_name == "sweep":
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
             base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
                 else self.shared_state.baseline_tput
@@ -3007,19 +4619,37 @@ class Coordinator:
                 params.setdefault(
                     "config_path", self.shared_state.baseline_config_path
                 )
-            if self.shared_state.framework:
-                params.setdefault("framework", self.shared_state.framework)
-            if self.shared_state.gpu_type:
-                params.setdefault("gpu_type", self.shared_state.gpu_type)
-            if self.shared_state.model_class:
-                params.setdefault("model_class", self.shared_state.model_class)
-            if self.shared_state.last_profile_kernel_breakdown:
-                params.setdefault(
-                    "last_profile_kernel_breakdown",
-                    self.shared_state.last_profile_kernel_breakdown,
-                )
-            if self.shared_state.model_path:
-                params.setdefault("model_path", self.shared_state.model_path)
+        if pending.action_name == "explore":
+            # Fix E (per-variant overtime kill — Q1 baseline-anchored,
+            # Q5 default-on-with-flag). These two fields are NOT LLM
+            # strategy: they're operational knobs the Coordinator
+            # owns. We always inject them so the ExploreExecutor can
+            # derive ``soft_deadline_sec = baseline_runtime_sec *
+            # explore_overtime_kill_ratio`` for the single-variant
+            # phase (stack rebench intentionally bypasses this gate
+            # — Q4). ``setdefault`` leaves an LLM-supplied override
+            # in place for one-off rebench / debug variants.
+            br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+            if br > 0:
+                params.setdefault("baseline_runtime_sec", br)
+            kill_ratio = float(getattr(
+                self.shared_state, "explore_overtime_kill_ratio", 0.0,
+            ) or 0.0)
+            if kill_ratio > 0:
+                params.setdefault("explore_overtime_kill_ratio", kill_ratio)
+            # Mirror the sweep/integrate branches: inject ``base_tput`` (and
+            # ``base_extra_args``) tied to current_best (or baseline_tput as
+            # fallback) whenever Orchestration omits them. Without this the
+            # ExploreExecutor sees ``base_tput=0``, ``_gain_pct`` returns
+            # ``None`` for every variant, and the KEEP/REVERT ladder is
+            # skipped — every variant lands in ``FAILED`` regardless of how
+            # far it beat baseline. Explicit operator value still wins via
+            # setdefault.
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else self.shared_state.baseline_tput
+            params.setdefault("base_tput", float(base or 0.0))
+            params.setdefault("base_extra_args", cb_args)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
             params=params,
@@ -3065,7 +4695,8 @@ class Coordinator:
                     rule="family_pruned",
                     hint=(
                         f"{action_name!r} is in pruned_families; pick another "
-                        f"action from Action scores"
+                        f"phase-allowed action (see the `=== Phase-allowed "
+                        f"actions ===` block)"
                     ),
                 ),
                 action_name=action_name,
@@ -3080,6 +4711,29 @@ class Coordinator:
                 source, intent, denied, action_name=action_name,
             )
             return
+        # Critic gate for explore grids: every ``delegate{action_name='explore',
+        # params={grid: [...]}}`` is reviewed per-variant by the Critic before
+        # any benchmark runs. We re-route through ``_handle_propose_action``
+        # so the proposal lands in ``pending_proposals``, the Critic emits a
+        # ``verdict_map``, and ``_handle_verdict_map`` materialises only the
+        # approved subset (variants the Critic rejects fire a KB ``refuted``
+        # edge via ``_cortex_t3_critic_rejected`` and never reach the executor).
+        # The proposal path re-runs is_pruned + _sequence_denial_for_action,
+        # and ``_materialize_approved_proposal`` writes the task via
+        # ``tasks.create_or_return_existing`` directly, so this re-route
+        # cannot recurse back into ``_handle_delegate``. Empty/missing grid
+        # falls through to the legacy delegate path (nothing to filter).
+        params_preview = intent.payload.get("params") or {}
+        grid_preview = (
+            params_preview.get("grid") if isinstance(params_preview, dict) else None
+        )
+        if (
+            action_name == "explore"
+            and isinstance(grid_preview, list)
+            and grid_preview
+        ):
+            await self._handle_propose_action(source, intent)
+            return
         params = dict(intent.payload.get("params") or {})
         # The schema says delegate idempotency_key is top-level, but LLMs
         # sometimes place it inside params (especially when following older
@@ -3092,26 +4746,86 @@ class Coordinator:
         # ran. See `_materialize_approved_proposal` for the same logic on the
         # proposal/review path. `setdefault` lets the delegator override.
         if (
-            action_name in ("backends", "params", "sweep")
+            action_name in ("sweep", "explore")
             and self.shared_state.baseline_config_path
         ):
             params.setdefault(
                 "config_path", self.shared_state.baseline_config_path
             )
-        # T2 — same synergy-dedup + per-round cap plumbing as the
-        # proposal-review path. Dedup against previously-tested variants
-        # rides on the shared ``backends_search`` ledger (Phase 2 of the
-        # dedup-by-fingerprint plan).
-        if action_name == "backends":
-            params.setdefault(
-                "synergy_attempted",
-                list(self.shared_state.synergy_attempted),
+        # Fix E (parity with _materialize_approved_proposal): inject
+        # overtime-kill operational knobs for direct explore delegates
+        # too. The common path is the Critic-gated reroute above, but
+        # this branch covers anything that bypasses the verdict map
+        # (legacy resume, tests that delegate explore directly).
+        if action_name == "explore":
+            br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+            if br > 0:
+                params.setdefault("baseline_runtime_sec", br)
+            kill_ratio = float(getattr(
+                self.shared_state, "explore_overtime_kill_ratio", 0.0,
+            ) or 0.0)
+            if kill_ratio > 0:
+                params.setdefault("explore_overtime_kill_ratio", kill_ratio)
+        # IR-7 — ``assess_remaining_gaps`` is a thin wrapper: rewrite
+        # the kind to ``specialist`` and force the
+        # ``session_steward_specialist`` domain (LLM cannot pick any
+        # other domain via this action). Throttle is checked separately
+        # via _assess_remaining_gaps_throttle_denial above.
+        if action_name == "assess_remaining_gaps":
+            throttle = self._assess_remaining_gaps_throttle_denial()
+            if throttle is not None:
+                await self._record_policy_denied(
+                    source, intent, throttle, action_name=action_name,
+                )
+                return
+            # Force the steward domain + a deterministic gap id so
+            # PolicyGate R2 passes. Preserve params.reason verbatim
+            # so the audit trail captures why the LLM proposed.
+            llm_reason = str(params.get("reason") or "").strip()
+            round_id = int(
+                (self.shared_state.explore_search or {}).get("cursor") or 0
             )
-            params.setdefault("max_candidates_per_round", 5)
-            params.setdefault("max_synergy_combos", 4)
-            params.setdefault(
-                "backends_search", self.shared_state.backends_search,
+            params["domain"] = "session_steward_specialist"
+            params["gap_canonical_id"] = (
+                params.get("gap_canonical_id")
+                or f"gap.steward.round{round_id}.llm"
             )
+            params["gap_symptom"] = (
+                "LLM-initiated steward assessment (reason="
+                f"{llm_reason or 'unspecified'!r})"
+            )
+            params.setdefault("gap_layer", "session_strategy")
+            params.setdefault("max_turns", 8)
+            params.setdefault("source", "orchestration")
+            params["reason"] = llm_reason or "llm_uncertainty"
+            # Rewire to the specialist task kind so the standard
+            # SpecialistRunner picks it up.
+            action_name = "specialist"
+
+        # Auto-roofline gate (EXPLORE-entry blocker). When
+        # ``_on_enter_explore`` enqueued a fresh ``roofline`` task and
+        # it is still in-flight, refuse new specialist dispatches so
+        # the first-round specialists run with the analysis.md
+        # snapshot. The field is cleared by
+        # ``_promote_to_shared_state`` when the roofline task reaches
+        # a terminal state.
+        if action_name == "specialist":
+            denied = await self._auto_roofline_pending_denial()
+            if denied is not None:
+                await self._record_policy_denied(
+                    source, intent, denied, action_name=action_name,
+                )
+                return
+
+        # v0.8 §3.5 + specialist pre-dispatch warmup.
+        # When the Orchestration role delegates a specialist task, the
+        # Coordinator is the only place with the KnowledgePlane facade
+        # in scope. Warm the prompt's external-knowledge sections here
+        # so SpecialistRunner's prompt assembly sees them via task
+        # params. ``setdefault`` lets the caller (Orchestration) pre-
+        # supply values; we only fill the gaps.
+        if action_name == "specialist":
+            await self._warm_specialist_params(params)
         # Idempotency-key resolution chain (most-explicit first):
         #   1. ``intent.payload.idempotency_key`` — schema-correct top-level
         #      placement.
@@ -3206,6 +4920,912 @@ class Coordinator:
         ))
 
     # ------------------------------------------------------------------
+    # v0.8 §3.5 + specialist pre-dispatch warmup
+    # ------------------------------------------------------------------
+    async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
+        """Fill the specialist task params with KnowledgePlane data
+        before the task is enqueued.
+
+        Mutates ``params`` in place. The caller (``_handle_delegate``)
+        always passes a fresh dict copy, so we don't risk mutating the
+        original intent.payload.
+
+        Sources, all best-effort (specialist still runs even if every
+        warmup call fails — SpecialistRunner sees empty fields and
+        SpecialistPromptBuilder renders ``(none)``):
+
+        * ``pr_feed`` — :meth:`KnowledgePlane.pr_feed_warm` for the
+          delegate's ``params.domain``. PRSummary objects are flattened
+          to dicts so the prompt builder can render them uniformly.
+        * ``pr_monitor_available`` — boolean mirror of
+          ``plane.pr_monitor_enabled``.
+        * ``warm_start_recipe`` / ``warm_start_pitfalls`` — mirror of
+          ``SharedState.warm_start_*`` (already T0'd by cli).
+        * ``framework_source_roots`` — picked up from
+          :func:`resolve_source_file_allowlist` so the LLM has a stable
+          local-source navigation hint without needing
+          ``$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`` propagated by
+          hand.
+        * GPU hardware hints (``gpu_type`` / ``tp``) from SharedState.
+
+        Gap-09 (gaps[] field) will later expose ``gap_symptom`` /
+        ``gap_layer`` / ``gap_attempts`` / ``kb_subgraph`` from a real
+        gap ledger; until then those stay empty (PromptBuilder
+        gracefully degrades).
+        """
+        state = self.shared_state
+        plane = self.knowledge_plane
+
+        domain = str(params.get("domain") or "").strip()
+
+        # PR feed (Gap-02 ↔ Gap-01 contract): if the plane is wired and
+        # PR Monitor is enabled, fetch the per-domain warm cache. Any
+        # exception falls back to an empty list + non-fatal warning.
+        if plane is not None and "pr_feed" not in params:
+            try:
+                prs, _warnings = plane.pr_feed_warm(domain=domain)
+                params["pr_feed"] = [
+                    self._pr_summary_to_dict(p) for p in prs
+                ]
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "specialist warmup: pr_feed_warm(domain=%r) failed: %r",
+                    domain, exc,
+                )
+                params.setdefault("pr_feed", [])
+        else:
+            params.setdefault("pr_feed", [])
+
+        if "pr_monitor_available" not in params:
+            params["pr_monitor_available"] = bool(
+                plane is not None and getattr(plane, "pr_monitor_enabled", True)
+            )
+
+        # PR-A5 (Arbor-into-Hyperloom): KB sub-graph traverse warmup.
+        # The plain ``pr_feed`` covers PR Monitor; this fills the
+        # specialist prompt's ``## 4. KB SUB-GRAPH`` section so the LLM
+        # starts with the Cortex KB anchor expanded rather than having
+        # to call ``mcp__cortex_kb__traverse`` itself.
+        if (
+            plane is not None
+            and getattr(plane, "cortex_enabled", False)
+            and "kb_subgraph" not in params
+        ):
+            try:
+                # PR-A10: pass the (lowercased) hw_slug so the per-domain
+                # fallback in select_kb_for_domain can filter recipe
+                # candidates to the same GPU.
+                from ..cortex_kb_client import _slug as _kb_slug
+                hw_slug = _kb_slug(state.gpu_type or "", "")
+                subgraph = plane.select_kb_for_domain(
+                    domain, hw_slug=hw_slug or None,
+                )
+                params["kb_subgraph"] = subgraph or {}
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "specialist warmup: select_kb_for_domain(domain=%r) "
+                    "failed: %r",
+                    domain, exc,
+                )
+                params.setdefault("kb_subgraph", {})
+        else:
+            params.setdefault("kb_subgraph", {})
+
+        # Warm-start recipe + pitfalls from T0 anchor.
+        if state.warm_start_recipe and "warm_start_recipe" not in params:
+            params["warm_start_recipe"] = dict(state.warm_start_recipe)
+        if state.warm_start_pitfalls and "warm_start_pitfalls" not in params:
+            params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
+
+        # Local-source navigation hint — same source the kernel agent
+        # uses for ``source_file`` containment.
+        if "framework_source_roots" not in params:
+            try:
+                from .framework_paths import resolve_source_file_allowlist
+                roots = resolve_source_file_allowlist()
+                if roots:
+                    params["framework_source_roots"] = list(roots)
+            except Exception as exc:  # noqa: BLE001
+                log.debug(
+                    "specialist warmup: framework_source_roots lookup "
+                    "failed: %r", exc,
+                )
+
+        # Hardware + workload hints (cheap; pulled from SharedState which
+        # ``cli._init_fresh_session`` populates from CLI flags / env at
+        # session start, and which ``cli`` re-exports back into env on
+        # ``--resume``). Without these the SpecialistPromptInputs
+        # dataclass defaults silently win — most notably ``tp=0`` /
+        # ``tp=1``, which makes comm_specialist self-veto on TP>1
+        # sessions with "cross-GPU collectives non-actionable". The same
+        # workload hints surface to the specialist's prompt section 2,
+        # so serving / system / kernel-switch specialists reason against the
+        # real benchmark workload rather than the dataclass defaults.
+        params.setdefault("gpu_type", state.gpu_type or "")
+        if int(getattr(state, "tp", 0) or 0) > 0:
+            params.setdefault("tp", int(state.tp))
+        if getattr(state, "precision", "") or "":
+            params.setdefault("precision", str(state.precision))
+        if int(getattr(state, "conc", 0) or 0) > 0:
+            params.setdefault("conc", int(state.conc))
+        if int(getattr(state, "isl", 0) or 0) > 0:
+            params.setdefault("isl", int(state.isl))
+        if int(getattr(state, "osl", 0) or 0) > 0:
+            params.setdefault("osl", int(state.osl))
+        if int(getattr(state, "max_model_len", 0) or 0) > 0:
+            params.setdefault("max_model_len", int(state.max_model_len))
+
+        # fill gap-specific anchors from the
+        # gaps[] ledger. Orchestration carries a ``gap_canonical_id``
+        # via ``delegate.params`` (and also as the M5 ``gap`` field);
+        # we look up the matching gap row and stamp its symptom /
+        # layer / domain_hint / recent attempts onto the task so the
+        # SpecialistPromptBuilder section that renders ``gap_symptom``
+        # / ``gap_layer`` / ``gap_evidence`` has structured context
+        # instead of falling back to ``(none)``.
+        gap_cid = (
+            str(params.get("gap_canonical_id") or "").strip()
+            or str(params.get("gap") or "").strip()
+        )
+        if gap_cid:
+            gap = state.find_gap(gap_cid)
+            if gap is not None:
+                if not params.get("gap_symptom"):
+                    params["gap_symptom"] = str(gap.get("symptom") or "")
+                if not params.get("gap_layer"):
+                    params["gap_layer"] = str(gap.get("layer") or "")
+                if not params.get("domain"):
+                    # When the LLM omitted ``domain`` we let the gap's
+                    # ``domain_hint`` win — PolicyGate R2 still validates
+                    # the routing against SPECIALIST_DOMAIN_KEYS.
+                    hint = str(gap.get("domain_hint") or "")
+                    if hint:
+                        params["domain"] = hint
+                evidence = params.get("gap_evidence")
+                if not isinstance(evidence, dict) or not evidence:
+                    attempts = list(gap.get("attempts") or [])[-5:]
+                    if attempts:
+                        params["gap_evidence"] = {
+                            "recent_attempts": attempts,
+                            "severity": str(gap.get("severity") or ""),
+                        }
+
+        # ROOFLINE EVIDENCE — specialists need ground-truth bottleneck
+        # signals (Executive Summary + Top Operations) to ground their
+        # proposal_set instead of guessing from the gap_evidence prose
+        # alone. We pack the canonical fields into ``roofline_evidence``
+        # plus ``analysis_md_path`` so the specialist can call
+        # ``Read(analysis_md_path)`` for the full TraceLens report on
+        # demand. No injection when the cache is empty (specialist
+        # prompt builder degrades gracefully).
+        last_ta = getattr(state, "last_trace_analyze", None) or {}
+        if (
+            isinstance(last_ta, dict)
+            and last_ta.get("analysis_md_text")
+            and "roofline_evidence" not in params
+        ):
+            from .roofline_snapshot import extract_workload_summary
+
+            analysis_path = str(last_ta.get("analysis_md_path") or "")
+            executive_summary: dict[str, Any] = {}
+            if analysis_path:
+                try:
+                    executive_summary = extract_workload_summary(analysis_path)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "specialist warmup: extract_workload_summary(%s) "
+                        "failed: %r", analysis_path, exc,
+                    )
+                    executive_summary = {}
+            hot_kernels = list(last_ta.get("hot_kernels_top15") or [])[:8]
+            params["roofline_evidence"] = {
+                "analysis_md_path": analysis_path,
+                "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
+                "executive_summary": executive_summary,
+                "hot_kernels_top15": hot_kernels,
+            }
+
+        # framework_pr_scout sub_kind: pre-fetch PR candidates
+        # from ``fa candidates`` in the main process so the specialist
+        # subprocess starts with a populated metadata list. The
+        # specialist still fetches diff bodies itself via the curl
+        # template in the prompt's FRAMEWORK PR CANDIDATES section.
+        sub_kind = str(params.get("sub_kind") or "").strip()
+        if (
+            sub_kind == "framework_pr_scout"
+            and bool(getattr(state, "framework_agent_enabled", False))
+            and "pr_candidates" not in params
+        ):
+            from .framework_agent_client import fetch_pr_candidates
+
+            gap_text = " ".join(
+                p for p in (
+                    str(params.get("gap_symptom") or "").strip(),
+                    str(params.get("gap_layer") or "").strip(),
+                    str(params.get("gap_canonical_id") or "").strip(),
+                )
+                if p
+            )
+            try:
+                params["pr_candidates"] = await fetch_pr_candidates(
+                    gap_description=gap_text,
+                    framework=str(getattr(state, "framework", "") or "sglang"),
+                    session_dir=self.session_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 — graceful degrade
+                log.warning(
+                    "framework_pr_scout: pre-fetch failed: %r", exc,
+                )
+                params["pr_candidates"] = []
+
+    @staticmethod
+    def _pr_summary_to_dict(pr: Any) -> dict[str, Any]:
+        """Flatten a :class:`PRSummary` (or any object with the same
+        attribute names) into the dict shape SpecialistPromptBuilder
+        expects (``{title, url, labels, repo, number, state, author}``).
+        Defensive against any future field additions in
+        :mod:`pr_monitor`.
+        """
+        return {
+            "repo":   str(getattr(pr, "repo", "")),
+            "number": int(getattr(pr, "number", 0) or 0),
+            "title":  str(getattr(pr, "title", "")),
+            "url":    str(getattr(pr, "url", "")),
+            "state":  str(getattr(pr, "state", "")),
+            "labels": list(getattr(pr, "labels", ()) or ()),
+            "author": str(getattr(pr, "author", "")),
+        }
+
+    # ------------------------------------------------------------------
+    # gaps[] ledger refresh
+    # ------------------------------------------------------------------
+    async def _refresh_gaps(self, *, reason: str) -> None:
+        """Refresh :attr:`SharedState.gaps` from observable signals.
+
+        Coordinator is the sole writer (Inv-1 single-writer +
+        PolicyGate ``CORE_STATE_FIELDS`` lock). Called at:
+
+        1. baseline completion          (``reason='baseline_done'``)
+        2. EXPLORE round KEEP / REVERT  (``reason='explore_round'``)
+        3. specialist_done bookkeeping  (``reason='specialist_done'``)
+        4. periodic Cortex refresh      (``reason='cortex_refresh'``)
+
+        The refresh is *additive*: each call upserts entries derived
+        from current observable signals (baseline, attempts log,
+        winners history, Cortex traverse) without nuking the existing
+        list. Dedup is keyed by ``canonical_id``; per-gap
+        ``attempts`` is capped at the most recent
+        :data:`_GAPS_ATTEMPTS_HISTORY` rows.
+
+        Best-effort: any exception is logged and absorbed so the
+        refresh never blocks the calling path (a stale gap list is
+        always preferable to a dead reactor).
+        """
+        state = self.shared_state
+        try:
+            for entry in self._extract_gaps_from_baseline():
+                state.upsert_gap(entry)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("gaps refresh: baseline extraction failed")
+        try:
+            for entry in self._extract_gaps_from_attempts():
+                state.upsert_gap(entry)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("gaps refresh: attempts extraction failed")
+
+        plane = getattr(self, "knowledge_plane", None)
+        if plane is not None and hasattr(plane, "cortex_traverse_issues"):
+            try:
+                traverse = getattr(plane, "cortex_traverse_issues")
+                rows = traverse(
+                    model_class=getattr(state, "model_class", "") or "",
+                    gpu_type=getattr(state, "gpu_type", "") or "",
+                )
+                if isinstance(rows, list):
+                    for entry in rows:
+                        if isinstance(entry, dict):
+                            entry = dict(entry)
+                            entry.setdefault("source", "cortex")
+                            state.upsert_gap(entry)
+            except Exception:  # noqa: BLE001 — defensive
+                log.warning(
+                    "gaps refresh: cortex_traverse_issues failed (reason=%s)",
+                    reason,
+                    exc_info=True,
+                )
+        log.debug(
+            "gaps refresh (reason=%s): %d gaps after merge",
+            reason, len(state.gaps),
+        )
+
+    def _extract_gaps_from_baseline(self) -> list[dict[str, Any]]:
+        """Derive initial gap rows from the baseline snapshot.
+
+        Two synthesised gaps when applicable:
+
+        * ``throughput_below_target`` — fires when ``target_gap_pct``
+          is positive (operator asked for a specific gain%, and we
+          haven't hit it yet). Severity scales with the gap.
+        * ``baseline_unstable`` — fires when ``baseline_failure_streak
+          > 0``. Tied to the kernel/system layer because that's where
+          most baseline crashes originate.
+
+        These are *anchor* gaps (the M1 fallback in
+        :meth:`_resolve_issue_canonical` already minted a workload
+        canonical_id; we reuse the same id so traverse rows align).
+        """
+        state = self.shared_state
+        gaps: list[dict[str, Any]] = []
+        if state.baseline_tput <= 0:
+            return gaps
+        anchor = self._gap_anchor_canonical_id()
+        target_gap = float(getattr(state, "target_gap_pct", 0.0) or 0.0)
+        if target_gap > 0.0:
+            severity = (
+                "high" if target_gap >= 10.0
+                else "medium" if target_gap >= 3.0
+                else "low"
+            )
+            gaps.append({
+                "canonical_id": f"{anchor}#throughput_below_target",
+                "symptom": (
+                    f"current_best is {target_gap:.1f}% short of "
+                    f"--target-gain"
+                ),
+                "layer": "framework",
+                "severity": severity,
+                "domain_hint": "serving_specialist",
+                "source": "baseline",
+            })
+        if state.baseline_failure_streak > 0:
+            gaps.append({
+                "canonical_id": f"{anchor}#baseline_unstable",
+                "symptom": (
+                    f"baseline crashed {state.baseline_failure_streak} "
+                    f"consecutive time(s)"
+                ),
+                "layer": "system",
+                "severity": (
+                    "high" if state.baseline_failure_streak >= 2 else "medium"
+                ),
+                "domain_hint": "system_specialist",
+                "source": "baseline",
+            })
+        return gaps
+
+    def _extract_gaps_from_attempts(self) -> list[dict[str, Any]]:
+        """Derive gaps from the rolling failures + winners history.
+
+        Walks ``last_action_failures`` to surface recurring (action,
+        error_class) failure patterns and ``explore_search.winners_history``
+        to surface a "stalled explore plateau" gap when several recent
+        rounds failed to produce a new ``current_best``.
+
+        Layer assignment is best-effort and uses the action family as
+        a proxy (kernel_opt → kernel; backends/params/explore →
+        framework; sweep → framework). ``domain_hint`` follows the
+        same mapping.
+        """
+        state = self.shared_state
+        anchor = self._gap_anchor_canonical_id()
+        gaps: list[dict[str, Any]] = []
+
+        failures = list(state.last_action_failures or [])[-10:]
+        seen_failures: dict[str, dict[str, Any]] = {}
+        for row in failures:
+            if not isinstance(row, dict):
+                continue
+            action = str(row.get("action") or "").strip() or "unknown"
+            err = str(row.get("error_class") or "").strip() or "unknown_error"
+            key = f"{action}::{err}"
+            layer, domain = self._gap_layer_for_action(action)
+            attempt = {
+                "action": action,
+                "variant_name": str(row.get("variant_name") or ""),
+                "outcome": "REVERT",
+                "error_class": err,
+                "ts": str(row.get("ts") or datetime.now(timezone.utc).isoformat()),
+            }
+            if key in seen_failures:
+                seen_failures[key]["attempts"].append(attempt)
+            else:
+                seen_failures[key] = {
+                    "canonical_id": f"{anchor}#fail:{action}:{err}",
+                    "symptom": f"{action} repeatedly fails with {err}",
+                    "layer": layer,
+                    "severity": "medium",
+                    "domain_hint": domain,
+                    "source": "attempts",
+                    "attempts": [attempt],
+                }
+        gaps.extend(seen_failures.values())
+
+        no_promote = int(state.params_no_promote_streak or 0)
+        explore_search = state.explore_search or {}
+        winners_hist = []
+        if isinstance(explore_search, dict):
+            winners_hist = list(explore_search.get("winners_history") or [])
+        recent_promotions = sum(
+            1 for w in winners_hist[-5:]
+            if isinstance(w, dict) and float(w.get("gain_pct") or 0.0) > 0.0
+        )
+        if no_promote >= 3 and recent_promotions == 0:
+            gaps.append({
+                "canonical_id": f"{anchor}#explore_plateau",
+                "symptom": (
+                    f"{no_promote} consecutive grid rounds without a new "
+                    f"current_best"
+                ),
+                "layer": "framework",
+                "severity": "high" if no_promote >= 6 else "medium",
+                "domain_hint": "serving_specialist",
+                "source": "attempts",
+            })
+        return gaps
+
+    @staticmethod
+    def _gap_layer_for_action(action: str) -> tuple[str, str]:
+        """Map an action name → (layer, domain_hint) for gap rows.
+
+        Centralised so the four call sites (baseline / attempts /
+        explore / specialist_done) agree on the routing. Falls back
+        to ``("framework", "serving_specialist")`` for unknown
+        action names — that's the broadest catch-all in the M5
+        specialist catalogue.
+        """
+        a = str(action or "").strip().lower()
+        if a in {"kernel_opt", "integrate", "select_kernels", "run_optimization"}:
+            return ("kernel", "kernel_switch_specialist")
+        if a in {"profile", "roofline"}:
+            return ("kernel", "kernel_switch_specialist")
+        if a in {"sweep", "explore"}:
+            return ("framework", "serving_specialist")
+        if a in {"baseline"}:
+            return ("system", "system_specialist")
+        return ("framework", "serving_specialist")
+
+    def _record_explore_round_gaps(
+        self, *, task: "Task | None", result: dict[str, Any],
+    ) -> None:
+        """Append per-variant KEEP/REVERT outcomes to the matching gap.
+
+        Called from :meth:`_promote_to_shared_state` after an explore
+        task settles. When the explore proposal carried a
+        ``gap_canonical_id`` (Orchestration routed the proposal to a
+        specific gap), we append every variant outcome as an attempt
+        on that gap; otherwise the attempts are folded under the
+        anchor gap so the velocity counter still moves.
+
+        Best-effort: a missing gap row is upserted with a minimal
+        symptom rather than dropped — the alternative would silently
+        lose the audit trail on cold-start sessions.
+        """
+        if task is None:
+            return
+        per_variant = result.get("per_variant_outcomes")
+        if not isinstance(per_variant, list) or not per_variant:
+            return
+        params = dict(task.params or {})
+        canonical = (
+            str(params.get("gap_canonical_id") or "").strip()
+            or self._gap_anchor_canonical_id()
+        )
+        state = self.shared_state
+        existing = state.find_gap(canonical)
+        if existing is None:
+            state.upsert_gap({
+                "canonical_id": canonical,
+                "symptom": "explore round outcomes",
+                "layer": "framework",
+                "severity": "medium",
+                "domain_hint": "serving_specialist",
+                "source": "attempts",
+            })
+        for outcome in per_variant:
+            if not isinstance(outcome, dict):
+                continue
+            state.append_gap_attempt(canonical, {
+                "action": "explore",
+                "variant_name": str(outcome.get("variant_name") or ""),
+                "outcome": str(outcome.get("outcome") or "").upper(),
+                "gain_pct": outcome.get("gain_pct"),
+            })
+
+    # ------------------------------------------------------------------
+    # v0.8 §3.5 §10 + specialist_done bookkeeping
+    # ------------------------------------------------------------------
+    async def _handle_specialist_done(
+        self, source: str, intent: Intent,
+    ) -> None:
+        """Handle a ``specialist_done`` intent.
+
+        Source format is ``specialist:<task_id>`` per Inv-5.3 / R3
+        (PolicyGate already validated this when called via
+        :meth:`_handle_intent`; defense in depth re-asserts the
+        prefix here so direct callers — e.g. the dispatcher exit
+        hook — get the same task lookup logic for free).
+
+        The bookkeeping itself is in :meth:`_record_specialist_result`
+        so the runner-internal path (Gap-01 adapter) and the
+        intent-routing path (this method) converge on the same writer.
+
+        Note: the current SpecialistRunner captures the done intent
+        internally and surfaces it via :class:`SubAgentResult`. The
+        dispatcher result hook is therefore the primary entry point
+        for production. The intent-routing branch (above) handles
+        the future case where an operator replay / out-of-band
+        emitter routes a done through the bus.
+        """
+        payload = dict(intent.payload or {})
+        task_id = self._task_id_from_specialist_source(source)
+        task: Task | None = None
+        if task_id:
+            try:
+                task = await self.tasks.get(task_id)
+            except Exception:  # noqa: BLE001 — TaskNotFound and friends
+                task = None
+        if task is None:
+            # PolicyGate R3 should have caught this. Log defensively
+            # but don't crash — the audit trail (transcript on disk +
+            # the runner-internal path's delegated_result) is still
+            # intact.
+            log.warning(
+                "specialist_done from source=%r references unknown "
+                "task_id=%r; skipping bookkeeping (R3 should have "
+                "denied; defense in depth)",
+                source, task_id,
+            )
+            return
+        await self._record_specialist_result(
+            task=task, done_payload=payload, source=source,
+        )
+
+    @staticmethod
+    def _task_id_from_specialist_source(source: str) -> str:
+        """Extract the task_id from a ``specialist:<task_id>`` source.
+
+        Returns an empty string when the source doesn't carry the
+        expected prefix (the caller treats that as an unknown-task
+        miss and bails out).
+        """
+        if not source:
+            return ""
+        if source.startswith(SPECIALIST_FROM_AGENT_PREFIX):
+            return source[len(SPECIALIST_FROM_AGENT_PREFIX):]
+        return ""
+
+    async def _record_specialist_result(
+        self,
+        *,
+        task: Task,
+        done_payload: dict[str, Any],
+        source: str,
+    ) -> None:
+        """Common bookkeeping for any specialist task termination.
+
+        Called from two paths:
+
+        * The dispatcher's result loop (production), once the
+          SpecialistRunner returns a :class:`SubAgentResult` with
+          ``result.specialist_done`` populated (Gap-01 adapter).
+        * The intent routing table (defense in depth), when an
+          out-of-band emitter sends a ``SPECIALIST_DONE`` intent
+          through the bus.
+
+        Both paths converge on the same SharedState writes so the
+        ledger / streak / ``last_specialist`` mirror stay coherent
+        regardless of where the trigger came from. Idempotent on
+        ``round_id`` (delegated to :meth:`SharedState.record_specialist_round`).
+
+        Failures inside the bookkeeping are logged but not re-raised:
+        the runner has already produced an on-disk transcript +
+        ``specialist_done.json`` artifact, so the audit trail
+        survives even if SharedState persistence hiccups.
+
+        T2 per-variant hypothesize is
+        intentionally **not** triggered here — it belongs to
+        :ref:`Gap-07` which up-shifts the existing per-proposal
+        ``_cortex_t2_hook`` to per-variant. Threading a stub call
+        site now would silently no-op (the per-variant edge map
+        ``PendingProposal.kb_edge_ids`` doesn't exist yet); the
+        Gap-07 PR will add the call.
+        """
+        domain = str(done_payload.get("domain") or "").strip()
+        proposals = done_payload.get("proposal_set") or []
+        if not isinstance(proposals, list):
+            proposals = []
+        is_empty = bool(done_payload.get("empty")) or len(proposals) == 0
+
+        round_entry = self._build_specialist_round_entry(
+            task=task, done_payload=done_payload, source=source,
+        )
+        try:
+            self.shared_state.record_specialist_round(round_entry)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "specialist bookkeeping: record_specialist_round failed for "
+                "task=%s", task.task_id,
+            )
+
+        try:
+            self.shared_state.bump_specialist_domain_empty_streak(
+                domain, empty=is_empty,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "specialist bookkeeping: bump_specialist_domain_empty_streak "
+                "failed for task=%s", task.task_id,
+            )
+
+        try:
+            self.shared_state.update_last_specialist({
+                "task_id": task.task_id,
+                "domain": domain,
+                "gap_canonical_id": str(
+                    done_payload.get("gap_canonical_id") or ""
+                ),
+                "empty": is_empty,
+                "proposals_total": len(proposals),
+                "confidence": done_payload.get("confidence"),
+                "summary": str(done_payload.get("summary") or "")[:480],
+                "reason": str(done_payload.get("reason") or "")[:480],
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "specialist bookkeeping: update_last_specialist failed for "
+                "task=%s", task.task_id,
+            )
+
+        # Persist + audit observation so a resume picks up the
+        # bookkeeping without re-running the specialist.
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "specialist bookkeeping: SharedState.save failed for task=%s",
+                task.task_id,
+            )
+
+        await self._record_observation(
+            source or "coordinator", "observation",
+            {
+                "kind": "specialist_done_recorded",
+                "task_id": task.task_id,
+                "domain": domain,
+                "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
+                "proposals_total": len(proposals),
+                "empty": is_empty,
+            },
+        )
+
+        # IR-7 — route session_steward_specialist verdicts. Done payload
+        # carries extra fields beyond the standard schema; see
+        # ``actions/assess_remaining_gaps.md`` and the prompt builder
+        # focus template. Coerce out-of-vocab recommendations to
+        # ``stop_session`` (defense in depth — the LLM is allowed to
+        # write any string but we only honour the closed enum).
+        if domain == "session_steward_specialist":
+            try:
+                await self._route_steward_verdict(
+                    task=task, done_payload=done_payload,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "steward routing failed for task=%s; assessment "
+                    "left in last_remaining_gaps_assessment but no "
+                    "phase-routing change applied",
+                    task.task_id,
+                )
+
+        # refresh the gaps ledger after a
+        # specialist round closes. The dedupe-by-canonical-id keeps the
+        # list bounded; the per-gap attempt log captures the
+        # specialist's verdict (empty vs non-empty proposal_set) as a
+        # fresh attempt row on the gap that triggered the dispatch.
+        gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
+        if gap_cid:
+            try:
+                self.shared_state.append_gap_attempt(gap_cid, {
+                    "action": "specialist",
+                    "variant_name": domain,
+                    "outcome": "EMPTY" if is_empty else "PROPOSALS",
+                    "proposals_total": len(proposals),
+                })
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "specialist bookkeeping: append_gap_attempt failed for "
+                    "gap=%s", gap_cid,
+                )
+        try:
+            await self._refresh_gaps(reason="specialist_done")
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "specialist bookkeeping: _refresh_gaps failed for task=%s",
+                task.task_id,
+            )
+
+    async def _route_steward_verdict(
+        self, *, task: "Task", done_payload: dict[str, Any],
+    ) -> None:
+        """IR-7 — process a session_steward_specialist verdict.
+
+        Side effects depending on ``recommendation``:
+
+        * ``stop_session``    → ``state.set_stop_reason('no_more_leverage')``.
+        * ``advance_to_kernel`` → ``state.set_pending_escalate_hint('skip_to_kernel')``.
+        * ``continue_explore`` → append ``next_gap_canonical_id`` to
+          ``state.gaps[]``, reset ``params_no_promote_streak`` and
+          per-domain empty streak counters, set
+          ``steward_continuation_used=True``.
+
+        Antiloop: only one continuation per session. A second
+        ``continue_explore`` is coerced to ``advance_to_kernel`` so
+        the EXPLORE→KERNEL transition becomes mandatory.
+
+        Out-of-vocab ``recommendation`` values are coerced to
+        ``stop_session`` (defense in depth — the LLM can write any
+        string, but we only honour the closed enum).
+        """
+        raw_rec = str(done_payload.get("recommendation") or "").strip().lower()
+        if raw_rec not in _STEWARD_RECS:
+            log.warning(
+                "steward: out-of-vocab recommendation=%r for task=%s; "
+                "coercing to 'stop_session'",
+                raw_rec, task.task_id,
+            )
+            raw_rec = "stop_session"
+        # Antiloop: only one continuation per session.
+        if (
+            raw_rec == "continue_explore"
+            and bool(getattr(
+                self.shared_state, "steward_continuation_used", False,
+            ))
+        ):
+            log.info(
+                "steward: continue_explore requested but continuation "
+                "already used this session; coercing to "
+                "'advance_to_kernel' (task=%s)",
+                task.task_id,
+            )
+            raw_rec = "advance_to_kernel"
+        next_gap = str(
+            done_payload.get("next_gap_canonical_id") or ""
+        ).strip()
+        if raw_rec == "continue_explore" and not next_gap:
+            log.warning(
+                "steward: continue_explore missing next_gap_canonical_id "
+                "for task=%s; coercing to 'advance_to_kernel'",
+                task.task_id,
+            )
+            raw_rec = "advance_to_kernel"
+
+        # Record the assessment unconditionally so the audit trail
+        # captures it even when the recommendation was coerced.
+        try:
+            potential_raw = done_payload.get(
+                "remaining_potential_pct_estimate"
+            )
+            potential = (
+                float(potential_raw)
+                if isinstance(potential_raw, (int, float)) else 0.0
+            )
+        except (TypeError, ValueError):
+            potential = 0.0
+        round_at = int(
+            (self.shared_state.explore_search or {}).get("cursor") or 0
+        )
+        self.shared_state.record_steward_assessment(
+            recommendation=raw_rec,
+            next_gap_canonical_id=next_gap,
+            remaining_potential_pct_estimate=potential,
+            rationale=str(done_payload.get("rationale") or ""),
+            task_id=task.task_id,
+            round_at_assessment=round_at,
+            source_payload=done_payload,
+        )
+        # Route — the heavy work is mostly already in helper writers
+        # on SharedState.
+        if raw_rec == "stop_session":
+            self.shared_state.set_stop_reason("no_more_leverage")
+            log.info(
+                "steward: recommendation='stop_session' for task=%s "
+                "-> stop_reason='no_more_leverage'",
+                task.task_id,
+            )
+        elif raw_rec == "advance_to_kernel":
+            from .phase_state import ESCALATE_HINT_SKIP_TO_KERNEL
+            self.shared_state.set_pending_escalate_hint(
+                ESCALATE_HINT_SKIP_TO_KERNEL,
+            )
+            log.info(
+                "steward: recommendation='advance_to_kernel' for task=%s "
+                "-> pending_escalate_hint='skip_to_kernel'",
+                task.task_id,
+            )
+        elif raw_rec == "continue_explore":
+            # Inject the next gap and reset plateau counters so the next
+            # tick does not immediately re-trigger plateau judgment on
+            # the same evidence.
+            try:
+                self.shared_state.append_gap_attempt(next_gap, {
+                    "action": "steward",
+                    "variant_name": "session_steward_specialist",
+                    "outcome": "CONTINUATION_GRANTED",
+                    "rationale": str(
+                        done_payload.get("rationale") or ""
+                    )[:480],
+                })
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "steward: append_gap_attempt failed for gap=%s",
+                    next_gap,
+                )
+            self.shared_state.params_no_promote_streak = 0
+            # Per-domain empty streak reset is a courtesy — Orchestration
+            # gets a clean slate to re-dispatch domains.
+            self.shared_state.specialist_domain_empty_streak = {}
+            self.shared_state.steward_continuation_used = True
+            log.info(
+                "steward: recommendation='continue_explore' for task=%s "
+                "-> next_gap=%r, plateau counters reset, "
+                "continuation marker set",
+                task.task_id, next_gap,
+            )
+        # Persist immediately so a crash between this routing and the
+        # broader _record_specialist_result.save still leaves the
+        # routing decision durable.
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "steward: SharedState.save after routing failed for task=%s",
+                task.task_id,
+            )
+
+    def _build_specialist_round_entry(
+        self,
+        *,
+        task: Task,
+        done_payload: dict[str, Any],
+        source: str,
+    ) -> dict[str, Any]:
+        """Translate a specialist done payload into a row for
+        ``SharedState.specialist_rounds[]``.
+
+        ``round_id`` defaults to the task_id so re-recording the same
+        task overwrites idempotently (M5 single-specialist case).
+        M6 batch dispatch will override this with the orchestration-
+        emitted round_id (e.g. ``round-12``).
+        """
+        proposals = done_payload.get("proposal_set") or []
+        if not isinstance(proposals, list):
+            proposals = []
+        round_id = str(
+            (task.params or {}).get("round_id")
+            or task.task_id
+        )
+        return {
+            "round_id":          round_id,
+            "task_id":           task.task_id,
+            "source":            source or "coordinator",
+            "completed_at":      datetime.now(timezone.utc).isoformat(),
+            "domain":            str(done_payload.get("domain") or ""),
+            "gap_canonical_id":  str(done_payload.get("gap_canonical_id") or ""),
+            "empty":             bool(done_payload.get("empty"))
+                                  or len(proposals) == 0,
+            "proposals_total":   len(proposals),
+            "proposal_set":      list(proposals),
+            "summary":           str(done_payload.get("summary") or "")[:480],
+            "reason":            str(done_payload.get("reason") or "")[:480],
+            "confidence":        done_payload.get("confidence"),
+            "new_findings":      list(done_payload.get("new_findings") or []),
+            "residual_questions": list(
+                done_payload.get("residual_questions") or []
+            ),
+        }
+
+    # ------------------------------------------------------------------
     # REQUEST / RESPONSE (Plan A)
     # ------------------------------------------------------------------
     async def _handle_request(self, source: str, intent: Intent) -> None:
@@ -3253,28 +5873,20 @@ class Coordinator:
             if handler is not None:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
-                if (
-                    kind == "trace_analyze"
-                    and self.shared_state.last_profile_roofline
-                    and not merged_payload.get("roofline_json")
-                ):
-                    merged_payload["roofline_json"] = self.shared_state.last_profile_roofline
-                # PR-X: Force batch dispatch for run_optimization.
+                # PR-X (1cd9f7d): force batch dispatch for run_optimization.
                 # ``kernel_request_handlers.run_optimization_handler`` upgrades
                 # the request to ``_run_optimization_batch`` only when the
                 # payload carries ``candidates_path`` (so it can fan out to
                 # every reusable kernel concurrently, bounded by
                 # ``_DEFAULT_KERNEL_BATCH_PARALLEL`` / Ray's per-task
-                # ``num_gpus`` reservation). Orchestration prompts already
-                # teach the LLM to include this field, but a missing /
-                # malformed value would silently collapse the dispatch back
-                # to a single-kernel run -- wasting 7 idle GPUs on a typical
+                # ``num_gpus`` reservation). A missing / malformed value
+                # would silently collapse the dispatch back to a
+                # single-kernel run — wasting 7 idle GPUs on a typical
                 # MI300X node and serializing the rest of the candidates
-                # over many LLM turns. Inject it from the SharedState
-                # snapshot here so batch mode is deterministic regardless of
-                # LLM compliance. LLM-supplied value still wins (e.g. when
-                # operators or future prompts want to target a different
-                # TraceLens snapshot).
+                # over many LLM turns. Inject it from the
+                # ``last_trace_analyze`` snapshot so batch mode is
+                # deterministic regardless of LLM compliance.
+                # LLM-supplied value still wins.
                 if (
                     kind == "run_optimization"
                     and self.shared_state.last_trace_analyze
@@ -3285,6 +5897,11 @@ class Coordinator:
                     )
                     if cached_candidates_path:
                         merged_payload["candidates_path"] = cached_candidates_path
+                # Note: main commit 1cd9f7d also auto-injects
+                # ``roofline_json`` from ``last_profile_roofline`` for
+                # ``trace_analyze`` requests; that field does not exist on
+                # this branch (Roofline-v2 caches the trace under
+                # ``last_trace_analyze`` instead), so the inject is omitted.
                 cache_hit_source = None
                 cached_result = self._cached_kernel_request(kind, merged_payload)
                 if cached_result is not None:
@@ -3373,16 +5990,20 @@ class Coordinator:
                     },
                     in_reply_to=request_msg.msg_id, priority=1,
                 ))
-                # Cache trace_analyze output so subsequent identical
-                # requests are short-circuited next tick. Only cache real
-                # successful runs, not failures, to avoid sticky errors.
+                # Cache select_kernels / trace_analyze output so subsequent
+                # identical requests are short-circuited next tick. Only
+                # cache real successful runs, not failures, to avoid
+                # sticky errors. Main M4 renamed ``select_kernels`` →
+                # ``trace_analyze`` so accept both request kinds at the
+                # cache write site too — the back-compat alias on
+                # ``KERNEL_REQUEST_HANDLERS`` lets either name reach
+                # here.
                 if (
-                    kind == "trace_analyze"
+                    kind in ("select_kernels", "trace_analyze")
                     and cache_hit_source is None
                     and result.get("status") in ("ok", "succeeded")
                 ):
-                    self.shared_state.record_trace_analyze(merged_payload, result)
-                    await self._maybe_enqueue_pmc_roofline()
+                    self.shared_state.record_select_kernels(merged_payload, result)
                     self.shared_state.save(self.session_dir)
                 # Mirror kernel-opt outcomes into SharedState so Orch
                 # sees decision/speedup in its prompt next tick and
@@ -3399,63 +6020,18 @@ class Coordinator:
                         isinstance(result, dict) and result.get("batch_mode")
                     ):
                         self.shared_state.record_kernel_opt(result)
-                    # Wire run_optimization decision (KEEP / REVERT / PARTIAL)
-                    # into the per-action scoring for kernel_opt. KEEP uses
-                    # the micro_speedup if it surfaces a percentage-shaped
-                    # number; otherwise we record a zero-gain KEEP (still
-                    # bumps runs + sets cooldown).
-                    verification = (
-                        result.get("verification")
-                        if isinstance(result, dict)
-                        else None
-                    ) or {}
-                    proposal = (
-                        result.get("proposal")
-                        if isinstance(result, dict)
-                        else None
-                    ) or {}
-                    decision = str(proposal.get("decision", "")).upper()
-                    if decision == "KEEP":
-                        speedup = verification.get("micro_speedup")
-                        gain = 0.0
-                        if isinstance(speedup, (int, float)) and speedup > 1.0:
-                            gain = float(speedup - 1.0) * 100.0
-                        self._score_action_keep("kernel_opt", gain_pct=gain)
-                    elif decision in {"REVERT", "PARTIAL"}:
-                        # Ran but did not promote — count toward the
-                        # no-promote streak rather than the failure
-                        # streak (the optimization itself didn't crash).
-                        self._score_action_no_promote("kernel_opt")
-                    else:
-                        # Unknown decision — treat as a measurement: bump
-                        # runs without rewarding or penalising the action.
-                        self._score_action_keep("kernel_opt", gain_pct=0.0)
+                    # Note: main commit ce36e70 also routes the decision
+                    # into a per-action scoreboard (KEEP / no-promote
+                    # accounting on the action-priority table). The
+                    # scoreboard was retired by KB_design §3.9 on this
+                    # branch (                     # §4), so the post-record bookkeeping is omitted.
                     self.shared_state.save(self.session_dir)
                 if kind == "integrate":
                     if result.get("status") != "skipped":
                         self.shared_state.record_kernel_integrate_result(result)
                     decision = str(result.get("decision", "")).upper()
-                    int_status = str(result.get("status") or "")
-                    int_failed = int_status in {"failed", "error"} or bool(
-                        result.get("error_class")
-                    )
                     if decision == "KEEP":
                         self._record_integrate_keep(result)
-                        gain = result.get("gain_pct")
-                        gain_f = (
-                            float(gain) if isinstance(gain, (int, float)) else 0.0
-                        )
-                        self._score_action_keep("integrate", gain_pct=max(0.0, gain_f))
-                    elif decision in {"REVERT", "NEEDS_REVIEW"}:
-                        if int_failed:
-                            self._score_action_failure("integrate")
-                        else:
-                            self._score_action_no_promote("integrate")
-                    elif int_status != "skipped":
-                        if int_failed:
-                            self._score_action_failure("integrate")
-                        else:
-                            self._score_action_keep("integrate", gain_pct=0.0)
                     self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
                 # so the LLM-backed kernel agent should NOT see the request
@@ -3471,10 +6047,23 @@ class Coordinator:
                 )
 
     def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """Return a cached programmatic_handler result if applicable."""
-        if kind != "trace_analyze":
+        """Return a cached programmatic_handler result if applicable.
+
+        Main M4 renamed ``select_kernels`` → ``trace_analyze``; both
+        request kinds dispatch to the same handler via the back-compat
+        alias and the cache lives under either of ``last_trace_analyze``
+        (canonical post-M4) or ``last_select_kernels`` (legacy resume
+        parity). Prefer the canonical field; fall back to the legacy
+        one so cached requests work regardless of which field the
+        handler write path populated last.
+        """
+        if kind not in ("select_kernels", "trace_analyze"):
             return None
-        cached = self.shared_state.last_trace_analyze or {}
+        cached = (
+            self.shared_state.last_trace_analyze
+            or self.shared_state.last_select_kernels
+            or {}
+        )
         if not isinstance(cached, dict) or not cached:
             return None
         trace_input = payload.get("trace_input") or payload.get("trace_dir")
@@ -3495,7 +6084,6 @@ class Coordinator:
         }
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
-        """Fan-out a RESPONSE intent back to the original requester."""
         in_reply_to = intent.payload["in_reply_to"]
         # Locate the original requester so we can address the response.
         original = await self.bus.lookup_by_id(in_reply_to)
@@ -3550,11 +6138,85 @@ class Coordinator:
         ))
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        # Priority-0 broadcast — non-destructive (DESIGN §19.3.4).
+        """Process ``escalate_strategy_change`` (KB_design §3.8 §7.3 +
+        §3.13 M7 §5.3).
+
+        Two responsibilities:
+
+        1. **Always** broadcast a priority-0 ``strategy_change`` event
+           so other reactors / breakdown see the LLM's intent (kept
+           verbatim from the legacy contract for back-compat).
+        2. When ``next_action_hint`` is in the closed ESCALATE_HINT
+           vocab, stash the hint onto
+           :attr:`SharedState.pending_escalate_hint` so the next phase
+           compute call can act on it. ``extend_*_budget`` hints
+           directly bump :attr:`SharedState.phase_budget_pct` (no
+           pending state needed — the budget map is consulted on
+           every tick). ``pause_specialist_<domain>`` hints bump the
+           per-domain empty-streak so the next EXPLORE round skips
+           that domain.
+
+        Unknown hints are silently dropped (only logged at debug) —
+        Inv-8.2 says phase decisions only act on a closed vocab.
+        """
+        payload = dict(intent.payload or {})
+        # Always emit the broadcast first (back-compat with the legacy contract tests
+        # that just count strategy_change events).
         await self.bus.append_and_seq(Message.new(
             source, "*", "strategy_change",
-            dict(intent.payload), priority=0,
+            payload, priority=0,
         ))
+        from .phase_state import (
+            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
+            ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+            ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
+            PHASE_EXPLORE,
+            PHASE_KERNEL,
+            apply_escalate_budget_bump,
+            is_pause_specialist_hint,
+            is_valid_escalate_hint,
+        )
+        hint = str(payload.get("next_action_hint") or "").strip()
+        if not hint or not is_valid_escalate_hint(hint):
+            return
+        # ``extend_*_budget`` mutates phase_budget_pct directly (no
+        # pending hint needed — the budget map is consulted every
+        # tick by phase_state).
+        now_ts = datetime.now(timezone.utc).isoformat()
+        if hint == ESCALATE_HINT_EXTEND_EXPLORE_BUDGET:
+            self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
+                self.shared_state.phase_budget_pct, phase=PHASE_EXPLORE,
+            )
+            self.shared_state.last_consumed_escalate_hint = hint
+            self.shared_state.last_consumed_escalate_hint_ts = now_ts
+            self.shared_state.save(self.session_dir)
+            return
+        if hint == ESCALATE_HINT_EXTEND_KERNEL_BUDGET:
+            self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
+                self.shared_state.phase_budget_pct, phase=PHASE_KERNEL,
+            )
+            self.shared_state.last_consumed_escalate_hint = hint
+            self.shared_state.last_consumed_escalate_hint_ts = now_ts
+            self.shared_state.save(self.session_dir)
+            return
+        # ``pause_specialist_<domain>``: bump the per-domain
+        # empty-streak counter so the next EXPLORE round won't pick
+        # the domain. Unknown domain suffixes
+        # are tolerated (the counter is just incremented; if the
+        # domain doesn't match a real specialist nothing happens).
+        if is_pause_specialist_hint(hint):
+            domain = hint[len(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX):]
+            self.shared_state.bump_specialist_domain_empty_streak(
+                domain, empty=True,
+            )
+            self.shared_state.last_consumed_escalate_hint = hint
+            self.shared_state.last_consumed_escalate_hint_ts = now_ts
+            self.shared_state.save(self.session_dir)
+            return
+        # ``skip_to_kernel`` / ``skip_to_close`` are deferred — stash
+        # them; the next ``compute_next_phase`` will pick them up.
+        self.shared_state.set_pending_escalate_hint(hint)
+        self.shared_state.save(self.session_dir)
 
     # ------------------------------------------------------------------
     # SEND_MESSAGE / ALERT / UPDATE_STATE — minimal persistence
@@ -3577,7 +6239,6 @@ class Coordinator:
         ))
 
     async def _handle_update_state(self, source: str, intent: Intent) -> None:
-        """Apply allowed SharedState mutations and broadcast the diff."""
         # Apply to persistent SharedState (PolicyGate already enforced that
         # the source role can't write CORE_STATE_FIELDS unless allowed).
         applied = self.shared_state.apply_changes(
@@ -3624,11 +6285,11 @@ class Coordinator:
             tick=int(self.shared_state.tick or 0),
             intent_payload=intent.payload,
         )
-        if resolved_action and streak >= 2:
-            score = self.shared_state.get_action_score(resolved_action)
-            if score is not None:
-                score.locked_reason = f"policy_loop:{denied.rule}"
-                self.shared_state.put_action_score(resolved_action, score)
+        # the streak counter is still a fact (LLM sees it
+        # via policy_denial_history), but we no longer mirror it onto
+        # a scoreboard ``locked_reason``. The phase machine's
+        # ``policy_loop`` stop_reason at streak ≥ 10 (below) remains
+        # the only system-side reaction.
         if resolved_action and streak >= 5:
             self.shared_state.prune_family(resolved_action)
             await self._record_observation(
@@ -3641,7 +6302,7 @@ class Coordinator:
                 },
             )
         if streak >= 10:
-            self.shared_state.stop_reason = "policy_loop"
+            self.shared_state.set_stop_reason("policy_loop")
 
     async def _record_observation(self, source: str, topic: str, payload: dict) -> None:
         await self.bus.append_and_seq(Message.new(source, "*", topic, payload))
@@ -3756,11 +6417,61 @@ class Coordinator:
     def _is_promotable_result(self, task_kind: str, result: dict[str, Any]) -> bool:
         if not isinstance(result, dict):
             return False
-        if task_kind in ("baseline", "profile", "validate_stack"):
+        if task_kind in ("baseline", "profile"):
             return is_valid_measurement(result)
-        if task_kind in ("backends", "params", "sweep"):
+        if task_kind == "sweep":
             return result.get("status") == "succeeded"
         return result.get("status") != "failed"
+
+    def _record_intervention_for_task(
+        self, task: "Task", result: Any,
+    ) -> None:
+        """PR-A8 (Arbor-into-Hyperloom): log the change_type of a
+        completed task into ``SharedState.intervention_mix``.
+
+        Mapping:
+        * ``task.kind == "explore"``       → ``change_type = "config"``
+          (every explore KEEP is a config tweak per v0.8 M3).
+        * ``task.kind == "integrate_patch"`` AND the executor reported
+          ``status == "kept"`` → ``change_type = "code_patch"``.
+        * ``integrate_patch`` with any other status (reverted /
+          apply_failed / rejected_by_critic / applied_no_bench) →
+          NOT recorded; only successful KEEPs roll the counter.
+
+        Best-effort: the caller wraps in try/except so any field
+        access failure is non-fatal.
+        """
+        if not isinstance(result, dict):
+            return
+        kind = (task.kind or "").strip()
+        if kind == "explore":
+            # explore advances ``optimization_stack`` only when at
+            # least one variant survived the KEEP gate AND the inlined
+            # stack rebench. Use the ledger surrogate: a winner is
+            # present in ``result.winners`` OR ``best_variant`` is set.
+            winners = result.get("winners") or []
+            best = result.get("best_variant")
+            if not winners and not best:
+                return
+            delta_pct = None
+            if isinstance(best, dict):
+                delta_pct = best.get("gain_pct")
+            self.shared_state.record_intervention(
+                change_type="config",
+                action="explore",
+                task_id=task.task_id,
+                delta_pct=delta_pct if isinstance(delta_pct, (int, float)) else None,
+            )
+            return
+        if kind == "integrate_patch":
+            if str(result.get("status") or "") != "kept":
+                return
+            self.shared_state.record_intervention(
+                change_type="code_patch",
+                action="integrate_patch",
+                task_id=task.task_id,
+                delta_pct=result.get("delta_pct"),
+            )
 
     async def _handle_unpromotable_result(
         self, task: Task, result: dict[str, Any] | None,
@@ -3774,8 +6485,8 @@ class Coordinator:
           :attr:`SharedState.last_action_failures` via
           :meth:`SharedState.record_action_failure` — that's the rich
           rolling log Orchestration consults after the inbox rotates.
-        * For the 6 audit kinds (baseline/profile/backends/params/sweep/
-          validate_stack) also append a ``status="failed"`` entry to
+        * For the kinds in :data:`_AUDIT_ACTIONS` (baseline / profile /
+          sweep / explore) also append a ``status="failed"`` entry to
           ``<kind>_attempts`` via
           :meth:`SharedState.record_action_attempt`, mirroring the
           kernel-equivalent per-action history.
@@ -3791,12 +6502,10 @@ class Coordinator:
             audit_extras: dict[str, Any] = {}
             # Stamp the baseline-params fingerprint so the prompt's
             # FAILURE RECOVERY block + the self-loop denial helper can
-            # detect "same params failed twice; refuse a third
-            # attempt". Only baseline is fingerprinted today
-            # (validate_stack uses the same surface but its own audit
-            # branch sits in ``_promote_to_shared_state``); other
-            # actions would need their own per-action fingerprint key
-            # set before this stamp is meaningful.
+            # detect "same params failed twice; refuse a third attempt".
+            # Only baseline is fingerprinted today; other actions would
+            # need their own per-action fingerprint key set before this
+            # stamp is meaningful.
             if task.kind == "baseline":
                 audit_extras["fingerprint"] = _baseline_params_fingerprint(
                     task.params
@@ -3825,7 +6534,7 @@ class Coordinator:
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             self.shared_state.baseline_failure_streak += 1
             if self.shared_state.baseline_failure_streak >= 3:
-                self.shared_state.stop_reason = "baseline_failed"
+                self.shared_state.set_stop_reason("baseline_failed")
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
@@ -3835,17 +6544,6 @@ class Coordinator:
                 "error_class": result_payload.get("error_class"),
             }
             any_changed = True
-        # N27: roofline-failure streak. Bump on every failed roofline
-        # action (the RooflineExecutor returns status=failed only after
-        # N26 inner auto-retry is exhausted, so this counter is the
-        # OUTER attempt counter -- each tick = at least one trace_analyze
-        # attempt, often two with N26). Reset is handled in the success
-        # promotion path (search for "roofline_failure_streak = 0"
-        # below) so we don't have to detect success from a failed
-        # event payload here.
-        if task.kind == "roofline":
-            self.shared_state.roofline_failure_streak += 1
-            any_changed = True
         if any_changed:
             self.shared_state.save(self.session_dir)
         if baseline_event_payload is not None:
@@ -3854,19 +6552,150 @@ class Coordinator:
             ))
 
     async def _pump_dispatcher_once(self) -> None:
+        """Dispatch queued tasks, respecting per-lane capacity.
+
+        concurrent dispatch path:
+
+        1. Read the current lane-holder snapshot + per-lane capacities
+           up front so the same tick can decide locally whether each
+           queued task fits without re-querying SQLite per task.
+        2. For each queued task: if the *expanded* lane set (incl.
+           cross-lane conflicts) still has headroom in our local view,
+           pre-acquire the lease via :meth:`try_acquire_many` and
+           spawn an asyncio task that runs the work + collects the
+           result. Update the local holder view so subsequent tasks
+           in the same tick see the bump.
+        3. ``asyncio.gather`` all spawned tasks before returning so
+           the tick semantics stay compatible with the original
+           serial dispatcher (one ``_pump_dispatcher_once`` call →
+           every dispatchable queued task has finished or stayed
+           queued).
+
+        With the default capacity=1 everywhere this is behaviourally
+        equivalent to serial dispatch (one task per conflict
+        group runs at a time). When ``research_lane.capacity > 1``
+        (M6 default 6), N specialist tasks fan out in parallel.
+
+        Inv-7.3 (atomic acquire / release per task) holds because the
+        pre-acquired lease is bound to the task's ``task_id`` and the
+        runner releases it in its own ``finally`` block.
+        """
         queued = await self.tasks.queued()
+        if not queued:
+            return
+        holders = await self.locks.lane_holders()
+        capacities = await self.locks.lane_capacities()
+        spawned: list[tuple[Task, asyncio.Task[SubAgentResult]]] = []
         for task in queued:
-            try:
-                result = await self.sub.run_task(task)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("dispatcher: failed to run task %s", task.task_id)
+            lanes_needed = list(task.requires_lanes or [])
+            if lanes_needed:
+                try:
+                    expanded = _expand_lanes(lanes_needed)
+                except ValueError:
+                    log.warning(
+                        "dispatcher: task %s has unknown lane in %r; "
+                        "skipping until resolved",
+                        task.task_id, lanes_needed,
+                    )
+                    continue
+                if not self._lanes_fit(expanded, holders, capacities):
+                    # Stays queued; next tick re-evaluates after
+                    # other holders release.
+                    continue
+                lease = await self.locks.try_acquire_many(
+                    lanes_needed,
+                    holder_id=task.task_id,
+                    task_id=task.task_id,
+                    action=task.kind,
+                    ttl_sec=task.lease_ttl_sec or 60,
+                )
+                if lease is None:
+                    # Race: another holder grabbed the lane between
+                    # our local read and the acquire. Leave queued.
+                    continue
+                # Reflect the bump in our local view so the next task
+                # in this tick sees the holder.
+                for lane in lease.lanes:
+                    holders[lane] = int(holders.get(lane, 0)) + 1
+            else:
+                lease = None
+            spawned.append((
+                task,
+                asyncio.create_task(
+                    self.sub.run_task(task, prebound_lease=lease),
+                ),
+            ))
+        if not spawned:
+            return
+        # Gather; we want to surface per-task results in the order the
+        # tasks finished but keep tick semantics simple by awaiting
+        # all of them. Exceptions are folded into SubAgentResult
+        # (run_task catches inside its body) but defensively absorb
+        # anything that leaks here too.
+        results = await asyncio.gather(
+            *(t for _, t in spawned), return_exceptions=True,
+        )
+        for (task, _), maybe_result in zip(spawned, results):
+            if isinstance(maybe_result, BaseException):
+                log.exception(
+                    "dispatcher: spawned task %s raised: %r",
+                    task.task_id, maybe_result,
+                )
                 continue
+            result: SubAgentResult = maybe_result
             await self.bus.append_and_seq(Message.new(
                 "coordinator", "*", "delegated_result",
                 {"task_id": task.task_id, "kind": task.kind,
                  "state": result.state, "result": result.result,
                  "error": result.error},
             ))
+            # v0.8 §3.5 §10 + specialist bookkeeping.
+            # SpecialistRunner returns the done payload under
+            # ``result.result['specialist_done']`` (Gap-01 adapter
+            # contract). We always run the bookkeeping pass for a
+            # specialist task — including the empty-synthesised
+            # path — so the per-domain streak / last_specialist
+            # mirror / specialist_rounds ledger stay coherent
+            # whether the LLM emitted a real done or the runner
+            # synthesised one.
+            if task.kind == "specialist":
+                result_dict = result.result if isinstance(result.result, dict) else {}
+                done_payload = result_dict.get("specialist_done") or {}
+                if isinstance(done_payload, dict):
+                    try:
+                        await self._record_specialist_result(
+                            task=task,
+                            done_payload=done_payload,
+                            source=(
+                                f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "specialist bookkeeping hook failed for task=%s",
+                            task.task_id,
+                        )
+                # PR-A8 (Arbor-into-Hyperloom): bump the per-EXPLORE
+                # specialist dispatch counter. Robustness reads this
+                # in its prompt context to detect storms (many
+                # specialists dispatched with no winning proposal).
+                try:
+                    self.shared_state.bump_specialist_dispatched()
+                except Exception:  # noqa: BLE001
+                    log.exception("PR-A8: bump_specialist_dispatched failed")
+            # PR-A8 — intervention-mix ledger: when an explore or
+            # integrate_patch task succeeds with a kept variant, log
+            # the change_type so Robustness can see config-only
+            # streaks. ``explore`` carries config-shaped KEEPs;
+            # ``integrate_patch`` carries code_patch KEEPs.
+            if task.kind in ("explore", "integrate_patch"):
+                try:
+                    self._record_intervention_for_task(task, result.result)
+                except Exception:  # noqa: BLE001
+                    log.exception(
+                        "PR-A8: intervention ledger update failed for task=%s",
+                        task.task_id,
+                    )
             # Auto-promote certain succeeded results into SharedState core
             # fields (Coordinator is the only writer of CORE_STATE_FIELDS;
             # see DESIGN §14.5 / §17.2).
@@ -3874,32 +6703,35 @@ class Coordinator:
             # executor didn't throw. Promotion is tied to task-specific
             # invariants: baseline/profile require a real measurement, while
             # grid actions require at least one successful variant.
-            if (
+            kept = (
                 result.state == "succeeded"
                 and self._is_promotable_result(task.kind, result.result or {})
-            ):
+            )
+            if kept:
                 await self._promote_to_shared_state(
                     task.kind, result.result, task=task,
                 )
             else:
                 await self._handle_unpromotable_result(task, result.result)
-            # N34 (May 2026) Bug #4: a successful ``report`` task is
-            # the canonical terminal signal -- the operator-facing
-            # ``final.md`` / ``final.json`` are already on disk.
-            # Without this guard the main loop kept iterating after
-            # the report was written, the LLM kept proposing fresh
-            # params/backends rounds, and the session burned the
-            # rest of its wall-clock budget producing data nobody
-            # would read. Set ``stop_reason`` immediately so the
-            # next iteration's stop check breaks the loop and the
-            # launcher gets a clean exit. Skip when ``stop_reason``
-            # is already set (signal / other terminal already won)
-            # so we don't paper over an earlier failure with the
-            # cheery "report_emitted" reason.
+            # N34 Bug #4 (May 2026): a successful ``report`` task is the
+            # canonical terminal signal — ``final.md`` / ``final.json``
+            # are already on disk, so any further LLM-driven exploration
+            # is waste. Set ``stop_reason='report_emitted'`` so the next
+            # run-loop iteration breaks out. Skip when ``stop_reason``
+            # is already set (signal / other terminal already won) so
+            # we don't paper over an earlier failure.
+            # N34 Bug #4 (May 2026) only fires for LLM-driven report
+            # tasks (kind="report" outside the closing phase). When the
+            # closing-phase report task is already in flight,
+            # ``in_closing`` owns the stop-reason transition — let the
+            # run loop's existing ``time_exhausted`` / ``no_more_leverage``
+            # path resolve it. Otherwise an LLM-proposed mid-run report
+            # would burn the rest of the budget without this guard.
             if (
                 task.kind == "report"
                 and result.state == "succeeded"
                 and not (self.shared_state.stop_reason or "").strip()
+                and not self.shared_state.closing_report_task_id
             ):
                 log.info(
                     "Coordinator: report task %s succeeded; setting "
@@ -3909,6 +6741,393 @@ class Coordinator:
                 )
                 self.shared_state.stop_reason = "report_emitted"
                 self.shared_state.save(self.session_dir)
+            # T3 anchor. Always called
+            # so KEEP / REVERT each get a corresponding ingest-attempt +
+            # verify pair. Best-effort: failures are absorbed into the
+            # NDJSON queue by the client.
+            await self._cortex_t3_hook(task=task, result=result, kept=kept)
+            # explore-round gap update.
+            # For explore tasks with per-variant outcomes, append each
+            # variant's KEEP/REVERT to the matching gap's attempts log
+            # (the canonical_id is plumbed via task.params, falling back
+            # to the workload anchor). Then re-run the global refresh
+            # so the failures/winners-history derived signals catch up.
+            if task.kind == "explore":
+                result_dict = (
+                    result.result if isinstance(result.result, dict) else {}
+                )
+                try:
+                    self._record_explore_round_gaps(
+                        task=task, result=result_dict,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "gaps refresh: explore-round update failed for "
+                        "task=%s", task.task_id,
+                    )
+                try:
+                    await self._refresh_gaps(reason="explore_round")
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "gaps refresh: _refresh_gaps after explore failed "
+                        "for task=%s", task.task_id,
+                    )
+
+    @staticmethod
+    def _lanes_fit(
+        expanded_lanes: list[str],
+        holders: dict[str, int],
+        capacities: dict[str, int],
+    ) -> bool:
+        """Local-view headroom check used by the concurrent dispatcher.
+
+        Returns True iff every lane in ``expanded_lanes`` has at least
+        one open slot in our point-in-time snapshot. This is a hint —
+        the authoritative gate is :meth:`ResourceLockManager.try_acquire_many`
+        which re-checks under ``BEGIN IMMEDIATE``.
+        """
+        for lane in expanded_lanes:
+            cap = int(capacities.get(lane, 1))
+            used = int(holders.get(lane, 0))
+            if cap <= 0 or used >= cap:
+                return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Cortex KB T3 hook (KEEP / REVERT mirror)
+    # ------------------------------------------------------------------
+    def _proposal_msg_id_for_task(self, task: "Task") -> str:
+        """Recover the original ``proposal_msg_id`` from a task.
+
+        ``_materialize_approved_proposal`` writes the task with
+        ``idempotency_key=f"approved-{proposal_msg_id}"`` (DESIGN §18,
+        also referenced by the resume path). Tasks created via direct
+        delegate (no review) carry a different idempotency_key shape;
+        for those we return ``""`` and the T3 hook falls back to
+        propose-edge (``late_verified``).
+        """
+        key = (task.idempotency_key or "").strip()
+        if key.startswith("approved-"):
+            return key[len("approved-"):]
+        return ""
+
+    async def _cortex_t3_hook(
+        self,
+        *,
+        task: "Task",
+        result: Any,
+        kept: bool,
+    ) -> None:
+        """T3 dispatcher — KB_design §3.13 M5 §5 step 7 / KB_gaps/Gap-08.
+
+        When the task is an ``explore`` action that returned a non-empty
+        ``per_variant_outcomes`` list, fan out to the per-variant path:
+        one ``ingest_attempt`` + ``verify`` per variant, keyed by the
+        per-variant ``kb_edge_id`` minted in T2 (Gap-07).
+
+        Everything else (kernel_opt, integrate, baseline, profile,
+        backends, params, sweep, ...) keeps the legacy per-task path:
+        a single attempt + single verify against the representative
+        edge_id (still recorded by T2 for back-compat).
+        """
+        if self.cortex_kb is None or not self.cortex_kb.enabled:
+            return
+        sid = (self.shared_state.cortex_session_id or "").strip()
+        if not sid:
+            return
+        result_dict = result.result if hasattr(result, "result") else (result or {})
+        if not isinstance(result_dict, dict):
+            result_dict = {}
+        per_variant = result_dict.get("per_variant_outcomes")
+        if (
+            task.kind == "explore"
+            and isinstance(per_variant, list)
+            and per_variant
+        ):
+            await self._cortex_t3_per_variant(
+                task=task, sid=sid, outcomes=per_variant,
+            )
+        else:
+            await self._cortex_t3_per_task(
+                task=task, sid=sid, result_dict=result_dict, kept=kept,
+            )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive; T3 must not crash.
+            log.exception("cortex T3 SharedState.save failed")
+
+    async def _cortex_t3_per_task(
+        self,
+        *,
+        task: "Task",
+        sid: str,
+        result_dict: dict[str, Any],
+        kept: bool,
+    ) -> None:
+        """Legacy per-task T3 — one attempt + one verify per task.
+
+        Used by all non-explore actions (kernel_opt / integrate /
+        baseline / profile / backends / params / sweep / ...).
+        """
+        # Mint per-task attempt_node for cross-session reachability.
+        attempt_canonical = attempt_canonical_id(sid, task.task_id)
+        outcome_label = "PASS" if kept else "FAIL"
+        if not kept:
+            status = str(result_dict.get("status", "")).lower()
+            if status in ("partial", "needs_review"):
+                outcome_label = "PARTIAL"
+        metrics: dict[str, Any] = {}
+        for key in (
+            "output_throughput", "gain_pct", "validated_gain_pct",
+            "accuracy", "ttft_mean_ms", "e2el_mean_ms", "decision",
+            "variant_name", "error_class",
+        ):
+            if key in result_dict and result_dict[key] is not None:
+                metrics[key] = result_dict[key]
+        metrics.setdefault("task_kind", task.kind)
+        metrics.setdefault("task_id",   task.task_id)
+        try:
+            self.cortex_kb.propose_point(
+                canonical_id=attempt_canonical,
+                kind="attempt_node",
+                authority="EXPERIENTIAL",
+                attrs={
+                    "task_kind": task.kind,
+                    "task_id":   task.task_id,
+                    "outcome":   outcome_label,
+                },
+                evidence=[f"log:task-{task.task_id}"],
+            )
+        except CortexKBError as exc:
+            log.warning("cortex T3 propose_point attempt failed: %s", exc)
+        proposal_msg_id = self._proposal_msg_id_for_task(task)
+        edge_entry = (
+            self._pop_pending_kb_edge(proposal_msg_id) if proposal_msg_id else None
+        )
+        edge_id = (edge_entry or {}).get("edge_id", "") if edge_entry else ""
+        plan_edge = edge_id or ""
+        try:
+            self.cortex_kb.ingest_attempt(
+                sid=sid,
+                iter_id=int(self.shared_state.tick or 0),
+                outcome=outcome_label,
+                metrics=metrics,
+                plan_edge=plan_edge,
+                evidence=[
+                    f"log:task-{task.task_id}",
+                    f"point_id:{attempt_canonical}",
+                ],
+            )
+        except CortexKBError as exc:
+            log.warning("cortex T3 ingest_attempt failed: %s", exc)
+        if edge_entry and edge_id:
+            verify_outcome = "confirmed" if kept else "refuted"
+            promote_authority = "EXPERIENTIAL" if kept else None
+            try:
+                self.cortex_kb.verify(
+                    sid=sid,
+                    edge_id=edge_id,
+                    outcome=verify_outcome,
+                    evidence=[f"log:task-{task.task_id}"],
+                    promote_authority=promote_authority,
+                )
+            except CortexKBError as exc:
+                log.warning("cortex T3 verify failed: %s", exc)
+        elif edge_entry and not edge_id:
+            # T2 fell through to NDJSON without a sync edge id. Fall back
+            # to a late propose-edge: signal the verdict via attempt
+            # outcome only; the flusher will eventually replay the
+            # hypothesize NDJSON row and Cortex will dedup by canonical_id.
+            log.info(
+                "cortex T3 late_verified (no edge_id for proposal %s)",
+                proposal_msg_id or "(no msg_id)",
+            )
+
+    async def _cortex_t3_per_variant(
+        self,
+        *,
+        task: "Task",
+        sid: str,
+        outcomes: list[dict[str, Any]],
+    ) -> None:
+        """Per-variant T3 — one attempt + one verify per variant.
+
+        KB_design §3.13 M5 §5 step 7 / KB_gaps/Gap-08. Iterates
+        ``per_variant_outcomes`` from the explore executor result and
+        binds each entry to the matching edge_id minted by T2 (Gap-07,
+        stored under ``pending_kb_edges[].variant_edges``).
+
+        Per-variant outcome → KB encoding:
+
+        * ``KEEP``           → attempt PASS + verify ``confirmed``
+                               (promote_authority=EXPERIENTIAL).
+        * ``REVERT`` /
+          ``FAILED`` /
+          ``KEEP_UNSTABLE``  → attempt FAIL + verify ``refuted``
+                               (no promotion).
+        * ``SKIPPED_DEDUP``  → no KB activity (no edge was minted).
+
+        Partial failures: a single variant's ``verify`` or
+        ``ingest_attempt`` exception is logged but does not abort the
+        remaining variants. The pending_kb_edges row is popped once
+        up front so resume + idempotency stay clean.
+        """
+        proposal_msg_id = self._proposal_msg_id_for_task(task)
+        edge_entry = (
+            self._pop_pending_kb_edge(proposal_msg_id) if proposal_msg_id else None
+        )
+        variant_edges_map: dict[str, str] = {}
+        if isinstance(edge_entry, dict):
+            raw = edge_entry.get("variant_edges") or {}
+            if isinstance(raw, dict):
+                variant_edges_map = {
+                    str(k): str(v or "") for k, v in raw.items()
+                }
+        if not edge_entry and not variant_edges_map:
+            # T2 hook never ran (e.g. --degraded-kb during materialize) or
+            # the row was already popped on a resume — fall back to the
+            # per-variant ``kb_edge_id`` stamped on the executor's
+            # result, which mirrors the same map.
+            for vo in outcomes:
+                name = str(vo.get("variant_name") or "")
+                edge_id = str(vo.get("kb_edge_id") or "")
+                if name and edge_id:
+                    variant_edges_map[name] = edge_id
+        if not variant_edges_map and isinstance(edge_entry, dict):
+            # Last-resort: only a single edge_id was recorded (e.g. the
+            # proposal pre-dates Gap-07). Map every KEEP/REVERT variant
+            # to it so we at least confirm/refute *something* — matches
+            # the per-task fallback behaviour.
+            single = str(edge_entry.get("edge_id") or "")
+            if single:
+                for vo in outcomes:
+                    name = str(vo.get("variant_name") or "")
+                    if name and vo.get("outcome") in (
+                        "KEEP", "REVERT", "FAILED", "KEEP_UNSTABLE",
+                    ):
+                        variant_edges_map[name] = single
+
+        any_terminal = False  # at least one KEEP/REVERT processed
+        for vo in outcomes:
+            variant_name = str(vo.get("variant_name") or "")
+            outcome = str(vo.get("outcome") or "")
+            if outcome == "SKIPPED_DEDUP":
+                continue
+            if not variant_name:
+                # Nameless variants slip through if the executor mutates
+                # the list — skip rather than mint a phantom attempt.
+                continue
+            any_terminal = True
+            if outcome == "KEEP":
+                attempt_outcome = "PASS"
+                verify_outcome = "confirmed"
+                promote_authority: str | None = "EXPERIENTIAL"
+            else:  # REVERT / FAILED / KEEP_UNSTABLE
+                attempt_outcome = "FAIL"
+                verify_outcome = "refuted"
+                promote_authority = None
+
+            # 1. Per-variant attempt_node — canonical id encodes the
+            #    variant name so cross-session diffs stay precise.
+            variant_attempt_canonical = (
+                f"{attempt_canonical_id(sid, task.task_id)}.variant-{variant_name}"
+            )
+            attempt_attrs = {
+                "task_kind":    task.kind,
+                "task_id":      task.task_id,
+                "variant_name": variant_name,
+                "outcome":      attempt_outcome,
+            }
+            if vo.get("provenance"):
+                attempt_attrs["provenance"] = str(vo.get("provenance"))
+            try:
+                self.cortex_kb.propose_point(
+                    canonical_id=variant_attempt_canonical,
+                    kind="attempt_node",
+                    authority="EXPERIENTIAL",
+                    attrs=attempt_attrs,
+                    evidence=[
+                        f"log:task-{task.task_id}",
+                        f"variant:{variant_name}",
+                    ],
+                )
+            except CortexKBError as exc:
+                log.warning(
+                    "cortex T3 propose_point attempt failed for variant=%s: %s",
+                    variant_name, exc,
+                )
+
+            # 2. ingest_attempt — carries per-variant metrics + plan_edge.
+            edge_id = variant_edges_map.get(variant_name, "")
+            metrics: dict[str, Any] = {
+                "task_kind":    task.kind,
+                "task_id":      task.task_id,
+                "variant_name": variant_name,
+            }
+            raw_metrics = vo.get("metrics") or {}
+            if isinstance(raw_metrics, dict):
+                for mk, mv in raw_metrics.items():
+                    if mv is not None:
+                        metrics[mk] = mv
+            if vo.get("reason"):
+                metrics["reason"] = str(vo.get("reason"))
+            try:
+                self.cortex_kb.ingest_attempt(
+                    sid=sid,
+                    iter_id=int(self.shared_state.tick or 0),
+                    outcome=attempt_outcome,
+                    metrics=metrics,
+                    plan_edge=edge_id,
+                    evidence=[
+                        f"log:task-{task.task_id}",
+                        f"variant:{variant_name}",
+                        f"point_id:{variant_attempt_canonical}",
+                    ],
+                    idempotency_key=(
+                        f"ingest_attempt:{sid}:{task.task_id}:{variant_name}"
+                    ),
+                )
+            except CortexKBError as exc:
+                log.warning(
+                    "cortex T3 ingest_attempt failed for variant=%s: %s",
+                    variant_name, exc,
+                )
+
+            # 3. verify — only when we have a real edge_id; otherwise
+            #    fall through (T2 NDJSON replay covers it eventually).
+            if edge_id:
+                try:
+                    self.cortex_kb.verify(
+                        sid=sid,
+                        edge_id=edge_id,
+                        outcome=verify_outcome,
+                        evidence=[
+                            f"log:task-{task.task_id}",
+                            f"variant:{variant_name}",
+                        ],
+                        promote_authority=promote_authority,
+                        idempotency_key=(
+                            f"verify:{sid}:{edge_id}:{variant_name}"
+                        ),
+                    )
+                except CortexKBError as exc:
+                    log.warning(
+                        "cortex T3 verify failed for variant=%s: %s",
+                        variant_name, exc,
+                    )
+            else:
+                log.info(
+                    "cortex T3 late_verified (no edge_id for variant=%s"
+                    " proposal=%s)",
+                    variant_name, proposal_msg_id or "(no msg_id)",
+                )
+
+        if not any_terminal and edge_entry:
+            log.info(
+                "cortex T3 per-variant: all variants skipped for proposal=%s"
+                " (round was 100%% dedup); pending edge row dropped",
+                proposal_msg_id or "(no msg_id)",
+            )
 
     def _lift_to_current_best(
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
@@ -4025,8 +7244,8 @@ class Coordinator:
         # ``audit_extras``); after all branches we call
         # ``record_action_attempt`` once so adding a new branch is a
         # local change. ``audit_decision`` remaining ``None`` means
-        # either the kind is out of scope (kernel-owned, pmc_roofline)
-        # or the branch had nothing to record.
+        # either the kind is out of scope (kernel-owned) or the branch
+        # had nothing to record.
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
         if task_kind == "baseline":
@@ -4046,6 +7265,17 @@ class Coordinator:
             materialized = result.get("materialized_config")
             if isinstance(materialized, str) and materialized:
                 self.shared_state.baseline_config_path = materialized
+                changed = True
+            # Fix E: promote the baseline Magpie wall-clock so the
+            # ExploreExecutor can derive a per-variant overtime kill
+            # deadline (``baseline_runtime_sec * explore_overtime_kill_ratio``).
+            # Only the success path carries this field; failure paths
+            # (timeout / nonzero / no_workspace / no_report) deliberately
+            # omit it so a botched baseline cannot seed a tiny / huge
+            # deadline downstream.
+            runtime_sec_raw = result.get("subprocess_runtime_sec")
+            if isinstance(runtime_sec_raw, (int, float)) and runtime_sec_raw > 0:
+                self.shared_state.baseline_runtime_sec = float(runtime_sec_raw)
                 changed = True
             self.shared_state.current_best = {
                 "action": "baseline",
@@ -4074,97 +7304,19 @@ class Coordinator:
                     task.params if task is not None else None
                 ),
             }
-        elif task_kind == "roofline":
-            # Roofline-v2 N10 (GPU-empirical fix): the RooflineExecutor
-            # mutates `self.shared_state.last_profile_trace` +
-            # `last_profile_status` + `last_profile_args` +
-            # `last_trace_analyze` inline during its sub-step
-            # orchestration (see action_executors/roofline.py). The
-            # mutations land on the in-memory SharedState object so
-            # the next-tick LLM prompt reflects them, BUT _promote_to_
-            # shared_state previously had no `roofline` branch so
-            # `changed` stayed False and `state.json` was never
-            # persisted — leaving the disk view stale (snapshot_id=0
-            # while in-memory snapshot_id was actually >=1).
-            #
-            # This branch flips `changed=True` so the standard
-            # `if changed: self.shared_state.save(...)` tail at the
-            # end of the method persists the mutations the executor
-            # already made. It does NOT re-mutate any field; the
-            # executor remains the single writer.
-            audit_decision = "promoted"
-            audit_extras = {
-                "snapshot_id": (self.shared_state.last_trace_analyze or {}).get(
-                    "roofline_snapshot_id"
-                ),
-                "analysis_md_path": (self.shared_state.last_trace_analyze or {}).get(
-                    "analysis_md_path"
-                ),
-                "trace_path": self.shared_state.last_profile_trace or None,
-                "profile_workspace": result.get("profile_workspace"),
-            }
-            # N27: roofline succeeded -> reset the failure streak so
-            # the next failure gets the full retry budget (2 outer
-            # attempts) before falling back to the no-analysis-md
-            # grid behaviour. Note `_record_action_failure` bumps
-            # the streak for FAILED roofline runs (status=failed
-            # after N26 inner retry exhausted); the success path
-            # is the symmetric reset.
-            self.shared_state.roofline_failure_streak = 0
-            changed = True
-            # N31: freeze the FIRST successful roofline as the
-            # ``baseline`` snapshot for the final ``## Roofline
-            # Comparison`` report section. Skip on subsequent
-            # rooflines so the freeze stays at snapshot #1 even when
-            # the N31 gate exception fires a snapshot #2 after
-            # optimization completes.
-            cached_now = self.shared_state.last_trace_analyze or {}
-            current_snap_id = cached_now.get("roofline_snapshot_id", 0)
-            baseline_locked = bool(self.shared_state.last_trace_analyze_baseline)
-            if (
-                not baseline_locked
-                and isinstance(current_snap_id, int)
-                and current_snap_id >= 1
-            ):
-                self.shared_state.last_trace_analyze_baseline = {
-                    "roofline_snapshot_id": current_snap_id,
-                    "analysis_md_path": str(
-                        cached_now.get("analysis_md_path") or ""
-                    ),
-                    "trace_input": str(cached_now.get("trace_input") or ""),
-                    "ts": datetime.now(timezone.utc).isoformat(
-                        timespec="seconds",
-                    ),
-                }
-            # N21 / N19c: freeze current discovered_flags into
-            # `discovered_flags_at_last_snapshot` so the next-tick
-            # `_proposal_denial_for_roofline` gate can compare and
-            # deny redundant roofline re-runs when flags haven't
-            # changed (which would produce a byte-equivalent trace
-            # — same sglang launch args, same hot kernel distribution).
-            # Deep-copy via json round-trip is overkill; a shallow
-            # dict() + per-framework dict() is enough because the
-            # discovered_flags schema is two-level (framework ->
-            # {backend_flags, param_flags}).
-            current = self.shared_state.discovered_flags or {}
-            self.shared_state.discovered_flags_at_last_snapshot = {
-                k: dict(v) if isinstance(v, dict) else v
-                for k, v in current.items()
-            }
-            changed = True
+            # seed the gaps[] ledger from baseline.
+            # Best-effort; failure is logged + absorbed inside the helper.
+            await self._refresh_gaps(reason="baseline_done")
         elif task_kind == "profile":
             audit_decision = "promoted"
             audit_extras = {
                 "trace_path": None,
                 "profile_args": None,
-                "pmc_summary_path": result.get("pmc_summary_path"),
-                "roofline_path": result.get("roofline_path"),
-                "kernel_breakdown_path": result.get("kernel_breakdown_path"),
                 "output_throughput": result.get("output_throughput"),
             }
             # Bug C fix: surface the trace path produced by ProfileExecutor
             # to SharedState so Orch can pass a real path to the kernel
-            # `trace_analyze` REQUEST instead of fabricating one.
+            # `select_kernels` REQUEST instead of fabricating one.
             trace_path = (
                 result.get("main_trace_path")
                 or (result.get("trace_files") or [None])[0]
@@ -4186,7 +7338,11 @@ class Coordinator:
                         (task.params or {}).get("base_extra_args") or ""
                     )
                 self.shared_state.last_profile_args = profile_args
-                # Stale trace_analyze cache no longer matches this trace.
+                # Stale select_kernels / trace_analyze cache no longer matches
+                # this trace. Clear both (M4 main merge: ``last_trace_analyze``
+                # is the canonical post-rename field; ``last_select_kernels``
+                # is kept on this branch for legacy resume parity).
+                self.shared_state.last_select_kernels = {}
                 self.shared_state.last_trace_analyze = {}
                 changed = True
                 audit_extras["trace_path"] = str(trace_path)
@@ -4215,121 +7371,181 @@ class Coordinator:
                         / self.shared_state.baseline_tput * 100.0
                     )
                 changed = True
-        elif task_kind == "pmc_roofline":
-            if result.get("pmc_summary_path"):
-                self.shared_state.last_profile_pmc_summary = str(result["pmc_summary_path"])
-                changed = True
-            if result.get("roofline_path"):
-                self.shared_state.last_profile_roofline = str(result["roofline_path"])
-                self.shared_state.last_trace_analyze = {}
-                changed = True
-            if result.get("kernel_breakdown_path"):
-                self.shared_state.last_profile_kernel_breakdown = str(result["kernel_breakdown_path"])
-                changed = True
-        elif task_kind == "validate_stack":
-            # Phase 3 — apply the rebenched throughput from the
-            # ValidateStackExecutor as the *only* source of truth for
-            # ``cumulative_gain_validated`` (CORE_STATE_FIELDS member).
-            # We deliberately DO NOT touch ``current_best`` /
-            # ``cumulative_gain`` / ``optimization_stack`` here because
-            # validate_stack is a measurement of an already-applied
-            # configuration, not a new modification.
-            tput = result.get("output_throughput")
-            stack_len_at_run = result.get("validated_stack_len")
-            if isinstance(tput, (int, float)) and tput > 0 and self.shared_state.baseline_tput > 0:
-                gain = (
-                    (float(tput) - self.shared_state.baseline_tput)
-                    / self.shared_state.baseline_tput * 100.0
-                )
-                # Validate-stack is a *measurement*, not a decision
-                # gate: even when the re-bench lands at or below the
-                # baseline we still record the number so the timeline /
-                # state.json reflects ground truth. The warning below
-                # flags the regression so an operator (or a future
-                # rollback policy) can react, but we deliberately leave
-                # ``optimization_stack`` / ``current_best`` /
-                # ``cumulative_gain`` untouched here.
-                VALIDATE_STACK_WARN_THRESHOLD_PCT = 0.0
-                if gain <= VALIDATE_STACK_WARN_THRESHOLD_PCT:
-                    log.warning(
-                        "validate_stack: cumulative_gain_validated=%.2f%% <= %.1f%% "
-                        "(tput=%.2f vs baseline=%.2f, stack_len=%d). Recording the "
-                        "measurement but NOT rolling back optimization_stack — "
-                        "validate_stack remains a measurement, not a decision gate.",
-                        gain, VALIDATE_STACK_WARN_THRESHOLD_PCT, float(tput),
-                        self.shared_state.baseline_tput,
-                        len(self.shared_state.optimization_stack),
-                    )
-                self.shared_state.cumulative_gain_validated = float(gain)
-                self.shared_state.cumulative_gain_validated_ts = (
-                    datetime.now(timezone.utc).isoformat()
-                )
-                # Pin the validation to the stack length the executor
-                # actually re-bench'd against. Falling back to the
-                # current stack length is dangerous: if a new KEEP
-                # sneaks in between the executor reading state.json and
-                # the Coordinator processing the result, the fallback
-                # would silently mark the new KEEP as validated. The
-                # executor surfaces validated_stack_len explicitly to
-                # avoid this race; if missing (defensive fallback for
-                # tests), we use the current length.
-                if isinstance(stack_len_at_run, int) and stack_len_at_run >= 0:
-                    self.shared_state.cumulative_gain_validated_stack_len = (
-                        stack_len_at_run
-                    )
-                else:
-                    self.shared_state.cumulative_gain_validated_stack_len = (
-                        len(self.shared_state.optimization_stack)
-                    )
-                changed = True
-                log.info(
-                    "validate_stack promoted: validated_gain=%.2f%% "
-                    "(tput=%.2f vs baseline=%.2f) at stack_len=%d",
-                    gain, float(tput), self.shared_state.baseline_tput,
-                    self.shared_state.cumulative_gain_validated_stack_len,
-                )
-                audit_decision = "promoted" if gain > 0 else "discarded"
+        elif task_kind == "roofline":
+            # F1-3 (Roofline-v2 / ): the
+            # composite ``roofline`` action runs profile +
+            # trace_analyze atomically. Its executor already writes
+            # ``last_profile_trace`` / ``last_profile_status`` /
+            # ``last_profile_args`` and calls ``record_trace_analyze``
+            # to populate ``last_trace_analyze`` (plus the top-level
+            # ``roofline_snapshot_id`` mirror). Coordinator's job here
+            # is therefore narrow: surface audit fields so the action
+            # attempt ledger records a ``promoted`` / ``discarded``
+            # decision, and bump ``changed`` so the post-promote
+            # save() path persists the executor's mutations to disk.
+            status = str(result.get("status") or "")
+            if status == "succeeded":
+                audit_decision = "promoted"
+                # N10: prefer the executor's already-published
+                # ``last_trace_analyze`` snapshot fields over the
+                # result dict so the audit row stays consistent with
+                # the SharedState view the LLM prompt renders. The
+                # result-dict fields still win for keys the snapshot
+                # does not carry (``profile_workspace`` / ``degraded``).
+                _last_ta = self.shared_state.last_trace_analyze or {}
                 audit_extras = {
-                    "validated_stack_len": (
-                        self.shared_state.cumulative_gain_validated_stack_len
+                    "snapshot_id": (
+                        _last_ta.get("roofline_snapshot_id")
+                        if _last_ta.get("roofline_snapshot_id") is not None
+                        else result.get("snapshot_id")
                     ),
-                    "gain_pct": float(gain),
-                    "baseline_tput_ref": float(self.shared_state.baseline_tput),
-                    "validated_tput": float(tput),
+                    "last_profile_trace": (
+                        self.shared_state.last_profile_trace
+                        or result.get("last_profile_trace")
+                    ),
+                    "analysis_md_path": (
+                        _last_ta.get("analysis_md_path")
+                        or result.get("analysis_md_path")
+                    ),
+                    "profile_workspace": result.get("profile_workspace"),
+                    "degraded": bool(result.get("degraded", False)),
                 }
+                # N27 — reset the outer roofline failure streak on a
+                # successful snapshot. The per-phase fallback (commit
+                # 6078012) already keeps the run alive when roofline
+                # keeps failing; the streak is exposed for prompt-side
+                # visibility only. ``setattr`` lets test stubs that omit
+                # the field still pass.
+                if hasattr(self.shared_state, "roofline_failure_streak"):
+                    self.shared_state.roofline_failure_streak = 0
+                changed = True
             else:
-                # Record the failed-to-measure case as a discard so the
-                # audit trail still captures *why* the validation didn't
-                # produce a number (NaN tput, baseline_tput == 0, etc.).
                 audit_decision = "discarded"
                 audit_extras = {
-                    "validated_stack_len": stack_len_at_run,
-                    "gain_pct": None,
-                    "baseline_tput_ref": float(self.shared_state.baseline_tput),
-                    "validated_tput": (
-                        float(tput) if isinstance(tput, (int, float)) else None
-                    ),
+                    "phase": result.get("phase"),
+                    "error_class": result.get("error_class"),
+                    "error": result.get("error"),
                 }
-        elif task_kind in ("backends", "params", "sweep"):
-            # backends/params content-fingerprint ledgers (Phase 4 of the
-            # dedup-by-fingerprint plan). Persist BEFORE the promotion
-            # logic below so a winner appended to ``accepted`` further
-            # down sees the latest ``tested`` / ``rejected`` already in
-            # place. ``apply_*_search_update`` preserves the existing
-            # ``accepted`` list (the executor never writes it) so the
-            # Coordinator remains the sole writer for promotion history.
-            if task_kind == "backends" and isinstance(
-                result.get("backends_search_update"), dict
-            ):
-                self.shared_state.apply_backends_search_update(
-                    result["backends_search_update"],
-                )
+                # N27 — bump the outer failure streak. The action_failure
+                # audit ledger already records the structured ``error_class``
+                # / ``error`` fields; this counter mirrors that signal on
+                # SharedState so prompt renderers
+                # (``_format_analysis_md_full``) can surface the cumulative
+                # count without having to grep ``action_attempts``.
+                # Guard for test stubs that omit the field.
+                if hasattr(self.shared_state, "roofline_failure_streak"):
+                    self.shared_state.roofline_failure_streak += 1
                 changed = True
-            # T1/T2 — persist discovered_flags + synergy_attempted +
-            # winners_history so the next Orchestration tick (and IR-26
-            # idea-generation prompt section) sees the full search-space
-            # context. These are independent of the promotion path below
-            # so they always run, even when no winner crossed the gate.
+                # Per-phase fallback on roofline failure (operator-
+                # requested 2026-05-25 after the TraceLens-patch-missing
+                # incident that left both EXPLORE-entry and KERNEL-entry
+                # roofline failing with ``trace_split_no_steady_state``
+                # and KERNEL plateauing immediately because
+                # ``last_profile_trace`` had no usable analysis path):
+                #
+                # * ``reason='explore_entry'`` → **skip** silently. The
+                #   gate-clear path below releases the specialist
+                #   dispatch lock and EXPLORE continues in degraded
+                #   mode (specialists run without ROOFLINE EVIDENCE).
+                #   No retry / no fallback — re-issuing the same
+                #   roofline almost always fails the same way and
+                #   eats 10-20 min of EXPLORE budget.
+                #
+                # * ``reason='kernel_phase_entry'`` → **fall back to a
+                #   plain profile task** so ``kernel_opt`` /
+                #   ``select_kernels`` has a fresh ``last_profile_trace``
+                #   to consume. ProfileExecutor's
+                #   ``_resolve_default_config`` picks
+                #   ``profile_sglang.yaml`` (torch_profiler enabled).
+                #   The fallback uses a phase-scoped idempotency key so
+                #   a re-entry to KERNEL deduplicates.
+                reason = (
+                    str((task.params or {}).get("reason") or "")
+                    if task is not None
+                    else ""
+                )
+                if reason == "kernel_phase_entry":
+                    try:
+                        fallback = await self._enqueue_internal_profile_task(
+                            reason="kernel_phase_entry_roofline_failed",
+                        )
+                        log.warning(
+                            "KERNEL-entry roofline %s failed "
+                            "(phase=%s error_class=%s); enqueued "
+                            "fallback profile task=%s",
+                            task.task_id if task else "?",
+                            result.get("phase"),
+                            result.get("error_class"),
+                            fallback.task_id,
+                        )
+                        # Stamp the latest phase_history row when it
+                        # is the KERNEL entry we just transitioned to;
+                        # safe no-op when the row has already moved on
+                        # (e.g. compute_next_phase fired plateau_kernel
+                        # before the fallback could land — rare but
+                        # possible under heavy budget pressure).
+                        self._record_phase_entry_evidence(
+                            auto_profile_fallback_enqueued=True,
+                            auto_profile_fallback_task_id=fallback.task_id,
+                            auto_profile_fallback_reason="roofline_failed",
+                        )
+                    except Exception as exc:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "KERNEL-entry roofline %s failed and the "
+                            "fallback profile enqueue also failed: %r",
+                            task.task_id if task else "?", exc,
+                        )
+                elif reason == "explore_entry":
+                    log.warning(
+                        "EXPLORE-entry roofline %s failed (phase=%s "
+                        "error_class=%s); skipping (no retry, no "
+                        "fallback). Specialists will proceed in "
+                        "degraded mode without analysis_md.",
+                        task.task_id if task else "?",
+                        result.get("phase"),
+                        result.get("error_class"),
+                    )
+            # Clear the EXPLORE-entry auto-roofline gate: regardless of
+            # success/failure, this task is no longer in-flight, so
+            # subsequent specialist dispatches stop being held by
+            # ``_auto_roofline_pending_denial``. We compare task ids so
+            # an unrelated roofline result (e.g. operator-enqueued via
+            # internal tooling) does not accidentally clear a gate set
+            # by a different task.
+            if (
+                task is not None
+                and self.shared_state.auto_roofline_pending_task_id
+                == task.task_id
+            ):
+                self.shared_state.auto_roofline_pending_task_id = ""
+                changed = True
+        elif task_kind == "explore":
+            # v0.8 M3 + KB_gaps/Dead-A.5 (prerequisite to Gap-10) —
+            # ``explore`` is the merged grid runner.
+            # The executor already does per-variant KEEP/REVERT gating
+            # *and* the inlined per-KEEP stack-rebench, so by the time
+            # we land here the result.``winners`` list contains only
+            # variants that beat the keep-threshold AND survived the
+            # rebench (KEEP_UNSTABLE variants are surfaced separately
+            # under ``keep_unstable_in_stack``).
+            #
+            # Coordinator responsibilities here mirror the
+            # backends/params branch (single-writer for
+            # ``explore_search.accepted`` + ``current_best`` +
+            # ``optimization_stack`` lift), but do **not** re-threshold
+            # the winners — the executor's keep_threshold_pct is
+            # authoritative.
+            #
+            # 1. Apply the executor's ledger increment (tested /
+            #    rejected / winners_history / cursor / last_round).
+            update = result.get("explore_search_update")
+            if isinstance(update, dict):
+                self.shared_state.apply_explore_search_update(update)
+                changed = True
+            # 2. Search-space expansion bookkeeping (parity with the
+            #    backends/params branch). Explore historically returns
+            #    ``discovered_flags_update=None`` but we honour it
+            #    defensively so a future enrichment path lands cleanly.
             disc_update = result.get("discovered_flags_update")
             if isinstance(disc_update, dict):
                 self.shared_state.record_discovered_flags(
@@ -4342,380 +7558,122 @@ class Coordinator:
                 if err:
                     self.shared_state.discovered_flags_error = str(err)
                 changed = True
-            new_attempts = result.get("synergy_attempted_new") or []
-            for combo in new_attempts:
-                if isinstance(combo, list):
-                    self.shared_state.mark_synergy_attempted(
-                        [str(x) for x in combo],
-                    )
-                    changed = True
-            winners_for_history = result.get("winners") or []
-            if winners_for_history and task_kind != "sweep":
-                self.shared_state.push_backend_winners_round(
-                    action=task_kind,
-                    base_tput=float(result.get("base_tput") or 0.0),
-                    base_extra_args=str(
-                        (task.params or {}).get("base_extra_args", "")
-                        if task is not None else ""
-                    ),
-                    winners=winners_for_history,
-                    best=result.get("best_variant"),
-                )
-                changed = True
-            if task_kind == "sweep":
-                # Audit trail (sweep is in _AUDIT_ACTIONS even though it
-                # never promotes a current_best — Orchestration still
-                # benefits from seeing what the sweep grid produced).
-                # Recorded FIRST so the subsequent ``record_sweep`` call
-                # gets the final word on ``last_sweep`` (which is a
-                # richer grid-summary payload than the uniform audit
-                # entry; see ``_format_last_sweep`` and
-                # test_p2_5_grid_promotion). ``sweep_attempts`` still
-                # captures the audit row.
-                pareto = result.get("pareto_front") or []
-                self.shared_state.record_action_attempt(
-                    action="sweep",
-                    task_id=getattr(task, "task_id", "") if task is not None else "",
-                    status="succeeded",
-                    decision="discarded",
-                    result=result,
-                    extras={
-                        "grid_size": result.get("grid_size"),
-                        "best_overall": result.get("best_overall"),
-                        "best_for_each_conc": result.get("best_for_each_conc"),
-                        "pareto_front_size": (
-                            len(pareto) if isinstance(pareto, list) else None
-                        ),
-                    },
-                )
-                self.shared_state.record_sweep(result)
-                changed = True
-                # Sweep maps the current stack across workloads; it is not
-                # itself a new serving config, so don't overwrite current_best.
-                self.shared_state.params_no_promote_streak += 1
-                # Treat sweep as a DISCARD-shaped score update: it records the
-                # run + sets a cooldown but does not register a KEEP because
-                # sweep itself never promotes a new current_best.
-                self._apply_action_score_update(
-                    "sweep", result, promoted=False, gain_vs_cb=0.0,
-                )
-                self.shared_state.save(self.session_dir)
-                return
-            # Promote a grid-runner winner if it actually beat the
-            # current best by a meaningful margin. We use 0.2% as the
-            # 1-shot KEEP threshold — relaxed from marathon's original
-            # 1.0% per the resume5 9h finding (35/38 winners landed in
-            # the 0.3–0.84% band but never promoted because each
-            # individual run sat under 1.0%), but kept above the
-            # session-to-session noise floor (~0.1%) so a single noisy
-            # round doesn't lock in a non-improvement. AND, as a
-            # separate path, promote ANY consistent winner that wins
-            # ≥ 2 of last 3 rounds with average gain ≥ 0.1% — that's
-            # the cross-round signal-vs-noise check; rounds individually
-            # under 0.2% still stack up when the same variant keeps
-            # winning, so we don't lose real but small gains.
-            PROMOTE_THRESHOLD_PCT = 0.2
-            CROSS_ROUND_LOOKBACK = 3
-            CROSS_ROUND_MIN_APPEARANCES = 2
-            # The cross-round bar must stay strictly under
-            # PROMOTE_THRESHOLD_PCT, otherwise the path is mathematically
-            # unreachable (any 2 sub-threshold rounds whose average
-            # crosses the cross-round bar would also have at least one
-            # round above the 1-shot bar, triggering single-shot promote
-            # first). 0.1% gives us a real cross-round signal between
-            # the noise floor and the 1-shot bar.
-            CROSS_ROUND_MIN_AVG_GAIN_PCT = 0.1
+            # 3. Per-winner ``record_explore_accepted`` — Coordinator
+            #    is the sole writer of ``explore_search.accepted``
+            #    per the shared_state docstring; the executor only
+            #    populates ``tested`` / ``rejected``.
+            winners = result.get("winners") or []
+            round_id = str(result.get("round_id") or "")
+            best_winner = result.get("best_variant")
             best_tput = result.get("output_throughput")
-            bv = result.get("best_variant") or {}
-            best_gain = result.get("best_gain_pct")
-            if task_kind == "params" and isinstance(result.get("params_search_update"), dict):
-                self.shared_state.apply_params_search_update(
-                    result["params_search_update"],
-                )
-                changed = True
-            cb = self.shared_state.current_best or {}
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            cur_best = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
-                else float(self.shared_state.baseline_tput or 0.0)
-            # Compute gain vs current_best (different from result.best_gain_pct
-            # which is gain vs base_tput injected at materialize time).
-            gain_vs_cb = (
-                (best_tput - cur_best) / cur_best * 100.0
-                if isinstance(best_tput, (int, float)) and best_tput > 0 and cur_best > 0
-                else None
-            )
-            # N19c: record marginal gain for the gain-driven kernel_opt
-            # unlock + flags-conditional roofline gates. Cheap rounds that
-            # don't improve over current_best signal "cheap exhausted",
-            # at which point kernel_opt becomes proposable (snapshot >= 1
-            # floor still applies) and redundant roofline re-runs get
-            # denied. Always write — None / 0.0 are valid signals too.
-            self.shared_state.last_cheap_delta_gain = (
-                float(gain_vs_cb) if gain_vs_cb is not None else 0.0
-            )
-            # Always record this round to the rolling history regardless
-            # of whether it promotes — `consistent_winner` consults it.
-            if isinstance(bv, dict) and bv.get("name") and gain_vs_cb is not None:
-                self.shared_state.push_params_winner(
-                    action=task_kind,
-                    variant_name=bv.get("name"),
-                    tput=best_tput,
-                    gain_pct=gain_vs_cb,
-                    extra_sglang_args=str(
-                        bv.get("candidate_extra_sglang_args")
-                        or bv.get("extra_sglang_args") or ""
-                    ),
-                    extra_envs=dict(bv.get("extra_envs") or {}),
-                )
             promoted = False
-            promotion_rule: str | None = None
-            promotion_rule_detail = ""
-            accuracy_gate_passed: bool | None = None
-            variants_tested_count = int(result.get("grid_size") or 0)
-            if not variants_tested_count:
-                tested = result.get("single_results") or result.get("all_results") or []
-                if isinstance(tested, list):
-                    variants_tested_count = len(tested)
-            if gain_vs_cb is not None and gain_vs_cb >= PROMOTE_THRESHOLD_PCT:
-                # Accuracy gate: if the winner touches precision-affecting
-                # flags, verify its GSM8K accuracy didn't drop > 5%.
-                # The eval ran during the benchmark (RUN_EVAL=true) so we
-                # check the result that came back.
-                from .action_executors._accuracy_gate import (
-                    accuracy_passed,
-                    is_high_accuracy_risk,
-                )
-                winner_args = str(bv.get("extra_sglang_args") or "")
-                winner_envs = dict(bv.get("extra_envs") or {})
-                accuracy_ok = True
-                if is_high_accuracy_risk(winner_args, winner_envs):
-                    new_acc = result.get("accuracy")
-                    base_acc = self.shared_state.baseline_accuracy
-                    if isinstance(new_acc, (int, float)) and base_acc > 0:
-                        accuracy_ok = accuracy_passed(base_acc, new_acc)
-                        accuracy_gate_passed = accuracy_ok
-                        if not accuracy_ok:
-                            log.warning(
-                                "accuracy gate FAILED for %s variant=%s: "
-                                "baseline=%.4f new=%.4f (drop=%.4f > 0.05)",
-                                task_kind, bv.get("name"),
-                                base_acc, new_acc, base_acc - new_acc,
-                            )
-                    elif base_acc <= 0:
-                        log.info(
-                            "accuracy gate skipped (no baseline_accuracy yet) "
-                            "for high-risk variant=%s", bv.get("name"),
-                        )
-                if accuracy_ok:
-                    self._lift_to_current_best(task_kind, best_tput, bv)
-                    promoted = True
-                    promotion_rule = "single_shot"
-                    promotion_rule_detail = (
-                        f"gain_vs_cb={float(gain_vs_cb):.2f}% >= "
-                        f"single_shot_threshold={PROMOTE_THRESHOLD_PCT}%"
-                    )
-                else:
-                    log.info(
-                        "accuracy gate blocked promotion of %s/%s",
-                        task_kind, bv.get("name"),
-                    )
-                    promotion_rule = "accuracy_blocked"
-                    promotion_rule_detail = (
-                        f"gain_vs_cb={float(gain_vs_cb):.2f}% met "
-                        f"single_shot_threshold={PROMOTE_THRESHOLD_PCT}% "
-                        f"but accuracy gate failed"
-                    )
-            else:
-                # Cross-round signal: same variant winning consistently
-                # at sub-threshold but real gains.
-                consistent = self.shared_state.consistent_winner(
-                    lookback=CROSS_ROUND_LOOKBACK,
-                    min_appearances=CROSS_ROUND_MIN_APPEARANCES,
-                    min_avg_gain_pct=CROSS_ROUND_MIN_AVG_GAIN_PCT,
-                )
-                if consistent and consistent.get("tput", 0) > cur_best:
-                    # Lift the consistent winner — synthesise a best_variant
-                    # from the history record (we don't have its full
-                    # extra_sglang_args here, so leave that blank; Orch
-                    # consults `params_winner_history` if it needs to know
-                    # which variant_name is the consistent one).
+            if isinstance(winners, list) and winners:
+                for winner in winners:
+                    if not isinstance(winner, dict):
+                        continue
+                    accepted = dict(winner)
+                    accepted.setdefault("accepted_at_round", round_id)
+                    accepted.setdefault("provenance", winner.get("provenance") or "llm_direct")
+                    self.shared_state.record_explore_accepted(accepted)
+                    changed = True
+                # 4. Lift the best winner into current_best /
+                #    optimization_stack (executor already validated the
+                #    rebench, so this is unconditional). ``best_tput``
+                #    is the post-rebench running_base_tput per
+                #    explore.py:803-810.
+                if (
+                    isinstance(best_winner, dict)
+                    and isinstance(best_tput, (int, float))
+                    and best_tput > 0
+                ):
                     self._lift_to_current_best(
-                        consistent["action"], consistent["tput"],
-                        {"name": consistent["variant_name"]},
-                    )
-                    log.info(
-                        "promoted consistent winner: variant=%s avg_gain=%.2f%% (%d rounds)",
-                        consistent["variant_name"],
-                        consistent["gain_pct"],
-                        CROSS_ROUND_LOOKBACK,
+                        "explore", float(best_tput), best_winner,
                     )
                     promoted = True
-                    promotion_rule = "cross_round_consistent"
-                    promotion_rule_detail = (
-                        f"variant={consistent['variant_name']} appeared "
-                        f">={CROSS_ROUND_MIN_APPEARANCES} of last "
-                        f"{CROSS_ROUND_LOOKBACK} rounds with "
-                        f"avg_gain={float(consistent['gain_pct']):.2f}% "
-                        f"(min_avg={CROSS_ROUND_MIN_AVG_GAIN_PCT}%)"
-                    )
-                else:
-                    promotion_rule = "below_threshold"
-                    if gain_vs_cb is None:
-                        promotion_rule_detail = (
-                            "no measurable output_throughput vs current_best"
-                        )
-                    else:
-                        promotion_rule_detail = (
-                            f"gain_vs_cb={float(gain_vs_cb):.2f}% < "
-                            f"single_shot_threshold={PROMOTE_THRESHOLD_PCT}% "
-                            f"and no cross_round_consistent winner"
-                        )
+                    changed = True
             if promoted:
+                # Reset the plateau proxy on a successful KEEP so
+                # the M2 transitional fallback in phase_state stays
+                # aligned with the unified ledger. The proxy is dual-
+                # tracked for resume parity.
                 self.shared_state.params_no_promote_streak = 0
-                # Phase 4 of the dedup-by-fingerprint plan: Coordinator
-                # is the sole writer to ``backends_search.accepted``. On
-                # a backends promote, stamp the winner so the next round
-                # filter treats this variant as accepted, not rejected.
-                if task_kind == "backends" and isinstance(bv, dict) and bv:
-                    promote_entry = dict(bv)
-                    promote_entry.setdefault(
-                        "gain_pct",
-                        float(gain_vs_cb) if isinstance(
-                            gain_vs_cb, (int, float)
-                        ) else None,
+                # v0.8 M3 §4.4 + explore inlines the
+                # per-KEEP stack rebench, so the post-rebench
+                # ``running_base_tput`` measures the *current*
+                # optimization_stack end-to-end. Promote it into
+                # ``cumulative_gain_validated`` + advance the
+                # validated_stack_len bookkeeping so the TODO 4
+                # stack-rebench guard clears immediately after the
+                # KEEP is recorded.
+                if (
+                    self.shared_state.baseline_tput > 0
+                    and isinstance(best_tput, (int, float))
+                    and best_tput > 0
+                ):
+                    validated_gain = (
+                        (float(best_tput) - self.shared_state.baseline_tput)
+                        / self.shared_state.baseline_tput * 100.0
                     )
-                    self.shared_state.record_backends_accepted(promote_entry)
-                changed = True
+                    self.shared_state.cumulative_gain_validated = float(validated_gain)
+                    self.shared_state.cumulative_gain_validated_ts = (
+                        datetime.now(timezone.utc).isoformat()
+                    )
+                    self.shared_state.cumulative_gain_validated_stack_len = len(
+                        self.shared_state.optimization_stack
+                    )
             else:
-                # Plateau detection: count consecutive grid runs that
-                # didn't move current_best. Prompt summary surfaces this
-                # so Orch knows when to switch to kernel-opt.
+                # No KEEP cleared the rebench. Bump the proxy so the
+                # plateau judges see the no-progress run.
                 self.shared_state.params_no_promote_streak += 1
-                changed = True  # streak counter changed → save state.json
-            # Mirror the promoted decision into per-action scoring so
-            # cooldown + diminishing-returns decay (or DISCARD dampening)
-            # surface in the prompt scoreboard. Always runs for backends /
-            # params so an LLM stuck in the explore loop sees the row
-            # decay deterministically.
-            self._apply_action_score_update(
-                task_kind, result,
-                promoted=bool(promoted),
-                gain_vs_cb=(
-                    float(gain_vs_cb) if isinstance(gain_vs_cb, (int, float)) else 0.0
-                ),
-            )
-            changed = True
-            # Audit-trail for backends / params. Sweep already recorded
-            # above (it short-circuits with ``return``).
+                changed = True
             audit_decision = "promoted" if promoted else "discarded"
             audit_extras = {
-                "round_id": (
-                    self.shared_state.backend_winners_history[-1].get("round_id")
-                    if self.shared_state.backend_winners_history
-                    and isinstance(
-                        self.shared_state.backend_winners_history[-1], dict,
-                    )
-                    else None
+                "round_id": round_id,
+                "winners_count": (
+                    len(winners) if isinstance(winners, list) else 0
                 ),
+                "losers_count": len(result.get("losers") or []),
+                "skipped_dup_count": len(result.get("skipped_dup") or []),
                 "best_variant_name": (
-                    bv.get("name") if isinstance(bv, dict) else None
+                    best_winner.get("name")
+                    if isinstance(best_winner, dict) else None
                 ),
-                "candidate_extra_sglang_args": (
-                    bv.get("extra_sglang_args")
-                    if isinstance(bv, dict) else None
-                ),
-                "extra_envs": (
-                    dict(bv.get("extra_envs") or {})
-                    if isinstance(bv, dict) else {}
-                ),
-                "best_gain_pct_vs_base": best_gain,
-                "gain_vs_cb": (
-                    float(gain_vs_cb)
-                    if isinstance(gain_vs_cb, (int, float)) else None
-                ),
-                "promotion_rule": promotion_rule,
-                "promotion_rule_detail": promotion_rule_detail or None,
-                "keep_threshold_pct": PROMOTE_THRESHOLD_PCT,
-                "accuracy_gate_passed": accuracy_gate_passed,
-                "variants_tested_count": variants_tested_count,
-                # PR-2: surface per-variant failures into the audit
-                # extras so the LLM critic prompt sees which variants
-                # silently aborted and avoids re-proposing them.
-                # Pairs with the on-disk abort_reason.json markers
-                # written by _grid_runner._write_variant_abort_marker.
-                "failed_variants": _summarize_failed_variants(
-                    result.get("all_results"),
+                "best_gain_pct_vs_base": result.get("best_gain_pct"),
+                "output_throughput": best_tput,
+                "keep_unstable_count": len(result.get("keep_unstable_in_stack") or []),
+                "explore_grid_exhausted": bool(
+                    result.get("explore_grid_exhausted")
                 ),
             }
-        elif task_kind == "framework_pr":
-            # framework_pr arm: executor returns ``decision='kept'`` with a
-            # PR-applied ``output_throughput`` when the new throughput beat
-            # ``base_tput`` by ``min_gain_pct`` (the bench gate is INSIDE
-            # the executor, not here, because rollback on DISCARD has to
-            # happen synchronously with the sub-baseline result). KEEP
-            # → lift into current_best like backends/params does; DISCARD
-            # → score_no_promote so the bandit cools the arm down. Failure
-            # / rollback paths fall through to the fallback score handler
-            # below.
-            decision = str(result.get("decision") or "")
-            new_tput = result.get("output_throughput")
-            promoted = False
-            gain_vs_cb_fpr: float | None = None
-            if decision == "kept" and isinstance(new_tput, (int, float)) and new_tput > 0:
-                cb = self.shared_state.current_best or {}
-                cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-                cur_best = (
-                    float(cb_tput)
-                    if isinstance(cb_tput, (int, float)) and cb_tput > 0
-                    else float(self.shared_state.baseline_tput or 0.0)
-                )
-                if cur_best > 0:
-                    gain_vs_cb_fpr = (float(new_tput) - cur_best) / cur_best * 100.0
-                bv_fpr: dict[str, Any] = {
-                    "name": result.get("applied_ref"),
-                    "candidate_extra_sglang_args": "",
-                    "extra_sglang_args": (
-                        str((task.params or {}).get("base_extra_args") or "")
-                        if task is not None else ""
+        elif task_kind == "sweep":
+            pareto = result.get("pareto_front") or []
+            self.shared_state.record_action_attempt(
+                action="sweep",
+                task_id=getattr(task, "task_id", "") if task is not None else "",
+                status="succeeded",
+                decision="discarded",
+                result=result,
+                extras={
+                    "grid_size": result.get("grid_size"),
+                    "best_overall": result.get("best_overall"),
+                    "best_for_each_conc": result.get("best_for_each_conc"),
+                    "pareto_front_size": (
+                        len(pareto) if isinstance(pareto, list) else None
                     ),
-                    "extra_envs": {},
-                    "workspace": result.get("workspace"),
-                    "ttft_mean_ms": (
-                        result.get("sub_baseline_result", {}).get("ttft_mean_ms")
-                        if isinstance(result.get("sub_baseline_result"), dict)
-                        else None
-                    ),
-                    "e2el_mean_ms": (
-                        result.get("sub_baseline_result", {}).get("e2el_mean_ms")
-                        if isinstance(result.get("sub_baseline_result"), dict)
-                        else None
-                    ),
-                }
-                self._lift_to_current_best("framework_pr", float(new_tput), bv_fpr)
-                promoted = True
-                changed = True
-                log.info(
-                    "framework_pr promoted: ref=%s new_tput=%.1f gain_vs_cb=%.2f%%",
-                    result.get("applied_ref"), float(new_tput),
-                    gain_vs_cb_fpr if gain_vs_cb_fpr is not None else 0.0,
-                )
-            self._apply_action_score_update(
-                "framework_pr", result,
-                promoted=promoted,
-                gain_vs_cb=(
-                    float(gain_vs_cb_fpr) if gain_vs_cb_fpr is not None else 0.0
-                ),
+                },
             )
-            changed = True
-        # Out-of-band score updates for the task_kinds that don't have a
-        # promoted-vs-discard notion (profile / pmc_roofline / validate_stack
-        # bump runs + cooldown; baseline is treated as a gate and skipped
-        # inside the helper). Sweep + backends/params/kernel branches above
-        # already called the helper themselves, so we filter to the
-        # measurement-style kinds here.
-        if task_kind in {"profile", "pmc_roofline", "validate_stack"}:
-            self._apply_action_score_update(task_kind, result)
-            changed = True
+            self.shared_state.record_sweep(result)
+            # Issue-E (Saturday May 2026): sweep is a discovery-only
+            # action that NEVER promotes (the branch above hard-codes
+            # ``decision='discarded'``). Previously this branch also
+            # bumped ``params_no_promote_streak``, which fed the
+            # plateau-judgment legacy proxy and caused a single SWEEP
+            # round to push the next EXPLORE phase one step closer to
+            # ``plateau_explore`` for no good reason. The streak field
+            # is owned by the ``params`` action lifecycle; sweep MUST
+            # NOT mutate it.
+            self.shared_state.save(self.session_dir)
+            return
         # Audit trail (kernel-parity) for the 6 non-kernel actions: one
         # record per attempt with status="succeeded" + branch-supplied
         # decision/extras. The sweep branch records its own attempt

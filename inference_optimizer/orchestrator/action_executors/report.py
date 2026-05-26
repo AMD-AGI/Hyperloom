@@ -1,4 +1,4 @@
-"""Real ``report`` ActionRunner — DESIGN v0.6 §16 report action.
+"""Real ``report`` ActionRunner report action.
 
 Reads the session's SharedState + bus event log and produces:
 
@@ -25,7 +25,6 @@ from typing import Any
 
 from ..message_bus import MessageBus
 from ..shared_state import SharedState
-from ..roofline_snapshot import build_roofline_comparison, format_roofline_metrics_table
 from ...paths import db_path_for
 from ...storage.connection import SqliteConnection
 
@@ -48,6 +47,15 @@ def _build_summary_dict(
         "stop_reason":      state.stop_reason,
         "baseline_tput":    state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
+        # IR-7 — steward verdict + history. The final report's section
+        # 9.1 (remaining gaps) reads ``last_remaining_gaps_assessment``
+        # rationale verbatim.
+        "remaining_gaps_assessment": dict(
+            state.last_remaining_gaps_assessment or {}
+        ),
+        "remaining_gaps_assessments_history": list(
+            state.remaining_gaps_assessments or []
+        ),
         "current_best":     state.current_best,
         "cumulative_gain":  state.cumulative_gain,
         # Phase 3 — separate the per-round-sum gain (kept as
@@ -72,16 +80,17 @@ def _build_summary_dict(
     # snapshot's Executive Summary with a note explaining why.
     baseline_snap = dict(getattr(state, "last_trace_analyze_baseline", {}) or {})
     latest_snap_raw = state.last_trace_analyze or {}
-    latest_meta = {
+    latest_snap = {
         "snapshot_id": latest_snap_raw.get("roofline_snapshot_id"),
-        "roofline_snapshot_id": latest_snap_raw.get("roofline_snapshot_id"),
         "analysis_md_path": str(latest_snap_raw.get("analysis_md_path") or ""),
         "trace_input": str(latest_snap_raw.get("trace_input") or ""),
         "ts": str(latest_snap_raw.get("ts") or ""),
     }
-    roofline_cmp = build_roofline_comparison(baseline_snap, latest_meta)
-    if roofline_cmp:
-        summary["roofline_comparison"] = roofline_cmp
+    if baseline_snap or latest_snap.get("analysis_md_path"):
+        summary["roofline_comparison"] = {
+            "baseline": baseline_snap,
+            "latest": latest_snap,
+        }
     return summary
 
 
@@ -156,6 +165,9 @@ def _format_md(summary: dict[str, Any]) -> str:
             )
     lines.append("")
 
+    # IR-7 — steward verdict transcript.
+    lines.extend(_format_steward_section(summary))
+
     roofline_cmp = summary.get("roofline_comparison")
     if roofline_cmp:
         lines.extend(_format_roofline_comparison_section(roofline_cmp))
@@ -165,6 +177,39 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.extend(_format_external_baseline_section(ext))
 
     return "\n".join(lines)
+
+
+def _format_steward_section(summary: dict[str, Any]) -> list[str]:
+    """IR-7 — render the session_steward verdict + history."""
+    assessment = summary.get("remaining_gaps_assessment") or {}
+    history = summary.get("remaining_gaps_assessments_history") or []
+    if not assessment and not history:
+        return []
+    lines: list[str] = ["## Remaining gaps (steward assessment)", ""]
+    if assessment:
+        rec = assessment.get("recommendation", "")
+        ts = assessment.get("ts", "")
+        potential = assessment.get(
+            "remaining_potential_pct_estimate", 0.0
+        ) or 0.0
+        rationale = (
+            assessment.get("rationale", "") or ""
+        ).strip()
+        next_gap = assessment.get("next_gap_canonical_id", "")
+        lines.append(f"- final verdict: `{rec}` at `{ts}`")
+        lines.append(
+            f"- remaining_potential_pct_estimate: `{potential:.2f}%`"
+        )
+        if next_gap:
+            lines.append(f"- next_gap_canonical_id: `{next_gap}`")
+        if rationale:
+            lines.append("")
+            lines.append("> " + rationale.replace("\n", "\n> "))
+            lines.append("")
+    if len(history) > 1:
+        lines.append(f"- prior assessments: {len(history) - 1}")
+    lines.append("")
+    return lines
 
 
 def _extract_executive_summary(analysis_md_path: str) -> str:
@@ -185,9 +230,12 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
         return f"(could not read {analysis_md_path}: {exc})"
     # Strip N11 base64 image data URLs upfront so the report stays
     # compact even if TraceLens regressed on inline images.
-    from inference_optimizer.tracelens_md import strip_base64_data_urls
-
-    text = strip_base64_data_urls(text)
+    import re
+    text = re.sub(
+        r"!\[[^\]]*\]\(data:image/[^)]+\)",
+        "[image stripped]",
+        text,
+    )
     lines = text.splitlines()
     start = None
     end = len(lines)
@@ -229,7 +277,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     latest = cmp.get("latest") or {}
     base_id = baseline.get("snapshot_id")
     latest_id = latest.get("snapshot_id")
-    if not baseline.get("snapshot_id") and not latest.get("snapshot_id"):
+    if not baseline.get("analysis_md_path"):
         lines.append(
             "_No roofline snapshot was captured during this session — "
             "the `roofline` composite action never completed successfully._"
@@ -237,35 +285,59 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         lines.append("")
         return lines
 
-    mode = cmp.get("mode") or "single_snapshot"
-    if mode == "single_snapshot":
+    same_snapshot = (
+        latest.get("analysis_md_path") == baseline.get("analysis_md_path")
+        or (
+            isinstance(base_id, int) and isinstance(latest_id, int)
+            and base_id == latest_id
+        )
+    )
+    if same_snapshot:
         lines.append(
             f"_Only one roofline snapshot was captured this session "
             f"(snapshot #{base_id}) — no post-optimization re-snapshot "
             "was triggered. Per N31 design: a final roofline runs before "
             "the report only when `cumulative_gain_validated > 0` AND "
-            "`optimization_stack` is non-empty._"
+            "`optimization_stack` is non-empty, i.e. when there is a real "
+            "improvement to compare against._"
         )
         lines.append("")
-    else:
-        lines.append(
-            "Structured before/after comparison — baseline snapshot was "
-            "captured after the first successful roofline; latest after "
-            "optimization was validated."
-        )
+        lines.append(f"### Snapshot #{base_id} — Executive Summary")
         lines.append("")
-
-    lines.extend(format_roofline_metrics_table(cmp))
-
-    if mode == "single_snapshot":
+        lines.append(f"`{baseline.get('analysis_md_path')}`")
+        lines.append("")
+        lines.append(_extract_executive_summary(
+            str(baseline.get("analysis_md_path") or "")
+        ))
+        lines.append("")
         return lines
 
-    lines.append(f"_Baseline snapshot #{base_id}_")
+    lines.append(
+        "Before/after comparison of TraceLens Executive Summaries — "
+        "the first snapshot was captured immediately after baseline, "
+        "the latest after `validate_stack` confirmed the cumulative "
+        "improvement."
+    )
+    lines.append("")
+    lines.append(f"### Baseline snapshot #{base_id}")
+    lines.append("")
+    lines.append(f"`{baseline.get('analysis_md_path')}`")
     if baseline.get("ts"):
         lines.append(f"_captured: {baseline.get('ts')}_")
-    lines.append(f"_Optimized snapshot #{latest_id}_")
+    lines.append("")
+    lines.append(_extract_executive_summary(
+        str(baseline.get("analysis_md_path") or "")
+    ))
+    lines.append("")
+    lines.append(f"### Post-optimization snapshot #{latest_id}")
+    lines.append("")
+    lines.append(f"`{latest.get('analysis_md_path')}`")
     if latest.get("ts"):
         lines.append(f"_captured: {latest.get('ts')}_")
+    lines.append("")
+    lines.append(_extract_executive_summary(
+        str(latest.get("analysis_md_path") or "")
+    ))
     lines.append("")
     return lines
 
@@ -517,10 +589,9 @@ class ReportExecutor:
         Strategy (in order):
         1. ``ctx.extra['session_dir']``     — Coordinator injects this for in-process runs
         2. ``task.params['session_dir']``   — explicit wins (e.g. tests)
-        3. :func:`paths.session_dir`        — honours
-           ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` (pin from
-           ``make_session_dir`` / ``--resume``), then ``$USER_DATA_PATH``.
-           Returns the path only if it exists and contains ``state.json``.
+        3. :func:`paths.session_dir`        — honours ``$USER_DATA_PATH``
+           and otherwise returns ``/workspace/hyperloom``. Returns the
+           path only if it exists and contains ``state.json``.
         4. None → runner returns failed status with an error
         """
         extra = getattr(ctx, "extra", None) or {}

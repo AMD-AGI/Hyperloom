@@ -17,7 +17,14 @@ from typing import Any
 
 from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer
 
-_CAPABILITY_ORDER = ("backends", "params", "sweep", "geak", "oob", "validate_stack")
+_CAPABILITY_ORDER = (
+    # ``explore`` is the primary row for sessions
+    #. backends / params / validate_stack
+    # remain as compatibility aliases so legacy resume reports stay
+    # readable.
+    "explore",
+    "backends", "params", "sweep", "geak", "oob", "validate_stack",
+)
 
 
 @register_renderer("capability_summary")
@@ -60,6 +67,11 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             extras.append(f"validated_gain={fmt_pct(v['last_validated_gain_pct'])}")
         if "grid_size" in v and v["grid_size"] is not None:
             extras.append(f"grid={v['grid_size']}")
+        # v0.8 M3 explore extras.
+        if "keep_unstable_count" in v and v["keep_unstable_count"]:
+            extras.append(f"keep_unstable={v['keep_unstable_count']}")
+        if "winners_history" in v and v["winners_history"]:
+            extras.append(f"history={v['winners_history']}")
         extras_str = " · ".join(extras) if extras else ""
 
         rows.append([name, status, attempts, keeps, extras_str])

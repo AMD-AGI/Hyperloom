@@ -23,7 +23,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `profile`, `backends`, `params`, `sweep`, Kernel requests, `report`).
-- Kernel: responder path for `trace_analyze`, `run_optimization`, `integrate`.
+- Kernel: responder path for `select_kernels`, `run_optimization`, `integrate`.
 - Critic: proposal review (default: `--critic-agent` — drives the
   `critic-agent/` skill runtime with KB priors / session memory /
   `review_constraints`-gated verdicts). `--critic-mock` for offline /
@@ -168,7 +168,7 @@ source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
 in the **same shell** that will spawn `inference_optimizer optimize`.
 Skipping install strikes silently *after* `baseline` succeeds: missing
-TraceLens/GEAK/OOB CLI → `trace_analyze` / `kernel_opt` fail; dead
+TraceLens/GEAK/OOB CLI → `select_kernels` / `kernel_opt` fail; dead
 auth-proxy → Claude SDK `401`; no live Ray head → `kernel_opt` tasks
 hang; missing `kernel-agent.env.sh` → first claude/codex call returns
 `401`. `install.sh --check-only` is a *diagnostic*, never a substitute.
@@ -181,6 +181,136 @@ failure → treat as fresh launch and re-run `install.sh`.
 
 > The in-loop equivalent is `_preflight()` steps 1–12 (drift repair, not
 > a substitute for this outer gate).
+
+### IR-3 — KB + PR Monitor reachability (in-loop, soft degrade)
+
+`_preflight()` invokes:
+
+```
+bash "$REPO_ROOT/inference_optimizer/scripts/preflight_kb.sh"
+```
+
+Exit codes (soft degrade — IR-3 never aborts launch):
+
+- `0` → KB + PR Monitor both reachable. `cortex_enabled` / `pr_monitor_enabled` stay `True`.
+- `1` → at least one branch unreachable. The cli automatically enables the
+  matching `--degraded-*` and continues; `manifest.json` records
+  `kb_degraded_reason=ir3_auto` (or `pr_degraded_reason=ir3_auto`).
+
+Operator opt-out: pass `--degraded-kb` / `--degraded-pr` to skip the
+corresponding probe (one round-trip saved); `manifest.json` then
+records `reason=explicit_flag`. Both flags together short-circuit the
+entire IR-3 step.
+
+### IR-4 — EXPLORE is specialist-first (PR-A9 Arbor-into-Hyperloom)
+
+PolicyGate's `explore_requires_specialist_provenance` rule denies any
+`delegate{action_name='explore'}` whose grid is entirely the legacy
+`provenance='llm_direct'`. Every EXPLORE round must trace its variants
+to one of:
+
+- `provenance='specialist:<domain>'` — variant came from a
+  `specialist_done.proposal_set` entry. The canonical path.
+- `provenance='default_grid'` — cold-start fallback when no specialist
+  has produced a proposal_set yet. The executor uses its built-in grid.
+
+The orchestration LLM is taught the specialist-first contract via
+`actions/_meta/specialist.yaml` (PR-A1) plus the orchestration prompt's
+EXPLORE section. Inv-5.1 (`specialist 不出 patch`) was relaxed by PR-A2 +
+PR-A4: specialists MAY author source patches into their isolated
+worktree (`runs/specialist/<task_id>/worktree/`), but the actual
+`git apply` against `framework_source_roots` is the sole job of the
+`integrate_patch` action (PR-A4) which holds the serving lanes and
+runs the throughput + accuracy gate.
+
+This rule is the final shape of the Arbor-into-Hyperloom porting
+effort (see `Agent-deligate-gap.MD` and the `arbor-dispatch-into-hyperloom`
+plan). Cold-start sessions can still proceed via `default_grid`; every
+subsequent round should be specialist-derived for Arbor-grade gains.
+
+### IR-6 — EXPLORE HARD force-exit on low budget
+
+`phase_state.should_force_exit_explore` exits EXPLORE the moment EITHER
+of the following holds:
+
+- total wall-clock remaining (`SharedState.remaining_minutes()`) is below
+  `--explore-force-exit-hours-remaining` (default **3.0 h**), OR
+- EXPLORE's remaining phase budget is below
+  `--explore-force-exit-budget-pct` (default **20%** of its allotted
+  slice).
+
+The gate is non-negotiable — the steward / plateau judge / LLM
+proposals cannot extend EXPLORE past either threshold. Routes
+EXPLORE → KERNEL (or → SWEEP when `--no-kernel`) via the standard
+`compute_next_phase` plumbing; the new exit reason
+`explore_force_exit_low_budget` lands in both `PHASE_EXIT_REASONS`
+and `STOP_REASON_VOCAB` so resume + breakdown collectors see it.
+
+Rationale (report iter 19 lesson): leave at least 3 h of buffer
+for the downstream KERNEL → SWEEP → CLOSE sequence so the session
+can produce a clean report + recipe write-back. EXPLORE that
+consumes the entire budget loses the value of every KEEP because
+the report never lands.
+
+### IR-7 — Honest self-stop via session_steward_specialist
+
+On EXPLORE plateau (the canonical `compute_plateau_explore` judge —
+real plateau, not the legacy m2_proxy), Coordinator enqueues an
+internal `session_steward_specialist` task BEFORE permitting the
+EXPLORE→KERNEL transition. The steward reads the full session state
+(`optimization_stack`, `explore_search.rejected`,
+`specialist_rounds`, `gaps[]`, `policy_denial_history`) and returns
+one of:
+
+- `recommendation='stop_session'` → Coordinator sets
+  `stop_reason='no_more_leverage'`; CLOSE phase runs next.
+- `recommendation='advance_to_kernel'` → Coordinator writes
+  `pending_escalate_hint='skip_to_kernel'`; the next
+  `compute_next_phase` advances to KERNEL (or SWEEP under
+  `--no-kernel`).
+- `recommendation='continue_explore'` → Coordinator injects
+  `next_gap_canonical_id` into `gaps[]`, resets
+  `params_no_promote_streak` + per-domain empty streaks, sets
+  `steward_continuation_used=True`. **Only one continuation per
+  session**: a second `continue_explore` is coerced to
+  `advance_to_kernel`.
+
+The steward is purely advisory at the SOFT layer — IR-6 still wins
+when wall-clock budget drops below the threshold, regardless of
+any steward verdict. Operators can disable the steward entirely
+via `--steward-disabled`; the plateau judge then exits EXPLORE
+directly without consulting it.
+
+LLM-side `propose_action{action_name='assess_remaining_gaps'}` is
+allowed when the LLM thinks plateau is imminent but the
+Coordinator hasn't fired yet. PolicyGate
+`assess_remaining_gaps_throttle` denies back-to-back proposals
+within `INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC`
+(default 1800s).
+
+## Retired modules and rules (do not re-introduce)
+
+These orchestrator modules were intentionally removed; the
+`actions/_meta/*.yaml` registry + `_grid_runner.py` + specialist-first
+EXPLORE flow replaced them. Re-adding them re-creates conflicting
+decision paths:
+
+- `orchestrator/backends.py` (the action-routing one — distinct from
+  the LLM-adapter directory `orchestrator/backends/`)
+- `orchestrator/params.py`
+- `orchestrator/validate_stack.py`
+- `orchestrator/scoring.py`
+
+Related rules that look reasonable but break things:
+
+- **No `framework_pr first-explore priority` rule** in
+  `system_prompts/orchestration.md` — conflicts with **IR-4**.
+  Framework-agent is invoked via `serving_specialist`'s
+  `framework_pr_scout` sub_kind.
+- **No `sequence_denial` rule** consuming `backends_attempts` /
+  `params_attempts` — those fields have no writers and would
+  permanently deny `kernel_opt`. Use
+  `explore_attempts_minimum_before_kernel_opt`.
 
 ## Setup
 
@@ -215,20 +345,6 @@ The install phase always initializes the full Hyperloom runtime. Even if the
 user later passes `--no-kernel` at runtime, the installer still prepares
 kernel-agent / TraceLens / GEAK / OOB / auth-proxy; `--no-kernel` only means
 that this `optimize` run skips the kernel optimization phase.
-
-The kernel agent and the framework agent (fa, surfaced as the `framework_pr`
-arm) are independent and each have a dedicated CLI toggle:
-
-* `--no-kernel`    → strips kernel-owned arms (`kernel_opt`, `integrate`,
-  `deep_kernel_analysis`, `operator_tuning`, `vendor_kernel_config`) plus
-  `profile` / `pmc_roofline`.
-* `--no-framework` → strips the `framework_pr` arm so the bandit never
-  invokes fa.
-
-Combining both yields a pure parameter-search run (baseline + params +
-backends + sweep + validate_stack + report). The toggles are persisted in
-`state.json` (`kernel_enabled`, `framework_enabled`) so resumes honour the
-original session's agent topology.
 
 `install.sh` installs everything in one shot (no `--with-*` flags to
 remember). Direct steps in `inference_optimizer/scripts/install.sh`:
@@ -311,7 +427,7 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 
 Quirks: with `set -u`, assign dependent vars on separate lines (chained
 `export A=... B=$A` can fail with `unbound variable`). The installer
-leaves a live Ray head; `ray status` must succeed because `trace_analyze`
+leaves a live Ray head; `ray status` must succeed because `select_kernels`
 submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 
 `_preflight()` runs every launch as the in-loop counterpart of IR-2.
@@ -602,74 +718,6 @@ The backend prunes everything older than the latest 50 turn workdirs
 on every tick to avoid unbounded growth.
 
 
-## Framework-Agent as Bandit Arm (`framework_pr` action)
-
-Framework-agent (fa) integration moved from a CLI pre-stage hook to a
-regular bandit arm called `framework_pr` (DESIGN doc:
-`claw-dev/docs-zh/fa-as-io-arm-design.md`). PR discovery and apply
-now happen *inside* the Coordinator tick loop, alongside `baseline` /
-`backends` / `params` / `sweep`, so PR selection participates in
-cooldown + streak penalties + observability exactly like every other
-arm. There is no longer any session-killing irreversible git side
-effect at CLI startup.
-
-What each `framework_pr` tick does (see
-`orchestrator/action_executors/framework_pr.py`):
-
-1. Compose `(gap, keywords)` from SharedState (`framework` /
-   `gpu_type` / `model_class` / `last_profile_kernel_breakdown`) +
-   manifest `precision`. Operator-supplied `proposal.params.gap_override`
-   or `keyword_override` win when present.
-2. Call `fa candidates` (read-only) to enumerate top-K PRs. No git
-   fetch, no worktree.
-3. Filter candidates: drop refs whose head_sha already matches the
-   sglang HEAD (= already KEEP'd this session, or shipped in the
-   base image).
-4. Stash the current `git rev-parse HEAD`; `git fetch` +
-   `git checkout --detach` the PR head.
-5. Run a sub-baseline benchmark against
-   `base_tput = current_best.tput || baseline_tput`, re-using the
-   same materialized YAML (`baseline_config_path`) + server flags
-   (`base_extra_args`) so we measure the PR delta, not a flag
-   regression.
-6. **KEEP** when `delta_pct >= min_gain_pct` (default 1.0): leave
-   the worktree on the PR head, return `status='succeeded'` +
-   `output_throughput=new_tput` so the Coordinator promotes the
-   PR into `current_best` via the normal `_lift_to_current_best`
-   path.
-7. **DISCARD** otherwise: `git checkout --detach <prev_head>` to
-   undo the apply, return `status='succeeded'` + `decision='discarded'`
-   so the bandit records a `no_promote` on the streak counter.
-8. Subprocess / git / sub-baseline failures return `status='failed'`
-   with an `error_class`, triggering the bandit's failure streak
-   penalty. The arm cools down on its own; the session continues.
-
-Operator-tunable `proposal.params`:
-
-| key | default | meaning |
-|---|---|---|
-| `max_candidates` | 5 | top-K returned by `fa candidates` |
-| `min_gain_pct` | 1.0 | KEEP threshold (PR-applied tput vs base_tput) |
-| `gap_override` | "" | bypass the auto-composer (raw gap_description) |
-| `keyword_override` | [] | bypass extract_keywords (verbatim list) |
-| `dry_run` | false | only enumerate + pick, skip apply + bench |
-
-Discover vs Kernel role boundary:
-
-| | framework-agent (`framework_pr` arm) | kernel-agent (in-loop) |
-|---|---|---|
-| When | Many times per session, scheduled by bandit | Many times, inside the optimize loop |
-| Granularity | Whole PR (cross-file change set) | Single kernel function |
-| Effect on session | New `current_best` source baseline | KEEP'd patches per kernel |
-| IO integration | `framework_pr` action executor (bandit arm) | Coordinator Kernel role + REQUEST kinds |
-| Hand-off | git checkout sglang to PR head + auto-rollback on DISCARD | `apply_kernel_patch.py` per-kernel |
-| Cooldown | Bandit streak counter (`consecutive_no_promote`) | Per-kernel `kernel_opt_attempts` |
-
-Gap / keywords for each tick are auto-composed from SharedState
-(`framework`, `gpu_type`, `model_class`, `precision`, optional profile
-bottleneck). Override per tick via `proposal.params.gap_override` /
-`proposal.params.keyword_override` from the Orchestration prompt.
-
 ## Framework Selection
 
 A session is single-framework. Pick `sglang` (default) or `vllm` via
@@ -686,8 +734,8 @@ What this controls:
 - Which Magpie YAML the executors default to
   (`baseline_sglang.yaml` / `baseline_vllm.yaml`,
   `profile_sglang.yaml` / `profile_vllm.yaml`)
-- Which params grid `params` action runs (`DEFAULT_VLLM_PARAMS_GRID`
-  vs `DEFAULT_PARAMS_GRID`)
+- Which framework-specific seed grid the `explore` action falls
+  back to when no `params.grid` is supplied
 - Which extra-args env name `_grid_runner` writes
   (`EXTRA_VLLM_ARGS` vs `EXTRA_SGLANG_ARGS`)
 - Which Marathon KB partition orchestration reads for hints
@@ -791,19 +839,6 @@ setsid nohup inference_optimizer --verbose optimize \
 echo $! > "$PID_FILE"
 ```
 
-framework-agent PR discovery is now a regular bandit arm (`framework_pr`,
-see [Framework-Agent as Bandit Arm](#framework-agent-as-bandit-arm-framework_pr-action)) —
-no startup flags needed. The Orchestration agent decides per tick when
-to propose the arm; the Coordinator composes the search gap from
-SharedState (`framework` / `gpu_type` / `model_class` / latest
-profile bottleneck). Override the auto-composed gap for an individual
-tick via `proposal.params.gap_override` from the Orchestration prompt.
-The arm self-disables when (a) `framework=vllm` (returns
-`unsupported_framework`), (b) `fa` binary is missing from PATH
-(returns `fa_candidates_failed`), or (c) the candidate set is empty
-(returns `no_applicable_candidate`); in all three cases the bandit
-streak counter cools the arm down and the session keeps running.
-
 `setsid nohup ... &` is required for runs > 5 min — Cursor's background
 shell can die on SSH disconnect.
 
@@ -878,7 +913,7 @@ python3 - <<'PY'
 import json, os, pathlib
 s = json.loads((pathlib.Path(os.environ["SESSION"]) / "state.json").read_text())
 for k in ("stop_reason", "baseline_tput", "cumulative_gain", "current_best",
-          "last_kernel_opt", "last_trace_analyze", "last_sweep"):
+          "last_kernel_opt", "last_select_kernels", "last_sweep"):
     print(f"{k}: {s.get(k)}")
 print("params_search_last_round:", s.get("params_search", {}).get("last_round"))
 print("backends_search_last_round:", s.get("backends_search", {}).get("last_round"))
@@ -896,15 +931,24 @@ python3 "$REPO_ROOT/inference_optimizer/scripts/event_counts.py" "$SESSION"
 The optimizer should:
 
 1. Establish or reuse `baseline_tput`.
-2. Run `profile` only when the active server args differ from
-  `last_profile_args`; otherwise reuse `last_profile_trace`.
-3. Run `trace_analyze` once per trace/config and cache the result in
-  `last_trace_analyze`.
+2. **Coordinator** auto-enqueues `roofline` (composite profile +
+  trace_analyze + analysis.md snapshot) on EXPLORE entry and KERNEL
+  entry when `--use-roofline-composite=true`. The LLM CANNOT propose
+  `roofline` — it is no longer in any phase allowlist. A fresh
+  roofline only re-fires when no snapshot exists, or when
+  `|cumulative_gain_validated - roofline_baseline_gain_at_snapshot|
+  > 10%`. When the toggle is off, EXPLORE runs no analysis at all and
+  KERNEL entry falls back to a plain auto-`profile`. Legacy LLM-
+  proposed `profile` is still allowed in EXPLORE / KERNEL as a manual
+  escape hatch (PolicyGate N9 denies it only when both
+  `--use-roofline-composite` and `--deny-direct-profile` are on).
+3. Run `select_kernels` once per trace/config and cache the result in
+  `last_select_kernels`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
 5. Require compile + correctness + microbench/E2E evidence before KEEP.
-6. Use `params_search` / `backends_search` to test parameters incrementally
-  and remember rejected candidates across resume. Both ledgers key entries
-  by **content fingerprint** (a sha1 hash of sorted `extra_sglang_args` +
+6. Use `explore_search` to test parameters incrementally and remember
+  rejected candidates across resume. The ledger keys entries by
+  **content fingerprint** (a sha1 hash of sorted `extra_sglang_args` +
   sorted `extra_envs`), so renaming an already-tested variant does not
   bypass dedup — LLM-supplied `params.grid` is filtered through the same
   ledger as the default seed grid.
@@ -1029,7 +1073,7 @@ direct Codex). See `## Critic Backend Selection`.
 ### Run-time signals
 
 - `No accelerator` (Magpie): subprocess `PATH` must lead with `$(dirname "$PYTHON")` (or set `MAGPIE_PYTHON`); use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
-- Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
+- Repeated `select_kernels` with unchanged trace/config: bug — reuse `last_select_kernels`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
 - `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied` events for the same action/rule pair; all top actions may be locked or pruned. Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials` block. To recover: manually edit `state.json` to remove the action from `pruned_families`, clear `policy_denial_streak` / `stop_reason`, and re-propose with fresh `params.grid` content (omit stale `idempotency_key`).

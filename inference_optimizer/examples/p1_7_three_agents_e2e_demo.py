@@ -93,7 +93,7 @@ _CRITIC_PROMPT = (
     "the most recent un-reviewed proposal.\n\n"
     "Decision rule (smoke run — keep it simple):\n"
     "  * If the proposed action_name is in {baseline, profile, classify, "
-    "    setup, target_analysis, report, dream}, verdict = 'approve'.\n"
+    "    setup, target_analysis, report}, verdict = 'approve'.\n"
     "  * If predicted_gain_pct is 0 and accuracy_risk is 0, verdict = 'approve'.\n"
     "  * If you can't tell, verdict = 'approve' with reasoning='conservative ok'.\n"
     "  * Reject only if the action_name is unknown or obviously dangerous.\n\n"
