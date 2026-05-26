@@ -1,7 +1,0 @@
-1660 passed
-1 skipped
-5 failed (all in docs/test-baselines/known_failed_20260524.txt)
-recorded_at: 2026-05-25T04:50:00Z
-recorded_at_head: 8aeaa11
-pytest_command: pytest inference_optimizer/tests -q --no-header --tb=no -p no:cacheprovider
-runtime: 80.41s
