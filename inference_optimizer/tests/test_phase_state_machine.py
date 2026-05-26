@@ -71,6 +71,17 @@ def test_allowed_actions_disjoint_phases():
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
 
 
+def test_retired_pmc_roofline_not_in_any_phase_allowlist():
+    # ``pmc_roofline`` action + executor were physically removed; leaving
+    # it in any phase allowlist would let PolicyGate R1 pass an LLM
+    # ``propose_action{action_name='pmc_roofline'}`` only to fail at the
+    # registry/handler layer with a confusing error.
+    for phase, allowed in phase_state.PHASE_ALLOWED_ACTIONS.items():
+        assert "pmc_roofline" not in allowed, (
+            f"{phase} still lists retired action 'pmc_roofline'"
+        )
+
+
 def test_is_action_allowed_in_phase_handles_unknowns():
     assert phase_state.is_action_allowed_in_phase("baseline", "PRELUDE")
     assert not phase_state.is_action_allowed_in_phase("baseline", "EXPLORE")
