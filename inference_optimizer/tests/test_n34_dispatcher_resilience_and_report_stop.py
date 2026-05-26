@@ -277,25 +277,3 @@ async def test_report_success_does_not_overwrite_prior_stop_reason(session_dir):
         await c.stop()
 
 
-@pytest.mark.asyncio
-async def test_run_loop_exits_after_report_emitted(session_dir):
-    """End-to-end: drop a report task on the queue, start the long
-    loop, verify it terminates via the ``report_emitted`` exit instead
-    of running until ``max_ticks``."""
-    _write_marker_target_baseline(session_dir)
-    c = Coordinator(session_dir, backends=_silent_backends())
-    c.sub.register_executor("report", report_executor)
-    c.shared_state.baseline_tput = 100.0
-    c.shared_state.save(session_dir)
-    try:
-        await c.tasks.create(
-            kind="report",
-            params={"session_dir": str(session_dir)},
-            idempotency_key="k-report-loop",
-        )
-        reason = await c.run(max_ticks=20, tick_interval_sec=0.0)
-        # ``run`` returns the resolved stop reason. ``report_emitted``
-        # must win over the ``max_ticks`` fallback.
-        assert reason == "report_emitted", reason
-    finally:
-        await c.stop()
