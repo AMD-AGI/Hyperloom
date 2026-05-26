@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from .config import KNOWN_PROVIDERS, ProviderName, WebToolsConfig
+from .config import IMPLEMENTED_SEARCH_PROVIDERS, KNOWN_PROVIDERS, ProviderName, WebToolsConfig
 from .fetch_client import FetchError, WebFetchClient, _new_default_http_client
 from .providers import (
     ProviderError,
@@ -69,6 +69,11 @@ def build_clients(
 
     providers: list[WebSearchProvider] = []
     for name in config.search_provider_chain():
+        if name not in IMPLEMENTED_SEARCH_PROVIDERS:
+            log.info(
+                "skipping web search provider %s — not implemented yet", name,
+            )
+            continue
         if not config.has_search_api_key(name):
             log.info(
                 "skipping web search provider %s — no API key configured", name,
@@ -103,6 +108,7 @@ def _provider_factory(
 
 
 __all__ = [
+    "IMPLEMENTED_SEARCH_PROVIDERS",
     "KNOWN_PROVIDERS",
     "FetchError",
     "ProviderError",
