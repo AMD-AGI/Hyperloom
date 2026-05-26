@@ -1,4 +1,4 @@
-"""ActionRegistry — DESIGN v0.6 §16.
+"""ActionRegistry
 
 Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per
 action). The corresponding markdown body at ``actions/<name>.md`` is

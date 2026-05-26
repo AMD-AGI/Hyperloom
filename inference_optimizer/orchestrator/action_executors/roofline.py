@@ -434,7 +434,7 @@ class RooflineExecutor:
         self.shared_state.record_trace_analyze(ta_payload, ta_result)
         cached = self.shared_state.last_trace_analyze or {}
 
-        # F3-4 (Roofline-v2 / plan_roofline_framework): append a
+        # F3-4 (Roofline-v2 / ): append a
         # per-direction saturation snapshot to
         # SharedState.roofline_saturation_history (capped at 10 most-
         # recent entries) so the next orchestration tick's prompt can
