@@ -185,7 +185,23 @@ class _CacheEntry:
     byte_len: int
 
 
-# ── Client ──────────────────────────────────────────────────────────────
+def _read_response_body_limited(resp: httpx.Response, max_bytes: int) -> bytes:
+    """Read at most ``max_bytes`` from a streaming response body."""
+    parts: list[bytes] = []
+    nbytes = 0
+    for chunk in resp.iter_bytes():
+        if nbytes >= max_bytes:
+            break
+        remaining = max_bytes - nbytes
+        if len(chunk) <= remaining:
+            parts.append(chunk)
+            nbytes += len(chunk)
+        else:
+            parts.append(chunk[:remaining])
+            break
+    return b"".join(parts)
+
+
 
 @dataclass
 class WebFetchClient:
@@ -295,45 +311,45 @@ class WebFetchClient:
             parsed = urlparse(current)
             _resolve_or_raise(parsed.hostname or "")
 
-            resp = self.http_client.get(
+            with self.http_client.stream(
+                "GET",
                 current,
                 follow_redirects=False,
                 timeout=self.config.fetch_timeout_s,
                 headers={"User-Agent": _USER_AGENT},
-            )
+            ) as resp:
+                if 300 <= resp.status_code < 400:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise FetchError(
+                            f"Redirect {resp.status_code} without Location header",
+                        )
+                    next_url = str(httpx.URL(current).join(location))
+                    next_parsed = urlparse(next_url)
+                    if next_parsed.scheme not in {"http", "https"}:
+                        raise FetchError(
+                            f"redirect to unsupported protocol: {next_parsed.scheme}",
+                        )
+                    if next_parsed.username or next_parsed.password:
+                        raise FetchError("redirect url must not contain credentials")
+                    if not _same_host(current, next_url):
+                        raise FetchError(
+                            f"cross-host redirect refused — "
+                            f"from {parsed.hostname} to {next_parsed.hostname}. "
+                            f"Re-call web_fetch with url={next_url} if you still "
+                            f"want this content."
+                        )
+                    current = next_url
+                    continue
 
-            if 300 <= resp.status_code < 400:
-                location = resp.headers.get("location")
-                if not location:
-                    raise FetchError(
-                        f"Redirect {resp.status_code} without Location header",
-                    )
-                next_url = str(httpx.URL(current).join(location))
-                next_parsed = urlparse(next_url)
-                if next_parsed.scheme not in {"http", "https"}:
-                    raise FetchError(
-                        f"redirect to unsupported protocol: {next_parsed.scheme}",
-                    )
-                if next_parsed.username or next_parsed.password:
-                    raise FetchError("redirect url must not contain credentials")
-                if not _same_host(current, next_url):
-                    raise FetchError(
-                        f"cross-host redirect refused — "
-                        f"from {parsed.hostname} to {next_parsed.hostname}. "
-                        f"Re-call web_fetch with url={next_url} if you still "
-                        f"want this content."
-                    )
-                current = next_url
-                continue
-
-            body = resp.content[:max_bytes] if resp.content else b""
-            ct = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-            return _FetchResult(
-                body=body,
-                content_type=ct,
-                status_code=resp.status_code,
-                final_url=current,
-            )
+                body = _read_response_body_limited(resp, max_bytes)
+                ct = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                return _FetchResult(
+                    body=body,
+                    content_type=ct,
+                    status_code=resp.status_code,
+                    final_url=current,
+                )
 
         raise FetchError(f"too many redirects (>{_MAX_REDIRECTS})")
 
