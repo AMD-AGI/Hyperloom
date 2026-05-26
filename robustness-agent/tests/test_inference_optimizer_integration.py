@@ -155,6 +155,11 @@ async def test_heartbeat_passes_gate(tmp_path):
         # ``ray_head_dead`` alongside the heartbeat, breaking the
         # single-intent gate assertion below.
         ray_probe_enabled=False,
+        # CI containers lack the TraceLens CLI / WekaFS mounts; turn
+        # off the J external_deps probe so the heartbeat envelope is
+        # not crowded out by ``tracelens_cli_missing`` /
+        # ``wekafs_degraded`` alerts.
+        external_deps_enabled=False,
     )
     intents, bundle = await _drive_reactor_with_prompt(
         config,

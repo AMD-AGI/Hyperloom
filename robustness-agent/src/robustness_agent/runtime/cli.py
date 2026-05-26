@@ -156,6 +156,13 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     # so a missing Ray daemon does not fire the ``ray_head_dead`` ladder.
     if "ray_probe_enabled" in options:
         config.ray_probe_enabled = bool(options["ray_probe_enabled"])
+    # Whole-probe disable for the J ``external_deps`` signal (TraceLens
+    # CLI / WekaFS mount). Heartbeat e2e tests run on inert CI hosts
+    # where neither dependency is provisioned, so the default probe
+    # fires ``tracelens_cli_missing`` + ``wekafs_degraded`` alerts that
+    # otherwise mask the expected ``send_message{heartbeat}`` envelope.
+    if "external_deps_enabled" in options:
+        config.external_deps_enabled = bool(options["external_deps_enabled"])
     # B3 ``no_levers_found`` floor knobs let hosts override the
     # default 45 min / 8 tick observation window without forking the
     # whole Config. Multi-node large-model setups need a longer floor

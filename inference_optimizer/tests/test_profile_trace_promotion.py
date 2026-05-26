@@ -37,6 +37,14 @@ def _silent_coordinator(session_dir) -> Coordinator:
 
 @pytest.mark.asyncio
 async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch):
+    # ProfileExecutor runs ``harvest_leaked_artifacts`` against the
+    # configured leak roots (defaults to ``/workspace`` which is not
+    # writable inside the CI runner). Pin the env to an isolated
+    # sandbox so the harvest never tries to stat a privileged path.
+    sandbox = tmp_path / "leak_sandbox"
+    sandbox.mkdir()
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
+
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / "capture_traces").mkdir()

@@ -70,6 +70,11 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
                 # escalate_strategy_change intents that mask the
                 # expected ``send_message{heartbeat}`` envelope.
                 "ray_probe_enabled": False,
+                # CI containers lack the TraceLens CLI and WekaFS mounts
+                # the J external_deps probe expects. Disable the whole
+                # probe so it does not enqueue ``tracelens_cli_missing``
+                # / ``wekafs_degraded`` alerts alongside the heartbeat.
+                "external_deps_enabled": False,
             },
         }
     )
@@ -186,6 +191,9 @@ def test_subprocess_tick_emits_heartbeat(tmp_path: Path):
             # intents alongside the heartbeat. Disable the A6 probe so
             # the envelope stays focused on the heartbeat contract.
             "ray_probe_enabled": False,
+            # Same rationale for the J external_deps probe — CI lacks
+            # the TraceLens CLI / WekaFS mounts it expects.
+            "external_deps_enabled": False,
         },
     }
     proc = _run_subprocess(request, request_path, out_path)

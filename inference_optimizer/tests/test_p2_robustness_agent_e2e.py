@@ -109,6 +109,11 @@ async def test_robustness_agent_real_runtime_heartbeat(
             # suppress the A6 ``ray_head_dead`` ladder so it does not
             # crowd out the expected ``send_message{heartbeat}`` intent.
             "ray_probe_enabled": False,
+            # CI runners lack the TraceLens CLI and WekaFS mounts the
+            # J external_deps probe expects; disable it so the heartbeat
+            # is not buried under ``tracelens_cli_missing`` /
+            # ``wekafs_degraded`` alerts.
+            "external_deps_enabled": False,
         },
     )
 
