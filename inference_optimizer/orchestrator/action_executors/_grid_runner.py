@@ -101,10 +101,11 @@ def _resolve_magpie_python() -> str:
 
     def _can_import_magpie(py: str) -> bool:
         try:
-            return subprocess.run(
+            proc = run_with_session_kill(
                 [py, "-c", "import Magpie"],
                 capture_output=True, timeout=10,
-            ).returncode == 0
+            )
+            return getattr(proc, "returncode", 1) == 0
         except Exception:
             return False
 
