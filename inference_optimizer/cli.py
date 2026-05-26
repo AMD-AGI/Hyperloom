@@ -1748,14 +1748,16 @@ def _probe_llm_catalog(
 
     Mirrors what the launcher had to do by hand (``terminals/6.txt``):
 
-        curl -k -H "Authorization: Bearer $SAFE_API_KEY" \
+        curl -H "Authorization: Bearer $SAFE_API_KEY" \
              "https://gateway/api/v1/llm-proxy/v1/models" | jq '.data[].id'
 
     The gateway has a documented flake rate; we retry up to
-    ``len(_CATALOG_RETRY_DELAYS_SEC)`` times with exponential backoff. SSL
-    verify is OFF because the gateway cert is occasionally self-signed;
-    we suppress the urllib3 InsecureRequestWarning so the diagnostics
-    section stays readable.
+    ``len(_CATALOG_RETRY_DELAYS_SEC)`` times with exponential backoff.
+
+    TLS verification is ON by default. For internal gateways with self-
+    signed certs, set ``INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1`` to
+    skip verification (a warning is printed since the probe also sends
+    ``Authorization: Bearer <api_key>``).
     """
     import time
 
@@ -1773,11 +1775,21 @@ def _probe_llm_catalog(
         )
         return None
 
-    try:
-        import urllib3  # type: ignore[import-not-found]
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    except Exception:  # noqa: BLE001
-        pass
+    insecure = os.environ.get(
+        "INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE", "",
+    ).strip().lower() in ("1", "true", "yes")
+    if insecure:
+        print(
+            "Preflight: WARNING — INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1 "
+            "is set; catalog probe will skip TLS verification while sending "
+            "an Authorization: Bearer header. Use only against trusted internal "
+            "gateways with self-signed certs."
+        )
+        try:
+            import urllib3  # type: ignore[import-not-found]
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:  # noqa: BLE001
+            pass
 
     probe_url = base_url.rstrip("/") + "/models"
     headers: dict[str, str] = {}
@@ -1794,7 +1806,7 @@ def _probe_llm_catalog(
                 probe_url,
                 headers=headers,
                 timeout=_CATALOG_REQUEST_TIMEOUT_SEC,
-                verify=False,
+                verify=not insecure,
             )
         except Exception as exc:  # noqa: BLE001
             last_err = f"{type(exc).__name__}: {exc}"
