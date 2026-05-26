@@ -1,4 +1,4 @@
-"""SpecialistRunner — v0.8 M5 (KB_design §3.5 + §3.13 M5).
+"""SpecialistRunner — v0.8 M5.
 
 The second sub-agent form factor. Whereas the deterministic
 :class:`SubAgentRunner` dispatches Python executors (BaselineExecutor,
@@ -12,14 +12,14 @@ mechanism + idempotency_key contract. They differ in:
 * execution: SpecialistRunner spawns an :class:`Backend.run` loop over
   up to ``max_turns`` turns instead of calling a Python executor.
 * tool surface: the runner passes a tightly-scoped tool whitelist into
-  the Backend (KB_design §3.5 §10 / §3.11 R5).
+  the Backend.
 * output: the runner harvests exactly one ``specialist_done`` intent
   from the transcript; any other intent type is logged and ignored.
-* workspace: per ``runs/specialist/<task_id>/`` (KB_design §3.5 §8):
+* workspace: per ``runs/specialist/<task_id>/``:
   ``prompt.md`` / ``transcript.jsonl`` / ``heartbeat.json`` /
   ``tool_calls.jsonl`` / ``specialist_done.json``.
 
-Failure modes (KB_design §3.5 §9 / §3.13 M5 §6) are folded into one
+Failure modes are folded into one
 recovery primitive: every exit path synthesises a ``specialist_done``
 payload so the upstream EXPLORE round never blocks on a missing
 result. ``status`` carries the original outcome
@@ -71,7 +71,7 @@ log = logging.getLogger(__name__)
 # :mod:`policy`. We re-export the tuples below so legacy importers
 # (and the runner itself) still see the historical names without a
 # code rewrite, but PolicyGate and SpecialistRunner now share a
-# single source of truth (KB_design §3.11 §4.4 / §4.5).
+# single source of truth.
 from .policy import (
     CORTEX_KB_READ_TOOL_NAMES as _CORTEX_KB_READ,
     KB_WRITE_TOOL_NAMES as _KB_WRITE,
@@ -203,7 +203,7 @@ def build_empty_specialist_done(
     """Return the canonical empty ``specialist_done`` payload.
 
     Used by every failure path in this module + by the Coordinator's
-    ``kill_task`` synth path (KB_design §3.5 §9 / §3.13 M5 §6). Guarantees
+    ``kill_task`` synth path. Guarantees
     the payload satisfies PolicyGate R3 schema (``empty=true``,
     ``proposal_set=[]``, non-empty summary).
     """
@@ -398,7 +398,7 @@ class SpecialistRunner:
         ).strip()
         max_turns = int(params.get("max_turns") or self.default_max_turns)
         domain = get_domain(domain_key)
-        # F2-3 — propagate sub_kind from the dispatch params so
+        # propagate sub_kind from the dispatch params so
         # _resolve_tools can apply differential gating. Empty = default
         # per-domain prompt + tool whitelist.
         sub_kind = str(params.get("sub_kind") or "").strip()
@@ -878,7 +878,7 @@ class SpecialistRunner:
         )
 
     # ------------------------------------------------------------------
-    # Workspace file protocol (KB_design §3.5 §8)
+    # Workspace file protocol
     # ------------------------------------------------------------------
     def _resolve_workspace(self, ctx: RunnerContext) -> Path | None:
         # Prefer the workspace SubAgentRunner pre-mkdir'd, fall back to
