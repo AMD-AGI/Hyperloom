@@ -144,11 +144,12 @@ def test_seed_action_scores_uses_model_class_priors_when_available(registry):
         ],
     )
     # Curated moe_mla priors (MODEL_CLASS_ACTION_PRIORS in scoring.py):
-    # operator_tuning=7.0, deep_kernel_analysis=2.0 (deliberately downweighted
-    # from the original 8.0 — see commit f97e7e60 — so deep-dive analysis
-    # doesn't crowd out faster explore actions on the scoreboard).
+    # operator_tuning=7.0, deep_kernel_analysis=8.0 (paired with the
+    # N30 ×2 deep boost on cheap-exhausted rounds — see test_n32 — so
+    # deep-dive analysis surfaces as top actionable on moe_mla once the
+    # cheap action grid is empty).
     assert seeded["operator_tuning"]["base_score"] == pytest.approx(7.0)
-    assert seeded["deep_kernel_analysis"]["base_score"] == pytest.approx(2.0)
+    assert seeded["deep_kernel_analysis"]["base_score"] == pytest.approx(8.0)
     # backends / params / sweep are also seeded from the curated table
     # (10x of their auto value for backends/params; flat 1.0 for sweep).
     assert seeded["backends"]["base_score"] == pytest.approx(8.4)
