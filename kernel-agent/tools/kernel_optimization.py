@@ -1296,32 +1296,45 @@ def build_prompt(
             "still measure compute/IO improvements.\n"
         )
     tracelens_context_block = ""
-    report_path_str = str(candidate.get("trace_report_path") or "")
-    report_path = Path(report_path_str) if report_path_str else None
-    if report_path and report_path.exists():
-        try:
-            full_report = report_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            full_report = ""
-        if full_report:
-            from inference_optimizer.tracelens_md import strip_base64_data_urls
+    # Per AMD-AGI/Hyperloom#307: the per-kernel TraceLens prose
+    # (Identification / Reasoning / Recommended direction / Impact
+    # estimate) is already extracted into ``hypothesis_block`` above
+    # via ``_build_hypothesis_block``, and the bound-specific lever
+    # list is in ``priority_block``. Dumping the full analysis.md on
+    # top of that bloats the prompt by ~300 lines (~40% of the body
+    # in a real Qwen3-32B run) and surfaces other P-items that this
+    # very prompt tells the agent NOT to optimize. Only fall back to
+    # the full-report dump when no per-kernel hypothesis could be
+    # rendered (raw-trace / csv-fallback path with empty prose), so
+    # the agent still has *some* TraceLens grounding in that edge
+    # case.
+    if not hypothesis_block.strip():
+        report_path_str = str(candidate.get("trace_report_path") or "")
+        report_path = Path(report_path_str) if report_path_str else None
+        if report_path and report_path.exists():
+            try:
+                full_report = report_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                full_report = ""
+            if full_report:
+                from inference_optimizer.tracelens_md import strip_base64_data_urls
 
-            full_report = strip_base64_data_urls(full_report)
-            rank = candidate.get("tracelens_pitem_rank")
-            title = candidate.get("tracelens_pitem_title", "")
-            if rank:
-                focus_line = (
-                    f"Focus on **P{rank}: {title}** in the report below. "
-                    "Other P-items are context only — do not optimize them.\n"
+                full_report = strip_base64_data_urls(full_report)
+                rank = candidate.get("tracelens_pitem_rank")
+                title = candidate.get("tracelens_pitem_title", "")
+                if rank:
+                    focus_line = (
+                        f"Focus on **P{rank}: {title}** in the report below. "
+                        "Other P-items are context only — do not optimize them.\n"
+                    )
+                else:
+                    focus_line = "Use the report below as full context for this kernel.\n"
+                tracelens_context_block = (
+                    "\n## TraceLens Context\n\n"
+                    + focus_line
+                    + "\n"
+                    + full_report
                 )
-            else:
-                focus_line = "Use the report below as full context for this kernel.\n"
-            tracelens_context_block = (
-                "\n## TraceLens Context\n\n"
-                + focus_line
-                + "\n"
-                + full_report
-            )
     # Use GEAK task_parser field names (kernel_name/kernel_url/kernel_type/repo)
     # so its LLM-based parser can extract them; OOB agents read the same body
     # as a normal natural-language prompt.
