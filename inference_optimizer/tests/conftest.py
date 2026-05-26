@@ -54,7 +54,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolate_session_layout_env(monkeypatch):
+def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     """N17 isolation: drop the in-process session-dir pin between tests.
 
     ``make_session_dir(model_name=...)`` writes
@@ -71,9 +71,22 @@ def _isolate_session_layout_env(monkeypatch):
     Tests that *do* call ``make_session_dir`` immediately overwrite the
     pin with their own tmp_path, which is the production-equivalent
     behaviour.
+
+    Also points ``MULTI_NODE_STATE_FILE`` at a per-test sentinel that
+    does not exist by default. ``is_multi_node()`` and
+    ``apply_kernel_patch._mn_state_path`` both honour this env var, so
+    tests run as single-node unless they explicitly opt in (e.g. by
+    writing their own state.json and re-setting the env). Without this,
+    a stale ``/tmp/multi_node_state.json`` from a real run on the same
+    host (or from an earlier test that didn't restore the env) would
+    trip every baseline / profile / grid_runner test into the multi-
+    node restart branch and surface as ``mn_server_restart_failed``.
     """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_LAYOUT", raising=False)
+    mn_state_sentinel = tmp_path_factory.mktemp("mn_state") / "missing_state.json"
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(mn_state_sentinel))
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
 
 
 
