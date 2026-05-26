@@ -824,65 +824,30 @@ cache state also lands in the boot `Preflight diagnostics:` block. If
 COLD_START repeats across retries, JIT was killed mid-`hipcc`; bump
 `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=5400` instead of relaunching.
 
-## Pre-GEAK Unittest Harness (`unittest_agent`)
+## Pre-GEAK Unittest Harness (unittest skill)
 
-Before every `backend=geak` attempt, `kernel-agent/tools/kernel_optimization.py`
-calls `tools/unittest_agent.py::generate_unittest()` to materialise an
-AgentKernelArena-compatible unittest right next to the GEAK run dir. The
-portable contract lives in `kernel-agent/SKILL.md`; do not depend on a
-developer-local AgentKernelArena checkout or copied task files. The harness
-pins the **live vLLM/SGLang runtime context** the kernel was profiled in
-(source-file symlink into `/sgl-workspace/...`, captured
-TraceLens input shapes/dtypes, `SGLANG_* / VLLM_* / AITER_* / TRITON_*`
-env vars, golden-bytes snapshot under `source/_baseline_snapshot/`) so
-GEAK can iterate against a real correctness gate instead of inventing
-its own surrogate `bench_<kernel>.py`.
+Before `backend=geak` attempts, the main agent generates a GEAK-compatible
+test harness by following `kernel-agent/skills/unittest/SKILL.md`. The skill
+searches for existing tests, collects shapes/dtypes from TraceLens and
+profiling data, and generates a 4-mode harness (`--correctness` / `--profile`
+/ `--benchmark` / `--full-benchmark`) that matches GEAK's evaluation contract.
 
-For HIP/C++ sources (`.cu` / `.cuh` / `.hip` / selected headers), the harness
-wraps the TraceLens-discovered benchmark command instead of importing Python:
-the generated `task_runner.py` temporarily overlays `source/<kernel>` onto the
-live framework source path, invalidates likely aiter JIT modules, runs the
-captured benchmark, and restores the live tree. Hyperloom runs this correctness
-command before GEAK handoff; only a HIP/C++ harness with passing compile and
-correctness self-verify is marked `ok` and passed as GEAK's `--test-command`.
+The resulting `test_command` is passed via `--test-command` to
+`kernel_optimization.py`, which forwards it to GEAK. If the skill fails to
+produce a valid harness (after up to 3 retries), `--test-command` is omitted
+and GEAK falls back to its own test discovery cascade.
 
-The generator self-verifies (compile + correctness MUST pass on the
-unmodified source) before declaring success. The artefact tree lives at:
+Validation uses `kernel-agent/skills/unittest/validate_harness.py` for both
+static checks (argparse + 4 flags + GEAK output markers) and runtime
+verification (run correctness + benchmark with reduced iterations).
 
-```text
-$USER_DATA_PATH/kernel-agent/unittests/<session_id>/<prompt_stem>/
-├── config.yaml                       # compile/correctness/performance commands
-├── scripts/task_runner.py            # compile / correctness / performance
-├── source/<kernel_name>.py           # symlink to the live framework src
-├── source/_baseline_snapshot/<kernel_name>.py   # frozen golden bytes
-└── unittest_meta.json                # generator manifest + self_verify
-```
+The Coordinator does NOT need to drive this step — the main agent executes
+the unittest skill before calling `kernel_optimization.py`. Observability
+shows up as `test_command` in `optimization_attempts.jsonl[].backend_paths`.
 
-The Coordinator does NOT need to drive this step — it runs implicitly
-inside `invoke_backend(backend="geak", ...)`. Observability shows up as
-`unittest_status` / `unittest_out_dir` / `unittest_test_command` keys in
-`optimization_attempts.jsonl[].backend_paths`; full audit lives in
-`unittest_meta.json` per harness.
-
-Control with `HYPERLOOM_UNITTEST_AGENT=auto|off|force` or
-`kernel_optimization.py --unittest-agent auto|off|force`. The default is
-`auto`; `HYPERLOOM_DISABLE_UNITTEST_AGENT=1` remains a backward-compatible
-alias for `off`. See `kernel-agent/SKILL.md` § *Auto-generated unittest harness
-(GEAK pre-step)* for the full manifest schema and status semantics.
-
-The unittest_agent owns the GEAK outer-timeout contract too: every
-manifest declares `harness_timeout_correctness_sec` /
-`harness_timeout_performance_sec`, and
-`kernel_optimization._geak_config_for_run` writes a per-attempt GEAK
-config whose `env.timeout` matches that budget (+300s buffer). Without
-this, mini-swe-agent's `LocalEnvironment.timeout` defaults to 30s and
-every `save_and_test` patch gets SIGKILLed inside the JIT recompile —
-the failure mode looks like GEAK silently rejecting every candidate
-patch (`patch_*_test.txt = "Test command timed out"`). If you bypass
-`_geak_config_for_run` (e.g. handcrafted GEAK runs), copy the matching
-`env.timeout` from the harness's `unittest_meta.json` into your config
-or you will reproduce the 30s-default failure. See `kernel-agent/SKILL.md`
-§ *Outer-timeout contract* for the regression checklist.
+The GEAK outer-timeout is managed by `_ensure_yaml_env_timeout()` in
+`kernel_optimization.py`, which sets a fallback of 3600s so GEAK's
+`LocalEnvironment.timeout` never silently inherits the 30s default.
 
 ## Kernel Apply Safety
 
