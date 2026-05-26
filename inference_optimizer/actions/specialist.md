@@ -55,7 +55,7 @@ LLM should dispatch specialists as the **primary** entry into a round:
 The Coordinator routes each delegate to the TaskRegistry; SpecialistRunner
 pulls them off the `research_lane` and runs them in parallel up to the
 lane capacity. Specialists are independent CPU-only research subprocesses
-in the v0.8-Hyperloom topology — they do not contend with the serving GPUs.
+— they do not contend with the serving GPUs.
 
 ## Inputs (task.params)
 

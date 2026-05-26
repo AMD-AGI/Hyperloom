@@ -1,4 +1,4 @@
-"""Coordinator + protocol layer (DESIGN v0.6 §7 / §13 / §14 / §15).
+"""Coordinator + protocol layer ().
 
 The orchestrator package owns:
 

@@ -1,4 +1,4 @@
-"""MessageBus (DESIGN v0.6 §13.1).
+"""MessageBus ().
 
 The ``events`` table is the source of truth. ``seq`` is the AUTOINCREMENT
 primary key, so we never have to coordinate sequence allocation in

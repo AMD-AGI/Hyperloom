@@ -1,4 +1,4 @@
-"""In-process MCP server exposing the ``emit_intent`` tool — DESIGN v0.6 §14.2.
+"""In-process MCP server exposing the ``emit_intent`` tool
 
 Wires :data:`EMIT_INTENT_TOOL_NAME` into the Claude SDK as a real tool
 (rather than a JSON-in-text convention). Each tool_use block from Claude's

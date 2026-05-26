@@ -2,7 +2,7 @@
 
 The Critic agent has two main entry shapes today:
 
-1. ``coordinator_inbox`` — Coordinator (DESIGN v0.6 §13.1) feeds a textual
+1. ``coordinator_inbox`` — Coordinator () feeds a textual
    prompt with a shared-state header and an inbox tail. The Critic must
    emit an intent envelope (``{"intents": [{"intent_type": ...}, ...]}``)
    that the Coordinator can route via :func:`validate_envelope`.
@@ -72,7 +72,7 @@ class Proposal:
     """One ``topic=proposal`` row extracted from a Coordinator inbox.
 
     Attributes:
-        msg_id: The Coordinator-issued ``msg_id`` (hex32 in v0.6).
+        msg_id: The Coordinator-issued ``msg_id`` (hex32 in the legacy release).
         from_agent: Originating agent name (e.g. ``orchestration``).
         seq: Optional bus sequence number (kept for ordering / replay).
         action_name: Convenience copy of ``payload.action_name``.
