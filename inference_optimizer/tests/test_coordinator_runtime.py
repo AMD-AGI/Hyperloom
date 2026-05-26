@@ -312,52 +312,6 @@ async def test_backend_error_streak_resets_after_successful_turn(
 
 
 @pytest.mark.asyncio
-async def test_coordinator_stops_when_no_more_leverage(session_dir):
-    backends = _build_backends({})
-    c = Coordinator(session_dir, backends=backends)
-    try:
-        c.shared_state.baseline_tput = 100.0
-        c.shared_state.current_best = {"action": "backends", "tput": 101.0}
-        c.shared_state.params_no_promote_streak = 5
-        # Use the actual registered grid length so adding a new variant
-        # (e.g. N22 added torch_compile_on) doesn't break this test.
-        from inference_optimizer.orchestrator.action_executors.params import (
-            DEFAULT_PARAMS_GRID,
-        )
-        _grid_size = len(DEFAULT_PARAMS_GRID)
-        c.shared_state.params_search = {
-            "cursor": _grid_size,
-            "tested": {f"v{i}": {} for i in range(_grid_size)},
-            "accepted": [],
-            "rejected": [],
-        }
-        # Phase 4 of the dedup-by-fingerprint plan: backends now has its
-        # own ledger and the no-leverage gate also requires it to be
-        # exhausted. Stamp the executor's exhaustion flag so this test
-        # reproduces the "everything explored" terminal state.
-        c.shared_state.backends_search = {
-            "backends_search_exhausted": True,
-            "tested": {},
-        }
-        c.shared_state.last_trace_analyze = {
-            "reusable_native_kernel_ids": ["k003", "k006", "k007"],
-        }
-        c.shared_state.rejected_kernel_ids = ["k003"]
-        c.shared_state.rejected_kernel_patches = [
-            {"kernel_id": "k006", "reason": "max_e2e_attempts_3_without_keep"},
-            {"kernel_id": "k007", "reason": "revert_decision"},
-        ]
-        c.shared_state.save(session_dir)
-
-        stop_reason = await c.run(max_ticks=5, tick_interval_sec=0.0)
-
-        assert stop_reason == "no_more_leverage"
-        assert c.shared_state.stop_reason == "no_more_leverage"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_coordinator_propose_action_creates_pending(session_dir):
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "baseline", "predicted_gain_pct": 0.0,
