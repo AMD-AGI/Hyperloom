@@ -4647,15 +4647,26 @@ class Coordinator:
             # SpecialistRunner picks it up.
             action_name = "specialist"
 
-        # Auto-roofline gate (EXPLORE-entry blocker). When
-        # ``_on_enter_explore`` enqueued a fresh ``roofline`` task and
-        # it is still in-flight, refuse new specialist dispatches so
-        # the first-round specialists run with the analysis.md
-        # snapshot. The field is cleared by
-        # ``_promote_to_shared_state`` when the roofline task reaches
-        # a terminal state.
-        if action_name == "specialist":
-            denied = await self._auto_roofline_pending_denial()
+        # Auto-roofline gate. When the Coordinator has an in-flight
+        # roofline task (PRELUDE bootstrap or 10% watermark crossing),
+        # refuse any dispatch whose output should observe the fresh
+        # ``analysis.md`` / ``last_profile_trace`` snapshot before it
+        # runs: specialists / explore grids and the KERNEL-owned
+        # actions. The field is cleared by ``_promote_to_shared_state``
+        # when the roofline task reaches a terminal state.
+        _ROOFLINE_GATED_ACTIONS = {
+            "specialist",
+            "explore",
+            "kernel_opt",
+            "integrate",
+            "deep_kernel_analysis",
+            "operator_tuning",
+            "vendor_kernel_config",
+        }
+        if action_name in _ROOFLINE_GATED_ACTIONS:
+            denied = await self._auto_roofline_pending_denial(
+                action_name=action_name,
+            )
             if denied is not None:
                 await self._record_policy_denied(
                     source, intent, denied, action_name=action_name,
@@ -5890,7 +5901,7 @@ class Coordinator:
                         self.shared_state.record_kernel_integrate_result(result)
                     decision = str(result.get("decision", "")).upper()
                     if decision == "KEEP":
-                        self._record_integrate_keep(result)
+                        await self._record_integrate_keep(result)
                     self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
                 # so the LLM-backed kernel agent should NOT see the request
@@ -6204,7 +6215,7 @@ class Coordinator:
                 (result or {}).get("kernel_id") if isinstance(result, dict) else None,
             )
 
-    def _record_integrate_keep(self, result: dict[str, Any]) -> None:
+    async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
@@ -6268,6 +6279,27 @@ class Coordinator:
             self.shared_state.cumulative_gain = (
                 (float(new_tput) - self.shared_state.baseline_tput)
                 / self.shared_state.baseline_tput * 100.0
+            )
+            # Mirror explore's single-writer pattern: an integrate KEEP
+            # has already been validated by the kernel-agent rebench,
+            # so promote it into ``cumulative_gain_validated`` and run
+            # the same 10% watermark check the explore branch uses.
+            # This collapses kernel + explore gain bookkeeping into one
+            # mechanism so a kernel-driven gain can fire a fresh
+            # roofline just like an explore-driven one.
+            validated_gain = (
+                (float(new_tput) - self.shared_state.baseline_tput)
+                / self.shared_state.baseline_tput * 100.0
+            )
+            self.shared_state.cumulative_gain_validated = float(validated_gain)
+            self.shared_state.cumulative_gain_validated_ts = (
+                datetime.now(timezone.utc).isoformat()
+            )
+            self.shared_state.cumulative_gain_validated_stack_len = len(
+                self.shared_state.optimization_stack
+            )
+            await self._maybe_enqueue_watermark_roofline(
+                reason="integrate_keep_watermark",
             )
 
     # ==================================================================
@@ -7166,6 +7198,33 @@ class Coordinator:
             # seed the gaps[] ledger from baseline.
             # Best-effort; failure is logged + absorbed inside the helper.
             await self._refresh_gaps(reason="baseline_done")
+            # PRELUDE bootstrap: enqueue the first roofline (composite
+            # profile + trace_analyze + analysis.md snapshot) anchored
+            # on baseline. Idempotency-keyed via the fixed ``prelude``
+            # reason so a resume after the baseline completion edge
+            # does not double-enqueue. The watermark check itself
+            # bootstraps from ``last_roofline_tput`` (initialised to 0
+            # in SharedState; set on roofline completion below).
+            if (
+                isinstance(tput, (int, float)) and tput > 0
+                and not (self.shared_state.auto_roofline_pending_task_id or "").strip()
+                and float(self.shared_state.last_roofline_tput or 0.0) <= 0
+            ):
+                try:
+                    rl_task = await self._enqueue_internal_roofline_task(
+                        reason="prelude_initial",
+                    )
+                    self.shared_state.auto_roofline_pending_task_id = rl_task.task_id
+                    log.info(
+                        "PRELUDE: baseline landed (tput=%.2f); auto-enqueued "
+                        "initial roofline task=%s",
+                        float(tput), rl_task.task_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "PRELUDE: failed to enqueue initial roofline after "
+                        "baseline: %r", exc,
+                    )
         elif task_kind == "profile":
             audit_decision = "promoted"
             audit_extras = {
@@ -7428,6 +7487,15 @@ class Coordinator:
                     )
                     self.shared_state.cumulative_gain_validated_stack_len = len(
                         self.shared_state.optimization_stack
+                    )
+                    # Watermark refresh: if the new validated gain has
+                    # pushed projected current tput >= 10% over the
+                    # last roofline measurement, enqueue a fresh
+                    # composite roofline and block subsequent
+                    # specialist / explore / kernel dispatches until
+                    # it lands.
+                    await self._maybe_enqueue_watermark_roofline(
+                        reason="explore_keep_watermark",
                     )
             else:
                 # No KEEP cleared the rebench. Bump the proxy so the
