@@ -1275,13 +1275,92 @@ def collect_capability_summary(
         state.get("cumulative_gain_validated")
     )
 
+    # v0.8 M3 — merged explore action capability row (KB_design §3.4 +
+    # §3.12 §4.2 "兼容 alias"). The backends / params / validate_stack
+    # rows stay alongside to keep v0.6 resume reports readable. On a
+    # pure v0.8 session those legacy rows will be ``not_attempted`` while
+    # ``explore`` carries the activity.
+    explore = _capability_for_action(state, "explore")
+    explore_search = state.get("explore_search") or {}
+    if isinstance(explore_search, dict):
+        explore["tested"] = len(explore_search.get("tested") or {})
+        accepted_entries = [
+            v for v in (explore_search.get("accepted") or [])
+            if isinstance(v, dict)
+        ]
+        if accepted_entries:
+            explore["best_gain_pct"] = max(
+                (_to_float(v.get("gain_pct")) or 0.0 for v in accepted_entries),
+                default=None,
+            )
+        keep_unstable_count = sum(
+            1 for entry in (explore_search.get("rejected") or [])
+            if isinstance(entry, dict)
+            and entry.get("reason") == "stack_unstable"
+        )
+        if keep_unstable_count:
+            explore["keep_unstable_count"] = keep_unstable_count
+        explore["winners_history"] = len(
+            explore_search.get("winners_history") or []
+        )
+
+    # v0.8 §3.12 §4.2 — specialist sub-agent capability row. Counts
+    # are derived from ``specialist_rounds`` so they always agree with
+    # ``specialist_runs`` (Inv-12.2 single source).
+    specialist_row = _specialist_capability_row(state)
     return {
         "geak":           geak_cap,
         "oob":            oob_cap,
+        # v0.8 M3 — primary row; backends/params/validate_stack are
+        # kept as compatibility aliases.
+        "explore":        explore,
         "backends":       backends,
         "params":         params,
         "sweep":          sweep_cap,
         "validate_stack": validate,
+        # v0.8 §3.12 §4.2 — sub-agent visibility row.
+        "specialist":     specialist_row,
+    }
+
+
+def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
+    """Derive ``capability_summary.specialist`` from
+    ``specialist_rounds``.
+
+    Single source of truth per Inv-12.2: the row never diverges from
+    the ``specialist_runs`` section because both read the same
+    SharedState ledger.
+    """
+    rounds = state.get("specialist_rounds") or []
+    if not isinstance(rounds, list) or not rounds:
+        return {
+            "status":    "not_attempted",
+            "attempts":  0,
+            "keeps":     0,
+            "tested":    0,
+        }
+    attempts = 0
+    proposals_total = 0
+    proposals_kept = 0
+    for r in rounds:
+        if not isinstance(r, dict):
+            continue
+        attempts += 1
+        proposals_total += int(r.get("proposals_total") or 0)
+        proposals_kept += int(r.get("proposals_kept") or 0)
+    if attempts == 0:
+        status = "not_attempted"
+    elif proposals_kept > 0:
+        status = "kept"
+    elif proposals_total > 0:
+        status = "tried"
+    else:
+        status = "attempted"
+    return {
+        "status":   status,
+        "attempts": attempts,
+        "keeps":    proposals_kept,
+        "tested":   proposals_total,
     }
 
 
@@ -2284,9 +2363,39 @@ def collect_critic_robustness(
                 "workdir": _rel(iter_dir, session_dir) or str(iter_dir),
             })
 
+    # v0.8 §3.12 §4.4 — kb_writes_summary mirrors the critic-agent's
+    # ``commit-review`` output count, grouped by verdict. Source is
+    # the same ``critic-workdir/<iter>/review.json`` we already
+    # parsed above so we don't re-read the disk.
+    kb_writes_summary = _critic_kb_writes_summary(critic_iters)
+
     return {
         "critic_iterations":  critic_iters,
         "robustness_signals": robustness_signals,
+        "kb_writes_summary":  kb_writes_summary,
+    }
+
+
+def _critic_kb_writes_summary(
+    critic_iters: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the ``critic_robustness.kb_writes_summary`` sub-block
+    (KB_design §3.12 §4.4).
+
+    Counts each iteration's verdict; downstream dashboards group on
+    ``by_verdict`` to render the KEEP / REVERT / NEEDS_INFO mix.
+    """
+    by_verdict: dict[str, int] = {}
+    total = 0
+    for entry in critic_iters:
+        verdict = str((entry or {}).get("verdict") or "").strip().upper()
+        if not verdict:
+            continue
+        total += 1
+        by_verdict[verdict] = by_verdict.get(verdict, 0) + 1
+    return {
+        "total":      total,
+        "by_verdict": by_verdict,
     }
 
 
@@ -2360,6 +2469,109 @@ def _aggregate_gpu_monitor(
     }
 
 
+def _collect_lane_timeline(
+    session_dir: Path,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """v0.8 M6 (KB_design §3.12 §4.5) — per-lane capacity / occupancy
+    summary derived from ``storage/coordinator.db``.
+
+    Returns one row per known lane with:
+
+    * ``lane``                — lane name
+    * ``capacity``            — current capacity (from ``lane_capacity``,
+                                falling back to defaults)
+    * ``live_holders``        — distinct holders currently below their
+                                expiration ts at collection time
+    * ``lease_expired_count`` — total ``lease_expired`` events emitted
+                                this session (from the events table)
+
+    The per-second / per-tick ``holders_timeline`` slice the design also
+    describes is deferred — it requires a dedicated sampler, which
+    Robustness will land in a follow-up. The aggregate numbers above
+    are enough for the breakdown's ``benchmark_lane.peak ≤ 1``
+    invariant check.
+    """
+    db_path = session_dir / "storage" / "coordinator.db"
+    if not db_path.exists():
+        return []
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(str(db_path), timeout=2.0)
+        conn.row_factory = _sqlite3.Row
+    except _sqlite3.Error as exc:
+        warnings.append(f"lane_timeline: open {db_path} failed: {exc!r}")
+        return []
+    try:
+        try:
+            cur = conn.execute(
+                "SELECT lane, capacity FROM lane_capacity ORDER BY lane",
+            )
+            capacities = {r["lane"]: int(r["capacity"]) for r in cur.fetchall()}
+        except _sqlite3.OperationalError:
+            # Pre-M6 DB without lane_capacity — fall back to defaults so
+            # resume on an old session still produces a stable shape.
+            from ..storage.schema import DEFAULT_LANE_CAPACITIES as _DEFAULT
+            capacities = dict(_DEFAULT)
+        try:
+            cur = conn.execute(
+                "SELECT lane, COUNT(*) AS n FROM leases "
+                "WHERE expires_at > datetime('now') GROUP BY lane",
+            )
+            holders = {r["lane"]: int(r["n"]) for r in cur.fetchall()}
+        except _sqlite3.OperationalError as exc:
+            warnings.append(f"lane_timeline: leases query failed: {exc!r}")
+            holders = {}
+        try:
+            cur = conn.execute(
+                "SELECT COUNT(*) AS n FROM events WHERE topic = 'lease_expired'",
+            )
+            row = cur.fetchone()
+            expired_total = int(row["n"]) if row else 0
+        except _sqlite3.OperationalError:
+            expired_total = 0
+        # Per-lane expired count breakdown (lease_expired events carry
+        # the lane in their JSON payload).
+        per_lane_expired: dict[str, int] = {}
+        try:
+            cur = conn.execute(
+                "SELECT payload FROM events WHERE topic = 'lease_expired'",
+            )
+            for r in cur.fetchall():
+                try:
+                    p = json.loads(r["payload"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                lane = str(p.get("lane") or "")
+                if lane:
+                    per_lane_expired[lane] = per_lane_expired.get(lane, 0) + 1
+        except _sqlite3.OperationalError:
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    rows: list[dict[str, Any]] = []
+    for lane in sorted(set(capacities) | set(holders)):
+        rows.append({
+            "lane":                lane,
+            "capacity":            int(capacities.get(lane, 1)),
+            "live_holders":        int(holders.get(lane, 0)),
+            "lease_expired_count": int(per_lane_expired.get(lane, 0)),
+        })
+    # Append totals row for breakdown consumers that aggregate across.
+    if rows:
+        rows.append({
+            "lane":                "__total__",
+            "capacity":            sum(r["capacity"] for r in rows),
+            "live_holders":        sum(r["live_holders"] for r in rows),
+            "lease_expired_count": int(expired_total),
+        })
+    return rows
+
+
 def collect_telemetry(
     session_dir: Path,
     state: dict[str, Any],
@@ -2384,6 +2596,11 @@ def collect_telemetry(
         "system_profile_paths": [_rel(p, session_dir) or str(p) for p in _scan_system_profiles(session_dir)],
         "server_log_paths":     [_rel(p, session_dir) or str(p) for p in _scan_server_logs(session_dir)],
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
+        # v0.8 M6 (KB_design §3.7 + §3.12 §4.5) — per-lane occupancy
+        # / capacity summary derived from the leases DB. Sits in the
+        # telemetry section so cross-cluster dashboards can chart
+        # lane usage alongside GPU power / temperature.
+        "lane_timeline": _collect_lane_timeline(session_dir, warnings),
     }
 
 
@@ -2403,6 +2620,11 @@ def _action_family(action: str) -> str:
         return "sweep"
     if s == "validate_stack":
         return "validate"
+    # v0.8 M3 — merged explore action (KB_design §3.4). Bucketed into
+    # its own ``explore`` family so the attribution table can show a
+    # single row that subsumes the legacy backends + params buckets.
+    if s == "explore":
+        return "explore"
     return "other"
 
 
@@ -2507,6 +2729,9 @@ def collect_attribution(
     family_totals: dict[str, float] = {
         "kernel": 0.0, "backends": 0.0, "params": 0.0,
         "sweep": 0.0, "validate": 0.0, "other": 0.0,
+        # v0.8 M3 — explore family (subsumes backends+params on v0.8
+        # sessions; legacy buckets stay populated on v0.6 resume).
+        "explore": 0.0,
     }
     for e in entries:
         if not isinstance(e, dict):
@@ -2548,19 +2773,192 @@ def collect_attribution(
             "cum_gain_after)."
         )
 
+    # v0.8 M7 (KB_design §3.12 §4.6 + §3.13 M7 §6) — per-phase gain
+    # breakdown. Cross-references the optimization_stack with the
+    # phase_history timestamps so each KEEP'd entry is bucketed into
+    # the phase that was active at its acceptance time. EXPLORE
+    # entries further break down by specialist domain (when
+    # winners_history carries a ``provenance`` field).
+    phase_breakdown = _collect_phase_breakdown(state, entries, warnings)
+
     return {
         "gain_per_stack_entry": entries,
         "method":               method,
         "source_breakdown": {
             "geak_pct_of_total":     round(geak_total, 2),
             "oob_pct_of_total":      round(oob_total, 2),
+            # v0.8 M3 — primary row.
+            "explore_pct_of_total":  round(family_totals.get("explore", 0.0), 2),
+            # Legacy bucket aliases — preserved for v0.6 resume reports.
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total":   round(family_totals.get("params", 0.0), 2),
             "sweep_pct_of_total":    round(family_totals.get("sweep", 0.0), 2),
             "validated_total_pct":   round(validated_total, 2),
         },
+        "phase_breakdown": phase_breakdown,
         "notes": notes,
     }
+
+
+def _collect_phase_breakdown(
+    state: dict[str, Any],
+    entries: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """KB_design §3.12 §4.6 + §3.13 M7 §6 — per-phase gain attribution.
+
+    Walks ``optimization_stack`` / ``gain_per_stack_entry`` and assigns
+    each KEEP entry to the phase that owned its acceptance timestamp.
+    Returns a shape compatible with the §3.13 M7 §6 example::
+
+        {
+            "prelude": 0.0,
+            "explore": {
+                "total_gain_pct": 18.4,
+                "by_domain": {
+                    "serving_specialist": 9.7,
+                    "default_grid":         2.5,
+                    ...
+                },
+            },
+            "kernel": {
+                "total_gain_pct": 7.1,
+                "by_kernel_id": {
+                    "fmoe_fp8_blockscale_g1u1": 4.3,
+                    ...
+                },
+            },
+            "sweep": 0.0,
+            "close":  0.0,
+        }
+
+    When phase_history is missing (legacy resume), every entry lands
+    under ``unattributed`` so the dashboard can call attention to
+    the gap.
+    """
+    # Build a phase timeline → bucket lookup once. Each row of
+    # ``phase_history`` has ``to_phase`` + ``ts_unix``; entries are
+    # ordered. For a given entry timestamp we pick the latest row
+    # whose ``ts_unix`` is ≤ entry ts.
+    history = state.get("phase_history") or []
+    if not isinstance(history, list):
+        history = []
+    timeline: list[tuple[float, str]] = []
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        try:
+            ts = float(row.get("ts_unix") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        phase = str(row.get("to_phase") or "").strip().upper()
+        if phase:
+            timeline.append((ts, phase))
+    timeline.sort(key=lambda r: r[0])
+
+    def _phase_for(ts_unix: float) -> str:
+        if not timeline:
+            return ""
+        current = ""
+        for ts, ph in timeline:
+            if ts <= ts_unix:
+                current = ph
+            else:
+                break
+        return current
+
+    # winners_history (explore) gives us per-entry provenance; map
+    # fingerprint → provenance for the explore bucket.
+    explore_search = state.get("explore_search") or {}
+    provenance_by_fp: dict[str, str] = {}
+    if isinstance(explore_search, dict):
+        for w in explore_search.get("winners_history") or []:
+            if not isinstance(w, dict):
+                continue
+            fp = str(w.get("fingerprint") or "")
+            prov = str(w.get("provenance") or "").strip()
+            if fp and prov:
+                provenance_by_fp[fp] = prov
+
+    phase_buckets: dict[str, dict[str, Any]] = {
+        "prelude": {"total_gain_pct": 0.0},
+        "explore": {"total_gain_pct": 0.0, "by_domain": {}},
+        "kernel":  {"total_gain_pct": 0.0, "by_kernel_id": {}},
+        "sweep":   {"total_gain_pct": 0.0},
+        "close":   {"total_gain_pct": 0.0},
+        "unattributed": {"total_gain_pct": 0.0},
+    }
+
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        delta = _to_float(e.get("delta_pct"))
+        if delta is None or delta <= 0:
+            continue
+        ts = e.get("ts_unix")
+        if ts is None:
+            ts_str = str(e.get("ts") or "")
+            if ts_str:
+                try:
+                    # Best-effort parse — strip trailing 'Z' / TZ offsets.
+                    from datetime import datetime as _dt
+                    ts = _dt.fromisoformat(
+                        ts_str.replace("Z", "+00:00")
+                    ).timestamp()
+                except (TypeError, ValueError):
+                    ts = 0.0
+        try:
+            ts_f = float(ts or 0.0)
+        except (TypeError, ValueError):
+            ts_f = 0.0
+        phase = _phase_for(ts_f).lower()
+        action = str(e.get("action") or "").lower()
+        # When phase_history isn't usable, fall back to the action
+        # family so we still bucket something usefully.
+        if phase not in phase_buckets:
+            fam = _action_family(action)
+            if fam in ("explore", "backends", "params"):
+                phase = "explore"
+            elif fam == "kernel":
+                phase = "kernel"
+            elif fam == "sweep":
+                phase = "sweep"
+            else:
+                phase = "unattributed"
+        bucket = phase_buckets[phase]
+        bucket["total_gain_pct"] = round(
+            float(bucket["total_gain_pct"]) + float(delta), 2,
+        )
+        if phase == "explore":
+            by_domain = bucket.setdefault("by_domain", {})
+            fp = str(e.get("fingerprint") or e.get("variant_fingerprint") or "")
+            prov = (
+                provenance_by_fp.get(fp)
+                or str(e.get("provenance") or "")
+                or "default_grid"
+            )
+            by_domain[prov] = round(
+                float(by_domain.get(prov, 0.0)) + float(delta), 2,
+            )
+        elif phase == "kernel":
+            by_kid = bucket.setdefault("by_kernel_id", {})
+            kid = str(e.get("kernel_id") or e.get("action_kernel_id") or "?")
+            by_kid[kid] = round(
+                float(by_kid.get(kid, 0.0)) + float(delta), 2,
+            )
+
+    # Drop the empty-by-default unattributed bucket when nothing
+    # landed there — keeps the JSON clean.
+    if phase_buckets["unattributed"]["total_gain_pct"] == 0.0:
+        phase_buckets.pop("unattributed", None)
+
+    if not timeline:
+        warnings.append(
+            "attribution.phase_breakdown: phase_history empty; gains "
+            "bucketed via action family fallback"
+        )
+
+    return phase_buckets
 
 
 def _reconstruct_gain_ledger(
@@ -2635,18 +3033,588 @@ def collect_source_files(
     return out
 
 
+# ---------------------------------------------------------------------------
+# §16 Phase segments — v0.8 M2 phase state machine (KB_design §3.2 + §3.12)
+# ---------------------------------------------------------------------------
+def collect_phase_segments(
+    state: dict[str, Any],
+    phase_timeline: list[dict[str, Any]],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Group action events by phase using ``phase_history`` boundaries.
+
+    Returns a list of segments shaped like::
+
+        {
+            "phase":            "EXPLORE",
+            "entered_ts":       "...iso...",
+            "exit_ts":          "...iso..." | "",
+            "exit_reason":      "plateau_explore",
+            "evidence":         {...},
+            "actions":          [<events from phase_timeline within window>...],
+            "elapsed_seconds":  float | None,
+        }
+
+    Ordering matches ``phase_history`` (chronological insertion order).
+    Empty when ``phase_history`` is missing — readers fall back to the
+    flat ``phase_timeline`` (v1 shape).
+    """
+    history = state.get("phase_history") or []
+    if not isinstance(history, list) or not history:
+        return []
+    segments: list[dict[str, Any]] = []
+    proxy_seen = False
+    for idx, row in enumerate(history):
+        if not isinstance(row, dict):
+            continue
+        entered_ts = str(row.get("ts") or "")
+        entered_unix = row.get("ts_unix")
+        if not isinstance(entered_unix, (int, float)):
+            entered_unix = None
+        # Exit info comes from the *next* row (its ``ts`` is when we
+        # left the current segment). The last segment is open.
+        exit_ts = ""
+        exit_unix: float | None = None
+        exit_reason = ""
+        if idx + 1 < len(history) and isinstance(history[idx + 1], dict):
+            nxt = history[idx + 1]
+            exit_ts = str(nxt.get("ts") or "")
+            exit_reason = str(nxt.get("reason") or "")
+            nxt_unix = nxt.get("ts_unix")
+            if isinstance(nxt_unix, (int, float)):
+                exit_unix = float(nxt_unix)
+        elapsed: float | None = None
+        if entered_unix is not None and exit_unix is not None:
+            elapsed = max(0.0, float(exit_unix) - float(entered_unix))
+        # Bucket the flat ``phase_timeline`` events by ``ts`` window.
+        actions_in_window: list[dict[str, Any]] = []
+        for ev in phase_timeline or []:
+            if not isinstance(ev, dict):
+                continue
+            ts = str(ev.get("ts") or "")
+            if not ts:
+                continue
+            if entered_ts and ts < entered_ts:
+                continue
+            if exit_ts and ts >= exit_ts:
+                continue
+            actions_in_window.append(ev)
+        evidence_dict = dict(row.get("evidence") or {})
+        if evidence_dict.get("r09_provisional") or (
+            str(evidence_dict.get("evidence") or "") == "m2_proxy"
+        ):
+            proxy_seen = True
+        segments.append({
+            "phase":           str(row.get("to_phase") or ""),
+            "from_phase":      str(row.get("from_phase") or ""),
+            "entered_ts":      entered_ts,
+            "entered_unix":    float(entered_unix) if entered_unix is not None else None,
+            "exit_ts":         exit_ts,
+            "exit_reason":     exit_reason,
+            "evidence":        evidence_dict,
+            "actions":         actions_in_window,
+            "elapsed_seconds": elapsed,
+        })
+    if proxy_seen:
+        # KB_gaps/Gap-15 / KB_design §3.14 R-09 — surface a single
+        # session-level marker so dashboards can flag legacy-proxy
+        # exits without scraping per-segment evidence.
+        warnings.append(
+            "plateau_proxy_provisional: legacy params_no_promote_streak "
+            "proxy fired (R-09); set INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1 "
+            "once the fleet is fully v0.8 to fail closed"
+        )
+    return segments
+
+
+# ---------------------------------------------------------------------------
+# §15 KB Provenance — Cortex KB integration audit (v0.8 M1)
+# ---------------------------------------------------------------------------
+def collect_kb_provenance(
+    session_dir: Path,
+    state: dict[str, Any],
+    manifest: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Collect the Cortex KB integration audit for ``session_breakdown.json``.
+
+    Three sources merged into one section:
+
+    1. SharedState (``state.json``) — ``cortex_session_id``,
+       ``cortex_session_summary`` (T4 result), ``warm_start_*``
+       snapshots, ``pending_kb_edges`` (T2 hypothesize edges not yet
+       verified).
+    2. NDJSON queues (``runtime/cortex/.kb_*.ndjson``) — counts of
+       drained / dead-letter rows. The flusher daemon writes one
+       ``drain_bookmark`` per round; we just sum the deltas.
+    3. Synchronous audit log (``runtime/cortex/.kb_audit.jsonl``) — per
+       Cortex CLI call status. Useful for diagnosing T0 / T4 sync
+       failures from the breakdown JSON alone.
+
+    Returns a stable shape (always the same keys, even on a `--degraded-kb`
+    session) so downstream readers (claw-stats-service) don't have to
+    branch.
+    """
+    from ..session_paths import (
+        cortex_audit_jsonl as _audit_path,
+        cortex_dead_letter_ndjson as _dl_path,
+        cortex_flushed_ndjson as _flushed_path,
+        cortex_flusher_pid as _flusher_pid_path,
+        cortex_flusher_status_json as _flusher_status_path,
+        cortex_pending_ndjson as _pending_path,
+        cortex_sid_file as _sid_path,
+        pr_monitor_status_json as _pr_status_path,
+    )
+
+    # v0.8 §3.6 + KB_gaps/Gap-02 — surface PR Monitor reachability
+    # snapshot written at cli boot. We use ``warnings`` (top-level
+    # breakdown.warnings) rather than a dedicated section so the
+    # operator can grep for ``pr_monitor`` regardless of the schema
+    # version they expect. KB_design §3.14 R-03 探测信号.
+    pr_status_path = _pr_status_path(session_dir)
+    if pr_status_path.exists():
+        try:
+            with pr_status_path.open("r", encoding="utf-8") as f:
+                pr_status = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.append(
+                f"pr_monitor:status_marker_unreadable:{exc!r}"[:240]
+            )
+        else:
+            if not pr_status.get("enabled"):
+                warnings.append("pr_monitor:disabled")
+            elif not pr_status.get("reachable"):
+                # KB_design §3.14 R-03 探测信号 — operator dashboard
+                # uses this exact string to light up the "PR Monitor
+                # cross-cluster ingress" alert.
+                url = str(pr_status.get("url") or "")
+                warnings.append(
+                    f"pr_monitor:unreachable:{url}"[:240] if url
+                    else "pr_monitor:unreachable"
+                )
+
+    def _count_lines(p: Path) -> int:
+        try:
+            if not p.exists():
+                return 0
+            with p.open("r", encoding="utf-8") as f:
+                return sum(1 for line in f if line.strip())
+        except OSError as exc:
+            warnings.append(f"kb_provenance: failed to count {p}: {exc!r}")
+            return 0
+
+    def _read_last_n_audit(p: Path, n: int = 50) -> list[dict[str, Any]]:
+        try:
+            if not p.exists():
+                return []
+            with p.open("r", encoding="utf-8") as f:
+                rows = [
+                    json.loads(line) for line in f
+                    if line.strip()
+                ]
+            return rows[-n:]
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.append(f"kb_provenance: failed to read audit {p}: {exc!r}")
+            return []
+
+    pending_path = _pending_path(session_dir)
+    flushed_path = _flushed_path(session_dir)
+    dl_path = _dl_path(session_dir)
+    audit_path = _audit_path(session_dir)
+    sid_path = _sid_path(session_dir)
+
+    audit_tail = _read_last_n_audit(audit_path, n=50)
+    # Status counts aggregated across the audit tail.
+    status_counts: dict[str, int] = {}
+    for row in audit_tail:
+        st = str(row.get("status") or "unknown")
+        status_counts[st] = status_counts.get(st, 0) + 1
+
+    # v0.8 M4 — ``points_created[]`` aggregation (KB_design §3.12 §4.4 +
+    # §3.13 M4 §4). We walk the *full* audit log (not just the tail) so
+    # one entry per (canonical_id, kind) is exposed even on long
+    # sessions; ``set`` dedups in case the same point was re-proposed
+    # mid-session. Only rows with op='propose_point' and a non-empty
+    # canonical_id qualify; we surface kind/authority/source so the
+    # ``pr_node`` rows (M4) are distinguishable from
+    # ``optimization_node`` / ``workload_node`` / ``issue_node``.
+    #
+    # KB_gaps/Gap-08 — same walk also aggregates verify outcomes into
+    # ``edges_promoted`` / ``edges_negated`` lists so the breakdown
+    # reader can answer "which edges did this session promote /
+    # refute?" without re-parsing NDJSON. We look for both async
+    # (``op=enqueue, envelope_op=verify``) and sync
+    # (``op=cli, args=['session','verify',...]``) rows; dedup by edge_id
+    # so a flushed enqueue + its later sync replay don't double-count.
+    points_created: list[dict[str, Any]] = []
+    points_by_kind: dict[str, int] = {}
+    edges_promoted: list[str] = []
+    edges_negated: list[str] = []
+    _seen_verify_edges: set[str] = set()
+
+    def _record_verify(edge_id: str, outcome: str) -> None:
+        if not edge_id or edge_id in _seen_verify_edges:
+            return
+        outcome_l = (outcome or "").strip().lower()
+        if outcome_l == "confirmed":
+            edges_promoted.append(edge_id)
+            _seen_verify_edges.add(edge_id)
+        elif outcome_l == "refuted":
+            edges_negated.append(edge_id)
+            _seen_verify_edges.add(edge_id)
+
+    try:
+        if audit_path.exists():
+            seen: set[tuple[str, str]] = set()
+            with audit_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    op_name = str(row.get("op") or "")
+                    if op_name == "propose_point":
+                        canonical = str(row.get("canonical_id") or "").strip()
+                        kind = str(row.get("kind") or "").strip()
+                        if not canonical or not kind:
+                            continue
+                        key = (canonical, kind)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        points_created.append({
+                            "canonical_id": canonical,
+                            "kind":         kind,
+                            "authority":    str(row.get("authority") or ""),
+                            "source":       str(row.get("source") or ""),
+                            "status":       str(row.get("status") or ""),
+                            "ts":           str(row.get("ts") or ""),
+                        })
+                        points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
+                    elif (
+                        op_name == "enqueue"
+                        and str(row.get("envelope_op") or "") == "verify"
+                    ):
+                        _record_verify(
+                            str(row.get("payload_edge") or ""),
+                            str(row.get("payload_outcome") or ""),
+                        )
+                    elif op_name == "cli":
+                        args = row.get("args") or []
+                        if (
+                            isinstance(args, list)
+                            and len(args) >= 4
+                            and args[0] == "session"
+                            and args[1] == "verify"
+                        ):
+                            edge_id = ""
+                            outcome = ""
+                            i = 2
+                            while i < len(args) - 1:
+                                if args[i] == "--edge":
+                                    edge_id = str(args[i + 1] or "")
+                                    i += 2
+                                elif args[i] == "--outcome":
+                                    outcome = str(args[i + 1] or "")
+                                    i += 2
+                                else:
+                                    i += 1
+                            _record_verify(edge_id, outcome)
+    except OSError as exc:
+        warnings.append(f"kb_provenance: failed to scan {audit_path}: {exc!r}")
+
+    cortex_sid = (state.get("cortex_session_id") or "").strip()
+    if not cortex_sid and sid_path.exists():
+        try:
+            cortex_sid = sid_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            cortex_sid = ""
+
+    commit_summary = state.get("cortex_session_summary") or {}
+    pending_edges = state.get("pending_kb_edges") or []
+    warm = state.get("warm_start_recipe") or {}
+    pitfalls = state.get("warm_start_pitfalls") or []
+
+    out: dict[str, Any] = {
+        "cortex_session_id":      cortex_sid,
+        "warm_start_ts":          state.get("warm_start_ts") or "",
+        "warm_start_recipe_seen": bool(warm and warm.get("raw")),
+        "warm_start_pitfall_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
+        "stack_fingerprint":      manifest.get("stack_fingerprint") or {},
+        "pending_edges": [
+            {
+                "proposal_msg_id": row.get("proposal_msg_id", ""),
+                "edge_id":         row.get("edge_id", ""),
+                "action":          row.get("action", ""),
+                "ts":              row.get("ts", ""),
+            }
+            for row in pending_edges if isinstance(row, dict)
+        ],
+        "queue": {
+            "pending_lines":     _count_lines(pending_path),
+            "flushed_bookmarks": _count_lines(flushed_path),
+            "dead_letter_lines": _count_lines(dl_path),
+        },
+        "audit_tail_count":     len(audit_tail),
+        "audit_status_counts":  status_counts,
+        # v0.8 M4 — full session points-created roll-up (KB_design §3.12
+        # §4.4). Sorted by canonical_id for stable diffing.
+        "points_created":        sorted(
+            points_created, key=lambda r: r.get("canonical_id", ""),
+        ),
+        "points_by_kind":        points_by_kind,
+        # KB_gaps/Gap-08 / KB_design §3.12 §4.4 — per-edge T3
+        # verify roll-up. Sorted for stable diffing.
+        "edges_promoted":        sorted(edges_promoted),
+        "edges_negated":         sorted(edges_negated),
+        "commit_summary": {
+            "status":             str(commit_summary.get("status") or "")
+                if isinstance(commit_summary, dict) else "",
+            "promoted_edges":     list(commit_summary.get("promoted_edges") or [])
+                if isinstance(commit_summary, dict) else [],
+            "derived_summary_id": str(commit_summary.get("derived_summary_id") or "")
+                if isinstance(commit_summary, dict) else "",
+        },
+        "flusher_status": _collect_flusher_status(
+            session_dir,
+            status_path=_flusher_status_path(session_dir),
+            pid_path=_flusher_pid_path(session_dir),
+            warnings=warnings,
+        ),
+        "kb_degraded_reason": (manifest.get("kb_degraded_reason") or "") or None,
+        "pr_degraded_reason": (manifest.get("pr_degraded_reason") or "") or None,
+    }
+    fs = out["flusher_status"]
+    # Only emit a warning when a boot marker was written (i.e. cli ran
+    # the spawn helper this session); a missing marker is treated as
+    # "legacy / pre-Dead-E session" rather than a misconfiguration.
+    if fs.get("reason") != "no_marker":
+        if not fs.get("enabled", True):
+            warnings.append("kb_flusher:disabled")
+        elif not fs.get("alive", False):
+            warnings.append("kb_flusher:not_alive")
+    return out
+
+
+def _collect_flusher_status(
+    session_dir: Path,
+    *,
+    status_path: Path,
+    pid_path: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Merge ``.kb_flusher_status.json`` (boot marker) with a live
+    ``kill -0 $pid`` probe so the breakdown reader sees one stable
+    shape (KB_gaps/Dead-E §6).
+    """
+    base: dict[str, Any] = {
+        "enabled":       False,
+        "spawned":       False,
+        "alive":         False,
+        "pid":           None,
+        "cortex_kb_url": None,
+        "interval_sec":  0.0,
+        "batch_size":    0,
+        "reason":        "no_marker",
+        "ts":            "",
+        "pid_path":      str(pid_path),
+    }
+    if status_path.exists():
+        try:
+            with status_path.open("r", encoding="utf-8") as f:
+                marker = json.load(f)
+            if isinstance(marker, dict):
+                for k in (
+                    "enabled", "spawned", "pid", "cortex_kb_url",
+                    "interval_sec", "batch_size", "reason", "ts", "pid_path",
+                ):
+                    if k in marker:
+                        base[k] = marker[k]
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.append(
+                f"kb_flusher:status_marker_unreadable:{exc!r}"[:240]
+            )
+
+    pid_alive = False
+    pid_from_file: int | None = None
+    if pid_path.exists():
+        try:
+            raw = pid_path.read_text(encoding="utf-8").strip().splitlines()
+            pid_from_file = int(raw[0]) if raw else None
+        except (OSError, ValueError):
+            pid_from_file = None
+        if pid_from_file:
+            try:
+                os.kill(pid_from_file, 0)
+                pid_alive = True
+            except (OSError, ProcessLookupError):
+                pid_alive = False
+    if pid_from_file and not base.get("pid"):
+        base["pid"] = pid_from_file
+    base["alive"] = pid_alive
+    return base
+
+
+# ---------------------------------------------------------------------------
+# v0.8 §3.12 §4.3 — specialist_runs section
+# ---------------------------------------------------------------------------
+def collect_specialist_runs(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+    *,
+    include_transcripts: bool = False,
+) -> list[dict[str, Any]]:
+    """Build the ``specialist_runs`` breakdown section.
+
+    Two data sources merge here (KB_design §3.12 §4.3):
+
+    1. ``state.json.specialist_rounds[]`` — per-round summary the
+       Coordinator writes after every EXPLORE specialist dispatch.
+    2. ``<session_dir>/runs/specialist/<task_id>/specialist_done.json``
+       — the runner's per-task transcript / proposal_set artifact.
+
+    The function is best-effort: a missing ``runs/specialist/``
+    directory simply means no transcripts get attached. We never
+    crash the export — every recoverable issue lands in ``warnings``
+    via the caller's ``_safe_collect`` wrapper.
+
+    Args:
+        session_dir: absolute session root.
+        state: parsed ``state.json`` as returned by
+            :func:`_load_state`.
+        warnings: shared warnings list (mutated in place).
+        include_transcripts: when True, the transcript file bytes are
+            inlined under each transcript ref's ``body`` field. The
+            CLI flag ``--breakdown-include-transcripts`` controls
+            this; default is False (path-only, smaller payload).
+    """
+    rounds = state.get("specialist_rounds") or []
+    if not isinstance(rounds, list) or not rounds:
+        return []
+
+    # Pre-index the runs/specialist/ directory so the round-merge
+    # below is O(1) per task lookup.
+    runs_root = session_dir / "runs" / "specialist"
+    by_task: dict[str, Path] = {}
+    if runs_root.exists():
+        try:
+            for child in runs_root.iterdir():
+                if not child.is_dir():
+                    continue
+                done_path = child / "specialist_done.json"
+                if done_path.exists():
+                    by_task[child.name] = done_path
+        except OSError as exc:
+            warnings.append(
+                f"specialist_runs: failed to scan {runs_root}: {exc!r}"
+            )
+
+    out: list[dict[str, Any]] = []
+    for raw in rounds:
+        if not isinstance(raw, dict):
+            continue
+        entry: dict[str, Any] = {
+            "round_id":          int(raw.get("round_id") or 0),
+            "dispatched_at":     str(raw.get("dispatched_at") or ""),
+            "completed_at":      str(raw.get("completed_at") or ""),
+            "domains":           list(raw.get("domains") or []),
+            "parallelism":       int(raw.get("parallelism") or 0),
+            "proposals_total":   int(raw.get("proposals_total") or 0),
+            "proposals_kept":    int(raw.get("proposals_kept") or 0),
+            "proposals_rejected": int(raw.get("proposals_rejected") or 0),
+            "proposals_skipped": int(raw.get("proposals_skipped") or 0),
+            "kb_edge_ids":       list(raw.get("kb_edge_ids") or []),
+            "confidence_avg":    _to_float(raw.get("confidence_avg")),
+            "domain_breakdown":  _normalize_specialist_domain_breakdown(
+                raw.get("domain_breakdown"),
+            ),
+            "notes":             list(raw.get("notes") or []),
+        }
+        # Attach transcript refs from runs/specialist/.
+        task_ids = list(raw.get("task_ids") or [])
+        transcripts: list[dict[str, Any]] = []
+        for tid in task_ids:
+            tid_str = str(tid)
+            done_path = by_task.get(tid_str)
+            if done_path is None:
+                continue
+            ref: dict[str, Any] = {
+                "task_id": tid_str,
+                "domain": _domain_for_task(raw, tid_str),
+                "path": _rel(done_path, session_dir) or str(done_path),
+            }
+            if include_transcripts:
+                try:
+                    ref["body"] = done_path.read_text(
+                        encoding="utf-8", errors="replace",
+                    )
+                except OSError as exc:
+                    warnings.append(
+                        f"specialist_runs: cannot read transcript "
+                        f"{done_path}: {exc!r}"
+                    )
+            transcripts.append(ref)
+        entry["transcripts"] = transcripts
+        out.append(entry)
+    return out
+
+
+def _normalize_specialist_domain_breakdown(
+    raw: Any,
+) -> dict[str, dict[str, int]]:
+    if not isinstance(raw, dict):
+        return {}
+    norm: dict[str, dict[str, int]] = {}
+    for domain, payload in raw.items():
+        if not isinstance(payload, dict):
+            continue
+        norm[str(domain)] = {
+            "dispatched":         int(payload.get("dispatched") or 0),
+            "proposals_total":    int(payload.get("proposals_total") or 0),
+            "proposals_kept":     int(payload.get("proposals_kept") or 0),
+            "proposals_rejected": int(payload.get("proposals_rejected") or 0),
+        }
+    return norm
+
+
+def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
+    """Best-effort lookup of the domain associated with ``task_id``
+    inside a single ``specialist_rounds`` entry. Returns "" when the
+    round doesn't carry the mapping (older rounds packed in M5)."""
+    mapping = round_entry.get("task_domains")
+    if isinstance(mapping, dict):
+        v = mapping.get(task_id)
+        if isinstance(v, str):
+            return v
+    # Fallback: if the round has exactly one domain we can attribute
+    # the task to it without ambiguity.
+    domains = round_entry.get("domains") or []
+    if isinstance(domains, list) and len(domains) == 1:
+        return str(domains[0])
+    return ""
+
+
 __all__ = [
     "collect_attribution",
     "collect_baseline",
     "collect_capability_summary",
     "collect_critic_robustness",
     "collect_final",
+    "collect_kb_provenance",
     "collect_kernel_invocations",
     "collect_kernel_lifecycle",
     "collect_param_search",
+    "collect_phase_segments",
     "collect_phase_timeline",
     "collect_session",
     "collect_source_files",
+    "collect_specialist_runs",
     "collect_sweep",
     "collect_telemetry",
     "collect_workload",

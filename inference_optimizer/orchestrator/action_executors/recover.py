@@ -338,9 +338,8 @@ class RecoverExecutor:
         time.sleep(self.SERVER_KILL_WAIT_S)
         for entry in killed:
             pid = entry["pid"]
-            if self._pid_alive(pid):
-                if self._send_signal(pid, signal.SIGKILL):
-                    entry["signal"] = "KILL"
+            if self._pid_alive(pid) and self._send_signal(pid, signal.SIGKILL):
+                entry["signal"] = "KILL"
         return killed
 
     def _discover_stale_pids(self) -> list[dict[str, Any]]:
