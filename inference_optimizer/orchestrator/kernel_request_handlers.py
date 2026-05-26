@@ -1019,16 +1019,43 @@ def _batch_kernel_candidates(
                 session_dir,
             )
 
-    def _is_live(kid: str) -> bool:
+    def _is_live(kid: str, current_source: str = "") -> bool:
         """A kernel_id is live (eligible for batch) iff it is NOT
         rejected, NOT in-flight, and has fewer than max_attempts
-        recorded attempts. ``max_attempts = 1`` (default) means: any
-        prior attempt at all -> not live."""
+        recorded attempts AGAINST THE CURRENT CANDIDATE'S source_file.
+
+        ``max_attempts = 1`` (default) means: any prior attempt against
+        the same source_file -> not live, but a prior attempt against a
+        DIFFERENT source_file is ignored. This is what lets PR-K's
+        launcher → device source promotion unlock a fresh attempt:
+        when ``aiter::ck_moe_stage1`` was first dispatched against the
+        python wrapper ``aiter/ops/moe_op.py`` and PARTIAL'd, a
+        subsequent dispatch with ``current_source`` pointing at the
+        promoted device file ``csrc/.../gemm_moe_ck2stages.cu`` is
+        treated as a fresh target with its own quota. Without this,
+        the wrapper's first failed attempt would lock the entire
+        task_group as ``group_exhausted`` even though the device path
+        had never been tried (Qwen3-30B-A3B-Base session
+        20260523T162026Z burned 2 hours on this).
+
+        Falls back to the cumulative ``attempts`` counter when:
+          * ``current_source`` is empty (legacy callers / synthetic
+            test fixtures that don't carry source_file);
+          * the entry was written by a v1 ``record_kernel_opt`` that
+            predated ``attempts_per_source`` (resumed state.json from
+            before this PR).
+        Both fallbacks preserve the pre-PR-K behaviour byte-for-byte.
+        """
         if kid in rejected_kernel_ids:
             return False
         if kid in in_flight:
             return False
         entry = attempts_by_kid.get(kid) or {}
+        if current_source:
+            per_source = entry.get("attempts_per_source")
+            if isinstance(per_source, dict):
+                src_attempts = int(per_source.get(current_source, 0))
+                return src_attempts < max_attempts
         if int(entry.get("attempts", 0)) >= max_attempts:
             return False
         return True
@@ -1076,7 +1103,7 @@ def _batch_kernel_candidates(
             primary_cand is not None
             and primary_cand.get("reusable_native_kernel") is True
             and bool(primary_cand.get("source_file"))
-            and _is_live(primary)
+            and _is_live(primary, str(primary_cand.get("source_file") or ""))
         )
         if not primary_live:
             primary_cand = next(
@@ -1086,7 +1113,7 @@ def _batch_kernel_candidates(
                     if m in kernel_by_id
                     and kernel_by_id[m].get("reusable_native_kernel") is True
                     and kernel_by_id[m].get("source_file")
-                    and _is_live(m)
+                    and _is_live(m, str(kernel_by_id[m].get("source_file") or ""))
                 ),
                 None,
             )
@@ -1129,7 +1156,7 @@ def _batch_kernel_candidates(
             continue
         if not item.get("source_file"):
             continue
-        if not _is_live(kernel_id):
+        if not _is_live(kernel_id, str(item.get("source_file") or "")):
             skipped[kernel_id] = "not_live"
             continue
         try:
