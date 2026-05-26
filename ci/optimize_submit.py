@@ -1249,34 +1249,109 @@ def _metrics_have_positive_throughput(path: str) -> bool:
         return False
 
 
-def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
-    """Add task metadata to ci_metrics.json when the agent omitted it.
+def _find_hyperloom_commit_sha(start: Path) -> str:
+    """Walk a few sibling locations to find ``hyperloom_source_commit.txt``.
 
-    Missing ``model`` was the reason Run 25813519878 could not be correlated
-    from /wekafs/users even though the metrics existed. The summary pipeline
-    does not require this field, but publishing/debugging does, and adding it
-    here makes downstream artifacts self-describing.
+    The PERSIST step in ``ci/prompt_prefix.txt`` writes the SHA both at
+    ``$RESULT_DIR/hyperloom_source_commit.txt`` and inside the V2 session
+    dir, so by the time NFS Stage B pulls things back it can show up at
+    ``task_dir/hyperloom_source_commit.txt`` or
+    ``task_dir/session/hyperloom_source_commit.txt`` (depth varies by
+    which fallback collected the artifacts).
     """
-    if path.name != "ci_metrics.json" or not path.exists():
+    candidates = [
+        start.parent / "hyperloom_source_commit.txt",
+        start.parent / "session" / "hyperloom_source_commit.txt",
+        start.parent.parent / "hyperloom_source_commit.txt",
+    ]
+    for sha_path in candidates:
+        if not sha_path.exists():
+            continue
+        try:
+            sha = sha_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            continue
+        # accept anything that looks like a SHA (or short SHA) — never trust
+        # garbage from an empty / corrupted file.
+        if 7 <= len(sha) <= 80 and all(c in "0123456789abcdef" for c in sha.lower()):
+            return sha
+    return ""
+
+
+def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
+    """Backfill task metadata into ci_metrics.json / session_breakdown.json
+    so the persisted artifacts are self-describing.
+
+    Originally added because missing ``model`` blocked correlation with
+    /wekafs/users entries (Run 25813519878). Extended in 2026-05 to also
+    cover audit fields the sandbox / V2 cli collectors don't always reach:
+
+    * ``image``           — registry-qualified container image (auto-detected
+                            at register time, e.g.
+                            ``…/lmsysorg/sglang:v0.5.11-rocm720-mi30x``)
+    * ``hyperloom_commit``— git SHA of the Hyperloom source tree the agent
+                            actually cloned (written by the fresh-clone
+                            block in ``ci/prompt_prefix.txt`` and pulled
+                            back via NFS Stage B as
+                            ``hyperloom_source_commit.txt``)
+
+    The same SHA + image also lands inside ``session_breakdown.json``'s
+    ``session_meta`` block when the file matches that name (V2 cli's
+    own collectors leave these as ``None`` in the field tests we ran).
+    """
+    if path.name not in ("ci_metrics.json", "session_breakdown.json") or not path.exists():
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return
     changed = False
-    for key, value in {
-        "model": rec.model,
-        "task_id": rec.task_id,
-        "claw_session_id": rec.claw_session_id,
-    }.items():
-        if value and not data.get(key):
-            data[key] = value
-            changed = True
     detected = rec.detected or {}
-    for key in ("framework", "tp"):
-        if detected.get(key) is not None and data.get(key) is None:
-            data[key] = detected.get(key)
+    image = detected.get("image") or ""
+    hyperloom_sha = _find_hyperloom_commit_sha(path)
+
+    if path.name == "ci_metrics.json":
+        for key, value in {
+            "model": rec.model,
+            "task_id": rec.task_id,
+            "claw_session_id": rec.claw_session_id,
+        }.items():
+            if value and not data.get(key):
+                data[key] = value
+                changed = True
+        for key in ("framework", "tp"):
+            if detected.get(key) is not None and data.get(key) is None:
+                data[key] = detected.get(key)
+                changed = True
+        if image and not data.get("image"):
+            data["image"] = image
             changed = True
+        if hyperloom_sha and not data.get("hyperloom_commit"):
+            data["hyperloom_commit"] = hyperloom_sha
+            changed = True
+
+    elif path.name == "session_breakdown.json":
+        # The breakdown is keyed by a `session_meta` sub-dict (see
+        # inference_optimizer/breakdown/schema.py::SessionMeta). Only write
+        # when the field is currently empty so we don't overwrite anything
+        # the V2 collectors did fill in.
+        meta = data.get("session_meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            data["session_meta"] = meta
+        if image and not meta.get("image"):
+            meta["image"] = image
+            changed = True
+        if hyperloom_sha and not meta.get("code_revision"):
+            meta["code_revision"] = hyperloom_sha
+            changed = True
+        # Also stamp the human-friendly tag suffix into `image_id` so
+        # dashboards can show `sglang:v0.5.11-rocm720-mi30x` without
+        # having to parse the registry path.
+        if image and not meta.get("image_id"):
+            meta["image_id"] = image.split("/")[-1]
+            changed = True
+
     if changed:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
