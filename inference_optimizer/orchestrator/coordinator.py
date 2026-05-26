@@ -5158,6 +5158,16 @@ class Coordinator:
                 )
                 params["pr_candidates"] = []
 
+        # proposal_set cap — flow the single-source-of-truth value into
+        # ``params`` so SpecialistRunner can read it without re-importing
+        # the constant. ``setdefault`` lets a delegate intent shrink the
+        # cap explicitly; values larger than the constant get re-clamped
+        # by the runner.
+        from inference_optimizer.orchestrator.policy import (
+            DEFAULT_SPECIALIST_MAX_PROPOSALS,
+        )
+        params.setdefault("max_proposals", DEFAULT_SPECIALIST_MAX_PROPOSALS)
+
     @staticmethod
     def _pr_summary_to_dict(pr: Any) -> dict[str, Any]:
         """Flatten a :class:`PRSummary` (or any object with the same
@@ -5805,7 +5815,8 @@ class Coordinator:
             (task.params or {}).get("round_id")
             or task.task_id
         )
-        return {
+        truncated_from = done_payload.get("proposals_truncated_from")
+        entry: dict[str, Any] = {
             "round_id":          round_id,
             "task_id":           task.task_id,
             "source":            source or "coordinator",
@@ -5824,6 +5835,9 @@ class Coordinator:
                 done_payload.get("residual_questions") or []
             ),
         }
+        if isinstance(truncated_from, int) and truncated_from > len(proposals):
+            entry["proposals_truncated_from"] = truncated_from
+        return entry
 
     # ------------------------------------------------------------------
     # REQUEST / RESPONSE (Plan A)

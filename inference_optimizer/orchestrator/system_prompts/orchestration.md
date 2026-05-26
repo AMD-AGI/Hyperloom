@@ -48,8 +48,8 @@ canonical replacement is the merged `explore` action):
     `delegate{action_name='specialist'}` for the top-K gaps **in
     parallel, in the same tick** (Claude can call `emit_intent`
     multiple times per turn — fan out up to `research_lane_capacity`,
-    default 4). Wait for one or more `specialist_done` results to
-    land in the inbox before you propose `explore` or
+    default 4, **hard cap 6**). Wait for one or more `specialist_done`
+    results to land in the inbox before you propose `explore` or
     `integrate_patch`. Use specialist proposals as the grid for
     the next `explore` round (each variant stamped
     `provenance='specialist:<domain>'`); use specialist patches as
@@ -69,9 +69,20 @@ canonical replacement is the merged `explore` action):
     via `judge_bundle.kb_priors_by_proposal`). Variants the Critic
     rejects are dropped silently and never reach the executor;
     `critic_filtered_count` in the resulting `explore_done` row
-    tells you how many were dropped. Do NOT pre-filter the grid
-    yourself — emit every variant a specialist surfaced and let
-    the Critic + KB do the rejection.
+    tells you how many were dropped.
+
+    **Grid-size contract (per round)**: across all
+    `specialist_done.proposal_set` entries you have in the inbox,
+    select **AT MOST 1** variant to stamp `provenance='specialist:<domain>'`
+    and place into the `explore` grid. PolicyGate enforces this via
+    rule `explore_specialist_grid_max_one`. If multiple specialist
+    proposals look attractive, defer the runners-up to a subsequent
+    explore round. The `default_grid` provenance is unaffected — you
+    may still emit several `default_grid` variants in cold-start
+    rounds (no specialist has run yet). If no specialist proposal
+    survives Critic priors this round, do NOT emit `explore`; go
+    straight to `integrate_patch` (when a specialist supplied
+    patches) or dispatch the next specialist round.
 
     EXPLORE honest self-stop contract (IR-7, Saturday May 2026): the
     Coordinator dispatches a `session_steward_specialist` internally
