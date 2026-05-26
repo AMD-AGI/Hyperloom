@@ -1173,6 +1173,119 @@ def _is_pybind_shim(source_file: str) -> bool:
     return "PYBIND11_MODULE" in text or "pybind11" in text
 
 
+# ---------------------------------------------------------------------------
+# PR-K: aiter @compile_ops launcher → device source promotion.
+#
+# aiter ships ``@compile_ops("module_<x>", gen_func=...)`` decorators on its
+# top-level Python wrappers under ``aiter/ops/`` (e.g. ``aiter/ops/moe_op.py``
+# for the ``ck_moe_stage1/2`` family). Trace events name the wrapper as the
+# call-site, so torch.profiler / TraceLens propagate ``aiter/ops/moe_op.py``
+# as the kernel's ``source_file`` — but the actual compute lives in
+# ``csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu`` (codegen entry
+# that hipcc compiles into ``module_moe_ck2stages_*.so`` under
+# ``<aiter>/jit/build/``). Rewriting the wrapper is a no-op at runtime
+# because the compiled .so bypasses the wrapper via the @compile_ops
+# dispatch path. Hyperloom Qwen3-30B-A3B-Base sessions burned 5+ rounds on
+# wrapper rewrites that GEAK/Codex correctly compiled but had zero E2E
+# effect (REVERT @-2.66%); the fix is to promote the wrapper to the
+# device-source ``.cu`` BEFORE handing the candidate to the LLM.
+#
+# Scope is intentionally narrow: only kernels whose name matches one of the
+# entries in :data:`_AITER_COMPILE_OPS_PROMOTIONS` get promoted, and only
+# when the corresponding ``.cu`` exists on disk under the resolved
+# ``kernel_repo``. Anything else falls through with the wrapper unchanged
+# (LLM still gets the original signal — better than a fabricated guess).
+# ---------------------------------------------------------------------------
+# Each entry: (kernel_name_substring_lowercase, ordered_csrc_relpaths_to_try).
+# First on-disk match wins. Order matters when a kernel name matches multiple
+# patterns or when several ``.cu`` files implement variants of the same op.
+_AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # ck_moe_stage1 / ck_moe_stage2 — @compile_ops("module_moe_ck2stages",
+    # gen_func=cmdGenFunc_ck_moe_stage). The ``.cu`` here is the codegen
+    # entry; hipcc compiles per-(dtype, quant, act) instances into
+    # module_moe_ck2stages_*.so under <aiter>/jit/build/. PR-K's
+    # apply_kernel_patch invalidates that jit/build/ before rebuild so the
+    # patched .cu actually takes effect on the next import.
+    ("ck_moe_stage", (
+        "csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
+    )),
+    # topk_softmax decode kernels.
+    ("topk_softmax_group", ("csrc/kernels/topk_softmax_kernels_group.cu",)),
+    ("topk_softmax", ("csrc/kernels/topk_softmax_kernels.cu",)),
+    # moe_align_block_size — pre-GEMM expert routing prep.
+    ("moe_align_block_size", ("csrc/kernels/moe_align_block_size_kernels.cu",)),
+    # moe_fused_gate — gating + top-k in fused form.
+    ("moe_fused_gate", ("csrc/kernels/moe_fused_gate.cu",)),
+)
+
+# Fallback aiter editable-checkout root for cases where ``find_repo_root``
+# cannot resolve from the wrapper path (e.g. wrapper is at
+# ``/usr/local/lib/python3.12/dist-packages/aiter/ops/moe_op.py`` from a
+# wheel install — wheel layouts strip ``csrc/`` so we have to look at the
+# co-located editable repo). Keep aligned with ``KNOWN_SEARCH_ROOTS``.
+_AITER_FALLBACK_REPO = "/sgl-workspace/aiter"
+
+
+def upgrade_aiter_compile_ops_launcher(
+    source_file: str, kernel_name: str, kernel_repo: str,
+) -> str:
+    """Promote an aiter ``@compile_ops`` Python wrapper to the device ``.cu``.
+
+    Returns the promoted absolute path when:
+      * ``source_file`` is a Python file under any ``aiter/ops/`` tree
+        (matches both editable-checkout and dist-packages layouts);
+      * ``kernel_name`` lowercased contains one of the
+        :data:`_AITER_COMPILE_OPS_PROMOTIONS` substring patterns;
+      * the corresponding ``.cu`` exists on disk under ``kernel_repo``
+        (or under :data:`_AITER_FALLBACK_REPO` when the wrapper lives in
+        a wheel install whose layout has no ``csrc/``).
+
+    Otherwise returns ``source_file`` unchanged so the LLM still gets a
+    valid (if suboptimal) signal — the caller will note the promotion
+    miss in ``optimization_notes`` so operators can audit it.
+    """
+    if not source_file or not kernel_name:
+        return source_file
+    s = source_file.replace(os.sep, "/")
+    if "/aiter/ops/" not in s or not s.endswith(".py"):
+        return source_file
+
+    name_lower = kernel_name.lower()
+    matched_pattern: str | None = None
+    matched_relpaths: tuple[str, ...] = ()
+    for pattern, relpaths in _AITER_COMPILE_OPS_PROMOTIONS:
+        if pattern in name_lower:
+            matched_pattern = pattern
+            matched_relpaths = relpaths
+            break
+    if matched_pattern is None:
+        return source_file
+
+    candidate_repos: list[str] = []
+    if kernel_repo:
+        candidate_repos.append(kernel_repo)
+    elif source_file:
+        derived = find_repo_root(source_file)
+        if derived:
+            candidate_repos.append(derived)
+    if _AITER_FALLBACK_REPO not in candidate_repos:
+        candidate_repos.append(_AITER_FALLBACK_REPO)
+
+    seen: set[str] = set()
+    for repo_str in candidate_repos:
+        if not repo_str or repo_str in seen:
+            continue
+        seen.add(repo_str)
+        repo = Path(repo_str)
+        if not repo.is_dir():
+            continue
+        for relpath in matched_relpaths:
+            candidate = repo / relpath
+            if candidate.is_file():
+                return str(candidate)
+    return source_file
+
+
 def upgrade_pybind_shim_source(source_file: str, kernel_name: str,
                                kernel_repo: str) -> str:
     """If `source_file` is a tiny pybind11 registration TU, walk the repo to
@@ -1388,6 +1501,23 @@ def _finalize_candidates(
         item["source_file"] = upgrade_pybind_shim_source(
             item.get("source_file", ""), item["name"], item.get("kernel_repo", "")
         )
+        # PR-K: aiter @compile_ops launcher → device source promotion.
+        # Capture the wrapper path BEFORE the upgrade so the LLM prompt
+        # builder can render BOTH (device source as the rewrite target +
+        # python launcher as call-site context). Only set
+        # ``launcher_source_file`` when promotion actually changed the
+        # path — otherwise the field would carry the same value as
+        # ``source_file`` and add nothing to the prompt. ``tracelens_
+        # launcher_path`` (the verbatim TraceLens kernel-path string) is
+        # set elsewhere in tracelens_skill_runner._row_to_candidate and
+        # is preserved through this pass for AST-grouping consumers.
+        wrapper_before_promotion = item.get("source_file", "")
+        item["source_file"] = upgrade_aiter_compile_ops_launcher(
+            wrapper_before_promotion, item["name"], item.get("kernel_repo", "")
+        )
+        if item["source_file"] != wrapper_before_promotion:
+            item["launcher_source_file"] = wrapper_before_promotion
+            item["source_promoted_from_launcher"] = True
         # Re-resolve repo in case the upgraded path lives in a different repo
         # (rare, but defensive).
         item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
