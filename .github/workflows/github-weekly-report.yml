@@ -3,6 +3,9 @@ name: github-weekly-report
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   weekly-issues-report:
     runs-on: ubuntu-latest

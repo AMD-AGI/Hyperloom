@@ -150,6 +150,16 @@ async def test_heartbeat_passes_gate(tmp_path):
         robustness_server_url="",
         auto_probe_auth_proxy=False,
         auto_probe_inference_server=False,
+        # Inert hosts have no Ray head running; the LocalProbe A6 sub-
+        # probe would otherwise time out at ``ray status`` and fire
+        # ``ray_head_dead`` alongside the heartbeat, breaking the
+        # single-intent gate assertion below.
+        ray_probe_enabled=False,
+        # CI containers lack the TraceLens CLI / WekaFS mounts; turn
+        # off the J external_deps probe so the heartbeat envelope is
+        # not crowded out by ``tracelens_cli_missing`` /
+        # ``wekafs_degraded`` alerts.
+        external_deps_enabled=False,
     )
     intents, bundle = await _drive_reactor_with_prompt(
         config,
