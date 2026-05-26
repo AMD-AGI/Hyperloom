@@ -57,6 +57,17 @@ def test_no_search_schema_without_api_key():
     assert names == ["web_fetch"]
 
 
+def test_no_search_schema_for_unimplemented_brave_provider():
+    cfg = _cfg(
+        search_provider="brave",
+        tavily_api_key="",
+        serper_api_key="",
+        brave_api_key="brave-key",
+        fetch_enabled=False,
+    )
+    assert build_tool_schemas(cfg) == []
+
+
 def test_search_schema_required_fields():
     schemas = build_tool_schemas(_cfg(fetch_enabled=False))
     search = schemas[0]
