@@ -115,7 +115,7 @@ _WORKSPACE_SKELETON: tuple[str, ...] = (
     "runtime",                 # pod-local env files (kernel-agent.env.sh, etc.)
     "runtime/source-mirrors",  # writable mirrors of GEAK / OOB / TraceLens sources
     "runtime/geak-config",     # generated litellm config consumed by GEAK CLI
-    # v0.8 M1 — Cortex KB integration. Holds the per-session ``.kb_sid`` /
+    # Cortex KB integration. Holds the per-session ``.kb_sid`` /
     # ``.kb_warm.json`` / ``.kb_pitfalls.json`` / ``.kb_pending.ndjson`` /
     # ``.kb_flushed.ndjson`` / ``.kb_dead_letter.ndjson`` / ``.kb_audit.jsonl``
     # / ``.kb_flusher.pid`` files described in KB_design §3.6 + §3.13 M1.
@@ -418,6 +418,39 @@ def optimizer_runs_dir(session_dir: Path) -> Path:
     return Path(session_dir) / "optimizer_runs"
 
 
+def mn_profile_trace_root() -> Path:
+    """``<workspace_root>/profile-traces/`` — multi-node torch profile shared root.
+
+    Multi-node-only: in ``--nodes >= 2`` mode the sandbox-side optimizer
+    and the RayJob GPU pods need a single path both sides can read/write
+    so the sandbox can consume the per-rank torch trace files that the
+    pod-side sglang/vllm server emits. Anchoring this on
+    ``workspace_root()`` (= ``$USER_DATA_PATH``, with the legacy
+    ``DEFAULT_SESSION_DIR`` fallback) lets the operator pin a single env
+    knob — typically a cluster-shared filesystem path like
+    ``/wekafs/<tenant>/sessions`` — and the whole multi-node profile
+    pipeline follows. Layout::
+
+        <workspace_root>/profile-traces/<rayjob_id>/torch_trace/
+
+    The ``<rayjob_id>`` subdir partitions traces across RayJob
+    provisions (OOM recreate, SaFE reschedule) so stale traces never
+    poison newer rounds; ``cli._gc_old_profile_traces`` sweeps sibling
+    RayJob dirs older than 7 days.
+
+    Operator caveat: when ``$USER_DATA_PATH`` is left unset the default
+    is the pod-local ``DEFAULT_SESSION_DIR`` (``/workspace/hyperloom``),
+    which is INVISIBLE to the sandbox in multi-node mode — the sandbox
+    will then never see the trace files. Multi-node operators MUST set
+    ``$USER_DATA_PATH`` to a cluster-shared path before launching.
+
+    Single-node mode never reads this — server traces stay under
+    ``<benchmark_workspace>/torch_trace`` inside the per-round workspace
+    dir (see ``ProfileExecutor._resolve_mn_round_trace_root``).
+    """
+    return workspace_root() / "profile-traces"
+
+
 __all__ = [
     "AssetRootNotFound",
     "DEFAULT_SESSION_DIR",
@@ -436,6 +469,7 @@ __all__ = [
     "kernel_agent_runs_root",
     "magpie_dir",
     "make_session_dir",
+    "mn_profile_trace_root",
     "optimizer_runs_dir",
     "runtime_dir",
     "session_dir",

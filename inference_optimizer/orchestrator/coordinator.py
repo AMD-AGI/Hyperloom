@@ -1,4 +1,4 @@
-"""Coordinator — DESIGN v0.6 §7.5 / §21 main loop.
+"""Coordinator main loop.
 
 The Coordinator is the **protocol manager** (not a decision-maker). It owns:
 
@@ -194,7 +194,7 @@ def _parse_iso_unix(ts: str) -> float:
     """Parse an ISO 8601 UTC timestamp into unix seconds.
 
     Returns ``0.0`` on any parse failure so callers can treat a missing
-    timestamp as "no information"; never raises. Used by the v0.8 §3.3
+    timestamp as "no information"; never raises. Used by the
     stale-specialist scanner to compute task-running duration without
     plumbing a separate ``started_unix`` column through TaskRegistry.
     """
@@ -360,13 +360,13 @@ class PendingProposal:
     payload: dict[str, Any]
     decided: bool = False
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
-    # v0.8 M1 — tentative_edge_id returned by Cortex T2
-    # ``session hypothesize`` (KB_design §3.6.6 / §3.13 M1 §5.2).
+    # tentative_edge_id returned by Cortex T2
+    # ``session hypothesize``.
     # Empty when T2 failed sync and went to NDJSON; T3 then falls back
     # to ``propose-edge + late_verified`` rather than ``verify``.
     #
     # Back-compat surface: when the proposal is a multi-variant
-    # ``explore`` grid (KB_gaps/Gap-07), this field carries the
+    # ``explore`` grid, this field carries the
     # *representative* edge_id (first variant) so the legacy T3 hook
     # — which still verifies one edge per proposal — keeps working.
     # The full per-variant map lives in :attr:`kb_edge_ids` below;
@@ -381,7 +381,7 @@ class PendingProposal:
     # ``SharedState.session_iter_index``). Per-variant grids reuse this
     # parent iter and append ``.variant-{name}`` to the canonical_id.
     experiment_iter_index: int = 0
-    # v0.8 M5 §5 step 6 / KB_gaps/Gap-07 — per-variant edge_ids minted
+    # per-variant edge_ids minted
     # by ``_cortex_t2_hook`` when the proposal is an ``explore``
     # action with a non-empty ``params.grid``. Keyed by variant
     # name; empty dict for non-grid proposals (kernel_opt / integrate
@@ -391,12 +391,12 @@ class PendingProposal:
     # variant that confirmed / refuted a hypothesis (instead of the
     # M3 per-proposal aggregate).
     kb_edge_ids: dict[str, str] = field(default_factory=dict)
-    # v0.8 M5 §5 step 6 / KB_gaps/Gap-07 — per-variant opt_canonical
+    # per-variant opt_canonical
     # ids parallel to :attr:`kb_edge_ids`. Stored separately so the
     # T3 hook can rebuild ``propose-edge`` fallbacks per variant
     # (Gap-08) even when the synchronous T2 hypothesize failed.
     kb_opt_canonicals: dict[str, str] = field(default_factory=dict)
-    # v0.8 M5 §5 step 5 / KB_gaps/Gap-11 — per-variant verdicts
+    # per-variant verdicts
     # surfaced by the Critic agent's batch review (``verdict_map``).
     # Keyed by variant_name, value carries ``{verdict, rationale}``.
     # Empty for single-verdict (kernel_opt / integrate / report /
@@ -404,7 +404,7 @@ class PendingProposal:
     # filters the grid down to the ``approve`` subset before
     # materializing the explore task and fires KB ``refuted`` for
     # every reject (so the Cortex view captures the
-    # critic-rejected edge in addition to the v0.8 KEEP/REVERT
+    # critic-rejected edge in addition to the KEEP/REVERT
     # signal the explore executor produces).
     verdict_map: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -445,8 +445,8 @@ class Coordinator:
     ):
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
-        # v0.8 M1 — Cortex KB client (KB_design §3.6 + §3.13 M1).  When
-        # ``None`` (legacy v0.6 cli path or ``--degraded-kb``) all T2/T3/T4
+        # Cortex KB client.  When
+        # ``None`` (legacy cli path or ``--degraded-kb``) all T2/T3/T4
         # hooks become no-ops; the rest of the Coordinator behaves
         # identically to v0.6.  The client itself is stateless apart
         # from the per-session NDJSON queue, so it can be shared across
@@ -464,7 +464,7 @@ class Coordinator:
         # the journal active but skips every KB fact-write call — used
         # for soak runs that don't want to pollute the shared KB.
         self._fact_writes_enabled: bool = bool(fact_writes_enabled)
-        # v0.8 M4 + KB_gaps/Gap-01/Gap-02 — KnowledgePlane facade.
+        # KnowledgePlane facade.
         # When non-None, ``_handle_delegate`` pre-warms ``pr_feed`` +
         # ``kb_subgraph`` for ``delegate{action='specialist'}`` tasks
         # before enqueue, so the SpecialistRunner prompt assembly sees
@@ -472,7 +472,7 @@ class Coordinator:
         # (no warmup; specialist still runs but sees empty knowledge
         # surface).
         self.knowledge_plane: Any = knowledge_plane
-        # v0.8 M2 — phase budget percentages (KB_design §3.8 §5.3 +
+        # phase budget percentages (KB_design §3.8 §5.3 +
         # §3.13 M2 §7). ``None`` means library defaults; CLI flags
         # populate this dict from ``--max-minutes-<phase>-pct``. We
         # normalise once at construction so downstream judges can
@@ -480,10 +480,10 @@ class Coordinator:
         self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(
             phase_budget_pct
         )
-        # v0.8 §3.3 §4.4 — specialist stale scan threshold (seconds).
+        # specialist stale scan threshold (seconds).
         # M5 wires real specialist sub-agents; M2 only ships the
         # scanner so the Robustness prompt block lights up the moment
-        # M5 lands. Env override mirrors the rest of the v0.8 knobs.
+        # M5 lands. Env override mirrors the rest of the knobs.
         try:
             self._specialist_stale_sec: float = max(
                 0.0,
@@ -493,10 +493,10 @@ class Coordinator:
             )
         except ValueError:
             self._specialist_stale_sec = 600.0
-        # KB_gaps/Gap-15 (KB_design §3.14 R-09) — opt-out switch for
+        # opt-out switch for
         # the legacy ``params_no_promote_streak`` plateau proxy.
         # When set, ``compute_next_phase`` skips the m2_proxy branch
-        # entirely; v0.6 resume sessions without v0.8 signals fall
+        # entirely; legacy resume sessions without signals fall
         # through to the wall-clock budget exhaustion exit.
         self._legacy_plateau_proxy_disabled: bool = (
             os.environ.get(
@@ -541,8 +541,8 @@ class Coordinator:
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
-        # v0.8 M6 — sync research_lane capacity from SharedState into
-        # the lane_capacity table (KB_design §3.7 §4.4). CLI/manifest
+        # sync research_lane capacity from SharedState into
+        # the lane_capacity table. CLI/manifest
         # flow already pinned the value onto SharedState at session
         # start; this propagates it into the SQLite source of truth so
         # ``acquire_many`` honours the operator-set cap. Idempotent:
@@ -663,12 +663,12 @@ class Coordinator:
         self._current_objective: Objective | None = None
 
         self._resumed_from = self._detect_resume_state()
-        # v0.8 M2 — initialise phase machine. Fresh session enters
+        # initialise phase machine. Fresh session enters
         # PRELUDE; resume from v0.6 (no phase field) infers a phase via
         # :func:`phase_state.infer_phase_from_state`.  Always idempotent:
         # second construction on the same session_dir is a no-op.
         self._ensure_phase_initialised()
-        # v0.8 KB_gaps/Gap-12 — Cortex T0 defensive fallback. The cli
+        # Cortex T0 defensive fallback. The cli
         # is the canonical T0 entry point (fail-fast banner +
         # sys.exit on Cortex outage); this hook only fires for
         # SDK / integration-test callers that constructed the
@@ -722,7 +722,7 @@ class Coordinator:
             target = v.payload.get("target_proposal_msg_id")
             if not target:
                 continue
-            # v0.8 KB_gaps/Gap-11 — ``_handle_verdict_map`` always
+            # ``_handle_verdict_map`` always
             # mirrors a *summary* ``verdict`` alongside the per-
             # variant ``verdict_map`` so this rebuild stays
             # backward-compatible. A verdict_map-only event with no
@@ -797,7 +797,7 @@ class Coordinator:
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
-        # v0.8 M1 — T4 anchor (KB_design §3.13 M1 §5.4). Drains the
+        # T4 anchor. Drains the
         # NDJSON queue (timeout 60s) then commits the Cortex session.
         # Failures are recorded on SharedState.stop_reason so the
         # operator sees ``cortex_drain_failed`` / ``cortex_commit_failed``
@@ -814,7 +814,7 @@ class Coordinator:
         queue + already-committed session is a no-op (cortex-kb commit
         is itself idempotent for a given sid).
 
-        v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — when the CLOSE phase
+        when the CLOSE phase
         sequencer ran (``close_sequence_done=True``), steps 3 + 4
         already drained + committed. We early-return so the hook is
         a no-op in that case (and ``cortex_session_summary`` already
@@ -839,7 +839,7 @@ class Coordinator:
             log.exception("cortex T4 fact_finalize fallback failed")
         # 1. Drain async queue. NDJSON drains *can* take meaningful time
         #    when Cortex was unreachable mid-run; 60s is the documented
-        #    upper bound (KB_design §3.13 M1 §5.4).
+        #    upper bound.
         try:
             drain_report = self.cortex_kb.drain_pending(timeout_sec=60.0)
         except Exception as exc:  # noqa: BLE001 — defensive
@@ -876,7 +876,7 @@ class Coordinator:
             log.exception("cortex T4 SharedState.save after commit failed")
 
     # ==================================================================
-    # v0.8 M2 — phase state machine
+    # phase state machine
     # ==================================================================
     def _ensure_phase_initialised(self) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session.
@@ -902,7 +902,7 @@ class Coordinator:
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("Coordinator: save after phase budget refresh failed")
             return
-        # Fresh OR v0.6 resume.
+        # Fresh OR legacy resume.
         if self._resumed_from.get("is_resume"):
             inferred, evidence = _phase_state.infer_phase_from_state(state)
             reason = "resumed_from_v06_inferred"
@@ -935,7 +935,7 @@ class Coordinator:
 
         The hook is intentionally narrow:
 
-        * Skip when ``cortex_kb`` is ``None`` (legacy v0.6 callers
+        * Skip when ``cortex_kb`` is ``None`` (legacy callers
           who don't even pass a client).
         * Skip when ``cortex_kb.enabled is False`` (``--degraded-kb``).
         * Skip when ``shared_state.cortex_session_id`` is already
@@ -1031,9 +1031,9 @@ class Coordinator:
         if target == (state.phase or "").upper():
             return  # already there
         prior = state.phase
-        # v0.8 M7 — when the transition was driven by an escalate
+        # when the transition was driven by an escalate
         # hint, consume it so the next tick re-evaluates against
-        # fresh signals (KB_design §3.8 §7.3). The phase_state module
+        # fresh signals. The phase_state module
         # already wrote the hint into ``evidence["hint"]`` if it
         # mattered, so this is just a cleanup step.
         if isinstance(evidence, dict) and (
@@ -1081,7 +1081,7 @@ class Coordinator:
             ))
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: phase_transition event bus write failed")
-        # v0.8 §3.2 — phase-entry side effects (KB_gaps/Gap-02 PR 5.4 +
+        # phase-entry side effects (KB_gaps/Gap-02 PR 5.4 +
         # follow-up Gap-04 / Gap-05 / Gap-06). Side effects are
         # *additive* — failures inside a hook are logged but never
         # roll back the transition. Keeping the dispatch table inside
@@ -1104,17 +1104,17 @@ class Coordinator:
         Currently wired:
 
         * ``EXPLORE`` — pre-warm PR feed across every specialist domain
-          (KB_design §3.6 + KB_gaps/Gap-02). The first specialist
+. The first specialist
           dispatch after EXPLORE entry then sees a populated cache
           rather than a cold ``pr_monitor`` fetch.
         * ``KERNEL`` — auto-enqueue ``profile`` so KERNEL phase always
           has a fresh ``last_profile_trace`` for ``select_kernels``
-          (KB_design §3.2 §5.3 step 1 + KB_gaps/Gap-04). Idempotent
+. Idempotent
           via a fixed-suffix idempotency_key; skipped on resume when
           a trace already exists or when ``--no-kernel``.
         * ``SWEEP`` — auto-enqueue ``sweep`` with a recipe-driven
           (or defaults-driven) grid so SWEEP doesn't degrade to
-          "LLM 自觉发 sweep" (KB_design §3.2 §5.4 + KB_gaps/Gap-05).
+          "LLM 自觉发 sweep".
           Same idempotency contract as KERNEL.
         * ``CLOSE`` — run the 5-step closing sequencer (report →
           session_breakdown → NDJSON drain → Cortex commit → mark
@@ -1136,7 +1136,7 @@ class Coordinator:
             await self._on_enter_close(from_phase=from_phase)
 
     async def _on_enter_explore(self, *, from_phase: str) -> None:
-        """KB_gaps/Gap-02 PR 5.4 — warm the PR feed across every
+        """warm the PR feed across every
         specialist domain on EXPLORE entry.
 
         Two responsibilities:
@@ -1160,7 +1160,7 @@ class Coordinator:
 
         The aggregated warnings end up on
         :attr:`KnowledgePlane.last_warnings`; the breakdown collector
-        (KB_design §3.12) can surface them next to the session-level
+ can surface them next to the session-level
         ``pr_monitor`` status.
         """
         plane = self.knowledge_plane
@@ -1204,9 +1204,9 @@ class Coordinator:
             )
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
-        """KB_gaps/Gap-04 — auto-enqueue analysis anchor on KERNEL entry.
+        """auto-enqueue analysis anchor on KERNEL entry.
 
-        KB_design §3.2 §5.3 step 1: "进入 KERNEL 即跑一次 ``profile``
+        "进入 KERNEL 即跑一次 ``profile``
         (固定动作, 不需要 LLM propose). 该次 profile 写入
         ``last_profile_trace``, 锚定 KERNEL 阶段所有 ``select_kernels``
         的 trace_input." Without this, the LLM has to remember to
@@ -1320,7 +1320,7 @@ class Coordinator:
     ) -> Task:
         """Build + enqueue a Coordinator-internal ``profile`` task.
 
-        Used by :meth:`_on_enter_kernel` (KB_gaps/Gap-04) and any
+        Used by :meth:`_on_enter_kernel` and any
         future phase entry that needs a deterministic profile anchor.
         Routes through :meth:`TaskRegistry.create_or_return_existing`
         so the standard dispatcher / audit / lease machinery applies
@@ -1570,12 +1570,12 @@ class Coordinator:
             )
 
     # ------------------------------------------------------------------
-    # v0.8 §3.2 §5.4 + KB_gaps/Gap-05 — SWEEP phase auto-dispatch
+    # v0.8 §3.2 §5.4 + SWEEP phase auto-dispatch
     # ------------------------------------------------------------------
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue a ``sweep`` task on SWEEP entry.
 
-        KB_design §3.2 §5.4: SWEEP must "自动构造 sweep grid (来自
+        SWEEP must "自动构造 sweep grid (来自
         SKILL.md 默认 grid + Cortex ``recipe.sweep_grid`` 字段, 后者
         优先), 自动 enqueue ``sweep`` action". Without this hook the
         phase degrades to "LLM 自觉发 sweep" — and if ``max_minutes``
@@ -1592,7 +1592,7 @@ class Coordinator:
         After enqueue, stamps ``phase_history[-1].evidence`` with
         ``auto_sweep_enqueued=True`` + ``auto_sweep_task_id`` +
         ``auto_sweep_grid_source`` + ``auto_sweep_combos`` so the
-        breakdown collector (KB_design §3.12) can verify the hook
+        breakdown collector can verify the hook
         fired and which grid source was used.
 
         Singleton enforcement: PolicyGate's
@@ -1654,7 +1654,7 @@ class Coordinator:
         executor honours the workload contract + current_best
         configuration.
 
-        Grid source priority (KB_design §3.2 §5.4 step 1):
+        Grid source priority:
 
         1. ``state.warm_start_recipe.sweep_grid`` — Cortex-recorded
            grid from a prior session for this (model, gpu) combo.
@@ -1707,7 +1707,7 @@ class Coordinator:
     def _build_sweep_params_from_recipe(state: SharedState) -> dict[str, Any]:
         """Pick a sweep grid: Cortex recipe first, defaults fallback.
 
-        KB_design §3.2 §5.4: "来自 SKILL.md 默认 grid + Cortex
+        "来自 SKILL.md 默认 grid + Cortex
         ``recipe.sweep_grid`` 字段, 后者优先". The recipe lookup is
         defensive — at the time of writing the Cortex T0 response is
         still free-text under ``warm_start_recipe.raw``; a future
@@ -1816,7 +1816,7 @@ class Coordinator:
         }
 
     # ------------------------------------------------------------------
-    # v0.8 §3.2 §5.5 + KB_gaps/Gap-06 — CLOSE phase 5-step sequencer
+    # v0.8 §3.2 §5.5 + CLOSE phase 5-step sequencer
     # ------------------------------------------------------------------
     # Class-level timeouts for the CLOSE sequencer's wait-for-task
     # polls. Class attributes (rather than constants in the method)
@@ -1829,7 +1829,7 @@ class Coordinator:
     CLOSE_NDJSON_DRAIN_TIMEOUT_SEC: float = 60.0
 
     async def _on_enter_close(self, *, from_phase: str) -> None:
-        """KB_design §3.2 §5.5 — CLOSE phase 5-step sequencer.
+        """CLOSE phase 5-step sequencer.
 
         Runs the fixed order the design contract requires:
 
@@ -1854,7 +1854,7 @@ class Coordinator:
         re-entry (Inv-2.1 forbids in production, but resume from a
         crash mid-sequencer counts) reuses existing tasks. NDJSON
         drain + Cortex commit are themselves idempotent for a given
-        sid (KB_design §3.13 M1 §5.4).
+        sid.
 
         The sequencer runs INLINE inside the hook — it doesn't wait
         for the reactor / dispatcher tick boundary. Steps 1 and 2
@@ -2000,7 +2000,7 @@ class Coordinator:
 
         # ---------------- Step 5: mark done ----------------
         self.shared_state.close_sequence_done = True
-        # v0.8 §3.2 §5.5 — phase-machine CLOSE path must set
+        # phase-machine CLOSE path must set
         # ``stop_reason`` so the main run loop's outer check
         # (Coordinator.run line ~1936) terminates the run on the next
         # tick. Without this the sequencer completes, writes the
@@ -2331,7 +2331,7 @@ class Coordinator:
             for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
-            # v0.8 M2 — phase machine advance at tick boundary.
+            # phase machine advance at tick boundary.
             await self._advance_phase_if_needed()
 
     # ==================================================================
@@ -2420,7 +2420,7 @@ class Coordinator:
                         await self._reactor_pass(name)
                 if not self._stop.is_set():
                     await self._pump_dispatcher_once()
-                # v0.8 M2 — phase machine advance at tick boundary.
+                # phase machine advance at tick boundary.
                 # Runs even when ``in_closing`` so CLOSE phase still gets
                 # recorded into phase_history when the final breakdown
                 # writer transitions us in.
@@ -2586,7 +2586,7 @@ class Coordinator:
         1. baseline + current_best present (otherwise we are still in
            PRELUDE / never finished a round)
         2. no pending proposals or queued / running tasks
-        3. ``params_no_promote_streak >= 5`` (v0.6 proxy still used as
+        3. ``params_no_promote_streak >= 5`` (proxy still used as
            the cross-phase plateau hint; see KB_gaps/Gap-15)
         4. every reusable kernel_id is rejected.
         """
@@ -2861,7 +2861,7 @@ class Coordinator:
         # with PolicyGate's path-containment guard.
         sections.append(f"SESSION_DIR={self.session_dir}")
 
-        # v0.8 §3.3 — per-tick phase block injected for **every** agent.
+        # per-tick phase block injected for **every** agent.
         # Comes high in the prompt (right after SESSION_DIR) because R1
         # rejection is driven by the current phase; the LLM should see
         # phase context before anything else.
@@ -3001,11 +3001,11 @@ class Coordinator:
                 sections.append("=== Execution checklist (Coordinator-enforced) ===")
                 sections.append(required_step)
 
-        # v0.8 §3.3 §4.1 — Cortex T0 warm-start snapshot + structured
-        # gaps[] ledger (KB_gaps/Gap-09) injected into the Orchestration
+        # Cortex T0 warm-start snapshot + structured
+        # gaps[] ledger injected into the Orchestration
         # prompt. ``kb_digest`` was retired upstream (origin/main commit
         # befbd1381814 — removed the hardcoded marathon path), so this
-        # block is the v0.8 replacement: a structured per-session
+        # block is the replacement: a structured per-session
         # snapshot the DECISION FRAMEWORK consumes directly.
         if agent_name == "orchestration":
             try:
@@ -3025,7 +3025,7 @@ class Coordinator:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
 
-        # v0.8 §3.3 §4.4 — Robustness gets a phase budget telemetry +
+        # Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
         # alerts described in the role prompt.
         if agent_name == "robustness":
@@ -3276,7 +3276,7 @@ class Coordinator:
                 f"{self.shared_state.cumulative_gain_validated_stack_len}). "
                 "Propose/delegate `explore` — its per-KEEP stack rebench "
                 "is inlined and updates cumulative_gain_validated as a "
-                "side effect (KB_design §3.4 §4.4 / KB_gaps/Gap-10). "
+                "side effect. "
                 "Per-round gains do NOT compose linearly — the final "
                 "report quotes the validated number, so this is the only "
                 "honest gain."
@@ -3411,7 +3411,7 @@ class Coordinator:
         ``no_more_leverage`` before any real exploration. We now deny
         the proposal until at least three stack entries have landed,
         so the steward can only fire on a real plateau judgment (which
-        Coordinator-internal dispatch already gates on v0.8 signals).
+        Coordinator-internal dispatch already gates on signals).
         """
         phase = (
             getattr(self.shared_state, "phase", "") or ""
@@ -3491,7 +3491,7 @@ class Coordinator:
         Phase 2 addition: once optimization_stack has unvalidated KEEPs,
         the next ``explore`` round must carry the inlined stack rebench
         (PolicyGate rule ``stack_rebench_required``). The legacy
-        ``validate_stack`` standalone action was retired in v0.8 M3; this
+        ``validate_stack`` standalone action was retired in the legacy release; this
         function now only enforces the cross-action ordering (target_analysis
         before baseline, baseline before everything else, baseline
         self-loop guard, profile/integrate kernel-agent guards).
@@ -3503,7 +3503,7 @@ class Coordinator:
         further call-site churn.
         """
         action = str(action_name or "").strip()
-        # v0.8 M3 + KB_gaps/Dead-A/Dead-C — the legacy
+        # the legacy
         # ``backends`` / ``params`` / ``validate_stack`` names are
         # already denied by PolicyGate with ``rule='action_deprecated'``
         # before reaching this function, so they intentionally do not
@@ -3637,11 +3637,11 @@ class Coordinator:
                         "HYPERLOOM_KERNEL_OPT_GATE_TOP_N."
                     ),
                 )
-        # v0.8 M3 + KB_gaps/Gap-10 — stack-rebench precedence. Once a
+        # stack-rebench precedence. Once a
         # KEEP lands on optimization_stack we want the next action
         # that touches the stack to also revalidate it. The merged
         # ``explore`` action carries an *inlined* per-KEEP stack
-        # rebench (KB_design §3.4 §4.4), so we allow it through
+        # rebench, so we allow it through
         # alongside ``baseline`` (ad-hoc re-baseline) and ``report``
         # (the wind-down). ``validate_stack`` itself is now denied at
         # the PolicyGate boundary with ``rule='action_deprecated'``,
@@ -3794,8 +3794,7 @@ class Coordinator:
     #   * PolicyGate's ``roofline_saturation_advisory`` (F3-4 N21).
     # The Coordinator-side helpers from main are therefore omitted
     # here (they would also re-import the dropped backends.py /
-    # params.py grids — see docs/integration/MAIN_FEATURES_DROPPED.md
-    # §1).
+    # params.py grids —     # §1).
 
     # ==================================================================
     # Intent handling
@@ -3833,7 +3832,7 @@ class Coordinator:
         elif it == IntentType.UPDATE_STATE:
             await self._handle_update_state(source, intent)
         elif it == IntentType.SPECIALIST_DONE:
-            # v0.8 §3.5 §10 + KB_gaps/Gap-03 — terminal intent of a
+            # v0.8 §3.5 §10 + terminal intent of a
             # specialist task. PolicyGate R3 has already validated the
             # ``from_agent='specialist:<task_id>'`` prefix + payload
             # schema + gap/domain match; the handler only does
@@ -3885,7 +3884,7 @@ class Coordinator:
             predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
             payload=dict(intent.payload),
         )
-        # v0.8 M1 — T2 anchor: mint optimization_node + hypothesize edge.
+        # T2 anchor: mint optimization_node + hypothesize edge.
         # Best-effort + isolated so a KB hiccup never blocks the
         # Critic-review pipeline (Inv-6.2 + KB_design §3.13 M1 §5.2).
         await self._cortex_t2_hook(pending)
@@ -3906,14 +3905,14 @@ class Coordinator:
           (per-proposal) keeps working until Gap-08 upgrades it.
         * **non-grid** (kernel_opt / integrate / sweep / profile /
           legacy backends / params): single optimization_node + single
-          hypothesize edge — identical to the v0.8 M1 behaviour.
+          hypothesize edge — identical to the legacy M1 behaviour.
 
         Best-effort: every Cortex KB failure is downgraded to an NDJSON
         enqueue by the client itself; partial failures within a
         per-variant batch are logged but don't poison the other
         variants in the same proposal.
 
-        Gap-anchor selection (KB_gaps/Gap-07 + Gap-09):
+        Gap-anchor selection:
         :meth:`_resolve_issue_canonical` consults
         ``payload.gap_canonical_id`` and ``payload.params.gap_canonical_id``
         before falling back to the M1 ``recipe_canonical_id``
@@ -3981,9 +3980,9 @@ class Coordinator:
                     "role":   pending.from_agent,
                     "action": pending.action_name,
                     "proposal_msg_id": pending.proposal_msg_id,
-                    # v0.8 M2 — phase provenance on every edge so
+                    # phase provenance on every edge so
                     # cross-session reachability queries can filter
-                    # by phase (KB_design §3.6.5.1 / §3.2 §7).
+                    # by phase.
                     "phase":  (self.shared_state.phase or "").upper() or "UNKNOWN",
                 },
                 evidence=[f"log:proposal-{pending.proposal_msg_id}"],
@@ -4204,7 +4203,7 @@ class Coordinator:
     def _resolve_issue_canonical(self, pending: PendingProposal) -> str:
         """Find the issue_node canonical_id this proposal addresses.
 
-        Priority (KB_gaps/Gap-07 + Gap-09 contract):
+        Priority:
 
         1. ``pending.payload['gap_canonical_id']`` — explicit
            top-level gap reference (set by Orchestration when it
@@ -4231,7 +4230,7 @@ class Coordinator:
     def _gap_anchor_canonical_id(self) -> str:
         """M1 placeholder for the gap anchor.
 
-        Per KB_design §3.13 M1: "M1 simplification — use
+        Per "M1 simplification — use
         ``workload_node.canonical_id`` as the from side of every
         hypothesize edge". M5 specialist framework will introduce real
         ``issue_node`` anchors keyed by gap descriptors. Centralising
@@ -4269,12 +4268,12 @@ class Coordinator:
         """Route a Critic ``review_verdict`` to the per-variant or
         legacy single-verdict handler.
 
-        v0.8 KB_gaps/Gap-11 (KB_design §3.5 §5 / M5 §5 step 5): the
+        v0.8 KB_gaps/Gap-11: the
         intent_parser already validated that exactly one of
         ``verdict`` / ``verdict_map`` is present. We branch on
         ``verdict_map`` first so the batch Explore path takes
         precedence; everything else (kernel_opt / integrate /
-        report / specialist dispatch) falls through to the v0.6
+        report / specialist dispatch) falls through to the legacy
         single-verdict path.
         """
         target = intent.payload["target_proposal_msg_id"]
@@ -4596,7 +4595,7 @@ class Coordinator:
         ``None`` (legacy single-verdict path) keeps the full grid.
         """
         params = dict(pending.payload.get("params") or {})
-        # v0.8 KB_gaps/Gap-07 — stamp per-variant kb_edge_id into the
+        # stamp per-variant kb_edge_id into the
         # grid so the explore executor (which already reads
         # ``variant.get("kb_edge_id")``) can carry the id through to
         # the result rows the ledger writer + T3 hook will consume.
@@ -4618,7 +4617,7 @@ class Coordinator:
                         stamped_grid.append(variant)
                     continue
                 vname = str(variant.get("name") or "").strip()
-                # v0.8 KB_gaps/Gap-11 — drop variants the Critic
+                # drop variants the Critic
                 # rejected before they ever hit the executor.
                 if (
                     approved_variant_names is not None
@@ -4864,7 +4863,7 @@ class Coordinator:
                 )
                 return
 
-        # v0.8 §3.5 + KB_gaps/Gap-01 — specialist pre-dispatch warmup.
+        # v0.8 §3.5 + specialist pre-dispatch warmup.
         # When the Orchestration role delegates a specialist task, the
         # Coordinator is the only place with the KnowledgePlane facade
         # in scope. Warm the prompt's external-knowledge sections here
@@ -4967,7 +4966,7 @@ class Coordinator:
         ))
 
     # ------------------------------------------------------------------
-    # v0.8 §3.5 + KB_gaps/Gap-01 — specialist pre-dispatch warmup
+    # v0.8 §3.5 + specialist pre-dispatch warmup
     # ------------------------------------------------------------------
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill the specialist task params with KnowledgePlane data
@@ -5058,7 +5057,7 @@ class Coordinator:
         else:
             params.setdefault("kb_subgraph", {})
 
-        # Warm-start recipe + pitfalls from T0 anchor (KB_design §3.6).
+        # Warm-start recipe + pitfalls from T0 anchor.
         if state.warm_start_recipe and "warm_start_recipe" not in params:
             params["warm_start_recipe"] = dict(state.warm_start_recipe)
         if state.warm_start_pitfalls and "warm_start_pitfalls" not in params:
@@ -5102,7 +5101,7 @@ class Coordinator:
         if int(getattr(state, "max_model_len", 0) or 0) > 0:
             params.setdefault("max_model_len", int(state.max_model_len))
 
-        # v0.8 KB_gaps/Gap-09 — fill gap-specific anchors from the
+        # fill gap-specific anchors from the
         # gaps[] ledger. Orchestration carries a ``gap_canonical_id``
         # via ``delegate.params`` (and also as the M5 ``gap`` field);
         # we look up the matching gap row and stamp its symptom /
@@ -5172,7 +5171,7 @@ class Coordinator:
                 "hot_kernels_top15": hot_kernels,
             }
 
-        # F2-3 — framework_pr_scout sub_kind: pre-fetch PR candidates
+        # framework_pr_scout sub_kind: pre-fetch PR candidates
         # from ``fa candidates`` in the main process so the specialist
         # subprocess starts with a populated metadata list. The
         # specialist still fetches diff bodies itself via the curl
@@ -5224,7 +5223,7 @@ class Coordinator:
         }
 
     # ------------------------------------------------------------------
-    # v0.8 KB_gaps/Gap-09 — gaps[] ledger refresh (KB_design §3.3 / §3.5)
+    # gaps[] ledger refresh
     # ------------------------------------------------------------------
     async def _refresh_gaps(self, *, reason: str) -> None:
         """Refresh :attr:`SharedState.gaps` from observable signals.
@@ -5479,12 +5478,12 @@ class Coordinator:
             })
 
     # ------------------------------------------------------------------
-    # v0.8 §3.5 §10 + KB_gaps/Gap-03 — specialist_done bookkeeping
+    # v0.8 §3.5 §10 + specialist_done bookkeeping
     # ------------------------------------------------------------------
     async def _handle_specialist_done(
         self, source: str, intent: Intent,
     ) -> None:
-        """Handle a ``specialist_done`` intent (KB_design §3.5 §10).
+        """Handle a ``specialist_done`` intent.
 
         Source format is ``specialist:<task_id>`` per Inv-5.3 / R3
         (PolicyGate already validated this when called via
@@ -5569,7 +5568,7 @@ class Coordinator:
         ``specialist_done.json`` artifact, so the audit trail
         survives even if SharedState persistence hiccups.
 
-        T2 per-variant hypothesize (KB_design §3.13 M5 §5 step 6) is
+        T2 per-variant hypothesize is
         intentionally **not** triggered here — it belongs to
         :ref:`Gap-07` which up-shifts the existing per-proposal
         ``_cortex_t2_hook`` to per-variant. Threading a stub call
@@ -5665,7 +5664,7 @@ class Coordinator:
                     task.task_id,
                 )
 
-        # v0.8 KB_gaps/Gap-09 — refresh the gaps ledger after a
+        # refresh the gaps ledger after a
         # specialist round closes. The dedupe-by-canonical-id keeps the
         # list bounded; the per-gap attempt log captures the
         # specialist's verdict (empty vs non-empty proposal_set) as a
@@ -5838,7 +5837,7 @@ class Coordinator:
         source: str,
     ) -> dict[str, Any]:
         """Translate a specialist done payload into a row for
-        ``SharedState.specialist_rounds[]`` (KB_design §3.12 §4.3).
+        ``SharedState.specialist_rounds[]``.
 
         ``round_id`` defaults to the task_id so re-recording the same
         task overwrites idempotently (M5 single-specialist case).
@@ -6071,8 +6070,7 @@ class Coordinator:
                     # into a per-action scoreboard (KEEP / no-promote
                     # accounting on the action-priority table). The
                     # scoreboard was retired by KB_design §3.9 on this
-                    # branch (see docs/integration/MAIN_FEATURES_DROPPED.md
-                    # §4), so the post-record bookkeeping is omitted.
+                    # branch (                     # §4), so the post-record bookkeeping is omitted.
                     self.shared_state.save(self.session_dir)
                 if kind == "integrate":
                     if result.get("status") != "skipped":
@@ -6193,7 +6191,7 @@ class Coordinator:
 
         1. **Always** broadcast a priority-0 ``strategy_change`` event
            so other reactors / breakdown see the LLM's intent (kept
-           verbatim from v0.6 for back-compat).
+           verbatim from the legacy contract for back-compat).
         2. When ``next_action_hint`` is in the closed ESCALATE_HINT
            vocab, stash the hint onto
            :attr:`SharedState.pending_escalate_hint` so the next phase
@@ -6208,7 +6206,7 @@ class Coordinator:
         Inv-8.2 says phase decisions only act on a closed vocab.
         """
         payload = dict(intent.payload or {})
-        # Always emit the broadcast first (back-compat with v0.6 tests
+        # Always emit the broadcast first (back-compat with the legacy contract tests
         # that just count strategy_change events).
         await self.bus.append_and_seq(Message.new(
             source, "*", "strategy_change",
@@ -6249,7 +6247,7 @@ class Coordinator:
             return
         # ``pause_specialist_<domain>``: bump the per-domain
         # empty-streak counter so the next EXPLORE round won't pick
-        # the domain (KB_design §3.5 / §3.9). Unknown domain suffixes
+        # the domain. Unknown domain suffixes
         # are tolerated (the counter is just incremented; if the
         # domain doesn't match a real specialist nothing happens).
         if is_pause_specialist_hint(hint):
@@ -6333,7 +6331,7 @@ class Coordinator:
             tick=int(self.shared_state.tick or 0),
             intent_payload=intent.payload,
         )
-        # v0.8 §3.9 — the streak counter is still a fact (LLM sees it
+        # the streak counter is still a fact (LLM sees it
         # via policy_denial_history), but we no longer mirror it onto
         # a scoreboard ``locked_reason``. The phase machine's
         # ``policy_loop`` stop_reason at streak ≥ 10 (below) remains
@@ -6602,7 +6600,7 @@ class Coordinator:
     async def _pump_dispatcher_once(self) -> None:
         """Dispatch queued tasks, respecting per-lane capacity.
 
-        v0.8 M6 (KB_design §3.7 §4.3) — concurrent dispatch path:
+        concurrent dispatch path:
 
         1. Read the current lane-holder snapshot + per-lane capacities
            up front so the same tick can decide locally whether each
@@ -6620,7 +6618,7 @@ class Coordinator:
            queued).
 
         With the default capacity=1 everywhere this is behaviourally
-        equivalent to v0.6 serial dispatch (one task per conflict
+        equivalent to serial dispatch (one task per conflict
         group runs at a time). When ``research_lane.capacity > 1``
         (M6 default 6), N specialist tasks fan out in parallel.
 
@@ -6697,7 +6695,7 @@ class Coordinator:
                  "state": result.state, "result": result.result,
                  "error": result.error},
             ))
-            # v0.8 §3.5 §10 + KB_gaps/Gap-03 — specialist bookkeeping.
+            # v0.8 §3.5 §10 + specialist bookkeeping.
             # SpecialistRunner returns the done payload under
             # ``result.result['specialist_done']`` (Gap-01 adapter
             # contract). We always run the bookkeeping pass for a
@@ -6789,12 +6787,12 @@ class Coordinator:
                 )
                 self.shared_state.stop_reason = "report_emitted"
                 self.shared_state.save(self.session_dir)
-            # v0.8 M1 — T3 anchor (KB_design §3.13 M1 §5.3). Always called
+            # T3 anchor. Always called
             # so KEEP / REVERT each get a corresponding ingest-attempt +
             # verify pair. Best-effort: failures are absorbed into the
             # NDJSON queue by the client.
             await self._cortex_t3_hook(task=task, result=result, kept=kept)
-            # v0.8 KB_gaps/Gap-09 — explore-round gap update.
+            # explore-round gap update.
             # For explore tasks with per-variant outcomes, append each
             # variant's KEEP/REVERT to the matching gap's attempts log
             # (the canonical_id is plumbed via task.params, falling back
@@ -6842,7 +6840,7 @@ class Coordinator:
         return True
 
     # ------------------------------------------------------------------
-    # v0.8 M1 — Cortex KB T3 hook (KEEP / REVERT mirror)
+    # Cortex KB T3 hook (KEEP / REVERT mirror)
     # ------------------------------------------------------------------
     def _proposal_msg_id_for_task(self, task: "Task") -> str:
         """Recover the original ``proposal_msg_id`` from a task.
@@ -7789,7 +7787,7 @@ class Coordinator:
                     task.params if task is not None else None
                 ),
             }
-            # v0.8 KB_gaps/Gap-09 — seed the gaps[] ledger from baseline.
+            # seed the gaps[] ledger from baseline.
             # Best-effort; failure is logged + absorbed inside the helper.
             await self._refresh_gaps(reason="baseline_done")
         elif task_kind == "profile":
@@ -7826,7 +7824,7 @@ class Coordinator:
                 # Stale select_kernels / trace_analyze cache no longer matches
                 # this trace. Clear both (M4 main merge: ``last_trace_analyze``
                 # is the canonical post-rename field; ``last_select_kernels``
-                # is kept on this branch for v0.6 resume parity).
+                # is kept on this branch for legacy resume parity).
                 self.shared_state.last_select_kernels = {}
                 self.shared_state.last_trace_analyze = {}
                 changed = True
@@ -7857,7 +7855,7 @@ class Coordinator:
                     )
                 changed = True
         elif task_kind == "roofline":
-            # F1-3 (Roofline-v2 / plan_roofline_framework): the
+            # F1-3 (Roofline-v2 / ): the
             # composite ``roofline`` action runs profile +
             # trace_analyze atomically. Its executor already writes
             # ``last_profile_trace`` / ``last_profile_status`` /
@@ -8006,7 +8004,7 @@ class Coordinator:
                 changed = True
         elif task_kind == "explore":
             # v0.8 M3 + KB_gaps/Dead-A.5 (prerequisite to Gap-10) —
-            # ``explore`` is the merged grid runner (KB_design §3.4).
+            # ``explore`` is the merged grid runner.
             # The executor already does per-variant KEEP/REVERT gating
             # *and* the inlined per-KEEP stack-rebench, so by the time
             # we land here the result.``winners`` list contains only
@@ -8077,12 +8075,12 @@ class Coordinator:
                     promoted = True
                     changed = True
             if promoted:
-                # Reset the v0.6 plateau proxy on a successful KEEP so
+                # Reset the plateau proxy on a successful KEEP so
                 # the M2 transitional fallback in phase_state stays
                 # aligned with the unified ledger. The proxy is dual-
-                # tracked for resume parity (KB_design §3.13 M3 §2.3).
+                # tracked for resume parity.
                 self.shared_state.params_no_promote_streak = 0
-                # v0.8 M3 §4.4 + KB_gaps/Gap-10 — explore inlines the
+                # v0.8 M3 §4.4 + explore inlines the
                 # per-KEEP stack rebench, so the post-rebench
                 # ``running_base_tput`` measures the *current*
                 # optimization_stack end-to-end. Promote it into

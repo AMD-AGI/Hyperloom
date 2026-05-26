@@ -34,7 +34,7 @@ The CLI starts a Python Coordinator that coordinates:
   intents. `--robustness-mock` for offline / smoke tests.
   - **Multi-node auto-downgrade (`--nodes >= 2`)**: the agent backend's
     `LocalProbeSource` targets sandbox-local resources only (ray status,
-    inference server, auth-proxy, GPU, FD, disk, shm). On multi-node every
+    inference server, GPU, FD, disk, shm). On multi-node every
     such resource lives in a separate pod (head / worker / RayJob), so each
     probe surfaces as a HIGH false positive that floods the bus. The CLI
     auto-downgrades to `--robustness-mock` (heartbeat only) and prints a
@@ -168,10 +168,10 @@ source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
 in the **same shell** that will spawn `inference_optimizer optimize`.
 Skipping install strikes silently *after* `baseline` succeeds: missing
-TraceLens/GEAK/OOB CLI → `select_kernels` / `kernel_opt` fail; dead
-auth-proxy → Claude SDK `401`; no live Ray head → `kernel_opt` tasks
-hang; missing `kernel-agent.env.sh` → first claude/codex call returns
-`401`. `install.sh --check-only` is a *diagnostic*, never a substitute.
+TraceLens/GEAK/OOB CLI → `select_kernels` / `kernel_opt` fail; no live
+Ray head → `kernel_opt` tasks hang; missing `kernel-agent.env.sh` →
+first claude/codex call returns `401`. `install.sh --check-only` is a
+*diagnostic*, never a substitute.
 
 **Resume carve-out.** `... optimize --resume` may skip install only when
 ALL hold: (1) `install.sh` exited 0 earlier in the *same shell*; (2)
@@ -288,65 +288,29 @@ Coordinator hasn't fired yet. PolicyGate
 within `INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC`
 (default 1800s).
 
-## Integration Freeze (active 2026-05-24 → tag `f3-done`)
+## Retired modules and rules (do not re-introduce)
 
-This branch is in a managed integration phase against `origin/main`
-(roofline-v2 PR #288 + framework-agent PR #280). Until tag `f3-done`
-exists, the rules below apply to anyone (humans **and** LLM agents)
-touching this repository.
+These orchestrator modules were intentionally removed; the
+`actions/_meta/*.yaml` registry + `_grid_runner.py` + specialist-first
+EXPLORE flow replaced them. Re-adding them re-creates conflicting
+decision paths:
 
-### What you MUST NOT do
+- `orchestrator/backends.py` (the action-routing one — distinct from
+  the LLM-adapter directory `orchestrator/backends/`)
+- `orchestrator/params.py`
+- `orchestrator/validate_stack.py`
+- `orchestrator/scoring.py`
 
-- **Do NOT** `git merge origin/main` directly. Use the cherry-pick
-  path documented in `plan_roofline_framework/F{0,1,2,3}_*.MD`. The
-  authoritative dry-run conflict map is
-  `docs/integration/dryrun_unmerged_*.log`.
-- **Do NOT** re-introduce `backends.py` / `params.py` /
-  `validate_stack.py` / `scoring.py`. They are intentionally deleted
-  (KB_design §3.4 / §3.9 / KB_gaps/Gap-10). See
-  `docs/integration/MUST_PRESERVE.md` for the full v0.8-asset list.
-- **Do NOT** add a `framework_pr first-explore priority` rule to
-  `system_prompts/orchestration.md`. It conflicts with **IR-4**
-  specialist-first contract. F2 absorbs the framework-agent
-  capability into `serving_specialist`'s `framework_pr_scout`
-  sub_kind instead — see
-  `docs/integration/MAIN_FEATURES_DROPPED.md` §3.
-- **Do NOT** add a `sequence_denial` rule that consumes
-  `backends_attempts` / `params_attempts` fields. v0.8 has no
-  writers for those zombies; the denial would be permanently true
-  and lock `kernel_opt` forever. F3-5 ships the v0.8 replacement
-  (`explore_attempts_minimum_before_kernel_opt`).
+Related rules that look reasonable but break things:
 
-### What you MAY do
-
-- New work that touches Coordinator / SharedState / PolicyGate must
-  rebase atop the F0 scaffolding commits (see tag
-  `pre-roofline-merge`..HEAD): placeholder `roofline_snapshot_id`
-  / `last_trace_analyze` / `roofline_saturation_history` fields,
-  the `TraceAnalyzeSnapshot` reader, EXPLORE/KERNEL/CLOSE allowlist
-  `roofline` placeholder, and the 5 F1/F2/F3 toggles
-  (`use_roofline_composite` / `framework_agent_enabled` /
-  `deny_direct_profile` / `gain_driven_kernel_opt` /
-  `roofline_saturation_advisory`).
-- Use the toggles to gate F1/F2/F3 features. All five default to
-  `False` — runtime behaviour at `f0-done` is identical to
-  `pre-roofline-merge`.
-
-### References
-
-- `plan_roofline_framework/README.md` — index + cherry-pick modes
-- `plan_roofline_framework/F{0,1,2,3}_*.MD` — phase playbooks
-- `docs/integration/MUST_PRESERVE.md` — v0.8 features that must
-  survive integration; `check_preserved.sh` enforces it
-- `docs/integration/MAIN_FEATURES_DROPPED.md` — main features
-  intentionally dropped, with replacement strategies
-- `docs/integration/dryrun_unmerged_*.log` — original conflict map
-- `docs/test-baselines/pre_roofline_merge_*.log` — 1624 passing baseline
-- `docs/test-baselines/known_failed_*.txt` — 5 pre-existing
-  failures that do NOT count against any phase verdict
-- Tag `pre-roofline-merge` — rollback anchor (last commit before F0)
-- Tags `f0-done` / `f1-done` / `f2-done` / `f3-done` — phase
-  completion anchors (each is its own rollback target)
+- **No `framework_pr first-explore priority` rule** in
+  `system_prompts/orchestration.md` — conflicts with **IR-4**.
+  Framework-agent is invoked via `serving_specialist`'s
+  `framework_pr_scout` sub_kind.
+- **No `sequence_denial` rule** consuming `backends_attempts` /
+  `params_attempts` — those fields have no writers and would
+  permanently deny `kernel_opt`. Use
+  `explore_attempts_minimum_before_kernel_opt`.
 
 ## Setup
 
@@ -379,7 +343,7 @@ full inference optimizer session.
 
 The install phase always initializes the full Hyperloom runtime. Even if the
 user later passes `--no-kernel` at runtime, the installer still prepares
-kernel-agent / TraceLens / GEAK / OOB / auth-proxy; `--no-kernel` only means
+kernel-agent / TraceLens / GEAK / OOB CLI auth; `--no-kernel` only means
 that this `optimize` run skips the kernel optimization phase.
 
 `install.sh` installs everything in one shot (no `--with-*` flags to
@@ -401,8 +365,7 @@ of `inference_optimizer/install.sh`):
 | TraceLens internal (perf-report CLI) | `ensure_tracelens` (`cp -r` from read-only WekaFS mount to `${HYPERLOOM_ROOT}/TraceLens-internal` = `$USER_DATA_PATH/runtime/source-mirrors/TraceLens-internal`) |
 | GEAK CLI + `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` | `ensure_geak` |
 | Node.js/npm + OOB CLI + claude/codex npm CLIs + `@cursor/sdk` global install + `~/.claude/config.json` + `~/.codex/auth.json` | `ensure_node` + `ensure_oob` (mirrors `${HYPERLOOM_BUNDLE}/OOB` → `${HYPERLOOM_ROOT}/OOB/oob_cli`) |
-| OOB auth-proxy on `127.0.0.1:4002` (rewrites `x-api-key` → `Authorization: Bearer`; without it Claude SDK returns 401) | `ensure_auth_proxy.sh` |
-| `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL` exported to `kernel-agent.env.sh` if set in env (cursor backend uses Cursor's own gateway, not the `:4002` proxy). When `CURSOR_API_KEY` is unset, `cursor` is auto-skipped from default backend selection (`choose_backends` / `recommend_backends` / batch fallback ladder / `parallel_e2e_runner --backends` default); explicit user-supplied backends are still honored. | `write_env_file` |
+| `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL` exported to `kernel-agent.env.sh` if set in env (cursor backend uses Cursor's own gateway). When `CURSOR_API_KEY` is unset, `cursor` is auto-skipped from default backend selection (`choose_backends` / `recommend_backends` / batch fallback ladder / `parallel_e2e_runner --backends` default); explicit user-supplied backends are still honored. | `write_env_file` |
 
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}` is
 regenerated by `install.sh` and contains the proxy-rewritten URLs, auth aliases,
@@ -474,13 +437,13 @@ Cite the linked section for fixes:
 |----|---|---|
 | 1  | Re-export auth aliases (`ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, ...) from `SAFE_API_KEY`. `OOB_BASE_URL` / `GEAK_BASE_URL` / `LLM_API_BASE` inherit `OPENAI_BASE_URL` directly (Bearer-native, no proxy). | — |
 | 2  | Auto-`pip install` missing `claude-agent-sdk>=0.1.65`, `openai>=1.50`, `httpx>=0.27` into `sys.executable` | `## Failure Handling` — `claude-agent-sdk not installed` |
-| 3  | Bootstrap `auth_proxy.py` source from `$OOB_SRC` (or `/wekafs/fully-local/{,inference_optimization/}OOB`) into `${HYPERLOOM_ROOT}/OOB/oob_cli/` (default `$USER_DATA_PATH/runtime/source-mirrors/OOB/oob_cli/`) if missing | `## Failure Handling` — `Claude SDK exit code 1` |
-| 4  | Re-run `ensure_auth_proxy.sh`; rewrite `~/.claude/config.json` `customApiUrl` and force-override `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` to the proxy URL (overriding any shell/`.env`/k8s value, logged on stdout). On retry-fail restores originals + WARN. | `### Recovery` |
+| 3  | Derive `ANTHROPIC_BASE_URL` from `OPENAI_BASE_URL` (strip trailing `/v1`); force-override both env vars to keep them consistent (overriding any shell/`.env`/k8s value, logged on stdout). | `### Recovery` |
+| 4  | Reset `~/.claude/config.json` `customApiUrl` to the upstream `ANTHROPIC_BASE_URL` so any stale `127.0.0.1:4002` value is replaced. | `### Recovery` |
 | 5  | ROCm hygiene (WARN-only): pop `HIP_VISIBLE_DEVICES` if `ROCR_VISIBLE_DEVICES` also set; visible-GPU count vs `$TP` via `rocm-smi --showid`; `/dev/shm` free ≥ 16 GiB | — |
 | 6  | Auto-install missing `ray` / `Magpie` / `InferenceX` (pod rebuild recovery) | — |
 | 7  | Auto-detect `--gpu-type` if not given | `## GPU Runner Type` |
 | 8  | WARN-only presence check: `node` / `claude` / `codex` CLIs + `@cursor/sdk` (resolved via `node -e "require.resolve('@cursor/sdk')"` against `$(npm root -g)`) | — |
-| 9  | Emit canonical `Preflight diagnostics:` block (`asset_root`, `session_dir` + resolving env var, `magpie_python`, `INFERENCEX_PATH`, aiter jit cache WARM/COLD + `.so` count + path, cold/warm timeouts, proxy URL). Paste verbatim into status reports. | `## Cold-start Discipline` |
+| 9  | Emit canonical `Preflight diagnostics:` block (`asset_root`, `session_dir` + resolving env var, `magpie_python`, `INFERENCEX_PATH`, aiter jit cache WARM/COLD + `.so` count + path, cold/warm timeouts, resolved `ANTHROPIC_BASE_URL`). Paste verbatim into status reports. | `## Cold-start Discipline` |
 | 10 | Hard model gate: `--claude-model` ∈ {`claude-opus-4-7` (preferred), `claude-opus-4-6` (fallback)}; probe `GET <OPENAI_BASE_URL>/models` with Bearer (3 retries 1s/3s/5s); rewrite to `4-6` if `4-7` missing; abort if neither present or gateway unreachable | `## Failure Handling` — model-gate errors |
 | 11 | Codex smoke-test (WARN-only): `--codex-model` checked when codex actually used (`--critic-agent` / `--critic-codex-bare` / `--kernel-codex`) | — |
 | 12 | Critic-agent runtime probe (when `--critic-agent` active): resolve `CRITIC_AGENT_ROOT` (env > sibling `$REPO_ROOT/critic-agent/` > abort), `python -m runtime.cli --help` (5s timeout); abort rc=2 if it fails. Default-sets `WORKSPACE_PATH` / `CRITIC_SESSION_MEMORY_DIR` / `CRITIC_KB_CLIENT_MODE`. | `## Critic Backend Selection` |
@@ -492,11 +455,11 @@ for the chained installer truth.
 ### Recovery
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
-the auth-proxy died. Re-run the supervisor and retry — both are idempotent:
+the gateway rejected the request. Check that `OPENAI_BASE_URL` / `SAFE_API_KEY`
+are set in `.env` (or the calling shell) and that the gateway is reachable:
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"   # noop if healthy
-inference_optimizer optimize ... # rerun
+curl -sS -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" | head
 ```
 
 If `_preflight()` itself fails, run install in `--check-only` mode to see
