@@ -55,7 +55,6 @@ from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     baseline_executor,
     explore_executor,
-    profile_executor,
     recover_executor,
     report_executor,
     session_breakdown_executor,
@@ -709,15 +708,12 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "recover":           recover_executor,
 }
 
-# Real executors enabled only when kernel-mode is on (profile only
-# feeds kernel-opt and would burn lanes for nothing in --no-kernel).
-# The composite ``roofline`` action is registered separately by
-# ``_register_executors`` below — it is the legacy successor to the
-# retired ``pmc_roofline`` action and is wired even in --no-kernel
-# when the toggle is on.
-_REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
-    "profile": profile_executor,
-}
+# Kernel-only real executors. The composite ``roofline`` action is
+# registered separately by ``_register_executors`` below and is the
+# sole entry point that runs the profile sub-step (which calls
+# ``profile_executor`` internally without going through
+# SubAgentRunner). There is no LLM-proposable ``profile`` action.
+_REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {}
 
 # Kernel-owned action kinds dispatched via
 # ``request{target_agent='kernel', kind=...}``. The executor body is a
