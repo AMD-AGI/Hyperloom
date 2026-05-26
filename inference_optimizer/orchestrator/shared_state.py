@@ -158,7 +158,10 @@ class TraceAnalyzeSnapshot:
 
     trace_input: str = ""
     candidates_path: str = ""
+    kernel_roofline_path: str = ""
+    kernel_roofline_report_path: str = ""
     hot_kernels_top15: list[dict[str, Any]] = field(default_factory=list)
+    kernel_roofline_top15: list[dict[str, Any]] = field(default_factory=list)
     task_groups: list[dict[str, Any]] = field(default_factory=list)
     reusable_native_kernel_ids: list[str] = field(default_factory=list)
     trace_health_warnings: list[dict[str, Any]] = field(default_factory=list)
@@ -174,7 +177,12 @@ class TraceAnalyzeSnapshot:
         return cls(
             trace_input=str(d.get("trace_input") or ""),
             candidates_path=str(d.get("candidates_path") or ""),
+            kernel_roofline_path=str(d.get("kernel_roofline_path") or ""),
+            kernel_roofline_report_path=str(
+                d.get("kernel_roofline_report_path") or ""
+            ),
             hot_kernels_top15=list(d.get("hot_kernels_top15") or []),
+            kernel_roofline_top15=list(d.get("kernel_roofline_top15") or []),
             task_groups=list(d.get("task_groups") or []),
             reusable_native_kernel_ids=list(
                 d.get("reusable_native_kernel_ids") or []
@@ -2542,25 +2550,68 @@ class SharedState:
             artifacts = result.get("artifact_paths") or {}
             if isinstance(artifacts, dict):
                 candidates_path = artifacts.get("kernel_candidates", "") or ""
+        kernel_roofline_path = result.get("kernel_roofline_path") or ""
+        if not kernel_roofline_path:
+            artifacts = result.get("artifact_paths") or {}
+            if isinstance(artifacts, dict):
+                kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
+        kernel_roofline_report_path = (
+            result.get("kernel_roofline_report_path") or ""
+        )
+        if not kernel_roofline_report_path:
+            artifacts = result.get("artifact_paths") or {}
+            if isinstance(artifacts, dict):
+                kernel_roofline_report_path = (
+                    artifacts.get("kernel_roofline_report", "") or ""
+                )
         hot = result.get("hot_kernels") or []
         summary: list[dict[str, Any]] = []
+        kernel_roofline: list[dict[str, Any]] = []
         reusable_ids: list[str] = []
         for entry in hot[:15] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
             kid = entry.get("kernel_id")
             reusable = bool(entry.get("reusable_native_kernel"))
-            summary.append({
+            arithmetic_intensity = entry.get("arithmetic_intensity")
+            if arithmetic_intensity is None:
+                arithmetic_intensity = entry.get("flops_per_byte")
+            efficiency_percent = entry.get("efficiency_percent")
+            if efficiency_percent is None:
+                efficiency_percent = entry.get("efficiency_pct")
+            summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
                 "gpu_pct": entry.get("gpu_pct"),
                 "bottleneck": entry.get("bottleneck"),
-                "arithmetic_intensity": entry.get("arithmetic_intensity"),
+                "bound_type": entry.get("bound_type"),
+                "arithmetic_intensity": arithmetic_intensity,
+                "flops_per_byte": entry.get("flops_per_byte"),
+                "efficiency_percent": efficiency_percent,
+                "compute_utilization_pct": entry.get("compute_utilization_pct"),
+                "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
+                "suggestion": entry.get("suggestion") or "",
+                "roofline_name": entry.get("roofline_name"),
                 "source_file": entry.get("source_file"),
                 "reusable_native_kernel": reusable,
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
-            })
+            }
+            summary.append(summary_entry)
+            if any(
+                summary_entry.get(key) not in (None, "", [])
+                for key in (
+                    "bound_type",
+                    "arithmetic_intensity",
+                    "flops_per_byte",
+                    "efficiency_percent",
+                    "compute_utilization_pct",
+                    "bandwidth_utilization_pct",
+                    "suggestion",
+                    "roofline_name",
+                )
+            ):
+                kernel_roofline.append(dict(summary_entry))
             if reusable and kid:
                 reusable_ids.append(str(kid))
 
@@ -2599,7 +2650,10 @@ class SharedState:
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
+            "kernel_roofline_path": str(kernel_roofline_path),
+            "kernel_roofline_report_path": str(kernel_roofline_report_path),
             "hot_kernels_top15": summary,
+            "kernel_roofline_top15": kernel_roofline,
             "task_groups": task_groups,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,

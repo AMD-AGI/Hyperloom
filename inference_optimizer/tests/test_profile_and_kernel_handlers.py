@@ -1101,6 +1101,8 @@ async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monke
             "hot_kernels": [],
             "artifact_paths": {
                 "kernel_candidates": "/tmp/kernel_candidates.json",
+                "kernel_roofline": "/tmp/kernel_roofline.json",
+                "kernel_roofline_report": "/tmp/reports/kernel_roofline.json",
             },
         }
         return 0, json.dumps(payload), ""
@@ -1116,6 +1118,8 @@ async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monke
         session_dir=session_dir,
     )
     assert res["candidates_path"] == "/tmp/kernel_candidates.json"
+    assert res["kernel_roofline_path"] == "/tmp/kernel_roofline.json"
+    assert res["kernel_roofline_report_path"] == "/tmp/reports/kernel_roofline.json"
     assert "--roofline-json" in captured["cmd"]
     assert "/tmp/roofline.json" in captured["cmd"]
     assert "--capture-folder" in captured["cmd"]

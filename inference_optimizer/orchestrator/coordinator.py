@@ -5118,11 +5118,21 @@ class Coordinator:
                     )
                     executive_summary = {}
             hot_kernels = list(last_ta.get("hot_kernels_top15") or [])[:8]
+            kernel_roofline = list(
+                last_ta.get("kernel_roofline_top15") or []
+            )[:8]
             params["roofline_evidence"] = {
                 "analysis_md_path": analysis_path,
+                "kernel_roofline_path": str(
+                    last_ta.get("kernel_roofline_path") or ""
+                ),
+                "kernel_roofline_report_path": str(
+                    last_ta.get("kernel_roofline_report_path") or ""
+                ),
                 "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
                 "executive_summary": executive_summary,
                 "hot_kernels_top15": hot_kernels,
+                "kernel_roofline_top15": kernel_roofline,
             }
 
         # framework_pr_scout sub_kind: pre-fetch PR candidates
@@ -6075,7 +6085,12 @@ class Coordinator:
         return {
             "status": "ok",
             "candidates_path": candidates_path,
+            "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
+            "kernel_roofline_report_path": cached.get(
+                "kernel_roofline_report_path", "",
+            ),
             "hot_kernels_top15": cached.get("hot_kernels_top15", []),
+            "kernel_roofline_top15": cached.get("kernel_roofline_top15", []),
             "reusable_native_kernel_ids": cached.get(
                 "reusable_native_kernel_ids", []
             ),

@@ -87,6 +87,10 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
         last_trace_analyze={
             "analysis_md_text": "FULL ANALYSIS TEXT",
             "analysis_md_path": str(analysis_path),
+            "kernel_roofline_path": str(tmp_path / "kernel_roofline.json"),
+            "kernel_roofline_report_path": str(
+                tmp_path / "reports" / "kernel_roofline.json"
+            ),
             "roofline_snapshot_id": 3,
             "hot_kernels_top15": [
                 {
@@ -108,6 +112,19 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
                     for i in range(2, 11)
                 ],
             ],
+            "kernel_roofline_top15": [
+                {
+                    "kernel_id": "k1",
+                    "name": "topk_softmax",
+                    "gpu_pct": 8.4,
+                    "bound_type": "compute",
+                    "arithmetic_intensity": 2.5,
+                    "efficiency_percent": 42.0,
+                    "compute_utilization_pct": 31.0,
+                    "bandwidth_utilization_pct": 12.0,
+                    "suggestion": "try tuned topk",
+                },
+            ],
         },
     )
 
@@ -118,10 +135,15 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
     assert "roofline_evidence" in params
     ev = params["roofline_evidence"]
     assert ev["analysis_md_path"] == str(analysis_path)
+    assert ev["kernel_roofline_path"] == str(tmp_path / "kernel_roofline.json")
+    assert ev["kernel_roofline_report_path"] == str(
+        tmp_path / "reports" / "kernel_roofline.json"
+    )
     assert ev["roofline_snapshot_id"] == 3
     # Sliced to top 8.
     assert len(ev["hot_kernels_top15"]) == 8
     assert ev["hot_kernels_top15"][0]["kernel_id"] == "k1"
+    assert ev["kernel_roofline_top15"][0]["kernel_id"] == "k1"
     # Executive summary parsed from disk.
     assert ev["executive_summary"]["compute_pct"] == pytest.approx(32.1, rel=0.01)
     assert ev["executive_summary"]["idle_pct"] == pytest.approx(17.5, rel=0.01)
@@ -213,6 +235,18 @@ def test_section_renders_executive_summary_and_hot_kernels():
                     "source_file": "/sgl/foo.py",
                 },
             ],
+            "kernel_roofline_top15": [
+                {
+                    "kernel_id": "k1",
+                    "name": "topk",
+                    "gpu_pct": 8.4,
+                    "bound_type": "memory",
+                    "arithmetic_intensity": 0.45,
+                    "efficiency_percent": 31.2,
+                    "bandwidth_utilization_pct": 72.4,
+                    "suggestion": "reduce memory traffic",
+                },
+            ],
         }
     )
     section = _section_roofline_evidence(inp)
@@ -222,6 +256,10 @@ def test_section_renders_executive_summary_and_hot_kernels():
     assert "Compute %" in text and "30.0%" in text
     assert "MoE_fused" in text
     assert "k1" in text and "8.40%" in text
+    assert "Kernel roofline" in text
+    assert "0.45" in text
+    assert "72.40%" in text
+    assert "reduce memory traffic" in text
     assert "/sd/.../analysis.md" in text
 
 

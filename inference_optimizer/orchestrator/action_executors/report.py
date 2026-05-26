@@ -83,6 +83,12 @@ def _build_summary_dict(
     latest_snap = {
         "snapshot_id": latest_snap_raw.get("roofline_snapshot_id"),
         "analysis_md_path": str(latest_snap_raw.get("analysis_md_path") or ""),
+        "kernel_roofline_path": str(
+            latest_snap_raw.get("kernel_roofline_path") or ""
+        ),
+        "kernel_roofline_report_path": str(
+            latest_snap_raw.get("kernel_roofline_report_path") or ""
+        ),
         "trace_input": str(latest_snap_raw.get("trace_input") or ""),
         "ts": str(latest_snap_raw.get("ts") or ""),
     }

@@ -1693,9 +1693,93 @@ def merge_roofline_into_candidates(
         else:
             item.setdefault("bottleneck", "unknown")
             item.setdefault("arithmetic_intensity", None)
-            item.setdefault("compute_utilization_pct", 0.0)
-            item.setdefault("bandwidth_utilization_pct", 0.0)
+            item.setdefault("compute_utilization_pct", None)
+            item.setdefault("bandwidth_utilization_pct", None)
             item.setdefault("recommended_actions", [])
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Project one hot-kernel candidate into the kernel-roofline view."""
+    arithmetic_intensity = _first_non_empty(
+        candidate.get("arithmetic_intensity"),
+        candidate.get("flops_per_byte"),
+    )
+    return {
+        "kernel_id": candidate.get("kernel_id"),
+        "name": candidate.get("name"),
+        "gpu_pct": candidate.get("gpu_pct"),
+        "duration_us": candidate.get("duration_us"),
+        "call_count": candidate.get("call_count"),
+        "kernel_category": candidate.get("kernel_category"),
+        "source_file": candidate.get("source_file"),
+        "bottleneck": _first_non_empty(
+            candidate.get("bottleneck"),
+            candidate.get("bound_type"),
+        ),
+        "bound_type": candidate.get("bound_type"),
+        "arithmetic_intensity": arithmetic_intensity,
+        "flops_per_byte": candidate.get("flops_per_byte"),
+        "efficiency_percent": candidate.get("efficiency_percent"),
+        "compute_utilization_pct": candidate.get("compute_utilization_pct"),
+        "bandwidth_utilization_pct": candidate.get("bandwidth_utilization_pct"),
+        "suggestion": candidate.get("suggestion") or "",
+        "roofline_name": candidate.get("roofline_name"),
+        "recommended_actions": list(candidate.get("recommended_actions") or []),
+        "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
+    }
+
+
+def build_kernel_roofline_payload(
+    *,
+    trace_input: str,
+    trace_input_type: str,
+    analysis_md_path: str,
+    kernel_candidates_path: str,
+    roofline_json_path: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the structured per-kernel roofline sidecar.
+
+    This sidecar is a view over TraceLens candidates plus optional
+    ``--roofline-json`` enrichment. It does not invent missing
+    utilization counters: absent compute/bandwidth utilization stays
+    ``null`` in JSON.
+    """
+    rows = [
+        _kernel_roofline_row(candidate)
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    ]
+    return {
+        "schema_version": 1,
+        "source": "tracelens_analysis",
+        "trace_input": trace_input,
+        "trace_input_type": trace_input_type,
+        "analysis_md_path": analysis_md_path,
+        "kernel_candidates_path": kernel_candidates_path,
+        "roofline_json_path": roofline_json_path,
+        "kernels": rows,
+    }
+
+
+def kernel_roofline_report_path_for_run(run_dir: Path) -> Path | None:
+    """Return ``<session_dir>/reports/kernel_roofline.json`` for real runs."""
+    try:
+        runs_dir = run_dir.parent
+        kernel_agent_dir = runs_dir.parent
+    except IndexError:
+        return None
+    if runs_dir.name != "runs" or kernel_agent_dir.name != "kernel-agent":
+        return None
+    session_dir = kernel_agent_dir.parent
+    return session_dir / "reports" / "kernel_roofline.json"
 
 
 def _candidate_model_config_paths(model_name: str) -> list[Path]:
@@ -1985,8 +2069,9 @@ def write_reports(
     }
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
+    kernel_candidates_path = run_dir / "kernel_candidates.json"
     atomic_write_json(
-        run_dir / "kernel_candidates.json",
+        kernel_candidates_path,
         {"hot_kernels": candidates, "task_groups": task_groups, **report},
     )
 
@@ -2043,9 +2128,29 @@ def write_reports(
             )
             existing_report_path = stub_md
 
-    return {
+    kernel_roofline_path = run_dir / "kernel_roofline.json"
+    kernel_roofline_payload = build_kernel_roofline_payload(
+        trace_input=str(Path(args.trace_input).resolve()),
+        trace_input_type=trace_input_type,
+        analysis_md_path=(
+            str(existing_report_path) if existing_report_path else ""
+        ),
+        kernel_candidates_path=str(kernel_candidates_path),
+        roofline_json_path=(
+            str(Path(args.roofline_json).expanduser())
+            if getattr(args, "roofline_json", "") else ""
+        ),
+        candidates=candidates,
+    )
+    atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
+    kernel_roofline_report_path = kernel_roofline_report_path_for_run(run_dir)
+    if kernel_roofline_report_path is not None:
+        atomic_write_json(kernel_roofline_report_path, kernel_roofline_payload)
+
+    artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
-        "kernel_candidates": str(run_dir / "kernel_candidates.json"),
+        "kernel_candidates": str(kernel_candidates_path),
+        "kernel_roofline": str(kernel_roofline_path),
         "tracelens_report_json": str(tracelens_dir / "tracelens_report.json"),
         # Post-#203 (PR #217): the canonical Markdown exit IS the
         # upstream SDK orchestrator's analysis.md surfaced via
@@ -2055,6 +2160,9 @@ def write_reports(
         "trace_report_path": str(existing_report_path) if existing_report_path else "",
         "tracelens_summary": str(summary_path),
     }
+    if kernel_roofline_report_path is not None:
+        artifact_paths["kernel_roofline_report"] = str(kernel_roofline_report_path)
+    return artifact_paths
 
 
 def _default_workspace_path() -> str:

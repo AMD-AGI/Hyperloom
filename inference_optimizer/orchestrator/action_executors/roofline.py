@@ -475,6 +475,10 @@ class RooflineExecutor:
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": str(trace_path),
             "analysis_md_path": cached.get("analysis_md_path", ""),
+            "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
+            "kernel_roofline_report_path": cached.get(
+                "kernel_roofline_report_path", "",
+            ),
             "profile_workspace": profile_result.get("workspace"),
         }
 

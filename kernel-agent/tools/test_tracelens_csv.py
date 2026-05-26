@@ -542,6 +542,64 @@ def test_write_reports_does_not_create_filename_aliases(tmp_path):
     assert not (tracelens_dir / "tracelens_report.md").exists()
 
 
+def test_write_reports_writes_kernel_roofline_sidecar(tmp_path):
+    import json as _json
+
+    trace = tmp_path / "trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    session_dir = tmp_path / "session"
+    run_dir = session_dir / "kernel-agent" / "runs" / "sid"
+    tracelens_dir = run_dir / "tracelens"
+    tracelens_dir.mkdir(parents=True, exist_ok=True)
+    analysis_md = tracelens_dir / "analysis.md"
+    analysis_md.write_text("# TraceLens upstream report\n", encoding="utf-8")
+    candidate = {
+        "kernel_id": "k001",
+        "name": "rmsnorm_kernel",
+        "gpu_pct": 8.2,
+        "duration_us": 12345.0,
+        "call_count": 128,
+        "kernel_category": "LayerNorm",
+        "source_file": "/tmp/rmsnorm.py",
+        "bound_type": "memory",
+        "flops_per_byte": 0.45,
+        "efficiency_percent": 31.2,
+        "recommended_actions": ["reduce memory traffic"],
+        "reusable_native_kernel": True,
+    }
+
+    artifacts = tla.write_reports(
+        run_dir,
+        trace_input_type="file",
+        trace_files=[trace],
+        candidates=[candidate],
+        args=_make_write_reports_args(trace),
+        existing_report_path=analysis_md,
+    )
+
+    payload = _json.loads(
+        Path(artifacts["kernel_roofline"]).read_text(encoding="utf-8")
+    )
+    row = payload["kernels"][0]
+    assert payload["schema_version"] == 1
+    assert payload["analysis_md_path"] == str(analysis_md)
+    assert payload["kernel_candidates_path"] == artifacts["kernel_candidates"]
+    assert artifacts["kernel_roofline_report"] == str(
+        session_dir / "reports" / "kernel_roofline.json"
+    )
+    report_payload = _json.loads(
+        Path(artifacts["kernel_roofline_report"]).read_text(encoding="utf-8")
+    )
+    assert report_payload == payload
+    assert row["kernel_id"] == "k001"
+    assert row["bound_type"] == "memory"
+    assert row["arithmetic_intensity"] == 0.45
+    assert row["flops_per_byte"] == 0.45
+    assert row["efficiency_percent"] == 31.2
+    assert row["compute_utilization_pct"] is None
+    assert row["bandwidth_utilization_pct"] is None
+
+
 def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     """#203: Hyperloom must not rewrite the upstream report's contents.
     Verifying byte-identity here prevents a future refactor from
