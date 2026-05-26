@@ -79,6 +79,19 @@ class TestParseCallTimeoutEnv:
         assert result == 120.0
         assert not math.isnan(result)
 
+    @pytest.mark.parametrize("raw", ["inf", "-inf", "infinity"])
+    def test_infinity_returns_default(self, monkeypatch, caplog, raw):
+        """``math.isfinite`` rejects both ``+inf`` and ``-inf`` -- a wall-clock
+        timeout can never be infinite. This pins the CodeQL fix that swapped
+        the NaN-only ``value != value`` check for ``not math.isfinite(value)``.
+        """
+        monkeypatch.setenv(PROBE_ENV, raw)
+        with caplog.at_level("WARNING"):
+            result = parse_call_timeout_env(PROBE_ENV, default=120.0)
+        assert result == 120.0
+        assert math.isfinite(result)
+        assert any("not a positive finite" in rec.message for rec in caplog.records)
+
 
 class TestClaudeBackendHonoursEnv:
     def test_default_when_env_unset(self, monkeypatch):
@@ -105,7 +118,7 @@ class TestCodexBackendHonoursEnv:
         backend = CodexBackend(
             api_key_env="OPENAI_API_KEY_TEST",
             base_url_env="OPENAI_BASE_URL_TEST",
-            client_factory=lambda: object(),
+            client_factory=object,
         )
         assert backend.call_timeout_s == 120.0
 
@@ -116,7 +129,7 @@ class TestCodexBackendHonoursEnv:
         backend = CodexBackend(
             api_key_env="OPENAI_API_KEY_TEST",
             base_url_env="OPENAI_BASE_URL_TEST",
-            client_factory=lambda: object(),
+            client_factory=object,
         )
         assert backend.call_timeout_s == 240.0
 
@@ -127,7 +140,7 @@ class TestCodexBackendHonoursEnv:
         backend = CodexBackend(
             api_key_env="OPENAI_API_KEY_TEST",
             base_url_env="OPENAI_BASE_URL_TEST",
-            client_factory=lambda: object(),
+            client_factory=object,
         )
         assert backend.call_timeout_s == 120.0
 

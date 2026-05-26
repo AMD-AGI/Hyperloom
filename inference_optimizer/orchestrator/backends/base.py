@@ -9,6 +9,7 @@ backends only need to produce intents.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -42,7 +43,7 @@ def parse_call_timeout_env(env_name: str, *, default: float) -> float:
             env_name, raw, default,
         )
         return default
-    if value <= 0 or value != value:  # NaN check via inequality
+    if value <= 0 or not math.isfinite(value):
         log.warning(
             "%s=%r is not a positive finite number; using default %.1fs",
             env_name, raw, default,
