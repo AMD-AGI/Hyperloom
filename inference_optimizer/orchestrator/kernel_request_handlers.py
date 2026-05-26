@@ -973,7 +973,7 @@ async def _run_optimization_single(
         extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
         enable_rag:      default True; false disables GEAK RAG tools
         enable_xs_memory: default True; false disables GEAK cross-session memory
-        unittest_agent:   auto|off|force; controls pre-GEAK unittest generation
+        test_command:     test command from unittest skill (passed to GEAK --test-command)
         dry_run:         default False (testing)
 
     Returns the tool's JSON output verbatim under ``result``.
@@ -1045,8 +1045,8 @@ async def _run_optimization_single(
         cmd += ["--disable-rag"]
     if payload.get("enable_xs_memory") is False:
         cmd += ["--disable-xs-memory"]
-    if payload.get("unittest_agent"):
-        cmd += ["--unittest-agent", str(payload["unittest_agent"])]
+    if payload.get("test_command"):
+        cmd += ["--test-command", str(payload["test_command"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     # Give kernel_optimization.py time to handle its own backend timeout and
