@@ -190,8 +190,8 @@ class TestExecute:
                       SearchHit("bad", "https://api.spam.io/y"))
         client = WebSearchClient(config=cfg, providers=(p,))
         out = client.execute({"query": "abc"})
-        assert "a.com" in out
-        assert "spam.io" not in out
+        assert "https://a.com/x" in out
+        assert "https://api.spam.io/y" not in out
 
     def test_global_denylist_merged_into_provider_blocked(self):
         cfg = _cfg(search_domain_denylist=("spam.io",))
@@ -199,8 +199,7 @@ class TestExecute:
         client = WebSearchClient(config=cfg, providers=(p,))
         client.execute({"query": "abc", "blocked_domains": ["evil.com"]})
         _, opts = p.calls[-1]
-        assert "spam.io" in opts.blocked_domains
-        assert "evil.com" in opts.blocked_domains
+        assert set(opts.blocked_domains) == {"spam.io", "evil.com"}
 
     def test_global_denylist_not_sent_when_allowed_domains_set(self):
         cfg = _cfg(search_domain_denylist=("spam.io",))
