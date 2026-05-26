@@ -1,4 +1,4 @@
-"""Baseline / validate_stack parameter override tests.
+"""Baseline parameter override tests.
 
 Pins the executor-boundary contract for the two Magpie leak-path
 recovery knobs that Orchestration drives via ``task.params``:
