@@ -54,7 +54,8 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
-    coordinator.shared_state.action_scores = {}
+    """v0.8 §3.9 — scoreboard retired. No-op back-compat shim."""
+    return None
 
 
 def _seed_target_analysis_marker(sd: Path) -> None:
@@ -258,8 +259,7 @@ async def test_sequence_denial_no_self_loop_for_other_actions(session_dir):
     try:
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.last_profile_trace = "/tmp/fake-trace"
-        c.shared_state.last_profile_pmc_summary = "/tmp/fake-pmc.json"
-        c.shared_state.last_trace_analyze = {
+        c.shared_state.last_select_kernels = {
             "trace_input": "/tmp/fake-trace",
             # Roofline-v2 N3: backends now requires fresh analysis_md_text.
             "analysis_md_text": "FAKE_REPORT",
