@@ -290,10 +290,19 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         "duration_us": 100.0,
         "call_count": 2,
         "gpu_pct": 10.0,
-        "source_file": "/tmp/paged_attention.py",
+        "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
         "is_multigpu": False,
         "num_gpus_recommended": 1,
+        # Per AMD-AGI/Hyperloom#314, ``kernel_candidates.json::hot_kernels``
+        # now only carries candidates that ``classify_patchability`` marked
+        # routable. In production this field is set by
+        # ``_finalize_candidates`` before ``write_reports`` runs; this
+        # unit test bypasses ``_finalize_candidates`` and passes a raw
+        # candidate straight into ``write_reports``, so set the routing
+        # marker explicitly to mirror the production fixture and keep
+        # the downstream assertions on ``hot_kernels[0]`` valid.
+        "reusable_native_kernel": True,
     }
     args = Namespace(
         trace_input=str(trace),
@@ -422,8 +431,10 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         "duration_us": 100.0,
         "call_count": 2,
         "gpu_pct": 10.0,
-        "source_file": "/tmp/paged_attention.py",
+        "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
+        # Per AMD-AGI/Hyperloom#314, see twin fixture above.
+        "reusable_native_kernel": True,
     }
     args = Namespace(
         trace_input=str(trace),
