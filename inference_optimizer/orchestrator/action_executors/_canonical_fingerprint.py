@@ -1,7 +1,7 @@
-"""Canonical variant fingerprint — v0.8 M3 (KB_design §3.4 Inv-4.2).
+"""Canonical variant fingerprint — v0.8 M3.
 
 A single, content-addressed identity for any explore variant. Replaces
-the v0.6-era pair of fingerprint helpers (one inside ``params.py``, one
+the legacy-era pair of fingerprint helpers (one inside ``params.py``, one
 inside ``backends.py``) so that:
 
 * the ``explore_search`` ledger has exactly one canonical key per variant,
@@ -54,9 +54,9 @@ def canonical_fingerprint(
 
     Identical in shape to ``_grid_runner.variant_fingerprint`` — kept as
     a separate symbol so call-sites in ``explore.py`` / SharedState
-    migration depend on the v0.8 canonical identity rather than the
+    migration depend on the legacy canonical identity rather than the
     v0.6 helper. Both functions intentionally produce the SAME hash
-    for the SAME inputs so the v0.6 → v0.8 ledger merge is lossless.
+    for the SAME inputs so the legacy → ledger merge is lossless.
 
     Normalization
     -------------

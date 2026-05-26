@@ -138,13 +138,11 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         config.llm_rca_enabled = bool(options["llm_rca_enabled"])
     if "metrics_window_s" in options:
         config.metrics_window_s = int(options["metrics_window_s"])
-    # Auto-probe knobs let hosts/tests opt out of the default
-    # auth-proxy / inference-server health probes without having to
-    # configure ``health_probe_targets`` from scratch. Useful for the
-    # heartbeat tests (which run on hosts with no inference server) and
-    # for sandbox environments that audit health out-of-band.
-    if "auto_probe_auth_proxy" in options:
-        config.auto_probe_auth_proxy = bool(options["auto_probe_auth_proxy"])
+    # Auto-probe knob lets hosts/tests opt out of the default
+    # inference-server health probe without having to configure
+    # ``health_probe_targets`` from scratch. Useful for the heartbeat
+    # tests (which run on hosts with no inference server) and for
+    # sandbox environments that audit health out-of-band.
     if "auto_probe_inference_server" in options:
         config.auto_probe_inference_server = bool(
             options["auto_probe_inference_server"]

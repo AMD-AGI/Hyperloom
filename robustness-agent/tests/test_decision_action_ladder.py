@@ -406,18 +406,6 @@ async def test_geak_budget_starvation_escalates_no_prune():
     assert IntentType.PRUNE_BRANCH not in types
 
 
-async def test_auth_proxy_unhealthy_escalates_to_ensure_script():
-    ladder = ActionLadder()
-    out = await ladder.decide(
-        [_sym("auth_proxy_unhealthy", SymptomSeverity.HIGH,
-              evidence={"url": "http://127.0.0.1:4002/health"},
-              subject={"url": "http://127.0.0.1:4002/health"})],
-        tick_index=0, now_unix=1.0,
-    )
-    esc = next(i for i in out.intents if i.type is IntentType.ESCALATE_STRATEGY_CHANGE)
-    assert "ensure_auth_proxy.sh" in esc.payload["next_action_hint"]
-
-
 async def test_kernel_opt_no_progress_prunes_and_escalates():
     ladder = ActionLadder()
     out = await ladder.decide(

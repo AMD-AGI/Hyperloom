@@ -1275,10 +1275,10 @@ def collect_capability_summary(
         state.get("cumulative_gain_validated")
     )
 
-    # v0.8 M3 — merged explore action capability row (KB_design §3.4 +
+    # merged explore action capability row (KB_design §3.4 +
     # §3.12 §4.2 "兼容 alias"). The backends / params / validate_stack
-    # rows stay alongside to keep v0.6 resume reports readable. On a
-    # pure v0.8 session those legacy rows will be ``not_attempted`` while
+    # rows stay alongside to keep legacy resume reports readable. On a
+    # pure session those legacy rows will be ``not_attempted`` while
     # ``explore`` carries the activity.
     explore = _capability_for_action(state, "explore")
     explore_search = state.get("explore_search") or {}
@@ -1304,21 +1304,21 @@ def collect_capability_summary(
             explore_search.get("winners_history") or []
         )
 
-    # v0.8 §3.12 §4.2 — specialist sub-agent capability row. Counts
+    # specialist sub-agent capability row. Counts
     # are derived from ``specialist_rounds`` so they always agree with
     # ``specialist_runs`` (Inv-12.2 single source).
     specialist_row = _specialist_capability_row(state)
     return {
         "geak":           geak_cap,
         "oob":            oob_cap,
-        # v0.8 M3 — primary row; backends/params/validate_stack are
+        # primary row; backends/params/validate_stack are
         # kept as compatibility aliases.
         "explore":        explore,
         "backends":       backends,
         "params":         params,
         "sweep":          sweep_cap,
         "validate_stack": validate,
-        # v0.8 §3.12 §4.2 — sub-agent visibility row.
+        # sub-agent visibility row.
         "specialist":     specialist_row,
     }
 
@@ -2363,7 +2363,7 @@ def collect_critic_robustness(
                 "workdir": _rel(iter_dir, session_dir) or str(iter_dir),
             })
 
-    # v0.8 §3.12 §4.4 — kb_writes_summary mirrors the critic-agent's
+    # kb_writes_summary mirrors the critic-agent's
     # ``commit-review`` output count, grouped by verdict. Source is
     # the same ``critic-workdir/<iter>/review.json`` we already
     # parsed above so we don't re-read the disk.
@@ -2380,7 +2380,7 @@ def _critic_kb_writes_summary(
     critic_iters: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Build the ``critic_robustness.kb_writes_summary`` sub-block
-    (KB_design §3.12 §4.4).
+.
 
     Counts each iteration's verdict; downstream dashboards group on
     ``by_verdict`` to render the KEEP / REVERT / NEEDS_INFO mix.
@@ -2596,7 +2596,7 @@ def collect_telemetry(
         "system_profile_paths": [_rel(p, session_dir) or str(p) for p in _scan_system_profiles(session_dir)],
         "server_log_paths":     [_rel(p, session_dir) or str(p) for p in _scan_server_logs(session_dir)],
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
-        # v0.8 M6 (KB_design §3.7 + §3.12 §4.5) — per-lane occupancy
+        # per-lane occupancy
         # / capacity summary derived from the leases DB. Sits in the
         # telemetry section so cross-cluster dashboards can chart
         # lane usage alongside GPU power / temperature.
@@ -2620,7 +2620,7 @@ def _action_family(action: str) -> str:
         return "sweep"
     if s == "validate_stack":
         return "validate"
-    # v0.8 M3 — merged explore action (KB_design §3.4). Bucketed into
+    # merged explore action. Bucketed into
     # its own ``explore`` family so the attribution table can show a
     # single row that subsumes the legacy backends + params buckets.
     if s == "explore":
@@ -2729,8 +2729,8 @@ def collect_attribution(
     family_totals: dict[str, float] = {
         "kernel": 0.0, "backends": 0.0, "params": 0.0,
         "sweep": 0.0, "validate": 0.0, "other": 0.0,
-        # v0.8 M3 — explore family (subsumes backends+params on v0.8
-        # sessions; legacy buckets stay populated on v0.6 resume).
+        # explore family (subsumes backends+params on v0.8
+        # sessions; legacy buckets stay populated on legacy resume).
         "explore": 0.0,
     }
     for e in entries:
@@ -2773,7 +2773,7 @@ def collect_attribution(
             "cum_gain_after)."
         )
 
-    # v0.8 M7 (KB_design §3.12 §4.6 + §3.13 M7 §6) — per-phase gain
+    # per-phase gain
     # breakdown. Cross-references the optimization_stack with the
     # phase_history timestamps so each KEEP'd entry is bucketed into
     # the phase that was active at its acceptance time. EXPLORE
@@ -2787,9 +2787,9 @@ def collect_attribution(
         "source_breakdown": {
             "geak_pct_of_total":     round(geak_total, 2),
             "oob_pct_of_total":      round(oob_total, 2),
-            # v0.8 M3 — primary row.
+            # primary row.
             "explore_pct_of_total":  round(family_totals.get("explore", 0.0), 2),
-            # Legacy bucket aliases — preserved for v0.6 resume reports.
+            # Legacy bucket aliases — preserved for legacy resume reports.
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total":   round(family_totals.get("params", 0.0), 2),
             "sweep_pct_of_total":    round(family_totals.get("sweep", 0.0), 2),
@@ -3034,7 +3034,7 @@ def collect_source_files(
 
 
 # ---------------------------------------------------------------------------
-# §16 Phase segments — v0.8 M2 phase state machine (KB_design §3.2 + §3.12)
+# §16 Phase segments — v0.8 M2 phase state machine
 # ---------------------------------------------------------------------------
 def collect_phase_segments(
     state: dict[str, Any],
@@ -3128,7 +3128,7 @@ def collect_phase_segments(
 
 
 # ---------------------------------------------------------------------------
-# §15 KB Provenance — Cortex KB integration audit (v0.8 M1)
+# §15 KB Provenance — Cortex KB integration audit
 # ---------------------------------------------------------------------------
 def collect_kb_provenance(
     session_dir: Path,
@@ -3166,7 +3166,7 @@ def collect_kb_provenance(
         pr_monitor_status_json as _pr_status_path,
     )
 
-    # v0.8 §3.6 + KB_gaps/Gap-02 — surface PR Monitor reachability
+    # v0.8 §3.6 + surface PR Monitor reachability
     # snapshot written at cli boot. We use ``warnings`` (top-level
     # breakdown.warnings) rather than a dedicated section so the
     # operator can grep for ``pr_monitor`` regardless of the schema
@@ -3230,7 +3230,7 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
-    # v0.8 M4 — ``points_created[]`` aggregation (KB_design §3.12 §4.4 +
+    # ``points_created[]`` aggregation (KB_design §3.12 §4.4 +
     # §3.13 M4 §4). We walk the *full* audit log (not just the tail) so
     # one entry per (canonical_id, kind) is exposed even on long
     # sessions; ``set`` dedups in case the same point was re-proposed
@@ -3239,7 +3239,7 @@ def collect_kb_provenance(
     # ``pr_node`` rows (M4) are distinguishable from
     # ``optimization_node`` / ``workload_node`` / ``issue_node``.
     #
-    # KB_gaps/Gap-08 — same walk also aggregates verify outcomes into
+    # same walk also aggregates verify outcomes into
     # ``edges_promoted`` / ``edges_negated`` lists so the breakdown
     # reader can answer "which edges did this session promote /
     # refute?" without re-parsing NDJSON. We look for both async
@@ -3362,13 +3362,13 @@ def collect_kb_provenance(
         },
         "audit_tail_count":     len(audit_tail),
         "audit_status_counts":  status_counts,
-        # v0.8 M4 — full session points-created roll-up (KB_design §3.12
+        # full session points-created roll-up (KB_design §3.12
         # §4.4). Sorted by canonical_id for stable diffing.
         "points_created":        sorted(
             points_created, key=lambda r: r.get("canonical_id", ""),
         ),
         "points_by_kind":        points_by_kind,
-        # KB_gaps/Gap-08 / KB_design §3.12 §4.4 — per-edge T3
+        # KB_gaps/Gap-08 / per-edge T3
         # verify roll-up. Sorted for stable diffing.
         "edges_promoted":        sorted(edges_promoted),
         "edges_negated":         sorted(edges_negated),
@@ -3410,7 +3410,7 @@ def _collect_flusher_status(
 ) -> dict[str, Any]:
     """Merge ``.kb_flusher_status.json`` (boot marker) with a live
     ``kill -0 $pid`` probe so the breakdown reader sees one stable
-    shape (KB_gaps/Dead-E §6).
+    shape.
     """
     base: dict[str, Any] = {
         "enabled":       False,
@@ -3461,7 +3461,7 @@ def _collect_flusher_status(
 
 
 # ---------------------------------------------------------------------------
-# v0.8 §3.12 §4.3 — specialist_runs section
+# specialist_runs section
 # ---------------------------------------------------------------------------
 def collect_specialist_runs(
     session_dir: Path,
@@ -3472,7 +3472,7 @@ def collect_specialist_runs(
 ) -> list[dict[str, Any]]:
     """Build the ``specialist_runs`` breakdown section.
 
-    Two data sources merge here (KB_design §3.12 §4.3):
+    Two data sources merge here:
 
     1. ``state.json.specialist_rounds[]`` — per-round summary the
        Coordinator writes after every EXPLORE specialist dispatch.

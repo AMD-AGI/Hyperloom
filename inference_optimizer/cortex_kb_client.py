@@ -1329,7 +1329,7 @@ class CortexKBClient:
         """T3 — record an attempt as a propose_point with
         ``kind=attempt_node`` (unregistered KB kind; pass-through).
 
-        Async per KB_design §3.6: always enqueues NDJSON; the flusher
+        Async per always enqueues NDJSON; the flusher
         (or T4 drain) replays as a single ``propose_point`` HTTP call.
 
         ``outcome ∈ {"PASS", "FAIL", "PARTIAL"}``.
