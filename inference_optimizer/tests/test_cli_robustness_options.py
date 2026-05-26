@@ -63,8 +63,7 @@ def test_single_node_passes_server_url_and_llm_rca():
 def test_multi_node_disables_inference_probe():
     """``nodes >= 2`` → auto-probe-inference-server gets False so the
     runtime CLI does NOT append ``http://127.0.0.1:8888/health`` to
-    ``probe_targets``. ``auto_probe_auth_proxy`` is intentionally
-    NOT touched (auth-proxy is local even on multi-node)."""
+    ``probe_targets``."""
     opts = _build_robustness_options(_ns(nodes=2))
     assert opts == {
         "auto_probe_inference_server": False,
@@ -133,8 +132,7 @@ def test_nodes_zero_or_none_treated_as_single_node():
 def test_resolve_choice_single_node_default_keeps_agent():
     """Default path on single-node must stay ``"agent"`` so the
     real LocalProbe coverage is preserved on hosts where the
-    inference server / auth-proxy / ray actually live in the
-    sandbox container."""
+    inference server / ray actually live in the sandbox container."""
     ns = _ns(nodes=1, robustness_backend=None)
     assert _resolve_robustness_choice(ns) == "agent"
 
