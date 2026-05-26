@@ -65,3 +65,7 @@ inference_optimizer/remain_robustness_todo.md
 !docs/test-baselines/*.log
 !docs/integration/*.log
 !docs/integration/logs/*.log
+
+# claude files
+*.claude
+CLAUDE.md
