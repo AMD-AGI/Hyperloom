@@ -288,65 +288,29 @@ Coordinator hasn't fired yet. PolicyGate
 within `INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC`
 (default 1800s).
 
-## Integration Freeze (active 2026-05-24 → tag `f3-done`)
+## Retired modules and rules (do not re-introduce)
 
-This branch is in a managed integration phase against `origin/main`
-(roofline-v2 PR #288 + framework-agent PR #280). Until tag `f3-done`
-exists, the rules below apply to anyone (humans **and** LLM agents)
-touching this repository.
+These orchestrator modules were intentionally removed; the
+`actions/_meta/*.yaml` registry + `_grid_runner.py` + specialist-first
+EXPLORE flow replaced them. Re-adding them re-creates conflicting
+decision paths:
 
-### What you MUST NOT do
+- `orchestrator/backends.py` (the action-routing one — distinct from
+  the LLM-adapter directory `orchestrator/backends/`)
+- `orchestrator/params.py`
+- `orchestrator/validate_stack.py`
+- `orchestrator/scoring.py`
 
-- **Do NOT** `git merge origin/main` directly. Use the cherry-pick
-  path documented in `plan_roofline_framework/F{0,1,2,3}_*.MD`. The
-  authoritative dry-run conflict map is
-  `docs/integration/dryrun_unmerged_*.log`.
-- **Do NOT** re-introduce `backends.py` / `params.py` /
-  `validate_stack.py` / `scoring.py`. They are intentionally deleted
-  (KB_design §3.4 / §3.9 / KB_gaps/Gap-10). See
-  `docs/integration/MUST_PRESERVE.md` for the full v0.8-asset list.
-- **Do NOT** add a `framework_pr first-explore priority` rule to
-  `system_prompts/orchestration.md`. It conflicts with **IR-4**
-  specialist-first contract. F2 absorbs the framework-agent
-  capability into `serving_specialist`'s `framework_pr_scout`
-  sub_kind instead — see
-  `docs/integration/MAIN_FEATURES_DROPPED.md` §3.
-- **Do NOT** add a `sequence_denial` rule that consumes
-  `backends_attempts` / `params_attempts` fields. v0.8 has no
-  writers for those zombies; the denial would be permanently true
-  and lock `kernel_opt` forever. F3-5 ships the v0.8 replacement
-  (`explore_attempts_minimum_before_kernel_opt`).
+Related rules that look reasonable but break things:
 
-### What you MAY do
-
-- New work that touches Coordinator / SharedState / PolicyGate must
-  rebase atop the F0 scaffolding commits (see tag
-  `pre-roofline-merge`..HEAD): placeholder `roofline_snapshot_id`
-  / `last_trace_analyze` / `roofline_saturation_history` fields,
-  the `TraceAnalyzeSnapshot` reader, EXPLORE/KERNEL/CLOSE allowlist
-  `roofline` placeholder, and the 5 F1/F2/F3 toggles
-  (`use_roofline_composite` / `framework_agent_enabled` /
-  `deny_direct_profile` / `gain_driven_kernel_opt` /
-  `roofline_saturation_advisory`).
-- Use the toggles to gate F1/F2/F3 features. All five default to
-  `False` — runtime behaviour at `f0-done` is identical to
-  `pre-roofline-merge`.
-
-### References
-
-- `plan_roofline_framework/README.md` — index + cherry-pick modes
-- `plan_roofline_framework/F{0,1,2,3}_*.MD` — phase playbooks
-- `docs/integration/MUST_PRESERVE.md` — v0.8 features that must
-  survive integration; `check_preserved.sh` enforces it
-- `docs/integration/MAIN_FEATURES_DROPPED.md` — main features
-  intentionally dropped, with replacement strategies
-- `docs/integration/dryrun_unmerged_*.log` — original conflict map
-- `docs/test-baselines/pre_roofline_merge_*.log` — 1624 passing baseline
-- `docs/test-baselines/known_failed_*.txt` — 5 pre-existing
-  failures that do NOT count against any phase verdict
-- Tag `pre-roofline-merge` — rollback anchor (last commit before F0)
-- Tags `f0-done` / `f1-done` / `f2-done` / `f3-done` — phase
-  completion anchors (each is its own rollback target)
+- **No `framework_pr first-explore priority` rule** in
+  `system_prompts/orchestration.md` — conflicts with **IR-4**.
+  Framework-agent is invoked via `serving_specialist`'s
+  `framework_pr_scout` sub_kind.
+- **No `sequence_denial` rule** consuming `backends_attempts` /
+  `params_attempts` — those fields have no writers and would
+  permanently deny `kernel_opt`. Use
+  `explore_attempts_minimum_before_kernel_opt`.
 
 ## Setup
 

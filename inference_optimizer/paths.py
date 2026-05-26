@@ -115,7 +115,7 @@ _WORKSPACE_SKELETON: tuple[str, ...] = (
     "runtime",                 # pod-local env files (kernel-agent.env.sh, etc.)
     "runtime/source-mirrors",  # writable mirrors of GEAK / OOB / TraceLens sources
     "runtime/geak-config",     # generated litellm config consumed by GEAK CLI
-    # v0.8 M1 — Cortex KB integration. Holds the per-session ``.kb_sid`` /
+    # Cortex KB integration. Holds the per-session ``.kb_sid`` /
     # ``.kb_warm.json`` / ``.kb_pitfalls.json`` / ``.kb_pending.ndjson`` /
     # ``.kb_flushed.ndjson`` / ``.kb_dead_letter.ndjson`` / ``.kb_audit.jsonl``
     # / ``.kb_flusher.pid`` files described in KB_design §3.6 + §3.13 M1.

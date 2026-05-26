@@ -1,4 +1,4 @@
-"""CLI entry — DESIGN v0.6 §22.
+"""CLI entry
 
 Usage::
 
@@ -508,8 +508,8 @@ def _seed_shared_state(
     *,
     session_id: str,
 ) -> SharedState:
-    # v0.8 M5 — research_lane capacity is locked here for the lifetime
-    # of the session (KB_design §3.7 §4.4). Clamp to [0, 32]; emit a
+    # research_lane capacity is locked here for the lifetime
+    # of the session. Clamp to [0, 32]; emit a
     # warning when the operator opts into the high end (LLM quota +
     # PR Monitor load risk per §3.14 R-07).
     research_lane_capacity = int(
@@ -522,8 +522,8 @@ def _seed_shared_state(
             "PR Monitor load may spike. See KB_design §3.14 R-07.",
             research_lane_capacity,
         )
-    # v0.8 M7 — collect plateau threshold overrides into a single dict
-    # (KB_design §3.8 §5 + §3.13 M7 §4). Only non-None CLI overrides
+    # collect plateau threshold overrides into a single dict
+    #. Only non-None CLI overrides
     # land in the dict; absent keys fall through to the
     # ``DEFAULT_PLATEAU_*`` library constants at phase-compute time.
     plateau_overrides: dict[str, Any] = {}
@@ -678,12 +678,12 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 # ``validate_stack`` registrations have been removed alongside
 # PolicyGate's ``action_deprecated`` rule. The merged ``explore``
 # action subsumes the per-variant KEEP/REVERT plus the per-KEEP stack
-# rebench (KB_design §3.4 §4.4); validate_stack is no longer a
+# rebench; validate_stack is no longer a
 # standalone action.
 #
 # The legacy executor Python modules (``action_executors/backends.py``,
 # ``params.py``, ``validate_stack.py``) have been physically deleted
-# from the tree. The v0.6 resume audit trails (``backends_attempts``
+# from the tree. The legacy resume audit trails (``backends_attempts``
 # etc.) keep their meaning on disk so legacy session resumes still
 # render correctly. New sessions never see these action names because
 # PolicyGate denies them with ``rule='action_deprecated'`` before a
@@ -700,14 +700,14 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, optionally shells out to
     # ``rocm-smi --gpureset``. See
     # ``orchestrator/action_executors/recover.py``. ``validate_stack``
-    # has been retired (KB_design §3.4) and is intentionally absent.
+    # has been retired and is intentionally absent.
     "recover":           recover_executor,
 }
 
 # Real executors enabled only when kernel-mode is on (profile only
 # feeds kernel-opt and would burn lanes for nothing in --no-kernel).
 # The composite ``roofline`` action is registered separately by
-# ``_register_executors`` below — it is the v0.8 successor to the
+# ``_register_executors`` below — it is the legacy successor to the
 # retired ``pmc_roofline`` action and is wired even in --no-kernel
 # when the toggle is on.
 _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
@@ -744,7 +744,7 @@ def _build_specialist_executor(
     :class:`SpecialistSubprocessDispatcher` so each specialist runs in
     a fresh ``claude`` subprocess inside a per-task git worktree
     (``runs/specialist/<task_id>/worktree/``). The
-    ``--specialist-dispatch-mode`` flag can fall back to the v0.8 M5
+    ``--specialist-dispatch-mode`` flag can fall back to the legacy M5
     in-process :class:`ClaudeBackend` path (used by tests + when the
     ``claude`` binary is missing from $PATH).
 
@@ -836,7 +836,7 @@ def _build_specialist_executor(
         )
     else:
         def _backend_factory(domain: Any) -> Any:
-            # KB_design §3.5 §6 — in-process Claude path (fallback).
+            # in-process Claude path (fallback).
             return ClaudeBackend(
                 model=claude_model, max_turns_default=max_turns,
             )
@@ -926,7 +926,7 @@ def _register_executors(
         ),
     )
 
-    # v0.8 §3.5 + KB_gaps/Gap-01 — register the specialist sub-agent
+    # v0.8 §3.5 + register the specialist sub-agent
     # adapter so ``delegate{action='specialist'}`` no longer hits
     # ``no_executor``. Gated by ``--research-lane-capacity`` upstream
     # (cli only passes a non-None executor when capacity > 0).
@@ -954,7 +954,7 @@ def _register_executors(
     for kind in _NOOP_KINDS_KERNEL_ONLY:
         coordinator.sub.register_executor(kind, _noop_prep)
 
-    # F1-3 (Roofline-v2 / plan_roofline_framework): the composite
+    # F1-3 (Roofline-v2 / ): the composite
     # ``roofline`` action runs profile + trace_analyze atomically and
     # surfaces analysis.md to the next orchestration tick. Gated by
     # ``SharedState.use_roofline_composite`` (F0-10 toggle, default
@@ -2414,7 +2414,7 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# v0.8 M1 — Cortex KB T0 hook (KB_design §3.6 / §3.13 M1 §5.1)
+# Cortex KB T0 hook
 # ---------------------------------------------------------------------------
 def _bootstrap_cortex_kb(
     args: argparse.Namespace,
@@ -2425,8 +2425,7 @@ def _bootstrap_cortex_kb(
 ) -> CortexKBClient:
     """Construct the :class:`CortexKBClient` and run the T0 anchor.
 
-    T0 (PRELUDE entry) sequence per KB_design §3.13 M1 §5.1:
-
+    T0 (PRELUDE entry) sequence per 
     1. ``session begin`` (sync, must succeed unless ``--degraded-kb``).
     2. ``propose-point workload_node`` (canonical: ``workload.<model>.<hw>``)
        — idempotent across sessions for the same pair.
@@ -2460,7 +2459,7 @@ def _bootstrap_cortex_kb(
         print("Cortex KB        : DISABLED (--degraded-kb)")
         return client
 
-    # v0.8 KB_gaps/Gap-12 — the cli is the *canonical* T0 entry point
+    # the cli is the *canonical* T0 entry point
     # (fail-fast banner + sys.exit on Cortex outage), but the actual
     # T0 ritual lives in :mod:`orchestrator.cortex_t0` so an SDK /
     # integration-test caller that constructs the Coordinator
@@ -2671,7 +2670,7 @@ def _stop_kb_flusher(
 
 
 # ---------------------------------------------------------------------------
-# v0.8 M4 — PR Monitor + KnowledgePlane wiring (KB_design §3.6 + §3.13 M4)
+# PR Monitor + KnowledgePlane wiring
 # ---------------------------------------------------------------------------
 def _bootstrap_knowledge_plane(
     args: argparse.Namespace,
@@ -2731,7 +2730,7 @@ def _bootstrap_knowledge_plane(
         )
         pr_reachable = True
 
-    # v0.8 §3.6 + KB_gaps/Gap-02 — record a one-shot status marker so
+    # v0.8 §3.6 + record a one-shot status marker so
     # ``breakdown.warnings`` can surface ``pr_monitor:disabled`` /
     # ``pr_monitor:unreachable`` without scraping logs. Best-effort: a
     # write failure here only loses the breakdown row, not the
@@ -2770,7 +2769,7 @@ def _reset_state_file(session_dir: Path) -> None:
 
     The backup name is ``state.json.preReset.<unix_ts>`` so multiple
     resets in the same session_dir don't clobber each other. Symbolic
-    of the operator's nuclear option (KB_design §3.10 §5.3 bottom):
+    of the operator's nuclear option:
     the Cortex KB cross-session knowledge is *not* touched here — only
     the per-session fact-layer is reset. ``Coordinator`` will reseed
     its dataclass defaults on the next ``load_or_init`` call.
@@ -3428,7 +3427,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"(was {prior_crash}) for fresh resume{override_note}"
             )
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
-        # v0.8 M1 — re-bootstrap (or pick up existing) Cortex KB session.
+        # re-bootstrap (or pick up existing) Cortex KB session.
         # Same call as the fresh-session branch; the resume rules inside
         # ``_bootstrap_cortex_kb`` (.kb_sid + state.cortex_session_id)
         # decide whether to begin a new session or reuse the prior one.
@@ -3438,7 +3437,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         kb_flusher_proc, kb_flusher_pid_path = _maybe_spawn_kb_flusher(
             args, session_dir=session_dir,
         )
-        # v0.8 M4 + KB_gaps/Gap-02 — KnowledgePlane facade. Bootstrapped
+        # KnowledgePlane facade. Bootstrapped
         # alongside the cortex client so a resumed session also gets the
         # PR Monitor + KB readonly tools wired into specialist dispatch.
         # Returns a plane that fail-soft degrades when PR Monitor or
@@ -3545,7 +3544,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _seed_shared_state(
             session_dir, args, session_id=manifest["session_id"],
         )
-        # v0.8 M1 — Cortex KB T0 anchor. Must run after the SharedState
+        # Cortex KB T0 anchor. Must run after the SharedState
         # seed (so model_name / gpu_type / framework are populated for
         # recipe_canonical_id derivation) but before Coordinator is
         # constructed (the Coordinator stores the client + threads it
@@ -3556,7 +3555,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         kb_flusher_proc, kb_flusher_pid_path = _maybe_spawn_kb_flusher(
             args, session_dir=session_dir,
         )
-        # v0.8 M4 + KB_gaps/Gap-02 — KnowledgePlane facade for specialist
+        # KnowledgePlane facade for specialist
         # sub-agents. Wraps cortex_client (already T0'd above) + a
         # PR Monitor REST client; fail-soft on either side so specialist
         # dispatch always has a non-None plane to consult.
@@ -3666,8 +3665,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # as `policy_denied` in its inbox. Tests omit this and keep the
     # legacy lenient mode for fixture paths under /tmp.
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
-    # v0.8 M2 — flip on PolicyGate R1 phase_incompatible enforcement
-    # for production runs (matches the v0.6→v0.8 strict_paths
+    # flip on PolicyGate R1 phase_incompatible enforcement
+    # for production runs (matches the legacy→v0.8 strict_paths
     # rollout). Tests construct PolicyGate directly with strict_phase
     # left at the dataclass default (False) so legacy fixtures aren't
     # broken; this env var only affects the cli boot path.
@@ -3675,7 +3674,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["INFERENCE_OPTIMIZER_STRICT_PHASE"] = "1"
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_STRICT_PHASE", None)
-    # v0.8 §3.9 — propagate the ``--legacy-action-scores`` choice so
+    # propagate the ``--legacy-action-scores`` choice so
     # ``SharedState.from_dict`` (called from anywhere — Coordinator,
     # breakdown, resume probes) handles the drop / warn behavior
     # uniformly. Default ``drop`` matches the env-unset case.
@@ -3686,7 +3685,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES"] = "warn"
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", None)
-    # v0.8 §3.10 — propagate ``--migration-mode``. SharedState.from_dict
+    # propagate ``--migration-mode``. SharedState.from_dict
     # consults this env var to decide whether a fact-layer
     # discrepancy is fatal (strict) or a downgraded WARNING (lenient).
     migration_mode = str(
@@ -3696,14 +3695,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["INFERENCE_OPTIMIZER_MIGRATION_MODE"] = "lenient"
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_MIGRATION_MODE", None)
-    # v0.8 §3.10 — ``--reset-state`` nukes the existing state.json
+    # ``--reset-state`` nukes the existing state.json
     # (backing it up to ``state.json.preReset.<unix_ts>``) so the
     # session starts blank. Done BEFORE Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir)
-    # v0.8 §3.12 — propagate ``--breakdown-include-transcripts`` so
+    # propagate ``--breakdown-include-transcripts`` so
     # any end-of-session breakdown emitted from this run picks up the
-    # inline / path-only choice (KB_design §3.12 §7 step 5).
+    # inline / path-only choice.
     transcripts_flag = str(
         getattr(args, "breakdown_include_transcripts", "false") or "false",
     ).strip().lower()
@@ -3770,7 +3769,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if not no_kernel:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
-    # v0.8 §3.5 + KB_gaps/Gap-01 — build specialist executor when the
+    # v0.8 §3.5 + build specialist executor when the
     # research_lane capacity is non-zero. ``args.research_lane_capacity``
     # is already clamped to [0, 32] by ``_seed_shared_state``; a value
     # of 0 means "degrade to M3 LLM-direct grid", and we keep
@@ -4264,12 +4263,12 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--kernel-prompt", type=str, default=None,
                       help="Override Kernel system prompt")
     # ------------------------------------------------------------------
-    # v0.8 M1 — Cortex KB integration flags (KB_design §3.13 M1, §3.6)
+    # Cortex KB integration flags
     # ------------------------------------------------------------------
     # The defaults wire Cortex *on* (matches the "Loop 1" expectation in
     # the cortex hand-off doc). ``--degraded-kb`` is a debug escape hatch
     # that fully bypasses T0/T2/T3/T4 so a fresh sandbox can reproduce
-    # the v0.6 behaviour without any KB writes. ``--cortex-kb-url``
+    # the behaviour without any KB writes. ``--cortex-kb-url``
     # overrides the env value (``CORTEX_KB_URL``) without exporting one
     # process-wide. ``--cortex-strict-fingerprint`` enforces the
     # manifest stack_fingerprint matches a recipe before warm_start is
@@ -4337,7 +4336,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "(default 50).",
     )
     # ------------------------------------------------------------------
-    # v0.8 M4 — PR Monitor REST + MCP (KB_design §3.6 §5.2 + §3.13 M4)
+    # PR Monitor REST + MCP
     # ------------------------------------------------------------------
     # ``--pr-monitor-url`` overrides the in-cluster default; the
     # marathon pod is typically in a different cluster from
@@ -4384,10 +4383,10 @@ def _build_parser() -> argparse.ArgumentParser:
             os.environ.get("PR_FEED_WINDOW_DAYS", "30") or "30"
         ),
         help="Look-back window for the PR feed warmup (days). "
-             "Default: 30 (KB_design §3.6 §5.2).",
+             "Default: 30.",
     )
     # ------------------------------------------------------------------
-    # v0.8 M5/M6 — specialist research_lane capacity (KB_design §3.7 §4.4)
+    # v0.8 M5/M6 — specialist research_lane capacity
     # ------------------------------------------------------------------
     # ``--research-lane-capacity`` locks the number of LLM specialists
     # that may run concurrently on the research_lane:
@@ -4412,16 +4411,16 @@ def _build_parser() -> argparse.ArgumentParser:
             or "4"
         ),
         help="Max concurrent LLM specialist sub-agents on the "
-             "research_lane (KB_design §3.7). 0 disables specialist "
+             "research_lane. 0 disables specialist "
              "dispatch entirely (degrades to M3 LLM-direct grid); 4 is "
              "the PR-A3 default (Arbor-into-Hyperloom); 6 is the M6 "
              "default. Range [0, 32]. Locked at session start.",
     )
     # ------------------------------------------------------------------
-    # v0.8 §3.5 / §3.13 M5 + KB_gaps/Gap-01 — specialist sub-agent
+    # v0.8 §3.5 / §3.13 M5 + specialist sub-agent
     # backend selection. Specialists run via Claude (default) and inherit
     # the orchestration model unless overridden. Per-task turn / time
-    # caps protect against runaway LLM consumption (KB_design §3.14 R-05).
+    # caps protect against runaway LLM consumption.
     # ------------------------------------------------------------------
     opt.add_argument(
         "--specialist-model",
@@ -4456,7 +4455,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         help="Wall-clock cap per specialist turn (default 600s). Used "
              "by the robustness stale-scan to detect stuck specialists "
-             "(KB_design §3.5 §9 / §3.13 M5 §4).",
+             ".",
     )
     # ------------------------------------------------------------------
     # PR-A2 (Arbor-into-Hyperloom): specialist dispatch shape.
@@ -4471,7 +4470,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ).strip() or "subprocess",
         help="Specialist execution shape. 'subprocess' (default) spawns "
              "a fresh `claude` CLI per task inside a per-task git worktree "
-             "for isolation (PR-A2). 'inprocess' keeps the v0.8 M5 path "
+             "for isolation (PR-A2). 'inprocess' keeps the legacy M5 path "
              "(claude-agent-sdk in the orchestrator process) for tests / "
              "environments without the claude binary.",
     )
@@ -4487,13 +4486,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "MCP servers into specialists. Default: None.",
     )
     # ------------------------------------------------------------------
-    # F0-10 — F1 / F2 / F3 integration toggles (default off).
+    # F1 / F2 / F3 integration toggles (default off).
     #
     # These flags scaffold the upcoming roofline-v2 (PR #288) +
     # framework-agent (PR #280) integration. F0 lands them at default
     # ``False`` so behaviour matches tag ``pre-roofline-merge``; each
     # subsequent F-step (F1 / F2 / F3) flips one or more on after its
-    # smoke gate passes. See plan_roofline_framework/{F1,F2,F3}_*.MD.
+    # smoke gate passes. See /{F1,F2,F3}_*.MD.
     #
     # Mirrored into ``SharedState.{use_roofline_composite,
     # framework_agent_enabled, deny_direct_profile, gain_driven_kernel_opt,
@@ -4620,10 +4619,10 @@ def _build_parser() -> argparse.ArgumentParser:
              "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
     )
     # ------------------------------------------------------------------
-    # v0.8 §3.9 — drop scoreboard (KB_design §3.9 §7)
+    # drop scoreboard
     # ------------------------------------------------------------------
-    # v0.8 retires the v0.6 ``action_scores`` decision system. The
-    # flag below controls how a resumed v0.6 session's leftover
+    # v0.8 retires the legacy ``action_scores`` decision system. The
+    # flag below controls how a resumed session's leftover
     # scoreboard data is handled:
     #
     # * ``drop`` (default): silently strip ``action_scores`` /
@@ -4645,15 +4644,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.environ.get(
             "INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", "drop",
         ).strip() or "drop",
-        help="Resume-mode handling of the v0.6 scoreboard "
+        help="Resume-mode handling of the legacy scoreboard "
              "(``action_scores`` and friends). 'drop' (default) "
              "silently discards. 'warn' logs a WARNING + adds a "
              "breakdown.warnings entry. KB_design §3.9 §7.",
     )
     # ------------------------------------------------------------------
-    # v0.8 §3.10 — SharedState evolution (KB_design §3.10 §5.3, §7.6)
+    # SharedState evolution
     # ------------------------------------------------------------------
-    # ``--migration-mode`` controls how non-fatal v0.6 → v0.8 migration
+    # ``--migration-mode`` controls how non-fatal schema migration
     # discrepancies are surfaced:
     #
     # * ``strict`` (default): a missing fact-layer field (baseline_tput
@@ -4667,7 +4666,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ``--reset-state`` is the nuclear option: when set, the existing
     # ``state.json`` is backed up to ``state.json.preReset.<ts>`` and
     # the session starts fresh. Cortex KB cross-session knowledge is
-    # untouched (KB_design §3.10 §5.3 bottom).
+    # untouched.
     opt.add_argument(
         "--migration-mode",
         dest="migration_mode",
@@ -4676,7 +4675,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.environ.get(
             "INFERENCE_OPTIMIZER_MIGRATION_MODE", "strict",
         ).strip() or "strict",
-        help="Strictness of the v0.6 → v0.8 state.json migration. "
+        help="Strictness of the legacy → v0.8 state.json migration. "
              "'strict' (default) aborts on fact-layer field loss; "
              "'lenient' logs WARNING and continues. KB_design §3.10 §5.3.",
     )
@@ -4691,7 +4690,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "KB_design §3.10 §5.3.",
     )
     # ------------------------------------------------------------------
-    # v0.8 §3.12 — observability (KB_design §3.12 §7 step 5)
+    # observability
     # ------------------------------------------------------------------
     # ``--breakdown-include-transcripts`` controls whether the per-task
     # specialist transcript bodies are inlined under
@@ -4712,7 +4711,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "only (false, default). KB_design §3.12 §7.",
     )
     # ------------------------------------------------------------------
-    # v0.8 M7 — plateau threshold tuning (KB_design §3.8 §5 + §3.13 M7 §4)
+    # plateau threshold tuning
     # ------------------------------------------------------------------
     # These flags swap the library default plateau thresholds for the
     # ``compute_plateau_explore`` / ``compute_plateau_kernel`` pure
@@ -4727,7 +4726,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="EXPLORE plateau: max cumulative KEEP-gain (%%) across the "
              "lookback window below which the AND condition fires. "
-             "Default 0.5 (KB_design §3.8 §5.1).",
+             "Default 0.5.",
     )
     opt.add_argument(
         "--plateau-explore-empty-streak",
@@ -4753,7 +4752,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="KERNEL plateau: consecutive REVERT / NEEDS_REVIEW integrate "
              "attempts to count as plateau (one half of the OR). "
-             "Default 3 (KB_design §3.8 §5.2).",
+             "Default 3.",
     )
     opt.add_argument(
         "--plateau-kernel-keep-gain",
@@ -4821,7 +4820,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "continue_explore is coerced to advance_to_kernel.",
     )
     # ------------------------------------------------------------------
-    # v0.8 M2 — phase budget percentages (KB_design §3.2 §8.5, §3.8 §5.3)
+    # phase budget percentages
     # ------------------------------------------------------------------
     # Each phase claims a fraction of the total wall-clock budget. The
     # numbers below are caps — the Coordinator may exit a phase earlier

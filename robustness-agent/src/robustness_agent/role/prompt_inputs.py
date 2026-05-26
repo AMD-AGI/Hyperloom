@@ -1,6 +1,6 @@
 """Parse Coordinator-rendered prompts and inbox.jsonl into ReactorContext.
 
-The Coordinator's ``_compose_prompt`` (DESIGN v0.6 §8.3) emits a
+The Coordinator's ``_compose_prompt`` () emits a
 deterministic two-section text:
 
     === Shared session state ===
