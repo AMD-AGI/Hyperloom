@@ -1,4 +1,4 @@
-"""SQLite WAL atomic storage backend (DESIGN v0.6 §3.5 / §13.1 / ADR-42).
+"""SQLite WAL atomic storage backend ().
 
 Single ``$SESSION_DIR/storage/coordinator.db`` consolidates 4 tables:
 

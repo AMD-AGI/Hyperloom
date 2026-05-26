@@ -53,7 +53,7 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # ``validate_stack`` names have been removed — PolicyGate's
     # ``action_deprecated`` rule denies them at the intent boundary
     # with a structured replacement hint (KB_design §3.4 / §3.13 M3
-    # §PR7). The executor modules stay in the tree so v0.6 resume
+    # §PR7). The executor modules stay in the tree so legacy resume
     # paths still find their per-action audit fields (Inv-10.1).
     "explore",
     # PR-A1 (Arbor-into-Hyperloom): ``specialist`` is the LLM sub-agent
@@ -81,7 +81,7 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis", "baseline",
     # explore (no profile — it only feeds kernel-opt)
     #
-    # Legacy backends/params/validate_stack removed in v0.8 M3 /
+    # Legacy backends/params/validate_stack removed in the legacy release /
     # KB_gaps/Gap-10; merged into ``explore`` which carries an
     # inlined per-KEEP stack rebench.
     "explore",
@@ -114,10 +114,10 @@ GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
     "explore", "sweep",
 })
 
-# v0.8 M3 + KB_gaps/Dead-A — names PolicyGate's ``action_deprecated``
+# names PolicyGate's ``action_deprecated``
 # rule denies. Catalogue tag + denial hint share the same map. The
 # executors / yamls were physically deleted; the names persist only
-# in this denial surface so a v0.6 resume that emits one of these
+# in this denial surface so a legacy resume that emits one of these
 # gets a structured replacement hint instead of ``no_executor``.
 DEPRECATED_ACTIONS: dict[str, str] = {
     "backends":       "Use `explore` instead (v0.8 M3 merged it in).",
@@ -212,7 +212,7 @@ def _section_session_context(
 
 
 # ---------------------------------------------------------------------------
-# v0.8 §3.3 — phase semantics injected into the static system prompt
+# phase semantics injected into the static system prompt
 # ---------------------------------------------------------------------------
 def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
     """Render the per-phase allowed-action contract.
@@ -497,8 +497,8 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "4. (No-kernel run.) Skip profile — the Kernel agent is disabled in this run.",
         )
     lines.extend([
-        "5. **Phase-aware action selection (KB_design §3.9 Inv-9.1)**. v0.8",
-        "   retired the v0.6 ``Action scores`` block. There is no system-side",
+        "5. **Phase-aware action selection**. v0.8",
+        "   retired the legacy ``Action scores`` block. There is no system-side",
         "   priority list. Pick the next action by reading FACTS in this order:",
         "",
         "   a. **Phase + allowed actions** (the `=== Phase ===` /",
@@ -588,7 +588,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "* **RULE F4 — `policy_denial_streak` is a fact, not a lock.** When the",
         "  per-tick `Recent policy denials` block shows `streak≥2` for an",
         "  (action, rule) pair, the SAME params will keep colliding.",
-        "  v0.8 §3.9 retired the v0.6 ``locked_reason`` mirror, but the",
+        "  v0.8 §3.9 retired the legacy ``locked_reason`` mirror, but the",
         "  underlying anti-loop is unchanged: at streak≥5 the family is",
         "  auto-pruned; at streak≥10 the run stops with",
         "  ``stop_reason='policy_loop'``. Recover by omitting",
@@ -667,7 +667,7 @@ _KERNEL_OPT_PIPELINE_BODY: str = """\
 
 The three kernel-owned actions (`select_kernels`, `kernel_opt`,
 `integrate`) are picked by the LLM per the DECISION FRAMEWORK (phase
-allowed-set + gaps + KB priors); v0.8 §3.9 retired the v0.6
+allowed-set + gaps + KB priors); v0.8 §3.9 retired the legacy
 `Action scores` board, so there is no system-side priority ranking.
 The blocks below are only **payload templates** describing how to
 build the REQUEST once you have selected the action. The Coordinator
@@ -676,12 +676,12 @@ still hard-gates the obvious prerequisites (TODO 3/4 fires after a
 enforced only at the REQUEST layer for `run_optimization`, and explore
 actions are NEVER gated on it.
 
-### KERNEL-phase decision signals (KB_design §3.2 §5.3 / §3.9 §6)
+### KERNEL-phase decision signals
 
 Pick the next kernel-owned REQUEST by reading facts in this order
 (no priority ranking — v0.8 §3.9 Inv-9.1):
 
-1. **`state.gaps[]`** (KB_gaps/Gap-09) — pick a `layer='kernel'` gap
+1. **`state.gaps[]`** — pick a `layer='kernel'` gap
    whose `attempts` history still has room. Each gap row carries the
    canonical_id / symptom / severity + per-attempt outcomes; routes
    straight to the matching `kernel_id`.
@@ -945,7 +945,7 @@ def build_orchestration_prompt(
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
-        # v0.8 §3.3 — phase contract sits between the legacy v0.6
+        # phase contract sits between the legacy
         # PIPELINE & TIME BUDGET (§3, action-runtime view) and the
         # ACTIONS catalogue (§4) so the LLM sees the *policy* layer
         # before the *catalogue*.

@@ -61,10 +61,8 @@ def test_orchestration_no_kernel_md_was_removed():
 def test_critic_md_is_rules_fragment():
     """``critic.md`` is a concise rules fragment, not a full system prompt.
 
-    v0.8 §3.3 added a per-phase review-contract section to the
-    fragment, which roughly doubled the line count; the assertion now
-    caps at 60 non-empty lines to accommodate the new content while
-    still flagging accidental bloat.
+    v0.8 §3.3 added a per-phase review-contract section; issue #170 added
+    the optional Web verification block. The line cap tracks both bumps.
     """
     p = asset_system_prompts_dir() / "critic.md"
     assert p.is_file(), f"missing critic rules fragment: {p}"
@@ -74,10 +72,11 @@ def test_critic_md_is_rules_fragment():
     # 45 → 65 by N38 (the "primary per-proposal rule" section that
     # introduces the action_verdict_policy lookup as the canonical
     # source of truth), then 65 → 75 to absorb F-phase v0.8 carve-out
-    # bullets that overlap with N38's text. Future bumps require
-    # equivalent justification (new mechanism, not just adding more
-    # action names to existing lists).
-    assert len(lines) <= 75, (
+    # bullets that overlap with N38's text, then 75 → 95 by issue #170
+    # (Web verification — when/why/how to use web_search / web_fetch and
+    # the mandatory source-citation rule). Future bumps require equivalent
+    # justification (new mechanism, not just adding more action names).
+    assert len(lines) <= 95, (
         f"critic.md should be a concise fragment, got {len(lines)} non-empty lines"
     )
     assert "judge_bundle" in text
