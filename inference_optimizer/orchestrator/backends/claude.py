@@ -36,7 +36,7 @@ from ..intent_parser import (
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import BackendError, BackendTurnResult
+from .base import BackendError, BackendTurnResult, parse_call_timeout_env
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
@@ -135,7 +135,19 @@ class ClaudeBackend:
     # gateway; if the gateway is unreachable the subprocess can hang
     # on TCP for minutes, stalling the orchestrator reactor. 120s is
     # well above a normal turn (~10–30s) but bounds the worst case.
-    call_timeout_s: float = 120.0
+    #
+    # Env-var override ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`` lets
+    # operators bump this when opus-class models with a heavy orchestrator
+    # system prompt (~22 KB) and a 4-turn agentic loop consistently exceed
+    # 120 s on the AMD gateway under load. Invalid values fall back to the
+    # 120s default rather than crashing backend construction; backend
+    # boot-time refuses to die for a malformed env-var.
+    call_timeout_s: float = field(
+        default_factory=lambda: parse_call_timeout_env(
+            "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC",
+            default=120.0,
+        )
+    )
 
     # Test seams — set these to bypass SDK import / network calls.
     sdk_query_factory: Callable[..., Any] | None = None
