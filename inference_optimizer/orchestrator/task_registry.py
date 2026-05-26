@@ -1,4 +1,4 @@
-"""TaskRegistry — DESIGN v0.6 §17.4.
+"""TaskRegistry
 
 DelegatedTask state machine, persisted in the ``tasks`` table.
 

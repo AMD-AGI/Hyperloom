@@ -54,5 +54,5 @@ should fall back to a `needs_review` heartbeat (see
 
 When `commit-review` produces zero intents, the runtime appends a single
 `send_message{topic="heartbeat"}` so the Coordinator's reactor pass
-always observes signal of life — exactly the behaviour the v0.6 mock
+always observes signal of life — exactly the behaviour the mock
 adapter ships with.

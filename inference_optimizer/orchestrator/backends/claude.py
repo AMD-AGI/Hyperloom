@@ -1,4 +1,4 @@
-"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude (DESIGN v0.6 §14.2).
+"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude ().
 
 P1-5 implementation:
 
@@ -76,7 +76,7 @@ payload={{"topic":"heartbeat","body_md":"ok"}}.
 def _import_sdk() -> tuple[Any, Any, Any]:
     """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise.
 
-    Only ``claude_agent_sdk`` is supported in v0.6 — legacy
+    Only ``claude_agent_sdk`` is supported in the legacy release — legacy
     ``claude_code_sdk`` was deprecated upstream.
     """
     try:
@@ -95,7 +95,7 @@ def _import_sdk() -> tuple[Any, Any, Any]:
 
 @dataclass
 class ClaudeBackend:
-    """Production Claude backend (DESIGN v0.6 §14.2). Implements :class:`Backend`.
+    """Production Claude backend (). Implements :class:`Backend`.
 
     Args:
         model: Claude model id (e.g. ``"claude-opus-4-7"``); defaults to
