@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,8 +40,6 @@ from ..role.prompt_inputs import InboxItem, ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
-
-log = logging.getLogger(__name__)
 
 
 # Per-family payload projection. Each tuple lists the dotted keys we

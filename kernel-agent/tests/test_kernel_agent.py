@@ -88,6 +88,98 @@ def write_vendor_trace(path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+class UpdateStatusTimingTests(unittest.TestCase):
+    """Hyperloom P2-3: ``update_status`` writes ``ended_at`` +
+    ``duration_seconds`` once the run reaches a terminal state, so
+    downstream session-breakdown collectors can fill the timeline
+    event with a real wall-clock duration.
+    """
+
+    def _import_module(self):
+        # The tracelens_analysis module imports ``tracelens_skill_runner``
+        # as a sibling module, so we need the tools directory on
+        # ``sys.path`` for the import to resolve.
+        tools_dir = str(TRACE_TOOL.parent)
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "tracelens_analysis_under_test", TRACE_TOOL,
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+
+    def test_running_state_omits_ended_at_and_duration(self) -> None:
+        mod = self._import_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpd = Path(tmp)
+            log_path = tmpd / "log.txt"
+            log_path.write_text("hello\n", encoding="utf-8")
+            status_path = tmpd / "status.json"
+            mod.update_status(
+                status_path,
+                state="running",
+                current_step="discover",
+                log_path=log_path,
+                artifact_paths={},
+                run_id="tl-run-test",
+                started_at="2026-05-22T01:00:00+00:00",
+            )
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["state"], "running")
+            self.assertNotIn("ended_at", data)
+            self.assertNotIn("duration_seconds", data)
+            self.assertEqual(data["started_at"], "2026-05-22T01:00:00+00:00")
+
+    def test_succeeded_state_writes_ended_at_and_duration(self) -> None:
+        mod = self._import_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpd = Path(tmp)
+            log_path = tmpd / "log.txt"
+            log_path.write_text("done\n", encoding="utf-8")
+            status_path = tmpd / "status.json"
+            mod.update_status(
+                status_path,
+                state="succeeded",
+                current_step="done",
+                log_path=log_path,
+                artifact_paths={},
+                run_id="tl-run-test",
+                started_at="2026-05-22T01:00:00+00:00",
+            )
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["state"], "succeeded")
+            self.assertIn("ended_at", data)
+            self.assertIn("duration_seconds", data)
+            self.assertEqual(data["ended_at"], data["updated_at"])
+            self.assertIsNotNone(data["duration_seconds"])
+            self.assertGreaterEqual(data["duration_seconds"], 0.0)
+
+    def test_failed_state_writes_ended_at_and_duration(self) -> None:
+        mod = self._import_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpd = Path(tmp)
+            log_path = tmpd / "log.txt"
+            log_path.write_text("err\n", encoding="utf-8")
+            status_path = tmpd / "status.json"
+            mod.update_status(
+                status_path,
+                state="failed",
+                current_step="failed",
+                log_path=log_path,
+                artifact_paths={},
+                run_id="tl-run-test",
+                started_at="2026-05-22T01:00:00+00:00",
+                error="RuntimeError: boom",
+            )
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["state"], "failed")
+            self.assertEqual(data["error"], "RuntimeError: boom")
+            self.assertIn("ended_at", data)
+            self.assertIn("duration_seconds", data)
+
+
 class KernelAgentToolTests(unittest.TestCase):
     def test_install_help_and_dry_run_backend_flags(self) -> None:
         help_proc = subprocess.run(
@@ -121,29 +213,49 @@ class KernelAgentToolTests(unittest.TestCase):
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
-        self.assertIn('GEAK_REF="${GEAK_REF:-v3.1.0}"', install_text)
-        self.assertIn('python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"', install_text)
-        # All five GEAK v3.1.0 MCP tools must be pip-installed; minisweagent
-        # imports profiler_mcp / metrix_mcp / cross_session_memory_mcp /
-        # automated_test_discovery in addition to rag-mcp. The
-        # ``for _geak_mcp in ...; do pip install ...; done`` loop has to
-        # include all five, in any order.
+        self.assertIn('GEAK_REF="${GEAK_REF:-v3.2.0}"', install_text)
+        # pip flags are factored into `_PIP_FLAGS`; assert the core flags
+        # survive (prefix match allows future additions) and the install line
+        # references the variable.
+        self.assertIn('_PIP_FLAGS="-q --no-cache-dir', install_text)
+        self.assertIn('python3 -m pip install ${_PIP_FLAGS} "${HYPERLOOM_ROOT}/geak"', install_text)
+        # GEAK v3.2.0 ships 4 MCP tool folders; minisweagent imports
+        # profiler_mcp / cross_session_memory_mcp / automated_test_discovery
+        # in addition to rag-mcp. Metrix is consumed transitively as a
+        # PyPI dependency of profiler-mcp (no standalone metrix-mcp folder
+        # in v3.2.0). Regression-guard: install.sh must NOT pip-install a
+        # ``mcp_tools/metrix-mcp`` path (it does not exist in v3.2.0 and
+        # was causing install to fail with "File ... does not exist").
+        # We assert on the path form to allow human-readable comments that
+        # explain the v3.1.0 -> v3.2.0 removal to keep mentioning the name.
         for _mcp in (
             "rag-mcp",
             "profiler-mcp",
-            "metrix-mcp",
             "cross-session-memory-mcp",
             "automated-test-discovery",
         ):
             self.assertIn(_mcp, install_text)
+        # The actual install loop iterates over hyphenated names; v3.1.0
+        # had ``rag-mcp profiler-mcp metrix-mcp ...``. Pin the v3.2.0
+        # ordering so accidental re-adding of ``metrix-mcp`` between
+        # ``profiler-mcp`` and ``cross-session-memory-mcp`` regresses
+        # this test (the comment block above is allowed to mention
+        # ``metrix-mcp`` for human readers).
         self.assertIn(
-            'python3 -m pip install -q --no-cache-dir \\\n'
+            "for _geak_mcp in rag-mcp profiler-mcp \\\n"
+            "                    cross-session-memory-mcp automated-test-discovery; do",
+            install_text,
+        )
+        self.assertIn(
+            'python3 -m pip install ${_PIP_FLAGS} \\\n'
             '        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"',
             install_text,
         )
-        # GEAK_RAG_INDEX_DEVICE_VAL is now auto-detected: cuda when rocm-smi
-        # or torch.cuda.is_available() succeeds, else cpu. The explicit env
-        # override still wins.
+        # GEAK_RAG_INDEX_DEVICE_VAL was refactored from a single-line `:-cuda`
+        # default into an auto-detect block (rocm-smi / torch.cuda) with an
+        # explicit env override. Assert the two semantic invariants instead of
+        # the old literal: cuda remains the preferred default, and the env var
+        # can still override.
         self.assertIn('if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then', install_text)
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cuda"', install_text)
         self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cpu"', install_text)
