@@ -28,59 +28,40 @@ EXPORTER_VERSION = "session-breakdown-1.0.0"
 BREAKDOWN_FILENAME = "session_breakdown.json"
 
 
-def _load_state(
-    session_dir: Path,
-    warnings: list[str],
-) -> tuple[dict[str, Any], bool]:
+def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
     """Read ``state.json`` as a plain dict.
 
     Falls back to an empty dict (recorded as warning) so collectors can
     still surface manifest-only metadata if state is missing.
-
-    Returns ``(state_dict, present_flag)``. ``present_flag`` is True iff
-    ``state.json`` exists *and* parsed successfully.
     """
     state_path = session_dir / "state.json"
     if not state_path.exists():
         warnings.append(f"state.json missing at {state_path}")
-        return {}, False
+        return {}
     try:
-        return json.loads(state_path.read_text(encoding="utf-8")), True
+        return json.loads(state_path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"failed to parse state.json: {exc!r}")
-        return {}, False
+        return {}
 
 
-def _load_manifest(
-    session_dir: Path,
-    warnings: list[str],
-) -> tuple[dict[str, Any], bool]:
-    """Read ``manifest.json`` as a plain dict.
-
-    Returns ``(manifest_dict, present_flag)``. ``present_flag`` is True
-    iff ``manifest.json`` exists *and* parsed successfully.
-    """
+def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
     manifest_path = session_dir / "manifest.json"
     if not manifest_path.exists():
         warnings.append(f"manifest.json missing at {manifest_path}")
-        return {}, False
+        return {}
     try:
-        return json.loads(manifest_path.read_text(encoding="utf-8")), True
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"failed to parse manifest.json: {exc!r}")
-        return {}, False
+        return {}
 
 
-def _coverage_label(state_present: bool, manifest_present: bool) -> str:
-    """Map the two presence flags to the documented coverage label."""
-    if state_present and manifest_present:
-        return "full"
-    if state_present or manifest_present:
-        return "partial"
-    return "shell_only"
-
-
-def build(session_dir: Path | str, *, detail_level: str = "standard") -> dict[str, Any]:
+def build(
+    session_dir: Path | str,
+    *,
+    include_transcripts: bool | None = None,
+) -> dict[str, Any]:
     """Build a complete :class:`SessionBreakdown` for ``session_dir``.
 
     Pure function — reads from disk, never mutates state.
@@ -90,31 +71,29 @@ def build(session_dir: Path | str, *, detail_level: str = "standard") -> dict[st
                      The directory MUST contain at least ``manifest.json``
                      or ``state.json`` for any usable output; a totally
                      empty dir returns mostly-empty sections with warnings.
+        include_transcripts: when True, specialist transcripts are
+            inlined under ``specialist_runs[i].transcripts[j].body``.
+            When None (default) we consult the env var
+            ``INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1`` so
+            CLI / SDK / agent-action call sites converge through one
+            switch (KB_design §3.12 §7 step 5). Defaults to False —
+            transcripts are large and most dashboards prefer a path
+            reference.
 
     Returns:
         A dict matching :class:`schema.SessionBreakdown`.
     """
     sd = Path(session_dir).resolve()
-    # Load state + manifest into a *private* warnings buffer first so we
-    # can decide post-hoc whether to surface the "missing" lines or
-    # consolidate them into a single ``coverage: shell_only`` marker.
-    # Doing it this way keeps the partial-coverage warnings explicit
-    # (e.g. only manifest missing → one informative line) while
-    # collapsing the dual-missing case (post-orchestrator output dirs
-    # with no session state) into a single low-noise summary.
-    load_warnings: list[str] = []
-    state, state_present = _load_state(sd, load_warnings)
-    manifest, manifest_present = _load_manifest(sd, load_warnings)
-    coverage = _coverage_label(state_present, manifest_present)
-
     warnings: list[str] = []
-    if coverage == "shell_only":
-        warnings.append(
-            "coverage: shell_only — neither state.json nor manifest.json "
-            "found; emitted payload is best-effort filesystem walk only"
+    if include_transcripts is None:
+        include_transcripts = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS", "",
+            ).strip().lower() in ("1", "true", "yes")
         )
-    else:
-        warnings.extend(load_warnings)
+
+    state = _load_state(sd, warnings)
+    manifest = _load_manifest(sd, warnings)
 
     from datetime import datetime, timezone
     exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -133,20 +112,14 @@ def build(session_dir: Path | str, *, detail_level: str = "standard") -> dict[st
                                        lambda: collectors.collect_final(sd, state, warnings),
                                        warnings)
     phase_timeline    = _safe_collect("phase_timeline",
-                                       lambda: collectors.collect_phase_timeline(state, warnings, sd),
+                                       lambda: collectors.collect_phase_timeline(state, warnings),
                                        warnings)
-    # Back-fill session timing + closing-event duration once both
-    # session_meta and phase_timeline are available. ``collect_session``
-    # runs before phase_timeline and therefore can't derive the
-    # "session_started/ended from phase_timeline" fallback or fill the
-    # closing event's duration_seconds against the session end. We do
-    # that here so the two sections stay consistent.
-    try:
-        collectors.enrich_session_and_timeline(session_meta, phase_timeline, state)
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(
-            f"enrich_session_and_timeline failed: {type(exc).__name__}: {exc}"
-        )
+    phase_segments    = _safe_collect("phase_segments",
+                                       lambda: collectors.collect_phase_segments(
+                                           state, phase_timeline, warnings,
+                                       ),
+                                       warnings,
+                                       default=[])
     geak_invocations, oob_invocations = _safe_collect(
         "invocations",
         lambda: collectors.collect_kernel_invocations(sd, warnings),
@@ -182,64 +155,22 @@ def build(session_dir: Path | str, *, detail_level: str = "standard") -> dict[st
                                             warnings,
                                         ),
                                         warnings)
-    decision_journal     = _safe_collect(
-        "decision_journal",
-        lambda: collectors.collect_decision_journal(
-            sd, state, warnings, detail_level=detail_level,
-        ),
-        warnings,
-        default=[],
-    )
-    kernel_profiling     = _safe_collect(
-        "kernel_profiling",
-        lambda: collectors.collect_kernel_profiling(sd, state, warnings),
-        warnings,
-        default=[],
-    )
-    kernel_decision_path = _safe_collect(
-        "kernel_decision_path",
-        lambda: collectors.collect_kernel_decision_path(state, warnings, sd),
-        warnings,
-        default=[],
-    )
-    roofline             = _safe_collect(
-        "roofline",
-        lambda: collectors.collect_roofline(sd, warnings),
-        warnings,
-        default=[],
-    )
-
-    # Pre-assemble the breakdown payload so ``collect_data_provenance``
-    # can decide each section's ``populated`` flag without re-deriving
-    # the section dicts from disk. The provenance collector only reads
-    # the dict values + on-disk artifact existence; it never mutates the
-    # payload it receives.
-    breakdown_so_far: dict[str, Any] = {
-        "session":              session_meta,
-        "workload":             workload,
-        "baseline":             baseline,
-        "final":                final,
-        "phase_timeline":       phase_timeline,
-        "capability_summary":   capability_summary,
-        "geak_invocations":     geak_invocations,
-        "oob_invocations":      oob_invocations,
-        "kernel_lifecycle":     kernel_lifecycle,
-        "param_search":         param_search,
-        "sweep":                sweep,
-        "critic_robustness":    critic_robustness,
-        "telemetry":            telemetry,
-        "attribution":          attribution,
-        "decision_journal":     decision_journal,
-        "kernel_profiling":     kernel_profiling,
-        "kernel_decision_path": kernel_decision_path,
-        "roofline":             roofline,
-    }
-    data_provenance      = _safe_collect(
-        "data_provenance",
-        lambda: collectors.collect_data_provenance(sd, breakdown_so_far, warnings),
-        warnings,
-        default=[],
-    )
+    kb_provenance      = _safe_collect("kb_provenance",
+                                        lambda: collectors.collect_kb_provenance(
+                                            session_dir, state, manifest, warnings,
+                                        ),
+                                        warnings)
+    # v0.8 §3.12 §4.3 — specialist sub-agent dispatch records. Built
+    # from ``state.specialist_rounds`` + the on-disk transcripts so
+    # capability_summary.specialist and specialist_runs always agree
+    # (Inv-12.2 single source).
+    specialist_runs    = _safe_collect("specialist_runs",
+                                        lambda: collectors.collect_specialist_runs(
+                                            sd, state, warnings,
+                                            include_transcripts=include_transcripts,
+                                        ),
+                                        warnings,
+                                        default=[])
 
     source_files = collectors.collect_source_files(
         sd,
@@ -249,42 +180,47 @@ def build(session_dir: Path | str, *, detail_level: str = "standard") -> dict[st
          if p.get("benchmark_report_path")],
     )
 
-    # For ``shell_only`` coverage there is no actionable signal beyond
-    # the single coverage marker — every other warning emitted by the
-    # downstream collectors (image not configured, server.log missing,
-    # framework_args extraction failure, …) is a direct consequence of
-    # the absent state/manifest. Suppress them to keep the breakdown
-    # readable; consumers still know full diagnostic context from
-    # ``coverage`` itself.
-    if coverage == "shell_only":
-        warnings = [w for w in warnings if w.startswith("coverage:")]
-
     return {
         "schema_version":      SCHEMA_VERSION,
         "exported_at_utc":     exported_at,
         "exporter_version":    EXPORTER_VERSION,
-        "detail_level":        detail_level,
-        "coverage":            coverage,
 
         "session":             session_meta,
         "workload":            workload,
         "baseline":            baseline,
         "final":               final,
         "phase_timeline":      phase_timeline,
+        # v0.8 M2 — phase boundary segments with embedded action events
+        # (KB_design §3.12 §4 "phase_timeline upgrade"). Additive: v1
+        # readers keep using ``phase_timeline`` (flat); v2 readers
+        # prefer ``phase_segments``.
+        "phase_segments":      phase_segments,
+        # v0.8 §3.12 §4.2 — top-level v1-reader alias: the flat
+        # per-action timeline used to live under ``phase_timeline``
+        # in v1. Mirrors the same list so an old reader picks it up
+        # without code change.
+        "action_timeline":     phase_timeline,
         "capability_summary":  capability_summary,
         "geak_invocations":    geak_invocations,
         "oob_invocations":     oob_invocations,
         "kernel_lifecycle":    kernel_lifecycle,
         "param_search":        param_search,
+        # v0.8 §3.12 §5 — ``explore_search`` is the v2-native name for
+        # the merged ledger (KB_design §3.4). Mirror of
+        # ``param_search`` so v2 readers can switch with a one-line
+        # rename + v1 readers don't break.
+        "explore_search":      param_search,
         "sweep":               sweep,
         "critic_robustness":   critic_robustness,
         "telemetry":           telemetry,
         "attribution":         attribution,
-        "decision_journal":    decision_journal,
-        "kernel_profiling":    kernel_profiling,
-        "kernel_decision_path": kernel_decision_path,
-        "roofline":            roofline,
-        "data_provenance":     data_provenance,
+        # v0.8 M1 — Cortex KB integration audit (KB_design §3.13 M1 §4
+        # "kb_provenance"). Added as a new top-level section rather than
+        # bumping ``schema_version`` because every field is optional; the
+        # v1 reader simply ignores it.
+        "kb_provenance":       kb_provenance,
+        # v0.8 §3.12 §4.3 — specialist sub-agent dispatch records.
+        "specialist_runs":     specialist_runs,
 
         "warnings":            warnings,
         "source_files":        source_files,
@@ -318,7 +254,7 @@ def write_breakdown_json(
     session_dir: Path | str,
     *,
     output_path: Path | str | None = None,
-    detail_level: str = "standard",
+    include_transcripts: bool | None = None,
 ) -> Path:
     """Build + atomically write ``session_breakdown.json``.
 
@@ -326,6 +262,10 @@ def write_breakdown_json(
         session_dir: hyperloom session directory.
         output_path: override target path (defaults to
                      ``<session_dir>/session_breakdown.json``).
+        include_transcripts: see :func:`build` — when None the
+            ``INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1``
+            env var (set by CLI ``--breakdown-include-transcripts``)
+            decides.
 
     Returns:
         Absolute path to the written JSON file.
@@ -334,7 +274,7 @@ def write_breakdown_json(
     target = Path(output_path).resolve() if output_path else sd / BREAKDOWN_FILENAME
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    breakdown = build(sd, detail_level=detail_level)
+    breakdown = build(sd, include_transcripts=include_transcripts)
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
 
     fd, tmp = tempfile.mkstemp(
@@ -366,9 +306,135 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+def write_minimal_final_report(
+    session_dir: Path | str,
+    *,
+    output_path: Path | str | None = None,
+) -> Path:
+    """Issue-I (Saturday May 2026): cli.finally safety-net for
+    ``reports/final.md`` when the CLOSE phase sequencer never reached
+    step 1 (e.g. SIGTERM mid-tick, ``no_more_leverage`` set before any
+    EXPLORE work landed, or the report executor itself failed).
+
+    The full :class:`ReportExecutor` walks the message bus to render
+    rich highlights; this helper deliberately stays minimal (one
+    SharedState read + the breakdown json that ``cli.finally`` already
+    writes alongside) so it never raises and never blocks shutdown. The
+    output is a plain markdown summary that always documents
+    ``stop_reason`` / ``baseline_tput`` / ``current_best`` / ``last_*``
+    + a pointer to ``session_breakdown.json`` for the structured
+    detail.
+
+    Returns the absolute path written. Idempotent: never overwrites a
+    pre-existing ``reports/final.md`` (the sequencer's authoritative
+    output).
+    """
+    from ..orchestrator.shared_state import SharedState
+    from ..session_paths import reports_dir
+
+    sd = Path(session_dir).resolve()
+    target = (
+        Path(output_path).resolve()
+        if output_path
+        else reports_dir(sd) / "final.md"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target.stat().st_size > 0:
+        return target
+
+    state = SharedState.load_or_init(sd)
+    breakdown_link = sd / BREAKDOWN_FILENAME
+
+    def _fmt_attempt(d: dict[str, Any] | None, label: str) -> str:
+        if not isinstance(d, dict) or not d:
+            return f"- **{label}**: (none)"
+        ts = d.get("ts") or "-"
+        body = json.dumps(
+            {k: v for k, v in d.items() if k != "ts"},
+            sort_keys=True,
+            default=str,
+        )[:600]
+        return f"- **{label}** (`{ts}`): `{body}`"
+
+    current_best = state.current_best or {}
+    cb_action = current_best.get("action") or "-"
+    cb_tput = current_best.get("tput")
+    cb_tput_s = (
+        f"{cb_tput:.2f}" if isinstance(cb_tput, (int, float)) else "-"
+    )
+    last_sweep = state.last_sweep or {}
+    if last_sweep:
+        sw_grid = last_sweep.get("grid_size", 0)
+        sw_best = last_sweep.get("best_overall") or {}
+        sw_tput = sw_best.get("output_throughput")
+        sw_line = (
+            f"grid_size={sw_grid} "
+            f"best_tput="
+            f"{(f'{sw_tput:.2f}' if isinstance(sw_tput, (int, float)) else '-')}"
+        )
+    else:
+        sw_line = "(none)"
+
+    lines = [
+        f"# Inference Optimizer — emergency final report",
+        "",
+        "> **Auto-generated safety-net.** The CLOSE phase 5-step "
+        "sequencer did not run to completion (process exited before "
+        "phase transition, or ``report`` executor failed). For the "
+        "full audit trail open `session_breakdown.json` next to this "
+        "file.",
+        "",
+        f"- session_id     : `{state.session_id or '-'}`",
+        f"- model_path     : `{state.model_path or '-'}`",
+        f"- framework      : `{state.framework or '-'}`",
+        f"- gpu_type       : `{state.gpu_type or '-'}`",
+        f"- phase (last)   : `{state.phase or '-'}`",
+        f"- stop_reason    : `{state.stop_reason or '-'}`",
+        f"- baseline_tput  : `{state.baseline_tput:.2f}`",
+        f"- current_best   : `{cb_action}` @ `{cb_tput_s}` tok/s",
+        f"- cumul_gain     : `{state.cumulative_gain:.2f}%` "
+        f"(validated `{state.cumulative_gain_validated:.2f}%`)",
+        f"- stack_entries  : `{len(state.optimization_stack or [])}`",
+        f"- sweep summary  : {sw_line}",
+        "",
+        "## Last action attempts",
+        "",
+        _fmt_attempt(getattr(state, "last_baseline", None), "last_baseline"),
+        _fmt_attempt(getattr(state, "last_profile", None), "last_profile"),
+        _fmt_attempt(getattr(state, "last_backends", None), "last_backends"),
+        _fmt_attempt(getattr(state, "last_params", None), "last_params"),
+        _fmt_attempt(state.last_sweep, "last_sweep"),
+        "",
+        f"## Structured detail",
+        "",
+        f"See `{breakdown_link.name}` (sibling of session root) for the "
+        f"complete `phase_history` / `critic_robustness` / "
+        f"`kb_provenance` blocks.",
+        "",
+    ]
+
+    fd, tmp = tempfile.mkstemp(
+        prefix=".final.md.", suffix=".tmp", dir=str(target.parent),
+    )
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        tmp_path.write_text("\n".join(lines), encoding="utf-8")
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    log.info("emergency final report: wrote %s", target)
+    return target
+
+
 __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "build",
     "write_breakdown_json",
+    "write_minimal_final_report",
 ]

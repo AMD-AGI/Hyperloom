@@ -77,6 +77,57 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# F3-4 — saturation per direction (soft advisory feed)
+# ---------------------------------------------------------------------------
+#: Direction → list of Executive Summary table label aliases. The
+#: aliases mirror what TraceLens' analyzer emits today; missing labels
+#: degrade silently to ``0.0`` so a partial / experimental analysis.md
+#: never produces a false saturation hint.
+_SATURATION_LABEL_MAP: dict[str, tuple[str, ...]] = {
+    "compute": ("Compute %", "Compute Bound %", "Compute Bound"),
+    "memory": ("Memory %", "Memory Bound %", "Memory Bound"),
+    "host_overhead": ("Idle %", "Host Overhead %", "GPU Idle %"),
+    "comm": ("Exposed Communication %", "Communication %", "Comm %"),
+}
+
+#: Saturation threshold (%) above which the prompt-side advisory
+#: surfaces a direction. Single source of truth for the threshold so
+#: the SharedState advisory renderer + tests share one constant.
+SATURATION_ADVISORY_THRESHOLD_PCT: float = 80.0
+
+
+def derive_saturation_per_direction(analysis_md_text: str) -> dict[str, float]:
+    """Parse Executive Summary cells from analysis.md and return
+    ``{direction: saturation_pct}`` for the four canonical directions
+    (compute / memory / host_overhead / comm).
+
+    F3-4 (Roofline-v2): the resulting dict is appended to
+    :attr:`SharedState.roofline_saturation_history` after every
+    successful ``roofline`` action so the prompt advisory renderer can
+    flag directions ≥ :data:`SATURATION_ADVISORY_THRESHOLD_PCT` as
+    "diminishing returns" hints.
+
+    Soft contract: any direction whose label is missing from the
+    Executive Summary (or whose value cannot be parsed as a percentage)
+    degrades silently to ``0.0`` — an empty / partial analysis.md must
+    never produce a false saturation hint that could mis-steer the
+    LLM toward dropping a direction.
+    """
+    out: dict[str, float] = {k: 0.0 for k in _SATURATION_LABEL_MAP}
+    if not analysis_md_text:
+        return out
+    rows = _parse_executive_table(analysis_md_text)
+    for direction, aliases in _SATURATION_LABEL_MAP.items():
+        for alias in aliases:
+            raw = rows.get(alias)
+            pct = _parse_pct(raw)
+            if pct is not None:
+                out[direction] = float(pct)
+                break
+    return out
+
+
 def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
     # ``.../tracelens/analysis.md`` -> ``.../tracelens/``
     if analysis_md_path.name == "analysis.md" and analysis_md_path.parent.name:

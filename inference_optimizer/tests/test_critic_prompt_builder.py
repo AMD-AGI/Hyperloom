@@ -32,12 +32,16 @@ def test_section_headers_present(registry):
         max_minutes=120,
         rules_fragment_path=_rules_path(),
     )
+    # v0.8 §3.3 — phase review contract (§5) sits between §4 default
+    # verdict and the kernel-owned carve-out (re-numbered to §5b so the
+    # downstream "## 6/7" anchors stay stable for LLM prompt parsers).
     for header in (
         "## 1. MISSION",
         "## 2. RUN CONTEXT",
         "## 3. KNOWN ACTIONS",
         "## 4. DEFAULT VERDICT",
-        "## 5. KERNEL-OWNED CARVE-OUT",
+        "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
+        "## 5b. KERNEL-OWNED CARVE-OUT",
         "## 6. RULES",
         "## 7. OUTPUT PROTOCOL",
     ):
