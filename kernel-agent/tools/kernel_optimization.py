@@ -1022,6 +1022,18 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         "runtime_flags": runtime_flags,
         "env_vars": candidate.get("env_vars") or {},
         "kernel_params": kernel_params,
+        # PR-K: source attribution. ``launcher_source_file`` is the python
+        # @compile_ops wrapper TraceLens originally attributed the kernel
+        # to (e.g. ``aiter/ops/moe_op.py``); ``kernel_path`` above is the
+        # device source the LLM must actually rewrite (e.g.
+        # ``csrc/.../gemm_moe_ck2stages.cu``). Both fields are empty /
+        # False when the candidate was NOT promoted, so this metadata
+        # block is a non-event for vendor-style kernels whose trace
+        # source already pointed at the device file.
+        "launcher_source_file": str(candidate.get("launcher_source_file", "") or ""),
+        "source_promoted_from_launcher": bool(
+            candidate.get("source_promoted_from_launcher"),
+        ),
     }
 
 
@@ -1057,6 +1069,42 @@ def build_prompt(
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
     kernel_metadata = build_kernel_metadata(candidate, args)
+    # PR-K: source attribution note. When TraceLens originally attributed a
+    # kernel to a python ``@compile_ops`` wrapper (e.g. ``aiter/ops/moe_op.py``
+    # for ``ck_moe_stage1``) and tracelens_analysis promoted it to the device
+    # source, render a hard-rule notice at the top of the prompt so the LLM
+    # rewrites the device file and not the bypassed wrapper. Empty for
+    # un-promoted kernels — does not bloat the legacy prompt by even a byte.
+    promotion_block = ""
+    launcher_source = str(candidate.get("launcher_source_file", "") or "").strip()
+    if candidate.get("source_promoted_from_launcher") and launcher_source:
+        promotion_block = (
+            "\n>>> SOURCE ATTRIBUTION NOTE — READ FIRST <<<\n"
+            f"This kernel (`{kernel_name}`) was originally traced at the Python launcher:\n"
+            f"  {launcher_source}\n"
+            "which is a thin `@compile_ops` wrapper. The wrapper does NOT contain the\n"
+            "compute path — at runtime the `@compile_ops` decorator dispatches to a\n"
+            "JIT-compiled `.so` under `<aiter>/jit/build/module_*/` and bypasses the\n"
+            "Python wrapper entirely. Patching the wrapper has ZERO runtime effect.\n"
+            "\n"
+            "Your rewrite target is the DEVICE SOURCE shown above as `kernel_url`:\n"
+            f"  {source_file}\n"
+            "\n"
+            "Hard rules for this kernel:\n"
+            "1. DO NOT modify the Python wrapper at the launcher path above. Patches\n"
+            "   there are silently bypassed by the @compile_ops .so loader and the\n"
+            "   integrate baseline will measure -0% E2E gain followed by REVERT.\n"
+            "2. The device source may be a CODEGEN ENTRY (e.g. `gemm_moe_ck2stages.cu`)\n"
+            "   that hipcc compiles into per-(dtype, quant, act) `module_*.so` instances\n"
+            "   under `<aiter>/jit/build/`. The orchestrator clears the matching jit/\n"
+            "   build/ entries before rebuild so your patch actually takes effect on\n"
+            "   next import (no manual cache invalidation needed on your side).\n"
+            "3. Preserve function names, signatures, host entry points, and the\n"
+            "   `aiter` namespace exactly as in the original — the apply step rejects\n"
+            "   patches that drop required host entry functions or that submit a\n"
+            "   standalone `PYBIND11_MODULE` / `TORCH_LIBRARY` block absent from the\n"
+            "   target file.\n"
+        )
     # Quote the per-backend wall-clock so GEAK v3.2.0's LLM task-mode parser
     # (mini.py:435 task_extracted_mode) infers the right mode (>=120min→full,
     # else quick), instead of always seeing the OOB 60min default.
@@ -1288,6 +1336,7 @@ def build_prompt(
         f"repo: {kernel_repo}",
         f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
         f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
+        promotion_block,
         "",
         "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
         "```json",
