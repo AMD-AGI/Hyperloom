@@ -124,7 +124,7 @@ def run_t0_anchor(
           ``failed_session_begin``; downstream stays workable with
           an empty warm_start.
     * ``find_recipe`` / ``traps`` failures are *always* non-fatal
-      (KB_design §3.13 M1 §5.1 — warm_start is M5+ consumption,
+      (warm_start is M5+ consumption,
       stale data is preferable to a crashed PRELUDE).
 
     Args

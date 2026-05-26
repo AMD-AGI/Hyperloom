@@ -1,4 +1,4 @@
-"""SubAgentRunner — DESIGN v0.6 §15.
+"""SubAgentRunner
 
 Receives ``delegate{action_name, params}`` intents (after PolicyGate),
 materializes them into ``tasks`` rows, and dispatches the work.
@@ -140,7 +140,7 @@ class SubAgentRunner:
         ``running`` first — even on the "no runner" failure path —
         otherwise IllegalTransition fires.
 
-        v0.8 M6 (KB_design §3.7): when the Coordinator's concurrent
+        v0.8 M6: when the Coordinator's concurrent
         dispatcher pre-acquires the lease via ``try_acquire_many``
         (non-blocking), it passes the resulting :class:`Lease` via
         ``prebound_lease`` and the runner skips its own acquire step.
