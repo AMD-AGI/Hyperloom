@@ -820,13 +820,9 @@ class PolicyGate:
         # vllm engines on init; see _validate_sweep_singleton.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # F3-1 / F3-2 / F3-5 (): same Roofline-v2
-        # propose_action gates also apply at the delegate channel so a
-        # task is never created on the legacy ``profile`` path while
-        # the operator has the Roofline composite + deny toggles on,
-        # and so kernel_opt cannot bypass the gain-driven /
-        # explore-minimum gates by skipping propose_action entirely.
-        self._validate_roofline_composite_supersedes_profile(action_name)
+        # Same gain-driven / explore-minimum gates apply at the
+        # delegate channel so kernel_opt cannot bypass them by skipping
+        # propose_action.
         self._validate_gain_driven_kernel_opt(action_name)
         self._validate_explore_minimum_before_kernel_opt(action_name)
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
@@ -926,13 +922,6 @@ class PolicyGate:
         if action_name == EXPLORE_ACTION_NAME:
             self._validate_explore_provenance(payload)
             self._validate_explore_grid_size(payload)
-        # F3-1 (Roofline-v2 N9): deny direct ``profile`` when the
-        # operator has flipped --use-roofline-composite + --deny-direct-profile
-        # on. Forces atomic ``roofline`` use so the snapshot_id counter
-        # stays monotonic and ``last_trace_analyze.analysis_md_text`` stays
-        # aligned with the trace path it was derived from. See
-        # ``action_executors/roofline.py`` §5/§8.5 stale-cache invariant.
-        self._validate_roofline_composite_supersedes_profile(action_name)
         # F3-2 (Roofline-v2 N19c): gain-driven kernel_opt lock — until
         # cheap rounds have plateaued, kernel_opt is denied so we don't
         # spend a 30 min GPU lane on a cheap-still-earning frontier.
@@ -954,75 +943,12 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # F3-1 / F3-2 / Roofline-v2 propose_action gates
-    # (F3_policygate_advisory.MD)
-    #
-    # These three sub-rules are validated together inside
-    # :meth:`_validate_propose_action` so an out-of-the-box session
-    # (every Roofline-v2 toggle off) sees zero behavioural change. Only
-    # an operator who explicitly opts into one of the toggles trips the
-    # corresponding rule. Each helper is a no-op when its toggle is off.
+    # Propose_action sub-gates (F3 series)
     #
     # Reading order in the dispatch path:
-    #   1. _validate_roofline_composite_supersedes_profile (N9)
-    #   2. _validate_gain_driven_kernel_opt                 (N19c)
-    #   3. _validate_explore_minimum_before_kernel_opt      (F3-5)
-    #
-    # Independent toggles let operators A/B test each rule in isolation
-    # before committing to the next; this is the design rationale in
-    # README.md §3 and the reason none of the
-    # rules is hard-coded "always on".
+    #   1. _validate_gain_driven_kernel_opt                 (N19c)
+    #   2. _validate_explore_minimum_before_kernel_opt      (F3-5)
     # ------------------------------------------------------------------
-    _N9_BLOCKED_ACTIONS: frozenset[str] = frozenset({"profile"})
-
-    def _validate_roofline_composite_supersedes_profile(
-        self, action_name: str,
-    ) -> None:
-        """F3-1 (N9): deny direct ``profile`` propose_action when
-        composite is on.
-
-        Two-toggle gate: both ``use_roofline_composite`` AND
-        ``deny_direct_profile`` must be on. The second toggle is the
-        operator escape hatch — flipping ``use_roofline_composite`` on
-        first lets the LLM exercise both paths in parallel, then
-        flipping ``deny_direct_profile`` on closes the legacy path.
-
-        Defers to the phase allowlist when the action is proposed in a
-        phase that disallows it (e.g. ``profile`` in PRELUDE) — the
-        ``phase_incompatible`` rule's hint is more actionable there
-        and the LLM should learn the phase contract first.
-        """
-        if action_name not in self._N9_BLOCKED_ACTIONS:
-            return
-        ss = getattr(self, "shared_state", None)
-        if ss is None:
-            return
-        if not bool(getattr(ss, "use_roofline_composite", False)):
-            return
-        if not bool(getattr(ss, "deny_direct_profile", False)):
-            return
-        # Defer to phase_incompatible when the action is not in the
-        # current phase's allow-set (single source of truth: phase_state
-        # PHASE_ALLOWED_ACTIONS). Avoids competing denials racing for
-        # the same intent.
-        from .phase_state import PHASE_ALLOWED_ACTIONS
-        current_phase = str(getattr(ss, "phase", "") or "")
-        allowed = PHASE_ALLOWED_ACTIONS.get(current_phase)
-        if allowed is not None and action_name not in allowed:
-            return
-        raise PolicyDenied(
-            f"propose_action: action_name={action_name!r} is denied "
-            f"while --use-roofline-composite + --deny-direct-profile "
-            f"are both on; use action_name='roofline' for an atomic "
-            f"profile + trace_analyze + analysis.md snapshot.",
-            rule="n9_deny_direct_profile_when_composite_on",
-            hint=(
-                "Re-emit propose_action{action_name='roofline'} (the "
-                "composite action runs profile + trace_analyze "
-                "atomically and produces last_trace_analyze."
-                "analysis_md_text + a fresh roofline_snapshot_id)."
-            ),
-        )
 
     _N19C_HISTORY_WINDOW: int = 3
     _N19C_EPSILON_PCT: float = 0.5
