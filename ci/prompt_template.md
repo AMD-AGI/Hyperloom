@@ -44,6 +44,7 @@ Requirements:
 2. Report the session ID, log path, PID, and initial health check result.
 3. Then monitor the process every 300s, until work is done.
 
-Auth (already re-exported by kernel-agent.env.sh; for reference only):
-  SAFE_API_KEY={safe_api_key}
-  SAFE_API_BASE={safe_base_url}
+Auth: SAFE_API_KEY and SAFE_API_BASE are already exported into the sandbox env
+by kernel-agent.env.sh — read them via `os.environ.get(...)` or `$SAFE_API_KEY`
+from bash. Do NOT echo the key into logs, chat messages, manifests, or any
+file that gets uploaded to artifacts.

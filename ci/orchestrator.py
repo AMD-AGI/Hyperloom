@@ -107,8 +107,13 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         conc=merged.get("conc"),
     )
 
-    safe_api_key = os.environ.get("CLAW_API_KEY", "")
-    safe_base_url = os.environ.get("SAFE_BASE_URL", "")
+    # NOTE: SAFE_API_KEY / SAFE_BASE_URL are NOT injected into the prompt
+    # body. The previous templates leaked the key by interpolating it into an
+    # "Auth: SAFE_API_KEY={safe_api_key}" block; the agent already has those
+    # values in its sandbox env (via kernel-agent.env.sh) and does not need
+    # them rendered into the prompt text — that path landed the key into Claw
+    # session history, Actions logs, and uploaded artifacts. Keep this comment
+    # so a future contributor doesn't add the variable back without thinking.
 
     # Multi-node entries (nodes > 1) need an explicit "Task submission" block
     # describing the RayJob image / per-node resources / RDMA env so the agent
@@ -143,8 +148,6 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         gpu_type_lc=str(merged["gpu_type"]).lower(),
         target_gpu=merged["target_gpu"],
         inferenceX_data=ifx_text,
-        safe_api_key=safe_api_key,
-        safe_base_url=safe_base_url,
         # Multi-node / Hyperloom-skill knobs (defaults match legacy single-node CI).
         nodes=nodes,
         target_gain=merged.get("target_gain", 10),
