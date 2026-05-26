@@ -1,4 +1,4 @@
-"""KnowledgePlane facade — v0.8 M1+M4 (KB_design §3.6).
+"""KnowledgePlane facade — v0.8 M1+M4.
 
 Single point of contact between the Coordinator and the three
 external knowledge sources:
@@ -201,7 +201,7 @@ class KnowledgePlane:
         self.last_warnings = []
 
     # ------------------------------------------------------------------
-    # Read surface (KB_design §3.6 §4.1)
+    # Read surface
     # ------------------------------------------------------------------
     @property
     def pr_monitor_enabled(self) -> bool:
@@ -620,7 +620,7 @@ class KnowledgePlane:
         :attr:`last_warnings` so the breakdown collector can surface
         them in the ``warnings`` section.
 
-        Failure semantics (KB_design §3.13 M4 §10):
+        Failure semantics:
 
         - PR Monitor disabled (``--degraded-pr``) → ``([],
           ["pr_monitor:disabled"])``.
@@ -669,7 +669,7 @@ class KnowledgePlane:
         return prs, warnings
 
     # ------------------------------------------------------------------
-    # Write surface (KB_design §3.6 §4.2) — all writes are
+    # Write surface — all writes are
     # Coordinator-only; PolicyGate sits one call up.
     # ------------------------------------------------------------------
     def cortex_propose_point(
@@ -738,7 +738,7 @@ class KnowledgePlane:
     ) -> dict[str, Any]:
         """Mint a Cortex ``pr_node`` for a PR referenced by a specialist.
 
-        KB_design §3.6 §5.2: when a specialist puts a PR reference in
+        when a specialist puts a PR reference in
         ``specialist_done.proposal_set[i].pr_evidence``, the Coordinator
         mint it as a Cortex point so future sessions can cite the
         same canonical_id (``pr.<repo>#<number>`` or
@@ -779,7 +779,7 @@ class KnowledgePlane:
 
 
 def pr_node_canonical_id(repo: str, *, number: int = 0, sha: str = "") -> str:
-    """Derive the Cortex canonical_id for one PR (KB_design §3.6 §5.2).
+    """Derive the Cortex canonical_id for one PR.
 
     Priority: ``pr.<repo>#<number>`` when ``number`` is positive;
     otherwise ``pr.<repo>@<sha>``. Falls back to

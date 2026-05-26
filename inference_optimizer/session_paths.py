@@ -1,4 +1,4 @@
-"""Per-session path helpers (DESIGN v0.6.1 §23).
+"""Per-session path helpers ().
 
 Single source of truth for every path *inside* a session directory. The
 skeleton itself is created by :func:`paths.make_session_dir`; this module
@@ -66,7 +66,7 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # ``specialist`` is yaml-less (v0.8 M5, parameterised by
 # ``params.domain``) so it is added explicitly.
 # ``support`` was added in 2026-05 alongside the real ``recover``
-# executor (Change C of the gpu-leak-robustness-fix plan); the v0.8
+# executor (Change C of the gpu-leak-robustness-fix plan); the legacy
 # stub-action purge (Gap-13) removed the dream / re_explore /
 # comm_optimization / compiler_tuning yamls, so ``recover`` is the
 # only fallback ``support`` entry.
@@ -115,7 +115,7 @@ def _runs_actions() -> frozenset[str]:
         registry = ActionRegistry().load()
     except Exception:
         return _RUNS_ACTIONS_FALLBACK
-    # v0.8 M5 (KB_design §3.5 §10) — ``specialist`` is a synthetic action
+    # ``specialist`` is a synthetic action
     # with no yaml meta (parameterised by ``params.domain``); the
     # registry-derived path can't see it, so we always add it explicitly.
     return frozenset(
@@ -311,12 +311,12 @@ def target_analysis_report_md(session_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Cortex KB integration paths (v0.8 M1 — KB_design §3.6, §3.13 M1)
+# Cortex KB integration paths
 # ---------------------------------------------------------------------------
 # Single source of truth for every file under ``<sd>/runtime/cortex/``. The
 # directory itself is created by :func:`paths.make_session_dir`; the helpers
 # below only compute the well-known file names.  Callers MUST go through
-# these helpers (no ad-hoc string concatenation) so the v0.8 NDJSON
+# these helpers (no ad-hoc string concatenation) so the legacy NDJSON
 # protocol stays homogeneous across producers / consumers (CortexKBClient,
 # flusher daemon, breakdown collector, robustness monitor).
 def cortex_dir(session_dir: Path) -> Path:
@@ -385,7 +385,7 @@ def cortex_audit_jsonl(session_dir: Path) -> Path:
 
 def pr_monitor_status_json(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.pr_monitor_status.json`` — one-shot marker
-    written by ``cli._bootstrap_knowledge_plane`` (KB_gaps/Gap-02) with
+    written by ``cli._bootstrap_knowledge_plane`` with
     the boot-time PR Monitor reachability snapshot. Breakdown collector
     reads it to emit ``warnings`` entries like ``pr_monitor:disabled``
     or ``pr_monitor:unreachable`` so dashboards can light up on
@@ -408,7 +408,7 @@ def cortex_flusher_pid(session_dir: Path) -> Path:
 
 def cortex_flusher_status_json(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.kb_flusher_status.json`` — one-shot marker
-    written by ``cli._maybe_spawn_kb_flusher`` (KB_gaps/Dead-E) with the
+    written by ``cli._maybe_spawn_kb_flusher`` with the
     boot-time flusher spawn decision. Breakdown collector merges this
     with the live pid-file check to populate
     ``kb_provenance.flusher_status``.

@@ -11,7 +11,7 @@ two-phase loop from ``critic-agent/AGENTS.md``::
     3. python -m runtime.cli commit-review  --request request.json
        --review review.json --out emit.json
 
-That gets us the full Critic feature set the v0.6 design asks for:
+That gets us the full Critic feature set the legacy design asks for:
 
 * KB priors lookup with circuit-breaker for unreachable services
 * Per-session memory + idempotent ``reviewed_msg_ids`` (no double-verdict)
