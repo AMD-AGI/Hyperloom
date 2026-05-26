@@ -98,6 +98,20 @@ def _make_ctx(*, task_id: str, params: dict) -> SimpleNamespace:
 _ATTN_SUBSET = ["attn_aiter", "attn_triton", "decode_aiter"]
 
 
+def _single_node_default_grid_names() -> list[str]:
+    """Mirror the single-node filter applied inside the executor.
+
+    The full ``DEFAULT_BACKENDS_GRID`` includes ``note='multi_node_only_*'``
+    variants which the executor drops when ``is_multi_node()`` is False.
+    These tests run with the conftest sentinel that forces single-node, so
+    the executor's grid passed to run_grid is the subset below.
+    """
+    return [
+        v.name for v in DEFAULT_BACKENDS_GRID
+        if not (v.note or "").lower().startswith("multi_node_only")
+    ]
+
+
 def _captured_grid_from_run_grid(mock_run_grid: AsyncMock) -> list[GridVariant]:
     """Pull the `grid=` kwarg the executor passed to run_grid."""
     assert mock_run_grid.call_args is not None
@@ -136,9 +150,7 @@ class TestNoSubsetIsBackwardCompat:
         with patch.object(mod, "run_grid", new=AsyncMock(return_value=[])) as rg:
             await executor(ctx)
         passed_grid = _captured_grid_from_run_grid(rg)
-        assert [v.name for v in passed_grid] == [
-            v.name for v in DEFAULT_BACKENDS_GRID
-        ]
+        assert [v.name for v in passed_grid] == _single_node_default_grid_names()
 
     @pytest.mark.asyncio
     async def test_variants_empty_list_runs_full_grid(
@@ -160,7 +172,7 @@ class TestNoSubsetIsBackwardCompat:
         with patch.object(mod, "run_grid", new=AsyncMock(return_value=[])) as rg:
             await executor(ctx)
         passed_grid = _captured_grid_from_run_grid(rg)
-        assert len(passed_grid) == len(DEFAULT_BACKENDS_GRID)
+        assert len(passed_grid) == len(_single_node_default_grid_names())
 
 
 # ===========================================================================
