@@ -14,6 +14,7 @@ def _cfg(**overrides) -> WebToolsConfig:
     base = dict(
         critic_web_tools_enabled=True,
         search_provider="tavily",
+        tavily_api_key="test-key",
         fetch_enabled=True,
     )
     base.update(overrides)
@@ -43,6 +44,17 @@ def test_both_schemas_when_fully_enabled():
     schemas = build_tool_schemas(_cfg())
     names = [s["function"]["name"] for s in schemas]
     assert names == ["web_search", "web_fetch"]
+
+
+def test_no_search_schema_without_api_key():
+    cfg = _cfg(
+        tavily_api_key="",
+        serper_api_key="",
+        brave_api_key="",
+        fetch_enabled=True,
+    )
+    names = [s["function"]["name"] for s in build_tool_schemas(cfg)]
+    assert names == ["web_fetch"]
 
 
 def test_search_schema_required_fields():
