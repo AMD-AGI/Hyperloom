@@ -149,6 +149,36 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         config.auto_probe_inference_server = bool(
             options["auto_probe_inference_server"]
         )
+    # The ``ray status`` probe was introduced in PR #239 and runs on
+    # every tick of the agent backend. Heartbeat tests (and any host
+    # without an in-sandbox Ray head) need to disable it to keep the
+    # default heartbeat envelope clean of false-positive
+    # ``ray_head_dead`` alerts. The Coordinator wiring mirrors
+    # ``auto_probe_*`` above.
+    if "ray_probe_enabled" in options:
+        config.ray_probe_enabled = bool(options["ray_probe_enabled"])
+    # Whole-probe disable for the J ``external_deps`` signal (TraceLens
+    # CLI / WekaFS mount). Heartbeat e2e tests run on inert CI hosts
+    # where neither dependency is provisioned, so the default probe
+    # fires ``tracelens_cli_missing`` + ``wekafs_degraded`` alerts that
+    # otherwise mask the expected ``send_message{heartbeat}`` envelope.
+    if "external_deps_enabled" in options:
+        config.external_deps_enabled = bool(options["external_deps_enabled"])
+    # B3 ``no_levers_found`` floor knobs let hosts override the
+    # default 45 min / 8 tick observation window without forking the
+    # whole Config. Multi-node large-model setups need a longer floor
+    # because sglang cold start + baseline + profile + turnaround
+    # alone consume 35-50 min before any explore family runs;
+    # inference_optimizer's _build_robustness_options injects 60.0
+    # when args.nodes >= 2 (single-node defaults stay at 45.0).
+    if "progress_no_levers_min_minutes" in options:
+        config.progress_no_levers_min_minutes = float(
+            options["progress_no_levers_min_minutes"]
+        )
+    if "progress_no_levers_min_ticks" in options:
+        config.progress_no_levers_min_ticks = int(
+            options["progress_no_levers_min_ticks"]
+        )
 
     # L4 — advertise our session_dir to co-deployed Critic processes so
     # their ``prepare-review`` can find ``agents/robustness/findings/
