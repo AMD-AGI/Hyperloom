@@ -419,7 +419,11 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     assert row["to_phase"] == "PRELUDE"
     assert row["reason"] == "phase_entered"
     # Budget dict populated.
-    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.6
+    # EXPLORE budget yielded 0.03 to PRELUDE (0.05 → 0.08) when the
+    # initial roofline became a PRELUDE step instead of an EXPLORE
+    # auto-enqueue. Sum across phases remains 1.0.
+    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.57
+    assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.08
 
 
 @pytest.mark.asyncio
