@@ -383,24 +383,16 @@ def test_deprecation_fires_before_kernel_owned_check(gate):
 # 4. Supporting infrastructure parity
 # ===========================================================================
 def test_phase_explore_allowlist_drops_legacy_actions():
-    """KB_gaps/Gap-10 PR 5.1 — the EXPLORE allowlist contains only the
-    v0.8 canonical action set.
-
-    PR-A1 (Arbor-into-Hyperloom) added ``integrate_patch`` as the
-    EXPLORE-phase serving-lane-locked patch integration step (consumes
-    specialist worktree patches). IR-7 (Honest self-stop) added
-    ``assess_remaining_gaps`` as a thin wrapper that dispatches the
-    session_steward_specialist domain. Commit 8aeaa11 (cumulative_gain
-    hotfix) added ``profile`` as an LLM-proposable escape hatch for the
-    sequence-gate when ``--use-roofline-composite=False`` (with composite
-    on, ``Coordinator._on_enter_explore``'s auto-roofline hook satisfies
-    the same prereq). All three are canonical v0.8 additions, not legacy
-    re-emergences; the test below still pins out the v0.6 deprecated
-    names via ``test_full_enabled_actions_drops_legacy_grid_actions``.
+    """The EXPLORE allowlist contains only the canonical action set:
+    merged grid runner, specialist dispatch, integrate_patch,
+    assess_remaining_gaps (IR-7 self-stop wrapper), the auto-managed
+    ``roofline`` (Coordinator-enqueued on watermark crossings), and
+    ``recover``. The legacy LLM-proposable ``profile`` was retired
+    when the two-path composite/direct bifurcation was collapsed.
     """
     assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
         "explore", "specialist", "integrate_patch",
-        "assess_remaining_gaps", "profile", "recover",
+        "assess_remaining_gaps", "roofline", "recover",
     })
 
 

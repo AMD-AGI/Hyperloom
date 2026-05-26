@@ -28,15 +28,11 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # prep (2)
     "target_analysis":      "prep",
     "baseline":             "prep",
-    # analysis (2) — F1-2.5 (Roofline-v2 / plan_roofline_framework F1):
-    # ``roofline`` is the v0.8 composite action that runs profile +
-    # trace_analyze atomically and surfaces analysis.md to the next
-    # orchestration tick. It supersedes the retired ``pmc_roofline``
-    # action (PMC counter / rocprof gathering); ``profile`` stays as
-    # the legacy escape hatch (PolicyGate's N9 rule denies direct
-    # ``profile`` propose when ``--deny-direct-profile`` is on, which
-    # is the default).
-    "profile":              "analysis",
+    # analysis (1) — ``roofline`` is the composite action that runs
+    # profile + trace_analyze atomically and surfaces analysis.md to
+    # the next orchestration tick. ``profile`` is NO longer a
+    # registered action; ``profile.py`` stays as an internal helper
+    # invoked by ``roofline.py``.
     "roofline":             "analysis",
     # shallow (5) — v0.8 M3 + KB_gaps/Dead-A merged the v0.6
     # ``backends`` / ``params`` / ``validate_stack`` actions into
