@@ -44,8 +44,9 @@ from ..action_registry import (
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # analysis
-    "profile", "roofline", "deep_kernel_analysis",
+    # analysis — roofline is Coordinator-auto-enqueued (PRELUDE + watermark);
+    # not LLM-proposable. deep_kernel_analysis stays as a kernel-owned REQUEST.
+    "roofline", "deep_kernel_analysis",
     # explore
     #
     # v0.8 M3 + KB_gaps/Gap-10: the merged ``explore`` action is the
