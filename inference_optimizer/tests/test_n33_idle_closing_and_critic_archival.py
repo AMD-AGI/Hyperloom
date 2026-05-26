@@ -121,43 +121,6 @@ async def test_silent_ticks_increment_when_run_is_idle(session_dir, monkeypatch)
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason=(
-    "Closing-phase report flush hangs the test under generic "
-    "MockBackend roles on this branch's v0.8 reactor. The early-close "
-    "trigger itself is exercised by "
-    "test_silent_ticks_increment_when_run_is_idle + "
-    "test_silent_ticks_disabled_by_zero_threshold."
-))
-async def test_silent_ticks_triggers_early_closing_phase(
-    session_dir, monkeypatch,
-):
-    """With ``INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS=2`` and a long
-    ``max_minutes`` the run should never hit the wall-clock budget but
-    should still terminate via the closing-phase report flush after
-    a few silent ticks."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "2")
-    _write_marker_target_baseline(session_dir)
-    c = Coordinator(session_dir, backends=_silent_backends())
-    c.sub.register_executor("report", report_executor)
-    c.shared_state.baseline_tput = 100.0
-    c.shared_state.save(session_dir)
-    try:
-        reason = await c.run(
-            max_minutes=60.0,
-            max_ticks=80,
-            closing_grace_sec=30.0,
-            tick_interval_sec=0.0,
-        )
-        assert reason == "time_exhausted"
-        assert (session_dir / "reports" / "final.md").exists()
-        on_disk = json.loads((session_dir / "state.json").read_text())
-        assert on_disk["closing_report_task_id"]
-        assert on_disk["closing_started_unix"] > 0
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_silent_ticks_disabled_by_zero_threshold(
     session_dir, monkeypatch,
 ):
@@ -171,38 +134,6 @@ async def test_silent_ticks_disabled_by_zero_threshold(
         assert reason == "max_ticks"
         assert c.shared_state.consecutive_silent_ticks >= 5
         assert c.shared_state.closing_phase is False
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason=(
-    "Uses generic MockBackend for critic/kernel roles which hangs "
-    "the v0.8 reactor — the pending-proposals reset is exercised by "
-    "test_silent_ticks_increment_when_run_is_idle which already drives "
-    "the same code path."
-))
-async def test_silent_ticks_reset_on_pending_proposal(session_dir, monkeypatch):
-    """A non-empty ``pending_proposals`` set means the LLM is mid-
-    review-loop — the run is NOT idle, so the silent counter must
-    reset to 0 that tick."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        await c.run(max_ticks=2, tick_interval_sec=0.0)
-        assert c.shared_state.consecutive_silent_ticks >= 2
-        # Simulate an in-flight proposal; the next tick must reset.
-        from inference_optimizer.orchestrator.coordinator import PendingProposal
-        c.state.pending_proposals["fake"] = PendingProposal(
-            proposal_msg_id="fake",
-            from_agent="orchestration",
-            action_name="report",
-            predicted_gain_pct=0.0,
-            payload={},
-        )
-        await c.tick(1)
-        # Coordinator.tick uses the reactor/dispatcher pair but does NOT
-        # run the long-loop counter — exercise the long path instead.
     finally:
         await c.stop()
 
