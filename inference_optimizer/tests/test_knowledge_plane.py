@@ -183,16 +183,18 @@ class _FakePlane:
 def _make_bare_shared_state():
     """Minimal SharedState stand-in used by the EXPLORE-entry tests.
 
-    Provides only the attributes the auto-roofline freshness gate
-    reads; ``use_roofline_composite=False`` keeps the gate inert so
-    the test stays focused on the pr_feed warmup branch.
+    Provides only the attributes the EXPLORE-entry hook reads while
+    the watermark gate is dormant (``last_roofline_tput=0`` short-
+    circuits the check), so the test stays focused on the pr_feed
+    warmup branch.
     """
     from dataclasses import dataclass, field
     from typing import Any
 
     @dataclass
     class _SS:
-        use_roofline_composite: bool = False
+        baseline_tput: float = 0.0
+        last_roofline_tput: float = 0.0
         last_trace_analyze: dict[str, Any] = field(default_factory=dict)
         cumulative_gain_validated: float = 0.0
         auto_roofline_pending_task_id: str = ""
