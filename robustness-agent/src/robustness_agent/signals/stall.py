@@ -1,6 +1,6 @@
 """Agent-stall detection.
 
-DESIGN v0.6 §7.4: the robustness role is expected to detect "agent
+: the robustness role is expected to detect "agent
 stalls (>3min no message processed)" and emit medium-severity alerts.
 
 We compute the "last activity" timestamp per agent from

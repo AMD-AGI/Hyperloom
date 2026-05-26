@@ -1,4 +1,4 @@
-"""SQLite connection wrapper (DESIGN v0.6 §3.5.4 / §13.1 / ADR-42).
+"""SQLite connection wrapper ().
 
 Design choices:
 

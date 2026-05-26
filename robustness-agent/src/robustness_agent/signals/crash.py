@@ -1,6 +1,6 @@
 """Crash-count signal.
 
-DESIGN v0.6 §9.1 lets ``crash_count >= crash_emergency_threshold``
+ lets ``crash_count >= crash_emergency_threshold``
 (default 25) terminate the run with ``stop_reason=emergency``. We fire
 escalating severity well before that:
 

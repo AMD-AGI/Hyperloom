@@ -1,6 +1,6 @@
 """Coordinator-event-driven signals.
 
-Two patterns the robustness role watches per DESIGN v0.6 §7.4 / §19.3:
+Two patterns the robustness role watches per:
 
 * Repeated ``policy_denied`` observations from the same source within
   a short window indicate either a misconfigured agent or a

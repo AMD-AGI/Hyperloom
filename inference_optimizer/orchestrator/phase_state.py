@@ -1,4 +1,4 @@
-"""Phase state machine — v0.8 M2 (KB_design §3.2 + §3.8 + §3.10).
+"""Phase state machine — v0.8 M2.
 
 The Coordinator owns the run-level phase ("where are we in the optimization
 lifecycle") so that LLM-side decisions stay scoped to one phase at a time
@@ -32,14 +32,14 @@ v0.8 transition (M3 complete)
 -----------------------------
 The §3.2 design talks about ``explore`` (single merged action) and
 ``specialist`` (LLM sub-agent). M3 (``explore`` merge) and M5
-(``specialist``) have shipped; the v0.6 ``backends`` / ``params`` /
+(``specialist``) have shipped; the legacy ``backends`` / ``params`` /
 ``validate_stack`` action names are now closed at the PolicyGate
 boundary via the ``action_deprecated`` rule (KB_gaps/Gap-10 /
 KB_design §3.13 M3 §PR7). The EXPLORE allowed-action set reflects
 that — only ``explore`` / ``specialist`` / ``recover`` remain. The
 legacy executor modules and ``last_backends`` / ``backends_attempts``
-fields stay on :class:`SharedState` for v0.6 resume parity (Inv-10.1)
-but cannot be re-entered in a fresh v0.8 session.
+fields stay on :class:`SharedState` for legacy resume parity (Inv-10.1)
+but cannot be re-entered in a fresh session.
 """
 
 from __future__ import annotations
@@ -76,21 +76,21 @@ def phase_index(phase: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Phase ↔ allowed action set (KB_design §3.2 §5)
+# Phase ↔ allowed action set
 # ---------------------------------------------------------------------------
-# v0.8 view (KB_design §3.4 + §3.13 M3 §PR7 / KB_gaps/Gap-10):
+# v0.8 view:
 #
 # * EXPLORE allowlist contains the merged ``explore`` action and the
 #   ``specialist`` LLM sub-agent. The v0.6 ``backends`` / ``params`` /
 #   ``validate_stack`` are gone — PolicyGate's ``action_deprecated``
-#   rule (KB_gaps/Gap-10) denies them at the intent boundary with a
+#   rule denies them at the intent boundary with a
 #   structured replacement hint, so the LLM gets a single
 #   forward-pointing error instead of the misleading
 #   ``phase_incompatible`` "wait for the phase to advance" message.
 # * ``recover`` stays in every phase — phase-orthogonal per §3.2.
 # * ``session_breakdown`` is a CLOSE action (it materializes the
 #   report bundle). The v0.6 ``validate_stack`` rebench is now
-#   inlined into ``explore`` (KB_design §3.4 §4.4), so it disappears
+#   inlined into ``explore``, so it disappears
 #   from the EXPLORE allowlist alongside the other legacy names.
 #
 # Note: the dataclass fields ``last_backends`` / ``backends_attempts``
@@ -184,7 +184,7 @@ def allowed_actions_for(phase: str) -> tuple[str, ...]:
 
 
 # ---------------------------------------------------------------------------
-# phase_exit_reasons vocab (KB_design §3.2 §6)
+# phase_exit_reasons vocab
 # ---------------------------------------------------------------------------
 PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     # Normal exits
@@ -224,13 +224,13 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     # for breakdown collection.
     "phase_entered",
 
-    # v0.6 resume inference (lenient mapping).
+    # legacy resume inference (lenient mapping).
     "resumed_from_v06_inferred",
 })
 
 
 # ---------------------------------------------------------------------------
-# stop_reason vocab (KB_design §3.8 §6, closed enum)
+# stop_reason vocab
 # ---------------------------------------------------------------------------
 STOP_REASON_VOCAB: frozenset[str] = frozenset({
     # v0.6 sentinels — kept for backward compat (resume from old sessions).
@@ -284,7 +284,7 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
 
 
 # ---------------------------------------------------------------------------
-# Plateau judgment defaults (KB_design §3.8 §5.1 / §5.2 + §3.13 M7 §5)
+# Plateau judgment defaults
 # ---------------------------------------------------------------------------
 # Default thresholds the CLI exposes via --plateau-* flags. Kept here
 # (not in cli.py) so pure-function callers + tests can introspect the
@@ -318,7 +318,7 @@ DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:      float = 0.20
 
 
 # ---------------------------------------------------------------------------
-# escalate_strategy_change hint vocabulary (KB_design §3.8 §7.3 / §3.13 M7 §5.3)
+# escalate_strategy_change hint vocabulary
 # ---------------------------------------------------------------------------
 # Closed enum so the Coordinator + phase_state agree on which hints can
 # influence phase transitions / budgets. Unknown hints are logged but
@@ -379,7 +379,7 @@ def apply_escalate_budget_bump(
     resulting dict is suitable for assigning back into
     :attr:`SharedState.phase_budget_pct`.
 
-    KB_design §3.13 M7 §5.3 — "上限 80% (绝对值)".
+    "上限 80% (绝对值)".
     """
     phase_key = (phase or "").strip().upper()
     if phase_key not in PHASE_NAMES:
@@ -605,7 +605,7 @@ def should_force_exit_explore(
     return fired, evidence
 
 
-# ----------------------- plateau pure functions (KB_design §3.8 §5) --------
+# ----------------------- plateau pure functions --------
 def compute_plateau_explore(
     state: Any,
     *,
@@ -613,7 +613,7 @@ def compute_plateau_explore(
     keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
 ) -> tuple[bool, dict[str, Any]]:
-    """Real plateau_explore (KB_design §3.8 §5.1 + §3.13 M7 §5.1).
+    """Real plateau_explore.
 
     Returns ``(triggered, evidence)``. ``evidence`` always contains the
     decision inputs so phase_history can audit the call (even when
@@ -622,9 +622,9 @@ def compute_plateau_explore(
     Inputs (all read from :class:`SharedState`, pure):
 
     * ``explore_search.winners_history``: last K KEEP'd variants
-      (KB_design §3.4); ``gain_pct`` per row drives the
+; ``gain_pct`` per row drives the
       "recent_keep_gain" sum.
-    * ``specialist_rounds``: last K specialist rounds (KB_design §3.5);
+    * ``specialist_rounds``: last K specialist rounds;
       ``proposals_total`` + ``proposals_kept`` per row drive the
       empty-round detection.
 
@@ -666,7 +666,7 @@ def compute_plateau_explore(
     def _round_is_empty(row: Any) -> bool:
         if not isinstance(row, dict):
             return False
-        # Designed shape (KB_design §3.5): ``proposals_total`` /
+        # Designed shape: ``proposals_total`` /
         # ``proposals_kept`` (M5+); fall back to ``proposal_count``
         # for forward-compat with older round summaries.
         try:
@@ -717,7 +717,7 @@ def compute_plateau_kernel(
     revert_streak_threshold: int = DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
     keep_gain_threshold_pct: float = DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
 ) -> tuple[bool, dict[str, Any]]:
-    """Real plateau_kernel (KB_design §3.8 §5.2 + §3.13 M7 §5.2).
+    """Real plateau_kernel.
 
     Returns ``(triggered, evidence)``. Inputs (all SharedState):
 
@@ -819,7 +819,7 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     Priority order:
 
     1. ``escalate_strategy_change`` hint of ``skip_to_close`` →
-       ``robustness_escalated`` (KB_design §3.8 §7.3 / §3.13 M7 §5.3).
+       ``robustness_escalated``.
     2. Coordinator-set ``stop_reason`` (any phase, any reason).
 
     Note: ``time_exhausted`` is signalled by the existing Coordinator
@@ -890,7 +890,7 @@ def exit_normal_explore(
     force_exit_hours_remaining: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
 ) -> tuple[str, dict[str, Any]] | None:
-    """EXPLORE normal exit (KB_design §3.8 §5.1 + §3.13 M7).
+    """EXPLORE normal exit.
 
     Priority order:
 
@@ -903,10 +903,10 @@ def exit_normal_explore(
     1. ``escalate_strategy_change`` hint ``skip_to_kernel`` →
        ``plateau_explore`` (``evidence='llm_escalation'``).
     2. Real ``plateau_explore`` (:func:`compute_plateau_explore`)
-       when v0.8 signals are present (``explore_search.winners_history``
+       when signals are present (``explore_search.winners_history``
        or ``specialist_rounds``).
     3. KB_gaps/Gap-15 R-09 transitional proxy
-       (``params_no_promote_streak``) when v0.8 signals are absent
+       (``params_no_promote_streak``) when signals are absent
        AND ``disable_legacy_proxy=False``. Evidence carries
        ``r09_provisional=True`` so the breakdown collector surfaces
        a ``plateau_proxy_provisional`` warning. Operators can set
@@ -1013,7 +1013,7 @@ def exit_normal_explore(
                 "backends_accepted": backends_accepted,
                 "note": (
                     "KB_design §3.14 R-09 — legacy params_no_promote_streak "
-                    "proxy fired (v0.8 signals empty); set "
+                    "proxy fired (signals empty); set "
                     "INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1 to forbid"
                 ),
             }
@@ -1108,7 +1108,7 @@ def exit_normal_kernel(
     plateau_keep_gain_pct: float = DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
     plateau_lookback: int = DEFAULT_PLATEAU_KERNEL_LOOKBACK,
 ) -> tuple[str, dict[str, Any]] | None:
-    """KERNEL normal exit (KB_design §3.8 §5.2 + §3.13 M7).
+    """KERNEL normal exit.
 
     Priority:
 
@@ -1173,7 +1173,7 @@ def exit_normal_sweep(
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     """Pull operator-tuned plateau thresholds off SharedState.
 
-    KB_design §3.13 M7 §4: CLI flags lock plateau thresholds at
+    CLI flags lock plateau thresholds at
     session start; phase_state reads them on every tick via
     :attr:`SharedState.plateau_overrides`. Empty / missing → library
     defaults.
@@ -1287,10 +1287,10 @@ def compute_next_phase(
 
 
 # ---------------------------------------------------------------------------
-# v0.6 → v0.8 resume inference (KB_design §3.2 §8.4, §3.10 §5.2)
+# v0.6 → legacy resume inference
 # ---------------------------------------------------------------------------
 def infer_phase_from_state(state: Any) -> tuple[str, dict[str, Any]]:
-    """Best-effort inference for v0.6 sessions that lack a ``phase`` field.
+    """Best-effort inference for sessions that lack a ``phase`` field.
 
     Returns ``(phase, evidence)`` where evidence captures the inference
     inputs so phase_history surfaces an audit row.
