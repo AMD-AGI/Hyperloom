@@ -617,7 +617,11 @@ async def trace_analyze_handler(
         model_name:      default ''
         framework:       default 'sglang'
         target_platform: defaults to payload target_platform, then SharedState.gpu_type
-        roofline_json:   optional path from a separate pmc_roofline action
+        roofline_json:   optional pre-computed roofline JSON path; the
+                         orchestrator no longer auto-produces this (the
+                         retired ``pmc_roofline`` action), but operators
+                         can still inject one manually when an external
+                         tool generated it
         dry_run:         default False (testing)
         budget_minutes:  default 60
 
@@ -1745,8 +1749,24 @@ async def integrate_handler(
 
 
 # ---------------------------------------------------------------------------
+# F1-2 (roofline composite) + main M4 — back-compat alias.
+#
+# Hyperloom main renamed ``select_kernels_handler`` to
+# ``trace_analyze_handler`` (the function does TraceLens analysis +
+# kernel selection in a single pass, so the new name is more accurate).
+# The M4 merge adopts main's canonical ``trace_analyze_handler`` name;
+# the back-compat alias below keeps the ~30 legacy callsites that import
+# ``select_kernels_handler`` working unchanged.
+select_kernels_handler = trace_analyze_handler
+
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
-    "trace_analyze":   trace_analyze_handler,
+    "select_kernels":   trace_analyze_handler,
+    # ``trace_analyze`` dispatch routes to the same handler as
+    # ``select_kernels`` — RooflineExecutor (F1-2) calls the function
+    # directly, but explicit dispatch entries keep the action-table
+    # symmetric for future PolicyGate / audit code that keys on the
+    # request kind.
+    "trace_analyze":    trace_analyze_handler,
     "run_optimization": run_optimization_handler,
     "integrate":        integrate_handler,
     "apply_patch":      integrate_handler,   # alias — same flow
@@ -1768,5 +1788,6 @@ __all__ = [
     "has_handler",
     "integrate_handler",
     "run_optimization_handler",
+    "select_kernels_handler",
     "trace_analyze_handler",
 ]
