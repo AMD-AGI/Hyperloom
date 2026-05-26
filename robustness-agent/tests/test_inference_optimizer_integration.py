@@ -142,13 +142,12 @@ async def test_heartbeat_passes_gate(tmp_path):
     from robustness_agent.config import Config
 
     # Heartbeat path requires no live alarms — disable the auto-probe
-    # defaults so an inert test host (no auth-proxy / no inference
-    # server) doesn't fire ``local_server_unreachable`` alerts that
-    # would mask the heartbeat ``send_message``.
+    # default so an inert test host (no inference server) doesn't fire
+    # ``local_server_unreachable`` alerts that would mask the heartbeat
+    # ``send_message``.
     config = Config(
         session_dir=tmp_path,
         robustness_server_url="",
-        auto_probe_auth_proxy=False,
         auto_probe_inference_server=False,
         # Inert hosts have no Ray head running; the LocalProbe A6 sub-
         # probe would otherwise time out at ``ray status`` and fire
