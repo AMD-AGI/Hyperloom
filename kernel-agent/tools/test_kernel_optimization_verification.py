@@ -716,7 +716,7 @@ def test_run_attempt_dry_run_emits_optimized_suffix_file(tmp_path):
         disable_xs_memory=False,
         num_gpus=1,
         target_platform="",
-        unittest_agent="off",
+        test_command="",
         kernel_id="k001",
     )
     log_path = tmp_path / "run.log"

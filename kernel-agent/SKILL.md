@@ -205,7 +205,8 @@ python "$REPO_ROOT/kernel-agent/tools/kernel_optimization.py" \
   --kernel-id "$KERNEL_ID" \
   ${BACKENDS:+--backends "$BACKENDS"} \
   ${BENCHMARK_FILE:+--benchmark-file "$BENCHMARK_FILE"} \
-  ${TEST_HARNESS_PATH:+--test-harness-path "$TEST_HARNESS_PATH"}
+  ${TEST_HARNESS_PATH:+--test-harness-path "$TEST_HARNESS_PATH"} \
+  ${TEST_COMMAND:+--test-command "$TEST_COMMAND"}
 ```
 
 The tool returns optimization attempts, verification, and a proposal in one
@@ -218,217 +219,79 @@ If a requested backend is missing after `install.sh` succeeded, this is a
 real bug; record the missing backend attempt in `optimization_attempts.jsonl`
 and report it instead of crashing the resident session.
 
-#### Auto-generated unittest harness (GEAK pre-step)
+#### Pre-GEAK Unittest Harness (unittest skill)
 
-Before each `backend=geak` attempt, `invoke_backend` calls
-`tools/unittest_agent.py::generate_unittest(candidate, ...)` to materialise
-an AgentKernelArena-compatible unittest task right next to the GEAK run dir.
-This repo carries the full contract below; do not read or depend on a
-developer-local AgentKernelArena checkout when generating or reviewing these
-harnesses. The harness reflects the **live vLLM/SGLang runtime** the kernel was
-profiled in:
+Before `backend=geak` attempts, the main agent generates a GEAK-compatible
+test harness by following `kernel-agent/skills/unittest/SKILL.md`. The skill
+searches for existing tests, collects shapes/dtypes from TraceLens, and
+generates a 4-mode harness (`--correctness`/`--profile`/`--benchmark`/`--full-benchmark`).
 
-| Field                | Source                                                                                  |
-|----------------------|-----------------------------------------------------------------------------------------|
-| `source/<kernel>` | Python/Triton: symlink/copy of the live source. HIP/C++: writable mirror copied from the live source; the runner overlays it onto the live path only while tests run. |
-| `_baseline_snapshot/`| Frozen copy of the original bytes — the **golden reference** for `correctness`.        |
-| `TEST_SHAPES`        | `candidate["input_shapes"]` (TraceLens-resolved per-arg shapes from real traffic).      |
-| `TEST_DTYPES`        | `candidate["input_dtypes"]` with `float16` fallback (warned in `unittest_meta.json`).   |
-| `RUNTIME_ENV`        | `candidate["env_vars"]` ∪ `os.environ` matching `SGLANG_* / VLLM_* / AITER_* / TRITON_* / HIP_* / ROCR_* / CUDA_*` (KEY/TOKEN/SECRET-redacted). |
-| `HOST_ENTRY`         | First non-`@triton.jit` top-level def whose name matches `kernel_name` / `<base>_triton` / `<base>_launcher` / `run_<base>`. |
+The resulting `test_command` is passed via `--test-command` to
+`kernel_optimization.py`, which forwards it to GEAK's `--test-command`.
 
-The harness lands at
-`$USER_DATA_PATH/kernel-agent/unittests/<session_id>/<prompt_stem>/` with the
-canonical layout:
+If the skill fails to produce a valid harness, omit `--test-command` and
+GEAK falls back to its own test discovery.
 
-```text
-<out_dir>/
-├── config.yaml
-├── scripts/task_runner.py
-├── source/<kernel>
-├── source/_baseline_snapshot/<kernel>
-└── unittest_meta.json
-```
+Validation uses `kernel-agent/skills/unittest/validate_harness.py` for
+static checks (argparse + 4 flags + output markers) and runtime verification
+(run correctness + benchmark modes, check exit codes and markers).
 
-`config.yaml` must name the target kernel and contain `compile_command`,
-`correctness_command`, and `performance_command` entries that call
-`python3 scripts/task_runner.py <mode>`. The runner exposes `compile` /
-`correctness` / `performance` modes; correctness imports *both* the live source
-and the snapshot under distinct module names and asserts tensor equality within
-natural fp tolerance (`fp8 -> 5e-2`, `bf16/fp16 -> 1e-2`, `fp32 -> 1e-4`).
+#### Merging same-kernel candidates
 
-After generation we **self-verify** on the unmodified source (compile +
-correctness MUST both pass). The manifest's `status` field reports:
+TraceLens often emits **multiple `kernel_id`s for the same kernel function
+called at different shapes** — e.g. `aiter::rmsnorm` shows up as `k006`,
+`k007`, `k008` because the model invokes it at `(256,128)`, `(1024,128)`,
+and `(64,4096)`. These all resolve to the same `source_file` and the same
+underlying op.
 
-* `ok` — compile and correctness both passed inside Hyperloom before GEAK
-  handoff; the harness becomes GEAK's `--test-command` (single-GPU compute
-  kernels only; multi-GPU collectives still take the legacy `torchrun` path
-  because the in-process harness can't drive `init_process_group`).
-* `degraded` — compile passed but correctness was skipped unexpectedly
-  (e.g. shapes were not captured) OR self-verify failed; Hyperloom records
-  `unittest_status=degraded` but does NOT use the harness in GEAK. It falls
-  back to the previous `candidate.benchmark_files` / `test_harness_path` mode.
-  For HIP/C++, correctness is also run in Hyperloom before handoff: the
-  generated runner overlays `source/<kernel>` onto the live source, invalidates
-  likely aiter JIT `.so` files, runs the captured benchmark or TraceLens shape
-  cases, then restores the live tree. A HIP/C++ harness that has only compile
-  precheck, or whose correctness was skipped, must remain `degraded`.
-* `skipped` — unsupported source suffix with no runner strategy.
-* `failed` — missing source file or unparseable; fall through without a
-  harness. Import errors, generation exceptions, and non-`ok` manifests must
-  never block GEAK dispatch; they always fall back to the legacy benchmark path.
+**Default (do-not-merge) behavior**: dispatch each `kernel_id` as a
+separate `run_optimization` request. The orchestrator picks them off
+`reusable_native_kernel_ids` one by one, GEAK runs its full
+preprocessing pipeline (`~4 min`) per task, and each task generates
+patches for one shape.
 
-Control: set `HYPERLOOM_UNITTEST_AGENT=off` or pass
-`--unittest-agent off` to bypass the whole pre-step (debugging only — GEAK then
-reverts to its legacy benchmark path). `auto` is the default; `force` attempts
-best-effort generation whenever a source file and benchmark surface exist. The
-older `HYPERLOOM_DISABLE_UNITTEST_AGENT=1` remains a compatibility alias for
-`off`.
+**Merge optimization** (preferred when the candidates share
+`(name, source_file)`): batch them into a single `run_optimization`
+request whose harness covers all shapes. Concrete benefits:
+- **Preprocessing amortization**: GEAK preprocessing (discovery →
+  resolution → testcase selection → baseline/profile collection) takes
+  ~4 min regardless of shape count. Merging 3 candidates skips 8 min of
+  duplicated work.
+- **Better patch quality**: the sub-agent sees ALL shapes when reasoning
+  about the optimization, so it can pick a strategy that wins on
+  small-and-large shapes simultaneously instead of overfitting to one.
+- **Cross-shape correctness gate**: a patch that breaks any shape fails
+  `--correctness` immediately rather than being merged later and
+  discovered to regress.
 
-Result surfaces (visible in `optimization_attempts.jsonl[].backend_paths`):
+Mechanically:
+1. Group `reusable_native_kernel_ids` by `(candidate.name,
+   candidate.source_file)`.
+2. For each group with size > 1, build a synthetic merged candidate:
+   - `kernel_id`: `<name>_merged` (or any unique id)
+   - `name`, `source_file`, `kernel_repo`, `benchmark_files`: copied
+     from any member (they're equal within the group)
+   - `input_shapes`: concatenation of all members' `input_shapes`
+     (the unittest skill will dedupe by ndim + dtype when building
+     `ALL_CONFIGS`)
+   - `call_count`: sum of members' `call_count`
+   - `gpu_pct`: sum of members' `gpu_pct`
+   - `kernel_params` / `env_vars`: copied from the member with the
+     highest `call_count`
+3. Write the merged candidate(s) to a new `candidates_path` (do not
+   mutate the original `kernel_candidates.json`) and dispatch
+   `kernel_optimization.py --candidates-path <merged>.json
+   --kernel-id <merged_id>`.
 
-* `unittest_status`        — `ok` / `degraded` / `skipped` / `failed`.
-* `unittest_out_dir`       — the harness workspace (inspect on debug).
-* `unittest_test_command`  — the exact `correctness` command GEAK ran.
-
-#### Outer-timeout contract (do NOT skip)
-
-When a unittest harness is in play, GEAK's `--test-command` stops being a
-fast `python bench_<kernel>.py` (seconds) and becomes
-`python3 scripts/task_runner.py correctness`, which transparently
-triggers an aiter JIT recompile (~51s) + a multi-shape benchmark and
-routinely takes minutes. mini-swe-agent's `LocalEnvironmentConfig.timeout`
-defaults to **30 seconds**, so a custom `local.yaml` that omits the `env`
-block — or copies an old `timeout: 30` — silently SIGKILLs every patch
-test with `"Test command timed out"`. select_patch then falls back to
-the unmodified baseline and the whole GEAK attempt looks like a no-op.
-
-`unittest_agent` owns BOTH halves of the test-command contract:
-
-| Knob                            | Where it lives                       | Wired by                                   |
-|---------------------------------|--------------------------------------|--------------------------------------------|
-| `--test-command`                | `unittest_test_command`              | `_append_unittest_context_to_prompt`       |
-| Outer `env.timeout` (GEAK side) | `harness_timeout_*_sec` in manifest  | `_geak_config_for_run(unittest_manifest=)` |
-
-`tools/kernel_optimization.py::_harness_outer_timeout(manifest)` returns
-`max(harness_timeout_correctness_sec, harness_timeout_performance_sec) +
-buffer` (buffer = 300s) whenever `status == "ok"`; the caller writes the
-result into the per-run GEAK config so mini-swe-agent sees a matching
-`env.timeout`. The fallback path (no manifest) still injects 3600s so a
-config without an `env` block never silently inherits the 30s default.
-
-Regression checklist — if `Test command timed out` reappears:
-1. Read `patch_*_test.txt` under `<session>/geak/run-*/` — confirm it's a
-   process-killed timeout, not a Python `pytest` failure.
-2. `grep -A4 '^env:' $GEAK_CONFIG` — confirm `env.timeout` >= the
-   manifest's `harness_timeout_correctness_sec`.
-3. Inspect `<harness>/unittest_meta.json` — confirm `status: ok` and that
-   `harness_timeout_*_sec` is in the manifest.
-4. Re-run `kernel_optimization.py` so `_apply_geak_env_overrides` writes
-   a fresh per-prompt `*.geak-config.yaml`; never edit `local.yaml` by
-   hand from a tight loop — Hyperloom rewrites it per attempt.
-
-#### Overlay no-op fast path (mirror==live)
-
-The first GEAK round always runs against `mirror == live` (the candidate
-hasn't been edited yet; the harness performs a baseline `save` against the
-unmodified live tree and then a `compare` against an untouched mirror).
-Before the 2026-05-21 fix the runner still unlinked every matched
-`module_*.so` and `shutil.copy2`'d the mirror over the live source on each
-overlay, which invalidated ninja's mtime cache and triggered a fresh
-~60–90s/module aiter+CK-Tile JIT recompile on **both** the save and the
-compare phases. That added 3-6 minutes of pure recompile per correctness
-gate on top of GEAK's existing budget.
-
-`_OverlayLiveSource.__enter__` now:
-
-1. Acquires the per-`LIVE_SOURCE.name` fcntl lock (unchanged).
-2. Calls `_purge_stale_aiter_batons()` (unchanged — needed even on the
-   fast path because the baton might be stale from a SIGKILL'd sibling).
-3. **NEW**: SHA-1 hashes `LIVE_SOURCE` and `self.overlay_source`. If they
-   are byte-identical, sets `self.skipped_overlay = True`, prints
-   `[unittest_agent] overlay no-op (mirror==live, sha1=...); skipping JIT
-   invalidate + copy`, and returns without touching `.so` files or the
-   live source. `__exit__` short-circuits the restore branch too.
-
-The slow path (`mirror != live`, i.e. GEAK produced an actual patch)
-still backs up live + the matching `.so` files, unlinks them, and copies
-the mirror in place — that's required so the next `import
-aiter.jit.module_<name>` re-runs ninja against the patched source.
-
-Regression checklist — if you suspect the no-op path is no longer firing:
-1. Run `python3 <harness>/scripts/task_runner.py correctness` with
-   `mirror == live` and grep stderr for `overlay no-op (mirror==live`.
-   No match = fast path is broken, every correctness gate will pay the
-   JIT recompile cost again.
-2. `sha1sum <harness>/source/<kernel> /sgl-workspace/.../<kernel>` and
-   confirm they are equal on a fresh harness.
-3. The unit test `OverlayLockTests::test_template_skips_jit_invalidate_when_overlay_matches_live`
-   pins the marker strings; failures there indicate template drift.
-
-#### Orphan task_runner / stale-baton recovery
-
-When a GEAK run is SIGTERM/SIGKILL'd mid-correctness (timeout, OOM, the
-user killed it, the pod was restarted, ...), three artefacts can persist
-across sessions and silently hang the **next** harness invocation:
-
-1. **Orphan `task_runner.py` subprocesses** still holding the overlay
-   fcntl lock. Symptom: `_OverlayLiveSource.__enter__` blocks forever in
-   `fcntl.flock(LOCK_EX)`.
-   - Detect: `pgrep -af task_runner.py`; check `lsof /tmp/hl_overlay_*.lock`.
-   - Recover: `kill -TERM <pid>` (the existing `__exit__` finally-block
-     releases the lock); if it ignores TERM after 5s, `kill -KILL`.
-2. **Stale aiter `FileBaton`** at
-   `/sgl-workspace/aiter/aiter/jit/build/lock_module_<name>`. Symptom:
-   `import aiter.jit.module_<name>` spins forever (no timeout) inside
-   `baton.wait()`. Happens when the compile that created the baton died
-   before `baton.release()` ran.
-   - Detect: `find /sgl-workspace/aiter/aiter/jit/build/lock_module_*
-     -mmin +1` returns hits while no `hipcc` / `ninja` / `amdclang` /
-     `clang++` is targeting the matching module name in
-     `/proc/*/cmdline`.
-   - Recover: the generated runner calls `_purge_stale_aiter_batons()`
-     from inside `_OverlayLiveSource.__enter__` once it holds the overlay
-     lock; if you're running outside the harness, replicate the same
-     guard (only purge when no live builder process owns the module) and
-     `rm` the lock file. Also drop the inner per-build lock at
-     `.../build/<module>/build/lock` if it's in the same stale window.
-3. **Mirror drift** — `<harness>/source/<kernel>` left holding a
-   half-written GEAK patch from a previous run, so the next correctness
-   gate compares a corrupt overlay against the baseline snapshot and
-   reports a false failure.
-   - Detect: `sha1sum <harness>/source/<kernel>
-     <harness>/source/_baseline_snapshot/<kernel>` differ but
-     `unittest_meta.json["status"]` says `ok` (i.e. the harness was
-     generated against an unmodified live tree).
-   - Recover: `cp <harness>/source/_baseline_snapshot/<kernel>
-     <harness>/source/<kernel>` to restore the baseline mirror, then
-     re-launch GEAK.
-
-A reusable cleanup snippet for the wrapper scripts (see
-`kernel_agnet/geakwith_unittest/run_all_geak_safe.sh`):
-
-```bash
-# Kill any orphan task_runner from previous attempts.
-pkill -TERM -f 'task_runner\.py' || true; sleep 3
-pkill -KILL -f 'task_runner\.py' || true
-
-# Purge stale aiter batons older than 60s with no live builder.
-for lock in /sgl-workspace/aiter/aiter/jit/build/lock_module_*; do
-  [ -e "$lock" ] || continue
-  stem=$(basename "${lock#*lock_}")
-  pgrep -af "$stem" | grep -E 'hipcc|ninja|amdclang|clang\+\+' && continue
-  find "$lock" -mmin +1 -delete
-done
-
-# Restore baseline mirror so first overlay round hits the no-op path.
-for d in deps/unittests/*/source; do
-  for f in "$d"/_baseline_snapshot/*; do
-    [ -e "$f" ] || continue
-    cp -p "$f" "$d/$(basename "$f")"
-  done
-done
-```
+When **not** to merge:
+- Candidates share a `source_file` but resolve to different functions
+  inside it (different `kernel_params.kernel_name`).
+- Shapes span ndim or dtype boundaries that would force the harness
+  to special-case at runtime (e.g. mixing 1-D `(128,)` weight tensors
+  with 2-D activations is OK because they're separate args; mixing
+  `bf16` and `fp8` activations is not — generate two harnesses).
+- One member is the bottleneck (`gpu_pct >> others`) and the others
+  are negligible — the LLM may be distracted by tiny shapes.
 
 ## TraceLens Requirements
 
