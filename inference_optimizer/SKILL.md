@@ -948,7 +948,7 @@ The optimizer should:
   `specialist` / `explore` / `kernel_opt` / `integrate` /
   `deep_kernel_analysis` / `operator_tuning` / `vendor_kernel_config`
   dispatches are blocked by PolicyGate
-  (`rule='specialist_wait_for_auto_roofline'`) until it lands.
+  (`rule='wait_for_auto_roofline'`) until it lands.
   `--force-roofline-after-baseline` (default on) controls whether the
   PRELUDE roofline is unconditional.
 3. Run `select_kernels` once per trace/config and cache the result in
