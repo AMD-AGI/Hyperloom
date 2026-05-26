@@ -1,7 +1,7 @@
 ---
 name: critic-agent
 description: |
-  Critic layer for the v0.6 inference optimizer. Use when Conductor asks
+  Critic layer for the inference optimizer. Use when Conductor asks
   for a Critic Review verdict on Orchestration or Kernel proposals,
   conversation-driven decision review, KB recall/ingest guidance,
   cross-run synthesis, or Devil's advocate review signals.
@@ -38,7 +38,7 @@ globs:
 
 ## Mission
 
-Critic is the horizontal review and memory layer for the v0.6 optimizer:
+Critic is the horizontal review and memory layer for the optimizer:
 
 1. Review Orchestration and Kernel proposals with one verdict per
    proposal: `approve`, `reject`, `redirect`, `advise`, or `needs_review`.
