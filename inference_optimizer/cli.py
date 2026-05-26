@@ -85,6 +85,7 @@ from .paths import (
     _SESSION_SKELETON,
     asset_system_prompts_dir,
     make_session_dir,
+    mn_profile_trace_root,
     session_dir as _session_dir_resolve,
     workspace_root,
 )
@@ -1960,16 +1961,20 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _gc_old_profile_traces(
-    root: str = "/wekafs/hyperloom/profile-traces",
+    root: str | None = None,
     retention_days: int = 7,
     keep: str | None = None,
 ) -> None:
-    """Best-effort GC of stale per-RayJob profile-trace dirs on shared wekafs.
+    """Best-effort GC of stale per-RayJob profile-trace dirs on the shared FS.
 
     Removes only top-level subdirectories whose mtime is older than
     ``retention_days``. The active session's dir (just mkdir'd seconds ago)
     is always young enough; ``keep`` adds an explicit name-match guard so
     the current run is never collected even if a clock skew flipped mtime.
+
+    ``root`` defaults to :func:`mn_profile_trace_root` (anchored on
+    ``$USER_DATA_PATH``); callers may pass an explicit override for
+    tests or migration scenarios.
 
     Failure is logged + swallowed: GC must never block optimizer startup.
 
@@ -1987,7 +1992,7 @@ def _gc_old_profile_traces(
         )
     except ValueError:
         retention_days = 7
-    base = Path(root)
+    base = Path(root) if root is not None else mn_profile_trace_root()
     if not base.is_dir():
         return
     cutoff = time.time() - retention_days * 86400
@@ -2022,7 +2027,7 @@ def _gc_old_profile_traces(
     if removed or kept:
         print(
             f"multi-node: GC profile-traces removed={removed} kept={kept} "
-            f"retention={retention_days}d root={root}"
+            f"retention={retention_days}d root={base}"
         )
 
 
@@ -2116,9 +2121,16 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     state_after = _load_state()
     rid = (state_after.get("rayjob_id") or "").strip()
     if rid:
-        trace_root = f"/wekafs/hyperloom/profile-traces/{rid}/torch_trace"
+        # Anchor torch-profile shared root on $USER_DATA_PATH so the
+        # operator only has to point one knob at a cluster-shared
+        # filesystem (e.g. wekafs); the sandbox and the RayJob pods then
+        # both see traces under the same path. See
+        # ``inference_optimizer.paths.mn_profile_trace_root`` docstring
+        # for the multi-node USER_DATA_PATH caveat.
+        trace_root_path = mn_profile_trace_root() / rid / "torch_trace"
+        trace_root = str(trace_root_path)
         try:
-            Path(trace_root).mkdir(parents=True, exist_ok=True)
+            trace_root_path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             print(
                 f"WARN multi-node: cannot mkdir {trace_root}: {exc}; "
@@ -2133,10 +2145,7 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
             # Best-effort GC of older sibling RayJob trace dirs. Runs only
             # AFTER the current session's dir is mkdir'd, so the active
             # rayjob_id is name-guarded and its mtime is fresh.
-            _gc_old_profile_traces(
-                root="/wekafs/hyperloom/profile-traces",
-                keep=rid,
-            )
+            _gc_old_profile_traces(keep=rid)
 
     # RayJob recreate path: when an existing session's RayJob was killed
     # (OOM, manual recreate, SaFE rescheduling) and we provisioned a
