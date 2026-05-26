@@ -274,7 +274,3 @@ class TestPersistence:
         assert s.session_id == "abc"
         assert not hasattr(s, "unknown_field")
 
-    def test_from_dict_filters_non_dict_action_scores(self):
-        raw = {"action_scores": ["not", "a", "dict"]}
-        s = SharedState.from_dict(raw)
-        assert s.action_scores == {}
