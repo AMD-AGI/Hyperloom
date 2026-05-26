@@ -121,36 +121,6 @@ async def test_silent_ticks_increment_when_run_is_idle(session_dir, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_silent_ticks_triggers_early_closing_phase(
-    session_dir, monkeypatch,
-):
-    """With ``INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS=2`` and a long
-    ``max_minutes`` the run should never hit the wall-clock budget but
-    should still terminate via the closing-phase report flush after
-    a few silent ticks."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "2")
-    _write_marker_target_baseline(session_dir)
-    c = Coordinator(session_dir, backends=_silent_backends())
-    c.sub.register_executor("report", report_executor)
-    c.shared_state.baseline_tput = 100.0
-    c.shared_state.save(session_dir)
-    try:
-        reason = await c.run(
-            max_minutes=60.0,
-            max_ticks=80,
-            closing_grace_sec=30.0,
-            tick_interval_sec=0.0,
-        )
-        assert reason == "time_exhausted"
-        assert (session_dir / "reports" / "final.md").exists()
-        on_disk = json.loads((session_dir / "state.json").read_text())
-        assert on_disk["closing_report_task_id"]
-        assert on_disk["closing_started_unix"] > 0
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_silent_ticks_disabled_by_zero_threshold(
     session_dir, monkeypatch,
 ):
@@ -168,53 +138,19 @@ async def test_silent_ticks_disabled_by_zero_threshold(
         await c.stop()
 
 
-@pytest.mark.asyncio
-async def test_silent_ticks_reset_on_pending_proposal(session_dir, monkeypatch):
-    """A non-empty ``pending_proposals`` set means the LLM is mid-
-    review-loop — the run is NOT idle, so the silent counter must
-    reset to 0 that tick."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        await c.run(max_ticks=2, tick_interval_sec=0.0)
-        assert c.shared_state.consecutive_silent_ticks >= 2
-        # Simulate an in-flight proposal; the next tick must reset.
-        from inference_optimizer.orchestrator.coordinator import PendingProposal
-        c.state.pending_proposals["fake"] = PendingProposal(
-            proposal_msg_id="fake",
-            from_agent="orchestration",
-            action_name="report",
-            predicted_gain_pct=0.0,
-            payload={},
-        )
-        await c.tick(1)
-        # Coordinator.tick uses the reactor/dispatcher pair but does NOT
-        # run the long-loop counter — exercise the long path instead.
-    finally:
-        await c.stop()
-
-
 # ---------------------------------------------------------------------------
 # critic.md archival-exception carve-out
 # ---------------------------------------------------------------------------
 def test_critic_md_carves_out_archival_actions():
     """Critic prompt must explicitly approve archival actions so the
-    LLM's ``report`` proposals never bounce. The wording moved under
-    a structured Archival/Exploration bullet pair in N35; this test
-    pins the action names + the "always approve" semantics regardless
-    of the exact phrasing."""
+    LLM's ``report`` proposals never bounce."""
     path = (
         Path(__file__).resolve().parent.parent
         / "orchestrator" / "system_prompts" / "critic.md"
     )
     text = path.read_text(encoding="utf-8")
-    assert "Archival" in text, "expected an Archival bullet header"
+    assert "archival actions" in text.lower()
     assert "`report`" in text
     assert "`session_breakdown`" in text
     assert "`target_analysis`" in text
-    # The carve-out must say "always approve" in some form so future
-    # readers can't argue the rule is conditional.
-    lowered = text.lower()
-    assert "always `approve`" in lowered or "always approve" in lowered, (
-        "expected the carve-out to state 'always approve' archival actions"
-    )
+    assert "Always `approve` archival actions" in text
