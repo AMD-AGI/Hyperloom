@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .. import cortex_kb_constants as C_KB
 from ..cortex_kb_client import (
     CortexKBClient,
     CortexKBError,
@@ -43,6 +44,15 @@ from ..cortex_kb_client import (
     experiment_canonical_id,
 )
 from . import phase_state as _phase_state
+from .optimization_journal import (
+    Journal,
+    JournalEntry,
+    OUTCOME_KEEP,
+    OUTCOME_NO_PROMOTE,
+    OUTCOME_REVERT,
+    classify_change_kind,
+    summarize_change,
+)
 from ..paths import db_path_for, make_session_dir
 from ..storage.connection import SqliteConnection
 from .action_registry import ActionRegistry
@@ -431,6 +441,7 @@ class Coordinator:
         cortex_kb: CortexKBClient | None = None,
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
+        fact_writes_enabled: bool = True,
     ):
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
@@ -441,6 +452,18 @@ class Coordinator:
         # from the per-session NDJSON queue, so it can be shared across
         # threads (the Coordinator is single-event-loop anyway).
         self.cortex_kb: CortexKBClient | None = cortex_kb
+        # Per-session optimization journal — see
+        # ``orchestrator/optimization_journal.py``. Lazy-instantiated
+        # the first time a T3 hook runs (so SharedState is already
+        # populated with model/hardware/framework + the Cortex sid).
+        # Survives ``--degraded-kb`` and ``--no-fact-writes`` because
+        # it is local-only.
+        self._journal: Journal | None = None
+        # CLI gate for the direct fact-write surface (``propose_lesson``
+        # / ``propose_pitfall`` / ``update_recipe``). ``False`` keeps
+        # the journal active but skips every KB fact-write call — used
+        # for soak runs that don't want to pollute the shared KB.
+        self._fact_writes_enabled: bool = bool(fact_writes_enabled)
         # v0.8 M4 + KB_gaps/Gap-01/Gap-02 — KnowledgePlane facade.
         # When non-None, ``_handle_delegate`` pre-warms ``pr_feed`` +
         # ``kb_subgraph`` for ``delegate{action='specialist'}`` tasks
@@ -806,6 +829,14 @@ class Coordinator:
         sid = (self.shared_state.cortex_session_id or "").strip()
         if not sid:
             return
+        # Fact finalize — safety net for the stop() path. The CLOSE
+        # sequencer already runs this as step 2.5; calling it again
+        # here is a no-op (KB merge is idempotent and the journal's
+        # finalize is a write-through of the same fields).
+        try:
+            self.cortex_finalize_recipe_and_journal()
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("cortex T4 fact_finalize fallback failed")
         # 1. Drain async queue. NDJSON drains *can* take meaningful time
         #    when Cortex was unreachable mid-run; 60s is the documented
         #    upper bound (KB_design §3.13 M1 §5.4).
@@ -1893,6 +1924,21 @@ class Coordinator:
             await self._record_close_step(
                 "session_breakdown", status="failed",
                 detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 2.5: fact finalize (recipe + journal) ---
+        # Writes update_recipe + finalises the local journal
+        # (final_throughput / total_gain_pct). Runs BEFORE the NDJSON
+        # drain so the recipe write is part of the same flush. Lives
+        # outside the 4-step KB design contract — recorded as an extra
+        # close_step so the breakdown collector can see it.
+        try:
+            self.cortex_finalize_recipe_and_journal()
+            await self._record_close_step("fact_finalize", status="done")
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("CLOSE step 2.5 (fact_finalize) failed")
+            await self._record_close_step(
+                "fact_finalize", status="failed", detail=repr(exc)[:240],
             )
 
         # ---------------- Step 3: NDJSON drain ----------------
@@ -6944,6 +6990,18 @@ class Coordinator:
                 "cortex T3 late_verified (no edge_id for proposal %s)",
                 proposal_msg_id or "(no msg_id)",
             )
+        # Fact-write surface — JSON journal + (optional) KB lesson /
+        # pitfall write. Best-effort: never raise back into the T3
+        # dispatcher (which would crash the run loop).
+        try:
+            self._record_fact_per_task(
+                task=task,
+                sid=sid,
+                result_dict=result_dict,
+                kept=kept,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("fact-write per-task failed (task=%s)", task.task_id)
 
     async def _cortex_t3_per_variant(
         self,
@@ -7124,12 +7182,437 @@ class Coordinator:
                     variant_name, proposal_msg_id or "(no msg_id)",
                 )
 
+            # Fact-write per variant — journal entry + maybe lesson /
+            # pitfall. Per-variant edges (kb_edge_id) are reused as the
+            # ``cited_citation_ids`` so the lesson can cite the exact
+            # experiment that evidenced it.
+            try:
+                self._record_fact_per_variant(
+                    task=task,
+                    sid=sid,
+                    variant_outcome=vo,
+                    variant_edge_id=edge_id,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "fact-write per-variant failed (task=%s variant=%s)",
+                    task.task_id, variant_name,
+                )
+
         if not any_terminal and edge_entry:
             log.info(
                 "cortex T3 per-variant: all variants skipped for proposal=%s"
                 " (round was 100%% dedup); pending edge row dropped",
                 proposal_msg_id or "(no msg_id)",
             )
+
+    # ------------------------------------------------------------------
+    # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes
+    # ------------------------------------------------------------------
+    # The methods below own the *fact* side of the KB integration —
+    # everything we know to be true at KEEP / REVERT / CLOSE time.
+    # Hypothesis writes (propose_point/hypothesize/verify) live above
+    # and run regardless of ``_fact_writes_enabled``; only this block
+    # respects the CLI gate.
+    # ------------------------------------------------------------------
+    PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
+
+    def _ensure_journal(self) -> Journal:
+        """Lazy-instantiate the per-session :class:`Journal`.
+
+        Called from every fact-write site so the journal stays valid
+        across resume (``load_or_create`` reads the existing file when
+        present). Header fields are read from SharedState which by T3
+        time has model / hardware / framework / baseline_tput
+        populated.
+
+        Uses :func:`getattr` rather than direct attribute access so
+        unit-test stubs that bypass ``__init__`` (``Coordinator.__new__``
+        pattern in the close-phase sequencer tests) still work.
+        """
+        existing = getattr(self, "_journal", None)
+        if existing is None:
+            ss = self.shared_state
+            self._journal = Journal.load_or_create(
+                self.session_dir,
+                session_id=str(getattr(ss, "cortex_session_id", "") or "")
+                           or str(getattr(ss, "session_id", "") or "")
+                           or self.session_dir.name,
+                model=str(getattr(ss, "model_name", "") or ""),
+                hardware=str(getattr(ss, "gpu_type", "") or ""),
+                framework=str(getattr(ss, "framework", "") or ""),
+                baseline_throughput=float(getattr(ss, "baseline_tput", 0.0) or 0.0),
+            )
+        else:
+            # Backfill baseline once the baseline executor finishes.
+            existing.update_baseline(
+                float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0)
+            )
+        return self._journal
+
+    def _pitfall_severity_for(
+        self, result_dict: dict[str, Any] | None,
+    ) -> str | None:
+        """Decide whether a failed result warrants a pitfall row.
+
+        Threshold-B contract (confirmed with operator):
+
+        * ``crash`` / ``oom`` / ``hang`` → ``SEVERITY_CRASH``
+        * ``gain_pct ≤ -5%``             → ``SEVERITY_REGRESS``
+        * otherwise (silent revert, ties, no-op-ish negative) → ``None``
+
+        Filtering at write time avoids polluting the shared KB with
+        the long tail of marginal regressions that every marathon
+        produces.
+        """
+        if not isinstance(result_dict, dict):
+            return None
+        error_class = str(result_dict.get("error_class") or "").lower()
+        if error_class in ("crash", "oom", "hang"):
+            return C_KB.SEVERITY_CRASH
+        status = str(result_dict.get("status") or "").lower()
+        if status in ("crash", "oom", "hang"):
+            return C_KB.SEVERITY_CRASH
+        gain = result_dict.get("gain_pct")
+        try:
+            gain_pct = float(gain) if gain is not None else None
+        except (TypeError, ValueError):
+            gain_pct = None
+        if gain_pct is not None and gain_pct <= self.PITFALL_REGRESS_THRESHOLD_PCT:
+            return C_KB.SEVERITY_REGRESS
+        return None
+
+    def _journal_entry_phase(self) -> str:
+        return str(getattr(self.shared_state, "phase", "") or "").strip().upper() or "UNKNOWN"
+
+    def _record_fact_per_task(
+        self,
+        *,
+        task: "Task",
+        sid: str,
+        result_dict: dict[str, Any],
+        kept: bool,
+    ) -> None:
+        """Per-task fact write — one journal row + maybe one KB fact."""
+        journal = self._ensure_journal()
+        gain_raw = result_dict.get("gain_pct")
+        try:
+            gain_pct = float(gain_raw) if gain_raw is not None else None
+        except (TypeError, ValueError):
+            gain_pct = None
+        tput_raw = result_dict.get("output_throughput")
+        try:
+            throughput_after = float(tput_raw) if tput_raw is not None else None
+        except (TypeError, ValueError):
+            throughput_after = None
+        kind = classify_change_kind(task.kind, None)
+        change = summarize_change(task.kind, None, result_dict)
+        if kept:
+            outcome = OUTCOME_KEEP
+            error_class = None
+            reason = None
+        else:
+            outcome = OUTCOME_REVERT
+            error_class = (str(result_dict.get("error_class") or "") or None)
+            reason = (str(result_dict.get("reason") or "") or None)
+        journal.append_entry(JournalEntry(
+            phase=self._journal_entry_phase(),
+            iter=int(self.shared_state.tick or 0),
+            kind=kind,
+            change=change,
+            outcome=outcome,
+            gain_pct=gain_pct,
+            throughput_after=throughput_after,
+            error_class=error_class,
+            reason=reason,
+            task_id=task.task_id,
+        ))
+
+        if not getattr(self, "_fact_writes_enabled", True):
+            return
+        if self.cortex_kb is None or not self.cortex_kb.enabled:
+            return
+
+        experiment_cid = experiment_canonical_id(
+            sid, int(self.shared_state.tick or 0),
+        )
+        models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
+        hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
+        evidence_refs = [
+            f"log:task-{task.task_id}",
+            f"point_id:{experiment_cid}",
+        ]
+        if kept and gain_pct is not None and gain_pct > 0:
+            statement = f"{change} → +{gain_pct:.2f}% on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
+            impact = f"gain_pct={gain_pct:.2f} throughput_after={throughput_after}"
+            try:
+                self.cortex_kb.propose_lesson(
+                    statement=statement,
+                    measured_impact=impact,
+                    applicable_models=models,
+                    applicable_hardware=hardware,
+                    cited_citation_ids=[experiment_cid],
+                    evidence=evidence_refs,
+                )
+            except CortexKBError as exc:
+                log.warning("propose_lesson failed: %s", exc)
+            return
+
+        severity = self._pitfall_severity_for(result_dict)
+        if severity is not None:
+            description = f"{change} → {severity} on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
+            try:
+                self.cortex_kb.propose_pitfall(
+                    description=description,
+                    severity=severity,
+                    applicable_models=models,
+                    applicable_hardware=hardware,
+                    cited_citation_ids=[experiment_cid],
+                    evidence=evidence_refs,
+                )
+            except CortexKBError as exc:
+                log.warning("propose_pitfall failed: %s", exc)
+
+    def _record_fact_per_variant(
+        self,
+        *,
+        task: "Task",
+        sid: str,
+        variant_outcome: dict[str, Any],
+        variant_edge_id: str,
+    ) -> None:
+        """Per-variant fact write — mirror of :meth:`_record_fact_per_task`
+        for the explore action's per-variant decisions."""
+        journal = self._ensure_journal()
+        outcome_raw = str(variant_outcome.get("outcome") or "")
+        if outcome_raw == "KEEP":
+            outcome = OUTCOME_KEEP
+        elif outcome_raw in ("REVERT", "FAILED", "KEEP_UNSTABLE"):
+            outcome = OUTCOME_REVERT
+        elif outcome_raw == "SKIPPED_DEDUP":
+            return  # nothing to journal
+        else:
+            outcome = OUTCOME_NO_PROMOTE
+        variant_name = str(variant_outcome.get("variant_name") or "")
+        metrics = variant_outcome.get("metrics") or {}
+        gain_raw = metrics.get("gain_pct") if isinstance(metrics, dict) else None
+        try:
+            gain_pct = float(gain_raw) if gain_raw is not None else None
+        except (TypeError, ValueError):
+            gain_pct = None
+        tput_raw = metrics.get("output_throughput") if isinstance(metrics, dict) else None
+        try:
+            throughput_after = float(tput_raw) if tput_raw is not None else None
+        except (TypeError, ValueError):
+            throughput_after = None
+        variant_attrs = variant_outcome.get("variant") or {}
+        kind = classify_change_kind(
+            task.kind, variant_attrs if isinstance(variant_attrs, dict) else None,
+        )
+        change = summarize_change(
+            task.kind,
+            variant_attrs if isinstance(variant_attrs, dict) else {"name": variant_name},
+            None,
+        )
+        error_class = None
+        reason = None
+        if outcome == OUTCOME_REVERT:
+            error_class = (str(variant_outcome.get("error_class") or "") or None)
+            reason = (str(variant_outcome.get("reason") or "") or None)
+        journal.append_entry(JournalEntry(
+            phase=self._journal_entry_phase(),
+            iter=int(self.shared_state.tick or 0),
+            kind=kind,
+            change=change,
+            outcome=outcome,
+            gain_pct=gain_pct,
+            throughput_after=throughput_after,
+            error_class=error_class,
+            reason=reason,
+            task_id=task.task_id,
+            variant_name=variant_name,
+        ))
+
+        if not getattr(self, "_fact_writes_enabled", True):
+            return
+        if self.cortex_kb is None or not self.cortex_kb.enabled:
+            return
+
+        models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
+        hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
+        cited = [variant_edge_id] if variant_edge_id else []
+        evidence_refs = [
+            f"log:task-{task.task_id}",
+            f"variant:{variant_name}",
+        ]
+        if variant_edge_id:
+            evidence_refs.append(f"edge_id:{variant_edge_id}")
+
+        if outcome == OUTCOME_KEEP and gain_pct is not None and gain_pct > 0:
+            statement = f"{change} → +{gain_pct:.2f}% on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
+            impact = f"gain_pct={gain_pct:.2f} throughput_after={throughput_after}"
+            try:
+                self.cortex_kb.propose_lesson(
+                    statement=statement,
+                    measured_impact=impact,
+                    applicable_models=models,
+                    applicable_hardware=hardware,
+                    cited_citation_ids=cited,
+                    evidence=evidence_refs,
+                )
+            except CortexKBError as exc:
+                log.warning(
+                    "propose_lesson (variant=%s) failed: %s", variant_name, exc,
+                )
+            return
+
+        severity = self._pitfall_severity_for({
+            **(metrics if isinstance(metrics, dict) else {}),
+            "error_class": variant_outcome.get("error_class"),
+            "status":      variant_outcome.get("outcome"),
+        })
+        if severity is not None:
+            description = f"{change} → {severity} on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
+            try:
+                self.cortex_kb.propose_pitfall(
+                    description=description,
+                    severity=severity,
+                    applicable_models=models,
+                    applicable_hardware=hardware,
+                    cited_citation_ids=cited,
+                    evidence=evidence_refs,
+                )
+            except CortexKBError as exc:
+                log.warning(
+                    "propose_pitfall (variant=%s) failed: %s", variant_name, exc,
+                )
+
+    def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
+        """Materialise the recipe-shaped view of :class:`SharedState`.
+
+        Returned dict is shallow-merged into the recipe anchor by
+        :meth:`CortexKBClient.update_recipe`; see kg-usage-guide §7.4
+        for the canonical field shape.
+
+        Defensive ``getattr`` reads keep the helper safe against the
+        ``Coordinator.__new__`` stubs the close-phase tests use.
+        """
+        ss = self.shared_state
+        current_best = getattr(ss, "current_best", {}) or {}
+        opt_stack = getattr(ss, "optimization_stack", []) or []
+        gain_per_stack = getattr(ss, "gain_per_stack_entry", []) or []
+        last_failures = getattr(ss, "last_action_failures", []) or []
+        best_config: dict[str, Any] = {}
+        if isinstance(current_best, dict):
+            for key in (
+                "extra_sglang_args", "extra_envs", "args", "envs",
+                "name", "tput", "accuracy",
+            ):
+                if key in current_best:
+                    best_config[key] = current_best[key]
+        what_worked: list[dict[str, Any]] = []
+        for idx, entry in enumerate(opt_stack):
+            if not isinstance(entry, dict):
+                continue
+            gain_per: float | None = None
+            if idx < len(gain_per_stack):
+                gain_per = gain_per_stack[idx]
+            what_worked.append({
+                "name":              str(entry.get("name") or ""),
+                "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                "extra_envs":        dict(entry.get("extra_envs") or {}),
+                "gain_pct":          gain_per,
+            })
+        what_failed: list[dict[str, Any]] = []
+        for failure in last_failures[-10:]:
+            if isinstance(failure, dict):
+                what_failed.append({
+                    "name":  str(failure.get("name") or failure.get("action") or ""),
+                    "reason": str(failure.get("reason") or failure.get("error_class") or ""),
+                })
+        cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
+        cumulative_total = float(getattr(ss, "cumulative_gain", 0.0) or 0.0)
+        validated_stack_len = int(
+            getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0
+        )
+        stack_fingerprint = getattr(ss, "stack_fingerprint", "") or ""
+        return {
+            "best_config":       best_config,
+            "best_throughput":   float(current_best.get("tput", 0.0))
+                                  if isinstance(current_best, dict) else 0.0,
+            "what_worked":       what_worked,
+            "what_failed":       what_failed,
+            "stack_fingerprint": {"sha": str(stack_fingerprint)} if stack_fingerprint else {},
+            "last_profiled":     str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
+            "sessions":          [{
+                "session_id":   str(getattr(ss, "cortex_session_id", "")
+                                    or self.session_dir.name),
+                "gain_pct":     cumulative_validated or cumulative_total,
+                "stack_len":    validated_stack_len or len(opt_stack),
+            }],
+        }
+
+    def cortex_finalize_recipe_and_journal(self) -> None:
+        """CLOSE-time fact finalize.
+
+        Writes the final ``update_recipe`` (best_config / what_worked /
+        what_failed / stack_fingerprint / sessions) and finalises the
+        local journal (total_gain_pct + final_throughput). Idempotent:
+        called once from the CLOSE sequencer and again as a safety net
+        from :meth:`_cortex_t4_hook`; KB merge is shallow new-wins so
+        the second call is a no-op when the state hasn't changed.
+        """
+        try:
+            journal = self._ensure_journal()
+            ss = self.shared_state
+            cb = getattr(ss, "current_best", {}) or {}
+            final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
+            total_gain = float(
+                getattr(ss, "cumulative_gain_validated", 0.0)
+                or getattr(ss, "cumulative_gain", 0.0)
+                or 0.0,
+            )
+            journal.finalize(
+                final_throughput=final_tput if final_tput > 0 else None,
+                total_gain_pct=total_gain,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("optimization_journal.finalize failed")
+
+        if not getattr(self, "_fact_writes_enabled", True):
+            return
+        if self.cortex_kb is None or not self.cortex_kb.enabled:
+            return
+        ss = self.shared_state
+        model_name = getattr(ss, "model_name", "") or ""
+        gpu_type = getattr(ss, "gpu_type", "") or ""
+        if not model_name or not gpu_type:
+            log.info(
+                "cortex finalize_recipe: missing model/hardware "
+                "(model=%r hardware=%r); skipping update_recipe",
+                model_name, gpu_type,
+            )
+            return
+        try:
+            attrs = self._build_recipe_attrs_from_state()
+            self.cortex_kb.update_recipe(
+                model=model_name,
+                hardware=gpu_type,
+                best_config=attrs["best_config"],
+                best_throughput=attrs["best_throughput"],
+                what_worked=attrs["what_worked"],
+                what_failed=attrs["what_failed"],
+                stack_fingerprint=attrs["stack_fingerprint"],
+                last_profiled=attrs["last_profiled"],
+                sessions=attrs["sessions"],
+                evidence=[
+                    f"log:session-{getattr(ss, 'cortex_session_id', '') or self.session_dir.name}",
+                ],
+            )
+        except CortexKBError as exc:
+            log.warning("update_recipe failed: %s", exc)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("update_recipe raised unexpectedly")
 
     def _lift_to_current_best(
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
