@@ -195,6 +195,23 @@ EXPLORE_PERMISSIVE_PROVENANCE_LITERALS: frozenset[str] = frozenset({
     "default_grid",
 })
 
+# Specialist / Explore parallelism caps — single source of truth
+# imported by cli.py, specialist_runner.py, specialist_prompt_builder.py,
+# and prompt_builder.py so the limits never drift between layers.
+#   * ``MAX_RESEARCH_LANE_CAPACITY`` — hard cap on concurrent specialist
+#     sub-agents (the M6 ceiling; CLI clamps higher operator values down
+#     to this without warning).
+#   * ``DEFAULT_SPECIALIST_MAX_PROPOSALS`` — per-specialist proposal_set
+#     cap; enforced both in the specialist prompt (self-curation) and on
+#     the SpecialistRunner write path (hard truncate before persist).
+#   * ``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS`` — number of
+#     ``provenance='specialist:*'`` variants Orchestration may stack in
+#     one ``explore`` grid. ``default_grid`` variants are unaffected
+#     (cold-start path).
+MAX_RESEARCH_LANE_CAPACITY: int = 6
+DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 3
+MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS: int = 1
+
 # Verdicts that allow ``integrate_patch`` to proceed without an
 # explicit operator override. ``advise`` is treated as a soft
 # approval (Critic provided guidance but didn't block); ``approve``
@@ -796,6 +813,7 @@ class PolicyGate:
         # for every round, matching Arbor's optimization loop.
         if action_name == EXPLORE_ACTION_NAME:
             self._validate_explore_provenance(payload)
+            self._validate_explore_grid_size(payload)
         # sweep_phase_singleton: deny LLM-emitted
         # sweep when the Coordinator's SWEEP-entry hook already
         # auto-enqueued one. Two concurrent sweep tasks crash both
@@ -897,6 +915,17 @@ class PolicyGate:
             self._validate_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
+        # PR-A9 + explore_specialist_grid_max_one — same explore-grid
+        # gates as the delegate channel. Without these, an LLM that
+        # cannot delegate{action_name='explore', ...} (e.g. wrong role
+        # or phase guard fires first) can still propose_action an
+        # explore grid full of llm_direct or many specialist:* variants
+        # and have the Coordinator materialise it. Mirror both rules
+        # here so the propose advisory path can never sidestep PR-A9
+        # or the new per-round specialist cap.
+        if action_name == EXPLORE_ACTION_NAME:
+            self._validate_explore_provenance(payload)
+            self._validate_explore_grid_size(payload)
         # F3-1 (Roofline-v2 N9): deny direct ``profile`` when the
         # operator has flipped --use-roofline-composite + --deny-direct-profile
         # on. Forces atomic ``roofline`` use so the snapshot_id counter
@@ -1618,6 +1647,45 @@ class PolicyGate:
                     "  2. stamp every cold-start variant with "
                     "provenance='default_grid' (signals 'no specialist "
                     "yet — use the executor's built-in grid')."
+                ),
+            )
+
+    # ------------------------------------------------------------------
+    # ``explore_specialist_grid_max_one`` — cap on how many
+    # ``provenance='specialist:*'`` variants Orchestration may stack
+    # into one explore round. ``default_grid`` variants are unaffected
+    # (cold-start path). Backstops the prompt instruction by hard-denying
+    # at PolicyGate so an over-eager LLM cannot ship a 5-way grid even
+    # if the orchestration prompt is later softened.
+    # ------------------------------------------------------------------
+    def _validate_explore_grid_size(
+        self, payload: dict[str, Any],
+    ) -> None:
+        params = payload.get("params") or {}
+        if not isinstance(params, dict):
+            return
+        grid = params.get("grid")
+        if not isinstance(grid, list) or not grid:
+            return
+        specialist_sourced = sum(
+            1 for v in grid
+            if isinstance(v, dict)
+            and str(v.get("provenance") or "").startswith("specialist:")
+        )
+        if specialist_sourced > MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS:
+            raise PolicyDenied(
+                f"explore: grid contains {specialist_sourced} "
+                f"specialist-sourced variants; max "
+                f"{MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS} per round.",
+                rule="explore_specialist_grid_max_one",
+                hint=(
+                    "Across all specialist_done.proposal_set entries in "
+                    "the inbox, select AT MOST one variant per explore "
+                    "round to stamp provenance='specialist:<domain>'. "
+                    "If multiple specialist proposals look attractive, "
+                    "defer the runners-up to a subsequent explore round. "
+                    "``default_grid`` variants are unaffected (cold-start "
+                    "path)."
                 ),
             )
 
