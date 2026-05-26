@@ -30,6 +30,14 @@ PATH_ABORT:         Final[str] = "/v1/sessions/{session_id}/abort"
 PATH_PROPOSE_POINT: Final[str] = "/v1/points/propose"
 PATH_QUERY_POINT:   Final[str] = "/v1/points/query"
 PATH_TRAVERSE:      Final[str] = "/v1/traverse"
+# Fact-write endpoints (kg-usage-guide §3.2 / §3.4 / §3.5). Direct-propose
+# path used by ``propose_lesson`` / ``propose_pitfall`` / ``update_recipe``;
+# orthogonal to the session-based hypothesize/verify protocol so KEEP /
+# REVERT can write standalone fact points without going through a
+# hypothesis cycle.
+PATH_PROPOSE_EDGE:  Final[str] = "/v1/edges/propose"
+PATH_NEGATE_EDGE:   Final[str] = "/v1/edges/negate"
+PATH_ADD_EVIDENCE:  Final[str] = "/v1/edges/{edge_id}/add_evidence"
 
 # ---------------------------------------------------------------------------
 # Request body field names (§1.1–§1.8)
@@ -167,6 +175,30 @@ KIND_SOURCE_CITATION:      Final[str] = "source_citation"
 # Unregistered kinds (KB pass-through — keep as soft compatibility)
 KIND_ATTEMPT:              Final[str] = "attempt_node"
 
+# Edge ``attrs.relation`` — semantic secondary labels (kg-usage-guide §7.3).
+# Must pair with a specific ``edge_type``; the propose-edge validator
+# rejects mismatched pairs. Carried on every direct edge written by the
+# fact-write helpers so cascade / warm-start renderers can follow the
+# semantic line.
+REL_CITES:                 Final[str] = "cites"            # empirical
+REL_GROUNDED_IN:           Final[str] = "grounded_in"      # causal
+REL_TESTED:                Final[str] = "tested"           # investigation
+REL_ON_RECIPE:             Final[str] = "on_recipe"        # structural
+REL_REVEALS:               Final[str] = "reveals"          # causal
+REL_HAS_PITFALL:           Final[str] = "has_pitfall"      # negation
+REL_BEST_KEEP_FROM:        Final[str] = "best_keep_from"   # causal
+REL_NEGATION_OF:           Final[str] = "negation_of"      # negation
+REL_SAME_FILE_AS:          Final[str] = "same_file_as"     # structural
+REL_SUPERSEDES:            Final[str] = "supersedes"       # evolutionary
+
+# Pitfall severity vocab (kg-usage-guide §7.4). hyperloom maps:
+#   crash / oom / hang        → SEVERITY_CRASH
+#   gain_pct <= -5%           → SEVERITY_REGRESS
+#   anything else REVERT      → no pitfall written (noise)
+SEVERITY_CRASH:            Final[str] = "crash"
+SEVERITY_REGRESS:          Final[str] = "regress"
+SEVERITY_NOOP:             Final[str] = "noop"
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -189,6 +221,9 @@ __all__ = [
     "PATH_PROPOSE_POINT",
     "PATH_QUERY_POINT",
     "PATH_TRAVERSE",
+    "PATH_PROPOSE_EDGE",
+    "PATH_NEGATE_EDGE",
+    "PATH_ADD_EVIDENCE",
     "F_GOAL",
     "F_INITIATOR",
     "F_THINKING_STYLE",
@@ -249,6 +284,19 @@ __all__ = [
     "EDGE_EMPIRICAL",
     "EDGE_HYPOTHETICAL",
     "EDGE_NEGATION",
+    "REL_CITES",
+    "REL_GROUNDED_IN",
+    "REL_TESTED",
+    "REL_ON_RECIPE",
+    "REL_REVEALS",
+    "REL_HAS_PITFALL",
+    "REL_BEST_KEEP_FROM",
+    "REL_NEGATION_OF",
+    "REL_SAME_FILE_AS",
+    "REL_SUPERSEDES",
+    "SEVERITY_CRASH",
+    "SEVERITY_REGRESS",
+    "SEVERITY_NOOP",
     "AUTHORITY_AUTHORITATIVE",
     "AUTHORITY_EXPERIENTIAL",
     "AUTHORITY_INFERRED",
