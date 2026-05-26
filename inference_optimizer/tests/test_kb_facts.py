@@ -1,0 +1,262 @@
+"""Tests for the direct-fact-write surface on ``CortexKBClient``.
+
+Covers the new methods added for the KEEP / REVERT / CLOSE fact-write
+contract (kg-usage-guide §3.2 / §3.4 / §3.5):
+
+* ``propose_lesson`` / ``propose_pitfall`` shape registered ``lesson`` /
+  ``pitfall`` points with the right canonical_id hashing.
+* ``update_recipe`` wraps ``propose_point`` with the recipe canonical_id
+  derived from (model, hardware).
+* ``propose_edge`` posts to /v1/edges/propose with ``attrs.relation``
+  honoured and falls back to NDJSON on transport failure.
+* ``lesson_canonical_id`` / ``pitfall_canonical_id`` are stable under
+  citation reorder and prefix-disjoint.
+
+All HTTP is mocked via ``respx`` — no real Cortex service required.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+import respx
+
+from inference_optimizer.cortex_kb_client import (
+    CortexKBClient,
+    lesson_canonical_id,
+    pitfall_canonical_id,
+    recipe_canonical_id,
+)
+from inference_optimizer.paths import make_session_dir
+from inference_optimizer.session_paths import cortex_pending_ndjson
+
+
+KB_URL = "http://kb-test.local"
+
+
+# ===========================================================================
+# fixtures
+# ===========================================================================
+@pytest.fixture
+def session_dir(tmp_path, monkeypatch) -> Path:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("CORTEX_KB_URL", KB_URL)
+    monkeypatch.delenv("KB_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("CORTEX_KB_SMOKE", raising=False)
+    return make_session_dir()
+
+
+# ===========================================================================
+# canonical id helpers
+# ===========================================================================
+def test_lesson_canonical_id_is_stable_under_citation_reorder():
+    a = lesson_canonical_id("X improves Y", ["c1", "c2", "c3"])
+    b = lesson_canonical_id("X improves Y", ["c3", "c1", "c2"])
+    assert a == b
+    assert a.startswith("lesson:")
+    assert len(a) == len("lesson:") + 16
+
+
+def test_pitfall_canonical_id_is_disjoint_from_lesson():
+    """Same text under both kinds must NOT collide."""
+    statement = "Z crashes on gfx942"
+    cit = ["c1"]
+    lesson = lesson_canonical_id(statement, cit)
+    pitfall = pitfall_canonical_id(statement, cit)
+    assert lesson != pitfall
+    assert pitfall.startswith("pitfall:")
+
+
+def test_lesson_canonical_id_empty_citations_is_stable():
+    a = lesson_canonical_id("X works", None)
+    b = lesson_canonical_id("X works", [])
+    assert a == b
+
+
+# ===========================================================================
+# propose_lesson / propose_pitfall — wrap propose_point with the right kind
+# ===========================================================================
+def test_propose_lesson_posts_with_kind_lesson(session_dir):
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 11, "status": "auto_accepted", "point_id": 11,
+            }),
+        )
+        out = client.propose_lesson(
+            statement="X improves Y by 12%",
+            measured_impact="gain_pct=12.0",
+            applicable_models=["m"],
+            applicable_hardware=["mi300x"],
+            cited_citation_ids=["exp:36:0001"],
+            evidence=["log:task-1"],
+        )
+    assert out["status"] == "auto_accepted"
+    body = json.loads(route.calls.last.request.content)
+    assert body["kind"] == "lesson"
+    assert body["canonical_id"].startswith("lesson:")
+    assert body["attrs"]["statement"] == "X improves Y by 12%"
+    assert body["attrs"]["measured_impact"] == "gain_pct=12.0"
+    assert body["attrs"]["applicable_models"] == ["m"]
+    assert body["attrs"]["applicable_hardware"] == ["mi300x"]
+    assert body["attrs"]["cited_citation_ids"] == ["exp:36:0001"]
+    assert body["authority"] == "EXPERIENTIAL"
+
+
+def test_propose_pitfall_posts_with_kind_pitfall_and_severity(session_dir):
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 22, "status": "auto_accepted", "point_id": 22,
+            }),
+        )
+        out = client.propose_pitfall(
+            description="Z crashes on gfx942",
+            severity="crash",
+            applicable_models=["m"],
+            applicable_hardware=["mi300x"],
+            cited_citation_ids=["exp:36:0001"],
+            evidence=["log:task-2"],
+        )
+    assert out["status"] == "auto_accepted"
+    body = json.loads(route.calls.last.request.content)
+    assert body["kind"] == "pitfall"
+    assert body["canonical_id"].startswith("pitfall:")
+    assert body["attrs"]["severity"] == "crash"
+    assert body["attrs"]["description"] == "Z crashes on gfx942"
+
+
+# ===========================================================================
+# update_recipe — merges fact fields into the recipe anchor
+# ===========================================================================
+def test_update_recipe_uses_recipe_canonical_id(session_dir):
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 33, "status": "auto_accepted", "point_id": 33,
+            }),
+        )
+        out = client.update_recipe(
+            model="DeepSeek-R1",
+            hardware="MI300X",
+            best_config={"extra_sglang_args": "--attention-backend AITER"},
+            best_throughput=875.0,
+            what_worked=[{"name": "attn-aiter", "gain_pct": 12.0}],
+            what_failed=[{"name": "fp4bmm", "reason": "crash"}],
+            stack_fingerprint={"sha": "abc123"},
+            last_profiled="2026-05-26T08:00:00Z",
+            sessions=[{"session_id": "sid-1", "gain_pct": 44.9}],
+        )
+    assert out["status"] == "auto_accepted"
+    body = json.loads(route.calls.last.request.content)
+    assert body["kind"] == "recipe"
+    assert body["canonical_id"] == recipe_canonical_id("DeepSeek-R1", "MI300X")
+    attrs = body["attrs"]
+    assert attrs["best_config"]["extra_sglang_args"] == "--attention-backend AITER"
+    assert attrs["best_throughput"] == 875.0
+    assert attrs["what_worked"][0]["name"] == "attn-aiter"
+    assert attrs["what_failed"][0]["reason"] == "crash"
+    assert attrs["stack_fingerprint"]["sha"] == "abc123"
+    assert attrs["last_profiled"] == "2026-05-26T08:00:00Z"
+    assert attrs["sessions"][0]["session_id"] == "sid-1"
+
+
+def test_update_recipe_omits_unset_fields_from_attrs(session_dir):
+    """Caller passing only model+hardware should not erase existing
+    optional fields on the server side. Our wrapper achieves this by
+    omitting unset keys from the propose body so KB's shallow new-wins
+    merge keeps them intact."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 44, "status": "auto_accepted", "point_id": 44,
+            }),
+        )
+        client.update_recipe(model="m", hardware="h")
+    body = json.loads(route.calls.last.request.content)
+    attrs = body["attrs"]
+    assert attrs == {"model": "m", "hardware": "h"}
+
+
+# ===========================================================================
+# propose_edge — direct edge writes
+# ===========================================================================
+def test_propose_edge_resolves_canonical_ids_and_carries_relation(session_dir):
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(side_effect=[
+            httpx.Response(200, json={"points": [{"id": 10, "canonical_id": "lesson:abc"}]}),
+            httpx.Response(200, json={"points": [{"id": 20, "canonical_id": "exp:42:0001"}]}),
+        ])
+        edge_route = router.post("/v1/edges/propose").mock(
+            return_value=httpx.Response(200, json={
+                "edge_id": 99, "status": "auto_accepted",
+            }),
+        )
+        out = client.propose_edge(
+            from_canonical_id="lesson:abc",
+            to_canonical_id="exp:42:0001",
+            edge_type="empirical",
+            relation="cites",
+            authority="EXPERIENTIAL",
+            evidence=["log:task-1"],
+        )
+    assert out["status"] == "auto_accepted"
+    assert out["edge_id"] == "99"
+    body = json.loads(edge_route.calls.last.request.content)
+    assert body["from_point"] == 10
+    assert body["to_point"] == 20
+    assert body["edge_type"] == "empirical"
+    assert body["attrs"]["relation"] == "cites"
+    assert body["authority"] == "EXPERIENTIAL"
+    assert body["evidence_refs"][0]["kind"] == "log"
+
+
+def test_propose_edge_falls_back_to_ndjson_on_http_failure(session_dir):
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(500, json={"detail": "boom"}),
+        )
+        out = client.propose_edge(
+            from_canonical_id="lesson:abc",
+            to_canonical_id="exp:42:0001",
+            edge_type="empirical",
+            relation="cites",
+        )
+    assert out["status"] == "queued"
+    pending = cortex_pending_ndjson(session_dir).read_text(encoding="utf-8")
+    rows = [json.loads(line) for line in pending.splitlines() if line.strip()]
+    assert len(rows) == 1
+    assert rows[0]["op"] == "propose_edge"
+    assert rows[0]["payload"]["from_canonical_id"] == "lesson:abc"
+    assert rows[0]["payload"]["to_canonical_id"] == "exp:42:0001"
+    assert rows[0]["payload"]["edge_type"] == "empirical"
+    assert rows[0]["payload"]["relation"] == "cites"
+
+
+# ===========================================================================
+# disabled client — fact writes are no-ops
+# ===========================================================================
+def test_disabled_client_skips_fact_writes(session_dir):
+    client = CortexKBClient(session_dir=session_dir, enabled=False, kb_url=KB_URL)
+    assert client.propose_lesson(
+        statement="X", measured_impact="y",
+    )["status"] == "skip_disabled"
+    assert client.propose_pitfall(
+        description="Z", severity="crash",
+    )["status"] == "skip_disabled"
+    assert client.update_recipe(
+        model="m", hardware="h",
+    )["status"] == "skip_disabled"
+    assert client.propose_edge(
+        from_canonical_id="a", to_canonical_id="b", edge_type="empirical",
+    )["status"] == "skip_disabled"
+    assert not cortex_pending_ndjson(session_dir).exists()

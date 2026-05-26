@@ -3753,6 +3753,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # ``None`` when --degraded-kb; otherwise wraps Cortex KB +
         # PR Monitor for specialist prompt assembly.
         knowledge_plane=knowledge_plane,
+        # Fact-write surface (propose_lesson / propose_pitfall /
+        # update_recipe). Default ON; ``--no-fact-writes`` flips it
+        # OFF for soak runs that should not pollute the shared KB.
+        # The local optimization_journal is independent of this gate.
+        fact_writes_enabled=not bool(getattr(args, "no_fact_writes", False)),
     )
     framework_for_prompt = (
         os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
@@ -4302,6 +4307,21 @@ def _build_parser() -> argparse.ArgumentParser:
              "stack_fingerprint does not match the current pod (recorded "
              "in manifest.json). Default: lenient (M1 records the flag "
              "in manifest only; consumed by M5 specialist assembly).",
+    )
+    # Fact-write surface gate (kg-usage-guide §3.2 / §3.4 / §3.5). When
+    # set, Coordinator still writes the local optimization_journal but
+    # skips every direct propose_lesson / propose_pitfall /
+    # update_recipe call. Useful for soak runs against the shared
+    # Cortex KB that should not pollute the lesson / pitfall tables.
+    opt.add_argument(
+        "--no-fact-writes",
+        dest="no_fact_writes",
+        action="store_true",
+        default=False,
+        help="Skip Cortex KB fact writes (propose_lesson / "
+             "propose_pitfall / update_recipe) at KEEP / REVERT / "
+             "CLOSE. Hypothesis writes (T2/T3) and the local "
+             "reports/optimization_journal.json are unaffected.",
     )
     # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle. The cli
     # spawns ``scripts.cortex_kb_flusher`` after the T0 anchor (so the

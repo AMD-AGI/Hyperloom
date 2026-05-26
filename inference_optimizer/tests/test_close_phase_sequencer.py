@@ -335,18 +335,22 @@ async def test_close_sequencer_runs_all_5_steps_in_order_happy_path(
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     # Step sequence: sequencer_started, report, session_breakdown,
-    # ndjson_drain, cortex_commit, done.
+    # fact_finalize (step 2.5 — recipe + journal), ndjson_drain,
+    # cortex_commit, done. The fact_finalize step lives outside the
+    # 4-step KB design contract but is recorded for breakdown
+    # observability (see _on_enter_close docstring).
     steps = [r["step"] for r in rows]
     assert steps == [
         "sequencer_started", "report", "session_breakdown",
-        "ndjson_drain", "cortex_commit", "done",
+        "fact_finalize", "ndjson_drain", "cortex_commit", "done",
     ]
-    # All five effective steps succeeded.
+    # All effective steps succeeded.
     assert rows[1]["status"] == "done"   # report
     assert rows[2]["status"] == "done"   # session_breakdown
-    assert rows[3]["status"] == "done"   # ndjson_drain
-    assert rows[4]["status"] == "done"   # cortex_commit
-    assert rows[5]["status"] == "done"   # done
+    assert rows[3]["status"] == "done"   # fact_finalize
+    assert rows[4]["status"] == "done"   # ndjson_drain
+    assert rows[5]["status"] == "done"   # cortex_commit
+    assert rows[6]["status"] == "done"   # done
     # close_sequence_done flag set.
     assert coord.shared_state.close_sequence_done is True
     # Cortex commit ran exactly once.
