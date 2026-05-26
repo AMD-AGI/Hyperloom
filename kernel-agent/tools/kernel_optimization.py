@@ -95,11 +95,42 @@ def update_status(
 
 
 def load_candidates(path: Path) -> list[dict[str, Any]]:
-    """Load kernel candidates from JSON, normalizing legacy shapes."""
+    """Load kernel candidates from JSON, normalizing legacy shapes.
+
+    Per AMD-AGI/Hyperloom#314 the canonical ``hot_kernels`` field now only
+    carries kernels that ``classify_patchability`` marked routable, with the
+    rejected ones moved to ``skipped_kernels`` (full candidate dicts, not a
+    compact audit projection). Batch dispatchers (parallel_e2e_runner,
+    ``_batch_kernel_candidates``) read ``hot_kernels`` directly and benefit
+    from the filter. The kernel-opt CLI's direct lookup path
+    (``find_candidate(load_candidates(...), kid)``) still needs to be able
+    to resolve a non-routable kernel by id — both for operator debugging
+    ("what does the backend selector say about k001?") and so the
+    dispatcher's ``_validate_reusable_native_kernel`` guard fires with the
+    real ``reusable_native_kernel=False`` candidate instead of an empty
+    "missing native source" stub. Return the union so both call sites
+    work; the older flat-list / ``kernel_candidates`` legacy shapes are
+    still respected.
+    """
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
         return payload
     candidates = list(payload.get("hot_kernels") or payload.get("kernel_candidates") or [])
+    skipped = payload.get("skipped_kernels") or []
+    if isinstance(skipped, list):
+        seen_ids = {
+            c.get("kernel_id") for c in candidates
+            if isinstance(c, dict) and c.get("kernel_id")
+        }
+        for entry in skipped:
+            if not isinstance(entry, dict):
+                continue
+            kid = entry.get("kernel_id")
+            if kid and kid in seen_ids:
+                continue
+            candidates.append(entry)
+            if kid:
+                seen_ids.add(kid)
     artifact_paths = payload.get("artifact_paths")
     if not isinstance(artifact_paths, dict):
         artifact_paths = {}
