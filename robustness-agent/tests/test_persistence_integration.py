@@ -76,13 +76,18 @@ def _ctx_with_tick(
     tick: int,
     *,
     cumulative_gain_validated: float = 0.0,
+    optimization_stack_size: int = 1,
 ) -> ReactorContext:
+    # ``optimization_stack_size > 0`` is required by the B2 gain_plateau
+    # detector ("explored but stalled" semantics) so the test signal
+    # actually fires once the rolling window is full.
     return ReactorContext(
         tick_index=tick,
         shared_state=SharedStateSnapshot(
             session_id="sess-int",
             tick=tick,
             cumulative_gain_validated=cumulative_gain_validated,
+            optimization_stack_size=optimization_stack_size,
         ),
         inbox=[],
         now_unix=float(tick),
