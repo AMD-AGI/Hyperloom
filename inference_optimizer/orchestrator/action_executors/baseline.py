@@ -424,20 +424,21 @@ class BaselineExecutor:
         env["SERVER_LOG"] = str(output_dir / "server.log")
         env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
 
-        # Multi-node mode (--nodes >= 2): inject MAGPIE_RUN_PHASE=client +
-        # BENCHMARK_BASE_URL=<head pod ClusterIP> so Magpie skips its own
-        # server launch and the benchmark_serving client targets the
-        # RayJob head. Single-node returns {}, leaving env unchanged.
+        # Multi-node mode (--nodes >= 2): inject MAGPIE_RUN_PHASE=client
+        # + BENCHMARK_BASE_URL=<head pod ClusterIP> so Magpie skips its
+        # own server launch and benchmark_serving targets the RayJob
+        # head. ``magpie_remote_env()`` returns {} in single-node, so
+        # ``env`` is unchanged on the default path.
         from ._multi_node_env import magpie_remote_env
         env.update(magpie_remote_env())
 
-        # Multi-node only: restart sglang/vllm with this round's flags so
-        # every benchmark invocation runs against a fresh server (parity
-        # with single-node Magpie's PHASE=all server lifecycle). No-op in
+        # Multi-node only: restart sglang/vllm with this round's flags
+        # so every benchmark runs against a fresh server (parity with
+        # single-node Magpie's PHASE=all server lifecycle). No-op in
         # single-node. Profile rounds set ctx.extra["mn_round_restarted"]
-        # before super().__call__() to claim the restart; we honour that
-        # flag and skip a second restart so each magpie spawn corresponds
-        # to exactly one server boot.
+        # before super().__call__() to claim the restart; honour that
+        # flag so each Magpie spawn corresponds to exactly one server
+        # boot.
         from ._multi_node_server_lifecycle import (
             ServerRestartFailed,
             restart_server_for_round,
@@ -445,13 +446,12 @@ class BaselineExecutor:
         ctx_extra = getattr(ctx, "extra", None) or {}
         if not ctx_extra.get("mn_round_restarted"):
             try:
-                # PD knobs (pd_mode / pd_prefill_nodes / pd_decode_nodes /
-                # pd_prefill_tp / pd_decode_tp / pd_transfer_backend /
-                # pd_ib_device) are NOT forwarded explicitly here; the
-                # helper resolves them from $PD_* env (exported by
-                # cli.py) and falls back to state.json. This keeps the
-                # baseline call site identical between colocated and
-                # disaggregated runs — the agent only changes CLI flags.
+                # PD knobs (pd_mode / pd_prefill_nodes / pd_decode_nodes
+                # / pd_prefill_tp / pd_decode_tp / pd_transfer_backend /
+                # pd_ib_device) are resolved by the helper from $PD_* env
+                # (set by cli.py) and fall back to state.json — keeping
+                # this call site identical between colocated and
+                # disaggregated runs (the agent only changes CLI flags).
                 await restart_server_for_round(
                     extra_sglang_args=str(params.get("extra_sglang_args") or ""),
                     framework=os.environ.get("FRAMEWORK") or None,
@@ -487,6 +487,9 @@ class BaselineExecutor:
             proc = await asyncio.to_thread(
                 run_with_session_kill, cmd,
                 env=env, cwd=str(self.cwd), timeout=timeout_sec,
+            )
+            subprocess_runtime_sec = max(
+                0.0, time.time() - subprocess_started_unix,
             )
         except subprocess.TimeoutExpired as exc:
             timeout_candidates = sorted(output_dir.glob("benchmark_*"))
@@ -618,6 +621,17 @@ class BaselineExecutor:
             # OSL=256/TP=1) and produce ~10x lower throughput than baseline.
             # See `_workload_envs.py` for the bug history.
             "materialized_config": str(materialized_config_path),
+            # Wall-clock of the Magpie subprocess (success path only).
+            # Coordinator promotes this into
+            # ``SharedState.baseline_runtime_sec`` so the explore
+            # overtime-kill gate (``--explore-overtime-kill-ratio``)
+            # can derive a per-variant deadline of
+            # ``baseline_runtime_sec * ratio``. Measured around the
+            # ``run_with_session_kill`` call only; not exposed on the
+            # failure paths (timeout / nonzero / no_workspace /
+            # no_report / invalid_measurement) so a botched baseline
+            # cannot accidentally seed a tiny / huge deadline.
+            "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
         }
 
         # Parse accuracy eval results (GSM8K). RUN_EVAL=true was injected
