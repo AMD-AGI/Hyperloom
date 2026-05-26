@@ -658,6 +658,30 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
                       "parallel_e2e_runner.py --geak-cost-limit default "
                       "must mirror kernel_optimization.py (0.0 / env-overridable)")
 
+    def test_parallel_e2e_runner_run_json_invokes_subprocess(self) -> None:
+        """run_json must have its subprocess dependency imported."""
+        import importlib.util
+        import tempfile
+
+        tool = ROOT / "tools" / "parallel_e2e_runner.py"
+        spec = importlib.util.spec_from_file_location("parallel_e2e_runner", tool)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        assert spec is not None and spec.loader is not None
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as td:
+            result = module.run_json(
+                [
+                    sys.executable,
+                    "-c",
+                    'import json; print(json.dumps({"ok": True}))',
+                ],
+                env=os.environ.copy(),
+                timeout_s=10,
+                log_path=Path(td) / "run.log",
+            )
+        self.assertEqual(result, {"ok": True})
+
     def test_env_var_overrides_default(self) -> None:
         """End-to-end smoke: HYPERLOOM_GEAK_COST_LIMIT must reach
         kernel_optimization.py's argparse default at import time.
