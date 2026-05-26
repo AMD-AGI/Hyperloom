@@ -1971,6 +1971,22 @@ class SharedState:
         })
         history = history[-10:]
         entry["attempts"] = int(entry.get("attempts", 0)) + 1
+        # PR-K: per-source attempts ledger. The dispatcher's ``_is_live``
+        # consults this dict so that promoting a kernel's source from the
+        # python @compile_ops wrapper (e.g. ``aiter/ops/moe_op.py``) to
+        # the device .cu (e.g. ``csrc/.../gemm_moe_ck2stages.cu``) does
+        # NOT inherit the wrapper's attempts counter -- the device path
+        # is treated as a fresh target with its own attempts_per_source
+        # quota. Empty ``source_file`` is normalized to ``""`` so the
+        # resume from a v1 state.json (no per-source field) is bit-for-
+        # bit transparent: every entry gets a valid key, the dispatcher
+        # falls back to ``attempts`` total when no per-source row matches
+        # the candidate's current source_file, and the cumulative
+        # ``attempts`` field above continues to reflect "any source".
+        per_source = dict(entry.get("attempts_per_source") or {})
+        src_key = source_file or ""
+        per_source[src_key] = int(per_source.get(src_key, 0)) + 1
+        entry["attempts_per_source"] = per_source
         if decision == "PARTIAL":
             entry["partial_count"] = int(entry.get("partial_count", 0)) + 1
         elif decision == "KEEP":
