@@ -1,6 +1,6 @@
 """Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark.
 
-DESIGN v0.6 §15.2 + §16.1 baseline action.
+ + §16.1 baseline action.
 
 Wire-up:
 
