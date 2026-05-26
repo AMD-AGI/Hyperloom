@@ -47,7 +47,7 @@ class WebSearchProvider(Protocol):
     name: str
 
     def search(self, query: str, opts: SearchOptions) -> list[SearchHit]:
-        ...
+        pass
 
 
 class ProviderError(RuntimeError):

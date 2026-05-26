@@ -208,7 +208,7 @@ class TestRedirect:
         client = WebFetchClient(config=_cfg(), http_client=_client(handler))
         out = client.execute({"url": "https://example.com/a"})
         assert "cross-host redirect refused" in out
-        assert "evil.com" in out
+        assert "to evil.com." in out
 
     def test_redirect_loop_detected(self):
         def handler(request: httpx.Request) -> httpx.Response:
