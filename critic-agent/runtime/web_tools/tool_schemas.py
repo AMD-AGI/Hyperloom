@@ -17,20 +17,28 @@ from .config import WebToolsConfig
 def build_tool_schemas(config: WebToolsConfig) -> list[dict[str, Any]]:
     """Build the tool list to pass as ``tools=...`` to OpenAI.
 
-    Tools are gated by config: returns an empty list when web tools are
-    disabled, only ``web_search`` when fetch is off, etc. The caller is
-    expected to skip the ``tools=`` argument entirely when this list is
-    empty.
+    Tools are gated by config **and** by whether a corresponding client
+    would actually be constructible (e.g. search requires a provider with
+    an API key). The caller is expected to skip the ``tools=`` argument
+    entirely when this list is empty.
     """
     if not config.critic_web_tools_enabled:
         return []
 
     out: list[dict[str, Any]] = []
-    if config.search_provider_chain():
+    if _search_usable(config):
         out.append(_search_schema())
     if config.fetch_enabled:
         out.append(_fetch_schema())
     return out
+
+
+def _search_usable(config: WebToolsConfig) -> bool:
+    """True when at least one configured search provider has an API key."""
+    return any(
+        config.has_search_api_key(name)
+        for name in config.search_provider_chain()
+    )
 
 
 def _search_schema() -> dict[str, Any]:
