@@ -110,6 +110,25 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
     safe_api_key = os.environ.get("CLAW_API_KEY", "")
     safe_base_url = os.environ.get("SAFE_BASE_URL", "")
 
+    # Multi-node entries (nodes > 1) need an explicit "Task submission" block
+    # describing the RayJob image / per-node resources / RDMA env so the agent
+    # can spawn the SaFE RayJob with the right topology and bnxt_re tar package.
+    # Single-node entries (nodes == 1, the default) get an empty section — the
+    # Claw sandbox is the only execution context they need.
+    nodes = int(merged.get("nodes", 1) or 1)
+    if nodes > 1:
+        rayjob_image = merged.get("rayjob_image", "") or merged.get("sandbox_image", "")
+        multinode_section = (
+            f"\nTask submission ({nodes}-node):\n"
+            f"RayJob image: {rayjob_image}\n"
+            f"RayJob resource per node: CPU=96, GPU=8, memory=1024Gi, ephemeralStorage=400Gi\n"
+            f"RayJob node count: {nodes}\n"
+            f"env:\n"
+            f"- PATH_TO_BNXT_TAR_PACKAGE=/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz\n"
+        )
+    else:
+        multinode_section = ""
+
     common_fields = dict(
         model_hf=merged["model_hf"],
         model_path=merged["model_path"],
@@ -126,6 +145,15 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         inferenceX_data=ifx_text,
         safe_api_key=safe_api_key,
         safe_base_url=safe_base_url,
+        # Multi-node / Hyperloom-skill knobs (defaults match legacy single-node CI).
+        nodes=nodes,
+        target_gain=merged.get("target_gain", 10),
+        max_hours=merged.get("max_hours", 2),
+        random_range_ratio=merged.get("random_range_ratio", 0.8),
+        kernel_agent_build_geak_rag_index=merged.get(
+            "kernel_agent_build_geak_rag_index", 0,
+        ),
+        multinode_section=multinode_section,
     )
 
     if pr_mode:

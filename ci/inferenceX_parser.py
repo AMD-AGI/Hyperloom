@@ -364,4 +364,23 @@ def merge_model_config(
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
         "inferenceX_key": model_cfg.get("inferenceX_key", ""),
         "rayjob_image": resolve_var(model_cfg.get("rayjob_image", "")),
+        # ── Hyperloom-skill knobs surfaced to prompt_template.md ──
+        # `nodes` triggers the multinode Task-submission block when > 1.
+        # `target_gain` / `max_hours` are forwarded as CLI flags to
+        # `inference_optimizer optimize`. `random_range_ratio` controls
+        # benchmark prompt length jitter (matches InferenceX default 0.8).
+        # `kernel_agent_build_geak_rag_index` defaults off to skip the slow
+        # GEAK RAG index rebuild on each cold-start. All five fall back to
+        # legacy single-node defaults when absent in ci-config, so the 5
+        # existing entries are unchanged.
+        "nodes": model_cfg.get("nodes", 1),
+        "target_gain": model_cfg.get("target_gain", defaults.get("target_gain", 10)),
+        "max_hours": model_cfg.get("max_hours", defaults.get("max_hours", 2)),
+        "random_range_ratio": model_cfg.get(
+            "random_range_ratio", defaults.get("random_range_ratio", 0.8),
+        ),
+        "kernel_agent_build_geak_rag_index": model_cfg.get(
+            "kernel_agent_build_geak_rag_index",
+            defaults.get("kernel_agent_build_geak_rag_index", 0),
+        ),
     }
