@@ -1,4 +1,4 @@
-"""Specialist sub-agent domain catalogue — v0.8 M5/M6 (KB_design §3.5 §5).
+"""Specialist sub-agent domain catalogue — v0.8 M5/M6.
 
 Specialists are an *LLM* sub-agent form factor (distinct from the
 deterministic Python executors in ``action_executors/``). Each specialist
@@ -20,7 +20,7 @@ other five (kernel/comm/compiler/system/pr_intel) are listed here so
 PolicyGate R2 already knows their identifiers but the prompt builder
 falls back to a *generic* template until M6 lands per-domain prompts.
 
-Field reference (KB_design §3.5 §5):
+Field reference:
 
 * ``key`` — canonical id used in ``delegate{params.domain}`` and
   ``specialist_done{payload.domain}``.
@@ -74,7 +74,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "Reads sglang/vllm source, focuses on scheduler, cuda graph, "
             "kv cache, batching, chunked prefill, max-num-seqs."
         ),
-        # F2-2 — ``framework_pr_scout`` lets the specialist invoke
+        # ``framework_pr_scout`` lets the specialist invoke
         # ``fa candidates`` + ``git fetch refs/pull/<N>/head`` to
         # discover an upstream sglang/vllm PR addressing a known gap.
         # Gated end-to-end on ``SharedState.framework_agent_enabled``;
