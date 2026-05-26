@@ -5,11 +5,9 @@ Hyperloom proper** but manifest as opaque hangs / 401 storms inside the
 session:
 
 * **J1 ``gateway_auth_outage``** — ``OPENAI_BASE_URL/models`` returns
-  401 / forbidden when probed with ``$SAFE_API_KEY``. The auth_proxy
-  on ``:4002`` is healthy (F3 stays silent), but the upstream gateway
-  has lost or revoked the key. Every claude/codex CLI will now fail
-  with HTTP 401 at the *gateway* level — distinct from the proxy
-  death F3 detects.
+  401 / forbidden when probed with ``$SAFE_API_KEY``. The upstream
+  gateway has lost or revoked the key. Every claude/codex CLI will
+  now fail with HTTP 401 at the gateway level.
 
 * **J2 ``wekafs_degraded``** — ``stat`` on any of
   ``$TRACELENS_ROOT`` / ``$INFERENCEX_PATH`` / ``$OOB_SRC`` either
@@ -128,8 +126,7 @@ def _gateway_symptoms(
                 summary=(
                     f"upstream LLM gateway returned {status_code}/{status} "
                     f"on {gateway.get('url')!r}; every claude/codex CLI "
-                    f"will now fail at the gateway (distinct from the "
-                    f"local auth_proxy)"
+                    f"will now fail at the gateway"
                 ),
                 evidence={
                     "url": gateway.get("url"),
@@ -141,8 +138,7 @@ def _gateway_symptoms(
                 source="local",
                 suggestion=(
                     "rotate $SAFE_API_KEY at https://llm.amd.com/ and "
-                    "re-export; the auth_proxy is healthy but the "
-                    "upstream key is revoked / expired"
+                    "re-export; the upstream key is revoked / expired"
                 ),
             )
         ]
