@@ -195,18 +195,23 @@ class ProgressDetector:
             # Validated gain exists even though stack count is 0 — odd
             # but not our problem; let it be.
             return None
-        # ``no_levers_found`` means "exploration ran but found nothing
-        # worth keeping". On multi-node large-model runs sglang cold
-        # start (10-15 min) + baseline + profile + turnaround can eat
-        # 35-50 min before any explore action even starts, during
-        # which stack_size==0 + cumulative_gain==0 are both
-        # by-construction rather than diagnostic. Defer until at
-        # least one explore family (backends / params / sweep /
-        # validate_stack) has been attempted; before that the
-        # session is mid-cold-start and there are no levers to find
-        # *yet*. Repro: sandbox primus-claw-20260522034541-xkk9f
-        # turn=7 (elapsed=47.6min, tick=8) fired HIGH 12 minutes
-        # before backends phase 1 actually started.
+        # PR-B Fix 2 (M0): do not claim "no lever" while kernel_opt is
+        # in flight or its KEEP queue is waiting to integrate. Qwen3
+        # 20260522T093903Z burned a 4.13x KEEP because this signal only
+        # looked at optimization_stack_size + cumulative_gain.
+        if snap.kernel_opt_attempts_count > 0:
+            return None
+        if snap.has_keep_pending_integrate:
+            return None
+        # Multi-node defer (PR #239 followup 97318ee): sglang cold start
+        # (10-15 min) + baseline + profile + turnaround eats 35-50 min
+        # on large-model multi-node runs, during which stack_size==0 +
+        # cumulative_gain==0 are by-construction rather than diagnostic.
+        # Defer the symptom until any explore family has actually run
+        # (last_explore / last_backends / last_params / last_sweep
+        # populated). Repro: primus-claw-20260522034541-xkk9f turn=7
+        # fired HIGH 12 minutes before backends phase 1 actually
+        # started.
         if not snap.explore_started:
             return None
         if snap.elapsed_minutes < cfg.no_levers_min_minutes:
@@ -226,6 +231,8 @@ class ProgressDetector:
                 "tick": snap.tick,
                 "optimization_stack_size": 0,
                 "cumulative_gain_validated": snap.cumulative_gain_validated,
+                "kernel_opt_attempts_count": snap.kernel_opt_attempts_count,
+                "has_keep_pending_integrate": snap.has_keep_pending_integrate,
                 "min_observation_minutes": cfg.no_levers_min_minutes,
                 "min_observation_ticks": cfg.no_levers_min_ticks,
             },
