@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
   security-events: write
+  # ``codeql-action/analyze`` reads the current workflow run via
+  # ``GET /repos/.../actions/runs/{id}`` to attach run metadata to the
+  # SARIF upload + send completion telemetry. Without ``actions: read``
+  # both calls fail with ``Resource not accessible by integration``.
+  actions: read
 
 jobs:
   analyze:
