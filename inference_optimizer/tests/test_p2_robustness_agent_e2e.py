@@ -105,6 +105,10 @@ async def test_robustness_agent_real_runtime_heartbeat(
             "robustness_server_url": "",
             "auto_probe_auth_proxy": False,
             "auto_probe_inference_server": False,
+            # Heartbeat test runs on inert CI hosts without a Ray head;
+            # suppress the A6 ``ray_head_dead`` ladder so it does not
+            # crowd out the expected ``send_message{heartbeat}`` intent.
+            "ray_probe_enabled": False,
         },
     )
 

@@ -88,6 +88,16 @@ _CUDA_GRAPH_SUBSET = [
 ]
 
 
+def _single_node_default_grid_names() -> list[str]:
+    """Mirror the executor's single-node filter for ``multi_node_only_*``
+    variants in the default params grid.
+    """
+    return [
+        v.name for v in DEFAULT_PARAMS_GRID
+        if not (v.note or "").lower().startswith("multi_node_only")
+    ]
+
+
 class TestNoSubsetIsBackwardCompat:
     @pytest.mark.asyncio
     async def test_omitting_variants_runs_full_grid(
@@ -107,9 +117,7 @@ class TestNoSubsetIsBackwardCompat:
         with patch.object(mod, "run_grid", new=AsyncMock(return_value=[])) as rg:
             await executor(ctx)
         passed = _captured_grid_from_run_grid(rg)
-        assert [v.name for v in passed] == [
-            v.name for v in DEFAULT_PARAMS_GRID
-        ]
+        assert [v.name for v in passed] == _single_node_default_grid_names()
 
     @pytest.mark.asyncio
     async def test_variants_empty_list_runs_full_grid(
@@ -128,7 +136,7 @@ class TestNoSubsetIsBackwardCompat:
         with patch.object(mod, "run_grid", new=AsyncMock(return_value=[])) as rg:
             await executor(ctx)
         passed = _captured_grid_from_run_grid(rg)
-        assert len(passed) == len(DEFAULT_PARAMS_GRID)
+        assert len(passed) == len(_single_node_default_grid_names())
 
 
 class TestVariantsSubsetFiltering:

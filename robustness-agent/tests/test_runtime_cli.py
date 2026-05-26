@@ -63,6 +63,13 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
                 "session_dir": str(tmp_path),
                 "auto_probe_auth_proxy": False,
                 "auto_probe_inference_server": False,
+                # Heartbeat path runs on inert CI hosts without a Ray
+                # head. Without this opt-out the LocalProbe A6 sub-probe
+                # fires ``ray_head_dead`` after the 5s timeout and the
+                # ladder appends alert + prune_branch +
+                # escalate_strategy_change intents that mask the
+                # expected ``send_message{heartbeat}`` envelope.
+                "ray_probe_enabled": False,
             },
         }
     )
@@ -173,6 +180,12 @@ def test_subprocess_tick_emits_heartbeat(tmp_path: Path):
             "session_dir": str(tmp_path / "sess"),
             "auto_probe_auth_proxy": False,
             "auto_probe_inference_server": False,
+            # Heartbeat path is exercised on CI/dev hosts with no Ray
+            # head running, where ``ray status`` hangs / times out and
+            # the LocalProbe ladder would otherwise fire alert + prune
+            # intents alongside the heartbeat. Disable the A6 probe so
+            # the envelope stays focused on the heartbeat contract.
+            "ray_probe_enabled": False,
         },
     }
     proc = _run_subprocess(request, request_path, out_path)
