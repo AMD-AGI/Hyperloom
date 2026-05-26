@@ -57,7 +57,11 @@ def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
         return {}
 
 
-def build(session_dir: Path | str) -> dict[str, Any]:
+def build(
+    session_dir: Path | str,
+    *,
+    include_transcripts: bool | None = None,
+) -> dict[str, Any]:
     """Build a complete :class:`SessionBreakdown` for ``session_dir``.
 
     Pure function — reads from disk, never mutates state.
@@ -67,12 +71,26 @@ def build(session_dir: Path | str) -> dict[str, Any]:
                      The directory MUST contain at least ``manifest.json``
                      or ``state.json`` for any usable output; a totally
                      empty dir returns mostly-empty sections with warnings.
+        include_transcripts: when True, specialist transcripts are
+            inlined under ``specialist_runs[i].transcripts[j].body``.
+            When None (default) we consult the env var
+            ``INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1`` so
+            CLI / SDK / agent-action call sites converge through one
+            switch (KB_design §3.12 §7 step 5). Defaults to False —
+            transcripts are large and most dashboards prefer a path
+            reference.
 
     Returns:
         A dict matching :class:`schema.SessionBreakdown`.
     """
     sd = Path(session_dir).resolve()
     warnings: list[str] = []
+    if include_transcripts is None:
+        include_transcripts = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS", "",
+            ).strip().lower() in ("1", "true", "yes")
+        )
 
     state = _load_state(sd, warnings)
     manifest = _load_manifest(sd, warnings)
@@ -96,6 +114,12 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     phase_timeline    = _safe_collect("phase_timeline",
                                        lambda: collectors.collect_phase_timeline(state, warnings),
                                        warnings)
+    phase_segments    = _safe_collect("phase_segments",
+                                       lambda: collectors.collect_phase_segments(
+                                           state, phase_timeline, warnings,
+                                       ),
+                                       warnings,
+                                       default=[])
     geak_invocations, oob_invocations = _safe_collect(
         "invocations",
         lambda: collectors.collect_kernel_invocations(sd, warnings),
@@ -131,6 +155,22 @@ def build(session_dir: Path | str) -> dict[str, Any]:
                                             warnings,
                                         ),
                                         warnings)
+    kb_provenance      = _safe_collect("kb_provenance",
+                                        lambda: collectors.collect_kb_provenance(
+                                            session_dir, state, manifest, warnings,
+                                        ),
+                                        warnings)
+    # v0.8 §3.12 §4.3 — specialist sub-agent dispatch records. Built
+    # from ``state.specialist_rounds`` + the on-disk transcripts so
+    # capability_summary.specialist and specialist_runs always agree
+    # (Inv-12.2 single source).
+    specialist_runs    = _safe_collect("specialist_runs",
+                                        lambda: collectors.collect_specialist_runs(
+                                            sd, state, warnings,
+                                            include_transcripts=include_transcripts,
+                                        ),
+                                        warnings,
+                                        default=[])
 
     source_files = collectors.collect_source_files(
         sd,
@@ -150,15 +190,37 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "baseline":            baseline,
         "final":               final,
         "phase_timeline":      phase_timeline,
+        # v0.8 M2 — phase boundary segments with embedded action events
+        # (KB_design §3.12 §4 "phase_timeline upgrade"). Additive: v1
+        # readers keep using ``phase_timeline`` (flat); v2 readers
+        # prefer ``phase_segments``.
+        "phase_segments":      phase_segments,
+        # v0.8 §3.12 §4.2 — top-level v1-reader alias: the flat
+        # per-action timeline used to live under ``phase_timeline``
+        # in v1. Mirrors the same list so an old reader picks it up
+        # without code change.
+        "action_timeline":     phase_timeline,
         "capability_summary":  capability_summary,
         "geak_invocations":    geak_invocations,
         "oob_invocations":     oob_invocations,
         "kernel_lifecycle":    kernel_lifecycle,
         "param_search":        param_search,
+        # v0.8 §3.12 §5 — ``explore_search`` is the v2-native name for
+        # the merged ledger (KB_design §3.4). Mirror of
+        # ``param_search`` so v2 readers can switch with a one-line
+        # rename + v1 readers don't break.
+        "explore_search":      param_search,
         "sweep":               sweep,
         "critic_robustness":   critic_robustness,
         "telemetry":           telemetry,
         "attribution":         attribution,
+        # v0.8 M1 — Cortex KB integration audit (KB_design §3.13 M1 §4
+        # "kb_provenance"). Added as a new top-level section rather than
+        # bumping ``schema_version`` because every field is optional; the
+        # v1 reader simply ignores it.
+        "kb_provenance":       kb_provenance,
+        # v0.8 §3.12 §4.3 — specialist sub-agent dispatch records.
+        "specialist_runs":     specialist_runs,
 
         "warnings":            warnings,
         "source_files":        source_files,
@@ -192,6 +254,7 @@ def write_breakdown_json(
     session_dir: Path | str,
     *,
     output_path: Path | str | None = None,
+    include_transcripts: bool | None = None,
 ) -> Path:
     """Build + atomically write ``session_breakdown.json``.
 
@@ -199,6 +262,10 @@ def write_breakdown_json(
         session_dir: hyperloom session directory.
         output_path: override target path (defaults to
                      ``<session_dir>/session_breakdown.json``).
+        include_transcripts: see :func:`build` — when None the
+            ``INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1``
+            env var (set by CLI ``--breakdown-include-transcripts``)
+            decides.
 
     Returns:
         Absolute path to the written JSON file.
@@ -207,7 +274,7 @@ def write_breakdown_json(
     target = Path(output_path).resolve() if output_path else sd / BREAKDOWN_FILENAME
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    breakdown = build(sd)
+    breakdown = build(sd, include_transcripts=include_transcripts)
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
 
     fd, tmp = tempfile.mkstemp(
@@ -239,9 +306,135 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+def write_minimal_final_report(
+    session_dir: Path | str,
+    *,
+    output_path: Path | str | None = None,
+) -> Path:
+    """Issue-I (Saturday May 2026): cli.finally safety-net for
+    ``reports/final.md`` when the CLOSE phase sequencer never reached
+    step 1 (e.g. SIGTERM mid-tick, ``no_more_leverage`` set before any
+    EXPLORE work landed, or the report executor itself failed).
+
+    The full :class:`ReportExecutor` walks the message bus to render
+    rich highlights; this helper deliberately stays minimal (one
+    SharedState read + the breakdown json that ``cli.finally`` already
+    writes alongside) so it never raises and never blocks shutdown. The
+    output is a plain markdown summary that always documents
+    ``stop_reason`` / ``baseline_tput`` / ``current_best`` / ``last_*``
+    + a pointer to ``session_breakdown.json`` for the structured
+    detail.
+
+    Returns the absolute path written. Idempotent: never overwrites a
+    pre-existing ``reports/final.md`` (the sequencer's authoritative
+    output).
+    """
+    from ..orchestrator.shared_state import SharedState
+    from ..session_paths import reports_dir
+
+    sd = Path(session_dir).resolve()
+    target = (
+        Path(output_path).resolve()
+        if output_path
+        else reports_dir(sd) / "final.md"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target.stat().st_size > 0:
+        return target
+
+    state = SharedState.load_or_init(sd)
+    breakdown_link = sd / BREAKDOWN_FILENAME
+
+    def _fmt_attempt(d: dict[str, Any] | None, label: str) -> str:
+        if not isinstance(d, dict) or not d:
+            return f"- **{label}**: (none)"
+        ts = d.get("ts") or "-"
+        body = json.dumps(
+            {k: v for k, v in d.items() if k != "ts"},
+            sort_keys=True,
+            default=str,
+        )[:600]
+        return f"- **{label}** (`{ts}`): `{body}`"
+
+    current_best = state.current_best or {}
+    cb_action = current_best.get("action") or "-"
+    cb_tput = current_best.get("tput")
+    cb_tput_s = (
+        f"{cb_tput:.2f}" if isinstance(cb_tput, (int, float)) else "-"
+    )
+    last_sweep = state.last_sweep or {}
+    if last_sweep:
+        sw_grid = last_sweep.get("grid_size", 0)
+        sw_best = last_sweep.get("best_overall") or {}
+        sw_tput = sw_best.get("output_throughput")
+        sw_line = (
+            f"grid_size={sw_grid} "
+            f"best_tput="
+            f"{(f'{sw_tput:.2f}' if isinstance(sw_tput, (int, float)) else '-')}"
+        )
+    else:
+        sw_line = "(none)"
+
+    lines = [
+        f"# Inference Optimizer — emergency final report",
+        "",
+        "> **Auto-generated safety-net.** The CLOSE phase 5-step "
+        "sequencer did not run to completion (process exited before "
+        "phase transition, or ``report`` executor failed). For the "
+        "full audit trail open `session_breakdown.json` next to this "
+        "file.",
+        "",
+        f"- session_id     : `{state.session_id or '-'}`",
+        f"- model_path     : `{state.model_path or '-'}`",
+        f"- framework      : `{state.framework or '-'}`",
+        f"- gpu_type       : `{state.gpu_type or '-'}`",
+        f"- phase (last)   : `{state.phase or '-'}`",
+        f"- stop_reason    : `{state.stop_reason or '-'}`",
+        f"- baseline_tput  : `{state.baseline_tput:.2f}`",
+        f"- current_best   : `{cb_action}` @ `{cb_tput_s}` tok/s",
+        f"- cumul_gain     : `{state.cumulative_gain:.2f}%` "
+        f"(validated `{state.cumulative_gain_validated:.2f}%`)",
+        f"- stack_entries  : `{len(state.optimization_stack or [])}`",
+        f"- sweep summary  : {sw_line}",
+        "",
+        "## Last action attempts",
+        "",
+        _fmt_attempt(getattr(state, "last_baseline", None), "last_baseline"),
+        _fmt_attempt(getattr(state, "last_profile", None), "last_profile"),
+        _fmt_attempt(getattr(state, "last_backends", None), "last_backends"),
+        _fmt_attempt(getattr(state, "last_params", None), "last_params"),
+        _fmt_attempt(state.last_sweep, "last_sweep"),
+        "",
+        f"## Structured detail",
+        "",
+        f"See `{breakdown_link.name}` (sibling of session root) for the "
+        f"complete `phase_history` / `critic_robustness` / "
+        f"`kb_provenance` blocks.",
+        "",
+    ]
+
+    fd, tmp = tempfile.mkstemp(
+        prefix=".final.md.", suffix=".tmp", dir=str(target.parent),
+    )
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        tmp_path.write_text("\n".join(lines), encoding="utf-8")
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    log.info("emergency final report: wrote %s", target)
+    return target
+
+
 __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "build",
     "write_breakdown_json",
+    "write_minimal_final_report",
 ]

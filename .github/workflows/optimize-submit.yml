@@ -26,7 +26,7 @@ name: SaFE Optimize Submit
 #
 # How to dispatch:
 #   • Single/few models      : `-f models='Qwen/Qwen2.5-7B-Instruct ...'`
-#   • Reproducible batch run : `-f candidates_file=ci/candidates/top600_2026-05-12.json
+#   • Reproducible batch run : `-f candidates_file=ci/candidates/production_1000_from_hf_2026-05-25.json
 #                              -f batch_index=0 -f batch_size=130`
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
@@ -44,7 +44,7 @@ on:
         required: false
         default: ''
       candidates_file:
-        description: 'Path to a build_candidates.py JSON (e.g. ci/candidates/top600_2026-05-12.json). Used when models is empty.'
+        description: 'Path to a candidates JSON built by ci/build_production_hf_pool.py (e.g. ci/candidates/production_1000_from_hf_2026-05-25.json). Used when models is empty.'
         required: false
         default: ''
       batch_index:
@@ -175,14 +175,23 @@ jobs:
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/top2000_2026-05-15.json' || github.event.inputs.candidates_file }}
+      # Production cron rotates over a fixed pool of models that already have
+      # real leaderboard data, so we can compare week-over-week. The file is
+      # generated manually via ci/build_production_leaderboard_pool.py and
+      # refreshed only when we want to bring in newly-published models.
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_hf_2026-05-25.json' || github.event.inputs.candidates_file }}
       INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '60' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
-      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_leaderboard }}
+      # Schedule no longer excludes leaderboard-known models — that was for
+      # the discovery cron. We now WANT to re-run the production pool. We
+      # still exclude active workflows so cron does not double-submit a
+      # model that is already running in a previous batch.
+      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
       INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
       GITHUB_TOKEN:          ${{ github.token }}
+      GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -268,10 +277,25 @@ jobs:
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
-          INPUT_ALL_ARTIFACTS:    ${{ github.event.inputs.all_artifacts }}
+          # Cron rotates through the production pool — operators can't go
+          # back and re-fetch sandbox state after the fact, so force
+          # `--all-artifacts=true` on schedule. workflow_dispatch keeps
+          # the user-provided value so manual runs can still pull only
+          # the three contract files when they want a faster batch.
+          INPUT_ALL_ARTIFACTS:    ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.all_artifacts }}
           INPUT_DRY_RUN:          ${{ github.event.inputs.dry_run }}
+          MATRIX_POOL_ID:         ${{ matrix.pool_id }}
+          MATRIX_POOL_INDEX:      ${{ matrix.pool_index }}
+          MATRIX_BATCH_INDEX:     ${{ matrix.batch_index }}
+          MATRIX_BATCH_SIZE:      ${{ matrix.batch_size }}
+          MATRIX_SOURCE_TASK_ID:  ${{ matrix.task_id }}
           OUTPUT_DIR:             ${{ github.workspace }}/submit-output
           ARTIFACTS_DIR:          ${{ github.workspace }}/task-artifacts
+          # GitHub-issued, repo-scoped, 7-day token. We embed it into the
+          # HYPERLOOM_SOURCE_REPO URL handed to the sandbox so `git clone`
+          # can authenticate against the private Hyperloom repo. Renamed
+          # from GITHUB_TOKEN to avoid clobbering actions/checkout's env.
+          HYPERLOOM_GIT_TOKEN:    ${{ github.token }}
         run: |
           set -euo pipefail
           ARGS=(--model "${MODEL_REPO}")
@@ -298,6 +322,21 @@ jobs:
             echo "::error::prompt_prefix is empty and ci/prompt_prefix.txt is missing — refusing to submit to SaFE with empty promptPrefix"
             exit 1
           fi
+          if [ -n "${GITHUB_SHA:-}" ]; then
+            # The sandbox needs git credentials to clone the private Hyperloom
+            # repo. We embed the workflow-scoped, 7-day `github.token` directly
+            # into the clone URL (same pattern that actions/checkout uses
+            # internally). This expands at submit time so the agent sees a
+            # ready-to-use URL — it must NOT be echoed back into the GHA log.
+            if [ -z "${HYPERLOOM_GIT_TOKEN:-}" ]; then
+              echo "::error::HYPERLOOM_GIT_TOKEN not set; cannot pin sandbox checkout to a private repo"
+              exit 1
+            fi
+            REPO_URL_AUTH="https://x-access-token:${HYPERLOOM_GIT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            PROMPT_PREFIX_VALUE="CI SOURCE PIN:"$'\n'"  export HYPERLOOM_SOURCE_REF=\"${GITHUB_SHA}\""$'\n'"  export HYPERLOOM_SOURCE_REPO=\"${REPO_URL_AUTH}\""$'\n\n'"${PROMPT_PREFIX_VALUE}"
+            # Log the SHA only — never the URL (it contains the token).
+            echo "[prompt_prefix] pinned sandbox Hyperloom checkout to ${GITHUB_SHA} (token-authenticated clone URL injected)"
+          fi
           ARGS+=(--prompt-prefix "$PROMPT_PREFIX_VALUE")
           if [ "${INPUT_WAIT:-true}" = "false" ]; then
             ARGS+=(--no-wait-for-completion)
@@ -310,6 +349,21 @@ jobs:
           fi
           if [ "${INPUT_DRY_RUN:-false}" = "true" ]; then
             ARGS+=(--dry-run)
+          fi
+          if [ -n "${MATRIX_POOL_ID:-}" ]; then
+            ARGS+=(--pool-id "${MATRIX_POOL_ID}")
+          fi
+          if [ -n "${MATRIX_POOL_INDEX:-}" ]; then
+            ARGS+=(--pool-index "${MATRIX_POOL_INDEX}")
+          fi
+          if [ -n "${MATRIX_BATCH_INDEX:-}" ]; then
+            ARGS+=(--pool-batch-index "${MATRIX_BATCH_INDEX}")
+          fi
+          if [ -n "${MATRIX_BATCH_SIZE:-}" ]; then
+            ARGS+=(--pool-batch-size "${MATRIX_BATCH_SIZE}")
+          fi
+          if [ -n "${MATRIX_SOURCE_TASK_ID:-}" ]; then
+            ARGS+=(--pool-source-task-id "${MATRIX_SOURCE_TASK_ID}")
           fi
           ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-480}")
           ARGS+=(--output-dir "${OUTPUT_DIR}")
@@ -325,39 +379,46 @@ jobs:
             echo "_No manifest produced for ${{ matrix.model }}._" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Publish per-model result to model-leaderboard
-        # Publish each matrix row as soon as it finishes so the leaderboard
-        # updates continuously instead of waiting for the whole 60-model batch.
-        # The final summary job still publishes the full batch as an idempotent
-        # upsert by run_id/task_id, so this does not create duplicate rows.
-        if: always() && github.event.inputs.dry_run != 'true'
-        continue-on-error: true
-        working-directory: ci
-        env:
-          HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
-          HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
-          INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
-          INPUT_ISL:        ${{ github.event.inputs.isl }}
-          INPUT_OSL:        ${{ github.event.inputs.osl }}
-        run: |
-          set -euo pipefail
-          if [ ! -f "${{ github.workspace }}/submit-output/submission_manifest.json" ]; then
-            echo "No submission_manifest.json for ${{ matrix.model }}; skipping per-model publish"
-            exit 0
-          fi
-          mkdir -p "${{ github.workspace }}/single-summary"
-          python3 build_summary.py \
-            --artifacts-dir "${{ github.workspace }}/task-artifacts" \
-            --manifests-dir "${{ github.workspace }}/submit-output" \
-            --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
-            --isl           "${INPUT_ISL:-1024}" \
-            --osl           "${INPUT_OSL:-1024}" \
-            --out-dir       "${{ github.workspace }}/single-summary"
-          if [ ! -f "${{ github.workspace }}/single-summary/normalized_results.json" ]; then
-            echo "normalized_results.json not produced for ${{ matrix.model }}; skipping publish"
-            exit 0
-          fi
-          python3 publish_results.py --input "${{ github.workspace }}/single-summary/normalized_results.json"
+      # ─── DISABLED 2026-05-25 ─────────────────────────────────────────
+      # Per-model publish to model-leaderboard is disabled per user request.
+      # Reason: we no longer want optimize-submit cron runs to push entries
+      # into the live leaderboard (leaderboard data is now curated through
+      # the manual production-pool refresh path).
+      # The Teams completion webhook (below) is still active.
+      # To re-enable: uncomment the whole `Publish per-model result …` step.
+      # - name: Publish per-model result to model-leaderboard
+      #   # Publish each matrix row as soon as it finishes so the leaderboard
+      #   # updates continuously instead of waiting for the whole 60-model batch.
+      #   # The final summary job still publishes the full batch as an idempotent
+      #   # upsert by run_id/task_id, so this does not create duplicate rows.
+      #   if: always() && github.event.inputs.dry_run != 'true'
+      #   continue-on-error: true
+      #   working-directory: ci
+      #   env:
+      #     HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
+      #     HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
+      #     INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
+      #     INPUT_ISL:        ${{ github.event.inputs.isl }}
+      #     INPUT_OSL:        ${{ github.event.inputs.osl }}
+      #   run: |
+      #     set -euo pipefail
+      #     if [ ! -f "${{ github.workspace }}/submit-output/submission_manifest.json" ]; then
+      #       echo "No submission_manifest.json for ${{ matrix.model }}; skipping per-model publish"
+      #       exit 0
+      #     fi
+      #     mkdir -p "${{ github.workspace }}/single-summary"
+      #     python3 build_summary.py \
+      #       --artifacts-dir "${{ github.workspace }}/task-artifacts" \
+      #       --manifests-dir "${{ github.workspace }}/submit-output" \
+      #       --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
+      #       --isl           "${INPUT_ISL:-1024}" \
+      #       --osl           "${INPUT_OSL:-1024}" \
+      #       --out-dir       "${{ github.workspace }}/single-summary"
+      #     if [ ! -f "${{ github.workspace }}/single-summary/normalized_results.json" ]; then
+      #       echo "normalized_results.json not produced for ${{ matrix.model }}; skipping publish"
+      #       exit 0
+      #     fi
+      #     python3 publish_results.py --input "${{ github.workspace }}/single-summary/normalized_results.json"
 
       - name: Upload per-model manifest
         if: always()
@@ -443,32 +504,41 @@ jobs:
             --osl           "${INPUT_OSL:-1024}" \
             --out-dir       "${{ github.workspace }}/summary-out"
 
-      - name: Publish results to model-leaderboard
-        # POST normalized_results.json to {HYPERLOOM_RESULTS_SERVICE_URL}/api/import.
-        # publish_results.py exits 0 with a log line if the URL env is unset,
-        # so this step is a no-op for runs that don't have the secret configured.
-        # Mirrors the same step in optimize-batch.yml so both workflows feed the
-        # results dashboard the same way.
-        #
-        # continue-on-error: the publish endpoint has known intermittent 500s
-        # when its postgres pod crashloops (luochen has been pinged). Even
-        # with the in-script retry loop, persistent service downtime should
-        # not block the webhook from being sent — that is the user's main
-        # signal that a batch finished. The summary artifact + GHA logs still
-        # carry the full data for re-publish later.
-        if: always()
-        continue-on-error: true
-        working-directory: ci
-        env:
-          HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
-          HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
-        run: |
-          INPUT="${{ github.workspace }}/summary-out/normalized_results.json"
-          if [ ! -f "$INPUT" ]; then
-            echo "normalized_results.json not produced — skipping publish"
-            exit 0
-          fi
-          python3 publish_results.py --input "$INPUT"
+      # ─── DISABLED 2026-05-25 ─────────────────────────────────────────
+      # Final batch publish to model-leaderboard is disabled per user request
+      # (paired with the per-model publish step in the optimize matrix).
+      # Reason: cron runs should no longer push results into the live
+      # leaderboard; the Teams completion webhook below stays on for batch
+      # completion notification, and ci_summary / normalized_results.json
+      # are still uploaded as artifacts so a manual republish via
+      # .harvest/republish_from_artifact.py is always possible.
+      # To re-enable: uncomment the whole `Publish results to model-leaderboard` step.
+      # - name: Publish results to model-leaderboard
+      #   # POST normalized_results.json to {HYPERLOOM_RESULTS_SERVICE_URL}/api/import.
+      #   # publish_results.py exits 0 with a log line if the URL env is unset,
+      #   # so this step is a no-op for runs that don't have the secret configured.
+      #   # Mirrors the same step in optimize-batch.yml so both workflows feed the
+      #   # results dashboard the same way.
+      #   #
+      #   # continue-on-error: the publish endpoint has known intermittent 500s
+      #   # when its postgres pod crashloops (luochen has been pinged). Even
+      #   # with the in-script retry loop, persistent service downtime should
+      #   # not block the webhook from being sent — that is the user's main
+      #   # signal that a batch finished. The summary artifact + GHA logs still
+      #   # carry the full data for re-publish later.
+      #   if: always()
+      #   continue-on-error: true
+      #   working-directory: ci
+      #   env:
+      #     HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
+      #     HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
+      #   run: |
+      #     INPUT="${{ github.workspace }}/summary-out/normalized_results.json"
+      #     if [ ! -f "$INPUT" ]; then
+      #       echo "normalized_results.json not produced — skipping publish"
+      #       exit 0
+      #     fi
+      #     python3 publish_results.py --input "$INPUT"
 
       - name: Render summary to job summary
         if: always()

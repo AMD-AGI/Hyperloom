@@ -82,11 +82,19 @@ _BASE_INTENTS: frozenset[IntentType] = frozenset({
 
 # Orchestration — proposes / delegates / requests Kernel; the only role with
 # REQUEST authority (target_agent="kernel" enforced by PolicyGate).
+#
+# Roofline-v2 C3: Orchestration is also granted PRUNE_BRANCH so it can act on
+# the structured ``suggested_prunes`` advice produced by the ``roofline``
+# action (C4 / C5). The intent's per-source allowlist is widened in
+# :mod:`.policy` (``_ROBUSTNESS_ONLY_INTENT_SOURCES``); the other two
+# scheduling-police intents (FORCE_DISPATCH, ESCALATE_STRATEGY_CHANGE) stay
+# robustness-only.
 _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
     IntentType.PROPOSE_ACTION,
     IntentType.DELEGATE,
     IntentType.UPDATE_STATE,
     IntentType.REQUEST,
+    IntentType.PRUNE_BRANCH,
 })
 
 
