@@ -42,9 +42,8 @@ import os
 import sys
 
 from ..orchestrator.action_executors import (
-    backends_executor,
     baseline_executor,
-    params_executor,
+    explore_executor,
     profile_executor,
     report_executor,
     sweep_executor,
@@ -86,7 +85,7 @@ _ORCH_PROMPT = (
 _CRITIC_PROMPT = (
     "You are the Critic. Approve every well-formed proposal whose\n"
     "action_name is one of: baseline, profile, backends, params, sweep,\n"
-    "integrate, report, dream. Reject anything else with a brief reason.\n"
+    "integrate, report. Reject anything else with a brief reason.\n"
     "REQUIRED payload: target_proposal_msg_id, verdict, reasoning."
 )
 
@@ -126,13 +125,10 @@ async def _run(ticks: int, target_gain: float) -> int:
     coordinator = Coordinator(session_dir, backends=backends)
     coordinator.sub.register_executor("baseline", baseline_executor)
     coordinator.sub.register_executor("profile",  profile_executor)
-    coordinator.sub.register_executor("backends", backends_executor)
-    coordinator.sub.register_executor("params",   params_executor)
+    coordinator.sub.register_executor("explore",  explore_executor)
     coordinator.sub.register_executor("sweep",    sweep_executor)
     coordinator.sub.register_executor("report",   report_executor)
-    for kind in ("target_analysis",
-                  "dream", "re_explore", "recover",
-                  "comm_optimization", "compiler_tuning"):
+    for kind in ("target_analysis", "recover"):
         coordinator.sub.register_executor(kind, _noop_prep)
 
     coordinator.system_prompt_overrides = {
