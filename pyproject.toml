@@ -32,7 +32,6 @@ Security = "https://github.com/AMD-AGI/Hyperloom/security/policy"
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
-    "respx>=0.21",
 ]
 
 [project.scripts]
@@ -58,8 +57,8 @@ inference_optimizer = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["inference_optimizer/tests", "robustness-agent/tests"]
-pythonpath = [".", "robustness-agent/src"]
+testpaths = ["inference_optimizer/tests", "robustness-agent/tests", "critic-agent/runtime/tests"]
+pythonpath = [".", "robustness-agent/src", "critic-agent"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
@@ -126,6 +125,11 @@ omit = [
     # exercise; treated as test files for coverage purposes).
     "kernel-agent/tools/test_*.py",
     "kernel-agent/tools/_collective_names.py",
+    # PMC roofline integration module — pure-Python helpers are covered
+    # by ``test_roofline_integration_units``; the rest of the file is a
+    # rocprofv3 + sglang subprocess driver that is exercised by GPU-bound
+    # integration tests on real hardware.
+    "inference_optimizer/orchestrator/roofline_integration.py",
     # Local-host metrics probes — wrap ``rocm-smi`` / ``nvidia-smi`` /
     # ``ps`` / ``df`` / ``ray status``. Each shell-out has a unit test
     # through the provider/factory layers; the local_probe glue itself
