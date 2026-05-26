@@ -1,4 +1,4 @@
-"""PolicyGate — DESIGN v0.6 §14.5.
+"""PolicyGate
 
 Single chokepoint: every parsed Intent passes through ``validate_intent``
 before the Coordinator commits side-effects. PolicyGate converges:
@@ -7,7 +7,7 @@ before the Coordinator commits side-effects. PolicyGate converges:
     * Source allowlist  — REVIEW_VERDICT is critic-only;
                           KILL_TASK / FORCE_DISPATCH / PRUNE_BRANCH /
                           ESCALATE_STRATEGY_CHANGE are robustness-only
-    * REQUEST routing   — only orchestration→kernel is allowed in v0.6
+    * REQUEST routing   — only orchestration→kernel is allowed in the legacy release
     * Kernel ownership  — 5 kernel-owned actions can NOT be `delegate`d;
                           orchestration must REQUEST(target_agent="kernel")
     * Core state guard  — only the Coordinator can mutate
@@ -154,7 +154,7 @@ DELEGATE_ACTION_REQUIRED_PAYLOAD: dict[str, tuple[str, ...]] = {
 
 
 # ---------------------------------------------------------------------------
-# v0.8 M5 — specialist sub-agent action (KB_design §3.5 + §3.13 M5).
+# specialist sub-agent action.
 #
 # ``specialist`` is a synthetic action_name that the Orchestration role
 # uses to delegate work to an LLM specialist (research_lane, capacity-1
@@ -180,7 +180,7 @@ INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 # explore-provenance gate has a single source of truth.
 EXPLORE_ACTION_NAME: str = "explore"
 
-# v0.8 §3.2 §5.4 — the sweep action; named constant so the
+# the sweep action; named constant so the
 # ``sweep_phase_singleton`` rule (deny LLM-emitted sweep when
 # Coordinator's auto-enqueue already landed one in SWEEP phase) has
 # a single source of truth.  See _validate_sweep_singleton.
@@ -213,7 +213,7 @@ SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
 
 
 # ---------------------------------------------------------------------------
-# v0.8 M3 / KB_gaps/Gap-10 — ``action_deprecated`` rule (KB_design §3.13 M3 §PR7)
+# v0.8 M3 / ``action_deprecated`` rule
 #
 # KB_design §3.4 / §3.15 §2.3: v0.8 merged ``backends`` / ``params`` /
 # ``validate_stack`` into a single ``explore`` action (with the per-KEEP
@@ -261,7 +261,7 @@ DEPRECATED_ACTION_REPLACEMENTS: dict[str, str] = {
 # SpecialistRunner share a single source of truth. The runner builds
 # its per-task tool list from the role-whitelist table below; PolicyGate
 # uses these constants for the intent-level R4 + R5 second pass
-# (KB_design §3.11 §5 "PolicyGate 仅作 *intent 层面* 的二次校验").
+#.
 #
 # Naming convention follows the Claude / Cursor tool surface.
 # ---------------------------------------------------------------------------
@@ -410,7 +410,7 @@ _ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
 
 
 # ---------------------------------------------------------------------------
-# SESSION_DIR path containment (DESIGN v0.6.1 §23 / §14.5).
+# SESSION_DIR path containment ().
 #
 # Any payload field listed in _PATH_LIKE_FIELDS must point either
 # (a) inside the active session_dir, OR
@@ -489,17 +489,17 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "model_class",
     "start_ts",
     "max_minutes",
-    # v0.8 §3.10 §6.2 — the fact-layer KEEP ledger. Coordinator is the
+    # the fact-layer KEEP ledger. Coordinator is the
     # sole writer (Inv-1 / Inv-10.2); LLM update_state can never
     # rewrite the stack, even though the LLM proposes the entries that
     # land in it via emit_intent → execute → promote flows.
     "optimization_stack",
     "gain_per_stack_entry",
-    # v0.8 §3.10 §5.1 — schema_version is a migration breadcrumb; an
+    # schema_version is a migration breadcrumb; an
     # LLM update_state must not be able to roll the state.json back to
-    # a v0.6 reader by setting ``schema_version=1``.
+    # a reader by setting ``schema_version=1``.
     "schema_version",
-    # v0.8 M1 — Cortex KB integration fields (KB_design §3.6, §3.10,
+    # Cortex KB integration fields (KB_design §3.6, §3.10,
     # §3.13 M1). Coordinator-only writes; LLM agents reading is fine.
     "cortex_session_id",
     "cortex_session_summary",
@@ -507,7 +507,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "warm_start_recipe",
     "warm_start_pitfalls",
     "warm_start_ts",
-    # v0.8 M2 — phase state machine fields (KB_design §3.2, §3.10,
+    # phase state machine fields (KB_design §3.2, §3.10,
     # §3.13 M2). All managed by ``Coordinator._advance_phase_if_needed``;
     # LLM update_state never reaches these.
     "phase",
@@ -515,18 +515,18 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
-    # v0.8 M5 — specialist sub-agent ledger (KB_design §3.5 §10 / §3.10
+    # specialist sub-agent ledger (KB_design §3.5 §10 / §3.10
     # §4.1 / §3.11). Coordinator-only writes; LLM cannot inject
     # arbitrary entries via update_state (specialist_done carries
     # proposals through the dedicated R3 path instead).
     "specialist_rounds",
     "specialist_domain_empty_streak",
     "last_specialist",
-    # v0.8 M5 — research_lane capacity is set once at CLI/manifest time
+    # research_lane capacity is set once at CLI/manifest time
     # and mirrored into SharedState. Locking it as CORE prevents an LLM
-    # from raising capacity mid-flight (KB_design §3.7 §4.4).
+    # from raising capacity mid-flight.
     "research_lane_capacity",
-    # v0.8 M7 — phase-machine escalation plumbing (KB_design §3.8 §7.3 /
+    # phase-machine escalation plumbing (KB_design §3.8 §7.3 /
     # §3.13 M7). Coordinator's ``_handle_escalate_strategy_change``
     # writes ``pending_escalate_hint`` via the validated
     # ``SharedState.set_pending_escalate_hint`` helper; LLM
@@ -537,29 +537,29 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "last_consumed_escalate_hint",
     "last_consumed_escalate_hint_ts",
     "plateau_overrides",
-    # v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — CLOSE phase sequencer flag.
+    # CLOSE phase sequencer flag.
     # Set by Coordinator at the end of the 5-step sequencer so
     # ``cli.finally`` can short-circuit its emergency breakdown
     # write. LLM update_state must not be able to toggle this and
     # trick the cli into skipping its safety net.
     "close_sequence_done",
-    # v0.8 KB_gaps/Gap-14 — explore search ledger (KB_design §3.10 §6.2).
+    # explore search ledger.
     # Coordinator's ``apply_explore_search_update`` / ``record_explore_accepted``
     # are the sole writers; LLM ``update_state`` must not rewrite the ledger
     # directly (would bypass dedup-by-fingerprint + Inv-1). The legacy
     # ``backends_search`` / ``params_search`` fields remain in the lock list
-    # purely for v0.6 resume parity — their writer APIs were retired in v0.8.
+    # purely for legacy resume parity — their writer APIs were retired in the legacy release.
     "explore_search",
     "backends_search",
     "params_search",
-    # v0.8 KB_gaps/Gap-09 — structured gaps ledger (KB_design §3.3 /
+    # structured gaps ledger (KB_design §3.3 /
     # §3.5 / §3.9 §6). Coordinator's ``_refresh_gaps`` is the sole
     # writer; LLM agents read via prompt injection. Locking the field
     # closes the proxy gap (last_action_failures + winners_history)
     # against an arbitrary update_state that would inject fake gaps
     # to bias specialist domain selection (Inv-1 / Inv-10.2).
     "gaps",
-    # KB_design_continue §3.5 — monotonic experiment counter feeding
+    # monotonic experiment counter feeding
     # ``experiment_canonical_id(sid, iter)``. Coordinator's T2 hook is
     # the sole writer (via ``SharedState.increment_session_iter_index``);
     # LLM update_state must not rewrite the index or duplicate KB
@@ -594,10 +594,10 @@ class PolicyGate:
     session_dir: Path | None = None
     strict_paths: bool = False
     shared_state: Any | None = None
-    # v0.8 M2 — phase-incompatible R1 enforcement mode.  When False
+    # phase-incompatible R1 enforcement mode.  When False
     # (default) the rule only emits a warning entry into the audit log;
     # production CLI flips this on via ``INFERENCE_OPTIMIZER_STRICT_PHASE=1``
-    # to fail-closed.  Two-stage rollout matches the v0.6 →
+    # to fail-closed.  Two-stage rollout matches the legacy →
     # v0.8 transition strategy in KB_design §3.13 M2.
     strict_phase: bool = False
 
@@ -630,8 +630,8 @@ class PolicyGate:
             4. Cross-source allowlists (review_verdict / kill_task /
                robustness-only)
         """
-        # v0.8 M5 — specialist sub-agents emit intents under an ephemeral
-        # ``specialist:<task_id>`` identity (KB_design §3.5 §7). They get
+        # specialist sub-agents emit intents under an ephemeral
+        # ``specialist:<task_id>`` identity. They get
         # routed to a synthetic role with a tightly-scoped intent set
         # (specialist_done + base inbox intents) and the R3 from-agent
         # contract is enforced against the task_id suffix.
@@ -716,7 +716,7 @@ class PolicyGate:
         """Return the Claude tool list a reactor may use.
 
         Codex roles → ``[]`` (no-tools). Claude roles → ``["emit_intent"]``
-        in v0.6; per-action Read/Bash/Edit injection happens in
+        in the legacy release; per-action Read/Bash/Edit injection happens in
         SubAgentRunner (P0-3) and via :meth:`allowed_tools_for_action`.
         """
         role = self.role_registry.get(agent_name)
@@ -752,7 +752,7 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
-        # v0.8 M3 / KB_gaps/Gap-10 — ``action_deprecated`` (KB_design
+        # v0.8 M3 / ``action_deprecated`` (KB_design
         # §3.13 M3 §PR7). Fires *before* the kernel-owned + phase
         # checks so the LLM gets the canonical "use ``explore``
         # instead" hint regardless of which other rule would have
@@ -767,8 +767,8 @@ class PolicyGate:
                 f"of delegate(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
-        # v0.8 M5 — R2 ``specialist`` is a synthetic action that bypasses
-        # ActionRegistry (KB_design §3.5 §10 "specialist 没有 yaml"). The
+        # R2 ``specialist`` is a synthetic action that bypasses
+        # ActionRegistry. The
         # per-payload contract (domain / gap / max_turns) is enforced by
         # ``_validate_specialist_dispatch`` instead of the generic
         # registry path.
@@ -796,13 +796,13 @@ class PolicyGate:
         # for every round, matching Arbor's optimization loop.
         if action_name == EXPLORE_ACTION_NAME:
             self._validate_explore_provenance(payload)
-        # v0.8 §3.2 §5.4 — sweep_phase_singleton: deny LLM-emitted
+        # sweep_phase_singleton: deny LLM-emitted
         # sweep when the Coordinator's SWEEP-entry hook already
         # auto-enqueued one. Two concurrent sweep tasks crash both
         # vllm engines on init; see _validate_sweep_singleton.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # F3-1 / F3-2 / F3-5 (plan_roofline_framework): same Roofline-v2
+        # F3-1 / F3-2 / F3-5 (): same Roofline-v2
         # propose_action gates also apply at the delegate channel so a
         # task is never created on the legacy ``profile`` path while
         # the operator has the Roofline composite + deny toggles on,
@@ -855,7 +855,7 @@ class PolicyGate:
                         "'evidence': {...}})"
                     ),
                 )
-        # v0.8 M2 — R1 phase_incompatible. Runs **after** the role +
+        # R1 phase_incompatible. Runs **after** the role +
         # kernel-ownership + unknown_action checks so the cheaper /
         # structural denials win when both apply (Inv-11.3 orthogonality).
         self._validate_phase_action(role, action_name, intent_kind="delegate")
@@ -872,7 +872,7 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        # v0.8 M3 / KB_gaps/Gap-10 — same ``action_deprecated`` gate
+        # v0.8 M3 / same ``action_deprecated`` gate
         # as ``_validate_delegate``. Catches advisory LLM proposals so
         # the policy_denial event surfaces in the prompt before the
         # delegate is even attempted.
@@ -890,7 +890,7 @@ class PolicyGate:
                 f"(not in ActionRegistry)",
                 rule="unknown_action",
             )
-        # v0.8 §3.2 §5.4 — sweep_phase_singleton (defense in depth on
+        # sweep_phase_singleton (defense in depth on
         # the propose_action channel; same shape as the delegate
         # validator). See _validate_sweep_singleton.
         if action_name == SWEEP_ACTION_NAME:
@@ -910,11 +910,11 @@ class PolicyGate:
         self._validate_gain_driven_kernel_opt(action_name)
         # F3-5: explore-attempt minimum guard — kernel_opt requires at
         # least one successful explore round on record (replaces the
-        # legacy v0.6 backends_attempts / params_attempts sequence
-        # denials, which had no writers in v0.8 and would have
+        # legacy backends_attempts / params_attempts sequence
+        # denials, which had no writers in the legacy release and would have
         # permanently locked kernel_opt).
         self._validate_explore_minimum_before_kernel_opt(action_name)
-        # v0.8 M2 — R1 phase_incompatible (KB_design §3.11 §4.1).
+        # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
         # v0.8 §3.11 R4 / R5 — defense in depth on propose_action.
         self._validate_no_kb_write_collision(
@@ -925,8 +925,8 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # F3-1 / F3-2 / F3-5 — Roofline-v2 propose_action gates
-    # (plan_roofline_framework/F3_policygate_advisory.MD)
+    # F3-1 / F3-2 / Roofline-v2 propose_action gates
+    # (F3_policygate_advisory.MD)
     #
     # These three sub-rules are validated together inside
     # :meth:`_validate_propose_action` so an out-of-the-box session
@@ -941,7 +941,7 @@ class PolicyGate:
     #
     # Independent toggles let operators A/B test each rule in isolation
     # before committing to the next; this is the design rationale in
-    # plan_roofline_framework/README.md §3 and the reason none of the
+    # README.md §3 and the reason none of the
     # rules is hard-coded "always on".
     # ------------------------------------------------------------------
     _N9_BLOCKED_ACTIONS: frozenset[str] = frozenset({"profile"})
@@ -1075,8 +1075,8 @@ class PolicyGate:
 
         Replaces v0.6's ``backends_attempts < 1`` / ``params_attempts
         < 1`` sequence denials, which would lock kernel_opt forever on
-        this branch (no writers exist for those v0.6 fields — see
-        docs/integration/MAIN_FEATURES_DROPPED.md §1.3).
+        this branch (no writers exist for those fields — see
+        the retired-features list §1.3).
 
         Successful = at least one entry in ``gain_per_stack_entry``,
         which is appended only when ``optimization_stack`` accepts a
@@ -1162,14 +1162,14 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # v0.8 M3 / KB_gaps/Gap-10 — ``action_deprecated`` covers the
-        # REQUEST channel too (defense in depth). None of the v0.8
+        # v0.8 M3 / ``action_deprecated`` covers the
+        # REQUEST channel too (defense in depth). None of the legacy
         # request kinds (select_kernels / kernel_opt / integrate /
         # ...) collide with the deprecated set today, but an operator
         # extension that re-uses one of the legacy names via
         # ``request.kind`` would still be caught here.
         self._validate_action_not_deprecated(kind, intent_kind="request")
-        # v0.8 M2 — R1 phase_incompatible (KB_design §3.11 §4.1). For
+        # R1 phase_incompatible. For
         # orchestration → kernel REQUEST we treat the request *kind* as
         # the action name (kernel-owned actions named identically to
         # their REQUEST kind: kernel_opt / integrate / etc.).
@@ -1202,8 +1202,7 @@ class PolicyGate:
             raise PolicyDenied(
                 "review_verdict missing target_proposal_msg_id", rule="payload",
             )
-        # v0.8 KB_gaps/Gap-11 (KB_design §3.5 §5 / M5 §5 step 5) —
-        # accept either the legacy single ``verdict`` field or the
+        #         # accept either the legacy single ``verdict`` field or the
         # per-variant ``verdict_map``. The intent_parser already
         # enforced mutual exclusion + structural shape; here we
         # validate the *content* (verdict strings must be in the
@@ -1254,7 +1253,7 @@ class PolicyGate:
                 )
 
     # ------------------------------------------------------------------
-    # v0.8 M3 / KB_gaps/Gap-10 — action_deprecated (KB_design §3.13 M3 §PR7)
+    # v0.8 M3 / action_deprecated
     # ------------------------------------------------------------------
     def _validate_action_not_deprecated(
         self,
@@ -1264,7 +1263,7 @@ class PolicyGate:
     ) -> None:
         """Reject a v0.6 action name that v0.8 has replaced.
 
-        The deprecation is *hard* in v0.8 (KB_design §3.13 M3 §PR7):
+        The deprecation is *hard* in the legacy release:
         new sessions cannot use ``backends`` / ``params`` /
         ``validate_stack`` directly; all three flows merge into
         ``explore``. The denial carries a structured replacement hint
@@ -1288,7 +1287,7 @@ class PolicyGate:
             action_name, "explore",
         )
         raise PolicyDenied(
-            f"action {action_name!r} is deprecated since v0.8 (M3); "
+            f"action {action_name!r} is deprecated since the legacy release (M3); "
             f"use {replacement!r} instead",
             rule="action_deprecated",
             hint=(
@@ -1302,7 +1301,7 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # v0.8 M2 — R1 phase_incompatible (KB_design §3.11 §4.1)
+    # R1 phase_incompatible
     # ------------------------------------------------------------------
     def _validate_phase_action(
         self,
@@ -1365,7 +1364,7 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # v0.8 §3.11 R4 — kb_write_unauthorized (KB_design §3.11 §4.4)
+    # v0.8 §3.11 R4 — kb_write_unauthorized
     # ------------------------------------------------------------------
     def _validate_no_kb_write_collision(
         self,
@@ -1393,7 +1392,7 @@ class PolicyGate:
             f"{action_name!r}",
             rule="kb_write_unauthorized",
             hint=(
-                "Direct KB writes are not allowed (KB_design §3.11 R4). "
+                "Direct KB writes are not allowed. "
                 "The Coordinator owns all KB writes. Express your "
                 "intent via propose_action / delegate / "
                 "specialist_done.proposal_set / review_verdict / "
@@ -1403,7 +1402,7 @@ class PolicyGate:
 
     # ------------------------------------------------------------------
     # v0.8 §3.11 R5 — tool_whitelist_role / tool_whitelist_phase
-    # (KB_design §3.11 §4.5)
+    #
     # ------------------------------------------------------------------
     def _validate_tool_whitelist_collision(
         self,
@@ -1460,7 +1459,7 @@ class PolicyGate:
             rule="tool_whitelist_role",
             hint=(
                 f"Tool {action_name!r} is restricted to "
-                f"specialist sub-agents (KB_design §3.11 §4.5). The "
+                f"specialist sub-agents. The "
                 f"primary agents (orchestration / kernel / critic / "
                 f"robustness) consult KB / PR Monitor via the "
                 f"Coordinator-mediated KnowledgePlane facade instead."
@@ -1551,7 +1550,7 @@ class PolicyGate:
         # tools that don't pass through PolicyGate.
 
     # ------------------------------------------------------------------
-    # v0.8 M5 — R2 ``specialist_dispatch_source`` (KB_design §3.11 §4.2)
+    # R2 ``specialist_dispatch_source``
     # ------------------------------------------------------------------
     def _validate_explore_provenance(
         self, payload: dict[str, Any],
@@ -1623,7 +1622,7 @@ class PolicyGate:
             )
 
     # ------------------------------------------------------------------
-    # v0.8 §3.2 §5.4 — ``sweep_phase_singleton``
+    # ``sweep_phase_singleton``
     # ------------------------------------------------------------------
     def _validate_sweep_singleton(
         self, payload: dict[str, Any], *, intent_kind: str,
@@ -1845,7 +1844,7 @@ class PolicyGate:
                 hint=(
                     f"params.domain must be one of "
                     f"{sorted(SPECIALIST_DOMAIN_KEYS)!r} "
-                    f"(KB_design §3.5 §5)"
+                    f""
                 ),
             )
 
@@ -1931,7 +1930,7 @@ class PolicyGate:
                 )
 
     # ------------------------------------------------------------------
-    # v0.8 M5 — R3 ``specialist_done_source`` (KB_design §3.11 §4.3)
+    # R3 ``specialist_done_source``
     # ------------------------------------------------------------------
     def _validate_specialist_intent(
         self, from_agent: str, intent: Intent,
@@ -1981,7 +1980,7 @@ class PolicyGate:
     ) -> None:
         """Per-field R3 checks for the ``specialist_done`` payload.
 
-        Schema (KB_design §3.5 §7):
+        Schema:
 
         * gap_canonical_id: str (matches dispatch task_id's gap)
         * domain: str ∈ SPECIALIST_DOMAIN_KEYS

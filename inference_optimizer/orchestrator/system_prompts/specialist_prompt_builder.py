@@ -1,4 +1,4 @@
-"""Specialist sub-agent prompt assembler — v0.8 M5 (KB_design §3.5 §6).
+"""Specialist sub-agent prompt assembler — v0.8 M5.
 
 The Coordinator hands the SpecialistRunner a typed input bundle and
 this module returns the fully-assembled 9-section prompt. The 9 sections
@@ -59,7 +59,7 @@ DEFAULT_SPECIALIST_MAX_PROPOSALS = 5
 #   domain — sourced from KB_design lessons + Arbor's lessons table).
 #
 # When a domain key is missing from this map, ``_section_identity``
-# falls back to the generic body (the v0.8 M5 default).
+# falls back to the generic body (the legacy M5 default).
 # ---------------------------------------------------------------------------
 
 
@@ -359,7 +359,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "## 1. IDENTITY & AUTONOMY",
         "",
         f"You are a fully autonomous **{inp.domain.key}** dispatched by the",
-        f"Hyperloom Coordinator (KB_design §3.5). Layer: {inp.domain.layer}.",
+        f"Hyperloom Coordinator. Layer: {inp.domain.layer}.",
         f"KB anchor: {inp.domain.kb_anchor}.",
         "",
         f"Description: {inp.domain.description or '(generic)'}",
@@ -850,7 +850,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         }, sort_keys=True, indent=2),
         "```",
         "",
-        "Field contract (KB_design §3.5 §7 + PR-A2 Arbor extensions):",
+        "Field contract:",
         "",
         "- ``proposal_set`` items reuse the §3.4 explore variant schema.",
         (
