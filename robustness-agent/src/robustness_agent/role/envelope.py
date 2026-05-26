@@ -48,7 +48,7 @@ class IntentType(str, Enum):
     FORCE_DISPATCH = "force_dispatch"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
-    # v0.8 M5 — specialist sub-agent exit protocol mirror.
+    # specialist sub-agent exit protocol mirror.
     # Robustness never emits this intent (PolicyGate restricts the
     # source to specialist sub-agents), but the value belongs in the
     # mirror so the upstream-contract test stays green and any tooling
@@ -70,7 +70,7 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.RESPONSE: ("in_reply_to", "kind"),
-    # Upstream KB_gaps/Gap-11 (v0.8 M5): the ``verdict``/``verdict_map``
+    # Upstream KB_gaps/Gap-11: the ``verdict``/``verdict_map``
     # choice is mutually exclusive but at least one of them must be
     # present. intent_parser only enforces the structural
     # ``target_proposal_msg_id`` here; the verdict-payload mutual
@@ -82,7 +82,7 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.FORCE_DISPATCH: ("task_id", "reason"),
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
-    # v0.8 M5 — specialist exit envelope; payload validated by
+    # specialist exit envelope; payload validated by
     # PolicyGate R3 (``policy._validate_specialist_done``).
     IntentType.SPECIALIST_DONE: (
         "gap_canonical_id", "domain",
@@ -169,44 +169,44 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "model_class",
     "start_ts",
     "max_minutes",
-    # v0.8 §3.10 §6.2 — fact-layer KEEP ledger (Coordinator-only writer).
+    # fact-layer KEEP ledger (Coordinator-only writer).
     "optimization_stack",
     "gain_per_stack_entry",
-    # v0.8 §3.10 §5.1 — schema migration breadcrumb.
+    # schema migration breadcrumb.
     "schema_version",
-    # v0.8 M1 — Cortex KB integration (KB_design §3.6 / §3.10 / §3.13).
+    # Cortex KB integration.
     "cortex_session_id",
     "cortex_session_summary",
     "pending_kb_edges",
     "warm_start_recipe",
     "warm_start_pitfalls",
     "warm_start_ts",
-    # v0.8 M2 — phase state machine (Coordinator-only writer).
+    # phase state machine (Coordinator-only writer).
     "phase",
     "phase_started_ts",
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
-    # v0.8 M5 — specialist sub-agent ledger.
+    # specialist sub-agent ledger.
     "specialist_rounds",
     "specialist_domain_empty_streak",
     "last_specialist",
     "research_lane_capacity",
-    # v0.8 M7 — phase-machine escalation plumbing.
+    # phase-machine escalation plumbing.
     "pending_escalate_hint",
     "last_consumed_escalate_hint",
     "last_consumed_escalate_hint_ts",
     "plateau_overrides",
-    # v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — CLOSE phase sequencer flag.
+    # CLOSE phase sequencer flag.
     "close_sequence_done",
-    # v0.8 KB_gaps/Gap-14 — explore search ledger (v0.6 backends/params
+    # explore search ledger (v0.6 backends/params
     # search fields retained for resume parity).
     "explore_search",
     "backends_search",
     "params_search",
-    # v0.8 KB_gaps/Gap-09 — structured gaps ledger.
+    # structured gaps ledger.
     "gaps",
-    # KB_design_continue §3.5 — monotonic experiment counter.
+    # monotonic experiment counter.
     "session_iter_index",
 })
 
