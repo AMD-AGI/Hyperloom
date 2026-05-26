@@ -17,6 +17,9 @@ from typing import Literal
 
 ProviderName = Literal["disabled", "tavily", "serper", "brave"]
 KNOWN_PROVIDERS: frozenset[str] = frozenset({"disabled", "tavily", "serper", "brave"})
+# Providers with a working backend in ``runtime.web_tools`` today. ``brave``
+# is recognized in env/config for forward-compat but not yet implemented.
+IMPLEMENTED_SEARCH_PROVIDERS: frozenset[str] = frozenset({"tavily", "serper"})
 
 
 def _env(name: str, default: str = "") -> str:
@@ -137,6 +140,7 @@ class WebToolsConfig:
 
 
 __all__ = [
+    "IMPLEMENTED_SEARCH_PROVIDERS",
     "KNOWN_PROVIDERS",
     "ProviderName",
     "WebToolsConfig",
