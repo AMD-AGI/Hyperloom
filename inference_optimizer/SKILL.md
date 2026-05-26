@@ -210,9 +210,13 @@ PolicyGate's `explore_requires_specialist_provenance` rule denies any
 to one of:
 
 - `provenance='specialist:<domain>'` — variant came from a
-  `specialist_done.proposal_set` entry. The canonical path.
+  `specialist_done.proposal_set` entry. The canonical path. **At most
+  ONE such variant per explore round** (rule
+  `explore_specialist_grid_max_one`); pick the strongest proposal and
+  defer the runners-up to a subsequent round.
 - `provenance='default_grid'` — cold-start fallback when no specialist
-  has produced a proposal_set yet. The executor uses its built-in grid.
+  has produced a proposal_set yet. The executor uses its built-in grid;
+  uncapped (several `default_grid` variants in one round is fine).
 
 The orchestration LLM is taught the specialist-first contract via
 `actions/_meta/specialist.yaml` (PR-A1) plus the orchestration prompt's
@@ -789,7 +793,9 @@ because random prompts skew acceptance-rate results.
 Judge candidates over **{1k/1k, 8k/1k} × {low CONC, high CONC}** (high-CONC
 only when the model fits); KEEP only when throughput improves without
 unacceptable TTFT/E2E or correctness regression. Coordinator long runs default
-`max_candidates_per_round=5`; direct runner calls may pass `0` for the full grid.
+`max_candidates_per_round=3` (aligned with the per-specialist `proposal_set`
+cap — see `DEFAULT_SPECIALIST_MAX_PROPOSALS` in `orchestrator/policy.py`);
+direct runner calls may pass `0` for the full grid.
 
 ### Per-Run Asset Override (advanced)
 

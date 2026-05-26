@@ -509,19 +509,18 @@ def _seed_shared_state(
     session_id: str,
 ) -> SharedState:
     # research_lane capacity is locked here for the lifetime
-    # of the session. Clamp to [0, 32]; emit a
-    # warning when the operator opts into the high end (LLM quota +
-    # PR Monitor load risk per §3.14 R-07).
+    # of the session. Clamp to [0, MAX_RESEARCH_LANE_CAPACITY] (M6
+    # ceiling; values above this are silently clamped down). The cap
+    # protects LLM quota and PR Monitor load (§3.14 R-07).
+    from inference_optimizer.orchestrator.policy import (
+        MAX_RESEARCH_LANE_CAPACITY,
+    )
     research_lane_capacity = int(
         getattr(args, "research_lane_capacity", 1) or 1
     )
-    research_lane_capacity = max(0, min(32, research_lane_capacity))
-    if research_lane_capacity > 6:
-        log.warning(
-            "research_lane_capacity=%d above M6 default 6; LLM quota / "
-            "PR Monitor load may spike. See KB_design §3.14 R-07.",
-            research_lane_capacity,
-        )
+    research_lane_capacity = max(
+        0, min(MAX_RESEARCH_LANE_CAPACITY, research_lane_capacity),
+    )
     # collect plateau threshold overrides into a single dict
     #. Only non-None CLI overrides
     # land in the dict; absent keys fall through to the
@@ -4398,8 +4397,10 @@ def _build_parser() -> argparse.ArgumentParser:
     #           top-K gap inside one tick (multi-emit shape) and have
     #           the dispatcher actually run them in parallel.
     #   * 6   → M6 ceiling that matches Arbor's "six specialists across
-    #           domains" pattern.
-    #   * 32  → hard upper bound; CLI warns but accepts.
+    #           domains" pattern; hard upper bound (values above this
+    #           are silently clamped down to 6 — see
+    #           ``MAX_RESEARCH_LANE_CAPACITY`` in
+    #           ``orchestrator/policy.py``).
     # Locked at session start (mirrored into manifest + SharedState);
     # PolicyGate denies mid-flight mutation via CORE_STATE_FIELDS.
     opt.add_argument(
@@ -4414,7 +4415,8 @@ def _build_parser() -> argparse.ArgumentParser:
              "research_lane. 0 disables specialist "
              "dispatch entirely (degrades to M3 LLM-direct grid); 4 is "
              "the PR-A3 default (Arbor-into-Hyperloom); 6 is the M6 "
-             "default. Range [0, 32]. Locked at session start.",
+             "hard cap. Range [0, 6]; values above 6 are silently "
+             "clamped down. Locked at session start.",
     )
     # ------------------------------------------------------------------
     # v0.8 §3.5 / §3.13 M5 + specialist sub-agent
