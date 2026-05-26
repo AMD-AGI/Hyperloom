@@ -89,6 +89,7 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
 
 
+
 def _bootstrap_kernel_agent_env() -> None:
     """Point HYPERLOOM_KERNEL_AGENT_ROOT at the in-repo kernel-agent checkout."""
     if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):

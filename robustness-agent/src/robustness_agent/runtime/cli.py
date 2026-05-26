@@ -149,11 +149,12 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         config.auto_probe_inference_server = bool(
             options["auto_probe_inference_server"]
         )
-    # Allow the host to suppress the A6 ``ray_head_dead`` probe entirely
-    # (e.g. heartbeat e2e tests running on a sandbox with no Ray head,
-    # or sandbox environments where Ray availability is monitored
-    # out-of-band). When False, LocalProbe short-circuits ``ray status``
-    # so a missing Ray daemon does not fire the ``ray_head_dead`` ladder.
+    # The ``ray status`` probe was introduced in PR #239 and runs on
+    # every tick of the agent backend. Heartbeat tests (and any host
+    # without an in-sandbox Ray head) need to disable it to keep the
+    # default heartbeat envelope clean of false-positive
+    # ``ray_head_dead`` alerts. The Coordinator wiring mirrors
+    # ``auto_probe_*`` above.
     if "ray_probe_enabled" in options:
         config.ray_probe_enabled = bool(options["ray_probe_enabled"])
     # Whole-probe disable for the J ``external_deps`` signal (TraceLens
