@@ -209,7 +209,12 @@ jobs:
     name: optimize-${{ matrix.key }}
     needs: prepare
     if: needs.prepare.outputs.count != '0'
-    runs-on: hyperloom-4hhzn
+    # TEMP: failover to hyperloom-mh826 while hyperloom-4hhzn pool is
+    # unavailable (revert to hyperloom-4hhzn when 4hhzn recovers).
+    # mh826 historically had RO /wekafs which made prewarm a no-op, but
+    # that step has continue-on-error: true so the SaFE register path
+    # still downloads the model itself.
+    runs-on: hyperloom-mh826
     # 8h per-task timeout + buffer for register/wait/collect.
     timeout-minutes: 600
     strategy:
@@ -454,14 +459,12 @@ jobs:
     name: Build summary
     needs: optimize
     if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
-    # Run on the self-hosted hyperloom-4hhzn runner (a K8s pod in the
-    # core42-hyperloom namespace) so the Publish step can reach the
-    # hyperloom-results-service ingress at core42.primus-safe.amd.com.
-    # hyperloom-4hhzn mounts /wekafs as RW (vs. hyperloom-mh826 which was RO),
-    # which is what the optimize stage needs for prewarm to actually write
-    # models into /wekafs/models/. Keeping the summary on the same pool
-    # avoids one-cluster-vs-another pitfalls.
-    runs-on: hyperloom-4hhzn
+    # TEMP: failover to hyperloom-mh826 while hyperloom-4hhzn pool is
+    # unavailable (revert when 4hhzn recovers). The Publish-to-leaderboard
+    # step that used to require the 4hhzn namespace is commented out in
+    # this workflow, so summarize no longer needs the 4hhzn ingress
+    # connectivity — mh826 is fine.
+    runs-on: hyperloom-mh826
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
