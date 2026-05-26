@@ -476,18 +476,15 @@ class ProfileExecutor(BaselineExecutor):
         # Mtime gate for the multi-node shared-trace-dir layout. Captured
         # BEFORE super().__call__ kicks off the magpie subprocess so any
         # trace.json.gz written by this round's /start_profile request is
-        # newer than this timestamp. Previous rounds' traces (which live
-        # in the same wekafs base dir under the resume path) stay below
-        # this watermark and are filtered out. See
-        # ``_resolve_mn_round_trace_root`` for why we share a single base.
+        # newer than this timestamp. Previous rounds' traces stay below
+        # this watermark and get filtered out below.
         import time as _time
         task_started_unix = _time.time()
 
-        # Multi-node banner: silent for single-node. Surfaces head pod /
-        # service_url + the round's trace dir so an operator tailing the
-        # log can tell apart a multi-node profile round (uses shared
-        # wekafs trace base) from a single-node one (uses workspace-local
-        # torch_trace/).
+        # Multi-node banner: silent for single-node. Surfaces the round's
+        # trace dir so an operator can tell apart a multi-node profile
+        # round (uses shared wekafs trace base) from a single-node one
+        # (uses workspace-local torch_trace/).
         from ._multi_node_env import log_mn_banner
         log_mn_banner(
             "profile_executor", log,
@@ -496,11 +493,9 @@ class ProfileExecutor(BaselineExecutor):
 
         # Multi-node only: pre-restart the inference server with this
         # round's profiler dir so sglang launches with
-        # ``--torch-profiler-dir <round_path>`` and writes traces to a
-        # round-scoped wekafs directory both pods and the sandbox can
-        # see. Mark ctx.extra so BaselineExecutor.__call__ doesn't run a
-        # second restart on top of ours. No-op in single-node mode (the
-        # helper short-circuits and ``round_trace_root`` is "").
+        # ``--torch-profiler-dir <round_path>``. Mark
+        # ``ctx.extra['mn_round_restarted']`` so BaselineExecutor.__call__
+        # skips a second restart. No-op in single-node.
         round_trace_root = self._resolve_mn_round_trace_root(ctx)
         if round_trace_root:
             from ._multi_node_server_lifecycle import (
@@ -528,7 +523,8 @@ class ProfileExecutor(BaselineExecutor):
                     "error": str(exc),
                     "trace_dir": round_trace_root,
                 }
-            extra["mn_round_restarted"] = True
+            if isinstance(extra, dict):
+                extra["mn_round_restarted"] = True
 
         # NOTE: InferenceX patches (``ensure_benchmark_lib_patched`` and
         # ``ensure_benchmark_serving_patched``) used to live here on the
@@ -542,6 +538,8 @@ class ProfileExecutor(BaselineExecutor):
         # ``_after_materialize_config`` carry the resolved-path
         # validation.
         result = await super().__call__(ctx)
+
+        # Augment with trace_dir if the workspace produced one.
         # Multi-node: trace files live at the round-scoped wekafs dir we
         # just restarted with. We do NOT read $HYPERLOOM_MN_PROFILE_TRACE_DIR
         # here because the helper restored it back to the rayjob-root
@@ -554,8 +552,8 @@ class ProfileExecutor(BaselineExecutor):
             # base dir that sglang's ``SGLANG_TORCH_PROFILER_DIR`` was
             # pinned to on first launch (see
             # ``_resolve_mn_round_trace_root`` for design rationale).
-            # main's ``_candidate_trace_dirs`` is workspace-local, so it
-            # never matches in multi-node — handle it explicitly here.
+            # ``_candidate_trace_dirs`` is workspace-local, so it never
+            # matches in multi-node — handle it explicitly here.
             #
             # Mtime gate: every profile round writes into the same base
             # dir under the resume path, so we filter to files created
@@ -598,7 +596,7 @@ class ProfileExecutor(BaselineExecutor):
                     round_trace_root,
                 )
         elif workspace_str:
-            # Single-node branch: main's multi-candidate trace discovery.
+            # Single-node branch: multi-candidate trace discovery.
             workspace = Path(workspace_str)
             selected_trace_dir: Path | None = None
             selected_trace_files: list[Path] = []
