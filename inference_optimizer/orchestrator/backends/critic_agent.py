@@ -487,6 +487,15 @@ class CriticAgentBackend:
             return
 
         schemas = _build_schemas(cfg)
+        available_names: set[str] = set()
+        if clients.search is not None:
+            available_names.add("web_search")
+        if clients.fetch is not None:
+            available_names.add("web_fetch")
+        schemas = [
+            s for s in schemas
+            if s.get("function", {}).get("name") in available_names
+        ]
         if not schemas or (clients.search is None and clients.fetch is None):
             log.info(
                 "critic_agent_backend: web tools enabled by config but no "
@@ -972,6 +981,8 @@ class CriticAgentBackend:
             args = json.loads(raw_args) if raw_args else {}
         except json.JSONDecodeError as exc:
             return f"Error: tool arguments are not valid JSON: {exc}"
+        if not isinstance(args, dict):
+            return "Error: tool arguments must be a JSON object"
 
         clients = self._web_tool_clients
         if clients is None:

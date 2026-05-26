@@ -323,6 +323,23 @@ def test_max_bytes_clamped_to_config():
     assert "Length: 200 bytes" in out
 
 
+def test_max_bytes_stops_reading_early():
+    """Streaming read must honor max_bytes before buffering the full body."""
+    cfg = _cfg(fetch_max_bytes=10 * 1024 * 1024)
+    client = WebFetchClient(
+        config=cfg,
+        http_client=_client(
+            lambda _request: httpx.Response(
+                200,
+                content=b"x" * 5000,
+                headers={"content-type": "text/plain"},
+            ),
+        ),
+    )
+    out = client.execute({"url": "https://example.com/large", "max_bytes": 2048})
+    assert "Length: 2048 bytes" in out
+
+
 # ── small URL helpers ──────────────────────────────────────────────────
 
 class TestSameHost:

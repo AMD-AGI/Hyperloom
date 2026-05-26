@@ -429,6 +429,34 @@ async def test_invalid_tool_arguments_returns_error_message(tmp_session: Path):
     assert "valid JSON" in tool_msgs[0]["content"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", ["[]", '"x"'])
+async def test_non_object_tool_arguments_returns_error_message(
+    tmp_session: Path, arguments: str,
+):
+    search = _RecordingSearchClient()
+    backend, fake = _make_backend(
+        tmp_session=tmp_session,
+        scripted_replies=[
+            _ScriptedReply(tool_calls=[
+                _FakeToolCall(
+                    id="c1",
+                    function=_FakeFunction(name="web_search", arguments=arguments),
+                ),
+            ]),
+            _ScriptedReply(text=_build_review_reply()),
+        ],
+        search_client=search,
+    )
+    await backend.run(prompt="inbox", system_prompt="You are critic.")
+    assert search.calls == []
+    tool_msgs = [
+        m for m in fake.completions.calls[1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    assert "JSON object" in tool_msgs[0]["content"]
+
+
 # ── Tests: unknown tool name yields an inline error ────────────────────
 
 @pytest.mark.asyncio
@@ -511,6 +539,42 @@ async def test_enabled_config_but_empty_clients_falls_back_to_no_tools(
     await backend.run(prompt="inbox", system_prompt="You are critic.")
     # No tools attached because clients are empty.
     assert "tools" not in fake_client.completions.calls[0]["kwargs"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_only_config_exposes_fetch_schema_not_search(tmp_session: Path):
+    """When search provider is configured but has no API key, only
+    ``web_fetch`` must appear in the tool list."""
+    Cfg = _import_web_tools_config()
+    cfg = Cfg(
+        critic_web_tools_enabled=True,
+        search_provider="tavily",
+        tavily_api_key="",
+        fetch_enabled=True,
+    )
+    fetch = _RecordingFetchClient()
+    fake_client = _ScriptedOpenAIClient([_ScriptedReply(text=_build_review_reply())])
+    bundle = _bundle(tmp_session.name)
+    fake_caller = _make_fake_runtime(judge_bundle=bundle)
+
+    backend = CriticAgentBackend(
+        critic_agent_root=REAL_CRITIC_AGENT_ROOT,
+        session_dir=tmp_session,
+        codex_model="gpt-test",
+        codex_client_factory=lambda: fake_client,
+        runtime_caller_factory=lambda: fake_caller,
+        web_tools_config=cfg,
+        web_tool_clients_factory=lambda _c: _FakeWebClients(
+            search=None, fetch=fetch,
+        ),
+        static_context={"model": "Qwen3", "framework": "sglang"},
+    )
+    await backend.run(prompt="inbox", system_prompt="You are critic.")
+    tool_names = [
+        t["function"]["name"]
+        for t in fake_client.completions.calls[0]["kwargs"]["tools"]
+    ]
+    assert tool_names == ["web_fetch"]
 
 
 # ── Tests: web tool client raising propagates as BackendError context ─
