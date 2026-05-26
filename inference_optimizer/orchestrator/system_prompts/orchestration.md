@@ -199,8 +199,7 @@ removed.
   roofline completes: `specialist`, `explore`, `kernel_opt`,
   `integrate`, `deep_kernel_analysis`, `operator_tuning`,
   `vendor_kernel_config`. Denial rule is
-  `specialist_wait_for_auto_roofline` (rule name retained across all
-  gated actions). Just retry the same intent next tick.
+  `wait_for_auto_roofline`. Just retry the same intent next tick.
 * **Operator override.** `--force-roofline-after-baseline` (default
   on) controls whether the PRELUDE-initial roofline fires
   unconditionally; you do not interact with this flag at runtime.
