@@ -28,6 +28,7 @@ from inferenceX_parser import (
     get_nfs_root,
     merge_model_config,
     resolve_var,
+    synthesize_entry_from_ci_config,
 )
 from report_generator import (
     build_model_result,
@@ -106,8 +107,32 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         conc=merged.get("conc"),
     )
 
-    safe_api_key = os.environ.get("CLAW_API_KEY", "")
-    safe_base_url = os.environ.get("SAFE_BASE_URL", "")
+    # NOTE: SAFE_API_KEY / SAFE_BASE_URL are NOT injected into the prompt
+    # body. The previous templates leaked the key by interpolating it into an
+    # "Auth: SAFE_API_KEY={safe_api_key}" block; the agent already has those
+    # values in its sandbox env (via kernel-agent.env.sh) and does not need
+    # them rendered into the prompt text — that path landed the key into Claw
+    # session history, Actions logs, and uploaded artifacts. Keep this comment
+    # so a future contributor doesn't add the variable back without thinking.
+
+    # Multi-node entries (nodes > 1) need an explicit "Task submission" block
+    # describing the RayJob image / per-node resources / RDMA env so the agent
+    # can spawn the SaFE RayJob with the right topology and bnxt_re tar package.
+    # Single-node entries (nodes == 1, the default) get an empty section — the
+    # Claw sandbox is the only execution context they need.
+    nodes = int(merged.get("nodes", 1) or 1)
+    if nodes > 1:
+        rayjob_image = merged.get("rayjob_image", "") or merged.get("sandbox_image", "")
+        multinode_section = (
+            f"\nTask submission ({nodes}-node):\n"
+            f"RayJob image: {rayjob_image}\n"
+            f"RayJob resource per node: CPU=96, GPU=8, memory=1024Gi, ephemeralStorage=400Gi\n"
+            f"RayJob node count: {nodes}\n"
+            f"env:\n"
+            f"- PATH_TO_BNXT_TAR_PACKAGE=/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz\n"
+        )
+    else:
+        multinode_section = ""
 
     common_fields = dict(
         model_hf=merged["model_hf"],
@@ -123,8 +148,15 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         gpu_type_lc=str(merged["gpu_type"]).lower(),
         target_gpu=merged["target_gpu"],
         inferenceX_data=ifx_text,
-        safe_api_key=safe_api_key,
-        safe_base_url=safe_base_url,
+        # Multi-node / Hyperloom-skill knobs (defaults match legacy single-node CI).
+        nodes=nodes,
+        target_gain=merged.get("target_gain", 10),
+        max_hours=merged.get("max_hours", 2),
+        random_range_ratio=merged.get("random_range_ratio", 0.8),
+        kernel_agent_build_geak_rag_index=merged.get(
+            "kernel_agent_build_geak_rag_index", 0,
+        ),
+        multinode_section=multinode_section,
     )
 
     if pr_mode:
@@ -290,8 +322,17 @@ def run_model(
         time.sleep(1)
 
         try:
-            claw.send_message(session_id, prompt)
-            log.info("Prompt sent to session %s", session_id)
+            # Per-entry plugin_id override (merged["claw_plugin_id"] defaults
+            # to 4 for entries that don't set it; null in ci-config opts the
+            # entry out of the Hyperloom plugin entirely — claw_client.
+            # send_message will omit the pluginId field from the JSON body
+            # when plugin_id is None).
+            entry_plugin_id = merged.get("claw_plugin_id", 4)
+            claw.send_message(session_id, prompt, plugin_id=entry_plugin_id)
+            log.info(
+                "Prompt sent to session %s (plugin_id=%s)",
+                session_id, entry_plugin_id,
+            )
         except Exception as e:
             log.error("Failed to send message to %s: %s", session_id, e)
             status_holder["status"] = "failed"
@@ -550,7 +591,11 @@ def main():
 
         ifx_script_contents: dict[str, str] = {}
         for model_cfg in model_list:
-            ifx_key = model_cfg["inferenceX_key"]
+            ifx_key = model_cfg.get("inferenceX_key", "")
+            if not ifx_key:
+                # Self-contained entry (no upstream InferenceX baseline). The
+                # agent constructs the server launch directly from the prompt.
+                continue
             script = find_benchmark_script(_tmpdir, ifx_key, scripts_path)
             ifx_scripts[ifx_key] = script
             if script:
@@ -564,9 +609,28 @@ def main():
     # Merge configs and fetch API data
     merged_models = []
     for model_cfg in model_list:
-        ifx_key = model_cfg["inferenceX_key"]
-        if ifx_key not in amd_master:
-            log.warning("Model %s not found in amd-master.yaml, skipping", ifx_key)
+        ifx_key = model_cfg.get("inferenceX_key", "")
+        entry_label = ifx_key or model_cfg.get("key", "<unnamed>")
+
+        if ifx_key and ifx_key in amd_master:
+            # Standard path: pull image/precision/framework/etc. from amd-master.yaml.
+            ifx_entry = amd_master[ifx_key]
+        elif model_cfg.get("model_hf") and model_cfg.get("image"):
+            # Self-contained Hyperloom-internal entry (no InferenceX baseline).
+            # Build a synthetic amd-master-style entry directly from ci-config
+            # fields so the rest of the merge flow works unchanged.
+            ifx_entry = synthesize_entry_from_ci_config(model_cfg)
+            log.info(
+                "Model %s: using self-contained ci-config entry "
+                "(no amd-master.yaml lookup)",
+                entry_label,
+            )
+        else:
+            log.warning(
+                "Model %s: inferenceX_key %r not in amd-master.yaml AND "
+                "ci-config entry lacks model_hf/image — skipping",
+                entry_label, ifx_key,
+            )
             continue
 
         api_name = model_cfg.get("inferenceX_api_name", "")
@@ -580,7 +644,7 @@ def main():
                 log.warning("Failed to fetch benchmarks for %s: %s", api_name, e)
 
         merged = merge_model_config(
-            model_cfg, amd_master[ifx_key], defaults, harbor_prefix, ifx_benchmarks)
+            model_cfg, ifx_entry, defaults, harbor_prefix, ifx_benchmarks)
         merged["benchmark_script"] = ifx_scripts.get(ifx_key)
         merged["benchmark_script_content"] = ifx_script_contents.get(ifx_key, "")
         if results_cfg.get("result_dir"):
