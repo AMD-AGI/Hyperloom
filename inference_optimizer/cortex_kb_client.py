@@ -691,20 +691,29 @@ class CortexKBClient:
         Tier   Conf   Lookup
         =====  =====  ============================================================
         T1     0.85   ``canonical_id == recipe:<model_slug>:<hw_slug>`` + has
-                      non-empty ``best_config_args`` (i.e. real recipe, not a
-                      smoke / seed record)
-        T3     0.55   any ``kind=recipe`` with ``model_family(attrs.model) ==
-                      model_family(workload)`` AND ``hardware == hw`` — same
-                      architecture family, same GPU
-        T4     0.40   any ``kind=recipe`` with ``attrs.model_class ==
-                      model_class`` AND ``hardware == hw`` — same coarse
-                      taxonomy (moe_mla / dense / ...), same GPU
+                      a real best_config (``best_config`` dict OR Arbor-shape
+                      ``best_config_args`` / ``best_config_envs`` populated)
+        T2     0.70   ``model_family`` + ``hardware`` + ``precision`` + ``tp``
+                      (+ ``framework`` when supplied) all match — workload-shape
+                      hit, dramatically more transferable than family alone
+                      because best_config diverges sharply on precision / TP
+        T3     0.55   ``model_family`` + ``hardware`` (+ ``framework``) match
+                      — same architecture family, same GPU + serving stack
+        T4     0.40   ``model_class`` + ``hardware`` (+ ``framework``) match
+                      — same coarse taxonomy (moe_mla / dense / ...), same GPU
         T5     0.25   any ``kind=recipe`` with ``hardware == hw`` — only
-                      hw-level ROCm defaults are reusable
+                      hw-level ROCm defaults are reusable (framework-agnostic
+                      on purpose; sweep params transcend serving stack)
         T6     0.20   any ``kind=recipe`` with ``attrs.model == workload``
                       across hardware — cross-GPU port with caveats
         miss   0.00   nothing found
         =====  =====  ============================================================
+
+        ``framework`` filter is applied on T2/T3/T4 only — a sglang
+        session must NEVER pick up a vLLM recipe (the best_config
+        ``extra_sglang_args`` blob is framework-specific and would
+        crash the server). When ``framework`` is ``None`` (caller
+        didn't pin one) the filter degrades to "any framework".
 
         On a hit, the returned dict carries the full Cortex point:
         ``{id, canonical_id, kind, entity_type, attrs, authority,
@@ -800,6 +809,11 @@ class CortexKBClient:
         # kv-cache-dtype + max-num-seqs.
         if family and (precision or tp):
             shape_filter: dict[str, Any] = {"hardware": slug_hw}
+            if framework:
+                # Critical: never cross frameworks — sglang's
+                # ``extra_sglang_args`` blob is incompatible with vLLM
+                # CLI flags and would crash the server.
+                shape_filter["framework"] = framework
             if precision:
                 shape_filter["precision"] = precision
             if tp:
@@ -819,9 +833,12 @@ class CortexKBClient:
 
         # ── T3: same family, same hardware ───────────────────────────
         if family:
+            t3_filter: dict[str, Any] = {"hardware": slug_hw}
+            if framework:
+                t3_filter["framework"] = framework
             cand = _query({
                 C.F_KIND:             C.KIND_RECIPE,
-                C.F_ATTRS_FILTER:     {"hardware": slug_hw},
+                C.F_ATTRS_FILTER:     t3_filter,
                 C.F_LIMIT:            20,
                 C.F_NEIGHBOR_PREVIEW: False,
             })
@@ -834,12 +851,15 @@ class CortexKBClient:
 
         # ── T4: same model_class, same hardware ──────────────────────
         if model_class:
+            t4_filter: dict[str, Any] = {
+                "model_class": model_class,
+                "hardware":    slug_hw,
+            }
+            if framework:
+                t4_filter["framework"] = framework
             cand = _query({
                 C.F_KIND:             C.KIND_RECIPE,
-                C.F_ATTRS_FILTER:     {
-                    "model_class": model_class,
-                    "hardware":    slug_hw,
-                },
+                C.F_ATTRS_FILTER:     t4_filter,
                 C.F_LIMIT:            20,
                 C.F_NEIGHBOR_PREVIEW: False,
             })
