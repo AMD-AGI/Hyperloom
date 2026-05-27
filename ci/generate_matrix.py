@@ -11,11 +11,16 @@ import yaml
 def _entry_key(m: dict) -> str:
     """Effective matrix/filter key: explicit `key` field overrides `inferenceX_key`.
 
-    Lets multiple ci-config entries share the same `inferenceX_key` (e.g.
-    amd-master.yaml lookup) while keeping unique matrix display names.
-    Example: single-node DSR1 + multi-node DSR1 both look up
-    `dsr1-fp8-mi300x-sglang` in amd-master, but only multi-node sets
-    `key: dsr1-multinode-fp8-mi300x-sglang` so the matrix doesn't dedupe them.
+    Two reasons an entry sets its own `key` instead of inheriting from
+    `inferenceX_key`:
+
+    1. Self-contained entries with no upstream amd-master baseline. The GLM-5
+       multi-node entry (`key: glm5-multinode-fp8-mi300x-sglang`) is the
+       canonical case — `inferenceX_parser.synthesize_entry_from_ci_config`
+       builds the lookup row from the ci-config fields themselves.
+    2. Two ci-config entries sharing the same `inferenceX_key` (e.g. variants
+       of the same amd-master row) need unique matrix display names to avoid
+       dedupe.
     """
     return m.get("key") or m["inferenceX_key"]
 
