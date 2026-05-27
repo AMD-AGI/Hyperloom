@@ -176,6 +176,38 @@ async def test_executor_no_patch_when_diff_url_and_patches_absent(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_executor_no_patch_when_explicit_patches_all_missing(tmp_path: Path):
+    """Regression for P2.a: when params.patches is non-empty but every
+    listed path is missing from disk, the executor must NOT fall back to
+    the candidate's diff_url — it would benchmark an unpatched tree and
+    silently report a false KEEP/REJECT. The executor must short-circuit
+    with status='no_patch' and surface the missing paths."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()  # carries a real diff_url
+    missing = [str(tmp_path / "nope-1.patch"), str(tmp_path / "nope-2.patch")]
+    ctx = _make_ctx("t-fp-no-explicit", {
+        "candidate": cand,
+        "patches": missing,
+        "framework_source_root": str(repo),
+        "batch_id": "batch-001",
+        "apply_only": True,
+    })
+    result = await executor(ctx)
+
+    assert result["status"] == "no_patch"
+    assert result["error_class"] == "explicit_patches_missing"
+    assert result["patches_applied"] == []
+    assert result["missing_patches"] == missing
+    # Tree must be untouched — no fall-through to diff_url fetch + apply.
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
 async def test_executor_apply_only_with_explicit_patch_succeeds(tmp_path: Path):
     """apply_only=True with an explicit patch path: patch lands on the
     framework root, bench is skipped, status='applied_no_bench'."""

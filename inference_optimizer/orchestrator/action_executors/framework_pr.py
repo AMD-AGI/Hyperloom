@@ -262,6 +262,24 @@ class FrameworkPrExecutor:
                     log.warning(
                         "framework_pr: explicit patch %r not found", p,
                     )
+            # Refuse to run the benchmark on an unpatched tree: if every
+            # explicit patch path was missing, downstream measurements
+            # would silently reflect the un-modified framework_root.
+            if not patch_paths:
+                return {
+                    "status": "no_patch",
+                    "error_class": "explicit_patches_missing",
+                    "candidate": candidate,
+                    "batch_id": batch_id,
+                    "patches_applied": [],
+                    "patches_reverted": [],
+                    "reason": (
+                        "all explicit patches were missing from disk; "
+                        "refusing to benchmark unpatched tree"
+                    ),
+                    "missing_patches": [str(p) for p in explicit_patches],
+                    "workspace": str(output_root),
+                }
         else:
             diff_url = str(candidate.get("diff_url") or "").strip()
             if not diff_url:
