@@ -61,10 +61,18 @@ def test_framework_pr_exit_reasons_registered():
         "framework_pr_phase_done",
         "framework_pr_plateau",
         "framework_pr_force_exit_low_budget",
-        "framework_pr_skipped",
     }
     assert reasons <= phase_state.PHASE_EXIT_REASONS
     assert reasons <= phase_state.STOP_REASON_VOCAB
+
+
+def test_framework_pr_skipped_is_not_a_registered_reason():
+    """``framework_pr_skipped`` was registered but never emitted by any
+    code path — when --no-framework is set, PRELUDE → EXPLORE reuses
+    the ``prelude_done`` reason for back-compat with pre-FRAMEWORK_PR
+    sessions. Remove the dead vocab entry."""
+    assert "framework_pr_skipped" not in phase_state.PHASE_EXIT_REASONS
+    assert "framework_pr_skipped" not in phase_state.STOP_REASON_VOCAB
 
 
 def test_framework_pr_action_allowlist():
@@ -275,9 +283,9 @@ def test_compute_next_phase_prelude_to_framework_pr_when_enabled():
 def test_compute_next_phase_prelude_to_explore_when_disabled_keeps_prelude_done_reason():
     """When ``framework_phase_enabled=False`` the routing must preserve
     the historical ``prelude_done`` reason so phase_history stays
-    compatible with pre-FRAMEWORK_PR sessions. ``framework_pr_skipped``
-    is reserved for the Coordinator-internal "entered FRAMEWORK_PR but
-    fa.discover returned 0 candidates" exit path."""
+    compatible with pre-FRAMEWORK_PR sessions. The FRAMEWORK_PR phase
+    has no dedicated "skipped" reason — see
+    :func:`test_framework_pr_skipped_is_not_a_registered_reason`."""
     state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
     out = phase_state.compute_next_phase(state, framework_phase_enabled=False)
     assert out is not None

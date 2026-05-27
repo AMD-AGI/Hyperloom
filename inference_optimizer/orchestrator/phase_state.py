@@ -206,7 +206,6 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
     "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
     "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
-    "framework_pr_skipped",             # PRELUDE → EXPLORE when --no-framework was set
 
     # Terminal exits (any phase → CLOSE)
     "robustness_escalated",
@@ -272,7 +271,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "framework_pr_phase_done",
     "framework_pr_plateau",
     "framework_pr_force_exit_low_budget",
-    "framework_pr_skipped",
 })
 
 
@@ -1424,10 +1422,10 @@ def compute_next_phase(
             if framework_phase_enabled:
                 return PHASE_FRAMEWORK_PR, norm[0], norm[1]
             # Framework phase off → straight through to EXPLORE with the
-            # historical ``prelude_done`` reason. (``framework_pr_skipped``
-            # is reserved for the Coordinator-internal path that enters
-            # FRAMEWORK_PR and finds zero candidates on the first
-            # ``fa phase-discover`` call.)
+            # historical ``prelude_done`` reason. The FRAMEWORK_PR phase
+            # has no dedicated "skipped" reason: --no-framework simply
+            # collapses the chain and the routing record stays
+            # backward-compatible with pre-FRAMEWORK_PR sessions.
             return PHASE_EXPLORE, norm[0], norm[1]
         return None
 
