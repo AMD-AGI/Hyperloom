@@ -187,3 +187,83 @@ def test_discover_timeout_default_used_when_override_zero(
 
     assert captured["timeout_sec"] == _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
     assert _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC == 180.0
+
+
+# ---------------------------------------------------------------------------
+# P2.e — enqueue failure records progress row.
+# ---------------------------------------------------------------------------
+class _TasksStub:
+    """Mimics ``Coordinator.tasks.create_or_return_existing``. Raises on
+    the first call to simulate an enqueue failure."""
+
+    def __init__(self, *, fail: bool = True) -> None:
+        self._fail = fail
+        self.calls: list[dict[str, Any]] = []
+
+    async def create_or_return_existing(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        if self._fail:
+            raise RuntimeError("simulated registry failure")
+        return SimpleNamespace(task_id="t-ok")
+
+
+async def _call_enqueue(stub: _CoordinatorStub, cand: dict[str, Any]) -> None:
+    await Coordinator._enqueue_framework_pr_task(stub, cand)  # type: ignore[arg-type]
+
+
+def test_enqueue_failure_appends_progress_row(tmp_path: Path):
+    """Regression for P2.e: a registry failure during
+    _enqueue_framework_pr_task must record an ``enqueue_failed``
+    progress row so the next pump tick skips this candidate."""
+    stub = _CoordinatorStub(tmp_path)
+    stub.tasks = _TasksStub(fail=True)  # type: ignore[attr-defined]
+    cand = {
+        "candidate_id": "pr-1",
+        "batch_id": "b-fail",
+        "pr_url": "https://example.com/pr/1",
+    }
+
+    asyncio.run(_call_enqueue(stub, cand))
+
+    rows = stub.shared_state.framework_pr_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["candidate_id"] == "pr-1"
+    assert rows[0]["batch_id"] == "b-fail"
+    assert rows[0]["status"] == "enqueue_failed"
+    assert "simulated registry failure" in rows[0]["error"]
+
+
+def test_enqueue_failed_candidate_skipped_by_selector(tmp_path: Path):
+    """After an enqueue_failed row is appended, the next selector pass
+    must NOT return that candidate — proves the failure breaks the
+    forever-loop."""
+    stub = _CoordinatorStub(tmp_path)
+    stub.tasks = _TasksStub(fail=True)  # type: ignore[attr-defined]
+    cand_bad = {"candidate_id": "pr-bad", "batch_id": "b1"}
+    cand_good = {"candidate_id": "pr-good", "batch_id": "b1"}
+    stub.shared_state.framework_pr_batches = [
+        {
+            "batch_id": "b1",
+            "candidates": [cand_bad, cand_good],
+        },
+    ]
+
+    # First tick: enqueue cand_bad → fails → progress row appended.
+    asyncio.run(_call_enqueue(stub, cand_bad))
+
+    # Next selector pass should skip cand_bad and return cand_good.
+    nxt = Coordinator._select_next_framework_pr_candidate(stub)  # type: ignore[arg-type]
+    assert nxt is not None
+    assert nxt["candidate_id"] == "pr-good"
+
+
+def test_enqueue_success_does_not_append_progress_row(tmp_path: Path):
+    """Belt-and-braces: success path must NOT write an enqueue_failed
+    (or any other) progress row; that's the executor's job."""
+    stub = _CoordinatorStub(tmp_path)
+    stub.tasks = _TasksStub(fail=False)  # type: ignore[attr-defined]
+    cand = {"candidate_id": "pr-ok", "batch_id": "b1"}
+
+    asyncio.run(_call_enqueue(stub, cand))
+
+    assert stub.shared_state.framework_pr_phase_progress == []
