@@ -1,8 +1,8 @@
-# `roofline` Action — Playbook
+# `roofline` Action — Reference
 
 ## What this is
 
-`roofline` is a **composite action** (macro / pipeline). Its executor
+`roofline` is a **Coordinator-internal composite action**. Its executor
 internally invokes two atomic sub-steps in order:
 
 1. **`profile`** — reuses `ProfileExecutor` to run Magpie + torch
@@ -30,31 +30,34 @@ the raw `analysis.md` from the prompt and makes decisions directly —
 this is the TraceLens-team-mandated "no second interpretation"
 contract (see design/roofline-v2.md §6.2).
 
-## When to propose
+## Who enqueues it
 
-Propose `roofline` (via `propose_action{action_name='roofline'}` or
-`delegate{action_name='roofline'}`):
+**The Coordinator does — never the LLM.** A roofline (or its
+`--no-enable-roofline` profile-only alternative) is auto-enqueued in
+exactly two places:
 
-1. **Once after `baseline`** — to produce the very first TraceLens
-   snapshot so `backends` / `params` / `kernel_opt` /
-   `comm_optimization` can run (these four are gated on the cache
-   by `_sequence_denial_for_action`).
-2. **Whenever `cumulative_gain_validated_pct` has increased by ≥ 3%
-   since the snapshot was taken** — bottleneck distribution likely
-   shifted and the next round of decisions should be grounded in a
-   refreshed `analysis.md`.
-3. **When the previous snapshot's recommended next actions have all
-   been tried with no new gain** — the report's signal is exhausted
-   for this configuration, refresh.
+1. **PRELUDE bootstrap** — once after `baseline` lands, to seed the
+   first `analysis.md`.
+2. **+10% validated-gain watermark crossing** — whenever
+   `cur_tput / last_roofline_tput >= 1.10`, where
+   `cur_tput = baseline_tput * (1 + cumulative_gain_validated/100)`.
+   Compound: 10% → 21% → 33% triggers.
 
-Do **not** propose `roofline` when:
+While the Coordinator-enqueued analysis task is in flight,
+`_auto_roofline_pending_denial` blocks `specialist` / `explore` /
+`kernel_opt` / `integrate` / `deep_kernel_analysis` /
+`operator_tuning` / `vendor_kernel_config` dispatches so downstream
+decisions always read the freshest snapshot.
 
-* `closing_phase` is near (< 15 minutes remaining) — the ~10 minute
-  profile + trace_analyze cost would eat the closing window.
-* You just emit `roofline` in the previous tick (idempotency: the
-  Coordinator's task dedup will short-circuit a repeated propose
-  with the same gain bucket; see §6.4 idempotency_key in the design
-  doc).
+## PolicyGate denies LLM proposals
+
+`propose_action{action_name='roofline'|'profile'}` and
+`delegate{action_name='roofline'|'profile'}` are denied at PolicyGate
+with `rule='analysis_action_not_llm_proposable'`. To run a profile
+instead of a full roofline, the operator launches with
+`--no-enable-roofline` (the Coordinator then auto-enqueues a `profile`
+task in PRELUDE and at every watermark crossing); there is no
+LLM-driven path.
 
 ## Failure semantics
 
@@ -67,9 +70,11 @@ Either sub-step failing causes the whole `roofline` task to fail:
   `last_profile_trace` **is** updated (profile artifact is still
   valuable) but no `last_trace_analyze` cache.
 
-There is no fallback — the executor returns a real failure and the
-main Orchestration LLM should propose `roofline` again (or `profile`
-+ `trace_analyze` separately as escape hatch) to retry.
+There is no fallback and no retry. A failed roofline does not block
+the next watermark trigger — the Coordinator will enqueue a fresh
+analysis task the next time the +10% threshold is crossed; downstream
+dispatches proceed in degraded mode (specialists / explore run
+without a refreshed `analysis.md`).
 
 ## Cost / runtime
 
@@ -78,12 +83,3 @@ main Orchestration LLM should propose `roofline` again (or `profile`
   subprocess); `trace_split` inside TraceLens adds < 30s.
 * `requires_lanes=[profile_lane]` — same lane as `profile` so we
   don't run two profile-class tasks concurrently against the server.
-
-## Why not just propose profile + select_kernels manually?
-
-Pre-v2 the Orchestration LLM had to emit `propose_action{profile}` →
-wait for completion → emit `request{kind="trace_analyze"}` → wait for
-completion. That's 2 ticks of LLM-managed sequencing where a single
-forgotten step strands `last_profile_trace` without a cache (or
-worse, a cache against a stale trace). `roofline` removes the
-sequencing burden from the LLM and guarantees the atomic snapshot.
