@@ -707,19 +707,20 @@ class CortexKBClient:
                       — same architecture family, same GPU + serving stack
         T4     0.40   ``model_class`` + ``hardware`` (+ ``framework``) match
                       — same coarse taxonomy (moe_mla / dense / ...), same GPU
-        T5     0.25   any ``kind=recipe`` with ``hardware == hw`` — only
-                      hw-level ROCm defaults are reusable (framework-agnostic
-                      on purpose; sweep params transcend serving stack)
-        T6     0.20   any ``kind=recipe`` with ``attrs.model == workload``
-                      across hardware — cross-GPU port with caveats
+        T5     0.25   any ``kind=recipe`` with ``hardware == hw``
+                      (+ ``framework`` when supplied) — broadest hw-level
+                      fallback when nothing model-family-related exists
+        T6     0.20   ``attrs.model == workload`` (+ ``framework``) across
+                      hardware — cross-GPU port with caveats
         miss   0.00   nothing found
         =====  =====  ============================================================
 
-        ``framework`` filter is applied on T2/T3/T4 only — a sglang
-        session must NEVER pick up a vLLM recipe (the best_config
-        ``extra_sglang_args`` blob is framework-specific and would
-        crash the server). When ``framework`` is ``None`` (caller
-        didn't pin one) the filter degrades to "any framework".
+        ``framework`` filter is applied on **every** tier when
+        supplied — a sglang session must NEVER pick up a vLLM recipe
+        (the best_config ``extra_sglang_args`` blob is framework-
+        specific and would crash the server on the first
+        ``run_optimization`` attempt). When ``framework`` is ``None``
+        (caller didn't pin one) the filter degrades to "any framework".
 
         On a hit, the returned dict carries the full Cortex point:
         ``{id, canonical_id, kind, entity_type, attrs, authority,
@@ -881,9 +882,16 @@ class CortexKBClient:
                 return cand[0], "T4_same_class", 0.40
 
         # ── T5: any recipe on this hardware ──────────────────────────
+        t5_filter: dict[str, Any] = {"hardware": slug_hw}
+        if framework:
+            # ``best_config.extra_sglang_args`` is framework-specific —
+            # a sglang session must not pick up a vLLM recipe even at
+            # the broadest "any model on this hw" tier (would crash
+            # the server on the first ``run_optimization`` attempt).
+            t5_filter["framework"] = framework
         cand = _query({
             C.F_KIND:             C.KIND_RECIPE,
-            C.F_ATTRS_FILTER:     {"hardware": slug_hw},
+            C.F_ATTRS_FILTER:     t5_filter,
             C.F_LIMIT:            10,
             C.F_NEIGHBOR_PREVIEW: False,
         })
@@ -893,9 +901,12 @@ class CortexKBClient:
             return cand[0], "T5_same_hw_any", 0.25
 
         # ── T6: same model name across hardware ──────────────────────
+        t6_filter: dict[str, Any] = {"model": workload}
+        if framework:
+            t6_filter["framework"] = framework
         cand = _query({
             C.F_KIND:             C.KIND_RECIPE,
-            C.F_ATTRS_FILTER:     {"model": workload},
+            C.F_ATTRS_FILTER:     t6_filter,
             C.F_LIMIT:            5,
             C.F_NEIGHBOR_PREVIEW: False,
         })
