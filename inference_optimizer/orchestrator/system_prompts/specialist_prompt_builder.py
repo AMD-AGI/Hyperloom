@@ -329,6 +329,11 @@ class SpecialistPromptInputs:
     # Recipe summary from T0 ``find-recipe`` (§3.5 §6 part 5)
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
+    # T0 ``lessons`` query result — positive priors from prior KEEPs
+    # on (model, hardware), sorted by KB-side confidence. Rendered as
+    # § 5b for the specialist (separate from § 5 recipe so the LLM can
+    # reason about each independently).
+    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
 
     # PR feed (§3.5 §6 part 6)
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
@@ -483,6 +488,7 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
         not inp.kb_subgraph
         and not inp.warm_start_recipe
         and not inp.warm_start_pitfalls
+        and not inp.warm_start_lessons
         and not inp.pr_feed
     )
 
@@ -667,6 +673,49 @@ def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
         rows.append("**Known pitfalls (do NOT repeat):**")
         for p in inp.warm_start_pitfalls:
             rows.append(f"- {json.dumps(p, sort_keys=True)}")
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Section 5b — Related lessons (positive priors from prior KEEPs)
+# ---------------------------------------------------------------------------
+def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
+    """Render KB ``kind=lesson`` points that previous KEEP decisions
+    on this (model, hardware) wrote — the positive counterpart of
+    the § 5 pitfalls block.
+
+    Each lesson is shown compactly: the ``statement`` line (one
+    actionable claim) + the ``measured_impact`` string (the numeric
+    delta from the prior session), with ``applicable_models`` /
+    ``applicable_hardware`` collapsed into a single header so the
+    specialist can scan a dozen lessons at a glance instead of
+    reading JSON dumps.
+    """
+    rows = ["## 5b. RELATED LESSONS (prior KEEPs on this model+hw)", ""]
+    if not inp.warm_start_lessons:
+        rows.append(_NONE_PLACEHOLDER)
+        return rows
+    for point in inp.warm_start_lessons:
+        attrs = (point or {}).get("attrs") or {}
+        statement = str(attrs.get("statement") or "").strip()
+        if not statement:
+            continue
+        impact = str(attrs.get("measured_impact") or "").strip()
+        # Optional: confidence + source session hint for "how
+        # transferable is this lesson?"
+        conf = point.get("confidence")
+        meta_bits: list[str] = []
+        if isinstance(conf, (int, float)) and conf > 0:
+            meta_bits.append(f"conf={float(conf):.2f}")
+        src_sid = str(attrs.get("source_session_id") or "").strip()
+        if src_sid:
+            meta_bits.append(f"src={src_sid}")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        rows.append(f"- **{statement}**{meta}")
+        if impact:
+            rows.append(f"    impact: {impact}")
+    if len(rows) == 2:  # only the header + blank line, all lessons filtered out
+        rows.append(_NONE_PLACEHOLDER)
     return rows
 
 
@@ -957,13 +1006,14 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_iron_rules(inp),
     ]
     user_sections = [
-        _section_hardware(inp),
-        _section_gap(inp),
-        _section_kb_subgraph(inp),
-        _section_roofline_evidence(inp),
-        _section_recipe(inp),
-        _section_pr_feed(inp),
-        _section_source_hint(inp),
+        _section_hardware(inp),           # 0: § 1
+        _section_gap(inp),                # 1: § 2-3
+        _section_kb_subgraph(inp),        # 2: § 4
+        _section_roofline_evidence(inp),  # 3: § 4a
+        _section_recipe(inp),             # 4: § 5
+        _section_lessons(inp),            # 5: § 5b
+        _section_pr_feed(inp),            # 6: § 6
+        _section_source_hint(inp),        # 7: § 7
     ]
     # F2-3: framework_pr_scout candidates ride right after PR feed so
     # the specialist sees PR Monitor warm cache + the fa-fetched
@@ -972,8 +1022,9 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     # specialists never see this section.
     fa_candidates_section = _section_framework_pr_candidates(inp)
     if fa_candidates_section:
-        # Insert after the PR feed section (index 5 in the list above).
-        user_sections.insert(6, fa_candidates_section)
+        # Insert after the PR feed section (index 6 — the list above
+        # shows PR feed at index 6 after § 5b was added).
+        user_sections.insert(7, fa_candidates_section)
     if inp.notes:
         user_sections.append([
             "## 10. NOTES FROM ORCHESTRATION",

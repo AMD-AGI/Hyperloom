@@ -351,6 +351,7 @@ def test_core_state_fields_contains_v08_new_additions():
         "cortex_session_summary",
         "warm_start_recipe",
         "warm_start_pitfalls",
+        "warm_start_lessons",
         "specialist_rounds",
         "specialist_domain_empty_streak",
         "research_lane_capacity",
