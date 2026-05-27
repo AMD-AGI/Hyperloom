@@ -64,21 +64,28 @@ _INFERENCE_PORT = 8888
 _PD_PREFILL_PORT = 30000
 _PD_DECODE_PORT = 30001
 # Default sglang collective port (resolution: $RAYJOB_DIST_INIT_PORT > 29500).
-# Changed from 5000 → 29500 (PyTorch's torch.distributed standard) because
-# RayJob head pod runs with `hostNetwork: true` (see amd-ray-job-template
-# ConfigMap `dnsPolicy: ClusterFirstWithHostNet`), so the port lives in
-# the host namespace. When a previous sglang launch crashes mid-init,
-# torch.distributed's TCPStore leaves an orphan LISTEN socket on the
-# host that survives pod deletion (no SO_REUSEADDR); the next RayJob
-# scheduled onto the same host inherits the EADDRINUSE and fails
-# `torch.distributed.init_process_group` -> baseline_failed cascade.
-# 29500 is the PyTorch convention and is much less likely to collide
-# with any pre-existing host-side listener. Operators can still override
-# via $RAYJOB_DIST_INIT_PORT (e.g. --rayjob-extra-env RAYJOB_DIST_INIT_PORT=29501).
-# A second port is used for the decode group to avoid collision when
-# both PD groups happen to land on the same node (rare but possible).
+# Changed from 5000 → 29500 because RayJob head pod uses hostNetwork=true
+# (amd-ray-job-template ConfigMap `dnsPolicy: ClusterFirstWithHostNet`),
+# so the port lives in the host namespace; torch.distributed TCPStore
+# leaves an orphan LISTEN socket on the host after a mid-init crash
+# (no SO_REUSEADDR), and the next RayJob scheduled on the same host
+# inherits EADDRINUSE → baseline_failed cascade. 29500 is the PyTorch
+# convention. Operators override via $RAYJOB_DIST_INIT_PORT.
+# PD disaggregated mode auto-derives decode port via
+# ``_pd_decode_dist_init_port`` (= prefill + 1) so the two rendezvous
+# endpoints never collide when both groups land on the same host
+# (single source of truth: whatever prefill resolves to).
 _DEFAULT_DIST_INIT_PORT = 29500
-_PD_DECODE_DIST_INIT_PORT = 29501
+
+
+def _pd_decode_dist_init_port(prefill_dist_init_port: int) -> int:
+    """Derive PD-disaggregated decode rendezvous port from prefill port.
+
+    Returns ``prefill + 1`` so an operator override of
+    ``$RAYJOB_DIST_INIT_PORT`` automatically shifts both endpoints in
+    lock-step (no chance of decode silently colliding with prefill).
+    """
+    return prefill_dist_init_port + 1
 # sglang PD bootstrap server port (KV transfer rendezvous). Default
 # matches the sglang docs example. Override per-call via --pd-bootstrap-port.
 _PD_DEFAULT_BOOTSTRAP_PORT = 8998
@@ -856,9 +863,10 @@ def main() -> int:
             )
             refs.append((f"prefill_{grp_rank}", actor_ref))
 
-        # Group B: decode — nodes[pn:pn+dn]; uses a *separate*
-        # dist-init port so it doesn't clash with prefill rendezvous
-        # if both happen to share a node (rare but legal in sglang docs).
+        # Group B: decode — nodes[pn:pn+dn]; uses prefill_port + 1 as
+        # its dist-init port so it never clashes with prefill rendezvous
+        # when both happen to share a node, regardless of whether the
+        # operator overrode the prefill port via $RAYJOB_DIST_INIT_PORT.
         decode_head_ip = nodes[pn].get("NodeManagerAddress", head_ip)
         for grp_rank in range(dn):
             node = nodes[pn + grp_rank]
@@ -870,7 +878,7 @@ def main() -> int:
                 framework=args.framework, model=args.model,
                 tp=dtp, nnodes=dn, node_rank=grp_rank,
                 head_ip=decode_head_ip,
-                dist_init_port=_PD_DECODE_DIST_INIT_PORT,
+                dist_init_port=_pd_decode_dist_init_port(args.dist_init_port),
                 pid_dir=args.pid_dir, log_dir=args.log_dir,
                 extra_args=extra_args,
                 torch_profiler_dir=args.torch_profiler_dir,
