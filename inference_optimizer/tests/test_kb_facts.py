@@ -855,6 +855,208 @@ def test_finalize_recipe_includes_workload_tags_in_extra_attrs(
     assert extra["ep"] == 4
 
 
+# ===========================================================================
+# Coordinator._record_fact_per_task / _record_fact_per_variant — direct unit tests
+# ===========================================================================
+@pytest.fixture
+def _coord_for_fact_writes(session_dir):
+    """Coordinator stub with KB call-recording so we can assert the
+    exact ``propose_lesson`` / ``propose_pitfall`` calls per outcome."""
+    from dataclasses import dataclass, field
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+
+    @dataclass
+    class _StubSharedState:
+        model_name: str = "DeepSeek-R1"
+        gpu_type: str = "MI300X"
+        framework: str = "sglang"
+        cortex_session_id: str = "session-X"
+        tick: int = 7
+        phase: str = "EXPLORE"
+        baseline_tput: float = 700.0
+
+        def save(self, *args, **kwargs):
+            pass
+
+    class _StubKB:
+        enabled = True
+
+        def __init__(self):
+            self.lesson_calls: list[dict] = []
+            self.pitfall_calls: list[dict] = []
+
+        def propose_lesson(self, **kwargs):
+            self.lesson_calls.append(kwargs)
+            return {"status": "auto_accepted"}
+
+        def propose_pitfall(self, **kwargs):
+            self.pitfall_calls.append(kwargs)
+            return {"status": "auto_accepted"}
+
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = session_dir
+    coord.shared_state = _StubSharedState()
+    coord.cortex_kb = _StubKB()
+    coord._fact_writes_enabled = True
+    return coord
+
+
+class _Task:
+    """Minimal Task stub — _record_fact_per_task only reads .kind / .task_id."""
+    def __init__(self, task_id: str = "task-1", kind: str = "kernel_opt"):
+        self.task_id = task_id
+        self.kind = kind
+
+
+def test_record_fact_per_task_keep_writes_lesson(_coord_for_fact_writes):
+    """KEEP with gain > 0 → exactly one propose_lesson call, no pitfall."""
+    coord = _coord_for_fact_writes
+    coord._record_fact_per_task(
+        task=_Task("t-1", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": 12.3, "output_throughput": 875.0},
+        kept=True,
+    )
+    assert len(coord.cortex_kb.lesson_calls) == 1
+    assert len(coord.cortex_kb.pitfall_calls) == 0
+    lesson = coord.cortex_kb.lesson_calls[0]
+    assert "+12.30%" in lesson["statement"]
+    assert "DeepSeek-R1" in lesson["statement"]
+    assert "mi300x" in lesson["statement"].lower()
+    assert lesson["source_session_id"] == "session-X"
+    assert lesson["source_task_id"] == "t-1"
+    assert lesson["applicable_models"] == ["DeepSeek-R1"]
+    assert lesson["applicable_hardware"] == ["MI300X"]
+
+
+def test_record_fact_per_task_keep_zero_gain_skips_lesson(_coord_for_fact_writes):
+    """KEEP with gain_pct == 0 → no lesson (avoids noise)."""
+    coord = _coord_for_fact_writes
+    coord._record_fact_per_task(
+        task=_Task("t-2", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": 0.0, "output_throughput": 700.0},
+        kept=True,
+    )
+    assert coord.cortex_kb.lesson_calls == []
+    assert coord.cortex_kb.pitfall_calls == []
+
+
+def test_record_fact_per_task_revert_crash_writes_pitfall(_coord_for_fact_writes):
+    """REVERT with error_class=crash → pitfall (severity=crash)."""
+    coord = _coord_for_fact_writes
+    coord._record_fact_per_task(
+        task=_Task("t-3", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={
+            "gain_pct": None,
+            "error_class": "crash",
+            "reason": "segfault",
+        },
+        kept=False,
+    )
+    assert len(coord.cortex_kb.lesson_calls) == 0
+    assert len(coord.cortex_kb.pitfall_calls) == 1
+    pitfall = coord.cortex_kb.pitfall_calls[0]
+    assert pitfall["severity"] == "crash"
+    assert pitfall["source_session_id"] == "session-X"
+
+
+def test_record_fact_per_task_revert_minor_drop_skips_pitfall(
+    _coord_for_fact_writes,
+):
+    """REVERT with gain_pct = -1% (above -5% threshold) → no pitfall
+    (noise control — Threshold-B contract)."""
+    coord = _coord_for_fact_writes
+    coord._record_fact_per_task(
+        task=_Task("t-4", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": -1.0, "output_throughput": 693.0},
+        kept=False,
+    )
+    assert coord.cortex_kb.lesson_calls == []
+    assert coord.cortex_kb.pitfall_calls == []
+
+
+def test_record_fact_per_task_revert_large_regression_writes_pitfall(
+    _coord_for_fact_writes,
+):
+    """REVERT with gain_pct = -8% (below -5% threshold) → pitfall."""
+    coord = _coord_for_fact_writes
+    coord._record_fact_per_task(
+        task=_Task("t-5", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": -8.0, "output_throughput": 644.0},
+        kept=False,
+    )
+    assert len(coord.cortex_kb.pitfall_calls) == 1
+    assert coord.cortex_kb.pitfall_calls[0]["severity"] == "regress"
+
+
+def test_record_fact_per_task_no_fact_writes_flag_skips_kb(
+    _coord_for_fact_writes,
+):
+    """--no-fact-writes (``_fact_writes_enabled=False``) skips KB calls
+    but still writes journal — independent gates."""
+    coord = _coord_for_fact_writes
+    coord._fact_writes_enabled = False
+    coord._record_fact_per_task(
+        task=_Task("t-6", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": 15.0, "output_throughput": 805.0},
+        kept=True,
+    )
+    assert coord.cortex_kb.lesson_calls == []
+    # journal still got the row.
+    j = coord._ensure_journal()
+    assert any(e.task_id == "t-6" for e in j.entries)
+
+
+def test_record_fact_per_variant_keep_writes_lesson_with_variant_name(
+    _coord_for_fact_writes,
+):
+    """Explore-grid KEEP variant → lesson tagged with source_variant_name."""
+    coord = _coord_for_fact_writes
+    coord._record_fact_per_variant(
+        task=_Task("t-7", "explore"),
+        source_session_id="session-X",
+        variant_outcome={
+            "variant_name": "attn_aiter",
+            "outcome": "KEEP",
+            "variant": {
+                "name": "attn_aiter",
+                "extra_sglang_args": "--attention-backend AITER",
+            },
+            "metrics": {"gain_pct": 9.0, "output_throughput": 763.0},
+        },
+    )
+    assert len(coord.cortex_kb.lesson_calls) == 1
+    lesson = coord.cortex_kb.lesson_calls[0]
+    assert lesson["source_variant_name"] == "attn_aiter"
+    assert "--attention-backend AITER" in lesson["statement"]
+
+
+def test_record_fact_per_variant_skipped_dedup_writes_nothing(
+    _coord_for_fact_writes,
+):
+    """SKIPPED_DEDUP variant must NOT write a journal entry OR a
+    KB lesson / pitfall (it's a no-op — the variant didn't actually
+    run, so there's nothing to attribute)."""
+    coord = _coord_for_fact_writes
+    coord._record_fact_per_variant(
+        task=_Task("t-8", "explore"),
+        source_session_id="session-X",
+        variant_outcome={
+            "variant_name": "dedup_target",
+            "outcome": "SKIPPED_DEDUP",
+        },
+    )
+    assert coord.cortex_kb.lesson_calls == []
+    assert coord.cortex_kb.pitfall_calls == []
+    j = coord._ensure_journal()
+    assert not any(e.variant_name == "dedup_target" for e in j.entries)
+
+
 def test_propose_edge_drain_replays_to_edge_endpoint(session_dir):
     """End-to-end fallback contract: when ``propose_edge`` sync failed
     and the row was enqueued, a later :meth:`drain_pending` must
