@@ -5335,6 +5335,14 @@ class Coordinator:
             ) or 0.0)
             if kill_ratio > 0:
                 params.setdefault("explore_overtime_kill_ratio", kill_ratio)
+            # Operator-pinned hard timeout override (``0`` = auto-derive in
+            # ExploreExecutor). Injected as ``params['variant_timeout_sec']``
+            # so it takes precedence over the executor's auto-derive path.
+            variant_timeout_override = int(getattr(
+                self.shared_state, "explore_variant_timeout_sec_override", 0,
+            ) or 0)
+            if variant_timeout_override > 0:
+                params.setdefault("variant_timeout_sec", variant_timeout_override)
             # Mirror the sweep/integrate branches: inject ``base_tput`` (and
             # ``base_extra_args``) tied to current_best (or baseline_tput as
             # fallback) whenever Orchestration omits them. Without this the
@@ -5471,6 +5479,11 @@ class Coordinator:
             ) or 0.0)
             if kill_ratio > 0:
                 params.setdefault("explore_overtime_kill_ratio", kill_ratio)
+            variant_timeout_override = int(getattr(
+                self.shared_state, "explore_variant_timeout_sec_override", 0,
+            ) or 0)
+            if variant_timeout_override > 0:
+                params.setdefault("variant_timeout_sec", variant_timeout_override)
         # IR-7 — ``assess_remaining_gaps`` is a thin wrapper: rewrite
         # the kind to ``specialist`` and force the
         # ``session_steward_specialist`` domain (LLM cannot pick any
