@@ -464,7 +464,7 @@ jobs:
           if [ -n "$EP" ]; then ARGS+=(--endpoint "$EP"); fi
           if [ -n "$TK" ]; then ARGS+=(--token "$TK"); fi
           echo "publishing $BD (${BD_SIZE} bytes); endpoint=${EP:-<script default = dev>}"
-          python3 scripts/post_perf_runs.py "${ARGS[@]}"
+          python3 ci/post_perf_runs.py "${ARGS[@]}"
 
       - name: Upload per-model manifest
         if: always()
