@@ -386,12 +386,16 @@ class SharedState:
     # ``framework_pr_scout`` sub_kind requires this. Operators opt out
     # via ``--no-framework-agent-enabled``.
     framework_agent_enabled: bool = True
-    # When True (the default) the Coordinator always enqueues the
-    # PRELUDE initial roofline once baseline completes. When False,
-    # the bootstrap is skipped if ``last_roofline_tput`` is already
-    # populated (resume edge), letting operators avoid a redundant
-    # roofline at the start of a continuation session.
-    force_roofline_after_baseline: bool = True
+    # When True (the default) the Coordinator's auto-managed analysis
+    # action — at PRELUDE bootstrap and on every +10% watermark
+    # crossing — is ``roofline`` (composite: profile + trace_analyze +
+    # analysis.md snapshot). When False the same trigger paths enqueue
+    # plain ``profile`` instead (no trace_analyze, no analysis.md);
+    # behaviour is otherwise identical (same idempotency keys, same
+    # pending-task gate, same watermark anchor update). Both kinds
+    # remain Coordinator-internal and are denied by PolicyGate when
+    # proposed by the LLM (``analysis_action_not_llm_proposable``).
+    enable_roofline: bool = True
     # Cheap-rounds gain gate is opt-in — only locks ``kernel_opt`` when
     # the operator has tuned the thresholds for their workload.
     gain_driven_kernel_opt: bool = False
