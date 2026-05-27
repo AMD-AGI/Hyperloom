@@ -267,3 +267,58 @@ def test_enqueue_success_does_not_append_progress_row(tmp_path: Path):
     asyncio.run(_call_enqueue(stub, cand))
 
     assert stub.shared_state.framework_pr_phase_progress == []
+
+
+# ---------------------------------------------------------------------------
+# Gap 4 — phase_history summary row when the pump gives up on discover.
+# ---------------------------------------------------------------------------
+def test_record_framework_pr_phase_done_appends_history_row(tmp_path: Path):
+    """The helper called from _pump_framework_pr_phase appends a
+    summary row to phase_history so the give-up decision is visible
+    alongside the per-attempt ``framework_pr_discover_failed`` rows."""
+    stub = _CoordinatorStub(tmp_path)
+    stub.shared_state.framework_pr_batches = [
+        {"batch_id": "b1", "candidates": []},
+        {"batch_id": "b2", "candidates": []},
+    ]
+
+    Coordinator._record_framework_pr_phase_done(  # type: ignore[arg-type]
+        stub,
+        reason="discover_retries_exhausted",
+        failure_count=3,
+    )
+
+    rows = [
+        r for r in stub.shared_state.phase_history
+        if r.get("event") == "framework_pr_phase_done"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "discover_retries_exhausted"
+    assert rows[0]["failure_count"] == 3
+    assert rows[0]["retry_limit"] == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    assert rows[0]["batches_discovered"] == 2
+    assert "ts" in rows[0]
+
+
+def test_record_framework_pr_phase_done_records_empty_payload_reason(
+    tmp_path: Path,
+):
+    """The same helper records a different reason when the pump
+    flipped because discover returned a clean empty payload (no
+    failures, no candidates)."""
+    stub = _CoordinatorStub(tmp_path)
+
+    Coordinator._record_framework_pr_phase_done(  # type: ignore[arg-type]
+        stub,
+        reason="discover_empty_payload",
+        failure_count=0,
+    )
+
+    rows = [
+        r for r in stub.shared_state.phase_history
+        if r.get("event") == "framework_pr_phase_done"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "discover_empty_payload"
+    assert rows[0]["failure_count"] == 0
+    assert rows[0]["batches_discovered"] == 0
