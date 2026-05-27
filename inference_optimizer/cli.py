@@ -2336,7 +2336,11 @@ def _bootstrap_cortex_kb(
         "marathon_dispatch_id": manifest.get("session_id", ""),
         "framework":            state.framework or manifest.get("framework", ""),
         "model_class":          state.model_class or "",
+        # Operator traceability — KB writes the most-recent triple onto
+        # the recipe anchor so a future debugger can answer "which Claw
+        # job / sandbox produced this best_config".
         "claw_session_id":      manifest.get("claw_session_id") or "",
+        "sandbox_user_id":      manifest.get("sandbox_user_id") or "",
     }
     try:
         run_t0_anchor(
