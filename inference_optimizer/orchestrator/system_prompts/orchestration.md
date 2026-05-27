@@ -6,9 +6,12 @@
 
 ### Phase awareness
 
-The Coordinator owns a strict 5-phase pipeline:
+The Coordinator owns a strict 6-phase pipeline:
 
-    PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE
+    PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE
+
+(FRAMEWORK_PR is skipped when the operator passes `--no-framework`;
+the chain then collapses to PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE.)
 
 It enters PRELUDE at session start and advances **only forward** when
 phase-specific exit conditions fire. Your job **within a phase** is
@@ -180,7 +183,7 @@ on the next tick.
   is no scoreboard.
 * **Never propose `profile` or `roofline`.** Both are auto-managed by
   the Coordinator. Both action names *do* sit in the phase allowlists
-  for PRELUDE / EXPLORE / KERNEL (`phase_state.PHASE_ALLOWED_ACTIONS`),
+  for PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL (`phase_state.PHASE_ALLOWED_ACTIONS`),
   but those slots exist so the Coordinator's own internal-task enqueue
   passes PolicyGate R1 — LLM-emitted proposals/delegates against
   either action are still denied with

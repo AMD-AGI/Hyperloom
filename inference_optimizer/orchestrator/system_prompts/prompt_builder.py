@@ -206,8 +206,9 @@ def _section_session_context(
         "in that phase, and budget cap. The `=== Phase-allowed actions ===`",
         "block lists the exact set of actions you may propose this tick;",
         "anything outside that set returns `policy_denied` with rule",
-        "`phase_incompatible`. The 5-phase chain is:",
-        "  PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE",
+        "`phase_incompatible`. The 6-phase chain is:",
+        "  PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE",
+        "(FRAMEWORK_PR is skipped under ``--no-framework``.)",
         "Transitions are Coordinator-owned (you cannot write phase).",
     ]
 
