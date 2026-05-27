@@ -904,8 +904,10 @@ def _register_executors(
     get ``_noop_prep`` so SubAgentRunner doesn't fail with "no_executor".
 
     When ``no_kernel`` is True, the kernel-owned executor table is
-    skipped, the kernel-only no-op stubs are skipped, and ``profile`` is
-    also skipped (profiling only feeds kernel-opt).
+    skipped and the kernel-only no-op stubs are skipped. The Coordinator-
+    internal ``profile`` and ``roofline`` analysis executors are
+    registered unconditionally so PRELUDE's auto-enqueued analysis task
+    (kind switched by ``--enable-roofline``) can always dispatch.
 
     ``target_analysis`` is *always* registered with the real
     :class:`TargetAnalysisExecutor`. When ``compare_against_gpu`` is a
@@ -951,6 +953,29 @@ def _register_executors(
         IntegratePatchExecutor(session_dir=session_dir),
     )
 
+    # The composite ``roofline`` action runs profile + trace_analyze
+    # atomically and surfaces analysis.md to the next orchestration
+    # tick. Coordinator auto-enqueues it at PRELUDE and on every 10%
+    # gain watermark crossing — independent of ``--no-kernel`` — so the
+    # executor is unconditionally registered. ``profile`` is the
+    # ``--no-enable-roofline`` alternative and is registered via
+    # ``_REAL_EXECUTORS_FULL`` above. PolicyGate denies LLM-proposed
+    # delegate{action_name='roofline'|'profile'} regardless of mode.
+    coordinator.sub.register_executor(
+        "roofline",
+        make_roofline_executor(shared_state=coordinator.shared_state),
+    )
+
+    if log.isEnabledFor(logging.DEBUG):
+        for required_kind in ("roofline", "profile"):
+            if required_kind not in coordinator.sub.executor_registry:
+                log.debug(
+                    "register_executors: %r missing from sub-agent registry "
+                    "(no_kernel=%s); PRELUDE analysis task will fail with "
+                    "no_executor",
+                    required_kind, no_kernel,
+                )
+
     if no_kernel:
         return
 
@@ -958,16 +983,6 @@ def _register_executors(
         coordinator.sub.register_executor(kind, fn)
     for kind in _NOOP_KINDS_KERNEL_ONLY:
         coordinator.sub.register_executor(kind, _noop_prep)
-
-    # The composite ``roofline`` action runs profile + trace_analyze
-    # atomically and surfaces analysis.md to the next orchestration
-    # tick. Coordinator auto-enqueues it at PRELUDE and on every 10%
-    # gain watermark crossing; the executor is unconditionally
-    # registered.
-    coordinator.sub.register_executor(
-        "roofline",
-        make_roofline_executor(shared_state=coordinator.shared_state),
-    )
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
