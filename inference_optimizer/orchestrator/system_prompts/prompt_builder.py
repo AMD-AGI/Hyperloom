@@ -233,7 +233,8 @@ def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
     lines: list[str] = [
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "",
-        "The Coordinator runs the optimization in a 5-phase linear pipeline.",
+        "The Coordinator runs the optimization in a 6-phase linear pipeline",
+        "(FRAMEWORK_PR collapses out with `--no-framework`, leaving 5).",
         "Each tick it injects a `=== Phase ===` block with the current",
         "phase. Per-phase action allowlists (PolicyGate R1 enforces these):",
         "",

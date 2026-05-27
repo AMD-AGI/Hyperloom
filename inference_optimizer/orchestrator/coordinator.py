@@ -1194,6 +1194,9 @@ class Coordinator:
 
         Currently wired:
 
+        * ``FRAMEWORK_PR`` — start the per-candidate pump that walks
+          ``fa phase-discover`` / ``phase-fetch`` /
+          ``phase-emit-proposal`` until the exit predicate fires.
         * ``EXPLORE`` — pre-warm PR feed across every specialist
           domain. The first specialist dispatch after EXPLORE entry
           then sees a populated cache rather than a cold
@@ -1210,8 +1213,9 @@ class Coordinator:
           ``state.close_sequence_done`` flag so ``cli.finally``
           short-circuits its emergency breakdown write.
 
-        All four phases with side effects are wired. Hook additions
-        for new phases should slot into this dispatcher table.
+        All five non-PRELUDE phases with side effects are wired.
+        Hook additions for new phases should slot into this
+        dispatcher table.
         """
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_FRAMEWORK_PR:

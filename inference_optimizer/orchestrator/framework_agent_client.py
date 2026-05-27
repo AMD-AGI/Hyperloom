@@ -28,8 +28,8 @@ log = logging.getLogger(__name__)
 
 # Repo URL table — keyed by framework name. Mirrors
 # ``specialist_domains.SpecialistDomain.pr_repos`` for serving_specialist
-# but flattens it to a single repo URL the ``fa candidates`` CLI needs
-# (the CLI accepts only one ``repo_url`` per ExploreRequest).
+# but flattens it to the single repo URL each ``fa phase-*`` request
+# carries (the request schema accepts one ``repo_url`` per call).
 _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
     "sglang": "https://github.com/sgl-project/sglang.git",
     "vllm":   "https://github.com/ROCm/vllm.git",

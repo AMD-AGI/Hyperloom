@@ -755,7 +755,7 @@ class SharedState:
     # :func:`phase_state.make_history_row` and conforms to KB_design
     # §3.2 §6 (reason must be in ``PHASE_EXIT_REASONS``).  Capped at
     # ``_PHASE_HISTORY_CAP`` so a runaway transition never bloats
-    # state.json (unlikely — there are only 5 phases — but defensive).
+    # state.json (unlikely — at most ~6 phases in the chain — but defensive).
     phase_history: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase.
     # Coordinator populates from CLI flags / defaults at construction
