@@ -1336,11 +1336,31 @@ class Coordinator:
                     # Either we've exhausted retries (failures >= limit),
                     # or the call returned a clean empty payload
                     # (counter was reset to 0). Both are real exits.
+                    # Stamp a summary row so the give-up decision shows
+                    # up in phase_history alongside the per-attempt
+                    # ``framework_pr_discover_failed`` rows — without
+                    # it the final flip to ``phase_done=True`` is
+                    # silent and operators have to infer the reason
+                    # from the retry trail. PR-327 P2.b follow-up.
+                    self._record_framework_pr_phase_done(
+                        reason=(
+                            "discover_retries_exhausted"
+                            if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+                            else "discover_empty_payload"
+                        ),
+                        failure_count=failures,
+                    )
                     state.framework_pr_phase_done = True
                     state.save(self.session_dir)
                 return
             next_candidate = self._select_next_framework_pr_candidate()
             if next_candidate is None:
+                self._record_framework_pr_phase_done(
+                    reason="discover_returned_no_new_candidates",
+                    failure_count=int(
+                        getattr(state, "framework_pr_discover_failures", 0) or 0,
+                    ),
+                )
                 state.framework_pr_phase_done = True
                 state.save(self.session_dir)
                 return
@@ -1415,6 +1435,33 @@ class Coordinator:
             if cand_id and cand_id not in processed:
                 return cand
         return None
+
+    def _record_framework_pr_phase_done(
+        self, *, reason: str, failure_count: int,
+    ) -> None:
+        """Append a single ``framework_pr_phase_done`` row to
+        ``phase_history`` describing why the pump gave up.
+
+        Per-attempt ``framework_pr_discover_failed`` rows already cover
+        each individual error; this is the summary row so the give-up
+        decision is not silent (PR-327 P2.b follow-up).
+        """
+        state = self.shared_state
+        try:
+            history = getattr(state, "phase_history", None)
+            if not isinstance(history, list):
+                return
+            from . import framework_agent_client as _fa_client
+            history.append({
+                "event":              "framework_pr_phase_done",
+                "reason":             reason,
+                "failure_count":      int(failure_count),
+                "retry_limit":        int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
+                "batches_discovered": len(getattr(state, "framework_pr_batches", None) or []),
+                "ts":                 datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:  # noqa: BLE001 — defensive
+            pass
 
     async def _discover_next_framework_pr_batch(self) -> bool:
         """Call ``fa phase-discover`` and append a batch to SharedState.
