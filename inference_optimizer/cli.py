@@ -100,6 +100,39 @@ from .session_paths import (
 log = logging.getLogger("inference_optimizer.cli")
 
 
+class _RetiredFlag(argparse.Action):
+    """Argparse action that hard-fails on a retired CLI flag.
+
+    Reaching for the old flag spelling should produce an immediate,
+    explicit error (``parser.error`` exits 2) with a one-line
+    migration hint — silent aliases would mask the behaviour change
+    when the underlying semantics differ.
+    """
+
+    def __init__(
+        self,
+        option_strings: list[str],
+        dest: str,
+        *,
+        hint: str,
+        **kwargs: Any,
+    ) -> None:
+        kwargs.setdefault("nargs", 0)
+        kwargs.setdefault("default", argparse.SUPPRESS)
+        kwargs.setdefault("help", argparse.SUPPRESS)
+        self._hint = hint
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        parser.error(f"{option_string} was removed. {self._hint}")
+
+
 def _orchestration_rules_fragment_path() -> Path:
     """Path to the rules-only fragment consumed by ``prompt_builder``.
 
@@ -4369,6 +4402,30 @@ def _build_parser() -> argparse.ArgumentParser:
              "dispatch gate, same watermark anchor update). Env: "
              "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
     )
+    # Retired flags that operator scripts may still pass. We hard-fail
+    # at argparse time with a one-line migration hint instead of
+    # silently aliasing — silent aliases hide the behaviour change from
+    # the single ``--enable-roofline`` mode-select (the old composite /
+    # direct-profile bifurcation no longer exists, and the
+    # PRELUDE-initial roofline is unconditional).
+    _retired_hint = (
+        "Use ``--enable-roofline`` (default on) / ``--no-enable-roofline`` "
+        "instead. The PRELUDE-initial analysis task is unconditional and "
+        "the composite/direct-profile bifurcation has been removed."
+    )
+    for _retired in (
+        "--use-roofline-composite",
+        "--no-use-roofline-composite",
+        "--deny-direct-profile",
+        "--no-deny-direct-profile",
+        "--force-roofline-after-baseline",
+        "--no-force-roofline-after-baseline",
+    ):
+        opt.add_argument(
+            _retired,
+            action=_RetiredFlag,
+            hint=_retired_hint,
+        )
     # ------------------------------------------------------------------
     # Fix E — per-variant explore overtime kill ratio.
     #
