@@ -166,7 +166,7 @@ jobs:
     if: github.event_name == 'schedule'
     steps:
       - name: Restore cached SHA
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .inferenceX_last_sha
           key: inferenceX-sha
@@ -189,7 +189,7 @@ jobs:
 
       - name: Save cached SHA
         if: steps.check.outputs.changed == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: .inferenceX_last_sha
           key: inferenceX-sha-${{ steps.check.outputs.latest }}
