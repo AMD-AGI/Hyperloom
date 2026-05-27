@@ -658,6 +658,21 @@ def _seed_shared_state(
     except (TypeError, ValueError):
         explore_overtime_kill_ratio = 1.10
 
+    # ``--explore-variant-timeout-sec`` mirror. ``0`` (default) lets the
+    # ExploreExecutor auto-derive the cap from baseline_runtime_sec; any
+    # positive value pins it (CI smoke / debug).
+    explore_variant_timeout_raw = getattr(
+        args, "explore_variant_timeout_sec", None,
+    )
+    try:
+        explore_variant_timeout_sec_override = max(
+            0,
+            int(explore_variant_timeout_raw)
+            if explore_variant_timeout_raw is not None else 0,
+        )
+    except (TypeError, ValueError):
+        explore_variant_timeout_sec_override = 0
+
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -699,6 +714,7 @@ def _seed_shared_state(
         gain_driven_kernel_opt=bool(
             getattr(args, "gain_driven_kernel_opt", False),
         ),
+        explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
     )
     state.save(session_dir)
     return state
@@ -4602,6 +4618,15 @@ def _build_parser() -> argparse.ArgumentParser:
             return float(raw)
         except (TypeError, ValueError):
             return float(default)
+
+    def _env_int_or(default: int, env_var: str) -> int:
+        raw = os.environ.get(env_var, "").strip()
+        if not raw:
+            return int(default)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return int(default)
     opt.add_argument(
         "--explore-overtime-kill-ratio",
         dest="explore_overtime_kill_ratio",
@@ -4618,6 +4643,40 @@ def _build_parser() -> argparse.ArgumentParser:
              "Default 1.10 (kill at +10%% over baseline wall-clock). "
              "Pass 0 to disable. Env: "
              "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
+    )
+    # ------------------------------------------------------------------
+    # Explore variant hard timeout — operator override for the
+    # auto-derived cap.
+    #
+    # The legacy class default (2400 s) is a smoke-workload floor. On
+    # slow workloads (Qwen3-32B TP=1 BF16 CONC=64 ISL/OSL=1024 NUM_PROMPTS
+    # =320 → ~70 min baseline) the floor under-budgets every variant
+    # before it can produce a measurement. ExploreExecutor now
+    # auto-derives the cap from ``baseline_runtime_sec * (kill_ratio +
+    # 0.5)`` so the hard cap stays above the soft kill ratio (preserves
+    # the layered design instead of inverting it).
+    #
+    # Operators can pin an explicit value here (e.g. CI smoke runs that
+    # want a tight bound, or workloads where the auto-derived value is
+    # too generous). ``0`` (default) leaves the auto-derive in charge.
+    # Mirrored to ``SharedState.explore_variant_timeout_sec_override``;
+    # the Coordinator injects it as ``params['variant_timeout_sec']``
+    # on every explore task, taking precedence over the auto-derive.
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--explore-variant-timeout-sec",
+        dest="explore_variant_timeout_sec",
+        type=int,
+        default=_env_int_or(
+            0, "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC",
+        ),
+        help="Pin the per-variant hard timeout (seconds) inside the "
+             "EXPLORE phase. ``0`` (default) auto-derives from "
+             "``baseline_runtime_sec * (--explore-overtime-kill-ratio + "
+             "0.5)`` once baseline lands, with a 2400-14400 s range "
+             "guard. Set to a positive integer to pin (CI smoke runs / "
+             "debugging). Env: "
+             "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC.",
     )
     # ------------------------------------------------------------------
     # drop scoreboard
