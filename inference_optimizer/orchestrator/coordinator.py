@@ -954,10 +954,19 @@ class Coordinator:
             getattr(state, "model_name", "") or "unknown_model"
         )
         hw = getattr(state, "gpu_type", "") or "unknown_gpu"
+        # ``marathon_dispatch_id`` mirrors the cli path: it's the
+        # hyperloom-internal manifest session id (state.session_id is
+        # the same value when populated from manifest).
         extra_attrs = {
+            "marathon_dispatch_id": getattr(state, "session_id", "") or "",
             "framework":   getattr(state, "framework", "") or "",
             "model_class": getattr(state, "model_class", "") or "",
-            "claw_session_id": getattr(state, "claw_session_id", "") or "",
+            "claw_session_id":  getattr(state, "claw_session_id", "") or "",
+            "sandbox_user_id":  getattr(state, "sandbox_user_id", "") or "",
+            # ``boot_origin`` is a dev-debug label, NOT written to KB.
+            # It's accepted by run_t0_anchor's whitelist filter and
+            # ignored — kept here so log lines can distinguish the
+            # SDK-fallback path from the cli-canonical path.
             "boot_origin": "coordinator_fallback",
         }
         try:
