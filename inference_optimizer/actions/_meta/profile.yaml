@@ -20,15 +20,11 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 15
 lease_ttl_sec: 2700
-description: "Run torch_profiler against the running server to produce a hot-kernel trace; required before any kernel-opt action."
+description: "Coordinator-internal: lightweight roofline alternative — torch_profiler trace only, no analysis.md. Enqueued when ``--no-enable-roofline``; LLM-proposed delegate is denied."
 pipeline_phase: analysis
 typical_runtime_min: 3.0
 applicable_when:
   - "baseline_tput > 0"
-  - "trace_path == '' OR last_profile_status == 'failed'"
-# Descriptive — see baseline.yaml. ProfileExecutor inherits BaselineExecutor
-# and consumes the same params surface, so the same script/result_dir
-# overrides apply when the profile invocation also lands on a leaky script.
 params_schema:
   benchmark_script:
     type: string
