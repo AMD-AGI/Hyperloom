@@ -467,6 +467,86 @@ def test_find_recipe_falls_through_to_t3_when_shape_misses(session_dir):
     assert conf == 0.55
 
 
+def test_find_recipe_t2_includes_framework_in_filter(session_dir):
+    """T2 same-shape MUST filter by framework — a sglang session must
+    not pick up a vLLM recipe (best_config args are framework-
+    specific and would crash the server)."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        # T1 miss → T2 fires
+        route = router.post("/v1/points/query").mock(side_effect=[
+            httpx.Response(200, json={"points": []}),  # T1
+            httpx.Response(200, json={"points": []}),  # T2 (asserted below)
+            httpx.Response(200, json={"points": []}),  # T3
+            httpx.Response(200, json={"points": []}),  # T4
+            httpx.Response(200, json={"points": []}),  # T5
+            httpx.Response(200, json={"points": []}),  # T6
+        ])
+        client.find_recipe_with_fallback(
+            workload="DeepSeek-R1",
+            hw="mi300x",
+            framework="sglang",
+            precision="fp8",
+            tp=8,
+        )
+    # T2 query (2nd call) must carry framework=sglang in attrs_filter.
+    t2_body = json.loads(route.calls[1].request.content)
+    assert t2_body["attrs_filter"]["framework"] == "sglang"
+    assert t2_body["attrs_filter"]["precision"] == "fp8"
+    assert t2_body["attrs_filter"]["tp"] == 8
+
+
+def test_find_recipe_t3_includes_framework_in_filter(session_dir):
+    """T3 same-family MUST also filter by framework."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/query").mock(side_effect=[
+            httpx.Response(200, json={"points": []}),  # T1
+            # No precision/tp ⇒ T2 skipped
+            httpx.Response(200, json={"points": []}),  # T3
+            httpx.Response(200, json={"points": []}),  # T4
+            httpx.Response(200, json={"points": []}),  # T5
+            httpx.Response(200, json={"points": []}),  # T6
+        ])
+        client.find_recipe_with_fallback(
+            workload="DeepSeek-R1",
+            hw="mi300x",
+            framework="sglang",
+            model_class="moe_mla",
+        )
+    # 2nd call is T3 (T2 skipped due to no precision/tp).
+    t3_body = json.loads(route.calls[1].request.content)
+    assert t3_body["attrs_filter"]["framework"] == "sglang"
+    assert t3_body["attrs_filter"]["hardware"] == "mi300x"
+    # 3rd call is T4 (model_class) — must also have framework filter.
+    t4_body = json.loads(route.calls[2].request.content)
+    assert t4_body["attrs_filter"]["framework"] == "sglang"
+    assert t4_body["attrs_filter"]["model_class"] == "moe_mla"
+
+
+def test_find_recipe_no_framework_falls_back_to_unfiltered(session_dir):
+    """When the caller doesn't pin a framework, the fallback ladder
+    must NOT add a framework filter (avoids accidentally filtering
+    out otherwise-valid same-family recipes during e.g. tests)."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/query").mock(side_effect=[
+            httpx.Response(200, json={"points": []}),
+        ] * 6)
+        client.find_recipe_with_fallback(
+            workload="DeepSeek-R1",
+            hw="mi300x",
+            # framework omitted
+        )
+    # T3 query (2nd call: T1 miss → T2 skipped → T3) — attrs_filter
+    # must NOT contain 'framework' key.
+    t3_body = json.loads(route.calls[1].request.content)
+    assert "framework" not in t3_body["attrs_filter"]
+
+
+# ===========================================================================
+# read_recipe_exact + sessions[] read-modify-write
+# ===========================================================================
 def test_read_recipe_exact_returns_point_dict(session_dir):
     """``read_recipe_exact`` queries the (model, hw) anchor and
     returns the parsed point dict (or ``{}`` on miss)."""
