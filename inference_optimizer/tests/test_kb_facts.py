@@ -833,6 +833,17 @@ def _coord_for_fact_writes(session_dir):
         model_name: str = "DeepSeek-R1"
         gpu_type: str = "MI300X"
         framework: str = "sglang"
+        # Workload-shape tags consumed by _collect_workload_tags
+        # so KB lesson/pitfall rows ride into KB carrying the same
+        # filter dimensions the warm-start reader queries by.
+        model_class: str = "moe_mla"
+        precision: str = "fp8"
+        tp: int = 8
+        ep: int = 4
+        conc: int = 64
+        isl: int = 1024
+        osl: int = 256
+        max_model_len: int = 4096
         cortex_session_id: str = "session-X"
         tick: int = 7
         phase: str = "EXPLORE"
@@ -1018,6 +1029,123 @@ def test_record_fact_per_variant_skipped_dedup_writes_nothing(
     assert coord.cortex_kb.pitfall_calls == []
     j = coord._ensure_journal()
     assert not any(e.variant_name == "dedup_target" for e in j.entries)
+
+
+# ===========================================================================
+# Workload-tag write-side symmetry — every KB fact write must carry the
+# same workload shape filters (framework / model_class / precision / tp /
+# ep / conc / isl / osl / max_model_len / pp) that the warm-start
+# ``client.lessons(framework=..., ...)`` reader queries by. Regression
+# guard: an earlier revision wired the reader-side filter without the
+# writer-side payload, leaving every lesson invisible to the reader.
+# ===========================================================================
+_EXPECTED_WORKLOAD_TAGS = {
+    "framework":     "sglang",
+    "model_class":   "moe_mla",
+    "precision":     "fp8",
+    "tp":            8,
+    "ep":            4,
+    "conc":          64,
+    "isl":           1024,
+    "osl":           256,
+    "max_model_len": 4096,
+}
+
+
+def test_record_fact_per_task_keep_attaches_workload_tags_to_lesson(
+    _coord_for_fact_writes,
+):
+    coord = _coord_for_fact_writes
+    coord._record_fact_per_task(
+        task=_Task("t-w1", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": 12.3, "output_throughput": 875.0},
+        kept=True,
+    )
+    assert len(coord.cortex_kb.lesson_calls) == 1
+    extra = coord.cortex_kb.lesson_calls[0].get("extra_attrs") or {}
+    for key, expected in _EXPECTED_WORKLOAD_TAGS.items():
+        assert extra.get(key) == expected, f"lesson missing {key}={expected!r}"
+
+
+def test_record_fact_per_task_revert_attaches_workload_tags_to_pitfall(
+    _coord_for_fact_writes,
+):
+    coord = _coord_for_fact_writes
+    coord._record_fact_per_task(
+        task=_Task("t-w2", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={
+            "gain_pct": None,
+            "error_class": "crash",
+            "reason": "oom",
+        },
+        kept=False,
+    )
+    assert len(coord.cortex_kb.pitfall_calls) == 1
+    extra = coord.cortex_kb.pitfall_calls[0].get("extra_attrs") or {}
+    for key, expected in _EXPECTED_WORKLOAD_TAGS.items():
+        assert extra.get(key) == expected, f"pitfall missing {key}={expected!r}"
+
+
+def test_record_fact_per_variant_keep_attaches_workload_tags_to_lesson(
+    _coord_for_fact_writes,
+):
+    coord = _coord_for_fact_writes
+    coord._record_fact_per_variant(
+        task=_Task("t-w3", "explore"),
+        source_session_id="session-X",
+        variant_outcome={
+            "variant_name": "AITER_v2",
+            "outcome": "KEEP",
+            "metrics": {"gain_pct": 9.5, "output_throughput": 770.0},
+            "variant": {"name": "AITER_v2"},
+        },
+    )
+    assert len(coord.cortex_kb.lesson_calls) == 1
+    extra = coord.cortex_kb.lesson_calls[0].get("extra_attrs") or {}
+    for key, expected in _EXPECTED_WORKLOAD_TAGS.items():
+        assert extra.get(key) == expected, (
+            f"variant lesson missing {key}={expected!r}"
+        )
+
+
+def test_collect_workload_tags_uses_env_fallback_for_ep_and_pp(
+    _coord_for_fact_writes, monkeypatch,
+):
+    """When ``SharedState.ep`` is 0 (legacy SDK callers that bypassed
+    ``cli._seed_shared_state``) and ``$EP`` / ``$PP`` are set, the
+    helper must fall back to the env so recipe + lesson writes keep
+    their parallelism dimensions."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.ep = 0
+    monkeypatch.setenv("EP", "16")
+    monkeypatch.setenv("PP", "2")
+    tags = coord._collect_workload_tags()
+    assert tags["ep"] == 16
+    assert tags["pp"] == 2
+
+
+def test_collect_workload_tags_skips_unset_dimensions(_coord_for_fact_writes):
+    """Empty / zero / None values must not pollute the tag dict — KB
+    treats missing-key as "any" but a present-zero value would cause
+    strict-equality readers to mismatch."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.framework = ""
+    coord.shared_state.precision = ""
+    coord.shared_state.tp = 0
+    coord.shared_state.ep = 0
+    coord.shared_state.conc = 0
+    tags = coord._collect_workload_tags()
+    assert "framework" not in tags
+    assert "precision" not in tags
+    assert "tp" not in tags
+    assert "ep" not in tags
+    assert "conc" not in tags
+    # model_class / isl / osl / max_model_len are still set on the
+    # stub, so they should survive.
+    assert tags["model_class"] == "moe_mla"
+    assert tags["isl"] == 1024
 
 
 # ===========================================================================
