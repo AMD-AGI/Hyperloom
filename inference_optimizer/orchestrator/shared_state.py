@@ -470,6 +470,16 @@ class SharedState:
     # into every explore task's params so the executor's call site honors
     # it without each LLM proposal having to re-emit it.
     explore_variant_timeout_sec_override: int = 0
+    # Headroom on top of the soft kill ratio when the executor auto-derives
+    # the per-variant hard cap: ``timeout = baseline_runtime_sec *
+    # (kill_ratio + safety_margin)``. Default 0.5 (≈ 50 % of baseline as
+    # buffer for one-off variant cold starts: torch.compile AOTI compile,
+    # fresh aiter shapes, spec-decoding draft load). Mirrored from
+    # ``--explore-variant-timeout-safety-margin`` (CLI) /
+    # ``INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN`` (env).
+    # Has no effect when ``explore_variant_timeout_sec_override > 0``
+    # (operator-pinned timeout bypasses the auto-derive).
+    explore_variant_timeout_safety_margin: float = 0.5
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)

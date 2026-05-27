@@ -673,6 +673,22 @@ def _seed_shared_state(
     except (TypeError, ValueError):
         explore_variant_timeout_sec_override = 0
 
+    # ``--explore-variant-timeout-safety-margin`` mirror. Headroom as a
+    # fraction of baseline_runtime_sec on top of the soft kill ratio when
+    # the auto-derive path computes the cap. Negative values clamp to 0
+    # (which collapses the hard cap onto the soft kill, no headroom).
+    explore_variant_timeout_safety_margin_raw = getattr(
+        args, "explore_variant_timeout_safety_margin", None,
+    )
+    try:
+        explore_variant_timeout_safety_margin = max(
+            0.0,
+            float(explore_variant_timeout_safety_margin_raw)
+            if explore_variant_timeout_safety_margin_raw is not None else 0.5,
+        )
+    except (TypeError, ValueError):
+        explore_variant_timeout_safety_margin = 0.5
+
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -715,6 +731,7 @@ def _seed_shared_state(
             getattr(args, "gain_driven_kernel_opt", False),
         ),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
+        explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
     )
     state.save(session_dir)
     return state
@@ -4673,10 +4690,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pin the per-variant hard timeout (seconds) inside the "
              "EXPLORE phase. ``0`` (default) auto-derives from "
              "``baseline_runtime_sec * (--explore-overtime-kill-ratio + "
-             "0.5)`` once baseline lands, with a 2400-14400 s range "
-             "guard. Set to a positive integer to pin (CI smoke runs / "
-             "debugging). Env: "
+             "--explore-variant-timeout-safety-margin)`` once baseline "
+             "lands, with a 2400-14400 s range guard. Set to a positive "
+             "integer to pin (CI smoke runs / debugging). Env: "
              "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC.",
+    )
+    opt.add_argument(
+        "--explore-variant-timeout-safety-margin",
+        dest="explore_variant_timeout_safety_margin",
+        type=float,
+        default=_env_float_or(
+            0.5, "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN",
+        ),
+        help="Headroom (as a fraction of baseline_runtime_sec) added on "
+             "top of --explore-overtime-kill-ratio when the EXPLORE hard "
+             "cap is auto-derived. Default 0.5 (≈ 50%% of baseline as "
+             "buffer for variant cold starts: torch.compile AOTI compile, "
+             "fresh aiter shapes, spec-decoding draft load). Bump for "
+             "workloads with heavy compile cost; lower to tighten the "
+             "backstop. No effect when --explore-variant-timeout-sec is "
+             "set to a positive value. Env: "
+             "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN.",
     )
     # ------------------------------------------------------------------
     # drop scoreboard

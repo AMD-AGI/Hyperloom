@@ -442,6 +442,68 @@ async def test_explore_executor_auto_derives_variant_timeout(
 
 
 @pytest.mark.asyncio
+async def test_explore_executor_safety_margin_param_overrides_default(
+    sub_agent_runner, tmp_path,
+):
+    """``params['variant_timeout_safety_margin']`` widens (or shrinks) the
+    auto-derived headroom when there is no explicit ``variant_timeout_sec``.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-margin"
+
+    captured_timeouts: list[int] = []
+
+    async def _spy_run_grid(*args, **kwargs):
+        captured_timeouts.append(int(kwargs.get("variant_timeout_sec")))
+        from inference_optimizer.orchestrator.action_executors._grid_runner import (
+            VariantResult,
+        )
+        slot = Path(kwargs["output_root"])
+        slot.mkdir(parents=True, exist_ok=True)
+        ws = _fake_workspace(slot, tput=805.0)
+        return [VariantResult(
+            name="v_smoke",
+            extra_sglang_args="--smoke",
+            extra_envs={},
+            status="succeeded",
+            output_throughput=805.0,
+            workspace=str(ws),
+        )]
+
+    grid = [{
+        "name": "v_smoke",
+        "extra_args": "--smoke",
+        "extra_envs": {},
+        "provenance": "default_grid",
+    }]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir":  str(output_dir),
+            "base_tput":   800.0,
+            "grid":        grid,
+            "baseline_runtime_sec": 4140.0,
+            "explore_overtime_kill_ratio": 1.10,
+            # Generous headroom (1.0) → 4140 * 2.10 = 8694 s.
+            "variant_timeout_safety_margin": 1.0,
+        },
+        idempotency_key="ex-margin",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.explore.run_grid",
+        side_effect=_spy_run_grid,
+    ):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    assert captured_timeouts and captured_timeouts[0] == 8694
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_explicit_variant_timeout_wins(
     sub_agent_runner, tmp_path,
 ):

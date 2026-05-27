@@ -5343,6 +5343,17 @@ class Coordinator:
             ) or 0)
             if variant_timeout_override > 0:
                 params.setdefault("variant_timeout_sec", variant_timeout_override)
+            # Auto-derive headroom override. Has no effect when
+            # ``variant_timeout_sec`` is pinned above; otherwise the
+            # ExploreExecutor passes it as ``safety_margin`` to
+            # ``_compute_explore_variant_timeout``.
+            safety_margin_override = float(getattr(
+                self.shared_state, "explore_variant_timeout_safety_margin", -1.0,
+            ))
+            if safety_margin_override >= 0:
+                params.setdefault(
+                    "variant_timeout_safety_margin", safety_margin_override,
+                )
             # Mirror the sweep/integrate branches: inject ``base_tput`` (and
             # ``base_extra_args``) tied to current_best (or baseline_tput as
             # fallback) whenever Orchestration omits them. Without this the
@@ -5484,6 +5495,13 @@ class Coordinator:
             ) or 0)
             if variant_timeout_override > 0:
                 params.setdefault("variant_timeout_sec", variant_timeout_override)
+            safety_margin_override = float(getattr(
+                self.shared_state, "explore_variant_timeout_safety_margin", -1.0,
+            ))
+            if safety_margin_override >= 0:
+                params.setdefault(
+                    "variant_timeout_safety_margin", safety_margin_override,
+                )
         # IR-7 — ``assess_remaining_gaps`` is a thin wrapper: rewrite
         # the kind to ``specialist`` and force the
         # ``session_steward_specialist`` domain (LLM cannot pick any
