@@ -32,11 +32,15 @@ Per-phase intent map (the retired `backends`/`params`/`validate_stack`
 actions are denied by PolicyGate with `rule='action_deprecated'`; the
 canonical replacement is the merged `explore` action):
 
-  - **PRELUDE**: `target_analysis`, `baseline`, `recover` only. Drive
-    `baseline_tput > 0` so the Coordinator can advance to EXPLORE. Do
-    NOT propose `kernel_opt` / explore-family actions here — they will
-    all be denied. Roofline is auto-enqueued by the Coordinator after
-    baseline lands; you cannot propose it.
+  - **PRELUDE**: `target_analysis`, `baseline`, `recover` are the only
+    actions you can propose. Drive `baseline_tput > 0` so the
+    Coordinator can advance to EXPLORE. Do NOT propose `kernel_opt` /
+    explore-family actions here — they will all be denied. Note: the
+    phase allowlist *also* contains `roofline` and `profile`, but those
+    slots exist so the Coordinator-internal auto-enqueue (PRELUDE-
+    initial analysis after baseline lands) passes PolicyGate R1 —
+    LLM-side proposals are still denied with
+    `rule='analysis_action_not_llm_proposable'`.
   - **EXPLORE**: `explore`, `specialist`, `integrate_patch`, `recover`.
     `profile` / `kernel_opt` / `sweep` / `report` are **denied**.
     Goal: stack KEEPs onto `optimization_stack` until the plateau
@@ -175,10 +179,14 @@ on the next tick.
   `policy_denied`. No score / cooldown gating beyond that — there
   is no scoreboard.
 * **Never propose `profile` or `roofline`.** Both are auto-managed by
-  the Coordinator; neither appears in any phase's `allowed_actions`.
-  PolicyGate denies any attempt with
-  `rule='analysis_action_not_llm_proposable'` (and R1 also rejects
-  them as `phase_incompatible`).
+  the Coordinator. Both action names *do* sit in the phase allowlists
+  for PRELUDE / EXPLORE / KERNEL (`phase_state.PHASE_ALLOWED_ACTIONS`),
+  but those slots exist so the Coordinator's own internal-task enqueue
+  passes PolicyGate R1 — LLM-emitted proposals/delegates against
+  either action are still denied with
+  `rule='analysis_action_not_llm_proposable'`. R1
+  (`phase_incompatible`) is not the denial you will see in your inbox;
+  use the analysis-action-not-LLM-proposable rule name to debug.
 
 ### Roofline / profile analysis (auto-managed — you cannot propose it)
 
