@@ -3292,10 +3292,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"(was {prior_crash}) for fresh resume{override_note}"
             )
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
-        # re-bootstrap (or pick up existing) Cortex KB session.
-        # Same call as the fresh-session branch; the resume rules inside
-        # ``_bootstrap_cortex_kb`` (.kb_sid + state.cortex_session_id)
-        # decide whether to begin a new session or reuse the prior one.
+        # re-bootstrap the Cortex KB client. The KB session protocol
+        # was retired (fact writes are session-less), so this just
+        # re-creates the client + reruns T0 warm-start; ``resume=True``
+        # is preserved for the banner label.
         cortex_client = _bootstrap_cortex_kb(
             args, session_dir=session_dir, manifest=manifest, resume=True,
         )
