@@ -926,19 +926,21 @@ class CortexKBClient:
         Empty list on failure (non-fatal — warm-start lessons are
         priors, not invariants).
 
-        Filtering strategy (KB attrs are queried via ``attrs_filter``
-        exact-match, so we match against the same ``applicable_models``
-        / ``applicable_hardware`` lists ``propose_lesson`` writes):
+        Filtering strategy (KB attrs are queried via ``attrs_filter``;
+        exact match against the values ``_record_fact_per_task`` /
+        ``_record_fact_per_variant`` write):
 
         * ``applicable_models`` is a list on the KB point; the
           ``attrs_filter`` semantics on lists is "any-of contains" on
           most KB backends, so passing ``model`` as a scalar matches
           lessons whose ``applicable_models`` includes ``model``.
         * Same for ``applicable_hardware`` + ``hardware``.
-        * ``framework`` (optional) — written into ``attrs`` by
-          ``_record_fact_per_task`` going forward; lessons predating
-          that field won't be filtered out (the KB attrs_filter
-          tolerates missing keys per "if present then match").
+        * ``framework`` (optional) — written into ``attrs`` by the
+          coordinator's ``_collect_workload_tags`` plumbing. Pass
+          ``None`` (the default) to skip framework filtering entirely,
+          which is the right choice when the KB backend uses strict
+          exact-match on missing keys (filtering would drop every
+          lesson predating the writer-side change).
 
         Symmetric with :meth:`traps` — same surface area, different
         kind. Specialist prompts consume the result via
