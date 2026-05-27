@@ -272,6 +272,31 @@ DEPRECATED_ACTION_REPLACEMENTS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Analysis actions that are Coordinator-internal only
+#
+# ``roofline`` (composite: profile + trace_analyze + analysis.md
+# snapshot) and ``profile`` (lightweight trace capture) are auto-managed
+# by the Coordinator: enqueued at PRELUDE after baseline lands, and
+# again on every +10% watermark crossing of ``last_roofline_tput``.
+# Which kind runs is selected by ``shared_state.enable_roofline``
+# (CLI flag ``--enable-roofline`` / ``--no-enable-roofline``, default
+# on). The LLM does not propose either name; PolicyGate denies them at
+# the intent boundary so the policy_denial event in the prompt nudges
+# the LLM toward the proposable surface (``specialist`` / ``explore``
+# / ``integrate_patch``).
+#
+# The denial is symmetric across delegate / propose_action / request:
+# the rule fires *after* ``action_deprecated`` (no overlap today —
+# different name sets) but *before* the kernel-owned + phase + unknown
+# checks, so the canonical hint always wins.
+# ---------------------------------------------------------------------------
+INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset({
+    "roofline",
+    "profile",
+})
+
+
+# ---------------------------------------------------------------------------
 # v0.8 §3.11 R4 / R5 — external tool whitelist registry
 #
 # Tool names live here (the *policy* layer) so PolicyGate AND the
@@ -776,6 +801,14 @@ class PolicyGate:
         # fired. Inv-11.3: one deprecated action triggers exactly one
         # rule.
         self._validate_action_not_deprecated(action_name, intent_kind="delegate")
+        # analysis_action_not_llm_proposable —
+        # roofline / profile are Coordinator-internal (PRELUDE bootstrap
+        # + watermark-triggered). Block the LLM from racing the auto
+        # path regardless of which channel (delegate / propose / request)
+        # it tries to smuggle the name through.
+        self._validate_action_not_llm_proposable(
+            action_name, intent_kind="delegate",
+        )
         # Plan A — kernel-owned actions are not directly delegatable.
         if action_name in KERNEL_OWNED_ACTIONS:
             raise PolicyDenied(
@@ -891,6 +924,11 @@ class PolicyGate:
         # the policy_denial event surfaces in the prompt before the
         # delegate is even attempted.
         self._validate_action_not_deprecated(action_name, intent_kind="propose_action")
+        # analysis_action_not_llm_proposable
+        # (propose channel) — same rule, same hint.
+        self._validate_action_not_llm_proposable(
+            action_name, intent_kind="propose_action",
+        )
         # Soft check — propose is advisory; only reject if registry is wired
         # AND the name is unknown AND it's not a kernel-owned action (which
         # are listed in metadata under their canonical names).
@@ -1124,6 +1162,10 @@ class PolicyGate:
         # extension that re-uses one of the legacy names via
         # ``request.kind`` would still be caught here.
         self._validate_action_not_deprecated(kind, intent_kind="request")
+        # analysis_action_not_llm_proposable —
+        # defense in depth: nobody REQUESTs roofline/profile today, but
+        # an extension that does would race the auto-managed gate.
+        self._validate_action_not_llm_proposable(kind, intent_kind="request")
         # R1 phase_incompatible. For
         # orchestration → kernel REQUEST we treat the request *kind* as
         # the action name (kernel-owned actions named identically to
@@ -1252,6 +1294,51 @@ class PolicyGate:
                 f"KB_design §3.4 / §3.15 §2.3 — v0.8 merged "
                 f"backends/params/validate_stack into the single "
                 f"explore action with per-KEEP stack rebench inlined."
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # analysis_action_not_llm_proposable —
+    # deny LLM proposals of ``roofline`` / ``profile``
+    # ------------------------------------------------------------------
+    def _validate_action_not_llm_proposable(
+        self,
+        action_name: str,
+        *,
+        intent_kind: str,
+    ) -> None:
+        """Reject LLM-proposed analysis actions.
+
+        ``roofline`` and ``profile`` are Coordinator-auto-managed at
+        PRELUDE bootstrap and on every +10% watermark crossing; the
+        kind selected is controlled by
+        :attr:`SharedState.enable_roofline` (``--enable-roofline`` /
+        ``--no-enable-roofline``). The LLM has no business proposing
+        either name — doing so would race the auto-managed pending-task
+        gate and could double-enqueue.
+
+        No-op when ``action_name`` isn't in
+        :data:`INTERNAL_ONLY_ACTION_NAMES`. Fires *after*
+        ``action_deprecated`` (the two sets are disjoint today) but
+        *before* the kernel-owned / phase / unknown gates, so the
+        canonical hint always wins.
+        """
+        if not action_name:
+            return
+        if action_name not in INTERNAL_ONLY_ACTION_NAMES:
+            return
+        raise PolicyDenied(
+            f"action {action_name!r} is Coordinator-internal; the LLM "
+            f"must not propose it ({intent_kind})",
+            rule="analysis_action_not_llm_proposable",
+            hint=(
+                "roofline / profile are auto-enqueued at PRELUDE and on "
+                "every +10% gain crossing. Selection is controlled by "
+                "``--enable-roofline`` / ``--no-enable-roofline`` (default "
+                "on → roofline; off → profile). Propose ``specialist`` "
+                "or ``explore`` instead — the analysis snapshot will be "
+                "refreshed automatically the next time the watermark "
+                "trips."
             ),
         )
 
@@ -2219,6 +2306,7 @@ __all__ = [
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "DEPRECATED_ACTION_NAMES",
     "DEPRECATED_ACTION_REPLACEMENTS",
+    "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",
     "KILL_TASK_SOURCE_ALLOWLIST",
