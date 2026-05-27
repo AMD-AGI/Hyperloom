@@ -770,11 +770,18 @@ def test_finalize_recipe_empty_anchor_only_writes_own_entry(
 def test_finalize_recipe_includes_workload_tags_in_extra_attrs(
     _coord_with_kb_stub,
 ):
-    """The workload-shape tags (precision/tp/conc/isl/osl + ep/pp from env)
-    must be hoisted into ``extra_attrs`` so they land flat on the
-    recipe anchor (NOT nested under ``workload``)."""
+    """The workload-shape tags (precision/tp/conc/isl/osl + ep/pp from
+    env) AND the framework / model_class CLOSE-time backstops must be
+    hoisted into ``extra_attrs`` so they land flat on the recipe
+    anchor (NOT nested under ``workload``). Framework / model_class
+    are written here as a backstop in case T0 backfill was skipped
+    (KB unreachable at PRELUDE) — without them the future fallback
+    queries' framework filter would never match this recipe."""
     import os as _os
     coord = _coord_with_kb_stub()
+    # The stub sets framework="sglang" + model_class="" by default;
+    # set model_class so the assertion exercises that branch too.
+    coord.shared_state.model_class = "moe_mla"
     prev_ep = _os.environ.get("EP")
     _os.environ["EP"] = "4"
     try:
@@ -785,6 +792,10 @@ def test_finalize_recipe_includes_workload_tags_in_extra_attrs(
         else:
             _os.environ["EP"] = prev_ep
     extra = coord.cortex_kb.update_recipe_calls[0]["extra_attrs"]
+    # CLOSE-time backstop tags (framework + model_class).
+    assert extra["framework"] == "sglang"
+    assert extra["model_class"] == "moe_mla"
+    # Workload-shape tags.
     assert extra["precision"] == "bf16"
     assert extra["tp"] == 8
     assert extra["conc"] == 64
