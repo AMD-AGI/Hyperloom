@@ -6641,6 +6641,12 @@ class Coordinator:
         # gone. evidence_refs (log:task-...) still gives full traceability
         # because ``source_session_id`` lands in attrs.
         evidence_refs = [f"log:task-{task.task_id}"]
+        # Workload-shape tags written into lesson/pitfall attrs so the
+        # warm-start reader (``client.lessons(framework=..., ...)``)
+        # can filter cross-framework noise out. Shared with the recipe
+        # write path via :meth:`_collect_workload_tags`.
+        workload_tags = self._collect_workload_tags()
+        extra = workload_tags if workload_tags else None
         # NOTE: propose_lesson / propose_pitfall do NOT raise
         # CortexKBError on transport / business failures — the client
         # swallows them and enqueues NDJSON instead. The caller of
@@ -6660,6 +6666,7 @@ class Coordinator:
                 source_session_id=source_session_id,
                 source_task_id=task.task_id,
                 evidence=evidence_refs,
+                extra_attrs=extra,
             )
             return
 
@@ -6674,6 +6681,7 @@ class Coordinator:
                 source_session_id=source_session_id,
                 source_task_id=task.task_id,
                 evidence=evidence_refs,
+                extra_attrs=extra,
             )
 
     def _record_fact_per_variant(
@@ -6750,6 +6758,10 @@ class Coordinator:
             f"log:task-{task.task_id}",
             f"variant:{variant_name}",
         ]
+        # Workload-shape tags — see _record_fact_per_task; same
+        # rationale (warm-start reader symmetry).
+        workload_tags = self._collect_workload_tags()
+        extra = workload_tags if workload_tags else None
 
         # See note in ``_record_fact_per_task``: the client swallows
         # CortexKBError internally and falls back to NDJSON, so no
@@ -6767,6 +6779,7 @@ class Coordinator:
                 source_task_id=task.task_id,
                 source_variant_name=variant_name,
                 evidence=evidence_refs,
+                extra_attrs=extra,
             )
             return
 
@@ -6786,7 +6799,70 @@ class Coordinator:
                 source_task_id=task.task_id,
                 source_variant_name=variant_name,
                 evidence=evidence_refs,
+                extra_attrs=extra,
             )
+
+    def _collect_workload_tags(self) -> dict[str, Any]:
+        """Return the workload-shape KB tag dict for the current session.
+
+        Shared by:
+
+        * :meth:`_build_recipe_attrs_from_state` — writes into
+          ``recipe.workload`` and re-hoisted into top-level recipe
+          attrs by :meth:`cortex_finalize_recipe_and_journal`.
+        * :meth:`_record_fact_per_task` /
+          :meth:`_record_fact_per_variant` — passed as ``extra_attrs``
+          to ``propose_lesson`` / ``propose_pitfall`` so the warm-start
+          reader (``client.lessons(framework=..., ...)``) and any
+          future shape-filtered queries can match these rows.
+
+        EP / PP fall back to env when ``SharedState`` is unset (legacy
+        SDK callers that bypassed ``cli._seed_shared_state`` — and
+        ``pp`` has no SharedState field at all because there is no CLI
+        surface for it).
+
+        Defensive ``getattr`` reads keep this helper safe against the
+        ``Coordinator.__new__`` stubs the close-phase tests use.
+        """
+        ss = self.shared_state
+        out: dict[str, Any] = {}
+        framework = str(getattr(ss, "framework", "") or "").strip()
+        if framework:
+            out["framework"] = framework
+        model_class = str(getattr(ss, "model_class", "") or "").strip()
+        if model_class:
+            out["model_class"] = model_class
+        for src_attr, dst_key in (
+            ("precision",     "precision"),
+            ("tp",            "tp"),
+            ("ep",            "ep"),
+            ("conc",          "conc"),
+            ("isl",           "isl"),
+            ("osl",           "osl"),
+            ("max_model_len", "max_model_len"),
+        ):
+            v = getattr(ss, src_attr, None)
+            if v not in (None, "", 0):
+                out[dst_key] = v
+        # EP env fallback when SharedState.ep is unset (legacy SDK
+        # callers that bypassed cli._seed_shared_state).
+        if "ep" not in out:
+            raw_ep = (os.environ.get("EP") or "").strip()
+            try:
+                n = int(raw_ep) if raw_ep else 0
+            except ValueError:
+                n = 0
+            if n > 0:
+                out["ep"] = n
+        # PP — no SharedState field (no CLI surface); env-only.
+        raw_pp = (os.environ.get("PP") or "").strip()
+        try:
+            pp_n = int(raw_pp) if raw_pp else 0
+        except ValueError:
+            pp_n = 0
+        if pp_n > 0:
+            out["pp"] = pp_n
+        return out
 
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
         """Materialise the recipe-shaped view of :class:`SharedState`.
@@ -6841,50 +6917,13 @@ class Coordinator:
         # Plumbing these into recipe attrs lets future warm-start queries
         # filter by precision / parallelism / shape and pick a *closer*
         # historical recipe than ``same-family`` alone.
-        workload_tags: dict[str, Any] = {}
-        # Framework + model_class — written here as a CLOSE-time
-        # backstop. T0 backfill writes the same fields, but if T0 was
-        # skipped (KB unreachable at PRELUDE) the anchor would
-        # otherwise land on KB without ``framework`` / ``model_class``
-        # tags, and future same-family / same-class fallback queries
-        # would never match this recipe. KB shallow-merges on the
-        # canonical_id so re-writing identical values is harmless.
-        framework = str(getattr(ss, "framework", "") or "").strip()
-        if framework:
-            workload_tags["framework"] = framework
-        model_class = str(getattr(ss, "model_class", "") or "").strip()
-        if model_class:
-            workload_tags["model_class"] = model_class
-        for src_attr, dst_key in (
-            ("precision",     "precision"),
-            ("tp",            "tp"),
-            ("ep",            "ep"),
-            ("conc",          "conc"),
-            ("isl",           "isl"),
-            ("osl",           "osl"),
-            ("max_model_len", "max_model_len"),
-        ):
-            v = getattr(ss, src_attr, None)
-            if v not in (None, "", 0):
-                workload_tags[dst_key] = v
-        # EP env fallback when SharedState.ep is unset (legacy SDK
-        # callers that bypassed cli._seed_shared_state).
-        if "ep" not in workload_tags:
-            raw_ep = (os.environ.get("EP") or "").strip()
-            try:
-                n = int(raw_ep) if raw_ep else 0
-            except ValueError:
-                n = 0
-            if n > 0:
-                workload_tags["ep"] = n
-        # PP — no SharedState field (no CLI surface); env-only.
-        raw_pp = (os.environ.get("PP") or "").strip()
-        try:
-            pp_n = int(raw_pp) if raw_pp else 0
-        except ValueError:
-            pp_n = 0
-        if pp_n > 0:
-            workload_tags["pp"] = pp_n
+        # Shared with _record_fact_per_task / _record_fact_per_variant
+        # via :meth:`_collect_workload_tags` so KB lesson / pitfall rows
+        # get the same shape filter at write time (the warm-start
+        # ``client.lessons(framework=...)`` reader pairs symmetrically).
+        # Re-writing identical values to KB is harmless — shallow merge
+        # on canonical_id.
+        workload_tags = self._collect_workload_tags()
         # Framework version: lifted from stack_fingerprint when available.
         # ``stack_fingerprint`` on SharedState is a SHA string (Coordinator
         # writes ``state.stack_fingerprint = sha``); the per-component
