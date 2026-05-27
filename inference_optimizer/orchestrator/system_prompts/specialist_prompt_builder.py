@@ -217,22 +217,29 @@ def _focus_session_steward_specialist(
         "one of three exits: continue exploring, advance to kernel phase, or",
         "stop the session. You are NOT proposing knobs or patches.",
         "",
-        "**What to read first** (no Bash needed — everything is in",
-        "$SESSION_DIR/state.json which the Coordinator pre-warms below):",
-        "- ``optimization_stack`` — what's been KEEP'd. Count entries +",
-        "  inspect ``gain_per_stack_entry`` for diminishing returns.",
-        "- ``explore_search.rejected`` — REVERT reasons grouped by",
-        "  ``stack_unstable`` / ``gain_below_threshold``. A long tail of",
-        "  one kind is a signal.",
-        "- ``specialist_rounds`` — empty_streak counters per domain. Three",
-        "  consecutive ``empty=True`` rounds across the active domains is a",
-        "  hard plateau signal.",
-        "- ``gaps[]`` — open gaps the Coordinator believes still exist.",
-        "  If non-empty and the recommended specialist domain has not been",
-        "  exhausted, ``continue_explore`` may be justified.",
-        "- ``policy_denial_history`` (tail) — when the LLM has been",
+        "**What to read first** — the Coordinator inlines a panoramic",
+        "state digest into **§ 5d. SESSION SNAPSHOT** below. Use that as",
+        "your primary evidence; you may use ``Bash`` to ``cat",
+        "$SESSION_DIR/state.json`` only if § 5d is empty (KB-degraded",
+        "boot) or you need a field that isn't included. Key signals:",
+        "- ``optimization_stack_len`` + ``gain_per_stack_entry_tail`` —",
+        "  diminishing returns over the last 5 KEEPs.",
+        "- ``rejected_counts`` — REVERT reasons aggregated from",
+        "  ``explore_search.rejected``. A long tail of one kind",
+        "  (``stack_unstable`` / ``gain_below_threshold``) is a signal.",
+        "- ``specialist_empty_streak`` — per-domain empty-round counter.",
+        "  Three consecutive ``empty=True`` rounds across the active",
+        "  domains is a hard plateau signal.",
+        "- ``gaps_count`` + ``gaps_top5_canonical_ids`` — open gaps the",
+        "  Coordinator believes still exist. If non-empty and the",
+        "  recommended specialist domain has not been exhausted,",
+        "  ``continue_explore`` may be justified.",
+        "- ``policy_denial_history_tail`` — when the LLM has been",
         "  thrashing against the same rule, this is evidence that further",
         "  exploration is unlikely to land KEEPs.",
+        "- ``steward_continuation_used`` — IR-7 antiloop flag; if True",
+        "  you've already burned your one continuation and must NOT",
+        "  recommend ``continue_explore`` again.",
         "",
         "**Output protocol** (your single ``specialist_done`` payload must",
         "carry these extra fields beyond the standard schema):",
@@ -334,6 +341,12 @@ class SpecialistPromptInputs:
     # § 5b for the specialist (separate from § 5 recipe so the LLM can
     # reason about each independently).
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
+    # IR-7 — session_steward_specialist panoramic state digest. Only
+    # populated when the dispatcher is dispatching a session_steward
+    # task (other specialists get an empty dict and the section is
+    # skipped entirely). See ``Coordinator._build_session_snapshot``
+    # for the field shape. Rendered as § 5d.
+    session_snapshot: dict[str, Any] = field(default_factory=dict)
 
     # PR feed (§3.5 §6 part 6)
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
@@ -712,6 +725,37 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Section 5d — Session snapshot (session_steward specialist only)
+# ---------------------------------------------------------------------------
+def _section_session_snapshot(inp: SpecialistPromptInputs) -> list[str]:
+    """Inline the panoramic SharedState digest the session_steward
+    specialist consumes to decide ``continue_explore`` /
+    ``advance_to_kernel`` / ``stop_session``.
+
+    Returns an empty list (section omitted entirely) when
+    ``session_snapshot`` is empty, so non-steward specialists never
+    see this section. The dispatcher populates this dict only for
+    ``session_steward_specialist`` tasks (see
+    :meth:`Coordinator._warm_specialist_params`).
+
+    Renders as a single fenced JSON block — small enough that the LLM
+    parses it in one pass, structured enough that the field-name
+    references in the focus block resolve to concrete values.
+    """
+    snap = inp.session_snapshot or {}
+    if not snap:
+        return []
+    rows = [
+        "## 5d. SESSION SNAPSHOT (panoramic state for steward decision)",
+        "",
+        "```json",
+        json.dumps(snap, sort_keys=True, indent=2),
+        "```",
+    ]
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Section 5c — Known pitfalls (anti-priors from prior REVERTs)
 # ---------------------------------------------------------------------------
 def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
@@ -1052,6 +1096,16 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_pr_feed(inp),            # 7: § 6
         _section_source_hint(inp),        # 8: § 7
     ]
+    # § 5d session snapshot — only the session_steward specialist
+    # populates ``session_snapshot``; for everyone else this section
+    # function returns ``[]`` and gets stripped by the flattener.
+    # Insert between § 5c (pitfalls, index 6) and § 6 (PR feed, was
+    # index 7). Done as conditional insert (rather than always in the
+    # list) so the section number stays meaningful — non-steward
+    # specialists don't see a "## 5d." header at all.
+    snapshot_section = _section_session_snapshot(inp)
+    if snapshot_section:
+        user_sections.insert(7, snapshot_section)
     # F2-3: framework_pr_scout candidates ride right after PR feed so
     # the specialist sees PR Monitor warm cache + the fa-fetched
     # candidates in adjacent sections. Returns an empty list for any
@@ -1059,9 +1113,13 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     # specialists never see this section.
     fa_candidates_section = _section_framework_pr_candidates(inp)
     if fa_candidates_section:
-        # Insert after the PR feed section (index 7 — the list above
-        # shows PR feed at index 7 after § 5b + § 5c were added).
-        user_sections.insert(8, fa_candidates_section)
+        # Insert after the PR feed section. Index is dynamic: +1 if
+        # § 5d was injected above. ``index`` uses the still-fresh
+        # ``§ 6. PR FEED`` header to anchor.
+        for i, section in enumerate(user_sections):
+            if section and section[0].startswith("## 6. PR FEED"):
+                user_sections.insert(i + 1, fa_candidates_section)
+                break
     if inp.notes:
         user_sections.append([
             "## 10. NOTES FROM ORCHESTRATION",

@@ -4616,6 +4616,18 @@ class Coordinator:
         if state.warm_start_lessons and "warm_start_lessons" not in params:
             params["warm_start_lessons"] = list(state.warm_start_lessons)
 
+        # session_steward gets a panoramic state digest inlined into
+        # its prompt (the steward needs stack depth, gain trajectory,
+        # plateau signals, gaps, denial history to decide
+        # continue_explore / advance_to_kernel / stop_session).
+        # Other specialists don't see this — keeps their prompt
+        # focused on the task at hand.
+        if (
+            str(params.get("domain") or "") == "session_steward_specialist"
+            and "session_snapshot" not in params
+        ):
+            params["session_snapshot"] = self._build_session_snapshot()
+
         # Local-source navigation hint — same source the kernel agent
         # uses for ``source_file`` containment.
         if "framework_source_roots" not in params:
@@ -6801,6 +6813,107 @@ class Coordinator:
                 evidence=evidence_refs,
                 extra_attrs=extra,
             )
+
+    def _build_session_snapshot(self) -> dict[str, Any]:
+        """Build a session-wide state digest for ``session_steward_specialist``.
+
+        The steward specialist needs a panoramic view of where the
+        session stands (stack depth, gain trajectory, plateau signals,
+        outstanding gaps, recent policy denials) to recommend
+        ``continue_explore`` / ``advance_to_kernel`` / ``stop_session``.
+
+        Previously its prompt told the LLM "everything is in
+        $SESSION_DIR/state.json which the Coordinator pre-warms below"
+        but no inline rendering existed — the steward had to use Bash
+        to read state.json off disk, costing a turn and contradicting
+        the prompt. This helper produces a compact dict the prompt
+        builder renders inline so the steward sees the data in its
+        first turn.
+
+        Returned shape (all keys present, empty / 0 when source is
+        empty so the prompt template never branches):
+
+        * ``phase`` / ``tick`` — current phase + monotonic tick.
+        * ``optimization_stack_len`` — count of KEEP'd entries.
+        * ``cumulative_gain_pct`` / ``cumulative_gain_validated_pct``
+          — total session uplift (validated_pct is the post-rebench
+          number; cumulative is the raw running sum).
+        * ``gain_per_stack_entry_tail`` — last 5 entries of the
+          per-stack gain ledger, exposing diminishing-returns trends.
+        * ``rejected_counts`` — REVERT reasons grouped by the
+          explore_search ``reason`` field (``stack_unstable`` /
+          ``gain_below_threshold`` / ...). A long tail of one kind is
+          a plateau signal.
+        * ``specialist_empty_streak`` — per-domain empty-round
+          counter (``specialist_domain_empty_streak``). Three
+          consecutive ``empty=True`` rounds is a hard plateau.
+        * ``gaps_count`` / ``gaps_top5_canonical_ids`` — count + the
+          first 5 open gap canonical_ids. Steward references one of
+          these in ``next_gap_canonical_id`` when recommending
+          ``continue_explore``.
+        * ``policy_denial_history_tail`` — last 10 PolicyGate
+          denials (rule + reason). Recurrence on the same rule means
+          the LLM is thrashing — strong signal to stop.
+        * ``steward_continuation_used`` — IR-7 antiloop flag; the
+          steward must not recommend ``continue_explore`` twice.
+        """
+        ss = self.shared_state
+        explore_search = getattr(ss, "explore_search", {}) or {}
+        rejected_rows = explore_search.get("rejected") or []
+        rejected_counts: dict[str, int] = {}
+        for row in rejected_rows:
+            if not isinstance(row, dict):
+                continue
+            reason = str(row.get("reason") or "unknown").strip() or "unknown"
+            rejected_counts[reason] = rejected_counts.get(reason, 0) + 1
+        gain_tail_raw = list(getattr(ss, "gain_per_stack_entry", []) or [])[-5:]
+        # Coerce None → 0.0 so the prompt renderer can json.dump
+        # without leaking ``null`` tokens (LLM-friendly).
+        gain_tail: list[float] = []
+        for v in gain_tail_raw:
+            try:
+                gain_tail.append(float(v) if v is not None else 0.0)
+            except (TypeError, ValueError):
+                gain_tail.append(0.0)
+        gaps = list(getattr(ss, "gaps", []) or [])
+        gaps_top5_ids = [
+            str((g or {}).get("canonical_id") or "")
+            for g in gaps[:5]
+            if isinstance(g, dict) and (g or {}).get("canonical_id")
+        ]
+        denial_tail_raw = list(getattr(ss, "policy_denial_history", []) or [])[-10:]
+        denial_tail: list[dict[str, str]] = []
+        for d in denial_tail_raw:
+            if not isinstance(d, dict):
+                continue
+            denial_tail.append({
+                "rule":   str(d.get("rule") or ""),
+                "reason": str(d.get("reason") or "")[:120],
+            })
+        return {
+            "phase":                            str(getattr(ss, "phase", "") or ""),
+            "tick":                             int(getattr(ss, "tick", 0) or 0),
+            "optimization_stack_len":           len(
+                getattr(ss, "optimization_stack", []) or []
+            ),
+            "cumulative_gain_pct":              float(
+                getattr(ss, "cumulative_gain", 0.0) or 0.0
+            ),
+            "cumulative_gain_validated_pct":    float(
+                getattr(ss, "cumulative_gain_validated", 0.0) or 0.0
+            ),
+            "gain_per_stack_entry_tail":        gain_tail,
+            "rejected_counts":                  rejected_counts,
+            "specialist_empty_streak":          dict(
+                getattr(ss, "specialist_domain_empty_streak", {}) or {}
+            ),
+            "gaps_count":                       len(gaps),
+            "gaps_top5_canonical_ids":          gaps_top5_ids,
+            "policy_denial_history_tail":       denial_tail,
+            "steward_continuation_used":        bool(
+                getattr(ss, "steward_continuation_used", False)
+            ),
+        }
 
     def _collect_workload_tags(self) -> dict[str, Any]:
         """Return the workload-shape KB tag dict for the current session.
