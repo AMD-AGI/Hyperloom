@@ -46,6 +46,7 @@ class _BareState:
     cumulative_gain_validated: float = 0.0
     last_roofline_tput: float = 0.0
     auto_roofline_pending_task_id: str = ""
+    enable_roofline: bool = True
     current_best: dict[str, Any] = field(default_factory=dict)
     last_baseline: dict[str, Any] = field(default_factory=dict)
     save_count: int = 0
@@ -188,8 +189,8 @@ async def test_maybe_enqueue_watermark_enqueues_when_crossed(coord: Coordinator)
     )
     assert fired is True
     # Task created with the reason-scoped idempotency key.
-    assert "internal-roofline-explore_keep_watermark" in coord.tasks._by_idem
-    task = coord.tasks._by_idem["internal-roofline-explore_keep_watermark"]
+    assert "internal-analysis-explore_keep_watermark" in coord.tasks._by_idem
+    task = coord.tasks._by_idem["internal-analysis-explore_keep_watermark"]
     assert task.kind == "roofline"
     # Pending field stamped so downstream dispatches are blocked.
     assert coord.shared_state.auto_roofline_pending_task_id == task.task_id
@@ -210,7 +211,7 @@ async def test_maybe_enqueue_watermark_dedups_per_reason(coord: Coordinator):
     second = await coord._maybe_enqueue_watermark_roofline(reason="dup_reason")
     assert first is True and second is True
     # Same task returned by the registry (idempotency dedup).
-    task = coord.tasks._by_idem["internal-roofline-dup_reason"]
+    task = coord.tasks._by_idem["internal-analysis-dup_reason"]
     assert task.task_id == pending_id
 
 
@@ -240,7 +241,7 @@ async def test_pending_denial_blocks_every_gated_action(
         kind="roofline",
         state="running",
         params={},
-        idempotency_key="internal-roofline-watermark_crossed",
+        idempotency_key="internal-analysis-watermark_crossed",
     )
     coord.tasks._tasks[pending.task_id] = pending  # type: ignore[assignment]
     coord.shared_state.auto_roofline_pending_task_id = pending.task_id
@@ -272,7 +273,7 @@ async def test_pending_denial_clears_field_on_terminal_state(coord: Coordinator)
         kind="roofline",
         state="succeeded",
         params={},
-        idempotency_key="internal-roofline-watermark_crossed",
+        idempotency_key="internal-analysis-watermark_crossed",
     )
     coord.tasks._tasks[done.task_id] = done  # type: ignore[assignment]
     coord.shared_state.auto_roofline_pending_task_id = done.task_id
