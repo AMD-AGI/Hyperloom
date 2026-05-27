@@ -1983,8 +1983,19 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
-def test_optimization_wrapper_timeout_sec_geak_default_90min():
-    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 90 * 60 + 180
+def test_optimization_wrapper_timeout_sec_geak_default_full_mode_130min(monkeypatch):
+    # Default tracks ``$GEAK_RUN_MODE`` (full -> 130 min) so the
+    # orchestrator wrapper agrees with the kernel-agent installer /
+    # driver defaults (PR #301 + matching orchestrator-side fix).
+    monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
+    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 130 * 60 + 180
+
+
+def test_optimization_wrapper_timeout_sec_geak_quick_mode_70min(monkeypatch):
+    monkeypatch.setenv("GEAK_RUN_MODE", "quick")
+    monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
+    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 70 * 60 + 180
 
 
 def test_optimization_wrapper_timeout_sec_oob_default_60min():
