@@ -421,6 +421,16 @@ class SharedState:
     # PR scan no longer collapses the whole FRAMEWORK_PR phase
     # silently.
     framework_pr_discover_failures: int = 0
+    # FRAMEWORK_PR Critic-gate decisions, one row per reviewed candidate:
+    # ``{candidate_id, batch_id, verdict, rationale, ts}``. The
+    # Coordinator's pump calls the Critic backend before each
+    # ``_enqueue_framework_pr_task``; ``approve`` proceeds, ``reject``
+    # records a ``critic_denied`` progress row instead. The cache lets a
+    # resume avoid double-calling the Critic on candidates the prior run
+    # already reviewed.
+    framework_pr_critic_decisions: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
     # When True (the default) the Coordinator's auto-managed analysis
     # action — at PRELUDE bootstrap and on every +10% watermark
     # crossing — is ``roofline`` (composite: profile + trace_analyze +
