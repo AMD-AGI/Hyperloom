@@ -1513,6 +1513,24 @@ class Coordinator:
                 "FRAMEWORK_PR: failed to enqueue candidate=%s: %r",
                 cand_id, exc,
             )
+            # Record an ``enqueue_failed`` progress row so the pump's
+            # ``_select_next_framework_pr_candidate`` skips this
+            # candidate on the next tick rather than retrying it
+            # forever. Without this row the candidate_id stays out of
+            # the ``processed`` set and the loop spins.
+            progress = getattr(state, "framework_pr_phase_progress", None)
+            if not isinstance(progress, list):
+                progress = []
+                state.framework_pr_phase_progress = progress
+            progress.append({
+                "candidate_id": cand_id,
+                "batch_id":     candidate.get("batch_id") or "",
+                "task_id":      None,
+                "status":       "enqueue_failed",
+                "error":        repr(exc),
+                "ts":           datetime.now(timezone.utc).isoformat(),
+            })
+            state.save(self.session_dir)
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """No-op KERNEL entry hook.
