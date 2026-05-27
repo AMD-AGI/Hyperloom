@@ -1223,7 +1223,7 @@ class Coordinator:
         if not self._needs_roofline_for_watermark():
             return False
         try:
-            task = await self._enqueue_internal_roofline_task(reason=reason)
+            task = await self._enqueue_internal_analysis_task(reason=reason)
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception(
                 "watermark-roofline (%s): failed to enqueue: %r", reason, exc,
@@ -1240,34 +1240,55 @@ class Coordinator:
         )
         return True
 
-    async def _enqueue_internal_roofline_task(self, *, reason: str) -> Task:
-        """Build + enqueue a Coordinator-internal ``roofline`` task.
+    def _internal_analysis_kind(self) -> str:
+        """Pick the kind for the next Coordinator-internal analysis task.
 
-        Mirrors :meth:`_enqueue_internal_profile_task` but for the
-        composite ``roofline`` action (profile + trace_analyze + analysis.md
-        snapshot). The LLM no longer has propose_action permission for
-        ``roofline`` (removed from ``PHASE_ALLOWED_ACTIONS``); this is
-        the only path that fires it.
+        ``shared_state.enable_roofline`` (CLI flag ``--enable-roofline``
+        / ``--no-enable-roofline``, default on) controls the choice:
 
-        Idempotency key: ``internal-roofline-<reason>`` — phase-scoped
-        so a re-entry (Inv-2.1 forbids in production but resume edges
-        may reach here twice) dedups via the existing task.
+        * True  → ``roofline`` (composite: profile + trace_analyze +
+          analysis.md snapshot).
+        * False → ``profile`` (lightweight: trace capture only).
+
+        Both kinds share the same enqueue + watermark-anchor +
+        pending-task-gate plumbing; the kind name is the only thing
+        that differs. PolicyGate denies either name when the LLM tries
+        to propose it (``analysis_action_not_llm_proposable``).
+        """
+        return "roofline" if bool(
+            getattr(self.shared_state, "enable_roofline", True),
+        ) else "profile"
+
+    async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
+        """Build + enqueue a Coordinator-internal analysis task.
+
+        The kind (``roofline`` or ``profile``) is selected by
+        :meth:`_internal_analysis_kind` from
+        :attr:`SharedState.enable_roofline`. PRELUDE bootstrap and
+        watermark-crossing paths both go through this single helper.
+
+        Idempotency key: ``internal-analysis-<reason>`` — kind-agnostic
+        so a mode flip across resume does not double-enqueue for the
+        same reason (the first task for that reason still satisfies
+        the gate, regardless of which kind it was). Concurrent callers
+        with the same reason collapse to the existing task.
 
         Config selection: we deliberately do NOT pass
-        ``state.baseline_config_path`` here. The composite action's
-        profile sub-step is :class:`ProfileExecutor`, whose
-        ``_resolve_default_config`` picks ``profile_sglang.yaml`` /
-        ``profile_vllm.yaml`` — the YAMLs that actually carry
-        ``profiler.torch_profiler.enabled: true`` so Magpie writes the
-        ``.trace.json.gz`` files ``trace_analyze`` consumes. Passing
-        the baseline yaml here silently disables the torch profiler
-        and the sub-step ends with ``error_class=no_trace_files``.
-        Workload contract (CONC / ISL / OSL / TP / PRECISION /
-        MAX_MODEL_LEN) still flows correctly because
-        ``materialize_config_with_envs`` re-applies the env vars
-        regardless of which YAML the executor starts from.
+        ``state.baseline_config_path``. Both roofline and profile lean
+        on :class:`ProfileExecutor` (RooflineExecutor calls it via
+        ``_wrap_profile_ctx``), whose ``_resolve_default_config`` picks
+        the ``profile_sglang.yaml`` / ``profile_vllm.yaml`` variant —
+        the YAMLs that carry ``profiler.torch_profiler.enabled: true``
+        so Magpie writes the ``.trace.json.gz`` files consumed
+        downstream. Passing the baseline yaml here silently disables
+        the torch profiler and the sub-step ends with
+        ``error_class=no_trace_files``. Workload contract (CONC / ISL
+        / OSL / TP / PRECISION / MAX_MODEL_LEN) still flows correctly
+        because ``materialize_config_with_envs`` re-applies the env
+        vars regardless of which YAML the executor starts from.
         """
         state = self.shared_state
+        kind = self._internal_analysis_kind()
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
@@ -1283,15 +1304,15 @@ class Coordinator:
             if bs:
                 params["benchmark_script"] = bs
         task, was_existing = await self.tasks.create_or_return_existing(
-            kind="roofline",
+            kind=kind,
             params=params,
-            idempotency_key=f"internal-roofline-{reason}",
+            idempotency_key=f"internal-analysis-{reason}",
         )
         if was_existing:
             log.info(
-                "internal-roofline task already exists (idempotent: "
-                "task_id=%s, state=%s)",
-                task.task_id, task.state,
+                "internal-analysis task already exists (idempotent: "
+                "kind=%s task_id=%s, state=%s)",
+                kind, task.task_id, task.state,
             )
         return task
 
@@ -7195,43 +7216,34 @@ class Coordinator:
             # seed the gaps[] ledger from baseline.
             # Best-effort; failure is logged + absorbed inside the helper.
             await self._refresh_gaps(reason="baseline_done")
-            # PRELUDE bootstrap: enqueue the first roofline (composite
-            # profile + trace_analyze + analysis.md snapshot) anchored
-            # on baseline. Idempotency-keyed via the fixed ``prelude``
-            # reason so a resume after the baseline completion edge
-            # does not double-enqueue.
+            # PRELUDE bootstrap: enqueue the first analysis action
+            # (kind picked by ``shared_state.enable_roofline``:
+            # ``roofline`` by default, ``profile`` when
+            # ``--no-enable-roofline``). Idempotency-keyed via the
+            # fixed ``prelude_initial`` reason so a resume after the
+            # baseline completion edge does not double-enqueue.
             #
             # Skip conditions:
             # * baseline tput missing or invalid;
-            # * a roofline task is already in-flight (gate field set);
-            # * ``--no-force-roofline-after-baseline`` AND a prior
-            #   roofline already populated ``last_roofline_tput`` on
-            #   this state.json (resume edge).
-            already_have_roofline = (
-                float(self.shared_state.last_roofline_tput or 0.0) > 0
-            )
-            force_flag = bool(
-                getattr(self.shared_state, "force_roofline_after_baseline", True),
-            )
+            # * an analysis task is already in-flight (gate field set).
             if (
                 isinstance(tput, (int, float)) and tput > 0
                 and not (self.shared_state.auto_roofline_pending_task_id or "").strip()
-                and (force_flag or not already_have_roofline)
             ):
                 try:
-                    rl_task = await self._enqueue_internal_roofline_task(
+                    rl_task = await self._enqueue_internal_analysis_task(
                         reason="prelude_initial",
                     )
                     self.shared_state.auto_roofline_pending_task_id = rl_task.task_id
                     log.info(
                         "PRELUDE: baseline landed (tput=%.2f); auto-enqueued "
-                        "initial roofline task=%s",
-                        float(tput), rl_task.task_id,
+                        "initial %s task=%s",
+                        float(tput), rl_task.kind, rl_task.task_id,
                     )
                 except Exception as exc:  # noqa: BLE001 — defensive
                     log.exception(
-                        "PRELUDE: failed to enqueue initial roofline after "
-                        "baseline: %r", exc,
+                        "PRELUDE: failed to enqueue initial analysis task "
+                        "after baseline: %r", exc,
                     )
         elif task_kind == "profile":
             audit_decision = "promoted"
@@ -7296,6 +7308,35 @@ class Coordinator:
                         (float(tput) - self.shared_state.baseline_tput)
                         / self.shared_state.baseline_tput * 100.0
                     )
+                changed = True
+            # When this profile task came in as the Coordinator-internal
+            # analysis action (``--no-enable-roofline`` mode), mirror
+            # the roofline-branch watermark + gate handling so PRELUDE
+            # bootstrap and watermark-crossing flows behave identically
+            # under either kind:
+            #   * refresh ``last_roofline_tput`` from the projected
+            #     current tput so the next +10% step is anchored on
+            #     this measurement (matches the roofline branch math);
+            #   * clear ``auto_roofline_pending_task_id`` so downstream
+            #     dispatches stop being held by
+            #     ``_auto_roofline_pending_denial``.
+            # The conditions are kind-agnostic — we always refresh the
+            # watermark on a successful profile (so any operator-
+            # enqueued profile also re-anchors the watermark) and
+            # always clear the pending field for THIS task id so an
+            # unrelated profile result cannot clear a gate set by a
+            # different task.
+            if profile_status == "succeeded":
+                anchor_tput = self._current_tput_from_validated_gain()
+                if anchor_tput > 0:
+                    self.shared_state.last_roofline_tput = float(anchor_tput)
+                    changed = True
+            if (
+                task is not None
+                and self.shared_state.auto_roofline_pending_task_id
+                == task.task_id
+            ):
+                self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
         elif task_kind == "roofline":
             # F1-3 (Roofline-v2 / ): the
