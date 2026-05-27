@@ -303,17 +303,30 @@ never proposes the `framework_pr` action; PolicyGate
 Flow per tick (`_pump_framework_pr_phase`):
 1. If no pending/running `framework_pr` task and no current batch:
    call `fa phase-discover` for a fresh candidate batch (model +
-   framework + gpu_type + `gaps[]`).
-2. Pop the next candidate; enqueue a `framework_pr` task with
+   framework + gpu_type + `gaps[]`). Transient timeouts/errors do
+   NOT immediately flip the phase done — the pump retries up to
+   `DISCOVER_FAILURE_RETRY_LIMIT` (3) times before giving up.
+2. Pop the next candidate; route it through the Critic gate
+   (`_critic_review_framework_pr_candidate`). `approve` (or the
+   degraded `abstain`) falls through to enqueue; `reject` records a
+   `critic_denied` row in `framework_pr_phase_progress` and moves
+   on to the next candidate.
+3. Enqueue a `framework_pr` task with
    `requires_lanes=[server_lifecycle, workspace_mutation, benchmark_lane]`.
-3. `FrameworkPrExecutor` (a) calls `fa phase-fetch` to apply the PR
-   into an isolated worktree, (b) shells `fa phase-emit-proposal`
-   to build a `specialist_done`-shaped envelope, (c) runs
-   `run_grid([single_variant])` for benchmarking.
-4. Result lands via `_promote_to_shared_state['framework_pr']` —
-   KEEP triggers a `cumulative_gain_validated` update + watermark
-   refresh (`_maybe_enqueue_watermark_roofline(reason="framework_pr_keep_watermark")`).
-5. Per-candidate row recorded in `framework_pr_phase_progress`;
+4. `FrameworkPrExecutor` (a) fetches the unified diff (curls
+   `candidate.diff_url` unless explicit `params.patches` are
+   supplied), (b) snapshots the live tree's HEAD SHA, (c)
+   `git apply`s the diff against the live framework_source_roots,
+   (d) runs `run_grid([single_variant])` for benchmarking. We do
+   NOT shell `fa phase-fetch` — apply targets the live tree, not an
+   fa-managed worktree.
+5. KEEP commits the change to the live tree (so the next candidate
+   stacks on top) and triggers a `cumulative_gain_validated` update
+   + watermark refresh
+   (`_maybe_enqueue_watermark_roofline(reason="framework_pr_keep_watermark")`).
+   REVERT runs `git reset --hard <pre_apply_sha>` to restore the
+   pre-apply state without touching prior KEEP commits.
+6. Per-candidate row recorded in `framework_pr_phase_progress`;
    batch totals in `framework_pr_batches`.
 
 Exit (`exit_normal_framework_pr`, 3-way precedence):
