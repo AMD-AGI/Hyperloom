@@ -157,6 +157,18 @@ class _StubCortex:
             raise self._drain_raises
         return {"remaining": self._drain_remaining}
 
+    # cortex_finalize_recipe_and_journal calls these on the read-modify-
+    # write path; tests using this stub set ``cortex_kb=None`` or omit
+    # ``model_name`` on SharedState so the finalize helper short-circuits
+    # before it gets here, but the methods are wired so adding new
+    # close-phase tests with a populated SharedState doesn't blow up
+    # with AttributeError.
+    def read_recipe_exact(self, *, model: str, hardware: str) -> dict:
+        return {}
+
+    def update_recipe(self, **kwargs) -> dict:
+        return {"status": "auto_accepted"}
+
 
 @pytest.fixture
 def coord(tmp_path: Path):

@@ -53,9 +53,12 @@ log = logging.getLogger(__name__)
 class CortexKBError(RuntimeError):
     """Raised for unrecoverable interactions with the Cortex KB.
 
-    The synchronous T0/T4 hooks treat this as fail-fast (PRELUDE
-    rejection / ``stop_reason=cortex_drain_failed``). Async T2/T3 hooks
-    catch it and downgrade to an NDJSON enqueue.
+    Synchronous T0 (warm-start) treats this as fail-fast for the
+    cli boot path (``sys.exit(2)``) and fail-soft for the Coordinator
+    SDK fallback. Synchronous fact writes (``propose_lesson`` /
+    ``propose_pitfall`` / ``update_recipe`` / ``propose_edge``) catch
+    it internally and downgrade to an NDJSON enqueue so the
+    Coordinator dispatcher never crashes on a transient KB outage.
 
     ``category`` discriminates business / validation / transport /
     unknown so callers can decide retry vs surface vs dead-letter.
@@ -934,11 +937,18 @@ class CortexKBClient:
         entity_type: str | None = None,
         _enqueue_on_failure: bool = True,
     ) -> dict[str, Any]:
-        """T0 mint / T2 mint — ``POST /v1/points/propose``.
+        """``POST /v1/points/propose`` — generic point write.
+
+        The fact-write surface methods (``propose_lesson`` /
+        ``propose_pitfall`` / ``update_recipe``) all wrap this with
+        kind-specific canonical_id derivation and attrs shape; direct
+        callers are T0 anchor backfill + NDJSON replay.
 
         Sync first (so the caller gets a ``point_id`` back); on HTTP
         failure, falls back to NDJSON enqueue (returns
-        ``{"status": "queued"}``).
+        ``{"status": "queued"}``). When ``_enqueue_on_failure=False``
+        (used by ``_flush_one`` replay) the CortexKBError propagates
+        to the caller instead of duplicating the row.
 
         H1: ``committeeEnabled=false`` so the response is always
         ``status="auto_accepted"`` and ``point_id == proposal_id``.
@@ -1009,12 +1019,12 @@ class CortexKBClient:
     # ==================================================================
     # Fact-write surface — direct propose (kg-usage-guide §3.1 / §3.2)
     #
-    # The methods below bypass the session/hypothesize/verify protocol
-    # and write **standalone fact points** (lesson / pitfall) plus the
-    # edges connecting them to experiments and source citations.
-    # They are designed for the case where hyperloom has already
-    # produced verified evidence locally (a KEEP / REVERT decision)
-    # and the surrounding "先猜后验" ritual would just be ceremony.
+    # The methods below write **standalone fact points** (lesson /
+    # pitfall) and edges connecting them to source citations. Hyperloom
+    # only writes facts after local verification (a KEEP / REVERT
+    # decision), so the writes are session-less — there is no KB-side
+    # session to register or commit (the legacy hypothesize/verify
+    # protocol was retired).
     # ==================================================================
     def propose_edge(
         self,
@@ -1035,8 +1045,8 @@ class CortexKBClient:
 
         Use this when both endpoints already exist as KB points and you
         want to record a structural / causal / empirical / negation /
-        evolutionary relation between them without spinning up a
-        ``hypothesize → verify`` round-trip.
+        evolutionary relation between them. This is the only edge-write
+        primitive (the legacy hypothesize/verify round-trip was retired).
 
         ``relation`` is folded into ``attrs.relation`` so the propose-
         edge validator can pair it with ``edge_type`` (see kg-usage-
@@ -1145,11 +1155,17 @@ class CortexKBClient:
         ``AUTHORITATIVE`` when seeding from upstream docs / release
         notes.
 
-        ``source_session_id`` / ``source_task_id`` / ``source_variant_name``
-        are written into ``attrs`` (NOT into ``cited_citation_ids``,
-        which is part of the canonical_id hash) so two different
-        sessions emitting the same lesson statement still merge into
-        a single KB row while traceability stays queryable.
+        ``source_session_id`` / ``source_task_id`` /
+        ``source_variant_name`` are stamped on ``attrs`` for
+        traceability. Note: KB does shallow new-wins merge on
+        ``attrs`` keys, so when two sessions emit the SAME lesson
+        statement, only the most recent ``source_*`` triple survives
+        on the KB row — the older one is overwritten. This is the
+        intended trade-off vs putting source ids in
+        ``cited_citation_ids`` (which would change the canonical_id
+        hash and create one separate lesson row per session, defeating
+        cross-session dedup). Full historical attribution lives in
+        the per-session ``optimization_journal.json`` instead.
         """
         cid = lesson_canonical_id(statement, cited_citation_ids)
         attrs: dict[str, Any] = {
@@ -1203,9 +1219,13 @@ class CortexKBClient:
         written (signal/noise control). Callers should filter before
         invoking this method.
 
-        ``source_session_id`` / ``source_task_id`` / ``source_variant_name``
-        are written into ``attrs`` for traceability without affecting
-        the canonical_id hash (so cross-session merge still works).
+        ``source_session_id`` / ``source_task_id`` /
+        ``source_variant_name`` are stamped on ``attrs`` for
+        traceability. Same caveat as :meth:`propose_lesson`: KB
+        shallow new-wins merge means only the most recent
+        ``source_*`` triple survives when multiple sessions write
+        the same pitfall description; full historical attribution
+        lives in the per-session ``optimization_journal.json``.
         """
         cid = pitfall_canonical_id(description, cited_citation_ids)
         attrs: dict[str, Any] = {
