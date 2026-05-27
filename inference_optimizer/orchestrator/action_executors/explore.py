@@ -136,7 +136,6 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
           "kb_evidence": list,          # passthrough (M5/M6 uses)
           "pr_evidence": list,          # passthrough
           "source_evidence": list,      # passthrough
-          "kb_edge_id": str,            # passthrough (T2 hypothesize)
         }
 
     Unknown keys are ignored. ``provenance`` defaults to ``'default_grid'``
@@ -164,15 +163,14 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             note=str(raw.get("note") or raw.get("provenance") or ""),
         )
         # Stash the extra M3 metadata on the GridVariant instance so the
-        # ledger writer below can pull provenance / kb_edge_id / evidence
-        # without round-tripping through a parallel list. GridVariant is
-        # a plain dataclass, so adding attrs is safe (they just aren't
-        # part of equality).
+        # ledger writer below can pull provenance / evidence without
+        # round-tripping through a parallel list. GridVariant is a plain
+        # dataclass, so adding attrs is safe (they just aren't part of
+        # equality).
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
         gv.kb_evidence = list(raw.get("kb_evidence") or [])         # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])         # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or []) # type: ignore[attr-defined]
-        gv.kb_edge_id = str(raw.get("kb_edge_id") or "")            # type: ignore[attr-defined]
         out.append(gv)
     return out
 
@@ -469,7 +467,6 @@ class ExploreExecutor:
             for idx, gv in enumerate(runnable):
                 fp = getattr(gv, "canonical_fp", "")
                 provenance = getattr(gv, "provenance", "llm_direct")
-                kb_edge_id = getattr(gv, "kb_edge_id", "")
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # 1. Run the single variant on top of the running stack.
@@ -526,7 +523,6 @@ class ExploreExecutor:
                         "workload_signature": ws_sig,
                         "framework": framework,
                         "workspace": r.workspace,
-                        "kb_edge_id": kb_edge_id,
                         "runtime_sec": round(variant_runtime, 2),
                         "wall_clock_ratio_vs_baseline": wall_clock_ratio,
                         "baseline_runtime_sec": round(
@@ -633,7 +629,6 @@ class ExploreExecutor:
                     "workload_signature": ws_sig,
                     "framework": framework,
                     "workspace": r.workspace,
-                    "kb_edge_id": kb_edge_id,
                 }
                 if gv.name:
                     name_index[gv.name] = fp
@@ -653,7 +648,6 @@ class ExploreExecutor:
                         "round_id": round_id,
                         "accepted_at_round": round_id,
                         "ts": _now_iso(),
-                        "kb_edge_id": kb_edge_id,
                     }
                     # Layer onto the running stack BEFORE rebench.
                     next_args = _join_args(stack_extra_args, gv.extra_sglang_args)
@@ -891,7 +885,6 @@ class ExploreExecutor:
                 "variant_name": str(te.get("name") or ""),
                 "outcome":      outcome,
                 "fingerprint":  fp_key,
-                "kb_edge_id":   str(te.get("kb_edge_id") or ""),
                 "provenance":   str(te.get("provenance") or ""),
                 "metrics":      metrics,
                 "reason":       reasons_by_fp.get(fp_key, ""),
@@ -901,7 +894,6 @@ class ExploreExecutor:
                 "variant_name": str(sd.get("name") or ""),
                 "outcome":      "SKIPPED_DEDUP",
                 "fingerprint":  str(sd.get("fingerprint") or ""),
-                "kb_edge_id":   "",
                 "provenance":   "",
                 "metrics":      {},
                 "reason":       str(sd.get("reason") or ""),
