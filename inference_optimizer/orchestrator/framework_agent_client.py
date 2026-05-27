@@ -1,12 +1,19 @@
 """Coordinator-side thin client for the framework-agent FRAMEWORK_PR
-phase subcommands (``fa phase-discover`` / ``fa phase-fetch`` /
-``fa phase-emit-proposal``).
+phase subcommands.
 
-Used by :meth:`Coordinator._run_framework_pr_phase` to drive the
-per-candidate pump that lives between PRELUDE and EXPLORE. Each
-subcommand is invoked via ``asyncio.to_thread`` so the Coordinator
-reactor loop never blocks on the CLI; failures degrade to empty /
-``status=failed`` results instead of raising.
+Only ``fa phase-discover`` is actually wired into the Coordinator
+pump: the pump calls it to obtain a batch of candidate PRs, then the
+Coordinator's own Critic gate + ``FrameworkPrExecutor`` (which curls
+``candidate.diff_url`` directly and runs ``git apply``) handles the
+rest. ``fa phase-fetch`` and ``fa phase-emit-proposal`` remain
+available on the standalone ``fa`` CLI but are NOT wrapped here —
+adding shims for unused subcommands invited the "dead API misleads
+readers" problem flagged in the PR-327 review.
+
+``phase_discover`` is invoked via ``asyncio.to_thread`` so the
+Coordinator reactor loop never blocks on the CLI; failures degrade to
+empty / raised ``RuntimeError`` results that the pump's retry counter
+absorbs.
 """
 
 from __future__ import annotations
@@ -102,9 +109,10 @@ def _run_fa_subcommand_sync(
 ) -> "tuple[int, str, str]":
     """Sync helper: run ``fa <subcommand> --request <path> --out -``.
 
-    Mirrors :func:`_run_fa_candidates_sync` for the FRAMEWORK_PR phase
-    subcommands (``phase-discover`` / ``phase-fetch`` /
-    ``phase-emit-proposal``). Never raises.
+    Only ``phase-discover`` calls into here today; the function stays
+    subcommand-agnostic so adding a second wired subcommand later
+    (should we ever need to bring ``phase-emit-proposal`` back into
+    the Coordinator loop) does not require touching it. Never raises.
     """
     cmd = [fa_bin, subcommand, "--request", str(request_path), "--out", "-"]
     try:
@@ -205,77 +213,19 @@ async def phase_discover(
     )
 
 
-async def phase_fetch(
-    *,
-    pr_url: str,
-    repo: str,
-    ref: str,
-    framework: str,
-    worktree_dir: Path,
-    session_dir: Path,
-    repo_url: str = "",
-    title: str = "",
-    timeout_sec: float = DEFAULT_FA_PHASE_TIMEOUT_SEC,
-) -> dict[str, Any]:
-    """FRAMEWORK_PR-phase candidate-fetch shim.
-
-    Returns ``{status, worktree_path, applied_files, message}``.
-    """
-    request = {
-        "pr_url":       pr_url,
-        "repo":         repo,
-        "ref":          ref,
-        "framework":    (framework or "sglang").strip().lower(),
-        "repo_url":     repo_url or repo_url_for_framework(framework),
-        "worktree_dir": str(worktree_dir),
-        "title":        title,
-    }
-    return await _invoke_fa_phase(
-        subcommand="phase-fetch",
-        request=request,
-        session_dir=session_dir,
-        timeout_sec=timeout_sec,
-    )
-
-
-async def phase_emit_proposal(
-    *,
-    task_id: str,
-    pr_url: str,
-    worktree_path: str,
-    gap_canonical_id: str,
-    framework: str,
-    session_dir: Path,
-    patches_written: list[str] | None = None,
-    rationale: str = "",
-    timeout_sec: float = DEFAULT_FA_PHASE_TIMEOUT_SEC,
-) -> dict[str, Any]:
-    """FRAMEWORK_PR-phase ``specialist_done`` envelope emitter.
-
-    Returns the envelope dict produced by ``fa phase-emit-proposal``.
-    """
-    request = {
-        "task_id":          task_id,
-        "pr_url":           pr_url,
-        "worktree_path":    worktree_path,
-        "gap_canonical_id": gap_canonical_id,
-        "framework":        (framework or "sglang").strip().lower(),
-        "patches_written":  list(patches_written or []),
-        "rationale":        rationale,
-    }
-    return await _invoke_fa_phase(
-        subcommand="phase-emit-proposal",
-        request=request,
-        session_dir=session_dir,
-        timeout_sec=timeout_sec,
-    )
+# NOTE: ``phase_fetch`` / ``phase_emit_proposal`` shims used to live
+# here but had zero callers in inference_optimizer (the Coordinator
+# pump only calls ``phase_discover``; ``FrameworkPrExecutor`` curls
+# ``candidate.diff_url`` directly via ``git apply``). The PR-327 review
+# flagged them as dead-API-that-misleads-readers, so they were removed.
+# The standalone ``fa`` CLI still ships both subcommands for ad-hoc /
+# external use — re-add wrappers here only when the Coordinator
+# actually wires a new caller.
 
 
 __all__ = [
     "DEFAULT_FA_PHASE_TIMEOUT_SEC",
     "DISCOVER_FAILURE_RETRY_LIMIT",
     "phase_discover",
-    "phase_fetch",
-    "phase_emit_proposal",
     "repo_url_for_framework",
 ]
