@@ -460,6 +460,16 @@ class SharedState:
     # ``variant_timeout_sec`` is a sufficient backstop). Default 1.10
     # (kill at +10 % over baseline wall-clock).
     explore_overtime_kill_ratio: float = 1.10
+    # Per-variant hard timeout override for ExploreExecutor. Mirrored from
+    # ``--explore-variant-timeout-sec`` (CLI) /
+    # ``INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC`` (env) at session
+    # start. ``0`` means "auto-derive from baseline_runtime_sec * (kill_ratio
+    # + safety_margin)" — see ``explore._compute_explore_variant_timeout``.
+    # An explicit positive value pins the cap (e.g. CI smoke runs that want
+    # a tight bound regardless of baseline). The Coordinator injects this
+    # into every explore task's params so the executor's call site honors
+    # it without each LLM proposal having to re-emit it.
+    explore_variant_timeout_sec_override: int = 0
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
