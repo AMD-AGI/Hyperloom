@@ -701,31 +701,6 @@ class KnowledgePlane:
             idempotency_key=idempotency_key,
         )
 
-    def cortex_hypothesize(
-        self,
-        *,
-        sid: str,
-        from_canonical: str,
-        to_canonical: str,
-        edge_type: str = "hypothetical",
-        reason: str = "",
-        attrs: Mapping[str, Any] | None = None,
-        evidence: list[str] | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        if not self.cortex_enabled:
-            return {"status": "skip_disabled", "tentative_edge_id": ""}
-        return self.cortex_kb.hypothesize(  # type: ignore[union-attr]
-            sid=sid,
-            from_canonical=from_canonical,
-            to_canonical=to_canonical,
-            edge_type=edge_type,
-            reason=reason,
-            attrs=attrs,
-            evidence=evidence,
-            idempotency_key=idempotency_key,
-        )
-
     def mint_pr_node(
         self,
         *,

@@ -355,28 +355,16 @@ def test_shared_state_has_v08_m1_cortex_fields():
     s = SharedState()
     assert s.cortex_session_id == ""
     assert s.cortex_session_summary == {}
-    assert s.pending_kb_edges == []
     assert s.warm_start_recipe == {}
     assert s.warm_start_pitfalls == []
     assert s.warm_start_ts == ""
-    assert s.session_iter_index == 0
-
-
-def test_shared_state_session_iter_index_increments():
-    from inference_optimizer.orchestrator.shared_state import SharedState
-    s = SharedState()
-    assert s.increment_session_iter_index() == 1
-    assert s.increment_session_iter_index() == 2
-    assert s.session_iter_index == 2
 
 
 def test_policy_gate_core_state_fields_includes_cortex():
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
     assert "cortex_session_id" in CORE_STATE_FIELDS
     assert "cortex_session_summary" in CORE_STATE_FIELDS
-    assert "pending_kb_edges" in CORE_STATE_FIELDS
     assert "warm_start_recipe" in CORE_STATE_FIELDS
-    assert "session_iter_index" in CORE_STATE_FIELDS
 
 
 # ===========================================================================

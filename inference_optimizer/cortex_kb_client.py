@@ -924,6 +924,7 @@ class CortexKBClient:
         idempotency_key: str | None = None,
         prefer_sync: bool = True,
         entity_type: str | None = None,
+        _enqueue_on_failure: bool = True,
     ) -> dict[str, Any]:
         """T0 mint / T2 mint — ``POST /v1/points/propose``.
 
@@ -981,6 +982,13 @@ class CortexKBClient:
                     C.F_PROPOSAL_ID: str(proposal_id) if proposal_id is not None else "",
                 }
             except CortexKBError as exc:
+                # ``_flush_one`` replays NDJSON rows with
+                # ``_enqueue_on_failure=False`` so this code path is
+                # only reached for live writes — re-enqueueing a row
+                # the replayer just dequeued would duplicate it
+                # forever on permanent errors.
+                if not _enqueue_on_failure:
+                    raise
                 log.info("propose_point sync failed (%s); enqueueing NDJSON", exc)
         self._audit_record(
             op="propose_point", status="queued",
@@ -1013,6 +1021,7 @@ class CortexKBClient:
         source: str = C.SOURCE_AGENT_OBSERVATION,
         idempotency_key: str | None = None,
         prefer_sync: bool = True,
+        _enqueue_on_failure: bool = True,
     ) -> dict[str, Any]:
         """``POST /v1/edges/propose`` — direct, session-less edge write.
 
@@ -1085,6 +1094,8 @@ class CortexKBClient:
                     "edge_id":  str(edge_id) if edge_id is not None else "",
                 }
             except CortexKBError as exc:
+                if not _enqueue_on_failure:
+                    raise
                 log.info("propose_edge sync failed (%s); enqueueing NDJSON", exc)
         self._audit_record(
             op="propose_edge", status="queued",
@@ -1107,6 +1118,9 @@ class CortexKBClient:
         cited_citation_ids: list[str] | None = None,
         evidence: list[str] | None = None,
         authority: str = C.AUTHORITY_EXPERIENTIAL,
+        source_session_id: str = "",
+        source_task_id: str = "",
+        source_variant_name: str = "",
         extra_attrs: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
         prefer_sync: bool = True,
@@ -1122,6 +1136,12 @@ class CortexKBClient:
         invoke this only after local verification (KEEP). Use
         ``AUTHORITATIVE`` when seeding from upstream docs / release
         notes.
+
+        ``source_session_id`` / ``source_task_id`` / ``source_variant_name``
+        are written into ``attrs`` (NOT into ``cited_citation_ids``,
+        which is part of the canonical_id hash) so two different
+        sessions emitting the same lesson statement still merge into
+        a single KB row while traceability stays queryable.
         """
         cid = lesson_canonical_id(statement, cited_citation_ids)
         attrs: dict[str, Any] = {
@@ -1131,6 +1151,12 @@ class CortexKBClient:
             "applicable_hardware": list(applicable_hardware or []),
             "cited_citation_ids":  sorted(str(c) for c in (cited_citation_ids or [])),
         }
+        if source_session_id:
+            attrs["source_session_id"] = source_session_id
+        if source_task_id:
+            attrs["source_task_id"] = source_task_id
+        if source_variant_name:
+            attrs["source_variant_name"] = source_variant_name
         if extra_attrs:
             attrs.update(extra_attrs)
         return self.propose_point(
@@ -1153,6 +1179,9 @@ class CortexKBClient:
         cited_citation_ids: list[str] | None = None,
         evidence: list[str] | None = None,
         authority: str = C.AUTHORITY_EXPERIENTIAL,
+        source_session_id: str = "",
+        source_task_id: str = "",
+        source_variant_name: str = "",
         extra_attrs: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
         prefer_sync: bool = True,
@@ -1165,6 +1194,10 @@ class CortexKBClient:
         gain_pct ≤ -5% maps to ``regress``; anything weaker is NOT
         written (signal/noise control). Callers should filter before
         invoking this method.
+
+        ``source_session_id`` / ``source_task_id`` / ``source_variant_name``
+        are written into ``attrs`` for traceability without affecting
+        the canonical_id hash (so cross-session merge still works).
         """
         cid = pitfall_canonical_id(description, cited_citation_ids)
         attrs: dict[str, Any] = {
@@ -1174,6 +1207,12 @@ class CortexKBClient:
             "applicable_hardware": list(applicable_hardware or []),
             "cited_citation_ids":  sorted(str(c) for c in (cited_citation_ids or [])),
         }
+        if source_session_id:
+            attrs["source_session_id"] = source_session_id
+        if source_task_id:
+            attrs["source_task_id"] = source_task_id
+        if source_variant_name:
+            attrs["source_variant_name"] = source_variant_name
         if extra_attrs:
             attrs.update(extra_attrs)
         return self.propose_point(
@@ -1266,6 +1305,7 @@ class CortexKBClient:
         evidence: list[str] | None = None,
         idempotency_key: str | None = None,
         prefer_sync: bool = True,
+        _enqueue_on_failure: bool = True,
     ) -> dict[str, Any]:
         """T2 — ``POST /v1/sessions/{sid}/hypothesize``.
 
@@ -1311,6 +1351,8 @@ class CortexKBClient:
                     C.F_TENTATIVE_EDGE_ID: str(edge_id) if edge_id is not None else "",
                 }
             except CortexKBError as exc:
+                if not _enqueue_on_failure:
+                    raise
                 log.info("hypothesize sync failed (%s); enqueueing NDJSON", exc)
         self._enqueue(op="hypothesize", payload=ndjson_payload, idempotency_key=idem)
         return {C.F_STATUS: "queued", C.F_TENTATIVE_EDGE_ID: ""}
@@ -1474,6 +1516,8 @@ class CortexKBClient:
                 if not stripped:
                     continue
                 if time.monotonic() > deadline:
+                    # Out-of-time rows are NOT attempted this drain, so
+                    # ``attempts`` is preserved verbatim (no increment).
                     leftover_lines.append(stripped)
                     continue
                 try:
@@ -1485,13 +1529,44 @@ class CortexKBClient:
                         line=stripped[:512],
                     )
                     continue
+                attempts = int(envelope.get("attempts") or 0)
+                if attempts >= C.MAX_FLUSH_ATTEMPTS:
+                    # Belt-and-braces guard for rows enqueued before this
+                    # check existed (or by a parallel writer): a row that
+                    # already exhausted its budget is dead-lettered on
+                    # the way in without re-attempting.
+                    dead_letter += 1
+                    self._audit_record(
+                        op="drain", status="attempts_exhausted",
+                        envelope_op=str(envelope.get("op", "")),
+                        idempotency_key=str(envelope.get("idempotency_key", "")),
+                        attempts=attempts,
+                    )
+                    continue
                 outcome = self._flush_one(envelope)
                 if outcome == "ok":
                     drained += 1
                 elif outcome == "permanent":
                     dead_letter += 1
                 else:
-                    leftover_lines.append(stripped)
+                    # Transient failure → bump attempts and re-serialise
+                    # so subsequent drains can see the counter. When it
+                    # crosses the threshold the row is dead-lettered
+                    # rather than retried forever.
+                    envelope = dict(envelope)
+                    envelope["attempts"] = attempts + 1
+                    if envelope["attempts"] >= C.MAX_FLUSH_ATTEMPTS:
+                        dead_letter += 1
+                        self._audit_record(
+                            op="drain", status="attempts_exhausted",
+                            envelope_op=str(envelope.get("op", "")),
+                            idempotency_key=str(envelope.get("idempotency_key", "")),
+                            attempts=envelope["attempts"],
+                        )
+                    else:
+                        leftover_lines.append(
+                            json.dumps(envelope, sort_keys=True),
+                        )
         if leftover_lines:
             new_pending = pending.with_suffix(f".restore.{os.getpid()}")
             with new_pending.open("w", encoding="utf-8") as f:
@@ -1527,8 +1602,23 @@ class CortexKBClient:
         """Replay one NDJSON envelope as a single HTTP call.
 
         Returns ``"ok"`` / ``"transient"`` / ``"permanent"``.
-        Business / validation errors → ``permanent`` (dead-letter).
-        Transport errors → ``transient`` (retry on next drain).
+
+        Each ``op`` is dispatched to its public client method with
+        ``_enqueue_on_failure=False`` so a transient failure raises
+        :class:`CortexKBError` back to us instead of silently
+        re-enqueueing the row we just dequeued (which would cause
+        infinite duplication for permanent errors).
+
+        Classification:
+
+        * ``transport`` / ``unknown`` → ``transient`` (KB unreachable;
+          drain again next tick).
+        * ``business`` with ``code="NOT_FOUND"`` → ``transient``. The
+          dependency (a ``propose_point`` row that registers the
+          referenced canonical_id) may still be ahead of us in the
+          NDJSON queue — give the next drain a chance.
+        * ``business`` (other codes) / ``validation`` → ``permanent``
+          (dead-letter; row will never validate on the server).
         """
         op = str(envelope.get("op", ""))
         payload = envelope.get("payload", {}) or {}
@@ -1542,6 +1632,7 @@ class CortexKBClient:
                     evidence=list(payload.get("evidence") or []),
                     source=str(payload.get("source") or C.SOURCE_AGENT_OBSERVATION),
                     prefer_sync=True,
+                    _enqueue_on_failure=False,
                 )
             elif op == "hypothesize":
                 self.hypothesize(
@@ -1553,6 +1644,7 @@ class CortexKBClient:
                     attrs=payload.get("attrs") or {},
                     evidence=list(payload.get("evidence") or []),
                     prefer_sync=True,
+                    _enqueue_on_failure=False,
                 )
             elif op == "ingest_attempt":
                 self._ingest_attempt_sync(
@@ -1571,11 +1663,33 @@ class CortexKBClient:
                     evidence=list(payload.get("evidence") or []),
                     promote_authority=str(payload.get("promoted_authority") or "") or None,
                 )
+            elif op == "propose_edge":
+                self.propose_edge(
+                    from_canonical_id=str(payload.get("from_canonical_id", "")),
+                    to_canonical_id=str(payload.get("to_canonical_id", "")),
+                    edge_type=str(payload.get("edge_type", "")),
+                    relation=str(payload.get("relation", "")),
+                    authority=str(payload.get("authority") or C.AUTHORITY_EXPERIENTIAL),
+                    attrs=payload.get("attrs") or {},
+                    evidence=list(payload.get("evidence") or []),
+                    source=str(payload.get("source") or C.SOURCE_AGENT_OBSERVATION),
+                    prefer_sync=True,
+                    _enqueue_on_failure=False,
+                )
             else:
                 return "permanent"
         except CortexKBError as exc:
             log.info("flush_one %s deferred: %s", op, exc)
-            if exc.category in ("business", "validation"):
+            if exc.category == "validation":
+                return "permanent"
+            if exc.category == "business":
+                # NOT_FOUND is treated as transient because the row
+                # that registers the missing canonical_id may still be
+                # ahead of this one in the queue; the attempts counter
+                # caps how many drains before we give up and dead-letter
+                # (handled in drain_pending).
+                if (exc.code or "").upper() == "NOT_FOUND":
+                    return "transient"
                 return "permanent"
             return "transient"
         return "ok"
@@ -1605,6 +1719,10 @@ class CortexKBClient:
             attrs=attrs,
             evidence=evidence,
             prefer_sync=True,
+            # Called only from ``_flush_one`` — never re-enqueue, let
+            # the CortexKBError propagate so the caller can classify
+            # transient vs permanent.
+            _enqueue_on_failure=False,
         )
 
     def _verify_sync(

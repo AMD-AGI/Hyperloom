@@ -139,13 +139,24 @@ class JournalEntry:
             ts=str(d.get("ts", "")),
         )
 
-    def dedupe_key(self) -> tuple[str, int, str, str, str, str]:
+    def dedupe_key(self) -> tuple[str, int, str, str, str, str, str]:
         """Tuple used by :meth:`Journal.append_entry` to skip duplicates
-        on resume replay. ``variant_name`` is part of the key because
-        an explore round emits multiple entries per ``(phase, iter)``."""
+        on resume replay.
+
+        Both ``variant_name`` and ``task_id`` participate in the key:
+
+        * ``variant_name`` — an explore round emits multiple entries per
+          ``(phase, iter)`` that differ only by which variant was tried.
+        * ``task_id`` — two independent non-explore tasks scheduled in
+          the same tick (e.g. two baseline / profile / kernel_opt runs)
+          legitimately collide on ``(phase, iter, kind, change, outcome)``
+          when :func:`summarize_change` falls back to the task kind
+          string; without ``task_id`` in the key the second entry would
+          be silently dropped as a "resume replay".
+        """
         return (
             self.phase, self.iter, self.kind, self.change,
-            self.outcome, self.variant_name,
+            self.outcome, self.variant_name, self.task_id,
         )
 
 

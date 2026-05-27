@@ -349,7 +349,6 @@ def test_core_state_fields_contains_v08_new_additions():
         "phase_budget_pct",
         "cortex_session_id",
         "cortex_session_summary",
-        "pending_kb_edges",
         "warm_start_recipe",
         "warm_start_pitfalls",
         "specialist_rounds",
