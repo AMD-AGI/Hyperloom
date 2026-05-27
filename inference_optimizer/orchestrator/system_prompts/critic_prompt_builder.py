@@ -76,7 +76,7 @@ def _section_run_context(
         "the user message as a judge bundle — not in this system prompt.",
         "",
         "Every `judge_bundle` you receive carries a `phase` field",
-        "(PRELUDE / EXPLORE / KERNEL / SWEEP / CLOSE). Use the phase-",
+        "(PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE). Use the phase-",
         "specific review rules in §6 to interpret each proposal in",
         "context. Reject proposals that mutate kernel source while the",
         "run is in EXPLORE phase (rule = 'kernel-source-in-explore').",
@@ -97,8 +97,8 @@ def _section_phase_review_contract() -> list[str]:
     lines: list[str] = [
         "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
         "",
-        "Each `judge_bundle` carries a `phase` (PRELUDE / EXPLORE /",
-        "KERNEL / SWEEP / CLOSE). Phase-allowed action sets:",
+        "Each `judge_bundle` carries a `phase` (PRELUDE / FRAMEWORK_PR /",
+        "EXPLORE / KERNEL / SWEEP / CLOSE). Phase-allowed action sets:",
         "",
     ]
     for phase in PHASE_NAMES:
