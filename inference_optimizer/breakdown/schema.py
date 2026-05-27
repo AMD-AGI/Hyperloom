@@ -617,6 +617,9 @@ class SpecialistRound(TypedDict, total=False):
     proposals_kept: int
     proposals_rejected: int
     proposals_skipped: int
+    # Retired field — was populated by the T2 hypothesize hook (now
+    # gone). Kept on the schema so claw-stats-service readers that
+    # destructure specialist_runs[] don't break; always empty.
     kb_edge_ids: list[str]
     confidence_avg: float | None
     domain_breakdown: dict[str, SpecialistDomainBreakdown]
