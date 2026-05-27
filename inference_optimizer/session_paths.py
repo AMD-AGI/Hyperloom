@@ -72,15 +72,16 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # only fallback ``support`` entry.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline",
-    # ``roofline`` is the composite analysis action (profile +
-    # trace_analyze + analysis.md snapshot); pipeline_phase 'analysis'
-    # already includes it in the registry-derived set, the fallback
-    # only matters when the yaml can't be loaded. ``profile`` is no
-    # longer registered as an LLM-proposable action and is invoked
-    # only as an internal helper from RooflineExecutor (which reuses
-    # the parent roofline workspace), so it does not need a fallback
-    # entry here.
-    "roofline",
+    # Coordinator-internal analysis actions. Which one runs is chosen
+    # by ``shared_state.enable_roofline`` (``--enable-roofline`` /
+    # ``--no-enable-roofline``, default on): ``roofline`` is the
+    # composite action (profile + trace_analyze + analysis.md
+    # snapshot); ``profile`` is the lighter trace-only fallback. Both
+    # land under ``runs/<kind>/<task_id>/`` so both names need a
+    # fallback entry for the loader-failure path. LLM proposals of
+    # either name are denied by PolicyGate
+    # (``analysis_action_not_llm_proposable``).
+    "roofline", "profile",
     "sweep",
     "explore",
     "specialist",
