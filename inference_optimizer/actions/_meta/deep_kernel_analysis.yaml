@@ -6,7 +6,7 @@ expected_gain_pct: [0.0, 0.0]
 accuracy_risk: 0.0
 crash_risk: 0.05
 prerequisites:
-  - profile
+  - roofline
 requires_lanes:
   - profile_lane
 allowed_tools:

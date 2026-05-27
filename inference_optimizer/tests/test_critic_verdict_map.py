@@ -219,6 +219,10 @@ class _BareSharedState:
 
     cortex_session_id: str = "sid-test"
     save_count: int = 0
+    # ``_materialize_approved_proposal`` reads this field to gate
+    # dispatch on a pending auto-roofline task; empty string means
+    # "nothing in flight" and the gate is a no-op.
+    auto_roofline_pending_task_id: str = ""
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
@@ -746,6 +750,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
+        auto_roofline_pending_task_id: str = ""
 
         def save(self, _session_dir):
             self.save_count += 1
@@ -920,7 +925,22 @@ def _build_specialist_prompt_text(max_proposals: int) -> str:
     return system_prompt + "\n" + user_prompt
 
 
-def test_specialist_prompt_renders_default_top_5_cap():
+def test_default_specialist_max_proposals_is_three():
+    """Single-source-of-truth check: policy.py owns the cap (=3) and
+    specialist_prompt_builder re-exports it. Both must agree."""
+    from inference_optimizer.orchestrator.policy import (
+        DEFAULT_SPECIALIST_MAX_PROPOSALS,
+    )
+    from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
+        DEFAULT_SPECIALIST_MAX_PROPOSALS as PROMPT_DEFAULT,
+    )
+    assert DEFAULT_SPECIALIST_MAX_PROPOSALS == 3
+    assert PROMPT_DEFAULT == 3
+
+
+def test_specialist_prompt_renders_max_proposals_5():
+    """Caller can still override to a larger value at the prompt layer
+    (the SpecialistRunner separately clamps to the policy cap)."""
     text = _build_specialist_prompt_text(max_proposals=5)
     # Section 8 hard cap line.
     assert "AT MOST **5** entries" in text
@@ -931,11 +951,11 @@ def test_specialist_prompt_renders_default_top_5_cap():
     assert "reviews each surviving variant" in text
 
 
-def test_specialist_prompt_renders_override():
+def test_specialist_prompt_renders_default_top_3_cap():
     text = _build_specialist_prompt_text(max_proposals=3)
     assert "AT MOST **3** entries" in text
     assert "top-3" in text
-    # The default 5 must not appear when the override is set.
+    # The legacy default 5 must not appear when the cap is 3.
     assert "AT MOST **5** entries" not in text
 
 
