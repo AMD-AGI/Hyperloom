@@ -214,11 +214,32 @@ class KernelAgentToolTests(unittest.TestCase):
 
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
         self.assertIn('GEAK_REF="${GEAK_REF:-v3.2.0}"', install_text)
+        self.assertIn("ensure_rocm_torch_for_geak()", install_text)
+        self.assertIn("KERNEL_AGENT_SKIP_TORCH_GATE", install_text)
+        self.assertIn("GEAK_PIP_CONSTRAINT_FILE", install_text)
+        self.assertIn("importlib.metadata", install_text)
+        self.assertIn("printf 'torch==%s\\n'", install_text)
+        self.assertIn("command -v rocm-smi", install_text)
+        self.assertIn("rocm-smi --showid", install_text)
+        self.assertIn('die "refusing GEAK install on ROCm pod without an importable torch"', install_text)
+        self.assertIn('on ROCm pod is not a ROCm build', install_text)
+        self.assertIn(
+            "ensure_rocm_torch_for_geak\n"
+            "    _PIP_CONSTRAINT_ARGS=\"\"\n"
+            "    if [ -n \"${GEAK_PIP_CONSTRAINT_FILE:-}\" ] && [ -f \"${GEAK_PIP_CONSTRAINT_FILE}\" ]; then\n"
+            "      _PIP_CONSTRAINT_ARGS=\"--constraint ${GEAK_PIP_CONSTRAINT_FILE}\"\n"
+            "    fi\n"
+            "    run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \"${HYPERLOOM_ROOT}/geak\"",
+            install_text,
+        )
         # pip flags are factored into `_PIP_FLAGS`; assert the core flags
         # survive (prefix match allows future additions) and the install line
         # references the variable.
         self.assertIn('_PIP_FLAGS="-q --no-cache-dir', install_text)
-        self.assertIn('python3 -m pip install ${_PIP_FLAGS} "${HYPERLOOM_ROOT}/geak"', install_text)
+        self.assertIn(
+            'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${HYPERLOOM_ROOT}/geak"',
+            install_text,
+        )
         # GEAK v3.2.0 ships 4 MCP tool folders; minisweagent imports
         # profiler_mcp / cross_session_memory_mcp / automated_test_discovery
         # in addition to rag-mcp. Metrix is consumed transitively as a
@@ -247,7 +268,7 @@ class KernelAgentToolTests(unittest.TestCase):
             install_text,
         )
         self.assertIn(
-            'python3 -m pip install ${_PIP_FLAGS} \\\n'
+            'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \\\n'
             '        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"',
             install_text,
         )
