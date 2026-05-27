@@ -167,6 +167,62 @@ def test_t0_find_recipe_failure_is_non_fatal(session_dir):
     assert result.warm_present is False
 
 
+def test_t0_short_circuits_when_already_anchored(session_dir):
+    """Both ``cli._bootstrap_cortex_kb`` and
+    ``Coordinator._ensure_cortex_t0_anchored`` call ``run_t0_anchor``
+    on a normal launch — the second call MUST short-circuit instead
+    of re-issuing the backfill + 6-tier warm-start query (would burn
+    7+ KB HTTP requests per launch).
+
+    Detection: ``cortex_session_id`` + ``warm_start_ts`` both set
+    on SharedState (the first call wrote them).
+    """
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    state = _state_for_session(session_dir)
+    # Pretend first call already anchored.
+    state.cortex_session_id = "session-prior"
+    state.warm_start_ts = "2026-05-27T00:00:00Z"
+    state.save(session_dir)
+    state = SharedState.load_or_init(session_dir)
+    with respx.mock(base_url=KB_URL) as router:
+        # NO routes wired — any HTTP would 404 / RouteNotFound. The
+        # short-circuit MUST return before any KB call fires.
+        result = run_t0_anchor(
+            client, state,
+            workload="Qwen-Qwen3-8B", hw="mi300x",
+            resume=False,
+            session_dir=session_dir,
+        )
+        # Zero HTTP requests made.
+        assert router.calls.call_count == 0
+    assert result.status == "skipped_already"
+    assert result.session_id == "session-prior"
+
+
+def test_t0_resume_skips_short_circuit_and_refreshes(session_dir):
+    """``resume=True`` callers intentionally re-run the ladder so a
+    long-paused session picks up KB changes accumulated since the
+    original launch."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    state = _state_for_session(session_dir)
+    state.cortex_session_id = "session-prior"
+    state.warm_start_ts = "2026-05-27T00:00:00Z"
+    state.save(session_dir)
+    state = SharedState.load_or_init(session_dir)
+    with respx.mock(base_url=KB_URL) as router:
+        _wire_t0_routes(router)
+        result = run_t0_anchor(
+            client, state,
+            workload="Qwen-Qwen3-8B", hw="mi300x",
+            resume=True,
+            session_dir=session_dir,
+        )
+        # update_recipe backfill + at least one query (T1) fired.
+        assert router.calls.call_count >= 2
+    # Status reflects resume rather than skipped_already.
+    assert result.status in ("ok", "resumed")
+
+
 def test_t0_recipe_backfill_failure_is_non_fatal(session_dir):
     """update_recipe backfill failure must NOT crash PRELUDE."""
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
