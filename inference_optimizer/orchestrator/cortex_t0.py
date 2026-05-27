@@ -78,6 +78,7 @@ class T0Result:
     hw: str = ""
     warm_present: bool = False
     traps_present: bool = False
+    lessons_present: bool = False
     error: str = ""
 
 
@@ -210,6 +211,7 @@ def run_t0_anchor(
             hw=hw,
             warm_present=bool(getattr(shared_state, "warm_start_recipe", {})),
             traps_present=bool(getattr(shared_state, "warm_start_pitfalls", [])),
+            lessons_present=bool(getattr(shared_state, "warm_start_lessons", [])),
         )
 
     if sid:
@@ -412,6 +414,41 @@ def run_t0_anchor(
     except OSError as exc:
         log.warning("warm_start_pitfalls snapshot write failed: %s", exc)
 
+    # warm_start_lessons — non-fatal. Pulls prior KEEP-derived lessons
+    # for (model, hardware), optionally filtered by framework so a
+    # sglang session doesn't surface vLLM-only lessons (KB attrs hold
+    # the source framework on each lesson; the filter is None-tolerant
+    # so historical lessons that predate the field still surface).
+    lessons_list: list[dict[str, Any]] = []
+    try:
+        lessons_list = client.lessons(
+            model=workload,
+            hardware=hw,
+            framework=_framework or None,
+            limit=20,
+        )
+    except CortexKBError as exc:
+        log.info("lessons non-fatal failure: %s", exc)
+    try:
+        les_path = sd / "runtime" / "cortex" / ".kb_lessons.json"
+        les_path.parent.mkdir(parents=True, exist_ok=True)
+        les_path.write_text(
+            json.dumps(
+                {
+                    "workload":  workload,
+                    "hw":        hw,
+                    "framework": _framework or "",
+                    "lessons":   lessons_list,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if lessons_list:
+            shared_state.warm_start_lessons = lessons_list
+    except OSError as exc:
+        log.warning("warm_start_lessons snapshot write failed: %s", exc)
+
     if save_state:
         try:
             shared_state.save(sd)
@@ -430,6 +467,7 @@ def run_t0_anchor(
     # is still flat JSON text.
     warm_present = bool(warm_point) and warm_conf > 0.0
     traps_present = bool((traps_text or "").strip())
+    lessons_present = bool(lessons_list)
     if began_now:
         warm_label = (
             f"hit:{warm_tier}@{warm_conf:.2f}" if warm_present else
@@ -440,7 +478,8 @@ def run_t0_anchor(
             f"Cortex KB        : session_id={sid} "
             f"workload={recipe_canonical_id(workload, hw)} "
             f"(warm={warm_label}, "
-            f"traps={'hit' if traps_present else 'empty'})"
+            f"traps={'hit' if traps_present else 'empty'}, "
+            f"lessons={len(lessons_list)})"
         )
     return T0Result(
         status="ok" if began_now else "skipped_already" if not resume else "resumed",
@@ -449,6 +488,7 @@ def run_t0_anchor(
         hw=hw,
         warm_present=warm_present,
         traps_present=traps_present,
+        lessons_present=lessons_present,
     )
 
 
