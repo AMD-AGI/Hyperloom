@@ -234,6 +234,21 @@ def run_t0_anchor(
         v = getattr(shared_state, src_attr, None)
         if v not in (None, "", 0):
             _attrs[dst_key] = v
+    # EP / PP — not on SharedState; cli writes EP into ``os.environ``
+    # (multi-node path) and PP currently has no CLI surface. Read
+    # both from env so a session that pinned EP via ``--ep N`` still
+    # gets it stamped on the recipe anchor.
+    import os as _os
+    for env_var, dst_key in (("EP", "ep"), ("PP", "pp")):
+        raw = (_os.environ.get(env_var) or "").strip()
+        if not raw:
+            continue
+        try:
+            n = int(raw)
+        except ValueError:
+            continue
+        if n > 0:
+            _attrs[dst_key] = n
     try:
         client.update_recipe(
             model=workload,

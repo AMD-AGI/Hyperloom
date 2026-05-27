@@ -607,6 +607,44 @@ class CortexKBClient:
     # ==================================================================
     # Public API — read side (T0)
     # ==================================================================
+    def read_recipe_exact(
+        self, *, model: str, hardware: str,
+    ) -> dict[str, Any]:
+        """Read the current ``recipe:{model}:{hardware}`` point as a dict.
+
+        Returns the parsed KB point (``{id, canonical_id, kind,
+        attrs, authority, confidence, ...}``) or ``{}`` when the
+        anchor doesn't exist yet / the KB is disabled / the query
+        fails.
+
+        Unlike :meth:`find_recipe_with_fallback` this NEVER falls
+        back to same-family / same-class records — it's the dedicated
+        read primitive for ``update_recipe`` read-modify-write
+        callers (e.g. CLOSE-time recipe finalize) that need to see
+        the CURRENT anchor state to merge ``sessions[]`` without
+        losing historical entries.
+
+        Failures are non-fatal: the caller treats ``{}`` as "no
+        prior state" and proceeds with a fresh write.
+        """
+        if not self.enabled:
+            return {}
+        body = {
+            C.F_CANONICAL_ID:     recipe_canonical_id(model, hardware),
+            C.F_KIND:             C.KIND_RECIPE,
+            C.F_NEIGHBOR_PREVIEW: False,
+            C.F_LIMIT:            1,
+        }
+        try:
+            resp = self._post(C.PATH_QUERY_POINT, body)
+        except CortexKBError as exc:
+            log.info("read_recipe_exact failed (%s); treating as no prior", exc)
+            return {}
+        points = resp.get(C.F_POINTS) or resp.get("points") or []
+        if isinstance(points, list) and points and isinstance(points[0], dict):
+            return points[0]
+        return {}
+
     def find_recipe(self, *, workload: str, hw: str) -> str:
         """T0 — ``POST /v1/points/query`` filtering ``kind=recipe`` for
         the (workload, hw) anchor.
