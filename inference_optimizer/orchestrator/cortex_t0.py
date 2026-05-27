@@ -287,14 +287,16 @@ def run_t0_anchor(
             continue
         if n > 0:
             _attrs[dst_key] = n
+    # update_recipe → propose_point internally swallows CortexKBError
+    # and enqueues NDJSON, so an explicit ``except CortexKBError`` here
+    # would be dead code. The catch-all only matters for true programmer
+    # bugs (OSError writing pending file, attr lookups blowing up, …).
     try:
         client.update_recipe(
             model=workload,
             hardware=hw,
             extra_attrs=_attrs,
         )
-    except CortexKBError as exc:
-        log.warning("update_recipe T0 backfill failed: %s", exc)
     except Exception:  # noqa: BLE001 — defensive
         log.exception("update_recipe T0 backfill raised unexpectedly")
 
@@ -304,9 +306,16 @@ def run_t0_anchor(
     model_class = (extra_attrs or {}).get("model_class") if isinstance(extra_attrs, Mapping) else None
     framework = (extra_attrs or {}).get("framework") if isinstance(extra_attrs, Mapping) else None
     # Workload-shape filters (T2 fallback tier — same precision + tp
-    # beats same-family alone).
+    # + ep beats same-family alone). EP is env-bound (no SharedState
+    # field); we read it the same way the recipe backfill block above
+    # does so the query filter matches what we just wrote.
     _precision = str(getattr(shared_state, "precision", "") or "").strip()
     _tp = int(getattr(shared_state, "tp", 0) or 0)
+    _ep_raw = (os.environ.get("EP") or "").strip()
+    try:
+        _ep = int(_ep_raw) if _ep_raw else 0
+    except ValueError:
+        _ep = 0
     warm_point: dict[str, Any] = {}
     warm_tier: str = "miss"
     warm_conf: float = 0.0
@@ -318,6 +327,7 @@ def run_t0_anchor(
             framework=str(framework) if framework else None,
             precision=_precision or None,
             tp=_tp if _tp > 0 else None,
+            ep=_ep if _ep > 0 else None,
         )
     except CortexKBError as exc:
         log.info("find_recipe_with_fallback non-fatal failure: %s", exc)
