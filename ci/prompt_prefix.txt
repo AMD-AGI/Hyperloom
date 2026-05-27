@@ -11,7 +11,23 @@ If clone fails: ABORT, write ci_metrics.json with gain_pct=0.0 +
 actions_taken=["aborted: source checkout failed"], do NOT silently switch to
 the shared wekafs tree.
 
-  export RESULT_DIR="${RESULT_DIR:-/workspace/hyperloom/}"
+  # When Claw set USER_DATA_PATH into a wekafs path (Claw-style pods do
+  # this so V2 cli's session_dir + every install.sh side-effect lands on
+  # persistent storage), mirror RESULT_DIR to it. Otherwise V2 cli writes
+  # to wekafs USER_DATA_PATH/<model>/<ts>/ while the agent-written
+  # contract files end up in a SEPARATE sandbox-ephemeral RESULT_DIR, and
+  # the post-pipeline `cp -a $RESULT_DIR ...` step can't reach the V2 tree.
+  case "${USER_DATA_PATH:-}" in
+    /hyperloom/*|/wekafs/*)
+      : "${RESULT_DIR:=$USER_DATA_PATH}"
+      echo "[CI_PATH] aligned RESULT_DIR=$RESULT_DIR with USER_DATA_PATH (already persistent in wekafs)"
+      ;;
+    *)
+      : "${RESULT_DIR:=/workspace/hyperloom/}"
+      echo "[CI_PATH] RESULT_DIR=$RESULT_DIR is sandbox-ephemeral; PERSIST cp will mirror it later"
+      ;;
+  esac
+  export RESULT_DIR
   export HYPERLOOM_SOURCE_REPO="${HYPERLOOM_SOURCE_REPO:-https://github.com/AMD-AGI/Hyperloom.git}"
   export HYPERLOOM_SOURCE_REF="${HYPERLOOM_SOURCE_REF:-main}"
   # Clone OUTSIDE $RESULT_DIR — otherwise the ~100MB shallow checkout gets
@@ -130,82 +146,137 @@ CRITICAL — vLLM Forbidden Flags (server will crash with "unrecognized argument
 CRITICAL — Result Directory:
 Before running any skill script (run_baseline.sh, run_sweep.sh, etc.), export:
   export NFS_ROOT=/wekafs
-  export RESULT_DIR=/workspace/hyperloom/
+  # RESULT_DIR was selected for you above (see [CI_PATH] log line). DO NOT
+  # hard-code /workspace/hyperloom/ here — when Claw set USER_DATA_PATH to
+  # a wekafs path, RESULT_DIR was aligned to it so V2 cli's session_dir
+  # and your ci_metrics.json / optimization_report.md / session_breakdown.json
+  # all land in the SAME persistent tree. Just trust the exported value.
 Otherwise baseline/sweep writes fail silently and the job will hang.
 
 CRITICAL — POST-PIPELINE PERSIST (paired with Required Artifacts above —
 together they form a single contract; either both succeed or the run is
 considered Failed):
 
-$RESULT_DIR (=/workspace/hyperloom/) lives inside the sandbox container's
-ephemeral storage. When SaFE marks the task Failed (or times out, or
-artifact upload fails — observed `uploaded=0/3287, failed=3287`), the pod
-gets cleaned up and EVERYTHING under /workspace is lost. The Hyperloom CI
-NFS Stage B fallback can only recover data that was previously copied to
-the persistent wekafs mount under /hyperloom/users/<your-safe-uuid>/.
+$RESULT_DIR may be either (a) the sandbox-ephemeral /workspace/hyperloom/
+or (b) the wekafs-backed $USER_DATA_PATH that Claw mounted. The fresh-clone
+snippet picked one for you and printed a `[CI_PATH]` line; trust that. In
+case (a) we MUST mirror everything to /hyperloom/users/<uid>/ before the
+pod gets cleaned up; in case (b) the files are ALREADY persistent and a
+cp -a would just be a wekafs→wekafs waste, so we only verify in place.
 
 This is non-optional. As the LAST step of the run (after the three
 Required Artifacts have been written), execute the snippet below and
-verify that `[PERSIST OK]` appears in the output. If you skip this, the
+verify that `[PERSIST OK]` appears in the output. If you skip it, the
 run will be reported as Failed regardless of what numbers you produced.
 
   mkdir -p "$RESULT_DIR"
-  UID_HEX="$(ls /hyperloom/users 2>/dev/null | head -1)"
-  if [ -z "$UID_HEX" ]; then
-    echo "[PERSIST FAIL] /hyperloom/users/<uid>/ not mounted in this sandbox — cannot persist to wekafs" >&2
-    # Do NOT proceed silently — emit a directory listing so the artifact
-    # upload (when it works) at least has a chance to grab the files.
-    ls -la "$RESULT_DIR/"
-  else
-    MODEL_TAG="$(echo "${DISPLAYNAME:-task}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/-*$//')"
-    TASK_TAG="${SAFE_TASK_ID:-$(date +%Y%m%d%H%M%S)}"
-    PERSIST_DIR="/hyperloom/users/$UID_HEX/${MODEL_TAG}-${TASK_TAG##*-}-opt"
-    mkdir -p "$PERSIST_DIR"
-    # Copy the FULL result tree — not just the three key artifacts — so
-    # logs, kernel candidates/results, sweep outputs, traces, manifest.json,
-    # state.json, every phase*/ dir, and any future audit files survive
-    # sandbox cleanup. This catches:
-    #   * $RESULT_DIR/ci_metrics.json (Required at root)
-    #   * $RESULT_DIR/optimization_report.md (Required at root)
-    #   * $RESULT_DIR/<model>/<ts>/session_breakdown.json (V2 cli.py writes
-    #     this to <session_dir>/, i.e. one level deeper than RESULT_DIR)
-    #   * $RESULT_DIR/hyperloom_source_commit.txt + source_commits.json (audit)
-    # Do NOT silence stderr — surfacing copy errors is what lets us debug
-    # "0 files persisted" outcomes.
-    if cp -a "$RESULT_DIR/." "$PERSIST_DIR/"; then
-      echo "[PERSIST] cp -a $RESULT_DIR/. -> $PERSIST_DIR/ succeeded"
-    else
-      echo "[PERSIST FAIL] cp -a returned non-zero exit; partial state may exist in $PERSIST_DIR/" >&2
-    fi
-    # Verify each Required Artifact appears SOMEWHERE under PERSIST_DIR.
-    # We use `find` because session_breakdown.json is nested under
-    # <model>/<ts>/ (V2 cli.py writes it inside the session dir, not at
-    # RESULT_DIR root). If the file isn't found at all, that's a real
-    # contract violation and the CI summary should route the run to
-    # manual review.
-    #
-    # NB: if V2 cli.py was launched with $USER_DATA_PATH already pointing
-    # into /wekafs/users/<uid>/<sess>/ (Claw-style pod), the files are
-    # ALREADY persistent at that path — the find below will still report
-    # them missing under $PERSIST_DIR, but the operator can recover them
-    # from $USER_DATA_PATH directly. We log $USER_DATA_PATH for that case.
+  case "$RESULT_DIR" in
+    /hyperloom/*|/wekafs/*)
+      # Case (b): RESULT_DIR == USER_DATA_PATH on wekafs. Skip cp -a;
+      # just verify the three contract files exist somewhere under it.
+      # CI's NFS Stage B fallback scans this exact path when artifact
+      # upload fails, so no extra mirroring is needed.
+      echo "[PERSIST] RESULT_DIR=$RESULT_DIR is already wekafs-backed (Claw mode); skipping cp -a"
+      PERSIST_SCAN_DIR="$RESULT_DIR"
+      ;;
+    *)
+      # Case (a): RESULT_DIR is sandbox-ephemeral. Mirror to wekafs.
+      UID_HEX="$(ls /hyperloom/users 2>/dev/null | head -1)"
+      if [ -z "$UID_HEX" ]; then
+        echo "[PERSIST FAIL] /hyperloom/users/<uid>/ not mounted in this sandbox — cannot persist to wekafs" >&2
+        ls -la "$RESULT_DIR/"
+        PERSIST_SCAN_DIR="$RESULT_DIR"
+      else
+        MODEL_TAG="$(echo "${DISPLAYNAME:-task}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/-*$//')"
+        TASK_TAG="${SAFE_TASK_ID:-$(date +%Y%m%d%H%M%S)}"
+        PERSIST_DIR="/hyperloom/users/$UID_HEX/${MODEL_TAG}-${TASK_TAG##*-}-opt"
+        mkdir -p "$PERSIST_DIR"
+        # Copy the FULL result tree — not just the three key artifacts — so
+        # logs, kernel candidates/results, sweep outputs, traces, manifest.json,
+        # state.json, every phase*/ dir, and any future audit files survive
+        # sandbox cleanup. This catches:
+        #   * $RESULT_DIR/ci_metrics.json (agent-written, flat top-level)
+        #   * $RESULT_DIR/optimization_report.md (agent-written)
+        #   * $RESULT_DIR/session_breakdown.json (agent-written placeholder
+        #     summary; V2 cli writes the AUTHORITATIVE full version at
+        #     $USER_DATA_PATH/<model>/<ts>/session_breakdown.json which we
+        #     pull in below as session_breakdown_v2.json)
+        #   * $RESULT_DIR/hyperloom_source_commit.txt + source_commits.json
+        if cp -a "$RESULT_DIR/." "$PERSIST_DIR/"; then
+          echo "[PERSIST] cp -a $RESULT_DIR/. -> $PERSIST_DIR/ succeeded"
+        else
+          echo "[PERSIST FAIL] cp -a returned non-zero exit; partial state may exist in $PERSIST_DIR/" >&2
+        fi
+        PERSIST_SCAN_DIR="$PERSIST_DIR"
+      fi
+      ;;
+  esac
+  # V2 cli writes its OWN session_breakdown.json (with the full populated
+  # `phases[]` array, 30-50 KB) under
+  #   $USER_DATA_PATH/<model>/<ts>/session_breakdown.json
+  # (see optimize.log line "inference_optimizer.breakdown.exporter [INFO]
+  # session_breakdown: wrote …/session_breakdown.json (NNNNN bytes)").
+  # The PERSIST cp above only moved $RESULT_DIR, which contains the agent-
+  # written compact summary (~1 KB, phases[] empty placeholders). Pull the
+  # V2-written authoritative version too so the GHA artifact zip contains
+  # phase-level detail. Search USER_DATA_PATH first; fall back to the
+  # standard wekafs mount root.
+  V2_SESSION_ROOTS=()
+  [ -n "${USER_DATA_PATH:-}" ] && V2_SESSION_ROOTS+=("$USER_DATA_PATH")
+  [ -n "${UID_HEX:-}" ] && V2_SESSION_ROOTS+=("/hyperloom/users/$UID_HEX")
+  for _root in "${V2_SESSION_ROOTS[@]}"; do
+    [ -d "$_root" ] || continue
+    # V2 cli session dir = <root>/<model>/<ts>/, we want the most recent one
+    # whose session_breakdown.json is non-trivial (> 4 KB rules out the
+    # agent's placeholder). -mmin -720 (12h) guards against picking up an
+    # unrelated old session from a previous run on the same uid.
+    _v2_bd="$(find "$_root" -mindepth 3 -maxdepth 3 -name session_breakdown.json -size +4k -mmin -720 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)"
+    [ -z "$_v2_bd" ] && continue
+    _v2_sess="$(dirname "$_v2_bd")"
+    echo "[PERSIST V2] found populated breakdown: $_v2_bd ($(stat -c %s "$_v2_bd") bytes)"
+    # Don't clobber agent's session_breakdown.json — keep both: rename V2's
+    # version so post-CI tooling can prefer it but agent's contract file is
+    # still at the canonical path.
+    cp "$_v2_bd" "$PERSIST_SCAN_DIR/session_breakdown_v2.json" 2>/dev/null \
+      && echo "[PERSIST V2] copied to $PERSIST_SCAN_DIR/session_breakdown_v2.json"
+    # Also pull manifest.json + state.json + any phase* subdirs if V2
+    # produced them; these only exist when V2 reached its finalize step.
+    for _f in manifest.json state.json optimizer_runs.json; do
+      [ -f "$_v2_sess/$_f" ] && cp "$_v2_sess/$_f" "$PERSIST_SCAN_DIR/$_f" 2>/dev/null \
+        && echo "[PERSIST V2] copied $_f"
+    done
+    # Mirror the full V2 session dir under a sub-folder for forensic depth.
+    mkdir -p "$PERSIST_SCAN_DIR/v2_session"
+    cp -a "$_v2_sess/." "$PERSIST_SCAN_DIR/v2_session/" 2>/dev/null \
+      && echo "[PERSIST V2] mirrored full V2 session dir -> $PERSIST_SCAN_DIR/v2_session/"
+    break
+  done
+  unset _root _v2_bd _v2_sess _f V2_SESSION_ROOTS
+
+  # Verify each Required Artifact appears SOMEWHERE under PERSIST_SCAN_DIR.
+  # We use `find` because session_breakdown.json is nested under
+  # <model>/<ts>/ (V2 cli writes it inside the session dir, not at
+  # RESULT_DIR root). If the file isn't found at all, that's a real
+  # contract violation and the CI summary will route the run to manual
+  # review.
+  if [ -n "${PERSIST_SCAN_DIR:-}" ]; then
     PERSIST_MISSING=""
     for f in ci_metrics.json optimization_report.md session_breakdown.json; do
-      hit="$(find "$PERSIST_DIR" -name "$f" -type f \! -size 0 2>/dev/null | head -1)"
+      hit="$(find "$PERSIST_SCAN_DIR" -name "$f" -type f \! -size 0 2>/dev/null | head -1)"
       if [ -n "$hit" ]; then
         echo "[PERSIST] ok: $f -> $hit"
       else
-        echo "[PERSIST FAIL] missing required artifact: $f (searched $PERSIST_DIR)" >&2
+        echo "[PERSIST FAIL] missing required artifact: $f (searched $PERSIST_SCAN_DIR)" >&2
         PERSIST_MISSING="${PERSIST_MISSING} $f"
       fi
     done
     if [ -z "$PERSIST_MISSING" ]; then
-      echo "[PERSIST OK] all three required artifacts present under $PERSIST_DIR/"
+      echo "[PERSIST OK] all three required artifacts present under $PERSIST_SCAN_DIR/"
     else
       echo "[PERSIST FAIL] missing required artifact(s):$PERSIST_MISSING" >&2
-      echo "[PERSIST] note: USER_DATA_PATH=${USER_DATA_PATH:-<unset>} — if Claw set it to a wekafs path, the files may already be persistent there." >&2
+      echo "[PERSIST] note: USER_DATA_PATH=${USER_DATA_PATH:-<unset>} RESULT_DIR=$RESULT_DIR — check both for stragglers." >&2
     fi
-    ls -la "$PERSIST_DIR/"
+    ls -la "$PERSIST_SCAN_DIR/"
   fi
   ls -la "$RESULT_DIR/"
 
