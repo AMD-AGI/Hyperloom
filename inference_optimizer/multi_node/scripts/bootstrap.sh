@@ -44,60 +44,49 @@ if [ ! -x "$HYPERLOOM_VENV/bin/python3" ]; then
     exit 1
 fi
 
-# --- 2. Install OOB CLI + claude/codex CLIs. These are required by
-#        IR-7/IR-7b for kernel optimization. They are NOT in the base image.
-#        Real installation is delegated to install_oob.sh / install_cli.sh
-#        if the upstream skill ships them; otherwise this is a no-op stub
-#        and the verify subcommand will catch the missing binary.
-if [ -x "$HYPERLOOM_VENV/bin/pip" ]; then
-    echo "bootstrap.sh: pip-installing oob (best effort)..."
-    "$HYPERLOOM_VENV/bin/pip" install --quiet --upgrade oob 2>>"$LOG_DIR/bootstrap_oob.log" || \
-        echo "bootstrap.sh: WARN — oob pip install failed; verify will surface this." >&2
-fi
+# --- 2. (removed) OOB CLI install. The multi-node kernel-agent path uses
+#        ``multi_node kernel-bench`` (NodeAffinity-hard-pinned to the head
+#        pod via ``kernel_bench_multinode.py``); the head pod runs the
+#        bench script directly, no OOB CLI is invoked inside the pod.
+#        ``oob_submit.run_via_ray`` (the legacy single-node ray.remote
+#        entrypoint) is not the path LLMs are prompted to take on
+#        ``--nodes >= 2``. See ``multi_node/SKILL.md`` and
+#        ``kernel-agent/tools/kernel_optimization.py:1244-1283``.
 
-# --- 2b. Install OOB CLI from WekaFS source (the framework image lacks it).
-OOB_SRC="${OOB_SRC:-/wekafs/hyperloom/OOB}"
-if [ -d "$OOB_SRC" ] && [ -x "$HYPERLOOM_VENV/bin/pip" ]; then
-    echo "bootstrap.sh: installing OOB from $OOB_SRC"
-    if [ -f "$OOB_SRC/requirements.txt" ]; then
-        "$HYPERLOOM_VENV/bin/pip" install --quiet --no-cache-dir -r "$OOB_SRC/requirements.txt" 2>>"$LOG_DIR/bootstrap_oob.log" || \
-            echo "bootstrap.sh: WARN — OOB requirements install failed (see $LOG_DIR/bootstrap_oob.log)" >&2
-    fi
-    "$HYPERLOOM_VENV/bin/pip" install --quiet --no-cache-dir "$OOB_SRC" 2>>"$LOG_DIR/bootstrap_oob.log" || \
-        echo "bootstrap.sh: WARN — OOB pip install from $OOB_SRC failed (see $LOG_DIR/bootstrap_oob.log)" >&2
-fi
-
-# --- 2c. Install claude + codex CLIs via npm (best-effort; require node).
-# Bring up Node.js if missing (use a portable WekaFS prebuilt or apt).
+# --- 2c. Install claude + codex CLIs via npm (best-effort; require node>=18).
+# Ubuntu 22.04's default apt nodejs is v12 (too old: @anthropic-ai/claude-code
+# requires node>=18 and uses syntax v12 cannot parse). Mirror sandbox-side
+# `kernel-agent/scripts/install.sh:ensure_node` and pull node 20 from
+# NodeSource. `$NODE_TARBALL_PATH` is an env-driven escape hatch (agent can
+# pass `--rayjob-extra-env NODE_TARBALL_PATH=<path-to-node-vXX-linux-x64.tar.xz>`
+# when the pod has no public-network access to deb.nodesource.com).
 NODE_OK=0
 if command -v node >/dev/null 2>&1; then
     if node -e 'process.exit(parseInt(process.versions.node.split(".")[0],10) >= 18 ? 0 : 1)' 2>/dev/null; then
         NODE_OK=1
     fi
 fi
-if [ "$NODE_OK" -eq 0 ]; then
-    NODE_TARBALL_CANDIDATES=(
-        "/wekafs/weilei/claw-dev/node-prebuilt/node-v22.18.0-linux-x64.tar.xz"
-        "/opt/yarn-v1.22.22/../node-v22-linux-x64.tar.xz"
-    )
-    INSTALLED_NODE=0
-    for cand in "${NODE_TARBALL_CANDIDATES[@]}"; do
-        if [ -f "$cand" ]; then
-            echo "bootstrap.sh: extracting node prebuilt from $cand"
-            mkdir -p /opt/node && tar -xJf "$cand" -C /opt/node --strip-components=1
-            ln -sfn /opt/node/bin/node /usr/local/bin/node
-            ln -sfn /opt/node/bin/npm /usr/local/bin/npm
-            ln -sfn /opt/node/bin/npx /usr/local/bin/npx
-            INSTALLED_NODE=1; break
-        fi
-    done
-    if [ "$INSTALLED_NODE" -eq 0 ]; then
-        # Fallback: apt-get (works on Debian-based images with network).
-        if command -v apt-get >/dev/null 2>&1; then
-            echo "bootstrap.sh: installing nodejs via apt-get"
-            apt-get update -qq 2>>"$LOG_DIR/bootstrap_apt.log" || true
-            apt-get install -y --no-install-recommends nodejs npm 2>>"$LOG_DIR/bootstrap_apt.log" ||                 echo "bootstrap.sh: WARN — apt nodejs install failed (see $LOG_DIR/bootstrap_apt.log)" >&2
-        fi
+if [ "$NODE_OK" -eq 0 ] && [ -n "${NODE_TARBALL_PATH:-}" ] && [ -f "$NODE_TARBALL_PATH" ]; then
+    echo "bootstrap.sh: extracting node prebuilt from \$NODE_TARBALL_PATH ($NODE_TARBALL_PATH)"
+    mkdir -p /opt/node && tar -xJf "$NODE_TARBALL_PATH" -C /opt/node --strip-components=1
+    for b in node npm npx; do ln -sfn "/opt/node/bin/$b" "/usr/local/bin/$b"; done
+    NODE_OK=1
+fi
+if [ "$NODE_OK" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "bootstrap.sh: installing curl/ca-certificates for NodeSource setup"
+        apt-get update -qq 2>>"$LOG_DIR/bootstrap_apt.log" || true
+        apt-get -y install ca-certificates curl gnupg 2>>"$LOG_DIR/bootstrap_apt.log" >/dev/null || true
+    fi
+    echo "bootstrap.sh: installing Node.js 20 from NodeSource (claude-code requires node>=18)"
+    apt-get -y purge libnode-dev libnode72 nodejs nodejs-doc npm 2>>"$LOG_DIR/bootstrap_apt.log" >/dev/null || true
+    NS_SCRIPT=/tmp/nodesource_setup_20.x
+    if curl -fsSL https://deb.nodesource.com/setup_20.x -o "$NS_SCRIPT" 2>>"$LOG_DIR/bootstrap_apt.log" \
+        && bash "$NS_SCRIPT" 2>>"$LOG_DIR/bootstrap_apt.log" >/dev/null \
+        && apt-get -y install nodejs 2>>"$LOG_DIR/bootstrap_apt.log" >/dev/null; then
+        NODE_OK=1
+    else
+        echo "bootstrap.sh: WARN — NodeSource setup failed; claude/codex CLIs will be missing (see $LOG_DIR/bootstrap_apt.log)" >&2
     fi
 fi
 
