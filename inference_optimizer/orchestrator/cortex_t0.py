@@ -173,6 +173,35 @@ def run_t0_anchor(
     workload = (workload or "").strip() or "unknown_model"
     hw = (hw or "").strip() or "unknown_gpu"
 
+    # Short-circuit when this session has already been anchored in
+    # the current process. Both cli._bootstrap_cortex_kb (canonical
+    # entry) and Coordinator._ensure_cortex_t0_anchored (SDK fallback)
+    # call us in sequence on a normal fresh launch; the second call
+    # should NOT re-issue the recipe-anchor write + warm-start ladder
+    # (those are 7+ KB HTTP requests in the worst case). Detect prior
+    # anchoring via ``warm_start_ts`` — written below on the first
+    # successful pass, present on resume from state.json, absent on a
+    # cold start.
+    #
+    # Resume callers (``resume=True``) intentionally bypass the
+    # short-circuit so a refreshed warm-start surface is fetched
+    # (the live KB may have grown new recipes since the original run).
+    if (
+        sid
+        and not resume
+        and (getattr(shared_state, "warm_start_ts", "") or "").strip()
+    ):
+        shared_state.cortex_session_id = sid
+        emit(f"Cortex KB        : already anchored session_id={sid}")
+        return T0Result(
+            status="skipped_already",
+            session_id=sid,
+            workload=workload,
+            hw=hw,
+            warm_present=bool(getattr(shared_state, "warm_start_recipe", {})),
+            traps_present=bool(getattr(shared_state, "warm_start_pitfalls", [])),
+        )
+
     if sid:
         shared_state.cortex_session_id = sid
         if resume:
