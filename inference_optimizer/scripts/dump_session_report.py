@@ -10,7 +10,7 @@ Usage::
 
     # With LLM-polished prose (OpenAI-compatible endpoint):
     HYPERLOOM_REPORT_LLM_BACKEND=openai \\
-    OPENAI_BASE_URL=http://127.0.0.1:4002/v1 \\
+    OPENAI_BASE_URL=https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1 \\
     OPENAI_API_KEY=... \\
     python -m inference_optimizer.scripts.dump_session_report \\
         --input  /wekafs/.../session_breakdown.json \\
