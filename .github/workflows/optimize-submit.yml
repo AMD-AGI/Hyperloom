@@ -464,7 +464,22 @@ jobs:
           if [ -n "$EP" ]; then ARGS+=(--endpoint "$EP"); fi
           if [ -n "$TK" ]; then ARGS+=(--token "$TK"); fi
           echo "publishing $BD (${BD_SIZE} bytes); endpoint=${EP:-<script default = dev>}"
+          # Capture exit code (set -e off briefly) so we can record per-task
+          # publish status into task-artifacts/ for the summarize job to count.
+          set +e
           python3 ci/post_perf_runs.py "${ARGS[@]}"
+          PERF_RC=$?
+          set -e
+          # Marker file the summarize job globs to count "X/N sent to
+          # perf-leaderboard" for the Teams webhook footer.
+          PERF_DIR=$(dirname "$BD")
+          if [ "$PERF_RC" -eq 0 ]; then
+            echo OK > "$PERF_DIR/perf_publish_marker.txt"
+            echo "[perf-publish] OK"
+          else
+            echo "FAIL rc=$PERF_RC" > "$PERF_DIR/perf_publish_marker.txt"
+            echo "[perf-publish] FAIL (rc=$PERF_RC) — continue-on-error keeps the matrix job green"
+          fi
 
       - name: Upload per-model manifest
         if: always()
@@ -604,6 +619,37 @@ jobs:
           retention-days: 45
           if-no-files-found: warn
 
+      - name: Count perf-leaderboard publish status
+        # Walk the merged task-artifacts/ tree for the per-matrix-job
+        # `perf_publish_marker.txt` files written by the publish step.
+        # Each marker is exactly one line: "OK" on success or "FAIL rc=<n>"
+        # otherwise. Counts feed the Teams webhook footer so reviewers can
+        # see at a glance how many models made it into perf-leaderboard
+        # without digging into individual matrix job logs.
+        if: always()
+        id: perf_publish_count
+        run: |
+          set -euo pipefail
+          ROOT="${{ github.workspace }}/task-artifacts-merged"
+          if [ ! -d "$ROOT" ]; then
+            echo "no merged task-artifacts/ dir; skip count"
+            echo "ok=0"    >> "$GITHUB_OUTPUT"
+            echo "total=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # find returns the absolute paths of every marker; -size +0c filters
+          # out the rare zero-byte file (would happen if cat into the file failed).
+          mapfile -t MARKERS < <(find "$ROOT" -name perf_publish_marker.txt -size +0c 2>/dev/null)
+          TOTAL=${#MARKERS[@]}
+          OK=0
+          for m in "${MARKERS[@]:-}"; do
+            [ -z "$m" ] && continue
+            if [ "$(head -c 2 "$m")" = "OK" ]; then OK=$((OK+1)); fi
+          done
+          echo "perf-publish markers found: ok=$OK total=$TOTAL"
+          echo "ok=$OK"        >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL"  >> "$GITHUB_OUTPUT"
+
       - name: Send webhook (completion notification)
         # Push the ranked summary into the Teams webhook. Format MUST be a
         # Power Automate Workflows Adaptive Card payload — the legacy Teams
@@ -619,6 +665,11 @@ jobs:
           DASHBOARD_URL:  ${{ secrets.HYPERLOOM_DASHBOARD_URL }}
           INPUT_MODELS:   ${{ github.event.inputs.models }}
           INPUT_HF_TOP:   ${{ github.event.inputs.hf_top }}
+          # Perf-leaderboard publish counts (from the previous step) so
+          # send_webhook.py can render "X/N sent to perf-leaderboard" in
+          # the card footer.
+          PERF_PUBLISH_OK:    ${{ steps.perf_publish_count.outputs.ok }}
+          PERF_PUBLISH_TOTAL: ${{ steps.perf_publish_count.outputs.total }}
         run: |
           # Power Automate / Teams reliably renders Adaptive Card Table when
           # each card is small. send_webhook.py splits the summary into
