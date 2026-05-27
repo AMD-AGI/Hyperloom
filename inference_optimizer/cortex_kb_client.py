@@ -41,7 +41,6 @@ from .session_paths import (
     cortex_audit_jsonl,
     cortex_dir,
     cortex_pending_ndjson,
-    cortex_sid_file,
 )
 
 
@@ -158,29 +157,6 @@ def model_family(model_name: str) -> str:
             if s.startswith(prefix) or prefix in s:
                 return family
     return ""
-
-
-def experiment_canonical_id(cortex_session_id: str, iter_index: int) -> str:
-    """``exp:{session_id}:{iter:04d}`` — KB-registered ``experiment`` kind.
-
-    Replaces the legacy ``opt.session-{sid}.proposal-{msg_id}`` name.
-    ``iter_index`` is the monotonic ``session_iter_index`` Coordinator
-    maintains on :class:`SharedState`; per-variant ids append
-    ``.variant-{name}`` (KB pass-through; the parent ``exp:`` point is
-    the registered anchor).
-    """
-    sid = (cortex_session_id or "0").strip() or "0"
-    return f"exp:{sid}:{int(iter_index):04d}"
-
-
-def attempt_canonical_id(cortex_session_id: str, task_id: str) -> str:
-    """``attempt.session-{sid}.task-{task_id}`` — unregistered KB kind,
-    pass-through. Kept for cross-session reachability; KB does no schema
-    validation since ``attempt_node`` is not in the registered set.
-    """
-    sid = (cortex_session_id or "unknown").strip() or "unknown"
-    tid = (task_id or "unknown").strip() or "unknown"
-    return f"attempt.session-{sid}.task-{tid}"
 
 
 def _hash16(payload: str) -> str:
@@ -482,10 +458,6 @@ class CortexKBClient:
     def audit_path(self) -> Path:
         return cortex_audit_jsonl(self.session_dir)
 
-    @property
-    def sid_path(self) -> Path:
-        return cortex_sid_file(self.session_dir)
-
     def close(self) -> None:
         if self._transport is not None:
             self._transport.close()
@@ -552,22 +524,9 @@ class CortexKBClient:
                 # fsync is best-effort: tmpfs / certain wekafs mounts
                 # reject it but the write is still visible.
                 pass
-        extras: dict[str, Any] = {}
-        if op in ("verify", "ingest_attempt"):
-            outcome = str(payload.get("outcome") or "")
-            if outcome:
-                extras["payload_outcome"] = outcome
-            if op == "verify":
-                edge = str(payload.get("edge") or "")
-                if edge:
-                    extras["payload_edge"] = edge
-                promoted = str(payload.get("promoted_authority") or "")
-                if promoted:
-                    extras["payload_promote"] = promoted
         self._audit_record(
             op="enqueue", status="ok",
             envelope_op=op, idempotency_key=idempotency_key,
-            **extras,
         )
 
     # ------------------------------------------------------------------
@@ -648,61 +607,6 @@ class CortexKBClient:
     # ==================================================================
     # Public API — read side (T0)
     # ==================================================================
-    def session_begin(
-        self,
-        *,
-        workload: str,
-        hw: str,
-        image_digest: str = "",
-        stack_fingerprint: Mapping[str, str] | None = None,
-        extra_attrs: Mapping[str, Any] | None = None,
-        goal: str = C.GOAL_FIND_RECOMMENDATION,
-        thinking_style: str | None = None,
-        initiator: str | None = None,
-    ) -> str:
-        """T0 — ``POST /v1/sessions/begin``.
-
-        Synchronous; failures bubble as :class:`CortexKBError` so the cli
-        layer can fail-fast unless ``--degraded-kb`` was passed. Caller
-        is responsible for writing the returned sid into SharedState +
-        ``.kb_sid``.
-        """
-        if not self.enabled:
-            self._audit_record(op="session_begin", status="skip_disabled")
-            return ""
-        attrs: dict[str, Any] = {
-            "workload":     workload,
-            "hw":           hw,
-            "image_digest": image_digest or "unknown",
-            "stack_fingerprint": dict(stack_fingerprint or {}),
-        }
-        if extra_attrs:
-            attrs.update(extra_attrs)
-        body: dict[str, Any] = {
-            C.F_GOAL:      goal,
-            C.F_INITIATOR: initiator or self.initiator,
-            C.F_ATTRS:     self._smoke_attrs(attrs),
-        }
-        if thinking_style:
-            body[C.F_THINKING_STYLE] = thinking_style
-        resp = self._post(C.PATH_BEGIN, body)
-        sid_val = resp.get(C.F_SESSION_ID)
-        if sid_val is None or sid_val == "":
-            raise CortexKBError(
-                f"session begin returned no session_id; resp={resp!r}",
-                category="unknown",
-            )
-        sid = str(sid_val)
-        try:
-            self.sid_path.write_text(sid + "\n", encoding="utf-8")
-        except OSError as exc:
-            log.warning("failed to persist .kb_sid: %s", exc)
-        self._audit_record(
-            op="session_begin", status="ok",
-            session_id=sid, workload=workload, hw=hw,
-        )
-        return sid
-
     def find_recipe(self, *, workload: str, hw: str) -> str:
         """T0 — ``POST /v1/points/query`` filtering ``kind=recipe`` for
         the (workload, hw) anchor.
@@ -1293,193 +1197,8 @@ class CortexKBClient:
             prefer_sync=prefer_sync,
         )
 
-    def hypothesize(
-        self,
-        *,
-        sid: str,
-        from_canonical: str,
-        to_canonical: str,
-        edge_type: str = C.EDGE_HYPOTHETICAL,
-        reason: str = "",
-        attrs: Mapping[str, Any] | None = None,
-        evidence: list[str] | None = None,
-        idempotency_key: str | None = None,
-        prefer_sync: bool = True,
-        _enqueue_on_failure: bool = True,
-    ) -> dict[str, Any]:
-        """T2 — ``POST /v1/sessions/{sid}/hypothesize``.
-
-        Resolves ``from_canonical`` / ``to_canonical`` to int point ids
-        first, then POSTs. ``tentative_edge_id`` in the response is a
-        trace id (kb_traces row), **not** a real kb_edges row — the
-        edge is materialised by verify(outcome=confirmed).
-
-        Returns ``{"status": ..., "tentative_edge_id": "<int>"}`` on
-        sync success; on failure enqueues NDJSON and returns
-        ``{"status": "queued", "tentative_edge_id": ""}``.
-        """
-        if not self.enabled or not sid:
-            return {C.F_STATUS: "skip_disabled", C.F_TENTATIVE_EDGE_ID: ""}
-        idem = idempotency_key or f"hypothesize:{sid}:{from_canonical}->{to_canonical}"
-        ndjson_payload = {
-            "sid":      sid,
-            "from":     from_canonical,
-            "to":       to_canonical,
-            "type":     edge_type,
-            "reason":   reason,
-            "attrs":    dict(attrs or {}),
-            "evidence": list(evidence or []),
-        }
-        if prefer_sync:
-            try:
-                from_id = self._resolve_point_id(from_canonical)
-                to_id = self._resolve_point_id(to_canonical)
-                body: dict[str, Any] = {
-                    C.F_FROM_POINT: from_id,
-                    C.F_TO_POINT:   to_id,
-                    C.F_EDGE_TYPE:  edge_type,
-                    C.F_REASON:     reason or "",
-                }
-                if attrs:
-                    body[C.F_ATTRS] = self._smoke_attrs(attrs)
-                resp = self._post(
-                    C.PATH_HYPOTHESIZE.format(session_id=sid), body,
-                )
-                edge_id = resp.get(C.F_TENTATIVE_EDGE_ID)
-                return {
-                    C.F_STATUS:            "ok",
-                    C.F_TENTATIVE_EDGE_ID: str(edge_id) if edge_id is not None else "",
-                }
-            except CortexKBError as exc:
-                if not _enqueue_on_failure:
-                    raise
-                log.info("hypothesize sync failed (%s); enqueueing NDJSON", exc)
-        self._enqueue(op="hypothesize", payload=ndjson_payload, idempotency_key=idem)
-        return {C.F_STATUS: "queued", C.F_TENTATIVE_EDGE_ID: ""}
-
-    def ingest_attempt(
-        self,
-        *,
-        sid: str,
-        iter_id: int,
-        outcome: str,
-        metrics: Mapping[str, Any],
-        plan_edge: str = "",
-        evidence: list[str] | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """T3 — record an attempt as a propose_point with
-        ``kind=attempt_node`` (unregistered KB kind; pass-through).
-
-        Async per always enqueues NDJSON; the flusher
-        (or T4 drain) replays as a single ``propose_point`` HTTP call.
-
-        ``outcome ∈ {"PASS", "FAIL", "PARTIAL"}``.
-        """
-        if not self.enabled or not sid:
-            return {C.F_STATUS: "skip_disabled"}
-        idem = idempotency_key or f"ingest_attempt:{sid}:{iter_id}"
-        payload = {
-            "sid":       sid,
-            "iter":      int(iter_id),
-            "outcome":   outcome,
-            "metrics":   dict(metrics or {}),
-            "plan_edge": plan_edge,
-            "evidence":  list(evidence or []),
-        }
-        self._enqueue(op="ingest_attempt", payload=payload, idempotency_key=idem)
-        return {C.F_STATUS: "queued"}
-
-    def verify(
-        self,
-        *,
-        sid: str,
-        edge_id: str,
-        outcome: str,
-        evidence: list[str] | None = None,
-        promote_authority: str | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """T3 — ``POST /v1/sessions/{sid}/verify``.
-
-        Async per KB_design §3.6; always enqueues. ``outcome ∈
-        {"confirmed", "refuted"}``. ``promote_authority="EXPERIENTIAL"``
-        is the standard promotion for KEEP outcomes.
-
-        Note: the ``edge_id`` here is the ``tentative_edge_id`` returned
-        by :meth:`hypothesize` (trace id); the real ``promoted_edge_id``
-        only exists after verify(confirmed) materialises the edge.
-        """
-        if not self.enabled or not sid or not edge_id:
-            return {C.F_STATUS: "skip_disabled"}
-        idem = idempotency_key or f"verify:{sid}:{edge_id}"
-        payload = {
-            "sid":                sid,
-            "edge":               edge_id,
-            "outcome":            outcome,
-            "evidence":           list(evidence or []),
-            "promoted_authority": promote_authority or "",
-        }
-        self._enqueue(op="verify", payload=payload, idempotency_key=idem)
-        return {C.F_STATUS: "queued"}
-
-    def session_commit(self, sid: str) -> dict[str, Any]:
-        """T4 — ``POST /v1/sessions/{sid}/commit``.
-
-        Synchronous. Caller must :meth:`drain_pending` first so all
-        queued T2/T3 rows land before commit closes the session.
-        Returns parsed commit summary; ``derived_summary_id`` is
-        currently always ``None`` (KB H1 wires it that way; M5 connects).
-        """
-        if not self.enabled or not sid:
-            return {C.F_STATUS: "skip_disabled"}
-        resp = self._post(C.PATH_COMMIT.format(session_id=sid), {})
-        promoted = [
-            str(eid) for eid in (resp.get(C.F_PROMOTED_EDGES) or [])
-        ]
-        derived = resp.get(C.F_DERIVED_SUMMARY_ID)
-        summary = {
-            C.F_STATUS:             str(resp.get(C.F_STATUS) or C.STATUS_COMMITTED),
-            C.F_PROMOTED_EDGES:     promoted,
-            C.F_DERIVED_SUMMARY_ID: str(derived) if derived is not None else "",
-            "raw":                  json.dumps(resp, sort_keys=True),
-        }
-        self._audit_record(
-            op="session_commit", status=summary[C.F_STATUS],
-            session_id=sid, promoted_count=len(promoted),
-        )
-        return summary
-
-    def session_abort(self, sid: str, *, reason: str = "") -> dict[str, Any]:
-        """``POST /v1/sessions/{sid}/abort`` — fail-fast escape hatch.
-
-        Called from cli failure paths (T0 succeeded but PRELUDE crashed)
-        so the KB-side session doesn't linger.
-
-        ``reason`` is recorded in audit but the new HTTP schema's body
-        is empty (``trace_preserved`` is recorded in response, always
-        ``True`` per kb_traces being append-only).
-        """
-        if not self.enabled or not sid:
-            return {C.F_STATUS: "skip_disabled"}
-        try:
-            resp = self._post(C.PATH_ABORT.format(session_id=sid), {})
-            self._audit_record(
-                op="session_abort", status="ok", session_id=sid, reason=reason,
-            )
-            return {
-                C.F_STATUS:           str(resp.get(C.F_STATUS) or "aborted"),
-                C.F_TRACE_PRESERVED:  bool(resp.get(C.F_TRACE_PRESERVED, True)),
-            }
-        except CortexKBError as exc:
-            self._audit_record(
-                op="session_abort", status="error",
-                session_id=sid, error=str(exc)[:512],
-            )
-            return {C.F_STATUS: "abort_failed", "error": str(exc)}
-
     # ==================================================================
-    # NDJSON drain (T4 + flusher)
+    # NDJSON drain (background flusher + CLOSE-time drain)
     # ==================================================================
     def drain_pending(self, *, timeout_sec: float = 60.0) -> dict[str, Any]:
         """Process every row in ``.kb_pending.ndjson`` synchronously.
@@ -1634,35 +1353,6 @@ class CortexKBClient:
                     prefer_sync=True,
                     _enqueue_on_failure=False,
                 )
-            elif op == "hypothesize":
-                self.hypothesize(
-                    sid=str(payload.get("sid", "")),
-                    from_canonical=str(payload.get("from", "")),
-                    to_canonical=str(payload.get("to", "")),
-                    edge_type=str(payload.get("type") or C.EDGE_HYPOTHETICAL),
-                    reason=str(payload.get("reason", "")),
-                    attrs=payload.get("attrs") or {},
-                    evidence=list(payload.get("evidence") or []),
-                    prefer_sync=True,
-                    _enqueue_on_failure=False,
-                )
-            elif op == "ingest_attempt":
-                self._ingest_attempt_sync(
-                    sid=str(payload.get("sid", "")),
-                    iter_id=int(payload.get("iter") or 0),
-                    outcome=str(payload.get("outcome") or "PARTIAL"),
-                    metrics=payload.get("metrics") or {},
-                    plan_edge=str(payload.get("plan_edge") or ""),
-                    evidence=list(payload.get("evidence") or []),
-                )
-            elif op == "verify":
-                self._verify_sync(
-                    sid=str(payload.get("sid", "")),
-                    edge_id=str(payload.get("edge", "")),
-                    outcome=str(payload.get("outcome") or C.OUTCOME_CONFIRMED),
-                    evidence=list(payload.get("evidence") or []),
-                    promote_authority=str(payload.get("promoted_authority") or "") or None,
-                )
             elif op == "propose_edge":
                 self.propose_edge(
                     from_canonical_id=str(payload.get("from_canonical_id", "")),
@@ -1694,68 +1384,10 @@ class CortexKBClient:
             return "transient"
         return "ok"
 
-    def _ingest_attempt_sync(
-        self, *, sid: str, iter_id: int, outcome: str,
-        metrics: Mapping[str, Any], plan_edge: str,
-        evidence: list[str],
-    ) -> None:
-        """Flush path for ``ingest_attempt`` — propose an
-        ``attempt_node`` point carrying the metrics in ``attrs``.
-
-        KB has no dedicated ingest-attempt endpoint; ``attempt_node`` is
-        an unregistered kind so KB does pass-through validation.
-        """
-        attrs = {
-            "outcome":   outcome,
-            "iter":      int(iter_id),
-            "metrics":   dict(metrics or {}),
-            "plan_edge": plan_edge,
-            "session":   sid,
-        }
-        self.propose_point(
-            canonical_id=attempt_canonical_id(sid, str(iter_id)),
-            kind=C.KIND_ATTEMPT,
-            authority=C.AUTHORITY_EXPERIENTIAL,
-            attrs=attrs,
-            evidence=evidence,
-            prefer_sync=True,
-            # Called only from ``_flush_one`` — never re-enqueue, let
-            # the CortexKBError propagate so the caller can classify
-            # transient vs permanent.
-            _enqueue_on_failure=False,
-        )
-
-    def _verify_sync(
-        self, *, sid: str, edge_id: str, outcome: str,
-        evidence: list[str], promote_authority: str | None,
-    ) -> None:
-        """Flush path for ``verify`` — ``POST /v1/sessions/{sid}/verify``.
-
-        ``edge_id`` is the ``tentative_edge_id`` (int as string) that
-        ``hypothesize`` returned; promoted_authority defaults to
-        ``EXPERIENTIAL`` per schema.
-        """
-        try:
-            ted = int(edge_id)
-        except (TypeError, ValueError) as exc:
-            raise CortexKBError(
-                f"verify: tentative_edge_id {edge_id!r} not an int",
-                category="validation",
-            ) from exc
-        body: dict[str, Any] = {
-            C.F_TENTATIVE_EDGE_ID:  ted,
-            C.F_OUTCOME:            outcome,
-            C.F_EVIDENCE_REFS:      self._evidence_refs(evidence),
-            C.F_PROMOTED_AUTHORITY: promote_authority or C.AUTHORITY_EXPERIENTIAL,
-        }
-        self._post(C.PATH_VERIFY.format(session_id=sid), body)
-
 
 __all__ = [
     "CortexKBClient",
     "CortexKBError",
-    "attempt_canonical_id",
-    "experiment_canonical_id",
     "lesson_canonical_id",
     "parse_kb_error",
     "pitfall_canonical_id",
