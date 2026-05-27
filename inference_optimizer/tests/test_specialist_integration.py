@@ -175,6 +175,9 @@ async def test_register_executors_registers_specialist_kind(tmp_path: Path):
 
     class _StubCoord:
         sub = _StubSub()
+        # RooflineExecutor refuses ``shared_state is None``; any truthy
+        # stand-in is enough since registration just stores the ref.
+        shared_state = object()
 
     coord = _StubCoord()
     args = _build_args(research_lane_capacity=1)
@@ -211,6 +214,9 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
 
     class _StubCoord:
         sub = _StubSub()
+        # RooflineExecutor refuses ``shared_state is None``; any truthy
+        # stand-in is enough since registration just stores the ref.
+        shared_state = object()
 
     coord = _StubCoord()
     # Pass specialist_executor=None to simulate cli's gating when
