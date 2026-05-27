@@ -77,7 +77,7 @@ class T0Result:
     workload: str = ""
     hw: str = ""
     warm_present: bool = False
-    traps_present: bool = False
+    pitfalls_present: bool = False
     lessons_present: bool = False
     error: str = ""
 
@@ -210,7 +210,7 @@ def run_t0_anchor(
             workload=workload,
             hw=hw,
             warm_present=bool(getattr(shared_state, "warm_start_recipe", {})),
-            traps_present=bool(getattr(shared_state, "warm_start_pitfalls", [])),
+            pitfalls_present=bool(getattr(shared_state, "warm_start_pitfalls", [])),
             lessons_present=bool(getattr(shared_state, "warm_start_lessons", [])),
         )
 
@@ -393,24 +393,40 @@ def run_t0_anchor(
     except OSError as exc:
         log.warning("warm_start snapshot write failed: %s", exc)
 
-    # warm_start_pitfalls — non-fatal.
-    traps_text = ""
+    # warm_start_pitfalls — non-fatal. Mirror of warm_start_lessons:
+    # query kind=pitfall by (model, hardware, framework) so the
+    # specialist prompt's "do NOT repeat" section actually surfaces
+    # the right pitfalls. The legacy ``traps(symptom=...)`` API was
+    # broken (filtered on an ``attrs.symptom`` field that
+    # ``propose_pitfall`` never wrote) — see the pitfall reader-
+    # symmetry fix.
+    pitfalls_list: list[dict[str, Any]] = []
     try:
-        traps_text = client.traps(symptom=f"{workload} {hw}")
+        pitfalls_list = client.pitfalls(
+            model=workload,
+            hardware=hw,
+            framework=_framework or None,
+            limit=20,
+        )
     except CortexKBError as exc:
-        log.info("traps non-fatal failure: %s", exc)
+        log.info("pitfalls non-fatal failure: %s", exc)
     try:
         pit_path = sd / "runtime" / "cortex" / ".kb_pitfalls.json"
         pit_path.parent.mkdir(parents=True, exist_ok=True)
         pit_path.write_text(
             json.dumps(
-                {"workload": workload, "hw": hw, "raw": traps_text},
+                {
+                    "workload":  workload,
+                    "hw":        hw,
+                    "framework": _framework or "",
+                    "pitfalls":  pitfalls_list,
+                },
                 indent=2,
             ),
             encoding="utf-8",
         )
-        if traps_text.strip():
-            shared_state.warm_start_pitfalls = [{"raw": traps_text}]
+        if pitfalls_list:
+            shared_state.warm_start_pitfalls = pitfalls_list
     except OSError as exc:
         log.warning("warm_start_pitfalls snapshot write failed: %s", exc)
 
@@ -466,7 +482,7 @@ def run_t0_anchor(
     # traps_present keeps the legacy semantics because the traps payload
     # is still flat JSON text.
     warm_present = bool(warm_point) and warm_conf > 0.0
-    traps_present = bool((traps_text or "").strip())
+    pitfalls_present = bool(pitfalls_list)
     lessons_present = bool(lessons_list)
     if began_now:
         warm_label = (
@@ -478,7 +494,7 @@ def run_t0_anchor(
             f"Cortex KB        : session_id={sid} "
             f"workload={recipe_canonical_id(workload, hw)} "
             f"(warm={warm_label}, "
-            f"traps={'hit' if traps_present else 'empty'}, "
+            f"pitfalls={len(pitfalls_list)}, "
             f"lessons={len(lessons_list)})"
         )
     return T0Result(
@@ -487,7 +503,7 @@ def run_t0_anchor(
         workload=workload,
         hw=hw,
         warm_present=warm_present,
-        traps_present=traps_present,
+        pitfalls_present=pitfalls_present,
         lessons_present=lessons_present,
     )
 

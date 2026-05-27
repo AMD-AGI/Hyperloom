@@ -421,6 +421,66 @@ def test_t0_populates_warm_start_lessons_from_kb(session_dir):
     assert payload["framework"] == "sglang"
 
 
+def test_t0_populates_warm_start_pitfalls_from_kb(session_dir):
+    """T0 must call ``client.pitfalls()`` (NOT the legacy
+    ``traps(symptom=...)`` API which filtered on a non-existent
+    ``attrs.symptom`` field) and stash KB point dicts on
+    ``SharedState.warm_start_pitfalls`` + write ``.kb_pitfalls.json``."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    state = _state_for_session(session_dir)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
+            }),
+        )
+        def _query_handler(request):
+            body = json.loads(request.content)
+            if body.get("kind") == "pitfall":
+                return httpx.Response(200, json={
+                    "points": [
+                        {"id": 21, "canonical_id": "pitfall:abc",
+                         "kind": "pitfall",
+                         "attrs": {
+                             "description": "VLLM_ROCM_USE_AITER_FP4BMM=1 → crash",
+                             "severity": "crash",
+                         },
+                         "confidence": 0.7},
+                        {"id": 22, "canonical_id": "pitfall:def",
+                         "kind": "pitfall",
+                         "attrs": {
+                             "description": "--max-num-seqs 1024 on MoE → regress",
+                             "severity": "regress",
+                         },
+                         "confidence": 0.85},
+                    ],
+                })
+            return httpx.Response(200, json={"points": []})
+        router.post("/v1/points/query").mock(side_effect=_query_handler)
+        result = run_t0_anchor(
+            client, state,
+            workload="Qwen-Qwen3-8B", hw="mi300x",
+            extra_attrs={"framework": "sglang", "model_class": "moe_mla"},
+            session_dir=session_dir,
+        )
+    assert result.pitfalls_present is True
+    assert len(state.warm_start_pitfalls) == 2
+    # Sorted by confidence desc.
+    descs = [
+        (p.get("attrs") or {}).get("description", "")
+        for p in state.warm_start_pitfalls
+    ]
+    assert "regress" in descs[0]
+    assert "crash" in descs[1]
+    # Local snapshot file.
+    from inference_optimizer.session_paths import cortex_dir
+    snap = cortex_dir(session_dir) / ".kb_pitfalls.json"
+    assert snap.exists()
+    payload = json.loads(snap.read_text(encoding="utf-8"))
+    assert len(payload["pitfalls"]) == 2
+    assert payload["framework"] == "sglang"
+
+
 def test_t0_recipe_backfill_failure_is_non_fatal(session_dir):
     """update_recipe backfill failure must NOT crash PRELUDE."""
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)

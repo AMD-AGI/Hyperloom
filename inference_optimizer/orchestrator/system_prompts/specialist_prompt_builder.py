@@ -487,8 +487,8 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     return (
         not inp.kb_subgraph
         and not inp.warm_start_recipe
-        and not inp.warm_start_pitfalls
         and not inp.warm_start_lessons
+        and not inp.warm_start_pitfalls
         and not inp.pr_feed
     )
 
@@ -658,21 +658,13 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
 # ---------------------------------------------------------------------------
 def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 5. WARM-START RECIPE SUMMARY", ""]
-    has_recipe = bool(inp.warm_start_recipe)
-    has_pitfalls = bool(inp.warm_start_pitfalls)
-    if not has_recipe and not has_pitfalls:
+    if not inp.warm_start_recipe:
         rows.append(_NONE_PLACEHOLDER)
         return rows
-    if has_recipe:
-        rows.append("**find-recipe result:**")
-        rows.append("```json")
-        rows.append(json.dumps(inp.warm_start_recipe, sort_keys=True, indent=2))
-        rows.append("```")
-    if has_pitfalls:
-        rows.append("")
-        rows.append("**Known pitfalls (do NOT repeat):**")
-        for p in inp.warm_start_pitfalls:
-            rows.append(f"- {json.dumps(p, sort_keys=True)}")
+    rows.append("**find-recipe result:**")
+    rows.append("```json")
+    rows.append(json.dumps(inp.warm_start_recipe, sort_keys=True, indent=2))
+    rows.append("```")
     return rows
 
 
@@ -715,6 +707,49 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         if impact:
             rows.append(f"    impact: {impact}")
     if len(rows) == 2:  # only the header + blank line, all lessons filtered out
+        rows.append(_NONE_PLACEHOLDER)
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Section 5c — Known pitfalls (anti-priors from prior REVERTs)
+# ---------------------------------------------------------------------------
+def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
+    """Render KB ``kind=pitfall`` points that previous REVERT / crash /
+    OOM decisions on this (model, hardware) wrote — the negative
+    counterpart of § 5b lessons.
+
+    Same compact rendering as lessons: ``description`` (one actionable
+    anti-pattern) + ``severity`` tag, with optional ``conf`` / ``src``
+    metadata. The "do NOT repeat" framing is critical — the specialist
+    must understand these are *forbidden* paths, not suggestions.
+
+    Replaces the legacy ``raw`` JSON-dump rendering that the old
+    ``traps(symptom=...)`` reader produced (which the LLM couldn't
+    reliably parse).
+    """
+    rows = ["## 5c. KNOWN PITFALLS (do NOT repeat — prior REVERTs)", ""]
+    if not inp.warm_start_pitfalls:
+        rows.append(_NONE_PLACEHOLDER)
+        return rows
+    for point in inp.warm_start_pitfalls:
+        attrs = (point or {}).get("attrs") or {}
+        description = str(attrs.get("description") or "").strip()
+        if not description:
+            continue
+        severity = str(attrs.get("severity") or "").strip()
+        conf = point.get("confidence")
+        meta_bits: list[str] = []
+        if severity:
+            meta_bits.append(f"severity={severity}")
+        if isinstance(conf, (int, float)) and conf > 0:
+            meta_bits.append(f"conf={float(conf):.2f}")
+        src_sid = str(attrs.get("source_session_id") or "").strip()
+        if src_sid:
+            meta_bits.append(f"src={src_sid}")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        rows.append(f"- **{description}**{meta}")
+    if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
         rows.append(_NONE_PLACEHOLDER)
     return rows
 
@@ -1013,8 +1048,9 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_roofline_evidence(inp),  # 3: § 4a
         _section_recipe(inp),             # 4: § 5
         _section_lessons(inp),            # 5: § 5b
-        _section_pr_feed(inp),            # 6: § 6
-        _section_source_hint(inp),        # 7: § 7
+        _section_pitfalls(inp),           # 6: § 5c
+        _section_pr_feed(inp),            # 7: § 6
+        _section_source_hint(inp),        # 8: § 7
     ]
     # F2-3: framework_pr_scout candidates ride right after PR feed so
     # the specialist sees PR Monitor warm cache + the fa-fetched
@@ -1023,9 +1059,9 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     # specialists never see this section.
     fa_candidates_section = _section_framework_pr_candidates(inp)
     if fa_candidates_section:
-        # Insert after the PR feed section (index 6 — the list above
-        # shows PR feed at index 6 after § 5b was added).
-        user_sections.insert(7, fa_candidates_section)
+        # Insert after the PR feed section (index 7 — the list above
+        # shows PR feed at index 7 after § 5b + § 5c were added).
+        user_sections.insert(8, fa_candidates_section)
     if inp.notes:
         user_sections.append([
             "## 10. NOTES FROM ORCHESTRATION",
