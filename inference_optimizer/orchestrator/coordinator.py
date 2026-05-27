@@ -715,15 +715,26 @@ class Coordinator:
         We treat a proposal as **undecided** when there is no
         ``review_verdict`` event addressed to it AND no ``decision`` event
         materializing it (`kind == "approved_proposal"`).
+
+        We also rebuild :attr:`_proposals_awaiting_roofline` from
+        ``proposal_materialize_blocked`` observations whose proposal_msg_id
+        never paired with a later ``approved_proposal`` decision — these
+        are Critic-approved proposals that were deferred by the
+        analysis gate at process shutdown and would otherwise be lost
+        (the in-memory deque does not survive a restart, and the
+        verdict already marks them as ``decided`` so they get dropped
+        from ``pending_proposals``).
         """
         # 1. Collect all proposal events.
         proposal_msgs = await self.bus.tail(topic="proposal", n=10_000)
         # 2. Collect verdicts and approved decisions, keyed by proposal_msg_id.
         verdicts = await self.bus.tail(topic="review_verdict", n=10_000)
         decisions = await self.bus.tail(topic="decision", n=10_000)
+        observations = await self.bus.tail(topic="observation", n=10_000)
 
         decided_ids: set[str] = set()
         verdict_by_target: dict[str, str] = {}
+        approved_verdict_ids: set[str] = set()
         for v in verdicts:
             target = v.payload.get("target_proposal_msg_id")
             if not target:
@@ -741,20 +752,47 @@ class Coordinator:
                 summary = "needs_review"
             verdict_by_target[target] = summary
             decided_ids.add(target)
+            # Track "approved" verdicts so the deferred-queue rebuild
+            # below can sanity-check it only acts on Critic-approved
+            # proposals (reject verdicts are correctly final).
+            sl = str(summary).strip().lower()
+            if sl in ("approve", "approved") or sl.startswith("approve") or (
+                isinstance(v.payload.get("verdict_map"), dict)
+                and any(
+                    str(vv).strip().lower().startswith("approve")
+                    for vv in (v.payload.get("verdict_map") or {}).values()
+                )
+            ):
+                approved_verdict_ids.add(target)
+
+        drained_proposal_ids: set[str] = set()
         for d in decisions:
             if d.payload.get("kind") == "approved_proposal":
-                # The coordinator stores task_id, not the original proposal_msg_id,
-                # in the decision; tasks created via materialization have
-                # idempotency_key f"approved-{proposal_msg_id}" — we can
-                # back-trace through the tasks table if needed, but for
-                # pending-proposal rebuild it's enough that the verdict event
-                # already marked the proposal as decided.
-                pass
+                pid = d.payload.get("proposal_msg_id") or ""
+                if pid:
+                    drained_proposal_ids.add(pid)
+
+        # Latest-wins map of materialize-blocked observations keyed by
+        # proposal_msg_id. ``bus.tail`` returns rows DESC by seq so
+        # the FIRST occurrence of a given proposal_msg_id is the
+        # newest — use ``setdefault`` to keep that one and ignore
+        # older blocked observations (which would otherwise overwrite
+        # the freshest ``approved_variant_names`` + ``kb_edge_ids``).
+        blocked_by_pid: dict[str, dict[str, Any]] = {}
+        for o in observations:
+            pl = o.payload or {}
+            if pl.get("kind") != "proposal_materialize_blocked":
+                continue
+            pid = pl.get("proposal_msg_id") or ""
+            if pid:
+                blocked_by_pid.setdefault(pid, pl)
 
         # 3. Rebuild PendingProposal entries for undecided proposals.
         rebuilt = 0
         self.state.pending_proposals.clear()
+        proposal_by_id: dict[str, Any] = {}
         for p in proposal_msgs:
+            proposal_by_id[p.msg_id] = p
             if p.msg_id in decided_ids:
                 # Optional: also remember the verdict so the Coordinator can
                 # surface it if asked (e.g. /status command).
@@ -769,13 +807,60 @@ class Coordinator:
             )
             rebuilt += 1
 
+        # 4. Rebuild the deferred-materialize queue. A proposal belongs
+        # here when it was Critic-approved, surfaced a
+        # ``proposal_materialize_blocked`` observation, and has no
+        # subsequent ``approved_proposal`` decision proving the drain
+        # already dispatched it. Without this rebuild the in-memory
+        # deque is empty on restart and the original Critic verdict
+        # would be permanently silenced (the proposal_msg_id is in
+        # ``decided_ids`` so step 3 above also drops it from
+        # ``pending_proposals``).
+        self._proposals_awaiting_roofline = []
+        deferred_restored = 0
+        for pid, blocked_payload in blocked_by_pid.items():
+            if pid in drained_proposal_ids:
+                continue
+            if pid not in approved_verdict_ids:
+                # Defensive: a blocked-without-approve combination
+                # should not occur (materialize only runs after the
+                # Critic approves) but if it does, skip rather than
+                # re-dispatch a never-approved proposal.
+                continue
+            src_msg = proposal_by_id.get(pid)
+            if src_msg is None:
+                continue
+            payload = src_msg.payload or {}
+            pending = PendingProposal(
+                proposal_msg_id=src_msg.msg_id,
+                from_agent=src_msg.from_agent,
+                action_name=str(payload.get("action_name", "")),
+                predicted_gain_pct=float(payload.get("predicted_gain_pct", 0.0)),
+                payload=dict(payload),
+            )
+            kb_edges = blocked_payload.get("kb_edge_ids")
+            if isinstance(kb_edges, dict):
+                pending.kb_edge_ids = {
+                    str(k): str(v) for k, v in kb_edges.items() if v
+                }
+            approved_names_list = blocked_payload.get("approved_variant_names")
+            approved_set: set[str] | None
+            if isinstance(approved_names_list, list):
+                approved_set = {str(n) for n in approved_names_list}
+            else:
+                approved_set = None
+            self._proposals_awaiting_roofline.append((pending, approved_set))
+            deferred_restored += 1
+
         self._resumed_from["rebuilt"] = True
         self._resumed_from["pending_restored"] = rebuilt
+        self._resumed_from["deferred_restored"] = deferred_restored
         return {
             "is_resume": self._resumed_from["is_resume"],
             "event_count": self._resumed_from["event_count"],
             "state_json_present": self._resumed_from["state_json_present"],
             "pending_restored": rebuilt,
+            "deferred_restored": deferred_restored,
             "verdicts_seen": len(verdicts),
         }
 
@@ -2210,6 +2295,15 @@ class Coordinator:
         """
         if self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]:
             await self.replay_for_resume()
+            # Replay rebuilt ``_proposals_awaiting_roofline`` from
+            # ``proposal_materialize_blocked`` observations. If the
+            # analysis task already completed during shutdown, the
+            # normal drain hook in ``_promote_to_shared_state`` will
+            # not fire on restart, so kick the drain explicitly. It
+            # re-checks the roofline gate per proposal and re-queues
+            # any that are still blocked.
+            if self._proposals_awaiting_roofline:
+                await self._drain_proposals_awaiting_roofline()
         for _ in range(n):
             self.shared_state.increment_tick()
             for name in self._tick_roles:
@@ -2283,6 +2377,12 @@ class Coordinator:
 
         if self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]:
             await self.replay_for_resume()
+            # Same drain reasoning as ``tick(...)`` — see the comment
+            # there. Without this, a session that restarted while
+            # analysis was complete but deferred proposals were still
+            # queued would never re-dispatch them.
+            if self._proposals_awaiting_roofline:
+                await self._drain_proposals_awaiting_roofline()
 
         tick_n = 0
         stop_reason = ""
@@ -4531,6 +4631,16 @@ class Coordinator:
                 self._proposals_awaiting_roofline.append(
                     (pending, approved_variant_names),
                 )
+                # Resume contract: this observation carries everything
+                # ``replay_for_resume`` needs to rebuild the deferred
+                # queue after a restart (proposal_msg_id keys the
+                # PendingProposal in the bus's proposal-topic events;
+                # approved_variant_names + kb_edge_ids preserve the
+                # per-variant filter the Critic produced and the
+                # Cortex T2 edge stamping). A subsequent
+                # ``approved_proposal`` decision carrying the same
+                # proposal_msg_id signals that the drain has dispatched
+                # the proposal so resume should skip it.
                 await self._record_observation(
                     "coordinator", "observation",
                     {
@@ -4546,6 +4656,12 @@ class Coordinator:
                         "deferred_queue_depth": len(
                             self._proposals_awaiting_roofline,
                         ),
+                        "approved_variant_names": (
+                            sorted(approved_variant_names)
+                            if approved_variant_names is not None
+                            else None
+                        ),
+                        "kb_edge_ids": dict(pending.kb_edge_ids or {}),
                     },
                 )
                 return
@@ -4677,10 +4793,17 @@ class Coordinator:
                 },
             )
             return
+        # ``proposal_msg_id`` is the resume contract for the deferred
+        # queue (see ``replay_for_resume``): a ``proposal_materialize_blocked``
+        # observation paired with a later ``approved_proposal`` decision
+        # for the same proposal_msg_id is interpreted as "drained
+        # successfully" and skipped on restart. Without this field
+        # the link was task_id-only, which replay cannot reverse.
         await self.bus.append_and_seq(Message.new(
             "coordinator", "*", "decision",
             {"kind": "approved_proposal", "task_id": task.task_id,
-             "action_name": pending.action_name, "from_agent": pending.from_agent},
+             "action_name": pending.action_name, "from_agent": pending.from_agent,
+             "proposal_msg_id": pending.proposal_msg_id},
         ))
 
     # ------------------------------------------------------------------
@@ -5136,7 +5259,7 @@ class Coordinator:
         sub_kind = str(params.get("sub_kind") or "").strip()
         if (
             sub_kind == "framework_pr_scout"
-            and bool(getattr(state, "framework_agent_enabled", False))
+            and bool(getattr(state, "framework_phase_enabled", False))
             and "pr_candidates" not in params
         ):
             from .framework_agent_client import fetch_pr_candidates
