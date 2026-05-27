@@ -47,7 +47,7 @@ benchmark:
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  timeout_seconds: 2400        # 40 min hard cap
+  timeout_seconds: 7200        # 120 min hard cap (Qwen-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 needs ~85 min incl. server boot)
 
   profiler:
     torch_profiler:
