@@ -183,23 +183,57 @@ def run_t0_anchor(
             timespec="seconds",
         )
 
-    # Backfill model-family / model-class / framework attrs onto the
-    # recipe anchor so PR-A10 same-family fallback lookups can succeed
-    # for future sessions. Best-effort: the first KEEP / CLOSE
-    # update_recipe will create the point on demand anyway, so this
-    # backfill is purely a "make warm-start queryable earlier" hint.
+    # Backfill metadata attrs onto the recipe anchor so PR-A10
+    # fallback queries can match it earlier. Best-effort: the first
+    # KEEP / CLOSE update_recipe will create the point on demand
+    # anyway, so this backfill just pre-stamps the searchable tags.
+    #
+    # Tags written here:
+    #   * model / hardware / model_family            — always
+    #   * model_class / framework                    — from extra_attrs (cli)
+    #   * framework_version                          — from stack_fingerprint
+    #   * precision / tp / conc / isl / osl /        — from SharedState (cli)
+    #     max_model_len
     from ..cortex_kb_client import model_family as _model_family
-    _model_class = (extra_attrs or {}).get("model_class") if isinstance(extra_attrs, Mapping) else ""
-    _framework = (extra_attrs or {}).get("framework") if isinstance(extra_attrs, Mapping) else ""
-    _attrs = {
+    _extra: Mapping[str, Any] = extra_attrs if isinstance(extra_attrs, Mapping) else {}
+    _model_class = str(_extra.get("model_class") or "").strip()
+    _framework = str(_extra.get("framework") or "").strip()
+    _attrs: dict[str, Any] = {
         "model":        workload,
         "hardware":     hw,
         "model_family": _model_family(workload),
     }
     if _model_class:
-        _attrs["model_class"] = str(_model_class)
+        _attrs["model_class"] = _model_class
     if _framework:
-        _attrs["framework"] = str(_framework)
+        _attrs["framework"] = _framework
+    # framework_version — lift from stack_fingerprint
+    # (``{rocm, sglang, vllm, aiter}`` versions, populated by manifest).
+    fp: Mapping[str, Any] = stack_fingerprint if isinstance(stack_fingerprint, Mapping) else {}
+    if _framework in ("sglang", "vllm"):
+        version = str(fp.get(_framework) or "").strip()
+        if version and version != "unknown":
+            _attrs["framework_version"] = version
+    rocm_v = str(fp.get("rocm") or "").strip()
+    if rocm_v and rocm_v != "unknown":
+        _attrs["rocm_version"] = rocm_v
+    aiter_v = str(fp.get("aiter") or "").strip()
+    if aiter_v and aiter_v != "unknown":
+        _attrs["aiter_version"] = aiter_v
+    # Workload-shape tags — read from SharedState (cli already wrote
+    # them via _seed_shared_state). Skipping empty / zero values so
+    # KB query filter doesn't match "tp=0" placeholders.
+    for src_attr, dst_key in (
+        ("precision",     "precision"),
+        ("tp",            "tp"),
+        ("conc",          "conc"),
+        ("isl",           "isl"),
+        ("osl",           "osl"),
+        ("max_model_len", "max_model_len"),
+    ):
+        v = getattr(shared_state, src_attr, None)
+        if v not in (None, "", 0):
+            _attrs[dst_key] = v
     try:
         client.update_recipe(
             model=workload,
@@ -216,6 +250,10 @@ def run_t0_anchor(
     # still pick up a same-family / same-class / same-hw prior.
     model_class = (extra_attrs or {}).get("model_class") if isinstance(extra_attrs, Mapping) else None
     framework = (extra_attrs or {}).get("framework") if isinstance(extra_attrs, Mapping) else None
+    # Workload-shape filters (T2 fallback tier — same precision + tp
+    # beats same-family alone).
+    _precision = str(getattr(shared_state, "precision", "") or "").strip()
+    _tp = int(getattr(shared_state, "tp", 0) or 0)
     warm_point: dict[str, Any] = {}
     warm_tier: str = "miss"
     warm_conf: float = 0.0
@@ -225,6 +263,8 @@ def run_t0_anchor(
             hw=hw,
             model_class=str(model_class) if model_class else None,
             framework=str(framework) if framework else None,
+            precision=_precision or None,
+            tp=_tp if _tp > 0 else None,
         )
     except CortexKBError as exc:
         log.info("find_recipe_with_fallback non-fatal failure: %s", exc)
