@@ -766,8 +766,18 @@ class SharedState:
     # without re-parsing. Empty dict on first-ever session for a
     # (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    # T0 snapshot of ``traps`` output (known pitfalls list). Same
-    # injection-deferral story as ``warm_start_recipe``.
+    # T0 snapshot of ``pitfalls`` output (negative priors from prior
+    # REVERT / crash / OOM decisions on this (model, hardware),
+    # optionally filtered by framework). List of KB point dicts
+    # (each with ``{canonical_id, kind, attrs, confidence, ...}``),
+    # mirroring ``warm_start_lessons``. Consumed by the specialist
+    # prompt's "§ 5c. KNOWN PITFALLS" section.
+    #
+    # Schema change history: pre-fix this field held
+    # ``[{"raw": <json_string>}]`` because the broken
+    # ``traps(symptom=...)`` reader returned an opaque JSON blob.
+    # Resume from such a snapshot is tolerated (the prompt section
+    # filters out rows without ``attrs.description``).
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     # T0 snapshot of ``lessons`` output (positive priors from prior
     # KEEPs on this (model, hardware), optionally filtered by
