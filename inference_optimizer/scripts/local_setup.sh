@@ -20,8 +20,12 @@ LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}
 
 PRIMUS_CLAW_REPO="${PRIMUS_CLAW_REPO:-https://github.com/AMD-AGI/Primus-Claw.git}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
-TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens-internal.git}"
-TRACELENS_REF="${TRACELENS_REF:-release/hyperloom_integration_0.3.1}"
+TRACELENS_PKG_REPO="${TRACELENS_PKG_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
+TRACELENS_INTERNAL_REPO="${TRACELENS_INTERNAL_REPO:-https://github.com/AMD-AGI/TraceLens-internal.git}"
+TRACELENS_INTERNAL_REF="${TRACELENS_INTERNAL_REF:-release/hyperloom_integration_0.3.1}"
+# Preferred container-local checkouts when operators install TraceLens manually.
+TRACELENS_PKG_DEFAULT_ROOT="${TRACELENS_PKG_DEFAULT_ROOT:-/workspace/TraceLens}"
+TRACELENS_DEFAULT_ROOT="${TRACELENS_DEFAULT_ROOT:-/workspace/TraceLens-internal}"
 
 usage() {
   cat <<'EOF'
@@ -41,8 +45,9 @@ Options:
 
 Advanced env overrides:
   REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV,
-  OOB_SRC, INFERENCEX_PATH, TRACELENS_ROOT,
-  PRIMUS_CLAW_REPO, INFERENCEX_REPO, TRACELENS_REPO, TRACELENS_REF
+  OOB_SRC, INFERENCEX_PATH, TRACELENS_PKG_ROOT, TRACELENS_ROOT,
+  PRIMUS_CLAW_REPO, INFERENCEX_REPO,
+  TRACELENS_PKG_REPO, TRACELENS_INTERNAL_REPO, TRACELENS_INTERNAL_REF
 EOF
 }
 
@@ -147,6 +152,57 @@ clone_or_update() {
   fi
 }
 
+_read_dotenv_var() {
+  local name="$1"
+  if [ -f "${REPO_ROOT}/.env" ]; then
+    grep -E "^[[:space:]]*${name}=" "${REPO_ROOT}/.env" \
+      | tail -n 1 \
+      | sed -E "s/^[[:space:]]*${name}=//; s/^[\"' ]//; s/[\"' ]$//"
+  fi
+}
+
+_resolve_existing_checkout() {
+  local var_name="$1"
+  local default_root="$2"
+  local value=""
+
+  value="${!var_name:-}"
+  if [ -z "$value" ]; then
+    value="$(_read_dotenv_var "$var_name" || true)"
+  fi
+  if [ -z "$value" ] && [ -d "${default_root}/.git" ]; then
+    value="${default_root}"
+  fi
+  if [ -n "$value" ]; then
+    [ -d "$value" ] || die "${var_name} is set but does not exist: ${value}"
+    log "${var_name}: using existing ${value}"
+    printf -v "$var_name" '%s' "$value"
+    export "$var_name"
+    return 0
+  fi
+  return 1
+}
+
+resolve_tracelens() {
+  if _resolve_existing_checkout TRACELENS_PKG_ROOT "$TRACELENS_PKG_DEFAULT_ROOT"; then
+    :
+  else
+    TRACELENS_PKG_ROOT="${HYPERLOOM_DEPS_ROOT}/TraceLens"
+    clone_or_update "TraceLens" "$TRACELENS_PKG_REPO" "$TRACELENS_PKG_ROOT" ""
+    export TRACELENS_PKG_ROOT
+    log "TRACELENS_PKG_ROOT: ${TRACELENS_PKG_ROOT}"
+  fi
+
+  if _resolve_existing_checkout TRACELENS_ROOT "$TRACELENS_DEFAULT_ROOT"; then
+    :
+  else
+    TRACELENS_ROOT="${HYPERLOOM_DEPS_ROOT}/TraceLens-internal"
+    clone_or_update "TraceLens-internal" "$TRACELENS_INTERNAL_REPO" "$TRACELENS_ROOT" "$TRACELENS_INTERNAL_REF"
+    export TRACELENS_ROOT
+    log "TRACELENS_ROOT: ${TRACELENS_ROOT}"
+  fi
+}
+
 resolve_oob_src() {
   if [ -n "${OOB_SRC:-}" ]; then
     [ -d "$OOB_SRC" ] || die "OOB_SRC is set but does not exist: ${OOB_SRC}"
@@ -177,19 +233,6 @@ resolve_inferencex() {
   log "INFERENCEX_PATH: ${INFERENCEX_PATH}"
 }
 
-resolve_tracelens() {
-  if [ -n "${TRACELENS_ROOT:-}" ]; then
-    [ -d "$TRACELENS_ROOT" ] || die "TRACELENS_ROOT is set but does not exist: ${TRACELENS_ROOT}"
-    log "TRACELENS_ROOT: using existing ${TRACELENS_ROOT}"
-    return 0
-  fi
-
-  TRACELENS_ROOT="${HYPERLOOM_DEPS_ROOT}/TraceLens-internal"
-  clone_or_update "TraceLens-internal" "$TRACELENS_REPO" "$TRACELENS_ROOT" "$TRACELENS_REF"
-  export TRACELENS_ROOT
-  log "TRACELENS_ROOT: ${TRACELENS_ROOT}"
-}
-
 write_local_env() {
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
     log "would write local env: ${LOCAL_SETUP_ENV}"
@@ -206,6 +249,7 @@ write_local_env() {
     write_export HYPERLOOM_DEPS_ROOT "$HYPERLOOM_DEPS_ROOT"
     write_export OOB_SRC "$OOB_SRC"
     write_export INFERENCEX_PATH "$INFERENCEX_PATH"
+    write_export TRACELENS_PKG_ROOT "$TRACELENS_PKG_ROOT"
     write_export TRACELENS_ROOT "$TRACELENS_ROOT"
   } > "$LOCAL_SETUP_ENV"
   chmod 600 "$LOCAL_SETUP_ENV"

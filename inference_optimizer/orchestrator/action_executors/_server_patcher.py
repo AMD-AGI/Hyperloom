@@ -12,7 +12,7 @@ that are *not* in upstream vLLM / SGLang:
 * SGLang: ``--enable-shape-discovery-for-cuda-graph-profile``
 
 These only exist in builds that have the TraceLens patch set applied
-(``TraceLens-internal/examples/custom_workflows/inference_analysis/``).
+(``TraceLens/examples/custom_workflows/inference_analysis/``).
 Without the patch, vLLM rejects ``capture_torch_profiler_dir`` as an
 "unknown JSON key" and SGLang ``argparse`` errors on the unknown flag —
 the server fails to start and the entire profile run is wasted.

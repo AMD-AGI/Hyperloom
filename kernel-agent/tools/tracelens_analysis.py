@@ -455,7 +455,7 @@ RUNTIME_API_NAMES = {
     "cudadevicesynchronize",
     "cudastreamsynchronize",
 }
-DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
+DEFAULT_TRACELENS_ROOT = "/workspace/TraceLens-internal"
 
 
 def utc_now() -> str:
@@ -2127,6 +2127,10 @@ def main() -> int:
         ),
     )
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
+    parser.add_argument("--tracelens-pkg-root",
+                        default=os.environ.get("TRACELENS_PKG_ROOT", ""),
+                        help="Public TraceLens checkout (TRACELENS_PKG_ROOT). "
+                             "Passed to the orchestrator prompt as TraceLens root.")
     parser.add_argument("--roofline-json", default="")
     parser.add_argument(
         "--capture-folder",
@@ -2606,11 +2610,13 @@ def main() -> int:
                         if args.capture_folder else
                         discover_capture_folder(trace_input_path, trace_files)
                     )
+                    tl_public_root = Path(args.tracelens_pkg_root) if args.tracelens_pkg_root else None
                     skill_result = asyncio.run(run_tracelens_skill(
                         skill_path=skill,
                         trace_path=cli_trace_path,
                         output_dir=tracelens_dir,
-                        tracelens_root=tl_root,
+                        tracelens_root=tl_public_root,
+                        tracelens_internal_root=tl_root,
                         platform=args.target_platform,
                         framework=args.framework,
                         analysis_mode=args.analysis_mode,

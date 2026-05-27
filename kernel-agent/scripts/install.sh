@@ -70,16 +70,12 @@ _resolve_magpie_python() {
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
-# TraceLens checkout root. MUST point at a checkout of the
-# AMD-AGI/TraceLens-internal repo at tag `Hyperloom_integration_v0.3.1`
-# or newer (release/hyperloom_integration_v0.3.1 branch). The per-version
-# sglang_roofline_patches/sglang_<minor>_<patch>/ layout is required by
-# _server_patcher; pre-v0.3.1 flat checkouts are no longer supported.
-TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
-# Writable mirror for TraceLens when $TRACELENS_ROOT is on a read-only mount
-# (e.g. /wekafs/...). Mirrors the OOB pattern: cp -r the read-only source into
-# ${HYPERLOOM_ROOT}/TraceLens-internal once, then pip install -e the mirror so
-# editable build artifacts land on a writable filesystem. See ensure_tracelens.
+# TraceLens requires two editable installs (see README Local Mode step 1):
+#   1. AMD-AGI/TraceLens        -> $TRACELENS_PKG_ROOT  (public base package)
+#   2. AMD-AGI/TraceLens-internal -> $TRACELENS_ROOT (skills, patches, CLI)
+TRACELENS_PKG_ROOT="${TRACELENS_PKG_ROOT:-/workspace/TraceLens}"
+TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens-internal}"
+# Writable mirror when $TRACELENS_ROOT is on a read-only mount (e.g. /wekafs/...).
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
 
 # Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
@@ -552,16 +548,42 @@ PY
   ray status >/dev/null 2>&1 || warn "ray status reports no live head after start"
 }
 
+_pip_install_editable() {
+  local root="$1"
+  local label="$2"
+  if [ ! -d "$root" ]; then
+    if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+      warn "${label} checkout not found: ${root}"
+      return 1
+    fi
+    die "${label} checkout not found: ${root}"
+  fi
+  log "ensuring ${label} editable install from ${root}"
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
+    run sh -c "cd '$root' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
+  fi
+  return 0
+}
+
 ensure_tracelens() {
+  if [ ! -d "$TRACELENS_PKG_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens" ]; then
+    TRACELENS_PKG_ROOT="${HYPERLOOM_BUNDLE}/TraceLens"
+  fi
   if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens-internal" ]; then
     TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens-internal"
   fi
+
+  _pip_install_editable "$TRACELENS_PKG_ROOT" "TraceLens (public)" || {
+    [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ] || die "install AMD-AGI/TraceLens at TRACELENS_PKG_ROOT=${TRACELENS_PKG_ROOT}"
+  }
+
   if [ ! -d "$TRACELENS_ROOT" ]; then
     if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
-      warn "TraceLens root not found: $TRACELENS_ROOT"
+      warn "TraceLens-internal root not found: $TRACELENS_ROOT"
       return
     fi
-    die "TraceLens root not found: $TRACELENS_ROOT"
+    die "TraceLens-internal root not found: $TRACELENS_ROOT"
   fi
   # Read-only source guard (mirrors the OOB cp -r pattern). When
   # $TRACELENS_ROOT is on a read-only mount (the WekaFS default), pip
@@ -573,17 +595,17 @@ ensure_tracelens() {
   # ${HYPERLOOM_ROOT}/geak / ${HYPERLOOM_ROOT}/OOB/oob_cli) lets both
   # the install-time and the runtime pip install land on a writable
   # filesystem. write_env_file() emits the resulting TRACELENS_ROOT into
-  # the pod-local kernel-agent env so subsequent CLI subprocesses (setsid nohup inference_optimizer
-  # optimize → kernel-agent → tracelens_analysis.py) inherit the mirror.
+  # the pod-local kernel-agent env so subsequent CLI subprocesses inherit
+  # the mirror.
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     if ! ( : > "$TRACELENS_ROOT/.hl_write_test" ) 2>/dev/null; then
-      log "TraceLens root not writable ($TRACELENS_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
+      log "TraceLens-internal root not writable ($TRACELENS_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
       mkdir -p "$(dirname "$TRACELENS_MIRROR_DIR")"
       if [ ! -d "$TRACELENS_MIRROR_DIR" ]; then
-        log "mirroring TraceLens to writable dir (large tree; may take minutes): $TRACELENS_ROOT -> $TRACELENS_MIRROR_DIR"
+        log "mirroring TraceLens-internal to writable dir (large tree; may take minutes): $TRACELENS_ROOT -> $TRACELENS_MIRROR_DIR"
         run cp -r "$TRACELENS_ROOT" "$TRACELENS_MIRROR_DIR"
       else
-        log "TraceLens mirror already present: $TRACELENS_MIRROR_DIR"
+        log "TraceLens-internal mirror already present: $TRACELENS_MIRROR_DIR"
       fi
       TRACELENS_ROOT="$TRACELENS_MIRROR_DIR"
       export TRACELENS_ROOT
@@ -591,11 +613,8 @@ ensure_tracelens() {
       rm -f "$TRACELENS_ROOT/.hl_write_test"
     fi
   fi
-  log "ensuring TraceLens CLI from $TRACELENS_ROOT"
-  if [ "$CHECK_ONLY" -eq 0 ]; then
-    # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
-    run sh -c "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
-  fi
+  _pip_install_editable "$TRACELENS_ROOT" "TraceLens-internal"
+  export TRACELENS_PKG_ROOT TRACELENS_ROOT
   if [ "$DRY_RUN" -eq 0 ]; then
     # TraceLens #124: only the inference variant is accepted (the correct
     # entry for vLLM/SGLang traces). Hyperloom is inference-only since
@@ -605,7 +624,7 @@ ensure_tracelens() {
       TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
       log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
     else
-      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; bump TraceLens-internal)"
+      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; reinstall TraceLens + TraceLens-internal)"
     fi
   fi
 }
@@ -892,6 +911,7 @@ write_env_file() {
     # ensure_tracelens(). This is what lets setsid nohup inference_optimizer
     # optimize → kernel-agent/tools/tracelens_analysis.py inherit the writable
     # mirror instead of falling back to the read-only /wekafs default.
+    [ -n "${TRACELENS_PKG_ROOT:-}" ] && echo "export TRACELENS_PKG_ROOT='${TRACELENS_PKG_ROOT}'"
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"

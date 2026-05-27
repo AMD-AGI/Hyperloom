@@ -435,7 +435,7 @@ def main() -> int:
     parser.add_argument(
         "--tracelens-root",
         default=os.environ.get("TRACELENS_ROOT", ""),
-        help="path to TraceLens-internal checkout (default: $TRACELENS_ROOT)",
+        help="path to TraceLens checkout (default: $TRACELENS_ROOT)",
     )
     parser.add_argument(
         "--sglang-version-pin",

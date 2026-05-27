@@ -212,7 +212,8 @@ class KernelAgentToolTests(unittest.TestCase):
         skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
-        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
+        self.assertIn('TRACELENS_PKG_ROOT="${TRACELENS_PKG_ROOT:-/workspace/TraceLens}"', install_text)
+        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens-internal}"', install_text)
         self.assertIn('GEAK_REF="${GEAK_REF:-v3.2.0}"', install_text)
         self.assertIn("ensure_rocm_torch_for_geak()", install_text)
         self.assertIn("KERNEL_AGENT_SKIP_TORCH_GATE", install_text)
@@ -277,7 +278,7 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('chmod 600 "$env_file"', install_text)
         self.assertIn("GEAK_MEMORY_STORE_PATH", ray_runtime_text)
         self.assertIn("GEAK_SAVE_TO_KNOWLEDGE_BASE", ray_runtime_text)
-        self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"', trace_tool_text)
+        self.assertIn('DEFAULT_TRACELENS_ROOT = "/workspace/TraceLens-internal"', trace_tool_text)
         self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
         # Read-only TRACELENS_ROOT must trigger a writable mirror under

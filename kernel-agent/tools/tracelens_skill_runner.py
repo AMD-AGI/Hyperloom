@@ -126,7 +126,8 @@ def build_orchestrator_prompt(
     skill_path: Path,
     trace_path: Path,
     output_dir: Path,
-    tracelens_root: Path,
+    tracelens_root: Path | None = None,
+    tracelens_internal_root: Path,
     platform: str,
     framework: str,
     analysis_mode: str,
@@ -143,6 +144,7 @@ def build_orchestrator_prompt(
         exec_mode = "default"
 
     capture_text = str(capture_folder) if capture_folder else "N/A"
+    tracelens_root_text = str(tracelens_root) if tracelens_root else "N/A"
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
@@ -153,7 +155,8 @@ questions; proceed with the analysis.
 
 Execution context:
 - Environment: local
-- TraceLens project root: {tracelens_root}
+- TraceLens root: {tracelens_root_text}
+- TraceLens-internal root: {tracelens_internal_root}
 - Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
 - Trace file path: {trace_path}
 - Output directory: {output_dir}
@@ -162,6 +165,8 @@ Execution context:
 - Analysis mode: {analysis_mode}
 - Inference execution mode: {exec_mode}
 - Capture folder path: {capture_text}
+- TL_EXTENSION: {tracelens_internal_root}
+
 
 Important requirements:
 1. Use the provided command prefix cache for all shell commands.
@@ -206,7 +211,8 @@ async def run_tracelens_skill(
     skill_path: Path,
     trace_path: Path,
     output_dir: Path,
-    tracelens_root: Path,
+    tracelens_root: Path | None = None,
+    tracelens_internal_root: Path,
     platform: str,
     framework: str,
     analysis_mode: str,
@@ -220,12 +226,13 @@ async def run_tracelens_skill(
     """Execute the standalone TraceLens skill with Claude SDK."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    prefix_path = write_local_cmd_prefix(output_dir, tracelens_root)
+    prefix_path = write_local_cmd_prefix(output_dir, tracelens_internal_root)
     prompt = build_orchestrator_prompt(
         skill_path=skill_path,
         trace_path=trace_path,
         output_dir=output_dir,
         tracelens_root=tracelens_root,
+        tracelens_internal_root=tracelens_internal_root,
         platform=platform,
         framework=framework,
         analysis_mode=analysis_mode,
@@ -256,8 +263,8 @@ async def run_tracelens_skill(
     if model:
         kwargs["model"] = model
     # Supported by claude-agent-sdk used by the outer role backend; harmless in
-    # tests via FakeOptions and keeps Bash relative paths rooted at TraceLens.
-    kwargs["cwd"] = str(tracelens_root)
+    # tests via FakeOptions and keeps Bash relative paths rooted at TraceLens-internal.
+    kwargs["cwd"] = str(tracelens_internal_root)
 
     try:
         options = sdk_options_cls(**kwargs)
