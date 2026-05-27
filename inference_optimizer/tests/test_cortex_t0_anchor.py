@@ -18,6 +18,7 @@ HTTP calls are mocked via ``respx``.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -221,6 +222,79 @@ def test_t0_resume_skips_short_circuit_and_refreshes(session_dir):
         assert router.calls.call_count >= 2
     # Status reflects resume rather than skipped_already.
     assert result.status in ("ok", "resumed")
+
+
+def test_t0_backfill_writes_image_digest_and_traceability_to_recipe_attrs(
+    session_dir,
+):
+    """``image_digest`` parameter + the ``marathon_dispatch_id`` /
+    ``claw_session_id`` / ``sandbox_user_id`` keys from extra_attrs
+    must land flat on the recipe anchor's attrs — otherwise the
+    operator can never answer "which Claw job / sandbox / docker
+    image produced this best_config" from the KB row alone.
+    """
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    state = _state_for_session(session_dir)
+    with respx.mock(base_url=KB_URL) as router:
+        propose_route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
+            }),
+        )
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={"points": []}),
+        )
+        run_t0_anchor(
+            client, state,
+            workload="Qwen-Qwen3-8B", hw="mi300x",
+            image_digest="sha256:abcdef123456",
+            stack_fingerprint={"sglang": "0.5.11", "rocm": "7.2.0"},
+            extra_attrs={
+                "model_class":          "moe_mla",
+                "framework":            "sglang",
+                "marathon_dispatch_id": "dispatch-XYZ",
+                "claw_session_id":      "claw-uuid-789",
+                "sandbox_user_id":      "alice@amd.com",
+                "boot_origin":          "cli",  # whitelist-rejected
+            },
+            session_dir=session_dir,
+        )
+    body = json.loads(propose_route.calls.last.request.content)
+    attrs = body["attrs"]
+    assert attrs["image_digest"] == "sha256:abcdef123456"
+    assert attrs["marathon_dispatch_id"] == "dispatch-XYZ"
+    assert attrs["claw_session_id"] == "claw-uuid-789"
+    assert attrs["sandbox_user_id"] == "alice@amd.com"
+    # boot_origin is a dev-debug label — must NOT land on KB.
+    assert "boot_origin" not in attrs
+    # And the existing tags still land.
+    assert attrs["framework"] == "sglang"
+    assert attrs["framework_version"] == "0.5.11"
+    assert attrs["model_class"] == "moe_mla"
+
+
+def test_t0_backfill_skips_unknown_image_digest(session_dir):
+    """``image_digest='unknown'`` (the manifest sentinel for
+    "couldn't detect") must NOT pollute the recipe attrs."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    state = _state_for_session(session_dir)
+    with respx.mock(base_url=KB_URL) as router:
+        propose_route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
+            }),
+        )
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={"points": []}),
+        )
+        run_t0_anchor(
+            client, state,
+            workload="Qwen-Qwen3-8B", hw="mi300x",
+            image_digest="unknown",
+            session_dir=session_dir,
+        )
+    body = json.loads(propose_route.calls.last.request.content)
+    assert "image_digest" not in body["attrs"]
 
 
 def test_t0_recipe_backfill_failure_is_non_fatal(session_dir):
