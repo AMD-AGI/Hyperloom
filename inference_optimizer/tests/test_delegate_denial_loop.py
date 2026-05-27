@@ -350,6 +350,67 @@ def test_explore_action_is_not_denied(gate):
 
 
 # ===========================================================================
+# 2b. Coordinator-internal analysis actions are never LLM-proposable
+# ===========================================================================
+# ``roofline`` and ``profile`` are both Coordinator-enqueued (PRELUDE
+# bootstrap + watermark refresh). Mode is selected by the operator via
+# ``--enable-roofline`` / ``--no-enable-roofline``; the LLM never
+# picks. PolicyGate denies any propose/delegate/request that names
+# either action so the orchestration loop cannot sneak a manual
+# analysis past the auto-enqueue dedup.
+_INTERNAL_ANALYSIS_ACTIONS = ("roofline", "profile")
+
+
+@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
+def test_delegate_with_analysis_action_is_denied(gate, action_name):
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": action_name,
+            "predicted_gain_pct": 1.0,
+            "params": {},
+        },
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", intent)
+    assert exc.value.rule == "analysis_action_not_llm_proposable"
+    assert action_name in str(exc.value)
+    assert "--enable-roofline" in (exc.value.hint or "")
+
+
+@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
+def test_propose_action_with_analysis_action_is_denied(gate, action_name):
+    intent = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": action_name,
+            "predicted_gain_pct": 1.0,
+        },
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", intent)
+    assert exc.value.rule == "analysis_action_not_llm_proposable"
+    assert action_name in str(exc.value)
+
+
+@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
+def test_request_with_analysis_kind_is_denied(gate, action_name):
+    """A REQUEST whose ``kind`` names roofline/profile is denied with
+    the same rule — the Coordinator-internal enqueue bypasses
+    PolicyGate, but any LLM-routed REQUEST must not."""
+    intent = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel",
+            "kind": action_name,
+        },
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", intent)
+    assert exc.value.rule == "analysis_action_not_llm_proposable"
+
+
+# ===========================================================================
 # 3. Rule precedence (Inv-11.3 orthogonality)
 # ===========================================================================
 def test_deprecation_fires_before_kernel_owned_check(gate):
@@ -386,13 +447,15 @@ def test_phase_explore_allowlist_drops_legacy_actions():
     """The EXPLORE allowlist contains only the canonical action set:
     merged grid runner, specialist dispatch, integrate_patch,
     assess_remaining_gaps (IR-7 self-stop wrapper), the auto-managed
-    ``roofline`` (Coordinator-enqueued on watermark crossings), and
-    ``recover``. The legacy LLM-proposable ``profile`` was retired
-    when the two-path composite/direct bifurcation was collapsed.
+    analysis kinds (``roofline`` and ``profile``, both
+    Coordinator-enqueued on watermark crossings; mode picked by
+    ``--enable-roofline``), and ``recover``. PolicyGate's
+    ``analysis_action_not_llm_proposable`` rule keeps the LLM from
+    delegating either analysis kind directly.
     """
     assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
         "explore", "specialist", "integrate_patch",
-        "assess_remaining_gaps", "roofline", "recover",
+        "assess_remaining_gaps", "roofline", "profile", "recover",
     })
 
 

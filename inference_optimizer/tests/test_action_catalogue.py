@@ -28,12 +28,18 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # prep (2)
     "target_analysis":      "prep",
     "baseline":             "prep",
-    # analysis (1) — ``roofline`` is the composite action that runs
-    # profile + trace_analyze atomically and surfaces analysis.md to
-    # the next orchestration tick. ``profile`` is NO longer a
-    # registered action; ``profile.py`` stays as an internal helper
-    # invoked by ``roofline.py``.
+    # analysis (2) — Coordinator-internal analysis actions, selected
+    # at runtime by ``shared_state.enable_roofline`` (``--enable-roofline``
+    # / ``--no-enable-roofline``, default on):
+    #   * ``roofline`` — composite (profile + trace_analyze +
+    #     analysis.md snapshot);
+    #   * ``profile`` — lightweight trace-only fallback.
+    # Both are registered so the Coordinator-internal task path can
+    # dispatch them through SubAgentRunner. PolicyGate denies LLM
+    # propose_action / delegate for either name
+    # (``analysis_action_not_llm_proposable``).
     "roofline":             "analysis",
+    "profile":              "analysis",
     # shallow (5) — v0.8 M3 + KB_gaps/Dead-A merged the v0.6
     # ``backends`` / ``params`` / ``validate_stack`` actions into
     # ``explore``; their yamls + executors were physically deleted.

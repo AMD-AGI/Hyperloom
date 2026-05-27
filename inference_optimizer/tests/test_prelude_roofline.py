@@ -1,15 +1,16 @@
-"""PRELUDE-bootstrap roofline enqueue test.
+"""PRELUDE-bootstrap analysis-task enqueue test.
 
-After Tasks 1-9 collapsed the two-path bifurcation, the PRELUDE
-phase ends with an auto-enqueued ``roofline`` task driven by the
-baseline-completion hook inside ``_promote_to_shared_state``. That
-hook delegates the actual enqueue to
-:meth:`Coordinator._enqueue_internal_roofline_task` with the fixed
-``reason='prelude_initial'`` idempotency key.
+The PRELUDE phase ends with an auto-enqueued analysis task driven by
+the baseline-completion hook inside ``_promote_to_shared_state``.
+That hook delegates the actual enqueue to
+:meth:`Coordinator._enqueue_internal_analysis_task` with the fixed
+``reason='prelude_initial'`` idempotency key. The task kind is
+``roofline`` when ``shared_state.enable_roofline`` is True (default)
+and ``profile`` when False — picked by ``_internal_analysis_kind``.
 
 This file pins:
 
-* The internal-roofline task contract: kind, idempotency key,
+* The internal-analysis task contract: kind, idempotency key,
   reason param, and benchmark-script wiring from ``last_baseline``.
 * Idempotency: a second enqueue with the same reason returns the
   existing task instead of creating a duplicate.
@@ -35,6 +36,7 @@ class _BareState:
     cumulative_gain_validated: float = 0.0
     last_roofline_tput: float = 0.0
     auto_roofline_pending_task_id: str = ""
+    enable_roofline: bool = True
     current_best: dict[str, Any] = field(default_factory=dict)
     last_baseline: dict[str, Any] = field(default_factory=dict)
 
@@ -86,7 +88,7 @@ def coord(tmp_path: Path) -> Coordinator:
 @pytest.mark.asyncio
 async def test_prelude_initial_roofline_task_contract(coord: Coordinator):
     """The PRELUDE-bootstrap enqueue produces a ``roofline`` task with
-    idempotency key ``internal-roofline-prelude_initial`` and carries
+    idempotency key ``internal-analysis-prelude_initial`` and carries
     forward the baseline's benchmark-script + current_best extra args
     so the profile sub-step bench against the same workload."""
     coord.shared_state.current_best = {
@@ -96,10 +98,10 @@ async def test_prelude_initial_roofline_task_contract(coord: Coordinator):
         "benchmark_script": "magpie_serving_bench.sh",
     }
 
-    task = await coord._enqueue_internal_roofline_task(reason="prelude_initial")
+    task = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
 
     assert task.kind == "roofline"
-    assert task.idempotency_key == "internal-roofline-prelude_initial"
+    assert task.idempotency_key == "internal-analysis-prelude_initial"
     assert task.params["reason"] == "prelude_initial"
     assert task.params["source"] == "coordinator_internal"
     assert task.params["base_extra_args"] == "--tp 8 --enable-mla"
@@ -111,8 +113,8 @@ async def test_prelude_initial_roofline_is_idempotent(coord: Coordinator):
     """A second call with ``reason='prelude_initial'`` returns the
     same task — resume after the baseline-completion edge must not
     double-enqueue."""
-    first = await coord._enqueue_internal_roofline_task(reason="prelude_initial")
-    second = await coord._enqueue_internal_roofline_task(reason="prelude_initial")
+    first = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
+    second = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
     assert first.task_id == second.task_id
     assert len(coord.tasks._tasks) == 1
 
@@ -123,12 +125,24 @@ async def test_distinct_reasons_produce_distinct_tasks(coord: Coordinator):
     ``explore_keep_watermark``) is a separate task from the PRELUDE
     initial — the idempotency key is reason-scoped so the two never
     collapse."""
-    prelude = await coord._enqueue_internal_roofline_task(
+    prelude = await coord._enqueue_internal_analysis_task(
         reason="prelude_initial",
     )
-    watermark = await coord._enqueue_internal_roofline_task(
+    watermark = await coord._enqueue_internal_analysis_task(
         reason="explore_keep_watermark",
     )
     assert prelude.task_id != watermark.task_id
-    assert "internal-roofline-prelude_initial" in coord.tasks._by_idem
-    assert "internal-roofline-explore_keep_watermark" in coord.tasks._by_idem
+    assert "internal-analysis-prelude_initial" in coord.tasks._by_idem
+    assert "internal-analysis-explore_keep_watermark" in coord.tasks._by_idem
+
+
+@pytest.mark.asyncio
+async def test_enable_roofline_false_picks_profile_kind(coord: Coordinator):
+    """When ``shared_state.enable_roofline`` is False, the internal
+    analysis task switches kind to ``profile`` (the lighter
+    Coordinator-internal analysis path) while keeping the same
+    reason-scoped idempotency key prefix."""
+    coord.shared_state.enable_roofline = False
+    task = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
+    assert task.kind == "profile"
+    assert task.idempotency_key == "internal-analysis-prelude_initial"
