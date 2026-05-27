@@ -625,6 +625,10 @@ def _seed_shared_state(
         # the SpecialistPromptInputs dataclass defaults (e.g. TP=1) and
         # comm_specialist self-vetoes on TP=8 sessions.
         tp=_int_env_or_arg("tp", "TP"),
+        # ``ep`` mirrors the EP env var so resume in a fresh shell
+        # still recovers the value — KB warm-start queries depend on
+        # it for the T2 same-shape filter.
+        ep=_int_env_or_arg("ep", "EP"),
         precision=(
             str(getattr(args, "precision", None) or os.environ.get("PRECISION", "") or "").strip()
         ),

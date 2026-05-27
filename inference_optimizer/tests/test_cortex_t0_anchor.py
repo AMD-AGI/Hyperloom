@@ -297,6 +297,65 @@ def test_t0_backfill_skips_unknown_image_digest(session_dir):
     assert "image_digest" not in body["attrs"]
 
 
+def test_t0_backfill_prefers_shared_state_ep_over_env(session_dir, monkeypatch):
+    """Resume scenario: SharedState.ep was set at original launch
+    (saved into state.json) but the new shell has no ``EP`` env var.
+    T0 must read from SharedState first so the recipe anchor's
+    ``ep`` tag survives the resume."""
+    monkeypatch.delenv("EP", raising=False)
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    state = _state_for_session(session_dir)
+    state.ep = 8  # persisted from original launch
+    state.save(session_dir)
+    state = SharedState.load_or_init(session_dir)
+    with respx.mock(base_url=KB_URL) as router:
+        propose_route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
+            }),
+        )
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={"points": []}),
+        )
+        run_t0_anchor(
+            client, state,
+            workload="Qwen-Qwen3-8B", hw="mi300x",
+            extra_attrs={"framework": "sglang", "model_class": "moe_mla"},
+            session_dir=session_dir,
+        )
+    body = json.loads(propose_route.calls.last.request.content)
+    assert body["attrs"]["ep"] == 8
+
+
+def test_t0_backfill_falls_back_to_env_ep_when_shared_state_unset(
+    session_dir, monkeypatch,
+):
+    """Legacy SDK caller: constructed SharedState without going
+    through ``_seed_shared_state`` → ``ep=0``. T0 must fall back to
+    reading ``EP`` env so backwards compat is preserved."""
+    monkeypatch.setenv("EP", "4")
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    state = _state_for_session(session_dir)
+    # state.ep is 0 (SharedState default, not seeded)
+    with respx.mock(base_url=KB_URL) as router:
+        propose_route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
+            }),
+        )
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={"points": []}),
+        )
+        run_t0_anchor(
+            client, state,
+            workload="Qwen-Qwen3-8B", hw="mi300x",
+            extra_attrs={"framework": "sglang", "model_class": "moe_mla"},
+            session_dir=session_dir,
+        )
+    body = json.loads(propose_route.calls.last.request.content)
+    assert body["attrs"]["ep"] == 4
+
+
 def test_t0_recipe_backfill_failure_is_non_fatal(session_dir):
     """update_recipe backfill failure must NOT crash PRELUDE."""
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
