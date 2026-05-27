@@ -87,10 +87,12 @@ def test_policy_allows_grid_with_default_grid_variant():
 
 
 def test_policy_allows_grid_with_specialist_provenance():
+    """Single specialist:* variant is allowed. Multi-specialist grids
+    are covered by ``explore_specialist_grid_max_one`` in
+    test_explore_grid_limits.py."""
     gate = _gate()
     intent = _delegate([
         {"name": "v1", "provenance": "specialist:serving_specialist"},
-        {"name": "v2", "provenance": "specialist:kernel_switch_specialist"},
     ])
     gate.validate_intent("orchestration", intent)  # no raise
 

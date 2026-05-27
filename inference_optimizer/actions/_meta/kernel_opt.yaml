@@ -6,7 +6,7 @@ expected_gain_pct: [5.0, 25.0]
 accuracy_risk: 0.10
 crash_risk: 0.20
 prerequisites:
-  - profile
+  - roofline
   - deep_kernel_analysis
 requires_lanes:
   - server_lifecycle

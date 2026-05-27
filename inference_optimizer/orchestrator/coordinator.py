@@ -138,6 +138,26 @@ _STEWARD_RECS: frozenset[str] = frozenset({
     "continue_explore", "advance_to_kernel", "stop_session",
 })
 
+# Actions whose output should observe the freshest ``analysis.md`` /
+# ``last_profile_trace`` snapshot. Every dispatch path
+# (``_handle_delegate`` / ``_handle_propose_action`` / the post-Critic
+# ``_materialize_approved_proposal``) consults
+# :meth:`Coordinator._auto_roofline_pending_denial` for these and defers
+# the dispatch while a Coordinator-internal roofline/profile task is
+# still in flight. The field is set by the PRELUDE bootstrap + the
+# +10% watermark crossing and cleared in
+# :meth:`Coordinator._promote_to_shared_state` once the analysis task
+# lands.
+_ROOFLINE_GATED_ACTIONS: frozenset[str] = frozenset({
+    "specialist",
+    "explore",
+    "kernel_opt",
+    "integrate",
+    "deep_kernel_analysis",
+    "operator_tuning",
+    "vendor_kernel_config",
+})
+
 
 def effective_closing_grace_sec(
     max_minutes: float | None,
@@ -556,6 +576,15 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
+        # Critic-approved proposals deferred because an auto-roofline /
+        # auto-profile task was still in flight when
+        # :meth:`_materialize_approved_proposal` ran. Drained when the
+        # analysis task lands (both the ``profile`` and ``roofline``
+        # branches in :meth:`_promote_to_shared_state` call
+        # :meth:`_drain_proposals_awaiting_roofline`).
+        self._proposals_awaiting_roofline: list[
+            tuple[PendingProposal, set[str] | None]
+        ] = []
 
         # Per-agent consecutive ``BackendError`` streak. Successful turns
         # reset the counter for that agent; a streak crossing
@@ -1072,15 +1101,12 @@ class Coordinator:
 
         Currently wired:
 
-        * ``EXPLORE`` — pre-warm PR feed across every specialist domain
-. The first specialist
-          dispatch after EXPLORE entry then sees a populated cache
-          rather than a cold ``pr_monitor`` fetch.
-        * ``KERNEL`` — auto-enqueue ``profile`` so KERNEL phase always
-          has a fresh ``last_profile_trace`` for ``select_kernels``
-. Idempotent
-          via a fixed-suffix idempotency_key; skipped on resume when
-          a trace already exists or when ``--no-kernel``.
+        * ``EXPLORE`` — pre-warm PR feed across every specialist
+          domain. The first specialist dispatch after EXPLORE entry
+          then sees a populated cache rather than a cold
+          ``pr_monitor`` fetch.
+        * ``KERNEL`` — no-op (roofline lives in PRELUDE +
+          watermark-driven mid-run refresh).
         * ``SWEEP`` — auto-enqueue ``sweep`` with a recipe-driven
           (or defaults-driven) grid so SWEEP doesn't degrade to
           "LLM 自觉发 sweep".
@@ -1105,333 +1131,193 @@ class Coordinator:
             await self._on_enter_close(from_phase=from_phase)
 
     async def _on_enter_explore(self, *, from_phase: str) -> None:
-        """warm the PR feed across every
-        specialist domain on EXPLORE entry.
+        """Warm ``KnowledgePlane.pr_feed`` across all specialist
+        domains so subsequent ``_warm_specialist_params`` calls hit
+        the cache. Best-effort: any failure is logged + the run
+        continues. A downstream specialist dispatch still calls
+        :meth:`KnowledgePlane.pr_feed_warm` individually
+        (``_handle_delegate`` → ``_warm_specialist_params``), so even
+        a hard failure here only loses the upfront cache-priming.
 
-        Two responsibilities:
-
-        1. Warm ``KnowledgePlane.pr_feed`` across all specialist
-           domains so subsequent ``_warm_specialist_params`` calls hit
-           the cache. Best-effort: any failure is logged + the run
-           continues. A downstream specialist dispatch still calls
-           :meth:`KnowledgePlane.pr_feed_warm` individually
-           (``_handle_delegate`` → ``_warm_specialist_params``), so even
-           a hard failure here only loses the upfront cache-priming.
-
-        2. Auto-enqueue a ``roofline`` task when
-           ``--use-roofline-composite`` is on and the snapshot is
-           missing or stale (see :meth:`_needs_fresh_roofline`). The
-           task id is stashed on
-           :attr:`SharedState.auto_roofline_pending_task_id` so
-           ``_handle_delegate`` can block first-round specialist
-           dispatches until the snapshot lands — specialists need
-           the analysis.md to be useful.
-
-        The aggregated warnings end up on
-        :attr:`KnowledgePlane.last_warnings`; the breakdown collector
- can surface them next to the session-level
-        ``pr_monitor`` status.
+        Roofline lives in PRELUDE (auto-enqueued after baseline) and
+        re-fires whenever ``cumulative_gain_validated`` crosses the
+        10% watermark over ``last_roofline_tput`` — see
+        :meth:`_needs_roofline_for_watermark`. EXPLORE entry no
+        longer enqueues roofline.
         """
         plane = self.knowledge_plane
-        if plane is not None:
-            try:
-                results = plane.pr_feed_warm_all_domains()
-                total_prs = sum(len(prs) for prs, _w in results.values())
-                log.info(
-                    "EXPLORE entry (from=%s): warmed pr_feed across %d "
-                    "domains (total PRs cached=%d)",
-                    from_phase or "<unknown>", len(results), total_prs,
-                )
-            except Exception as exc:  # noqa: BLE001 — defensive
-                log.warning(
-                    "EXPLORE entry: pr_feed_warm_all_domains failed: %r", exc,
-                )
-
-        # Auto-roofline on EXPLORE entry — only when composite is on
-        # AND a fresh snapshot is needed (gain-only freshness gate).
-        if self._needs_fresh_roofline():
-            try:
-                task = await self._enqueue_internal_roofline_task(
-                    reason="explore_entry",
-                )
-            except Exception as exc:  # noqa: BLE001 — defensive
-                log.exception(
-                    "EXPLORE entry: failed to enqueue auto-roofline: %r", exc,
-                )
-                self._record_phase_entry_evidence(
-                    auto_roofline_error=repr(exc)[:240],
-                )
-                return
-            self.shared_state.auto_roofline_pending_task_id = task.task_id
+        if plane is None:
+            return
+        try:
+            results = plane.pr_feed_warm_all_domains()
+            total_prs = sum(len(prs) for prs, _w in results.values())
             log.info(
-                "EXPLORE entry (from=%s): auto-enqueued roofline task=%s",
-                from_phase or "<unknown>", task.task_id,
+                "EXPLORE entry (from=%s): warmed pr_feed across %d "
+                "domains (total PRs cached=%d)",
+                from_phase or "<unknown>", len(results), total_prs,
             )
-            self._record_phase_entry_evidence(
-                auto_roofline_enqueued=True,
-                auto_roofline_task_id=task.task_id,
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.warning(
+                "EXPLORE entry: pr_feed_warm_all_domains failed: %r", exc,
             )
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
-        """auto-enqueue analysis anchor on KERNEL entry.
+        """No-op KERNEL entry hook.
 
-        "进入 KERNEL 即跑一次 ``profile``
-        (固定动作, 不需要 LLM propose). 该次 profile 写入
-        ``last_profile_trace``, 锚定 KERNEL 阶段所有 ``select_kernels``
-        的 trace_input." Without this, the LLM has to remember to
-        propose profile itself; missing it would silently block every
-        subsequent ``select_kernels`` / ``kernel_opt`` (sequence gate
-        denies them when ``last_profile_trace == ""``).
-
-        Toggle-aware fork:
-
-        * ``--use-roofline-composite=True``: enqueue ``roofline``
-          (composite profile + trace_analyze + analysis.md snapshot)
-          when :meth:`_needs_fresh_roofline` returns True; skip with
-          ``auto_roofline_skipped='fresh_snapshot'`` otherwise. The
-          KERNEL LLM gets a fresh ``analysis.md`` aligned with the
-          stack's current gain instead of an EXPLORE-end snapshot.
-        * ``--use-roofline-composite=False``: legacy auto-profile
-          path — enqueue ``profile`` if ``last_profile_trace`` is
-          empty, skip otherwise.
-
-        Skipped when:
-
-        * ``--no-kernel`` (defense in depth: ``compute_next_phase``
-          should already route to SWEEP, but a corrupt resume might
-          still land us here).
-
-        Idempotent via phase-scoped idempotency keys so a phase flap
-        (which Inv-2.1 monotonic guard forbids in practice, but we
-        still defend against) doesn't double-enqueue.
-
-        After enqueue, mutates ``phase_history[-1].evidence`` to
-        record ``auto_{roofline,profile}_enqueued=True`` so the
-        breakdown collector (KB_design §3.12 §4 / KB_gaps/Gap-04
-        acceptance criterion 3) can verify the hook fired.
+        Roofline is auto-enqueued at PRELUDE (initial) and on every
+        10% watermark crossing of ``last_roofline_tput`` — see
+        :meth:`_maybe_enqueue_watermark_roofline`. The KERNEL phase
+        no longer needs an entry-time profile anchor: the watermark
+        refresh keeps ``analysis.md`` aligned with stack progress,
+        and ``select_kernels`` / ``kernel_opt`` read
+        ``last_profile_trace`` written by the same roofline executor.
         """
-        state = self.shared_state
         if not self._kernel_enabled():
             # Should not happen — compute_next_phase routes
-            # --no-kernel runs straight EXPLORE → SWEEP. Defensive log:
+            # --no-kernel runs straight EXPLORE → SWEEP.
             log.info(
                 "KERNEL entry hook fired with kernel_enabled=False "
-                "(from=%s); skipping auto-analysis",
-                from_phase or "<unknown>",
+                "(from=%s)", from_phase or "<unknown>",
             )
-            return
 
-        # Roofline composite path — toggle-driven.
-        if bool(getattr(state, "use_roofline_composite", False)):
-            if not self._needs_fresh_roofline():
-                log.info(
-                    "KERNEL entry hook (from=%s): roofline snapshot fresh "
-                    "(gain drift within %.1f%%); skipping auto-roofline",
-                    from_phase or "<unknown>", self._ROOFLINE_GAIN_DRIFT_PCT,
-                )
-                self._record_phase_entry_evidence(
-                    auto_roofline_skipped="fresh_snapshot",
-                )
-                return
-            try:
-                task = await self._enqueue_internal_roofline_task(
-                    reason="kernel_phase_entry",
-                )
-            except Exception as exc:  # noqa: BLE001 — defensive
-                log.exception(
-                    "KERNEL entry hook: failed to enqueue auto-roofline: %r",
-                    exc,
-                )
-                self._record_phase_entry_evidence(
-                    auto_roofline_error=repr(exc)[:240],
-                )
-                return
-            log.info(
-                "KERNEL entry (from=%s): auto-enqueued roofline task=%s",
-                from_phase or "<unknown>", task.task_id,
-            )
-            self._record_phase_entry_evidence(
-                auto_roofline_enqueued=True,
-                auto_roofline_task_id=task.task_id,
-            )
-            return
+    # ------------------------------------------------------------------
+    # Auto-roofline — single-path PRELUDE bootstrap + 10% watermark
+    # refresh anchored on ``last_roofline_tput``.
+    # ------------------------------------------------------------------
+    _ROOFLINE_WATERMARK_RATIO: float = 1.10   # 10% step over last roofline
 
-        # Legacy auto-profile path (composite off).
-        if (state.last_profile_trace or "").strip():
-            log.info(
-                "KERNEL entry hook (from=%s): last_profile_trace already "
-                "set; skipping auto-profile (resume path)",
-                from_phase or "<unknown>",
-            )
-            self._record_phase_entry_evidence(auto_profile_skipped="trace_exists")
-            return
+    def _current_tput_from_validated_gain(self) -> float:
+        """Project the current measured tput from
+        ``baseline_tput * (1 + cumulative_gain_validated/100)``.
+
+        Returns 0.0 when ``baseline_tput`` is not yet known so callers
+        can treat the watermark as not-yet-armed.
+        """
+        state = self.shared_state
         try:
-            task = await self._enqueue_internal_profile_task(
-                reason="kernel_phase_entry",
-            )
+            base = float(state.baseline_tput or 0.0)
+        except (TypeError, ValueError):
+            base = 0.0
+        if base <= 0:
+            return 0.0
+        try:
+            gain = float(state.cumulative_gain_validated or 0.0)
+        except (TypeError, ValueError):
+            gain = 0.0
+        return base * (1.0 + gain / 100.0)
+
+    def _needs_roofline_for_watermark(self) -> bool:
+        """Return True iff the projected current tput has crossed the
+        10% watermark over ``last_roofline_tput``.
+
+        Bootstrap guard: returns False when ``last_roofline_tput <= 0``
+        so the PRELUDE initial roofline enqueue (driven by the
+        baseline-completion hook) is the sole entry point before the
+        first roofline lands.
+
+        Re-arm guard: returns False when an auto-roofline task is
+        already in-flight (``auto_roofline_pending_task_id`` non-empty)
+        so a single watermark crossing cannot enqueue multiple
+        rooflines.
+        """
+        state = self.shared_state
+        try:
+            last_rl = float(state.last_roofline_tput or 0.0)
+        except (TypeError, ValueError):
+            last_rl = 0.0
+        if last_rl <= 0:
+            return False
+        if (state.auto_roofline_pending_task_id or "").strip():
+            return False
+        cur = self._current_tput_from_validated_gain()
+        if cur <= 0:
+            return False
+        return cur / last_rl >= self._ROOFLINE_WATERMARK_RATIO
+
+    async def _maybe_enqueue_watermark_roofline(
+        self, *, reason: str,
+    ) -> bool:
+        """Enqueue a fresh roofline if the watermark has crossed.
+
+        Idempotency-keyed via ``reason`` so a re-entrant caller (e.g.
+        explore-promote followed immediately by kernel-integrate-promote
+        in the same tick) collapses to a single task. Sets
+        ``auto_roofline_pending_task_id`` so the dispatch gate
+        :meth:`_auto_roofline_pending_denial` blocks subsequent
+        specialist / explore / kernel actions until the roofline lands.
+
+        Returns True when a task was enqueued (or returned existing),
+        False when the watermark check did not fire.
+        """
+        if not self._needs_roofline_for_watermark():
+            return False
+        try:
+            task = await self._enqueue_internal_analysis_task(reason=reason)
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception(
-                "KERNEL entry hook: failed to enqueue auto-profile: %r", exc,
+                "watermark-roofline (%s): failed to enqueue: %r", reason, exc,
             )
-            self._record_phase_entry_evidence(auto_profile_error=repr(exc)[:240])
-            return
-        log.info(
-            "KERNEL entry (from=%s): auto-enqueued profile task=%s",
-            from_phase or "<unknown>", task.task_id,
-        )
-        self._record_phase_entry_evidence(
-            auto_profile_enqueued=True,
-            auto_profile_task_id=task.task_id,
-        )
-
-    async def _enqueue_internal_profile_task(
-        self, *, reason: str,
-    ) -> Task:
-        """Build + enqueue a Coordinator-internal ``profile`` task.
-
-        Used by :meth:`_on_enter_kernel` and any
-        future phase entry that needs a deterministic profile anchor.
-        Routes through :meth:`TaskRegistry.create_or_return_existing`
-        so the standard dispatcher / audit / lease machinery applies
-        unchanged — the only thing this method is responsible for is
-        building a coherent params dict + a stable idempotency_key.
-
-        Params seeded:
-
-        * ``source='coordinator_internal'`` so downstream consumers
-          (breakdown collector, robustness alerting) can distinguish
-          auto-enqueued from LLM-proposed profiles.
-        * ``reason`` mirrored verbatim into the task params and the
-          idempotency_key suffix so a re-entry to KERNEL (defended
-          against by Inv-2.1 but possible in tests) deduplicates.
-        * ``base_extra_args`` from current_best (consistent with the
-          existing ``_materialize_approved_proposal`` profile branch).
-
-        Idempotency key: ``internal-profile-<reason>`` (phase-scoped;
-        ``reason`` is currently only ``"kernel_phase_entry"`` but the
-        suffix slot is reserved for future phase entries that might
-        also need a profile).
-
-        Config selection: we deliberately do NOT pass
-        ``state.baseline_config_path`` here. ProfileExecutor's
-        ``_resolve_default_config`` picks ``profile_sglang.yaml`` /
-        ``profile_vllm.yaml`` — the YAMLs that actually carry
-        ``profiler.torch_profiler.enabled: true`` so Magpie writes
-        the ``.trace.json.gz`` files downstream consumers
-        (``select_kernels`` / ``trace_analyze``) need. Passing the
-        baseline yaml here silently disables the torch profiler
-        (the materializer's ``is_profile`` heuristic reads the
-        YAML's profiler flag) and the executor ends with
-        ``error_class=no_trace_files``. Workload contract still
-        flows correctly via ``materialize_config_with_envs`` reading
-        CONC / ISL / OSL / TP / PRECISION / MAX_MODEL_LEN from env
-        vars regardless of which YAML it starts from.
-
-        Returns the freshly-created (or returned-existing) Task. The
-        caller can read ``task.task_id`` for logging or the
-        ``phase_history`` evidence stamp.
-        """
-        state = self.shared_state
-        params: dict[str, Any] = {
-            "source": "coordinator_internal",
-            "reason": str(reason),
-        }
-        cb = state.current_best or {}
-        if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_sglang_args") or "")
-            if cb_args:
-                params["base_extra_args"] = cb_args
-        # Last-baseline benchmark_script feeds the executor's preflight
-        # path when set; falling back to the default is fine when not.
-        last_bl = state.last_baseline or {}
-        if isinstance(last_bl, dict):
-            bs = str(last_bl.get("benchmark_script") or "").strip()
-            if bs:
-                params["benchmark_script"] = bs
-        task, was_existing = await self.tasks.create_or_return_existing(
-            kind="profile",
-            params=params,
-            idempotency_key=f"internal-profile-{reason}",
-        )
-        if was_existing:
-            log.info(
-                "internal-profile task already exists (idempotent: "
-                "task_id=%s, state=%s)",
-                task.task_id, task.state,
-            )
-        return task
-
-    # ------------------------------------------------------------------
-    # Auto-roofline — Coordinator-side dispatch on EXPLORE/KERNEL entry
-    # (replaces F3-3 / N31 final-roofline-on-CLOSE; gain-only freshness)
-    # ------------------------------------------------------------------
-    _ROOFLINE_GAIN_DRIFT_PCT: float = 10.0   # %  (gain drift threshold)
-
-    def _needs_fresh_roofline(self) -> bool:
-        """Return True iff a fresh ``roofline`` task should be enqueued.
-
-        Gate policy (gain-only, no time component):
-
-        * ``use_roofline_composite`` toggle off → always False (legacy
-          path; EXPLORE skips analysis entirely, KERNEL still runs the
-          plain ``auto_profile`` fallback in :meth:`_on_enter_kernel`).
-        * ``last_trace_analyze`` missing / ``analysis_md_text`` empty
-          → True (no snapshot at all).
-        * ``abs(cumulative_gain_validated -
-          last_trace_analyze.roofline_baseline_gain_at_snapshot)``
-          exceeds :attr:`_ROOFLINE_GAIN_DRIFT_PCT` percentage points
-          → True (existing snapshot is too stale relative to the
-          stack's progress).
-        * Otherwise → False (snapshot is still representative).
-        """
-        state = self.shared_state
-        if not bool(getattr(state, "use_roofline_composite", False)):
             return False
-        last_ta = state.last_trace_analyze or {}
-        if not isinstance(last_ta, dict):
-            last_ta = {}
-        if not last_ta or not last_ta.get("analysis_md_text"):
-            return True
-        try:
-            snap_gain = float(
-                last_ta.get("roofline_baseline_gain_at_snapshot") or 0.0
-            )
-        except (TypeError, ValueError):
-            snap_gain = 0.0
-        try:
-            cur_gain = float(state.cumulative_gain_validated or 0.0)
-        except (TypeError, ValueError):
-            cur_gain = 0.0
-        return abs(cur_gain - snap_gain) > self._ROOFLINE_GAIN_DRIFT_PCT
+        self.shared_state.auto_roofline_pending_task_id = task.task_id
+        log.info(
+            "watermark-roofline (%s): enqueued task=%s "
+            "(cur=%.2f, last_roofline=%.2f, ratio>=%.2f)",
+            reason, task.task_id,
+            self._current_tput_from_validated_gain(),
+            float(self.shared_state.last_roofline_tput or 0.0),
+            self._ROOFLINE_WATERMARK_RATIO,
+        )
+        return True
 
-    async def _enqueue_internal_roofline_task(self, *, reason: str) -> Task:
-        """Build + enqueue a Coordinator-internal ``roofline`` task.
+    def _internal_analysis_kind(self) -> str:
+        """Pick the kind for the next Coordinator-internal analysis task.
 
-        Mirrors :meth:`_enqueue_internal_profile_task` but for the
-        composite ``roofline`` action (profile + trace_analyze + analysis.md
-        snapshot). The LLM no longer has propose_action permission for
-        ``roofline`` (removed from ``PHASE_ALLOWED_ACTIONS``); this is
-        the only path that fires it.
+        ``shared_state.enable_roofline`` (CLI flag ``--enable-roofline``
+        / ``--no-enable-roofline``, default on) controls the choice:
 
-        Idempotency key: ``internal-roofline-<reason>`` — phase-scoped
-        so a re-entry (Inv-2.1 forbids in production but resume edges
-        may reach here twice) dedups via the existing task.
+        * True  → ``roofline`` (composite: profile + trace_analyze +
+          analysis.md snapshot).
+        * False → ``profile`` (lightweight: trace capture only).
+
+        Both kinds share the same enqueue + watermark-anchor +
+        pending-task-gate plumbing; the kind name is the only thing
+        that differs. PolicyGate denies either name when the LLM tries
+        to propose it (``analysis_action_not_llm_proposable``).
+        """
+        return "roofline" if bool(
+            getattr(self.shared_state, "enable_roofline", True),
+        ) else "profile"
+
+    async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
+        """Build + enqueue a Coordinator-internal analysis task.
+
+        The kind (``roofline`` or ``profile``) is selected by
+        :meth:`_internal_analysis_kind` from
+        :attr:`SharedState.enable_roofline`. PRELUDE bootstrap and
+        watermark-crossing paths both go through this single helper.
+
+        Idempotency key: ``internal-analysis-<reason>`` — kind-agnostic
+        so a mode flip across resume does not double-enqueue for the
+        same reason (the first task for that reason still satisfies
+        the gate, regardless of which kind it was). Concurrent callers
+        with the same reason collapse to the existing task.
 
         Config selection: we deliberately do NOT pass
-        ``state.baseline_config_path`` here. The composite action's
-        profile sub-step is :class:`ProfileExecutor`, whose
-        ``_resolve_default_config`` picks ``profile_sglang.yaml`` /
-        ``profile_vllm.yaml`` — the YAMLs that actually carry
-        ``profiler.torch_profiler.enabled: true`` so Magpie writes the
-        ``.trace.json.gz`` files ``trace_analyze`` consumes. Passing
-        the baseline yaml here silently disables the torch profiler
-        and the sub-step ends with ``error_class=no_trace_files``.
-        Workload contract (CONC / ISL / OSL / TP / PRECISION /
-        MAX_MODEL_LEN) still flows correctly because
-        ``materialize_config_with_envs`` re-applies the env vars
-        regardless of which YAML the executor starts from.
+        ``state.baseline_config_path``. Both roofline and profile lean
+        on :class:`ProfileExecutor` (RooflineExecutor calls it via
+        ``_wrap_profile_ctx``), whose ``_resolve_default_config`` picks
+        the ``profile_sglang.yaml`` / ``profile_vllm.yaml`` variant —
+        the YAMLs that carry ``profiler.torch_profiler.enabled: true``
+        so Magpie writes the ``.trace.json.gz`` files consumed
+        downstream. Passing the baseline yaml here silently disables
+        the torch profiler and the sub-step ends with
+        ``error_class=no_trace_files``. Workload contract (CONC / ISL
+        / OSL / TP / PRECISION / MAX_MODEL_LEN) still flows correctly
+        because ``materialize_config_with_envs`` re-applies the env
+        vars regardless of which YAML the executor starts from.
         """
         state = self.shared_state
+        kind = self._internal_analysis_kind()
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
@@ -1446,27 +1332,41 @@ class Coordinator:
             bs = str(last_bl.get("benchmark_script") or "").strip()
             if bs:
                 params["benchmark_script"] = bs
+        # The ``internal-analysis-<reason>`` key is intentionally
+        # kind-agnostic (roofline vs profile) so a mode flip across
+        # resume cannot double-enqueue for the same reason. We do NOT
+        # accept the old kind-specific spellings
+        # (``internal-roofline-*`` / ``internal-profile-*``) — sessions
+        # written by commits before this PR enqueue at most one extra
+        # analysis task on the first resume tick (no compat shim,
+        # acceptable per operator decision; see pr.md Migration notes).
         task, was_existing = await self.tasks.create_or_return_existing(
-            kind="roofline",
+            kind=kind,
             params=params,
-            idempotency_key=f"internal-roofline-{reason}",
+            idempotency_key=f"internal-analysis-{reason}",
         )
         if was_existing:
             log.info(
-                "internal-roofline task already exists (idempotent: "
-                "task_id=%s, state=%s)",
-                task.task_id, task.state,
+                "internal-analysis task already exists (idempotent: "
+                "kind=%s task_id=%s, state=%s)",
+                kind, task.task_id, task.state,
             )
         return task
 
-    async def _auto_roofline_pending_denial(self) -> "PolicyDenied | None":
-        """Return a ``PolicyDenied`` when an EXPLORE-entry auto-roofline
-        task is still in-flight; ``None`` otherwise.
+    async def _auto_roofline_pending_denial(
+        self, *, action_name: str = "",
+    ) -> "PolicyDenied | None":
+        """Return a ``PolicyDenied`` when an auto-roofline task is
+        still in-flight; ``None`` otherwise.
 
-        Specialist dispatches block on this so first-round specialists
-        always see the ``analysis.md`` snapshot in their prompt's
-        ROOFLINE EVIDENCE section. The field is set by
-        :meth:`_on_enter_explore` and cleared in
+        Gates every action that should observe the freshest
+        ``analysis.md`` / ``last_profile_trace`` snapshot before
+        running: specialist dispatches, explore-grid dispatches, and
+        the KERNEL-owned actions (``kernel_opt`` / ``integrate`` /
+        ``deep_kernel_analysis`` / ``operator_tuning`` /
+        ``vendor_kernel_config``). The field is set by
+        :meth:`_maybe_enqueue_watermark_roofline` (mid-run) or the
+        PRELUDE bootstrap (baseline-completion hook) and cleared in
         :meth:`_promote_to_shared_state` once the task lands.
         """
         from .task_registry import TaskNotFound
@@ -1480,7 +1380,7 @@ class Coordinator:
         except TaskNotFound:
             # Task got purged (resume edge / corrupt state) — clear
             # the field and let the dispatch through; we never want a
-            # corrupted pointer to permanently block specialists.
+            # corrupted pointer to permanently block dispatches.
             self.shared_state.auto_roofline_pending_task_id = ""
             return None
         terminal_states = {"succeeded", "failed", "cancelled", "needs_manual_review"}
@@ -1489,21 +1389,51 @@ class Coordinator:
             # Clear it here so subsequent dispatches go through.
             self.shared_state.auto_roofline_pending_task_id = ""
             return None
+        label = action_name or "dispatch"
         return PolicyDenied(
             (
-                f"delegate{{action_name='specialist'}} waits for the "
+                f"delegate{{action_name={label!r}}} waits for the "
                 f"auto-enqueued roofline task {pending_id!r} "
-                f"(state={pending.state!r}) — first-round specialists "
-                f"need the analysis.md snapshot."
+                f"(state={pending.state!r}) — downstream actions "
+                f"need the fresh analysis.md snapshot before they "
+                f"can run."
             ),
-            rule="specialist_wait_for_auto_roofline",
+            rule="wait_for_auto_roofline",
             hint=(
-                "The Coordinator auto-enqueued a `roofline` task on "
-                "EXPLORE entry; re-emit the same specialist delegate "
-                "next tick (TaskRegistry will dedupe by content "
-                "fingerprint) once the roofline result lands."
+                "The Coordinator auto-enqueued a `roofline` task "
+                "(PRELUDE bootstrap or 10% gain watermark crossing); "
+                "re-emit the same delegate next tick (TaskRegistry "
+                "dedupes by content fingerprint) once the roofline "
+                "result lands."
             ),
         )
+
+    async def _drain_proposals_awaiting_roofline(self) -> None:
+        """Re-run materialise for proposals deferred by the analysis gate.
+
+        Called from :meth:`_promote_to_shared_state` once the
+        Coordinator-internal ``profile`` / ``roofline`` task clears
+        ``auto_roofline_pending_task_id``. Drains FIFO so the original
+        Critic-approval order is preserved. Each materialise re-checks
+        the gate, so if another analysis task slipped in between (rare
+        but possible) the proposal is re-queued instead of dispatched
+        before the freshest snapshot lands.
+        """
+        if not self._proposals_awaiting_roofline:
+            return
+        deferred = self._proposals_awaiting_roofline
+        self._proposals_awaiting_roofline = []
+        for pending, approved_variant_names in deferred:
+            try:
+                await self._materialize_approved_proposal(
+                    pending, approved_variant_names=approved_variant_names,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "drain_proposals_awaiting_roofline: re-materialise "
+                    "failed for proposal=%s action=%s",
+                    pending.proposal_msg_id, pending.action_name,
+                )
 
     def _record_phase_entry_evidence(self, **kvs: Any) -> None:
         """Merge ``kvs`` into the latest ``phase_history`` row's
@@ -3151,9 +3081,17 @@ class Coordinator:
         if "kernel" in self.role_registry:
             if not self.shared_state.last_profile_trace:
                 return (
-                    "TODO 2/5: profile is required now. Baseline exists but "
-                    "last_profile_trace is empty; propose/delegate only `profile`. "
-                    "Do not run backends/params/sweep yet."
+                    "TODO 2/5: waiting for the Coordinator-internal analysis "
+                    "task to populate ``last_profile_trace``. The Coordinator "
+                    "auto-enqueues `roofline` (default) or `profile` (under "
+                    "``--no-enable-roofline``) at the end of PRELUDE and on "
+                    "every +10% watermark crossing; PolicyGate denies any "
+                    "LLM-proposed roofline/profile with "
+                    "``rule='analysis_action_not_llm_proposable'``. If "
+                    "``auto_roofline_pending_task_id`` is stuck (failed / "
+                    "cancelled task that never cleared the field), emit "
+                    "`recover` as your escape hatch — the analysis lane is "
+                    "Coordinator-owned and not LLM-proposable."
                 )
             # analysis.md contract: require `select_kernels` to have
             # run against the current trace so analysis.md exists on disk
@@ -3531,7 +3469,16 @@ class Coordinator:
                 return PolicyDenied(
                     f"action={action!r} denied: profile must run before {action!r}",
                     rule="execution_order",
-                    hint="propose/delegate `profile`; last_profile_trace is empty",
+                    hint=(
+                        "wait for the Coordinator-internal analysis task "
+                        "(auto-enqueued at PRELUDE / on every +10% watermark "
+                        "crossing) to populate ``last_profile_trace``; "
+                        "PolicyGate denies LLM-proposed `profile` / "
+                        "`roofline` with "
+                        "``rule='analysis_action_not_llm_proposable'``. If "
+                        "``auto_roofline_pending_task_id`` is stuck on a "
+                        "failed task, emit `recover`."
+                    ),
                 )
             # integrate gate: kernel_opt KEEP awaiting integrate. Allow
             # integrate / report through; recover is not in
@@ -3649,7 +3596,17 @@ class Coordinator:
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: profile must run first",
                 rule="execution_order",
-                hint="propose/delegate `profile` before select_kernels/run_optimization",
+                hint=(
+                    "wait for the Coordinator-internal analysis task to "
+                    "populate ``last_profile_trace`` before requesting "
+                    "select_kernels / run_optimization; analysis is "
+                    "auto-enqueued at PRELUDE and on every +10% watermark "
+                    "crossing. The analysis lane is Coordinator-owned and not "
+                    "LLM-proposable (PolicyGate denies with "
+                    "``rule='analysis_action_not_llm_proposable'``). If "
+                    "``auto_roofline_pending_task_id`` is stuck, emit "
+                    "`recover` as the escape hatch."
+                ),
             )
         # Main M4 renamed the cache field from ``last_select_kernels`` to
         # ``last_trace_analyze``; this branch populates BOTH (legacy +
@@ -3740,15 +3697,12 @@ class Coordinator:
 
     # Note: main commit c900791 also ports the N22 keyword-implied
     # advice (``_record_keyword_implied_advice``,
-    # ``_registered_variants_for``) and N21 roofline-rerun denial
-    # (``_proposal_denial_for_roofline``). On this branch the
-    # equivalent functionality lives in:
-    #   * orchestrator/_analysis_keyword_map.py + PolicyGate's
-    #     ``analysis_keyword_advisory`` rule (F3-4 N22), and
-    #   * PolicyGate's ``roofline_saturation_advisory`` (F3-4 N21).
-    # The Coordinator-side helpers from main are therefore omitted
-    # here (they would also re-import the dropped backends.py /
-    # params.py grids —     # §1).
+    # ``_registered_variants_for``). On this branch the equivalent
+    # functionality lives in
+    # ``orchestrator/_analysis_keyword_map.py`` + PolicyGate's
+    # ``analysis_keyword_advisory`` rule. The Coordinator-side
+    # helpers from main are therefore omitted here (they would also
+    # re-import the dropped backends.py / params.py grids).
 
     # ==================================================================
     # Intent handling
@@ -3818,6 +3772,20 @@ class Coordinator:
                 {"kind": "proposal_pruned", "from": source, "action": action_name},
             )
             return
+        # Gate proposals on a pending auto-roofline / auto-profile task
+        # *before* paying for the Critic round-trip. This is the cheap
+        # path; ``_materialize_approved_proposal`` carries a symmetric
+        # check for the race where the watermark trips while a proposal
+        # is already in front of the Critic.
+        if action_name in _ROOFLINE_GATED_ACTIONS:
+            roofline_denied = await self._auto_roofline_pending_denial(
+                action_name=action_name,
+            )
+            if roofline_denied is not None:
+                await self._record_policy_denied(
+                    source, intent, roofline_denied, action_name=action_name,
+                )
+                return
         denied = self._sequence_denial_for_action(
             action_name,
             proposed_params=intent.payload.get("params"),
@@ -4548,6 +4516,39 @@ class Coordinator:
         dispatches only the 2 approved variants to the executor.
         ``None`` (legacy single-verdict path) keeps the full grid.
         """
+        # Safety net for the race where the watermark fires while a
+        # proposal is already in front of the Critic.
+        # ``_handle_propose_action`` carries the same check (the cheaper
+        # path); this one catches proposals the Critic approved between
+        # the watermark crossing and the dispatch tick. Defer rather
+        # than drop — the Critic already approved, so re-running the
+        # round-trip would be wasted budget.
+        if pending.action_name in _ROOFLINE_GATED_ACTIONS:
+            roofline_denied = await self._auto_roofline_pending_denial(
+                action_name=pending.action_name,
+            )
+            if roofline_denied is not None:
+                self._proposals_awaiting_roofline.append(
+                    (pending, approved_variant_names),
+                )
+                await self._record_observation(
+                    "coordinator", "observation",
+                    {
+                        "kind": "proposal_materialize_blocked",
+                        "reason": "wait_for_auto_roofline",
+                        "proposal_msg_id": pending.proposal_msg_id,
+                        "action_name": pending.action_name,
+                        "from_agent": pending.from_agent,
+                        "pending_roofline_task_id": (
+                            self.shared_state.auto_roofline_pending_task_id
+                            or ""
+                        ),
+                        "deferred_queue_depth": len(
+                            self._proposals_awaiting_roofline,
+                        ),
+                    },
+                )
+                return
         params = dict(pending.payload.get("params") or {})
         # stamp per-variant kb_edge_id into the
         # grid so the explore executor (which already reads
@@ -4802,15 +4803,17 @@ class Coordinator:
             # SpecialistRunner picks it up.
             action_name = "specialist"
 
-        # Auto-roofline gate (EXPLORE-entry blocker). When
-        # ``_on_enter_explore`` enqueued a fresh ``roofline`` task and
-        # it is still in-flight, refuse new specialist dispatches so
-        # the first-round specialists run with the analysis.md
-        # snapshot. The field is cleared by
-        # ``_promote_to_shared_state`` when the roofline task reaches
-        # a terminal state.
-        if action_name == "specialist":
-            denied = await self._auto_roofline_pending_denial()
+        # Auto-roofline gate. When the Coordinator has an in-flight
+        # roofline task (PRELUDE bootstrap or 10% watermark crossing),
+        # Refuse any dispatch whose output should observe the fresh
+        # ``analysis.md`` / ``last_profile_trace`` snapshot before it
+        # runs. The gated action set is the module-level
+        # ``_ROOFLINE_GATED_ACTIONS`` so propose_action / materialize
+        # paths gate against the exact same names.
+        if action_name in _ROOFLINE_GATED_ACTIONS:
+            denied = await self._auto_roofline_pending_denial(
+                action_name=action_name,
+            )
             if denied is not None:
                 await self._record_policy_denied(
                     source, intent, denied, action_name=action_name,
@@ -5157,6 +5160,16 @@ class Coordinator:
                     "framework_pr_scout: pre-fetch failed: %r", exc,
                 )
                 params["pr_candidates"] = []
+
+        # proposal_set cap — flow the single-source-of-truth value into
+        # ``params`` so SpecialistRunner can read it without re-importing
+        # the constant. ``setdefault`` lets a delegate intent shrink the
+        # cap explicitly; values larger than the constant get re-clamped
+        # by the runner.
+        from inference_optimizer.orchestrator.policy import (
+            DEFAULT_SPECIALIST_MAX_PROPOSALS,
+        )
+        params.setdefault("max_proposals", DEFAULT_SPECIALIST_MAX_PROPOSALS)
 
     @staticmethod
     def _pr_summary_to_dict(pr: Any) -> dict[str, Any]:
@@ -5805,7 +5818,8 @@ class Coordinator:
             (task.params or {}).get("round_id")
             or task.task_id
         )
-        return {
+        truncated_from = done_payload.get("proposals_truncated_from")
+        entry: dict[str, Any] = {
             "round_id":          round_id,
             "task_id":           task.task_id,
             "source":            source or "coordinator",
@@ -5824,6 +5838,9 @@ class Coordinator:
                 done_payload.get("residual_questions") or []
             ),
         }
+        if isinstance(truncated_from, int) and truncated_from > len(proposals):
+            entry["proposals_truncated_from"] = truncated_from
+        return entry
 
     # ------------------------------------------------------------------
     # REQUEST / RESPONSE (Plan A)
@@ -6031,7 +6048,7 @@ class Coordinator:
                         self.shared_state.record_kernel_integrate_result(result)
                     decision = str(result.get("decision", "")).upper()
                     if decision == "KEEP":
-                        self._record_integrate_keep(result)
+                        await self._record_integrate_keep(result)
                     self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
                 # so the LLM-backed kernel agent should NOT see the request
@@ -6345,7 +6362,7 @@ class Coordinator:
                 (result or {}).get("kernel_id") if isinstance(result, dict) else None,
             )
 
-    def _record_integrate_keep(self, result: dict[str, Any]) -> None:
+    async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
@@ -6409,6 +6426,27 @@ class Coordinator:
             self.shared_state.cumulative_gain = (
                 (float(new_tput) - self.shared_state.baseline_tput)
                 / self.shared_state.baseline_tput * 100.0
+            )
+            # Mirror explore's single-writer pattern: an integrate KEEP
+            # has already been validated by the kernel-agent rebench,
+            # so promote it into ``cumulative_gain_validated`` and run
+            # the same 10% watermark check the explore branch uses.
+            # This collapses kernel + explore gain bookkeeping into one
+            # mechanism so a kernel-driven gain can fire a fresh
+            # roofline just like an explore-driven one.
+            validated_gain = (
+                (float(new_tput) - self.shared_state.baseline_tput)
+                / self.shared_state.baseline_tput * 100.0
+            )
+            self.shared_state.cumulative_gain_validated = float(validated_gain)
+            self.shared_state.cumulative_gain_validated_ts = (
+                datetime.now(timezone.utc).isoformat()
+            )
+            self.shared_state.cumulative_gain_validated_stack_len = len(
+                self.shared_state.optimization_stack
+            )
+            await self._maybe_enqueue_watermark_roofline(
+                reason="integrate_keep_watermark",
             )
 
     # ==================================================================
@@ -7307,6 +7345,35 @@ class Coordinator:
             # seed the gaps[] ledger from baseline.
             # Best-effort; failure is logged + absorbed inside the helper.
             await self._refresh_gaps(reason="baseline_done")
+            # PRELUDE bootstrap: enqueue the first analysis action
+            # (kind picked by ``shared_state.enable_roofline``:
+            # ``roofline`` by default, ``profile`` when
+            # ``--no-enable-roofline``). Idempotency-keyed via the
+            # fixed ``prelude_initial`` reason so a resume after the
+            # baseline completion edge does not double-enqueue.
+            #
+            # Skip conditions:
+            # * baseline tput missing or invalid;
+            # * an analysis task is already in-flight (gate field set).
+            if (
+                isinstance(tput, (int, float)) and tput > 0
+                and not (self.shared_state.auto_roofline_pending_task_id or "").strip()
+            ):
+                try:
+                    rl_task = await self._enqueue_internal_analysis_task(
+                        reason="prelude_initial",
+                    )
+                    self.shared_state.auto_roofline_pending_task_id = rl_task.task_id
+                    log.info(
+                        "PRELUDE: baseline landed (tput=%.2f); auto-enqueued "
+                        "initial %s task=%s",
+                        float(tput), rl_task.kind, rl_task.task_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "PRELUDE: failed to enqueue initial analysis task "
+                        "after baseline: %r", exc,
+                    )
         elif task_kind == "profile":
             audit_decision = "promoted"
             audit_extras = {
@@ -7371,6 +7438,36 @@ class Coordinator:
                         / self.shared_state.baseline_tput * 100.0
                     )
                 changed = True
+            # When this profile task came in as the Coordinator-internal
+            # analysis action (``--no-enable-roofline`` mode), mirror
+            # the roofline-branch watermark + gate handling so PRELUDE
+            # bootstrap and watermark-crossing flows behave identically
+            # under either kind:
+            #   * refresh ``last_roofline_tput`` from the projected
+            #     current tput so the next +10% step is anchored on
+            #     this measurement (matches the roofline branch math);
+            #   * clear ``auto_roofline_pending_task_id`` so downstream
+            #     dispatches stop being held by
+            #     ``_auto_roofline_pending_denial``.
+            # The conditions are kind-agnostic — we always refresh the
+            # watermark on a successful profile (so any operator-
+            # enqueued profile also re-anchors the watermark) and
+            # always clear the pending field for THIS task id so an
+            # unrelated profile result cannot clear a gate set by a
+            # different task.
+            if profile_status == "succeeded":
+                anchor_tput = self._current_tput_from_validated_gain()
+                if anchor_tput > 0:
+                    self.shared_state.last_roofline_tput = float(anchor_tput)
+                    changed = True
+            if (
+                task is not None
+                and self.shared_state.auto_roofline_pending_task_id
+                == task.task_id
+            ):
+                self.shared_state.auto_roofline_pending_task_id = ""
+                changed = True
+                await self._drain_proposals_awaiting_roofline()
         elif task_kind == "roofline":
             # F1-3 (Roofline-v2 / ): the
             # composite ``roofline`` action runs profile +
@@ -7411,13 +7508,21 @@ class Coordinator:
                     "degraded": bool(result.get("degraded", False)),
                 }
                 # N27 — reset the outer roofline failure streak on a
-                # successful snapshot. The per-phase fallback (commit
-                # 6078012) already keeps the run alive when roofline
-                # keeps failing; the streak is exposed for prompt-side
-                # visibility only. ``setattr`` lets test stubs that omit
-                # the field still pass.
+                # successful snapshot. The streak is exposed for
+                # prompt-side visibility only. ``hasattr`` lets test
+                # stubs that omit the field still pass.
                 if hasattr(self.shared_state, "roofline_failure_streak"):
                     self.shared_state.roofline_failure_streak = 0
+                # Refresh the watermark: anchor the 10% step on the
+                # projected current tput (matches the watermark check
+                # so consecutive small KEEPs don't accidentally re-arm
+                # before the stack has actually advanced 10% from this
+                # measurement). For PRELUDE initial,
+                # ``cumulative_gain_validated`` is 0 so the anchor
+                # equals baseline_tput.
+                anchor_tput = self._current_tput_from_validated_gain()
+                if anchor_tput > 0:
+                    self.shared_state.last_roofline_tput = float(anchor_tput)
                 changed = True
             else:
                 audit_decision = "discarded"
@@ -7436,82 +7541,23 @@ class Coordinator:
                 if hasattr(self.shared_state, "roofline_failure_streak"):
                     self.shared_state.roofline_failure_streak += 1
                 changed = True
-                # Per-phase fallback on roofline failure (operator-
-                # requested 2026-05-25 after the TraceLens-patch-missing
-                # incident that left both EXPLORE-entry and KERNEL-entry
-                # roofline failing with ``trace_split_no_steady_state``
-                # and KERNEL plateauing immediately because
-                # ``last_profile_trace`` had no usable analysis path):
-                #
-                # * ``reason='explore_entry'`` → **skip** silently. The
-                #   gate-clear path below releases the specialist
-                #   dispatch lock and EXPLORE continues in degraded
-                #   mode (specialists run without ROOFLINE EVIDENCE).
-                #   No retry / no fallback — re-issuing the same
-                #   roofline almost always fails the same way and
-                #   eats 10-20 min of EXPLORE budget.
-                #
-                # * ``reason='kernel_phase_entry'`` → **fall back to a
-                #   plain profile task** so ``kernel_opt`` /
-                #   ``select_kernels`` has a fresh ``last_profile_trace``
-                #   to consume. ProfileExecutor's
-                #   ``_resolve_default_config`` picks
-                #   ``profile_sglang.yaml`` (torch_profiler enabled).
-                #   The fallback uses a phase-scoped idempotency key so
-                #   a re-entry to KERNEL deduplicates.
-                reason = (
+                log.warning(
+                    "Auto-roofline %s failed (reason=%s phase=%s "
+                    "error_class=%s); continuing in degraded mode "
+                    "(specialists / explore proceed without a fresh "
+                    "analysis_md). No retry, no fallback.",
+                    task.task_id if task else "?",
                     str((task.params or {}).get("reason") or "")
-                    if task is not None
-                    else ""
+                    if task is not None else "",
+                    result.get("phase"),
+                    result.get("error_class"),
                 )
-                if reason == "kernel_phase_entry":
-                    try:
-                        fallback = await self._enqueue_internal_profile_task(
-                            reason="kernel_phase_entry_roofline_failed",
-                        )
-                        log.warning(
-                            "KERNEL-entry roofline %s failed "
-                            "(phase=%s error_class=%s); enqueued "
-                            "fallback profile task=%s",
-                            task.task_id if task else "?",
-                            result.get("phase"),
-                            result.get("error_class"),
-                            fallback.task_id,
-                        )
-                        # Stamp the latest phase_history row when it
-                        # is the KERNEL entry we just transitioned to;
-                        # safe no-op when the row has already moved on
-                        # (e.g. compute_next_phase fired plateau_kernel
-                        # before the fallback could land — rare but
-                        # possible under heavy budget pressure).
-                        self._record_phase_entry_evidence(
-                            auto_profile_fallback_enqueued=True,
-                            auto_profile_fallback_task_id=fallback.task_id,
-                            auto_profile_fallback_reason="roofline_failed",
-                        )
-                    except Exception as exc:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "KERNEL-entry roofline %s failed and the "
-                            "fallback profile enqueue also failed: %r",
-                            task.task_id if task else "?", exc,
-                        )
-                elif reason == "explore_entry":
-                    log.warning(
-                        "EXPLORE-entry roofline %s failed (phase=%s "
-                        "error_class=%s); skipping (no retry, no "
-                        "fallback). Specialists will proceed in "
-                        "degraded mode without analysis_md.",
-                        task.task_id if task else "?",
-                        result.get("phase"),
-                        result.get("error_class"),
-                    )
-            # Clear the EXPLORE-entry auto-roofline gate: regardless of
-            # success/failure, this task is no longer in-flight, so
-            # subsequent specialist dispatches stop being held by
-            # ``_auto_roofline_pending_denial``. We compare task ids so
-            # an unrelated roofline result (e.g. operator-enqueued via
-            # internal tooling) does not accidentally clear a gate set
-            # by a different task.
+            # Clear the auto-roofline gate: regardless of success/failure,
+            # this task is no longer in-flight, so subsequent dispatches
+            # stop being held by ``_auto_roofline_pending_denial``. We
+            # compare task ids so an unrelated roofline result (e.g.
+            # operator-enqueued via internal tooling) does not
+            # accidentally clear a gate set by a different task.
             if (
                 task is not None
                 and self.shared_state.auto_roofline_pending_task_id
@@ -7519,6 +7565,7 @@ class Coordinator:
             ):
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
+                await self._drain_proposals_awaiting_roofline()
         elif task_kind == "explore":
             # v0.8 M3 + KB_gaps/Dead-A.5 (prerequisite to Gap-10) —
             # ``explore`` is the merged grid runner.
@@ -7620,6 +7667,15 @@ class Coordinator:
                     )
                     self.shared_state.cumulative_gain_validated_stack_len = len(
                         self.shared_state.optimization_stack
+                    )
+                    # Watermark refresh: if the new validated gain has
+                    # pushed projected current tput >= 10% over the
+                    # last roofline measurement, enqueue a fresh
+                    # composite roofline and block subsequent
+                    # specialist / explore / kernel dispatches until
+                    # it lands.
+                    await self._maybe_enqueue_watermark_roofline(
+                        reason="explore_keep_watermark",
                     )
             else:
                 # No KEEP cleared the rebench. Bump the proxy so the

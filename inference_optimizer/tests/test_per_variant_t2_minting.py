@@ -66,6 +66,8 @@ class _BareState:
     params_search: dict = field(default_factory=dict)
     # Pruned-family check.
     pruned_families: list = field(default_factory=list)
+    # Pending auto-roofline gate.
+    auto_roofline_pending_task_id: str = ""
 
     save_count: int = 0
     session_iter_index: int = 0

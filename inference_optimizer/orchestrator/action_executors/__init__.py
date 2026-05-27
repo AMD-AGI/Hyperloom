@@ -24,11 +24,6 @@ from .explore import (
     ExploreExecutor,
     explore_executor,
 )
-from .profile import (
-    PROFILE_DEFAULT_CONFIG,
-    ProfileExecutor,
-    profile_executor,
-)
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .sweep import (
@@ -48,8 +43,6 @@ __all__ = [
     "DEFAULT_KEEP_THRESHOLD_PCT",
     "DEFAULT_STACK_STABLE_PCT",
     "ExploreExecutor",
-    "PROFILE_DEFAULT_CONFIG",
-    "ProfileExecutor",
     "RecoverExecutor",
     "ReportExecutor",
     "SessionBreakdownExecutor",
@@ -57,7 +50,6 @@ __all__ = [
     "TargetAnalysisExecutor",
     "baseline_executor",
     "explore_executor",
-    "profile_executor",
     "recover_executor",
     "report_executor",
     "session_breakdown_executor",

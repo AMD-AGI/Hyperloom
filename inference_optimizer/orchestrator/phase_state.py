@@ -98,7 +98,16 @@ def phase_index(phase: str) -> int:
 # only the *entry points* close.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset({
-        "target_analysis", "baseline", "recover",
+        # ``roofline`` / ``profile`` are Coordinator-auto-enqueued at
+        # PRELUDE after baseline lands so the EXPLORE-phase first
+        # specialist sees a populated trace (and, when roofline is on,
+        # an ``analysis.md`` snapshot). The Coordinator picks the kind
+        # via ``shared_state.enable_roofline`` — both names sit in the
+        # allowlist so the internal-enqueue passes R1
+        # ``phase_incompatible``. LLM-side propose_action /
+        # delegate is denied by PolicyGate's
+        # ``analysis_action_not_llm_proposable`` rule for both names.
+        "target_analysis", "baseline", "roofline", "profile", "recover",
     }),
     PHASE_EXPLORE: frozenset({
         # v0.8 canonical: merged grid runner + LLM specialist dispatch.
@@ -106,40 +115,31 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # PR-A1 (Arbor-into-Hyperloom): specialists in EXPLORE may write
         # source patches into ``runs/specialist/<task_id>/worktree/``;
         # ``integrate_patch`` is the orchestrator-side serving-lane-locked
-        # apply+restart+gate step that consumes those patches. The action
-        # is deterministic (Python executor, no LLM) and bound to EXPLORE
-        # only — KERNEL still uses the ``integrate`` (kernel-owned) path.
+        # apply+restart+gate step that consumes those patches.
         "integrate_patch",
         # IR-7 (Honest self-stop): thin wrapper that dispatches the
         # session_steward_specialist domain. Coordinator also enqueues
         # this internally on plateau (bypasses PolicyGate); LLM-side
         # proposes are throttled by ``assess_remaining_gaps_throttle``.
         "assess_remaining_gaps",
-        # Local hotfix: ``profile`` stays in the EXPLORE allowlist so
-        # the sequence-gate (which requires non-empty
-        # ``last_profile_trace`` before any ``sequence_actions`` entry
-        # like ``explore`` can run) has an LLM-proposable escape
-        # hatch when ``use_roofline_composite`` is off. With composite
-        # on, the Coordinator's ``_on_enter_explore`` auto-roofline
-        # hook satisfies the same prereq.
-        # NOTE: ``roofline`` is intentionally NOT here — see the
-        # post-dict comment below.
-        "profile",
+        # ``roofline`` / ``profile`` are Coordinator-auto-enqueued mid-
+        # EXPLORE whenever the watermark check at the
+        # cumulative_gain_validated writer fires (10% step compound vs
+        # ``last_roofline_tput``). The Coordinator picks the kind via
+        # ``enable_roofline``; the auto_roofline_pending_task_id
+        # blocker holds dispatches until either kind lands.
+        "roofline", "profile",
         "recover",
     }),
     PHASE_KERNEL: frozenset({
-        # ``profile`` stays LLM-proposable so the operator can fall
-        # back to it when ``--use-roofline-composite=False`` (PolicyGate
-        # N9 denies direct ``profile`` only when the composite toggle
-        # AND ``--deny-direct-profile`` are both on; the auto-profile
-        # hook in :meth:`Coordinator._on_enter_kernel` already runs it
-        # automatically in that fallback configuration).
-        # NOTE: ``pmc_roofline`` was retired (action + executor removed);
-        # do not re-add — see post-dict comment about ``roofline``.
-        "profile",
         # KERNEL_OWNED_ACTIONS from policy.py.
         "kernel_opt", "integrate", "deep_kernel_analysis",
         "operator_tuning", "vendor_kernel_config",
+        # ``roofline`` / ``profile`` are auto-enqueued on watermark
+        # crossing here too — kernel integrate KEEPs flow through the
+        # same single-writer hook as explore/specialist KEEPs; mode is
+        # picked via ``enable_roofline``.
+        "roofline", "profile",
         "recover",
     }),
     PHASE_SWEEP: frozenset({
@@ -150,17 +150,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         "recover",
     }),
 }
-
-# v0.8 (post-N31 retirement): ``roofline`` is intentionally NOT in any
-# phase allowlist. The composite action is no longer LLM-proposable —
-# the Coordinator auto-enqueues it on EXPLORE entry and KERNEL entry
-# via ``_on_enter_explore`` / ``_on_enter_kernel`` (gated by the
-# ``use_roofline_composite`` toggle + the gain-only freshness gate in
-# :meth:`Coordinator._needs_fresh_roofline`). PolicyGate R1
-# ``phase_incompatible`` therefore denies any LLM
-# ``propose_action{action_name='roofline'}`` /
-# ``delegate{action_name='roofline'}``; internal Coordinator enqueues
-# bypass PolicyGate so they continue to work.
 
 
 def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
@@ -275,8 +264,12 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 # Default phase budgets (% of total wall-clock) — KB_design §3.8 §5.3
 # ---------------------------------------------------------------------------
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
-    PHASE_PRELUDE: 0.05,
-    PHASE_EXPLORE: 0.60,
+    # PRELUDE bumped from 0.05 to 0.08 because the phase now owns the
+    # initial roofline (profile + trace_analyze) in addition to
+    # target_analysis + baseline. IR-6 force-exit thresholds only ever
+    # gated EXPLORE, so this bump is the only budget knob affected.
+    PHASE_PRELUDE: 0.08,
+    PHASE_EXPLORE: 0.57,
     PHASE_KERNEL:  0.25,
     PHASE_SWEEP:   0.08,
     PHASE_CLOSE:   0.02,

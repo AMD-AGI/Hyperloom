@@ -46,7 +46,8 @@ LLM should dispatch specialists as the **primary** entry into a round:
 
 1. Read `SharedState.gaps[]` (or fall back to `last_action_failures` +
    `explore_search.winners_history` when gaps are empty).
-2. Pick the top-K gaps (K up to `research_lane_capacity`).
+2. Pick the top-K gaps (K up to `min(len(gaps), research_lane_capacity)`;
+   `research_lane_capacity` is hard-capped at 6).
 3. For each gap, emit one `delegate{action_name='specialist', params={...}}`
    intent in the **same** tick. Claude's tool API supports multiple
    `emit_intent` tool calls per turn, so a single LLM response fans
