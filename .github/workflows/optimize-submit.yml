@@ -474,14 +474,14 @@ jobs:
         run: pip install --quiet requests pyyaml
 
       - name: Download all submission manifests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ github.workspace }}/manifests
           pattern: submission-manifest-*
           merge-multiple: false
 
       - name: Download all task artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ github.workspace }}/task-artifacts-merged
           pattern: task-artifacts-*
