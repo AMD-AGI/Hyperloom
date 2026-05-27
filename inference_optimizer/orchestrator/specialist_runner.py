@@ -57,6 +57,7 @@ from .specialist_subprocess import (
     _pick_worktree_base,
     _setup_worktree,
 )
+from .policy import DEFAULT_SPECIALIST_MAX_PROPOSALS
 from .sub_agent_runner import RunnerContext, SubAgentResult
 from .system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -497,6 +498,14 @@ class SpecialistRunner:
                     str(workspace_for_prompt) if workspace_for_prompt else ""
                 ),
                 notes=str(params.get("notes") or ""),
+                # proposal_set cap (single source of truth: policy.py).
+                # Coordinator._warm_specialist_params seeds this; clamp
+                # defensively in case a caller passes a larger value.
+                max_proposals=max(1, min(
+                    DEFAULT_SPECIALIST_MAX_PROPOSALS,
+                    int(params.get("max_proposals") or
+                        DEFAULT_SPECIALIST_MAX_PROPOSALS),
+                )),
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
@@ -781,6 +790,28 @@ class SpecialistRunner:
         done_payload["domain"] = domain.key
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
+        # Hard truncate proposal_set to the single-source-of-truth cap.
+        # The prompt asks the specialist to self-curate, but we never
+        # trust LLM output for size limits — anything beyond the cap is
+        # dropped before persist so the on-disk artifact, Coordinator
+        # bookkeeping, Critic review and explore-grid materialisation
+        # all see the same N≤cap shape. ``proposals_truncated_from`` is
+        # picked up by ``coordinator._build_specialist_round_entry`` for
+        # the session_breakdown audit trail.
+        _proposals = done_payload["proposal_set"]
+        if (
+            isinstance(_proposals, list)
+            and len(_proposals) > DEFAULT_SPECIALIST_MAX_PROPOSALS
+        ):
+            _original_len = len(_proposals)
+            done_payload["proposal_set"] = (
+                _proposals[:DEFAULT_SPECIALIST_MAX_PROPOSALS]
+            )
+            done_payload["proposals_truncated_from"] = _original_len
+            notes.append(
+                f"proposal_set_truncated:{_original_len}->"
+                f"{DEFAULT_SPECIALIST_MAX_PROPOSALS}"
+            )
         if "empty" not in done_payload:
             done_payload["empty"] = not bool(done_payload["proposal_set"])
         if "summary" not in done_payload:

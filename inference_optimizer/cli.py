@@ -55,7 +55,6 @@ from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     baseline_executor,
     explore_executor,
-    profile_executor,
     recover_executor,
     report_executor,
     session_breakdown_executor,
@@ -63,10 +62,8 @@ from .orchestrator.action_executors import (
 )
 from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
 from .orchestrator.action_executors.recover import recover_executor
-from .orchestrator.action_executors.roofline import (
-    make_roofline_executor,
-    make_roofline_stub_executor,
-)
+from .orchestrator.action_executors.profile import profile_executor
+from .orchestrator.action_executors.roofline import make_roofline_executor
 from .orchestrator.backends import (
     ClaudeBackend,
     CodexBackend,
@@ -92,6 +89,7 @@ from .paths import (
     _SESSION_SKELETON,
     asset_system_prompts_dir,
     make_session_dir,
+    mn_profile_trace_root,
     session_dir as _session_dir_resolve,
 )
 from .session_paths import (
@@ -100,6 +98,39 @@ from .session_paths import (
 
 
 log = logging.getLogger("inference_optimizer.cli")
+
+
+class _RetiredFlag(argparse.Action):
+    """Argparse action that hard-fails on a retired CLI flag.
+
+    Reaching for the old flag spelling should produce an immediate,
+    explicit error (``parser.error`` exits 2) with a one-line
+    migration hint — silent aliases would mask the behaviour change
+    when the underlying semantics differ.
+    """
+
+    def __init__(
+        self,
+        option_strings: list[str],
+        dest: str,
+        *,
+        hint: str,
+        **kwargs: Any,
+    ) -> None:
+        kwargs.setdefault("nargs", 0)
+        kwargs.setdefault("default", argparse.SUPPRESS)
+        kwargs.setdefault("help", argparse.SUPPRESS)
+        self._hint = hint
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        parser.error(f"{option_string} was removed. {self._hint}")
 
 
 def _orchestration_rules_fragment_path() -> Path:
@@ -227,14 +258,6 @@ _CLAUDE_ALLOWED_MODELS  = (_CLAUDE_PREFERRED_MODEL, _CLAUDE_FALLBACK_MODEL)
 # is the retry count after the initial attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
 _CATALOG_REQUEST_TIMEOUT_SEC = 5.0
-
-# Where ``ensure_auth_proxy.sh`` expects ``auth_proxy.py`` to live, plus the
-# read-only mount points that ship the source. ``OOB_SRC`` env wins; the
-# defaults below match the bundle layout used by ``kernel-agent/install.sh``.
-_OOB_SRC_CANDIDATES: tuple[str, ...] = (
-    "/wekafs/fully-local/OOB",
-    "/wekafs/fully-local/inference_optimization/OOB",
-)
 
 # /dev/shm threshold: vLLM IPC + NCCL shm segments routinely need >8GB; when
 # free space drops below this the next launch tends to collide with stale
@@ -509,19 +532,18 @@ def _seed_shared_state(
     session_id: str,
 ) -> SharedState:
     # research_lane capacity is locked here for the lifetime
-    # of the session. Clamp to [0, 32]; emit a
-    # warning when the operator opts into the high end (LLM quota +
-    # PR Monitor load risk per §3.14 R-07).
+    # of the session. Clamp to [0, MAX_RESEARCH_LANE_CAPACITY] (M6
+    # ceiling; values above this are silently clamped down). The cap
+    # protects LLM quota and PR Monitor load (§3.14 R-07).
+    from inference_optimizer.orchestrator.policy import (
+        MAX_RESEARCH_LANE_CAPACITY,
+    )
     research_lane_capacity = int(
         getattr(args, "research_lane_capacity", 1) or 1
     )
-    research_lane_capacity = max(0, min(32, research_lane_capacity))
-    if research_lane_capacity > 6:
-        log.warning(
-            "research_lane_capacity=%d above M6 default 6; LLM quota / "
-            "PR Monitor load may spike. See KB_design §3.14 R-07.",
-            research_lane_capacity,
-        )
+    research_lane_capacity = max(
+        0, min(MAX_RESEARCH_LANE_CAPACITY, research_lane_capacity),
+    )
     # collect plateau threshold overrides into a single dict
     #. Only non-None CLI overrides
     # land in the dict; absent keys fall through to the
@@ -618,6 +640,15 @@ def _seed_shared_state(
         research_lane_capacity=research_lane_capacity,
         plateau_overrides=plateau_overrides,
         explore_overtime_kill_ratio=explore_overtime_kill_ratio,
+        enable_roofline=bool(
+            getattr(args, "enable_roofline", True),
+        ),
+        framework_agent_enabled=bool(
+            getattr(args, "framework_agent_enabled", True),
+        ),
+        gain_driven_kernel_opt=bool(
+            getattr(args, "gain_driven_kernel_opt", False),
+        ),
     )
     state.save(session_dir)
     return state
@@ -690,6 +721,13 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 # task is ever queued.
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline":          baseline_executor,
+    # ``profile`` is registered so the Coordinator-internal task path
+    # (kind switched via ``--no-enable-roofline``) can dispatch it
+    # through SubAgentRunner. PolicyGate denies LLM-proposed
+    # delegate{action_name='profile'} via
+    # ``analysis_action_not_llm_proposable``, so this registration is
+    # effectively Coordinator-only.
+    "profile":           profile_executor,
     "explore":           explore_executor,
     "sweep":             sweep_executor,
     "report":            report_executor,
@@ -704,15 +742,15 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "recover":           recover_executor,
 }
 
-# Real executors enabled only when kernel-mode is on (profile only
-# feeds kernel-opt and would burn lanes for nothing in --no-kernel).
-# The composite ``roofline`` action is registered separately by
-# ``_register_executors`` below — it is the legacy successor to the
-# retired ``pmc_roofline`` action and is wired even in --no-kernel
-# when the toggle is on.
-_REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {
-    "profile": profile_executor,
-}
+# Kernel-only real executors. The composite ``roofline`` action is
+# registered separately by ``_register_executors`` below. ``profile``
+# is registered in ``_REAL_EXECUTORS_FULL`` so the Coordinator's
+# auto-managed analysis path can dispatch it through SubAgentRunner
+# when ``--no-enable-roofline`` is set; the same ``profile_executor``
+# is also called directly from RooflineExecutor's ``_wrap_profile_ctx``
+# in the default roofline mode. PolicyGate denies LLM-proposed
+# delegate{action_name='profile'} regardless of mode.
+_REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {}
 
 # Kernel-owned action kinds dispatched via
 # ``request{target_agent='kernel', kind=...}``. The executor body is a
@@ -899,8 +937,10 @@ def _register_executors(
     get ``_noop_prep`` so SubAgentRunner doesn't fail with "no_executor".
 
     When ``no_kernel`` is True, the kernel-owned executor table is
-    skipped, the kernel-only no-op stubs are skipped, and ``profile`` is
-    also skipped (profiling only feeds kernel-opt).
+    skipped and the kernel-only no-op stubs are skipped. The Coordinator-
+    internal ``profile`` and ``roofline`` analysis executors are
+    registered unconditionally so PRELUDE's auto-enqueued analysis task
+    (kind switched by ``--enable-roofline``) can always dispatch.
 
     ``target_analysis`` is *always* registered with the real
     :class:`TargetAnalysisExecutor`. When ``compare_against_gpu`` is a
@@ -946,6 +986,29 @@ def _register_executors(
         IntegratePatchExecutor(session_dir=session_dir),
     )
 
+    # The composite ``roofline`` action runs profile + trace_analyze
+    # atomically and surfaces analysis.md to the next orchestration
+    # tick. Coordinator auto-enqueues it at PRELUDE and on every 10%
+    # gain watermark crossing — independent of ``--no-kernel`` — so the
+    # executor is unconditionally registered. ``profile`` is the
+    # ``--no-enable-roofline`` alternative and is registered via
+    # ``_REAL_EXECUTORS_FULL`` above. PolicyGate denies LLM-proposed
+    # delegate{action_name='roofline'|'profile'} regardless of mode.
+    coordinator.sub.register_executor(
+        "roofline",
+        make_roofline_executor(shared_state=coordinator.shared_state),
+    )
+
+    if log.isEnabledFor(logging.DEBUG):
+        for required_kind in ("roofline", "profile"):
+            if required_kind not in coordinator.sub.executor_registry:
+                log.debug(
+                    "register_executors: %r missing from sub-agent registry "
+                    "(no_kernel=%s); PRELUDE analysis task will fail with "
+                    "no_executor",
+                    required_kind, no_kernel,
+                )
+
     if no_kernel:
         return
 
@@ -953,27 +1016,6 @@ def _register_executors(
         coordinator.sub.register_executor(kind, fn)
     for kind in _NOOP_KINDS_KERNEL_ONLY:
         coordinator.sub.register_executor(kind, _noop_prep)
-
-    # F1-3 (Roofline-v2 / ): the composite
-    # ``roofline`` action runs profile + trace_analyze atomically and
-    # surfaces analysis.md to the next orchestration tick. Gated by
-    # ``SharedState.use_roofline_composite`` (F0-10 toggle, default
-    # off): when the toggle is off we register the stub executor so a
-    # speculative ``propose_action{action='roofline'}`` returns
-    # ``status='succeeded' degraded=True`` instead of failing with
-    # ``no_executor`` — keeps PolicyGate's ``rule='no_executor'`` path
-    # exclusively for genuine misconfiguration. Flipping the toggle on
-    # (post-F1 smoke per plan §F1-6) swaps in the real executor.
-    if getattr(coordinator.shared_state, "use_roofline_composite", False):
-        coordinator.sub.register_executor(
-            "roofline",
-            make_roofline_executor(shared_state=coordinator.shared_state),
-        )
-    else:
-        coordinator.sub.register_executor(
-            "roofline",
-            make_roofline_stub_executor(shared_state=coordinator.shared_state),
-        )
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
@@ -1009,138 +1051,37 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print("===============================================")
 
 
-def _derive_proxy_urls(upstream_url: str, proxy_port: int) -> tuple[str, str]:
-    """Mirror of bash ``derive_proxy_urls`` in ``ensure_auth_proxy.sh``.
+def _derive_anthropic_base_url(openai_base_url: str) -> str:
+    """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL``.
 
-    Returns ``(proxy_anthropic_url, proxy_openai_url)`` from a LiteLLM-style
-    ``upstream_url`` like ``https://host/api/v1/llm-proxy/v1``:
-
-    * The OpenAI URL keeps the path verbatim → ``http://127.0.0.1:4002/api/v1/llm-proxy/v1``.
-    * The Anthropic URL strips a trailing ``/v1`` because the Anthropic SDK
-      appends it itself → ``http://127.0.0.1:4002/api/v1/llm-proxy``.
+    The Anthropic SDK appends ``/v1`` itself, so we strip a trailing
+    ``/v1`` from the OpenAI-style URL. Returns the input verbatim when
+    there is no ``/v1`` suffix to strip.
     """
-    from urllib.parse import urlparse
+    from urllib.parse import urlparse, urlunparse
 
-    path = urlparse(upstream_url).path.rstrip("/")
-    anthropic_path = path[: -len("/v1")] if path.endswith("/v1") else path
-    base = f"http://127.0.0.1:{proxy_port}"
-    return f"{base}{anthropic_path}", f"{base}{path}"
-
-
-def _proxy_alive(proxy_port: int, timeout: float = 2.0) -> bool:
-    """TCP-probe ``127.0.0.1:proxy_port``. Returns True iff connect succeeds."""
-    import socket
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(timeout)
-            s.connect(("127.0.0.1", proxy_port))
-        return True
-    except (ConnectionRefusedError, OSError):
-        return False
+    parsed = urlparse(openai_base_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[: -len("/v1")]
+    return urlunparse(parsed._replace(path=path))
 
 
-def _ensure_auth_proxy_and_claude_config(
-    safe_key: str, base_url: str
-) -> tuple[str, str] | None:
-    """Start auth-proxy on :4002 and ensure ~/.claude/config.json uses it.
+def _reset_claude_config_to_upstream(
+    safe_key: str, anthropic_base_url: str
+) -> None:
+    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway.
 
-    The AMD primus-safe gateway rejects x-api-key (returns "token not
-    present"). Claude CLI only sends x-api-key. The auth_proxy bridges
-    the gap by rewriting to Authorization: Bearer. We must:
-
-    1. Start the proxy (idempotent — reuses ``ensure_auth_proxy.sh`` logic).
-       If the supervisor reports success but the port is not actually open,
-       retry the supervisor once before giving up (the "127 retry" leg).
-    2. Point ~/.claude/config.json at the proxy, not directly at the gateway.
-
-    Returns ``(proxy_anthropic_url, proxy_openai_url)`` when the proxy is
-    confirmed alive on ``127.0.0.1:proxy_port``; ``None`` otherwise. The
-    caller is responsible for force-overriding ``ANTHROPIC_BASE_URL`` /
-    ``OPENAI_BASE_URL`` based on this return value.
+    Used after the auth-proxy was removed: a stale ``127.0.0.1:4002``
+    value would make the Claude CLI dial a port no longer bound. We
+    rewrite to the upstream Anthropic URL so the CLI talks directly to
+    the gateway with its ``x-api-key`` header (the gateway accepts it).
     """
     import json as _json
 
-    proxy_port = int(os.environ.get("AUTH_PROXY_PORT", "4002"))
-    upstream_url = base_url or os.environ.get(
-        "ANTHROPIC_BASE_URL",
-        os.environ.get("OPENAI_BASE_URL", ""),
-    )
-    if not upstream_url:
-        print("Preflight: no LLM base URL set; skipping auth-proxy setup")
-        return None
-
-    proxy_anthropic_url, proxy_openai_url = _derive_proxy_urls(
-        upstream_url, proxy_port
-    )
-
-    proxy_script = (
-        Path(__file__).resolve().parent.parent
-        / "kernel-agent"
-        / "scripts"
-        / "ensure_auth_proxy.sh"
-    )
-
-    def _run_supervisor() -> bool:
-        """Run ensure_auth_proxy.sh once. Returns True if it exited 0."""
-        if not proxy_script.exists():
-            return False
-        env_for_proxy = os.environ.copy()
-        env_for_proxy["OOB_BASE_URL"] = upstream_url
-        env_for_proxy["OOB_API_KEY"] = safe_key or os.environ.get(
-            "ANTHROPIC_API_KEY", ""
-        )
-        env_for_proxy["AUTH_PROXY_PORT"] = str(proxy_port)
-        result = subprocess.run(
-            ["bash", str(proxy_script)],
-            capture_output=True,
-            text=True,
-            env=env_for_proxy,
-        )
-        for line in (result.stdout or "").strip().splitlines():
-            print(f"  {line}")
-        if result.returncode != 0:
-            print(
-                f"Preflight: WARNING — ensure_auth_proxy.sh failed "
-                f"(rc={result.returncode})"
-            )
-            for line in (result.stderr or "").strip().splitlines()[-5:]:
-                print(f"  {line}")
-            return False
-        return True
-
-    proxy_ready = False
-    if proxy_script.exists():
-        if _run_supervisor() and _proxy_alive(proxy_port):
-            proxy_ready = True
-        else:
-            # 127 retry leg — supervisor may have just unblocked a stuck
-            # port or swapped credentials. One re-run is cheap and recovers
-            # from "port_open but probe timed out" races.
-            print("Preflight: auth-proxy not alive after first attempt; retrying")
-            if _run_supervisor() and _proxy_alive(proxy_port):
-                proxy_ready = True
-    else:
-        # Supervisor missing — best-effort: trust the port if it is open.
-        if _proxy_alive(proxy_port):
-            print("Preflight: auth-proxy :4002 already open")
-            proxy_ready = True
-        else:
-            print(
-                "Preflight: WARNING — auth-proxy :4002 not running and "
-                f"ensure_auth_proxy.sh not found at {proxy_script}"
-            )
-
-    if not proxy_ready:
-        print(
-            "Preflight: WARNING — auth-proxy could not be brought up; "
-            "falling back to original env"
-        )
-        return None
-
-    # Proxy is alive. Update ~/.claude/config.json to match.
+    if not anthropic_base_url:
+        return
     claude_config_path = Path.home() / ".claude" / "config.json"
-    needs_update = False
     config_data: dict = {}
     if claude_config_path.exists():
         try:
@@ -1150,31 +1091,26 @@ def _ensure_auth_proxy_and_claude_config(
         except (ValueError, OSError):
             config_data = {}
         current_url = config_data.get("customApiUrl", "")
-        if "127.0.0.1" not in current_url and "localhost" not in current_url:
-            needs_update = True
-    else:
-        needs_update = True
+        if current_url == anthropic_base_url:
+            print("Preflight: ~/.claude/config.json already points at upstream")
+            return
 
-    if needs_update:
-        config_data.setdefault("theme", "dark")
-        config_data.setdefault("hasCompletedOnboarding", True)
-        config_data["primaryApiKey"] = safe_key or config_data.get(
-            "primaryApiKey", ""
-        )
-        config_data["customApiUrl"] = proxy_anthropic_url
-        claude_config_path.parent.mkdir(parents=True, exist_ok=True)
-        claude_config_path.write_text(
-            _json.dumps(config_data, indent=2) + "\n", encoding="utf-8",
-        )
-        claude_config_path.chmod(0o600)
-        print(
-            f"Preflight: updated ~/.claude/config.json customApiUrl -> "
-            f"{proxy_anthropic_url}"
-        )
-    else:
-        print("Preflight: ~/.claude/config.json already points at proxy")
-
-    return proxy_anthropic_url, proxy_openai_url
+    config_data.setdefault("theme", "dark")
+    config_data.setdefault("hasCompletedOnboarding", True)
+    if safe_key:
+        config_data["primaryApiKey"] = safe_key
+    elif "primaryApiKey" not in config_data:
+        config_data["primaryApiKey"] = ""
+    config_data["customApiUrl"] = anthropic_base_url
+    claude_config_path.parent.mkdir(parents=True, exist_ok=True)
+    claude_config_path.write_text(
+        _json.dumps(config_data, indent=2) + "\n", encoding="utf-8",
+    )
+    claude_config_path.chmod(0o600)
+    print(
+        f"Preflight: updated ~/.claude/config.json customApiUrl -> "
+        f"{anthropic_base_url}"
+    )
 
 
 def _load_dotenv_fallback() -> None:
@@ -1358,73 +1294,6 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: installed {pip_spec}")
 
 
-def _ensure_oob_proxy_source() -> bool:
-    """Make sure ``auth_proxy.py`` exists at the path supervisor expects.
-
-    ``ensure_auth_proxy.sh`` looks for the script at
-    ``${HYPERLOOM_ROOT}/OOB/oob_cli/auth_proxy.py``. After the migration
-    ``HYPERLOOM_ROOT`` defaults to ``$USER_DATA_PATH/runtime/source-mirrors``
-    so the auth-proxy source ends up under the session tree alongside the
-    GEAK / TraceLens mirrors. On a fresh sandbox where
-    ``kernel-agent/scripts/install.sh`` has NOT run yet, the file is absent
-    and the supervisor silently noops + returns 1, leaving :4002 dead and
-    Claude SDK requests hitting the gateway directly with ``x-api-key`` →
-    HTTP 401 → "Waiting for first result" hang.
-
-    This helper bootstraps just the ``auth_proxy.py`` source from a known
-    bundle mount (``$OOB_SRC`` > ``/wekafs/fully-local/OOB`` > sibling
-    ``inference_optimization/OOB``) so the supervisor can find + start it.
-    Returns True if the file is present afterwards, False otherwise.
-    """
-    from .paths import source_mirrors_dir as _source_mirrors
-
-    hyperloom_root_env = os.environ.get("HYPERLOOM_ROOT")
-    if hyperloom_root_env:
-        hyperloom_root = Path(hyperloom_root_env)
-    else:
-        hyperloom_root = _source_mirrors(_session_dir_resolve())
-    target_dir = hyperloom_root / "OOB" / "oob_cli"
-    proxy_py = target_dir / "auth_proxy.py"
-    if proxy_py.is_file():
-        return True
-
-    candidates: list[Path] = []
-    env_src = os.environ.get("OOB_SRC", "").strip()
-    if env_src:
-        candidates.append(Path(env_src))
-    candidates.extend(Path(p) for p in _OOB_SRC_CANDIDATES)
-
-    for cand in candidates:
-        try:
-            if not cand or not cand.is_dir():
-                continue
-            if not (cand / "auth_proxy.py").is_file():
-                continue
-        except OSError:
-            continue
-        try:
-            target_dir.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(cand, target_dir, dirs_exist_ok=True)
-        except (OSError, shutil.Error) as exc:
-            print(
-                f"Preflight: WARNING — failed to copy OOB source {cand} -> "
-                f"{target_dir}: {exc}"
-            )
-            continue
-        print(
-            f"Preflight: bootstrapped auth_proxy.py from {cand} -> {target_dir}"
-        )
-        return True
-
-    print(
-        f"Preflight: WARNING — auth_proxy.py source not located at any of "
-        f"$OOB_SRC / {_OOB_SRC_CANDIDATES}. The :4002 supervisor will "
-        f"warn-and-skip; ANTHROPIC_BASE_URL stays at upstream and Claude "
-        f"SDK may 401."
-    )
-    return False
-
-
 def _unset_hip_visible_devices() -> None:
     """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set.
 
@@ -1569,7 +1438,7 @@ def _check_node_claude_cli() -> None:
 
     ``claude_agent_sdk`` typically shells out to the bundled
     ``@anthropic-ai/claude-code`` CLI; without it on PATH the SDK falls
-    back to a direct HTTP path that our auth-proxy still services, so this
+    back to a direct HTTP path against the upstream gateway, so this
     is informational rather than fatal. Same for ``codex`` (used by
     ``CodexBackend`` whenever Codex is on the wire — i.e. ``--critic-agent``
     / ``--critic-codex-bare`` and/or ``--kernel-codex``). ``node`` is a
@@ -1615,7 +1484,7 @@ def _check_node_claude_cli() -> None:
 def _emit_preflight_diagnostics(
     *,
     magpie_python: str,
-    proxy_anthropic: str | None,
+    anthropic_base_url: str | None,
     args: argparse.Namespace | None = None,
 ) -> None:
     """One canonical diagnostics block at the end of preflight.
@@ -1662,12 +1531,12 @@ def _emit_preflight_diagnostics(
     print(f"  aiter jit cache     = {cache_line}")
     print(f"  cold_start_timeout  = {cold_cap}s")
     print(f"  warm_timeout        = {BASELINE_DEFAULT_TIMEOUT_SEC}s")
-    if proxy_anthropic:
-        print(f"  proxy URLs          = {proxy_anthropic} (auth-proxy alive)")
+    if anthropic_base_url:
+        print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url} (direct to gateway)")
     else:
         print(
-            "  proxy URLs          = DIRECT — auth-proxy unavailable; "
-            "Claude SDK may 401"
+            "  ANTHROPIC_BASE_URL  = <unset> — OPENAI_BASE_URL missing; "
+            "Claude SDK will fail"
         )
     if args is not None:
         kb_enabled = bool(getattr(args, "cortex_enabled", True))
@@ -1852,7 +1721,7 @@ def _probe_llm_catalog(
 
 def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
-    proxy_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str] | None,
 ) -> set[str] | None:
     """Hard-gate Claude model selection. Mutates ``args.claude_model``.
 
@@ -1881,15 +1750,15 @@ def _validate_and_resolve_claude_model(
         )
         sys.exit(2)
 
-    # Catalog probe uses GET <base>/models. The local auth-proxy (:4002) does
-    # not implement that route (404); _preflight snapshots the upstream SaFE
-    # URL in INFERENCE_OPTIMIZER_CATALOG_PROBE_URL before rewriting OPENAI_BASE_URL.
+    # Catalog probe uses GET <base>/models against the upstream gateway URL.
+    # ``INFERENCE_OPTIMIZER_CATALOG_PROBE_URL`` remains an explicit override
+    # path for operators who need to point the probe at a different host.
     base_url = (
         os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
         or os.environ.get("OPENAI_BASE_URL", "")
     )
-    if not base_url and proxy_urls is not None:
-        base_url = proxy_urls[1]
+    if not base_url and resolved_urls is not None:
+        base_url = resolved_urls[1]
 
     api_key = (
         os.environ.get("SAFE_API_KEY", "")
@@ -1971,16 +1840,19 @@ def _preflight(
     1. Credentials fallback: env > $REPO_ROOT/.env (env always wins).
     2. Auth aliases for Claude/Codex CLIs from SAFE_API_KEY/OPENAI_BASE_URL.
     3. Python SDK (claude-agent-sdk / openai / httpx) auto-install.
-    4. ``auth_proxy.py`` source bootstrap (so ensure_auth_proxy.sh has fuel).
-    5. Auth-proxy + ~/.claude/config.json supervision.
-    6. ROCm env hygiene (HIP_VISIBLE_DEVICES unset, GPU/shm sanity).
-    7. ray + Magpie + InferenceX auto-install.
-    8. node / claude / codex CLI presence check (WARN-only).
-    9. Single canonical diagnostics block.
+    4. Resolve ANTHROPIC_BASE_URL from OPENAI_BASE_URL (strip trailing /v1)
+       and reset ``~/.claude/config.json`` ``customApiUrl`` to the upstream
+       gateway. The auth-proxy on :4002 has been retired — the AMD
+       primus-safe gateway accepts both ``x-api-key`` and Bearer auth so
+       the proxy rewrite step is no longer needed.
+    5. ROCm env hygiene (HIP_VISIBLE_DEVICES unset, GPU/shm sanity).
+    6. ray + Magpie + InferenceX auto-install.
+    7. node / claude / codex CLI presence check (WARN-only).
+    8. Single canonical diagnostics block.
 
-    Returns the ``(proxy_anthropic_url, proxy_openai_url)`` tuple from
-    :func:`_ensure_auth_proxy_and_claude_config` so the caller
-    (``_run_optimize``) can route the catalog probe through the proxy.
+    Returns ``(anthropic_base_url, openai_base_url)`` — the resolved
+    upstream URLs that ``_run_optimize`` uses for the catalog probe and
+    diagnostics. ``None`` only when ``OPENAI_BASE_URL`` is missing.
     """
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
@@ -1992,15 +1864,19 @@ def _preflight(
         for alias in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN",
                       "ANTHROPIC_API_KEY", "OOB_API_KEY", "GEAK_API_KEY",
                       "LLM_API_KEY", "AMD_LLM_API_KEY"):
-            os.environ.setdefault(alias, safe_key)
-    # OOB / GEAK / LLM_API_BASE keep upstream URL: those clients speak Bearer
-    # auth natively and do NOT need the auth-proxy. ANTHROPIC_BASE_URL and
-    # OPENAI_BASE_URL are handled separately below — the auth-proxy step
-    # force-overrides them so any externally-preset value (shell rc, .env,
-    # k8s secret, container env) cannot bypass :4002.
+            if os.environ.get(alias) != safe_key:
+                os.environ[alias] = safe_key
+                print(f"Preflight: refreshed {alias} from SAFE_API_KEY")
+    # OOB / GEAK / LLM_API_BASE inherit the upstream URL verbatim.
     if base_url:
         for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
-            os.environ.setdefault(alias, base_url)
+            if os.environ.get(alias) != base_url:
+                prev = os.environ.get(alias, "")
+                os.environ[alias] = base_url
+                print(
+                    f"Preflight: {alias} {prev or '<unset>'} -> {base_url} "
+                    f"(direct to gateway)"
+                )
 
     # --- Resolve install interpreters ---
     from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
@@ -2020,50 +1896,31 @@ def _preflight(
     # in the same site-packages this process imports from.
     _ensure_python_sdks(sys.executable, pip_extra)
 
-    # --- Bootstrap auth_proxy.py source (so the supervisor has fuel) ---
-    _ensure_oob_proxy_source()
-
-    # --- Ensure auth-proxy is running + ~/.claude/config.json points at it ---
-    # The AMD primus-safe gateway only accepts Authorization: Bearer, but the
-    # Claude CLI (bundled in claude_agent_sdk) sends x-api-key. The auth_proxy
-    # on :4002 rewrites the header. Without this, Claude SDK hangs at
-    # "Waiting for first result" / exits with code 1.
-    #
-    # Snapshot any externally-preset URLs BEFORE supervision so we can either
-    # force-override them (proxy alive) or restore them (proxy unavailable).
-    # The two env vars MUST stay consistent — either both proxy or both orig.
-    orig_anthropic = os.environ.get("ANTHROPIC_BASE_URL", "")
-    orig_openai = os.environ.get("OPENAI_BASE_URL", "")
-    catalog_probe_url = (orig_openai or base_url or "").strip()
-    if catalog_probe_url:
-        os.environ["INFERENCE_OPTIMIZER_CATALOG_PROBE_URL"] = catalog_probe_url
-    proxy_urls = _ensure_auth_proxy_and_claude_config(safe_key, base_url)
-    if proxy_urls is not None:
-        proxy_anthropic, proxy_openai = proxy_urls
+    # --- Resolve ANTHROPIC_BASE_URL + reset ~/.claude/config.json ---
+    # The auth-proxy on :4002 has been removed. We force-override both URL
+    # vars to keep them consistent and prevent stale shell/.env/k8s values
+    # (e.g. a legacy 127.0.0.1:4002 leftover) from reaching the CLIs.
+    resolved_urls: tuple[str, str] | None = None
+    if base_url:
+        anthropic_url = _derive_anthropic_base_url(base_url)
+        orig_anthropic = os.environ.get("ANTHROPIC_BASE_URL", "")
+        orig_openai = os.environ.get("OPENAI_BASE_URL", "")
         for var, want, prev in (
-            ("ANTHROPIC_BASE_URL", proxy_anthropic, orig_anthropic),
-            ("OPENAI_BASE_URL", proxy_openai, orig_openai),
+            ("ANTHROPIC_BASE_URL", anthropic_url, orig_anthropic),
+            ("OPENAI_BASE_URL", base_url, orig_openai),
         ):
             if os.environ.get(var) != want:
                 os.environ[var] = want
                 print(
                     f"Preflight: {var} {prev or '<unset>'} -> {want} "
-                    f"(auth-proxy)"
+                    f"(direct to gateway)"
                 )
+        _reset_claude_config_to_upstream(safe_key, anthropic_url)
+        resolved_urls = (anthropic_url, base_url)
     else:
-        # Proxy unavailable after retry — restore the originals so both vars
-        # stay consistent with whatever the user had (no half-overridden state).
-        for var, prev in (
-            ("ANTHROPIC_BASE_URL", orig_anthropic),
-            ("OPENAI_BASE_URL", orig_openai),
-        ):
-            if prev:
-                os.environ[var] = prev
-            else:
-                os.environ.pop(var, None)
         print(
-            "Preflight: WARNING — Claude/Codex SDKs may receive 401 "
-            "without auth-proxy"
+            "Preflight: WARNING — OPENAI_BASE_URL unset; "
+            "Claude/Codex SDKs will fail at first call"
         )
 
     # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
@@ -2187,11 +2044,11 @@ def _preflight(
     # --- Single canonical diagnostics block ---
     _emit_preflight_diagnostics(
         magpie_python=magpie_python,
-        proxy_anthropic=(proxy_urls[0] if proxy_urls is not None else None),
+        anthropic_base_url=(resolved_urls[0] if resolved_urls is not None else None),
         args=args,
     )
 
-    return proxy_urls
+    return resolved_urls
 
 
 def _run_ir3_preflight(args: argparse.Namespace) -> None:
@@ -2323,13 +2180,13 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     Multi-node auto-downgrade: when ``args.nodes >= 2`` the
     robustness-agent's ``LocalProbeSource`` family targets
     sandbox-local resources only — ``ray status``, the inference
-    server health URL, the auth-proxy URL, GPU / FD / disk / shm
-    metrics, etc. On multi-node every one of those resources lives
-    in a separate Kubernetes pod (head pod / worker pod / RayJob
-    submitter), unreachable from the sandbox by design. Each probe
-    failure surfaces as a HIGH-severity false positive symptom
+    server health URL, GPU / FD / disk / shm metrics, etc. On
+    multi-node every one of those resources lives in a separate
+    Kubernetes pod (head pod / worker pod / RayJob submitter),
+    unreachable from the sandbox by design. Each probe failure
+    surfaces as a HIGH-severity false positive symptom
     (``ray_head_dead``, ``local_server_unreachable``,
-    ``auth_proxy_unhealthy``, ``gpu_memory_leaked``, ...) that
+    ``gpu_memory_leaked``, ...) that
     drowns the bus, eats ActionLadder cooldown slots, and risks
     tripping ``escalate_strategy_change`` chains that stall
     Orchestration. Until ``robustness-agent`` grows multi-node-aware
@@ -2360,7 +2217,7 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
                 f"WARN: --robustness-agent selected but nodes={nodes} — "
                 f"robustness-agent's LocalProbe family targets "
                 f"sandbox-local resources (ray, inference server, "
-                f"auth-proxy, GPU, ...) that all live in separate pods "
+                f"GPU, ...) that all live in separate pods "
                 f"on multi-node and surface as HIGH false positives. "
                 f"Auto-downgrading to --robustness-mock; pass "
                 f"--robustness-mock explicitly to suppress this "
@@ -2797,16 +2654,20 @@ def _reset_state_file(session_dir: Path) -> None:
 
 
 def _gc_old_profile_traces(
-    root: str = "/wekafs/hyperloom/profile-traces",
+    root: str | None = None,
     retention_days: int = 7,
     keep: str | None = None,
 ) -> None:
-    """Best-effort GC of stale per-RayJob profile-trace dirs on shared wekafs.
+    """Best-effort GC of stale per-RayJob profile-trace dirs on the shared FS.
 
     Removes only top-level subdirectories whose mtime is older than
     ``retention_days``. The active session's dir (just mkdir'd seconds ago)
     is always young enough; ``keep`` adds an explicit name-match guard so
     the current run is never collected even if a clock skew flipped mtime.
+
+    ``root`` defaults to :func:`mn_profile_trace_root` (anchored on
+    ``$USER_DATA_PATH``); callers may pass an explicit override for
+    tests or migration scenarios.
 
     Failure is logged + swallowed: GC must never block optimizer startup.
 
@@ -2824,7 +2685,7 @@ def _gc_old_profile_traces(
         )
     except ValueError:
         retention_days = 7
-    base = Path(root)
+    base = Path(root) if root is not None else mn_profile_trace_root()
     if not base.is_dir():
         return
     cutoff = time.time() - retention_days * 86400
@@ -2859,7 +2720,7 @@ def _gc_old_profile_traces(
     if removed or kept:
         print(
             f"multi-node: GC profile-traces removed={removed} kept={kept} "
-            f"retention={retention_days}d root={root}"
+            f"retention={retention_days}d root={base}"
         )
 
 
@@ -2953,9 +2814,16 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     state_after = _load_state()
     rid = (state_after.get("rayjob_id") or "").strip()
     if rid:
-        trace_root = f"/wekafs/hyperloom/profile-traces/{rid}/torch_trace"
+        # Anchor torch-profile shared root on $USER_DATA_PATH so the
+        # operator only has to point one knob at a cluster-shared
+        # filesystem (e.g. wekafs); the sandbox and the RayJob pods then
+        # both see traces under the same path. See
+        # ``inference_optimizer.paths.mn_profile_trace_root`` docstring
+        # for the multi-node USER_DATA_PATH caveat.
+        trace_root_path = mn_profile_trace_root() / rid / "torch_trace"
+        trace_root = str(trace_root_path)
         try:
-            Path(trace_root).mkdir(parents=True, exist_ok=True)
+            trace_root_path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             print(
                 f"WARN multi-node: cannot mkdir {trace_root}: {exc}; "
@@ -2970,10 +2838,7 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
             # Best-effort GC of older sibling RayJob trace dirs. Runs only
             # AFTER the current session's dir is mkdir'd, so the active
             # rayjob_id is name-guarded and its mtime is fresh.
-            _gc_old_profile_traces(
-                root="/wekafs/hyperloom/profile-traces",
-                keep=rid,
-            )
+            _gc_old_profile_traces(keep=rid)
 
     # RayJob recreate path: when an existing session's RayJob was killed
     # (OOM, manual recreate, SaFE rescheduling) and we provisioned a
@@ -3206,12 +3071,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
 
-    proxy_urls = _preflight(args)
+    resolved_urls = _preflight(args)
 
     # Hard-gate Claude model BEFORE any session work. Mutates args.claude_model
     # in-place when falling back to opus-4-6; aborts with sys.exit(2) if the
     # gateway catalog cannot be probed or neither allowed model is present.
-    catalog_ids = _validate_and_resolve_claude_model(args, proxy_urls)
+    catalog_ids = _validate_and_resolve_claude_model(args, resolved_urls)
     _smoke_test_codex_model(args, catalog_ids)
 
     # `--resume-from <path>` implies `--resume` (operator convenience).
@@ -4398,8 +4263,10 @@ def _build_parser() -> argparse.ArgumentParser:
     #           top-K gap inside one tick (multi-emit shape) and have
     #           the dispatcher actually run them in parallel.
     #   * 6   → M6 ceiling that matches Arbor's "six specialists across
-    #           domains" pattern.
-    #   * 32  → hard upper bound; CLI warns but accepts.
+    #           domains" pattern; hard upper bound (values above this
+    #           are silently clamped down to 6 — see
+    #           ``MAX_RESEARCH_LANE_CAPACITY`` in
+    #           ``orchestrator/policy.py``).
     # Locked at session start (mirrored into manifest + SharedState);
     # PolicyGate denies mid-flight mutation via CORE_STATE_FIELDS.
     opt.add_argument(
@@ -4414,7 +4281,8 @@ def _build_parser() -> argparse.ArgumentParser:
              "research_lane. 0 disables specialist "
              "dispatch entirely (degrades to M3 LLM-direct grid); 4 is "
              "the PR-A3 default (Arbor-into-Hyperloom); 6 is the M6 "
-             "default. Range [0, 32]. Locked at session start.",
+             "hard cap. Range [0, 6]; values above 6 are silently "
+             "clamped down. Locked at session start.",
     )
     # ------------------------------------------------------------------
     # v0.8 §3.5 / §3.13 M5 + specialist sub-agent
@@ -4486,63 +4354,25 @@ def _build_parser() -> argparse.ArgumentParser:
              "MCP servers into specialists. Default: None.",
     )
     # ------------------------------------------------------------------
-    # F1 / F2 / F3 integration toggles (default off).
-    #
-    # These flags scaffold the upcoming roofline-v2 (PR #288) +
-    # framework-agent (PR #280) integration. F0 lands them at default
-    # ``False`` so behaviour matches tag ``pre-roofline-merge``; each
-    # subsequent F-step (F1 / F2 / F3) flips one or more on after its
-    # smoke gate passes. See /{F1,F2,F3}_*.MD.
-    #
-    # Mirrored into ``SharedState.{use_roofline_composite,
-    # framework_agent_enabled, deny_direct_profile, gain_driven_kernel_opt,
-    # roofline_saturation_advisory}`` by the cli boot path so PolicyGate /
-    # Coordinator / prompt builders see consistent values.
+    # Integration toggles. The roofline composite + watermark-driven
+    # refresh path is unconditional now: roofline auto-fires at PRELUDE
+    # (after baseline) and on every 10% ``cumulative_gain_validated``
+    # crossing over ``last_roofline_tput``. The composite/deny toggles
+    # that gated the legacy single-step ``profile`` path are gone.
     # ------------------------------------------------------------------
-    # The three Roofline-v2 / framework-agent toggles default to ON.
-    # ``argparse.BooleanOptionalAction`` exposes both ``--flag`` (force
-    # on) and ``--no-flag`` (force off) so operators have a one-line
-    # opt-out for the legacy path. Env-var fallback uses ``"1"`` as
-    # the default, so ``ENV=0`` on a CI box also turns the flag off.
     def _env_default_on(env_var: str) -> bool:
         return os.environ.get(env_var, "1").strip() != "0"
 
-    opt.add_argument(
-        "--use-roofline-composite",
-        dest="use_roofline_composite",
-        action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE"),
-        help="(F1) Composite ``roofline`` action (atomic profile + "
-             "trace_analyze, produces analysis.md snapshot) is the "
-             "default analysis path. Pass ``--no-use-roofline-composite`` "
-             "(or env INFERENCE_OPTIMIZER_USE_ROOFLINE_COMPOSITE=0) "
-             "to opt out and fall back to the separate ``profile`` "
-             "action.",
-    )
     opt.add_argument(
         "--framework-agent-enabled",
         dest="framework_agent_enabled",
         action=argparse.BooleanOptionalAction,
         default=_env_default_on("INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED"),
-        help="(F2) ``serving_specialist`` may invoke ``fa candidates`` "
+        help="``serving_specialist`` may invoke ``fa candidates`` "
              "and ``git fetch refs/pull/...`` via the "
-             "``framework_pr_scout`` sub_kind (PR #280 framework-agent). "
-             "On by default. Pass ``--no-framework-agent-enabled`` "
-             "(or env INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0) "
-             "to opt out.",
-    )
-    opt.add_argument(
-        "--deny-direct-profile",
-        dest="deny_direct_profile",
-        action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE"),
-        help="(F3 / N9) PolicyGate denies ``propose_action{profile}`` "
-             "while ``--use-roofline-composite`` is on, forcing the "
-             "LLM through the atomic ``roofline`` action so the "
-             "analysis.md cache + snapshot_id stay aligned. On by "
-             "default. Pass ``--no-deny-direct-profile`` (or env "
-             "INFERENCE_OPTIMIZER_DENY_DIRECT_PROFILE=0) to re-open "
-             "the legacy direct ``profile`` path for debugging.",
+             "``framework_pr_scout`` sub_kind. On by default. Pass "
+             "``--no-framework-agent-enabled`` (or env "
+             "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0) to opt out.",
     )
     opt.add_argument(
         "--gain-driven-kernel-opt",
@@ -4551,25 +4381,51 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.environ.get(
             "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT", "0",
         ).strip() == "1",
-        help="(F3 / N19c) Lock ``kernel_opt`` until the 3-round moving "
+        help="Lock ``kernel_opt`` until the 3-round moving "
              "average of ``last_explore_delta_gain_pct`` drops below "
              "epsilon (0.5%%). Prevents premature deep work while cheap "
              "exploration is still earning. Default off. Env: "
              "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT=1.",
     )
     opt.add_argument(
-        "--roofline-saturation-advisory",
-        dest="roofline_saturation_advisory",
-        action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_ROOFLINE_SATURATION_ADVISORY", "0",
-        ).strip() == "1",
-        help="(F3) Inject a ``Roofline Saturation Advisory`` section "
-             "into the orchestration prompt listing directions whose "
-             "saturation exceeds 80%%. Soft hint only — never hard-"
-             "rejects an LLM dispatch. Default off. Env: "
-             "INFERENCE_OPTIMIZER_ROOFLINE_SATURATION_ADVISORY=1.",
+        "--enable-roofline",
+        dest="enable_roofline",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_ENABLE_ROOFLINE"),
+        help="Select which analysis action the Coordinator enqueues at "
+             "PRELUDE bootstrap and on every +10% watermark crossing. "
+             "Default on: ``roofline`` (composite profile + "
+             "trace_analyze + analysis.md). Pass ``--no-enable-roofline`` "
+             "to use plain ``profile`` instead (lighter — captures the "
+             "trace only, skips trace_analyze). Behaviour is otherwise "
+             "identical (same idempotency keys, same pending-task "
+             "dispatch gate, same watermark anchor update). Env: "
+             "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
     )
+    # Retired flags that operator scripts may still pass. We hard-fail
+    # at argparse time with a one-line migration hint instead of
+    # silently aliasing — silent aliases hide the behaviour change from
+    # the single ``--enable-roofline`` mode-select (the old composite /
+    # direct-profile bifurcation no longer exists, and the
+    # PRELUDE-initial roofline is unconditional).
+    _retired_hint = (
+        "Use ``--enable-roofline`` (default on) / ``--no-enable-roofline`` "
+        "instead. The PRELUDE-initial analysis task is unconditional and "
+        "the composite/direct-profile bifurcation has been removed."
+    )
+    for _retired in (
+        "--use-roofline-composite",
+        "--no-use-roofline-composite",
+        "--deny-direct-profile",
+        "--no-deny-direct-profile",
+        "--force-roofline-after-baseline",
+        "--no-force-roofline-after-baseline",
+    ):
+        opt.add_argument(
+            _retired,
+            action=_RetiredFlag,
+            hint=_retired_hint,
+        )
     # ------------------------------------------------------------------
     # Fix E — per-variant explore overtime kill ratio.
     #
