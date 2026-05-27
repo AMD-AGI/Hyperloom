@@ -938,18 +938,19 @@ python3 "$REPO_ROOT/inference_optimizer/scripts/event_counts.py" "$SESSION"
 The optimizer should:
 
 1. Establish or reuse `baseline_tput`.
-2. **Coordinator** auto-enqueues `roofline` (composite profile +
-  trace_analyze + analysis.md snapshot) at the end of PRELUDE (after
-  baseline) and again whenever measured tput crosses the watermark
-  (`current_tput / last_roofline_tput >= 1.10`; compound 10% → 21% →
-  33% …). The LLM CANNOT propose `roofline` or `profile` — neither is
-  in any phase allowlist. While a roofline is pending,
-  `specialist` / `explore` / `kernel_opt` / `integrate` /
-  `deep_kernel_analysis` / `operator_tuning` / `vendor_kernel_config`
+2. **Coordinator** auto-enqueues an analysis task at the end of
+  PRELUDE (after baseline) and again whenever validated tput crosses
+  the watermark (`current_tput / last_roofline_tput >= 1.10`;
+  compound 10% → 21% → 33% …). The task is `roofline` (composite
+  profile + trace_analyze + analysis.md snapshot) by default;
+  `--no-enable-roofline` switches it to plain `profile` (trace only,
+  no analysis.md) with otherwise-identical semantics. The LLM CANNOT
+  propose `roofline` or `profile` — PolicyGate denies both with
+  `rule='analysis_action_not_llm_proposable'`. While an analysis task
+  is in flight, `specialist` / `explore` / `kernel_opt` / `integrate`
+  / `deep_kernel_analysis` / `operator_tuning` / `vendor_kernel_config`
   dispatches are blocked by PolicyGate
   (`rule='wait_for_auto_roofline'`) until it lands.
-  `--force-roofline-after-baseline` (default on) controls whether the
-  PRELUDE roofline is unconditional.
 3. Run `select_kernels` once per trace/config and cache the result in
   `last_select_kernels`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
