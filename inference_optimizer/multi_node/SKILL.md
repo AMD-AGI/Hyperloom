@@ -174,9 +174,8 @@ resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
    `head_pod_ip` / `service_url` once phase is `Running`.
 2. **`bootstrap`** — once. Submits `bootstrap.sh` via Ray Dashboard REST
    to install oob / claude / codex / tracelens on the head pod.
-3. **`verify`** — once. Confirms toolchain on PATH on the RayJob head pod.
-   Missing `oob` is common on minimal BYOI images: WARN for baseline-only
-   runs; kernel-opt needs OOB in the image or a fixed `bootstrap`.
+3. **`verify`** — once. Checks `ray` on PATH on the head pod.
+   On `MISSING:`, re-run `bootstrap --print-logs`.
 4. **`restart-server`** — every framework / model / TP / flag change.
    Kills the previous server via PID file (never `pkill -f`), relaunches
    under `nohup` so Ray pods do NOT restart and the aiter JIT cache
