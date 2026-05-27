@@ -98,14 +98,16 @@ def phase_index(phase: str) -> int:
 # only the *entry points* close.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset({
-        # ``roofline`` is Coordinator-auto-enqueued at PRELUDE after
-        # baseline lands so the EXPLORE-phase first specialist sees a
-        # populated ``analysis.md`` snapshot. The action sits in the
+        # ``roofline`` / ``profile`` are Coordinator-auto-enqueued at
+        # PRELUDE after baseline lands so the EXPLORE-phase first
+        # specialist sees a populated trace (and, when roofline is on,
+        # an ``analysis.md`` snapshot). The Coordinator picks the kind
+        # via ``shared_state.enable_roofline`` — both names sit in the
         # allowlist so the internal-enqueue passes R1
-        # ``phase_incompatible``; LLM-side propose_action is denied at
-        # the registry boundary (the action is no longer registered for
-        # LLM dispatch — see action_registry / action_executors/__init__).
-        "target_analysis", "baseline", "roofline", "recover",
+        # ``phase_incompatible``. LLM-side propose_action /
+        # delegate is denied by PolicyGate's
+        # ``analysis_action_not_llm_proposable`` rule for both names.
+        "target_analysis", "baseline", "roofline", "profile", "recover",
     }),
     PHASE_EXPLORE: frozenset({
         # v0.8 canonical: merged grid runner + LLM specialist dispatch.
@@ -120,22 +122,24 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # this internally on plateau (bypasses PolicyGate); LLM-side
         # proposes are throttled by ``assess_remaining_gaps_throttle``.
         "assess_remaining_gaps",
-        # ``roofline`` is Coordinator-auto-enqueued mid-EXPLORE whenever
-        # the watermark check at the cumulative_gain_validated writer
-        # fires (10% step compound vs ``last_roofline_tput``). The
-        # auto_roofline_pending_task_id blocker holds dispatches until
-        # the task lands.
-        "roofline",
+        # ``roofline`` / ``profile`` are Coordinator-auto-enqueued mid-
+        # EXPLORE whenever the watermark check at the
+        # cumulative_gain_validated writer fires (10% step compound vs
+        # ``last_roofline_tput``). The Coordinator picks the kind via
+        # ``enable_roofline``; the auto_roofline_pending_task_id
+        # blocker holds dispatches until either kind lands.
+        "roofline", "profile",
         "recover",
     }),
     PHASE_KERNEL: frozenset({
         # KERNEL_OWNED_ACTIONS from policy.py.
         "kernel_opt", "integrate", "deep_kernel_analysis",
         "operator_tuning", "vendor_kernel_config",
-        # ``roofline`` is auto-enqueued on watermark crossing here too —
-        # kernel integrate KEEPs flow through the same single-writer
-        # hook as explore/specialist KEEPs.
-        "roofline",
+        # ``roofline`` / ``profile`` are auto-enqueued on watermark
+        # crossing here too — kernel integrate KEEPs flow through the
+        # same single-writer hook as explore/specialist KEEPs; mode is
+        # picked via ``enable_roofline``.
+        "roofline", "profile",
         "recover",
     }),
     PHASE_SWEEP: frozenset({
