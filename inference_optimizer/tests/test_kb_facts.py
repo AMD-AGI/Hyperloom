@@ -722,6 +722,7 @@ def _coord_with_kb_stub(session_dir):
         baseline_tput: float = 700.0
         precision: str = "bf16"
         tp: int = 8
+        ep: int = 0
         conc: int = 64
         isl: int = 1024
         osl: int = 1024
@@ -816,6 +817,32 @@ def test_finalize_recipe_empty_anchor_only_writes_own_entry(
     written_sessions = coord.cortex_kb.update_recipe_calls[0]["sessions"]
     assert len(written_sessions) == 1
     assert written_sessions[0]["session_id"] == "session-NEW"
+
+
+def test_finalize_recipe_prefers_shared_state_ep_over_env(
+    _coord_with_kb_stub, monkeypatch,
+):
+    """CLOSE-time finalize must prefer ``SharedState.ep`` over the
+    ``EP`` env var (resume-safety mirror of the T0 logic). When
+    SharedState has ep=8 but env is empty / different, the recipe
+    write must carry the SharedState value."""
+    monkeypatch.delenv("EP", raising=False)
+    coord = _coord_with_kb_stub()
+    coord.shared_state.ep = 8
+    coord.cortex_finalize_recipe_and_journal()
+    extra = coord.cortex_kb.update_recipe_calls[0]["extra_attrs"]
+    assert extra["ep"] == 8
+
+
+def test_finalize_recipe_falls_back_to_env_ep_when_shared_state_unset(
+    _coord_with_kb_stub, monkeypatch,
+):
+    monkeypatch.setenv("EP", "4")
+    coord = _coord_with_kb_stub()
+    coord.shared_state.ep = 0  # not seeded
+    coord.cortex_finalize_recipe_and_journal()
+    extra = coord.cortex_kb.update_recipe_calls[0]["extra_attrs"]
+    assert extra["ep"] == 4
 
 
 def test_finalize_recipe_includes_workload_tags_in_extra_attrs(

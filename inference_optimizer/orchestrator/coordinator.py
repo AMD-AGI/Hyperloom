@@ -6855,6 +6855,7 @@ class Coordinator:
         for src_attr, dst_key in (
             ("precision",     "precision"),
             ("tp",            "tp"),
+            ("ep",            "ep"),
             ("conc",          "conc"),
             ("isl",           "isl"),
             ("osl",           "osl"),
@@ -6863,19 +6864,24 @@ class Coordinator:
             v = getattr(ss, src_attr, None)
             if v not in (None, "", 0):
                 workload_tags[dst_key] = v
-        # EP / PP — env-bound (no SharedState field). Match the T0
-        # backfill's sourcing so the recipe stays consistent between
-        # PRELUDE and CLOSE.
-        for env_var, dst_key in (("EP", "ep"), ("PP", "pp")):
-            raw = (os.environ.get(env_var) or "").strip()
-            if not raw:
-                continue
+        # EP env fallback when SharedState.ep is unset (legacy SDK
+        # callers that bypassed cli._seed_shared_state).
+        if "ep" not in workload_tags:
+            raw_ep = (os.environ.get("EP") or "").strip()
             try:
-                n = int(raw)
+                n = int(raw_ep) if raw_ep else 0
             except ValueError:
-                continue
+                n = 0
             if n > 0:
-                workload_tags[dst_key] = n
+                workload_tags["ep"] = n
+        # PP — no SharedState field (no CLI surface); env-only.
+        raw_pp = (os.environ.get("PP") or "").strip()
+        try:
+            pp_n = int(raw_pp) if raw_pp else 0
+        except ValueError:
+            pp_n = 0
+        if pp_n > 0:
+            workload_tags["pp"] = pp_n
         # Framework version: lifted from stack_fingerprint when available.
         # ``stack_fingerprint`` on SharedState is a SHA string (Coordinator
         # writes ``state.stack_fingerprint = sha``); the per-component

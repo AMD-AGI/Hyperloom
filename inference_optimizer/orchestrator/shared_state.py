@@ -225,6 +225,14 @@ class SharedState:
     # PRECISION) so downstream executors see the same values the
     # original run used. Zero / empty means "unspecified".
     tp: int = 0
+    # Expert-parallel size for MoE inference. Mirror of the ``EP`` env
+    # var (cli writes both at boot). Stored on SharedState so resume in
+    # a fresh shell that hasn't ``export EP`` still recovers the
+    # original value — without this, KB warm-start queries would lose
+    # the EP filter on resume and the recipe anchor's ``ep`` tag would
+    # become unreliable. Multi-node lifecycle scripts still read the
+    # env var; this field is the resume-safe authority.
+    ep: int = 0
     precision: str = ""
     conc: int = 0
     isl: int = 0

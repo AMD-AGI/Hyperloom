@@ -284,10 +284,13 @@ def run_t0_anchor(
             _attrs[src_key] = v
     # Workload-shape tags — read from SharedState (cli already wrote
     # them via _seed_shared_state). Skipping empty / zero values so
-    # KB query filter doesn't match "tp=0" placeholders.
+    # KB query filter doesn't match "tp=0" placeholders. EP is read
+    # from SharedState first (resume-safe), env as fallback (legacy
+    # paths that bypass _seed_shared_state).
     for src_attr, dst_key in (
         ("precision",     "precision"),
         ("tp",            "tp"),
+        ("ep",            "ep"),
         ("conc",          "conc"),
         ("isl",           "isl"),
         ("osl",           "osl"),
@@ -296,20 +299,24 @@ def run_t0_anchor(
         v = getattr(shared_state, src_attr, None)
         if v not in (None, "", 0):
             _attrs[dst_key] = v
-    # EP / PP — not on SharedState; cli writes EP into ``os.environ``
-    # (multi-node path) and PP currently has no CLI surface. Read
-    # both from env so a session that pinned EP via ``--ep N`` still
-    # gets it stamped on the recipe anchor.
-    for env_var, dst_key in (("EP", "ep"), ("PP", "pp")):
-        raw = (os.environ.get(env_var) or "").strip()
-        if not raw:
-            continue
+    # PP — no SharedState field (no CLI surface); read env only.
+    # EP env fallback when SharedState.ep is unset (legacy SDK callers
+    # that constructed SharedState without _seed_shared_state).
+    if "ep" not in _attrs:
+        raw_ep = (os.environ.get("EP") or "").strip()
         try:
-            n = int(raw)
+            n = int(raw_ep) if raw_ep else 0
         except ValueError:
-            continue
+            n = 0
         if n > 0:
-            _attrs[dst_key] = n
+            _attrs["ep"] = n
+    raw_pp = (os.environ.get("PP") or "").strip()
+    try:
+        pp_n = int(raw_pp) if raw_pp else 0
+    except ValueError:
+        pp_n = 0
+    if pp_n > 0:
+        _attrs["pp"] = pp_n
     # update_recipe → propose_point internally swallows CortexKBError
     # and enqueues NDJSON, so an explicit ``except CortexKBError`` here
     # would be dead code. The catch-all only matters for true programmer
@@ -329,16 +336,17 @@ def run_t0_anchor(
     model_class = (extra_attrs or {}).get("model_class") if isinstance(extra_attrs, Mapping) else None
     framework = (extra_attrs or {}).get("framework") if isinstance(extra_attrs, Mapping) else None
     # Workload-shape filters (T2 fallback tier — same precision + tp
-    # + ep beats same-family alone). EP is env-bound (no SharedState
-    # field); we read it the same way the recipe backfill block above
-    # does so the query filter matches what we just wrote.
+    # + ep beats same-family alone). All three read from SharedState
+    # first (resume-safe); EP falls back to env for legacy SDK callers.
     _precision = str(getattr(shared_state, "precision", "") or "").strip()
     _tp = int(getattr(shared_state, "tp", 0) or 0)
-    _ep_raw = (os.environ.get("EP") or "").strip()
-    try:
-        _ep = int(_ep_raw) if _ep_raw else 0
-    except ValueError:
-        _ep = 0
+    _ep = int(getattr(shared_state, "ep", 0) or 0)
+    if _ep == 0:
+        _ep_raw = (os.environ.get("EP") or "").strip()
+        try:
+            _ep = int(_ep_raw) if _ep_raw else 0
+        except ValueError:
+            _ep = 0
     warm_point: dict[str, Any] = {}
     warm_tier: str = "miss"
     warm_conf: float = 0.0
