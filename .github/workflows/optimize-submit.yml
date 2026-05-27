@@ -193,7 +193,7 @@ jobs:
       GITHUB_TOKEN:          ${{ github.token }}
       GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
@@ -225,7 +225,7 @@ jobs:
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         working-directory: ci
@@ -464,7 +464,7 @@ jobs:
     runs-on: hyperloom-4hhzn
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         # No setup-python on the self-hosted runner — it has system python3
@@ -474,14 +474,14 @@ jobs:
         run: pip install --quiet requests pyyaml
 
       - name: Download all submission manifests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ github.workspace }}/manifests
           pattern: submission-manifest-*
           merge-multiple: false
 
       - name: Download all task artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ github.workspace }}/task-artifacts-merged
           pattern: task-artifacts-*
