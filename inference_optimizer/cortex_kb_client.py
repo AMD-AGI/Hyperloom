@@ -681,6 +681,7 @@ class CortexKBClient:
         framework: str | None = None,
         precision: str | None = None,
         tp: int | None = None,
+        ep: int | None = None,
     ) -> tuple[dict[str, Any], str, float]:
         """PR-A10 (Arbor-into-Hyperloom) — graceful warm-start fallback.
 
@@ -697,9 +698,11 @@ class CortexKBClient:
                       a real best_config (``best_config`` dict OR Arbor-shape
                       ``best_config_args`` / ``best_config_envs`` populated)
         T2     0.70   ``model_family`` + ``hardware`` + ``precision`` + ``tp``
-                      (+ ``framework`` when supplied) all match — workload-shape
-                      hit, dramatically more transferable than family alone
-                      because best_config diverges sharply on precision / TP
+                      (+ ``framework`` + ``ep`` when supplied) all match —
+                      workload-shape hit, dramatically more transferable than
+                      family alone because best_config diverges sharply on
+                      precision / TP / EP (``--enable-expert-parallel`` flips
+                      large blocks of the MoE serving config)
         T3     0.55   ``model_family`` + ``hardware`` (+ ``framework``) match
                       — same architecture family, same GPU + serving stack
         T4     0.40   ``model_class`` + ``hardware`` (+ ``framework``) match
@@ -810,7 +813,7 @@ class CortexKBClient:
         # DeepSeek-R1 bf16 TP=4 share the architecture but their
         # best_config will diverge sharply on attention backend +
         # kv-cache-dtype + max-num-seqs.
-        if family and (precision or tp):
+        if family and (precision or tp or ep):
             shape_filter: dict[str, Any] = {"hardware": slug_hw}
             if framework:
                 # Critical: never cross frameworks — sglang's
@@ -821,6 +824,12 @@ class CortexKBClient:
                 shape_filter["precision"] = precision
             if tp:
                 shape_filter["tp"] = int(tp)
+            if ep:
+                # EP=1 (TP-shared experts) vs EP=TP (rank-local experts)
+                # produce very different best_configs (the latter pins
+                # ``--enable-expert-parallel`` + tweaks the MoE schedule).
+                # Strict filter so we never carry one across to the other.
+                shape_filter["ep"] = int(ep)
             cand = _query({
                 C.F_KIND:             C.KIND_RECIPE,
                 C.F_ATTRS_FILTER:     shape_filter,

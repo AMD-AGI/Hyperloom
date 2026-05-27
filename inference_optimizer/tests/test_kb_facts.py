@@ -524,6 +524,57 @@ def test_find_recipe_t3_includes_framework_in_filter(session_dir):
     assert t4_body["attrs_filter"]["model_class"] == "moe_mla"
 
 
+def test_find_recipe_t2_includes_ep_in_filter(session_dir):
+    """T2 same-shape MUST include ``ep`` in the filter when supplied.
+    EP=1 (TP-shared experts) vs EP=TP (rank-local experts) produce
+    very different best_configs (``--enable-expert-parallel`` flag
+    + MoE schedule changes) — picking one for the other crashes the
+    server or silently drops throughput."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/query").mock(side_effect=[
+            httpx.Response(200, json={"points": []}),  # T1
+            httpx.Response(200, json={"points": []}),  # T2
+            httpx.Response(200, json={"points": []}),  # T3
+            httpx.Response(200, json={"points": []}),  # T4
+            httpx.Response(200, json={"points": []}),  # T5
+            httpx.Response(200, json={"points": []}),  # T6
+        ])
+        client.find_recipe_with_fallback(
+            workload="DeepSeek-R1", hw="mi300x",
+            framework="sglang",
+            precision="fp8", tp=8, ep=8,
+        )
+    t2_body = json.loads(route.calls[1].request.content)
+    assert t2_body["attrs_filter"]["ep"] == 8
+
+
+def test_find_recipe_t2_fires_with_only_ep_when_precision_tp_missing(session_dir):
+    """``ep`` alone is enough to trigger T2 same-shape (the OR guard
+    is precision OR tp OR ep)."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/query").mock(side_effect=[
+            httpx.Response(200, json={"points": []}),  # T1
+            httpx.Response(200, json={"points": []}),  # T2 (must fire)
+            httpx.Response(200, json={"points": []}),  # T3
+            httpx.Response(200, json={"points": []}),  # T5 (T4 skipped — no model_class)
+            httpx.Response(200, json={"points": []}),  # T6
+        ])
+        client.find_recipe_with_fallback(
+            workload="DeepSeek-R1", hw="mi300x",
+            framework="sglang",
+            ep=4,  # only ep — model_class omitted so T4 is skipped
+        )
+    # The 2nd call must be T2 (not T3). With the old "precision OR tp"
+    # guard ep alone would have skipped T2 and the 2nd call would be
+    # T3 (which has no precision / tp / ep keys).
+    t2_body = json.loads(route.calls[1].request.content)
+    assert t2_body["attrs_filter"]["ep"] == 4
+    assert "precision" not in t2_body["attrs_filter"]
+    assert "tp" not in t2_body["attrs_filter"]
+
+
 def test_find_recipe_no_framework_falls_back_to_unfiltered(session_dir):
     """When the caller doesn't pin a framework, the fallback ladder
     must NOT add a framework filter (avoids accidentally filtering
