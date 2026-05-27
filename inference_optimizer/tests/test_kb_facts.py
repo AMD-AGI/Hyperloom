@@ -467,6 +467,62 @@ def test_find_recipe_falls_through_to_t3_when_shape_misses(session_dir):
     assert conf == 0.55
 
 
+def test_read_recipe_exact_returns_point_dict(session_dir):
+    """``read_recipe_exact`` queries the (model, hw) anchor and
+    returns the parsed point dict (or ``{}`` on miss)."""
+    from inference_optimizer.cortex_kb_client import recipe_canonical_id
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    expected_cid = recipe_canonical_id("DeepSeek-R1", "MI300X")
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={
+                "points": [{
+                    "id": 99,
+                    "canonical_id": expected_cid,
+                    "kind": "recipe",
+                    "attrs": {
+                        "model": "DeepSeek-R1",
+                        "hardware": "mi300x",
+                        "sessions": [
+                            {"session_id": "A", "gain_pct": 12.0},
+                            {"session_id": "B", "gain_pct": 18.5},
+                        ],
+                    },
+                }],
+            }),
+        )
+        point = client.read_recipe_exact(model="DeepSeek-R1", hardware="MI300X")
+    assert point["id"] == 99
+    assert point["canonical_id"] == expected_cid
+    body = json.loads(route.calls.last.request.content)
+    assert body["canonical_id"] == expected_cid
+    assert body["kind"] == "recipe"
+
+
+def test_read_recipe_exact_returns_empty_dict_on_miss(session_dir):
+    """When the anchor doesn't exist yet, ``read_recipe_exact`` returns
+    ``{}`` — caller treats it as 'no prior sessions'."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={"points": []}),
+        )
+        point = client.read_recipe_exact(model="NewModel", hardware="mi300x")
+    assert point == {}
+
+
+def test_read_recipe_exact_returns_empty_dict_on_http_failure(session_dir):
+    """Network / 5xx failure → ``{}`` so the caller can proceed with
+    a clean write (last-writer-wins is preferable to crashing CLOSE)."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(500, json={"detail": "boom"}),
+        )
+        point = client.read_recipe_exact(model="M", hardware="h")
+    assert point == {}
+
+
 def test_update_recipe_with_extra_workload_attrs_lands_them_flat(session_dir):
     """The workload-shape tags coordinator hoists into ``extra_attrs``
     must land as top-level recipe attrs (so the KB ``attrs_filter``
@@ -498,6 +554,163 @@ def test_update_recipe_with_extra_workload_attrs_lands_them_flat(session_dir):
     # And the canonical_id is still keyed by (model, hardware) only —
     # workload-shape tags are searchable but NOT part of identity.
     assert body["canonical_id"] == "recipe:deepseek-r1:mi300x"
+
+
+# ===========================================================================
+# Coordinator.cortex_finalize_recipe_and_journal — sessions[] read-modify-write
+# ===========================================================================
+@pytest.fixture
+def _coord_with_kb_stub(session_dir):
+    """Minimal Coordinator stub for the finalize-recipe path.
+
+    Uses ``Coordinator.__new__`` so we skip the heavy __init__ and
+    wire only the attributes the helper reads.
+    """
+    from dataclasses import dataclass, field
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+
+    @dataclass
+    class _StubSharedState:
+        model_name: str = "DeepSeek-R1"
+        gpu_type: str = "MI300X"
+        framework: str = "sglang"
+        cortex_session_id: str = "session-NEW"
+        current_best: dict = field(default_factory=lambda: {
+            "tput": 875.0, "extra_sglang_args": "--attention-backend AITER",
+        })
+        optimization_stack: list = field(default_factory=list)
+        gain_per_stack_entry: list = field(default_factory=list)
+        last_action_failures: list = field(default_factory=list)
+        cumulative_gain: float = 12.5
+        cumulative_gain_validated: float = 12.5
+        cumulative_gain_validated_stack_len: int = 1
+        cumulative_gain_validated_ts: str = "2026-05-27T00:00:00Z"
+        stack_fingerprint: str = "abc123"
+        phase: str = "CLOSE"
+        tick: int = 5
+        baseline_tput: float = 700.0
+        precision: str = "bf16"
+        tp: int = 8
+        conc: int = 64
+        isl: int = 1024
+        osl: int = 1024
+        max_model_len: int = 0
+
+        def save(self, *args, **kwargs):
+            pass
+
+    class _StubKB:
+        enabled = True
+
+        def __init__(self, prior_sessions):
+            self._prior_sessions = prior_sessions
+            self.read_calls = 0
+            self.update_recipe_calls = []
+            self.read_recipe_calls = []
+
+        def read_recipe_exact(self, *, model, hardware):
+            self.read_calls += 1
+            self.read_recipe_calls.append((model, hardware))
+            return {
+                "id": 42,
+                "canonical_id": f"recipe:{model.lower()}:{hardware.lower()}",
+                "kind": "recipe",
+                "attrs": {
+                    "model": model,
+                    "hardware": hardware,
+                    "sessions": list(self._prior_sessions),
+                },
+            }
+
+        def update_recipe(self, **kwargs):
+            self.update_recipe_calls.append(kwargs)
+            return {"status": "auto_accepted", "point_id": "42"}
+
+    def _build(prior_sessions=None, my_session_id="session-NEW"):
+        coord = Coordinator.__new__(Coordinator)
+        coord.session_dir = session_dir
+        coord.shared_state = _StubSharedState(cortex_session_id=my_session_id)
+        coord.cortex_kb = _StubKB(prior_sessions or [])
+        coord._fact_writes_enabled = True
+        return coord
+    return _build
+
+
+def test_finalize_recipe_appends_new_session_keeping_history(_coord_with_kb_stub):
+    """update_recipe must include prior sessions[] entries alongside the
+    new one — otherwise the KB shallow-merge overwrites and loses history."""
+    coord = _coord_with_kb_stub(
+        prior_sessions=[
+            {"session_id": "session-A", "gain_pct": 8.0, "stack_len": 1},
+            {"session_id": "session-B", "gain_pct": 15.0, "stack_len": 2},
+        ],
+        my_session_id="session-NEW",
+    )
+    coord.cortex_finalize_recipe_and_journal()
+    assert len(coord.cortex_kb.update_recipe_calls) == 1
+    written_sessions = coord.cortex_kb.update_recipe_calls[0]["sessions"]
+    ids = [s["session_id"] for s in written_sessions]
+    assert ids == ["session-A", "session-B", "session-NEW"]
+
+
+def test_finalize_recipe_dedup_resume_replays_own_session_id(
+    _coord_with_kb_stub,
+):
+    """Resume / retry of the SAME session must not duplicate the session
+    in sessions[] — the new entry supersedes the prior copy carrying
+    the latest gain_pct / stack_len."""
+    coord = _coord_with_kb_stub(
+        prior_sessions=[
+            {"session_id": "session-A", "gain_pct": 8.0, "stack_len": 1},
+            {"session_id": "session-NEW", "gain_pct": 5.0, "stack_len": 1},
+        ],
+        my_session_id="session-NEW",
+    )
+    coord.cortex_finalize_recipe_and_journal()
+    written_sessions = coord.cortex_kb.update_recipe_calls[0]["sessions"]
+    ids = [s["session_id"] for s in written_sessions]
+    assert ids == ["session-A", "session-NEW"]
+    # Latest copy wins — gain_pct reflects current cumulative_gain (12.5),
+    # not the stale 5.0 from the prior entry.
+    new_entry = next(s for s in written_sessions if s["session_id"] == "session-NEW")
+    assert new_entry["gain_pct"] == 12.5
+
+
+def test_finalize_recipe_empty_anchor_only_writes_own_entry(
+    _coord_with_kb_stub,
+):
+    """First-time write (no prior anchor) → sessions[] is just our entry."""
+    coord = _coord_with_kb_stub(prior_sessions=[], my_session_id="session-NEW")
+    coord.cortex_finalize_recipe_and_journal()
+    written_sessions = coord.cortex_kb.update_recipe_calls[0]["sessions"]
+    assert len(written_sessions) == 1
+    assert written_sessions[0]["session_id"] == "session-NEW"
+
+
+def test_finalize_recipe_includes_workload_tags_in_extra_attrs(
+    _coord_with_kb_stub,
+):
+    """The workload-shape tags (precision/tp/conc/isl/osl + ep/pp from env)
+    must be hoisted into ``extra_attrs`` so they land flat on the
+    recipe anchor (NOT nested under ``workload``)."""
+    import os as _os
+    coord = _coord_with_kb_stub()
+    prev_ep = _os.environ.get("EP")
+    _os.environ["EP"] = "4"
+    try:
+        coord.cortex_finalize_recipe_and_journal()
+    finally:
+        if prev_ep is None:
+            _os.environ.pop("EP", None)
+        else:
+            _os.environ["EP"] = prev_ep
+    extra = coord.cortex_kb.update_recipe_calls[0]["extra_attrs"]
+    assert extra["precision"] == "bf16"
+    assert extra["tp"] == 8
+    assert extra["conc"] == 64
+    assert extra["isl"] == 1024
+    assert extra["osl"] == 1024
+    assert extra["ep"] == 4
 
 
 def test_propose_edge_drain_replays_to_edge_endpoint(session_dir):
