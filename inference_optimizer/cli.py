@@ -3231,6 +3231,26 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if not bool(getattr(state, "framework_phase_enabled", True)):
             args.no_framework = True
             print("  framework phase       : DISABLED (persisted from original run)")
+        elif bool(getattr(args, "no_framework", False)):
+            # Inverse direction (P2.d): persisted state still has the
+            # phase enabled, but the operator passed ``--no-framework``
+            # on resume. Only honour this when the original session has
+            # not yet entered FRAMEWORK_PR (or anything past it) —
+            # retroactively skipping a phase we are in/past is
+            # incoherent.
+            cur_phase = (getattr(state, "phase", "") or "").strip().upper()
+            if cur_phase in ("", "PRELUDE"):
+                state.framework_phase_enabled = False
+                print(
+                    "  framework phase       : DISABLING for resume "
+                    "(--no-framework + phase=PRELUDE)"
+                )
+            else:
+                print(
+                    f"  framework phase       : WARN --no-framework ignored; "
+                    f"session is already in phase={cur_phase!r} "
+                    f"(cannot retroactively skip)"
+                )
 
         # CRITICAL: a leftover stop_reason from the prior run (most often
         # "time_exhausted") fools Orchestration into thinking the work is
@@ -4045,13 +4065,17 @@ def _build_parser() -> argparse.ArgumentParser:
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
-    opt.add_argument("--no-framework", action="store_true", default=False,
+    opt.add_argument("--no-framework", action="store_true",
+                      default=os.environ.get(
+                          "INFERENCE_OPTIMIZER_NO_FRAMEWORK", "0",
+                      ).strip() in ("1", "true", "True", "TRUE", "yes"),
                       help="Skip the FRAMEWORK_PR phase (PRELUDE → EXPLORE "
                            "directly). The phase pre-scans upstream sglang/"
                            "vllm PRs via framework-agent and lands KEPT "
                            "patches before EXPLORE starts. Disable when "
                            "the framework-agent toolchain is unavailable "
-                           "or you want a faster cold start. "
+                           "or you want a faster cold start. Also read from "
+                           "$INFERENCE_OPTIMIZER_NO_FRAMEWORK=1. "
                            "Default: framework phase enabled.")
     opt.add_argument("--kernel-codex", action="store_true", default=True,
                       help="Use Codex backend for Kernel agent (default — faster). "
