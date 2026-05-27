@@ -159,7 +159,6 @@ class TraceAnalyzeSnapshot:
     trace_input: str = ""
     candidates_path: str = ""
     kernel_roofline_path: str = ""
-    kernel_roofline_report_path: str = ""
     hot_kernels_top15: list[dict[str, Any]] = field(default_factory=list)
     kernel_roofline_top15: list[dict[str, Any]] = field(default_factory=list)
     task_groups: list[dict[str, Any]] = field(default_factory=list)
@@ -178,9 +177,6 @@ class TraceAnalyzeSnapshot:
             trace_input=str(d.get("trace_input") or ""),
             candidates_path=str(d.get("candidates_path") or ""),
             kernel_roofline_path=str(d.get("kernel_roofline_path") or ""),
-            kernel_roofline_report_path=str(
-                d.get("kernel_roofline_report_path") or ""
-            ),
             hot_kernels_top15=list(d.get("hot_kernels_top15") or []),
             kernel_roofline_top15=list(d.get("kernel_roofline_top15") or []),
             task_groups=list(d.get("task_groups") or []),
@@ -2555,15 +2551,6 @@ class SharedState:
             artifacts = result.get("artifact_paths") or {}
             if isinstance(artifacts, dict):
                 kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
-        kernel_roofline_report_path = (
-            result.get("kernel_roofline_report_path") or ""
-        )
-        if not kernel_roofline_report_path:
-            artifacts = result.get("artifact_paths") or {}
-            if isinstance(artifacts, dict):
-                kernel_roofline_report_path = (
-                    artifacts.get("kernel_roofline_report", "") or ""
-                )
         hot = result.get("hot_kernels") or []
         summary: list[dict[str, Any]] = []
         kernel_roofline: list[dict[str, Any]] = []
@@ -2651,7 +2638,6 @@ class SharedState:
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
             "kernel_roofline_path": str(kernel_roofline_path),
-            "kernel_roofline_report_path": str(kernel_roofline_report_path),
             "hot_kernels_top15": summary,
             "kernel_roofline_top15": kernel_roofline,
             "task_groups": task_groups,

@@ -87,8 +87,7 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
         last_trace_analyze={
             "analysis_md_text": "FULL ANALYSIS TEXT",
             "analysis_md_path": str(analysis_path),
-            "kernel_roofline_path": str(tmp_path / "kernel_roofline.json"),
-            "kernel_roofline_report_path": str(
+            "kernel_roofline_path": str(
                 tmp_path / "reports" / "kernel_roofline.json"
             ),
             "roofline_snapshot_id": 3,
@@ -135,8 +134,7 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
     assert "roofline_evidence" in params
     ev = params["roofline_evidence"]
     assert ev["analysis_md_path"] == str(analysis_path)
-    assert ev["kernel_roofline_path"] == str(tmp_path / "kernel_roofline.json")
-    assert ev["kernel_roofline_report_path"] == str(
+    assert ev["kernel_roofline_path"] == str(
         tmp_path / "reports" / "kernel_roofline.json"
     )
     assert ev["roofline_snapshot_id"] == 3

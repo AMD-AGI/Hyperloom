@@ -785,10 +785,6 @@ async def trace_analyze_handler(
             result["tracelens_summary_path"] = str(artifacts["tracelens_summary"])
         if isinstance(artifacts, dict) and artifacts.get("kernel_roofline"):
             result["kernel_roofline_path"] = str(artifacts["kernel_roofline"])
-        if isinstance(artifacts, dict) and artifacts.get("kernel_roofline_report"):
-            result["kernel_roofline_report_path"] = str(
-                artifacts["kernel_roofline_report"]
-            )
 
         # A failed TraceLens run is a hard trace-quality / integration
         # failure, not a valid "empty candidates" signal. Keep

@@ -267,19 +267,14 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
                 },
             ],
             "candidates_path": "/some/kc.json",
-            "kernel_roofline_path": "/some/kernel_roofline.json",
-            "kernel_roofline_report_path": "/some/reports/kernel_roofline.json",
+            "kernel_roofline_path": "/some/reports/kernel_roofline.json",
             "trace_report_path": str(analysis_md),
             "trace_health_warnings": [],
         },
     )
 
     cached = state.last_trace_analyze
-    assert cached["kernel_roofline_path"] == "/some/kernel_roofline.json"
-    assert (
-        cached["kernel_roofline_report_path"]
-        == "/some/reports/kernel_roofline.json"
-    )
+    assert cached["kernel_roofline_path"] == "/some/reports/kernel_roofline.json"
     row = cached["hot_kernels_top15"][0]
     assert row["bound_type"] == "memory"
     assert row["arithmetic_intensity"] == 0.45

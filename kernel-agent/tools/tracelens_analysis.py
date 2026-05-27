@@ -1769,15 +1769,15 @@ def build_kernel_roofline_payload(
     }
 
 
-def kernel_roofline_report_path_for_run(run_dir: Path) -> Path | None:
-    """Return ``<session_dir>/reports/kernel_roofline.json`` for real runs."""
+def kernel_roofline_path_for_run(run_dir: Path) -> Path:
+    """Return the session-level kernel roofline report path."""
     try:
         runs_dir = run_dir.parent
         kernel_agent_dir = runs_dir.parent
     except IndexError:
-        return None
+        return run_dir / "reports" / "kernel_roofline.json"
     if runs_dir.name != "runs" or kernel_agent_dir.name != "kernel-agent":
-        return None
+        return run_dir / "reports" / "kernel_roofline.json"
     session_dir = kernel_agent_dir.parent
     return session_dir / "reports" / "kernel_roofline.json"
 
@@ -2128,7 +2128,7 @@ def write_reports(
             )
             existing_report_path = stub_md
 
-    kernel_roofline_path = run_dir / "kernel_roofline.json"
+    kernel_roofline_path = kernel_roofline_path_for_run(run_dir)
     kernel_roofline_payload = build_kernel_roofline_payload(
         trace_input=str(Path(args.trace_input).resolve()),
         trace_input_type=trace_input_type,
@@ -2143,9 +2143,6 @@ def write_reports(
         candidates=candidates,
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
-    kernel_roofline_report_path = kernel_roofline_report_path_for_run(run_dir)
-    if kernel_roofline_report_path is not None:
-        atomic_write_json(kernel_roofline_report_path, kernel_roofline_payload)
 
     artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
@@ -2160,8 +2157,6 @@ def write_reports(
         "trace_report_path": str(existing_report_path) if existing_report_path else "",
         "tracelens_summary": str(summary_path),
     }
-    if kernel_roofline_report_path is not None:
-        artifact_paths["kernel_roofline_report"] = str(kernel_roofline_report_path)
     return artifact_paths
 
 

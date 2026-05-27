@@ -86,9 +86,6 @@ def _build_summary_dict(
         "kernel_roofline_path": str(
             latest_snap_raw.get("kernel_roofline_path") or ""
         ),
-        "kernel_roofline_report_path": str(
-            latest_snap_raw.get("kernel_roofline_report_path") or ""
-        ),
         "trace_input": str(latest_snap_raw.get("trace_input") or ""),
         "ts": str(latest_snap_raw.get("ts") or ""),
     }

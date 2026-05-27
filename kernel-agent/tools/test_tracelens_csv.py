@@ -577,6 +577,10 @@ def test_write_reports_writes_kernel_roofline_sidecar(tmp_path):
         existing_report_path=analysis_md,
     )
 
+    assert artifacts["kernel_roofline"] == str(
+        session_dir / "reports" / "kernel_roofline.json"
+    )
+    assert not (run_dir / "kernel_roofline.json").exists()
     payload = _json.loads(
         Path(artifacts["kernel_roofline"]).read_text(encoding="utf-8")
     )
@@ -584,13 +588,6 @@ def test_write_reports_writes_kernel_roofline_sidecar(tmp_path):
     assert payload["schema_version"] == 1
     assert payload["analysis_md_path"] == str(analysis_md)
     assert payload["kernel_candidates_path"] == artifacts["kernel_candidates"]
-    assert artifacts["kernel_roofline_report"] == str(
-        session_dir / "reports" / "kernel_roofline.json"
-    )
-    report_payload = _json.loads(
-        Path(artifacts["kernel_roofline_report"]).read_text(encoding="utf-8")
-    )
-    assert report_payload == payload
     assert row["kernel_id"] == "k001"
     assert row["bound_type"] == "memory"
     assert row["arithmetic_intensity"] == 0.45
