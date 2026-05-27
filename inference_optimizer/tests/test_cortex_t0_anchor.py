@@ -356,6 +356,71 @@ def test_t0_backfill_falls_back_to_env_ep_when_shared_state_unset(
     assert body["attrs"]["ep"] == 4
 
 
+def test_t0_populates_warm_start_lessons_from_kb(session_dir):
+    """T0 must call ``client.lessons()`` and stash the result on
+    ``SharedState.warm_start_lessons`` + write a ``.kb_lessons.json``
+    snapshot. Regression guard: lessons used to be write-only in
+    KB (no reader), so a future refactor must not drop this path."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    state = _state_for_session(session_dir)
+    with respx.mock(base_url=KB_URL) as router:
+        # propose_point (backfill) + various queries.
+        router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
+            }),
+        )
+        # All /v1/points/query calls — the lessons one returns 2 lessons.
+        # find_recipe_with_fallback fires up to 6 queries; the lessons
+        # query is independent. Use a callable side_effect that inspects
+        # the body's ``kind`` to route the response.
+        def _query_handler(request):
+            body = json.loads(request.content)
+            if body.get("kind") == "lesson":
+                return httpx.Response(200, json={
+                    "points": [
+                        {"id": 11, "canonical_id": "lesson:abc",
+                         "kind": "lesson",
+                         "attrs": {
+                             "statement": "VLLM_ROCM_USE_AITER=1 → +9.5%",
+                             "measured_impact": "gain_pct=9.50",
+                         },
+                         "confidence": 0.8},
+                        {"id": 12, "canonical_id": "lesson:def",
+                         "kind": "lesson",
+                         "attrs": {
+                             "statement": "--attention-backend AITER → +12.3%",
+                             "measured_impact": "gain_pct=12.30",
+                         },
+                         "confidence": 0.9},
+                    ],
+                })
+            return httpx.Response(200, json={"points": []})
+        router.post("/v1/points/query").mock(side_effect=_query_handler)
+        result = run_t0_anchor(
+            client, state,
+            workload="Qwen-Qwen3-8B", hw="mi300x",
+            extra_attrs={"framework": "sglang", "model_class": "moe_mla"},
+            session_dir=session_dir,
+        )
+    assert result.lessons_present is True
+    assert len(state.warm_start_lessons) == 2
+    # Sorted by confidence desc — the +12.3% lesson comes first.
+    statements = [
+        (p.get("attrs") or {}).get("statement", "")
+        for p in state.warm_start_lessons
+    ]
+    assert "+12.3%" in statements[0]
+    assert "+9.5%" in statements[1]
+    # Local snapshot file written.
+    from inference_optimizer.session_paths import cortex_dir
+    snap = cortex_dir(session_dir) / ".kb_lessons.json"
+    assert snap.exists()
+    payload = json.loads(snap.read_text(encoding="utf-8"))
+    assert len(payload["lessons"]) == 2
+    assert payload["framework"] == "sglang"
+
+
 def test_t0_recipe_backfill_failure_is_non_fatal(session_dir):
     """update_recipe backfill failure must NOT crash PRELUDE."""
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)

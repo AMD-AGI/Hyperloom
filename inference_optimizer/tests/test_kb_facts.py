@@ -1084,6 +1084,64 @@ def test_record_fact_per_variant_skipped_dedup_writes_nothing(
     assert not any(e.variant_name == "dedup_target" for e in j.entries)
 
 
+# ===========================================================================
+# client.lessons() — T0 reader symmetric with traps()
+# ===========================================================================
+def test_lessons_query_filters_by_model_hardware_framework(session_dir):
+    """``lessons()`` posts an ``attrs_filter`` with the three discriminators
+    that match what ``propose_lesson`` writes (applicable_models /
+    applicable_hardware / framework). Critical for ensuring a sglang
+    session doesn't pick up vLLM-only lesson statements."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={"points": []}),
+        )
+        client.lessons(model="DeepSeek-R1", hardware="mi300x", framework="sglang")
+    body = json.loads(route.calls.last.request.content)
+    assert body["kind"] == "lesson"
+    assert body["attrs_filter"]["applicable_models"] == "DeepSeek-R1"
+    assert body["attrs_filter"]["applicable_hardware"] == "mi300x"
+    assert body["attrs_filter"]["framework"] == "sglang"
+
+
+def test_lessons_returns_points_sorted_by_confidence_desc(session_dir):
+    """Higher-confidence lessons must surface first so the specialist
+    prompt's truncated list shows the most authoritative ones."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={
+                "points": [
+                    {"id": 1, "canonical_id": "lesson:a", "kind": "lesson",
+                     "attrs": {"statement": "low-conf"}, "confidence": 0.3},
+                    {"id": 2, "canonical_id": "lesson:b", "kind": "lesson",
+                     "attrs": {"statement": "high-conf"}, "confidence": 0.95},
+                    {"id": 3, "canonical_id": "lesson:c", "kind": "lesson",
+                     "attrs": {"statement": "mid-conf"}, "confidence": 0.6},
+                ],
+            }),
+        )
+        out = client.lessons(model="m", hardware="h")
+    ids = [p["canonical_id"] for p in out]
+    assert ids == ["lesson:b", "lesson:c", "lesson:a"]
+
+
+def test_lessons_returns_empty_on_disabled_or_failure(session_dir):
+    """Both disabled-client and HTTP-failure paths return ``[]`` — the
+    warm-start surface is best-effort, never crash PRELUDE."""
+    # disabled
+    disabled = CortexKBClient(session_dir=session_dir, enabled=False, kb_url=KB_URL)
+    assert disabled.lessons(model="m", hardware="h") == []
+    # HTTP failure
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(500, json={"detail": "boom"}),
+        )
+        assert client.lessons(model="m", hardware="h") == []
+
+
 def test_propose_edge_drain_replays_to_edge_endpoint(session_dir):
     """End-to-end fallback contract: when ``propose_edge`` sync failed
     and the row was enqueued, a later :meth:`drain_pending` must

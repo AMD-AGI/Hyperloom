@@ -4535,8 +4535,9 @@ class Coordinator:
           to dicts so the prompt builder can render them uniformly.
         * ``pr_monitor_available`` — boolean mirror of
           ``plane.pr_monitor_enabled``.
-        * ``warm_start_recipe`` / ``warm_start_pitfalls`` — mirror of
-          ``SharedState.warm_start_*`` (already T0'd by cli).
+        * ``warm_start_recipe`` / ``warm_start_pitfalls`` /
+          ``warm_start_lessons`` — mirror of ``SharedState.warm_start_*``
+          (already T0'd by cli).
         * ``framework_source_roots`` — picked up from
           :func:`resolve_source_file_allowlist` so the LLM has a stable
           local-source navigation hint without needing
@@ -4607,11 +4608,13 @@ class Coordinator:
         else:
             params.setdefault("kb_subgraph", {})
 
-        # Warm-start recipe + pitfalls from T0 anchor.
+        # Warm-start recipe + pitfalls + lessons from T0 anchor.
         if state.warm_start_recipe and "warm_start_recipe" not in params:
             params["warm_start_recipe"] = dict(state.warm_start_recipe)
         if state.warm_start_pitfalls and "warm_start_pitfalls" not in params:
             params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
+        if state.warm_start_lessons and "warm_start_lessons" not in params:
+            params["warm_start_lessons"] = list(state.warm_start_lessons)
 
         # Local-source navigation hint — same source the kernel agent
         # uses for ``source_file`` containment.

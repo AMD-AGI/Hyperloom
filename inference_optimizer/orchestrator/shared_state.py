@@ -769,6 +769,13 @@ class SharedState:
     # T0 snapshot of ``traps`` output (known pitfalls list). Same
     # injection-deferral story as ``warm_start_recipe``.
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
+    # T0 snapshot of ``lessons`` output (positive priors from prior
+    # KEEPs on this (model, hardware), optionally filtered by
+    # framework). Symmetric with ``warm_start_pitfalls``; consumed
+    # by the specialist prompt's "§ 5b. RELATED LESSONS" section.
+    # Empty when Cortex was bypassed (``--degraded-kb``) or T0
+    # failed.
+    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
     # bypassed (``--degraded-kb``) or T0 failed.
     warm_start_ts: str = ""

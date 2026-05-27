@@ -567,6 +567,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "cortex_session_summary",
     "warm_start_recipe",
     "warm_start_pitfalls",
+    "warm_start_lessons",
     "warm_start_ts",
     # phase state machine fields (KB_design §3.2, §3.10,
     # §3.13 M2). All managed by ``Coordinator._advance_phase_if_needed``;

@@ -136,6 +136,7 @@ class _State:
     max_model_len: int = 0
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
+    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
     def find_gap(self, _cid: str):

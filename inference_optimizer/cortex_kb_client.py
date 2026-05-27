@@ -940,6 +940,70 @@ class CortexKBClient:
             return ""
         return json.dumps(resp, sort_keys=True)
 
+    def lessons(
+        self,
+        *,
+        model: str,
+        hardware: str,
+        framework: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """T0 — query ``kind=lesson`` points relevant to ``(model, hardware)``.
+
+        Returns a list of KB point dicts (each with
+        ``{canonical_id, kind, attrs, authority, confidence, ...}``).
+        Empty list on failure (non-fatal — warm-start lessons are
+        priors, not invariants).
+
+        Filtering strategy (KB attrs are queried via ``attrs_filter``
+        exact-match, so we match against the same ``applicable_models``
+        / ``applicable_hardware`` lists ``propose_lesson`` writes):
+
+        * ``applicable_models`` is a list on the KB point; the
+          ``attrs_filter`` semantics on lists is "any-of contains" on
+          most KB backends, so passing ``model`` as a scalar matches
+          lessons whose ``applicable_models`` includes ``model``.
+        * Same for ``applicable_hardware`` + ``hardware``.
+        * ``framework`` (optional) — written into ``attrs`` by
+          ``_record_fact_per_task`` going forward; lessons predating
+          that field won't be filtered out (the KB attrs_filter
+          tolerates missing keys per "if present then match").
+
+        Symmetric with :meth:`traps` — same surface area, different
+        kind. Specialist prompts consume the result via
+        ``shared_state.warm_start_lessons``.
+        """
+        if not self.enabled:
+            return []
+        attrs_filter: dict[str, Any] = {}
+        if model:
+            attrs_filter["applicable_models"] = model
+        if hardware:
+            attrs_filter["applicable_hardware"] = hardware
+        if framework:
+            attrs_filter["framework"] = framework
+        body = {
+            C.F_KIND:         C.KIND_LESSON,
+            C.F_ATTRS_FILTER: attrs_filter,
+            C.F_LIMIT:        int(limit),
+        }
+        try:
+            resp = self._post(C.PATH_QUERY_POINT, body)
+        except CortexKBError as exc:
+            log.info("lessons query failed: %s", exc)
+            return []
+        points = resp.get(C.F_POINTS) or resp.get("points") or []
+        if not isinstance(points, list):
+            return []
+        # Sort by KB-side confidence desc so the most authoritative
+        # lessons land first in the specialist prompt's section.
+        sorted_points = sorted(
+            (p for p in points if isinstance(p, dict)),
+            key=lambda p: float(p.get("confidence") or 0.0),
+            reverse=True,
+        )
+        return sorted_points
+
     # ==================================================================
     # Public API — write side (T2 / T3 / T4)
     # ==================================================================
