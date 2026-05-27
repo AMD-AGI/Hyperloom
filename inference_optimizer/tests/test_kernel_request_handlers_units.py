@@ -220,3 +220,142 @@ class TestEnrichCandidate:
     def test_enrich_candidates_artifact_noop_when_missing_path(self):
         # Should not raise even though path does not exist.
         krh._enrich_candidates_artifact("", {"env_vars": {}}, trace_report_path="")
+
+
+# ---------------------------------------------------------------------------
+# _default_geak_budget_minutes / _geak_budget_minutes
+#
+# Orchestrator-side mirror of the kernel-agent default (PR #301). The
+# legacy hard-coded 90 forced quick-mode timing on the orchestrator path
+# even when ``install.sh`` had set ``GEAK_RUN_MODE=full``.
+# ---------------------------------------------------------------------------
+
+class TestDefaultGeakBudgetMinutes:
+    @pytest.mark.parametrize(
+        "geak_run_mode, expected",
+        [
+            (None, 130.0),       # unset -> full default
+            ("", 130.0),         # empty -> full default
+            ("full", 130.0),
+            ("FULL", 130.0),     # case-insensitive
+            ("  full  ", 130.0), # whitespace tolerated
+            ("garbage", 130.0),  # unknown values fall back to full
+            ("quick", 70.0),
+            ("QUICK", 70.0),
+            ("  quick  ", 70.0),
+        ],
+    )
+    def test_tracks_geak_run_mode(self, monkeypatch, geak_run_mode, expected):
+        if geak_run_mode is None:
+            monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
+        else:
+            monkeypatch.setenv("GEAK_RUN_MODE", geak_run_mode)
+        assert krh._default_geak_budget_minutes() == expected
+
+
+class TestGeakBudgetMinutes:
+    def test_payload_override_wins(self, monkeypatch):
+        monkeypatch.setenv("GEAK_RUN_MODE", "quick")
+        monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "500")
+        # payload wins over both env signals
+        assert krh._geak_budget_minutes({"geak_budget_min": 100}) == 100.0
+
+    def test_env_override_beats_default(self, monkeypatch):
+        monkeypatch.setenv("GEAK_RUN_MODE", "quick")
+        monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "115")
+        # env wins over the GEAK_RUN_MODE-derived default
+        assert krh._geak_budget_minutes({}) == 115.0
+
+    @pytest.mark.parametrize("geak_run_mode, expected", [
+        ("full", 130.0),
+        ("quick", 70.0),
+    ])
+    def test_falls_through_to_helper_when_no_overrides(
+        self, monkeypatch, geak_run_mode, expected,
+    ):
+        monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
+        monkeypatch.setenv("GEAK_RUN_MODE", geak_run_mode)
+        assert krh._geak_budget_minutes({}) == expected
+
+    def test_empty_env_value_falls_through_to_helper(self, monkeypatch):
+        # Pre-fix code would let "" propagate into ``float("")`` and raise.
+        monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "")
+        monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
+        assert krh._geak_budget_minutes({}) == 130.0
+
+
+# ---------------------------------------------------------------------------
+# _default_kernel_batch_parallel
+#
+# Adaptive batch fanout. The legacy hard-coded 8 over-admitted on smaller
+# pods (4-GPU labs, partial-node CI shards), letting the asyncio
+# semaphore queue up siblings that Ray could not actually schedule.
+# ---------------------------------------------------------------------------
+
+class TestDefaultKernelBatchParallel:
+    @pytest.fixture
+    def patch_torch(self, monkeypatch):
+        """Returns a setter that overrides ``torch.cuda.device_count`` and
+        ``$KERNEL_AGENT_NUM_GPUS`` for the helper under test."""
+        import torch
+
+        def _set(n_gpus, per_task=None):
+            monkeypatch.setattr(torch.cuda, "device_count", lambda: n_gpus)
+            if per_task is None:
+                monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
+            else:
+                monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", str(per_task))
+
+        return _set
+
+    @pytest.mark.parametrize(
+        "n_gpus, per_task, expected",
+        [
+            # Exact full-node match (8 GPU, 1 GPU/task) -> cap kicks in at 8.
+            (8, 1, 8),
+            # Partial node -> floor at the visible-GPU count.
+            (4, 1, 4),
+            # 8-GPU node with 4-GPU GEAK reservations -> 2 concurrent.
+            (8, 4, 2),
+            # 4-GPU pod with 2-GPU per task -> 2 concurrent.
+            (4, 2, 2),
+            # Larger-than-cap node -> cap still kicks in.
+            (16, 1, 8),
+            # Per-task larger than visible -> floor at 1 (don't stall the
+            # batch with semaphore=0).
+            (1, 4, 1),
+        ],
+    )
+    def test_scales_with_visible_gpus(
+        self, patch_torch, n_gpus, per_task, expected,
+    ):
+        patch_torch(n_gpus, per_task=per_task)
+        assert krh._default_kernel_batch_parallel() == expected
+
+    def test_per_task_unset_defaults_to_one(self, patch_torch):
+        patch_torch(4, per_task=None)
+        assert krh._default_kernel_batch_parallel() == 4
+
+    def test_per_task_invalid_falls_back_to_one(self, patch_torch):
+        patch_torch(4, per_task="not-an-int")
+        assert krh._default_kernel_batch_parallel() == 4
+
+    def test_zero_visible_gpus_returns_legacy_fallback(self, patch_torch):
+        patch_torch(0)
+        assert (
+            krh._default_kernel_batch_parallel()
+            == krh._DEFAULT_KERNEL_BATCH_PARALLEL
+        )
+
+    def test_torch_failure_returns_legacy_fallback(self, monkeypatch):
+        import torch
+
+        def _boom():
+            raise RuntimeError("driver init failed")
+
+        monkeypatch.setattr(torch.cuda, "device_count", _boom)
+        monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
+        assert (
+            krh._default_kernel_batch_parallel()
+            == krh._DEFAULT_KERNEL_BATCH_PARALLEL
+        )
