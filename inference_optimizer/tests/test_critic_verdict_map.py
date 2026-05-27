@@ -219,6 +219,10 @@ class _BareSharedState:
 
     cortex_session_id: str = "sid-test"
     save_count: int = 0
+    # ``_materialize_approved_proposal`` reads this field to gate
+    # dispatch on a pending auto-roofline task; empty string means
+    # "nothing in flight" and the gate is a no-op.
+    auto_roofline_pending_task_id: str = ""
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
@@ -746,6 +750,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
+        auto_roofline_pending_task_id: str = ""
 
         def save(self, _session_dir):
             self.save_count += 1
