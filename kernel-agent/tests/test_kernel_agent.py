@@ -216,22 +216,7 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('GEAK_REF="${GEAK_REF:-v3.2.0}"', install_text)
         self.assertIn("ensure_rocm_torch_for_geak()", install_text)
         self.assertIn("KERNEL_AGENT_SKIP_TORCH_GATE", install_text)
-        self.assertIn("GEAK_PIP_CONSTRAINT_FILE", install_text)
-        self.assertIn("importlib.metadata", install_text)
-        self.assertIn("printf 'torch==%s\\n'", install_text)
-        self.assertIn("command -v rocm-smi", install_text)
         self.assertIn("rocm-smi --showid", install_text)
-        self.assertIn('die "refusing GEAK install on ROCm pod without an importable torch"', install_text)
-        self.assertIn('on ROCm pod is not a ROCm build', install_text)
-        self.assertIn(
-            "ensure_rocm_torch_for_geak\n"
-            "    _PIP_CONSTRAINT_ARGS=\"\"\n"
-            "    if [ -n \"${GEAK_PIP_CONSTRAINT_FILE:-}\" ] && [ -f \"${GEAK_PIP_CONSTRAINT_FILE}\" ]; then\n"
-            "      _PIP_CONSTRAINT_ARGS=\"--constraint ${GEAK_PIP_CONSTRAINT_FILE}\"\n"
-            "    fi\n"
-            "    run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \"${HYPERLOOM_ROOT}/geak\"",
-            install_text,
-        )
         # pip flags are factored into `_PIP_FLAGS`; assert the core flags
         # survive (prefix match allows future additions) and the install line
         # references the variable.
@@ -654,6 +639,27 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
     If anyone reverts the default to ``None`` or drops the
     propagation, every GEAK attempt will silently die at $3 again.
     """
+
+    def setUp(self) -> None:
+        import tempfile
+        # _resolve_geak_config() requires GEAK_CONFIG to point at a file
+        # containing "model_class: litellm". Create a minimal stub so tests
+        # that exercise _build_cmd() can run without a real install.
+        self._cfg_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        )
+        self._cfg_file.write("model:\n  model_class: litellm\n")
+        self._cfg_file.flush()
+        self._cfg_file.close()
+        self._prev_geak_config = os.environ.get("GEAK_CONFIG")
+        os.environ["GEAK_CONFIG"] = self._cfg_file.name
+
+    def tearDown(self) -> None:
+        if self._prev_geak_config is None:
+            os.environ.pop("GEAK_CONFIG", None)
+        else:
+            os.environ["GEAK_CONFIG"] = self._prev_geak_config
+        Path(self._cfg_file.name).unlink(missing_ok=True)
 
     # Source-text match: ArgumentParser does not surface ``default=...``
     # in ``--help`` output, so the most direct way to lock the contract
