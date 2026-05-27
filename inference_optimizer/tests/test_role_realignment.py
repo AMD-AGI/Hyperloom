@@ -61,9 +61,9 @@ def test_orchestration_prompt_includes_phase_contract(registry):
         objective_value=10.0,
         max_minutes=120,
     )
-    # PHASE CONTRACT section + all 5 phase names + R1 hint anchor.
+    # PHASE CONTRACT section + every phase name + R1 hint anchor.
     assert "PHASE CONTRACT" in text
-    for phase in ("PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+    for phase in ("PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
         assert phase in text, f"missing phase {phase} from orchestration prompt"
     assert "phase-allowed actions" in text.lower()
     assert "policy_denied" in text.lower()
@@ -289,6 +289,9 @@ async def test_compose_prompt_robustness_includes_budget_telemetry(
 ):
     c = coordinator_with_mocks
     try:
+        # Skip FRAMEWORK_PR so PRELUDE → EXPLORE remains the routing
+        # this telemetry test exercises.
+        c.shared_state.framework_phase_enabled = False
         # Force a transition so phase_history has a second row + we get
         # a phase budget telemetry block with PRELUDE elapsed.
         c.shared_state.baseline_tput = 1500.0
