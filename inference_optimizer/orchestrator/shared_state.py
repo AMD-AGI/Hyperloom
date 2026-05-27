@@ -3570,6 +3570,7 @@ class SharedState:
         """
         from .phase_state import (
             DEFAULT_PHASE_BUDGET_PCT,
+            PHASE_NAMES,
             normalize_budget_pct,
             phase_elapsed_seconds,
         )
@@ -3599,8 +3600,9 @@ class SharedState:
         mm = float(self.max_minutes or 0.0)
         total_budget_sec = mm * 60.0
         lines: list[str] = []
-        # Stable order — by PHASE_INDEX so the operator sees the chain.
-        for phase in ("PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+        # Stable order — iterate ``PHASE_NAMES`` so any phase added to
+        # the chain (e.g. FRAMEWORK_PR) renders automatically.
+        for phase in PHASE_NAMES:
             if phase not in elapsed_per_phase:
                 continue
             elapsed = elapsed_per_phase[phase]
