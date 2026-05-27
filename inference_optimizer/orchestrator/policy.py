@@ -1112,7 +1112,7 @@ class PolicyGate:
         # F3-5 is a within-KERNEL correctness rule. Skipping here keeps
         # the legacy ``phase_incompatible`` message fired by
         # _validate_phase_action when an LLM proposes kernel_opt in
-        # PRELUDE / EXPLORE.
+        # PRELUDE / FRAMEWORK_PR / EXPLORE.
         if str(getattr(ss, "phase", "") or "") != "KERNEL":
             return
         history = list(getattr(ss, "gain_per_stack_entry", []) or [])
