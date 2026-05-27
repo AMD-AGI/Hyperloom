@@ -8,7 +8,8 @@ Covers the additive subset of M2 implemented in this PR:
 * PolicyGate R1 ``phase_incompatible`` (warn-vs-enforce modes).
 * Coordinator initialises ``phase`` to PRELUDE on fresh sessions and
   records a baseline ``phase_entered`` row in ``phase_history``.
-* Coordinator advances PRELUDE → EXPLORE once ``baseline_tput > 0``.
+* Coordinator advances PRELUDE → EXPLORE once ``baseline_tput > 0``
+  (with FRAMEWORK_PR phase opt-out via ``framework_phase_enabled=False``).
 * breakdown.collect_phase_segments groups action events by phase
   window with proper ``elapsed_seconds`` math.
 * PolicyGate adds the new phase fields to ``CORE_STATE_FIELDS``.
@@ -443,7 +444,9 @@ async def test_coordinator_advances_to_explore_when_baseline_present(
         c.shared_state.save(session_dir)
         await c.tick(1)
         assert c.shared_state.phase == "EXPLORE"
-        # phase_history now has 2 rows: PRELUDE entry + PRELUDE→EXPLORE.
+        # phase_history now has 2 rows: PRELUDE entry + PRELUDE→EXPLORE
+        # (FRAMEWORK_PR is skipped here because the fixture sets
+        # ``framework_phase_enabled=False``).
         assert len(c.shared_state.phase_history) == 2
         last = c.shared_state.phase_history[-1]
         assert last["from_phase"] == "PRELUDE"

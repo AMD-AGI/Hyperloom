@@ -88,8 +88,8 @@ _DEFAULT_ATTEMPTS_HISTORY = 20
 # prompt; older failures stay in the event log but drop from the prompt.
 _DEFAULT_LAST_FAILURES = 10
 
-# phase_history cap. There are only 5 phases in the line
-# (PRELUDE/EXPLORE/KERNEL/SWEEP/CLOSE) so 100 rows is wildly generous;
+# phase_history cap. There are only 6 phases in the line
+# (PRELUDE/FRAMEWORK_PR/EXPLORE/KERNEL/SWEEP/CLOSE) so 100 rows is wildly generous;
 # the only realistic path to hitting it is repeated escalate/recover
 # loops, which we'd want surfaced as a warning anyway. Cap is enforced
 # in :meth:`SharedState.record_phase_transition`.
@@ -736,8 +736,8 @@ class SharedState:
     # ------------------------------------------------------------------
     # Phase state machine fields
     # ------------------------------------------------------------------
-    # ``phase`` is the run-level pipeline phase (PRELUDE / EXPLORE /
-    # KERNEL / SWEEP / CLOSE).  Coordinator is the only writer
+    # ``phase`` is the run-level pipeline phase (PRELUDE / FRAMEWORK_PR /
+    # EXPLORE / KERNEL / SWEEP / CLOSE). Coordinator is the only writer
     # (PolicyGate adds it to CORE_STATE_FIELDS); LLM agents can read
     # via prompt injection but cannot update_state. Empty string
     # signals "phase machine not yet initialised" — Coordinator

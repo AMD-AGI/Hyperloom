@@ -486,7 +486,7 @@ class Attribution(TypedDict, total=False):
 # §16 Phase segments — v0.8 M2 phase state machine
 # ---------------------------------------------------------------------------
 class PhaseSegment(TypedDict, total=False):
-    phase: str                 # PRELUDE / EXPLORE / KERNEL / SWEEP / CLOSE
+    phase: str                 # PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE
     from_phase: str            # previous phase (empty for first segment)
     entered_ts: str            # iso UTC of entry
     entered_unix: float | None

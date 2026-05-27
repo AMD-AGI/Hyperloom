@@ -14,14 +14,15 @@ Coordinator is the only writer of SharedState; this module just decides
 Design intent reference: ``KB_design/3.2_pipeline_phases/README.md``,
 ``KB_design/3.8_phase_state_machine/README.md``, ``KB_design/3.10_shared_state_evolution/README.md``.
 
-The five phases form a strictly monotonic chain (Inv-2.1 phase
+The six phases form a strictly monotonic chain (Inv-2.1 phase
 monotonicity):
 
 ::
 
-    PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE
-                   ↘ (no_kernel) ↗
-                   ↘──── any phase ────→ CLOSE  (terminal / abort)
+    PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE
+                ↘ (--no-framework) ↗
+                              ↘ (no_kernel) ↗
+                              ↘──── any phase ────→ CLOSE  (terminal / abort)
 
 ``recover`` is *phase-orthogonal* and not modeled as a transition.
 
