@@ -176,33 +176,36 @@ on the next tick.
   is no scoreboard.
 * **Never propose `profile` or `roofline`.** Both are auto-managed by
   the Coordinator; neither appears in any phase's `allowed_actions`.
-  PolicyGate R1 will deny any attempt with `rule='phase_incompatible'`.
+  PolicyGate denies any attempt with
+  `rule='analysis_action_not_llm_proposable'` (and R1 also rejects
+  them as `phase_incompatible`).
 
-### Roofline (auto-managed — you cannot propose it)
+### Roofline / profile analysis (auto-managed — you cannot propose it)
 
-The Coordinator owns the roofline lifecycle. There is exactly **one**
+The Coordinator owns the analysis lifecycle. There is exactly **one**
 path; the legacy composite / direct-profile bifurcation has been
-removed.
+removed. The kind of analysis enqueued (`roofline` vs `profile`) is
+chosen once by the operator via `--enable-roofline` /
+`--no-enable-roofline` (default on); you do not interact with that
+flag at runtime.
 
-* **Initial roofline** runs at the end of PRELUDE, immediately after
-  baseline lands. It produces the `analysis.md` snapshot consumed by
-  EXPLORE / KERNEL downstream actions.
-* **Refresh roofline** auto-enqueues whenever a stack KEEP (explore
-  side) or a kernel `integrate` KEEP lifts measured tput past the
+* **Initial analysis** runs at the end of PRELUDE, immediately after
+  baseline lands. It produces the `analysis.md` (roofline mode) or
+  the `last_profile_trace` (profile mode) consumed by EXPLORE /
+  KERNEL downstream actions.
+* **Refresh analysis** auto-enqueues whenever a stack KEEP (explore
+  side) or a kernel `integrate` KEEP lifts validated tput past the
   watermark — specifically when
   `current_tput / last_roofline_tput >= 1.10` (compound: 10% → 21% →
-  33% → … of the most recent roofline measurement). After each
-  roofline lands, `last_roofline_tput` is rearmed at the new tput.
-* **Blocked dispatches while a roofline is pending.** Any in-flight
-  roofline (`SharedState.auto_roofline_pending_task_id` set) holds
-  back the following actions, which PolicyGate denies until the
-  roofline completes: `specialist`, `explore`, `kernel_opt`,
+  33% → … of the most recent analysis anchor). After each analysis
+  lands, `last_roofline_tput` is rearmed.
+* **Blocked dispatches while analysis is pending.** Any in-flight
+  analysis task (`SharedState.auto_roofline_pending_task_id` set)
+  holds back the following actions, which PolicyGate denies until
+  the task completes: `specialist`, `explore`, `kernel_opt`,
   `integrate`, `deep_kernel_analysis`, `operator_tuning`,
-  `vendor_kernel_config`. Denial rule is
-  `wait_for_auto_roofline`. Just retry the same intent next tick.
-* **Operator override.** `--force-roofline-after-baseline` (default
-  on) controls whether the PRELUDE-initial roofline fires
-  unconditionally; you do not interact with this flag at runtime.
+  `vendor_kernel_config`. Denial rule is `wait_for_auto_roofline`.
+  Just retry the same intent next tick.
 
 The SharedState dump carries an `analysis_md=...` line with the
 **full TraceLens `analysis.md`** between `=== TraceLens Analysis
