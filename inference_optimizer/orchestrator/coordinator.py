@@ -1340,6 +1340,41 @@ class Coordinator:
                 state.framework_pr_phase_done = True
                 state.save(self.session_dir)
                 return
+        # P1.b: Critic gate before apply. The Critic sees the PR
+        # metadata (diff URL + title + gap target) and returns an
+        # ``approve`` / ``reject`` verdict. ``reject`` short-circuits
+        # the candidate with a ``critic_denied`` progress row so the
+        # apply / bench round is never spent on a candidate the Critic
+        # already classified as out-of-scope or unsafe. ``approve`` (and
+        # the degraded ``abstain`` returned when no Critic backend is
+        # wired) falls through to the enqueue.
+        verdict = await self._critic_review_framework_pr_candidate(next_candidate)
+        if verdict.get("verdict") == "reject":
+            cand_id = str(
+                next_candidate.get("candidate_id")
+                or next_candidate.get("pr_url")
+                or "",
+            )
+            progress = getattr(state, "framework_pr_phase_progress", None)
+            if not isinstance(progress, list):
+                progress = []
+                state.framework_pr_phase_progress = progress
+            progress.append({
+                "candidate_id": cand_id,
+                "batch_id":     next_candidate.get("batch_id") or "",
+                "task_id":      None,
+                "status":       "critic_denied",
+                "rationale":    str(verdict.get("rationale") or ""),
+                "ts":           datetime.now(timezone.utc).isoformat(),
+            })
+            state.save(self.session_dir)
+            log.info(
+                "FRAMEWORK_PR: critic rejected candidate=%s batch=%s "
+                "rationale=%r",
+                cand_id, next_candidate.get("batch_id") or "",
+                str(verdict.get("rationale") or "")[:200],
+            )
+            return
         await self._enqueue_framework_pr_task(next_candidate)
 
     def _select_next_framework_pr_candidate(self) -> dict[str, Any] | None:
@@ -1538,6 +1573,135 @@ class Coordinator:
                 "ts":           datetime.now(timezone.utc).isoformat(),
             })
             state.save(self.session_dir)
+
+    async def _critic_review_framework_pr_candidate(
+        self, candidate: dict[str, Any],
+    ) -> dict[str, str]:
+        """Ask the Critic backend whether to apply ``candidate``.
+
+        Returns ``{"verdict": "approve"|"reject"|"abstain", "rationale": str}``.
+
+        - ``abstain`` is the safe degraded path: returned when no
+          Critic backend is wired (test harnesses), when the backend
+          raises, or when it emits no ``REVIEW_VERDICT`` intent. The
+          caller treats ``abstain`` the same as ``approve`` so a
+          missing Critic does not silently block the whole phase.
+        - Decisions are cached in ``state.framework_pr_critic_decisions``
+          keyed by ``candidate_id`` so a resumed session does not
+          re-call the Critic for candidates it already classified.
+        """
+        state = self.shared_state
+        cand_id = str(
+            candidate.get("candidate_id")
+            or candidate.get("pr_url")
+            or "",
+        )
+        # Resume-safe cache lookup.
+        cached = getattr(state, "framework_pr_critic_decisions", None)
+        if isinstance(cached, list):
+            for row in cached:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("candidate_id") or "") == cand_id and cand_id:
+                    return {
+                        "verdict":   str(row.get("verdict") or "abstain"),
+                        "rationale": str(row.get("rationale") or ""),
+                    }
+        critic_backend = self.backends.get("critic")
+        if critic_backend is None:
+            return {"verdict": "abstain", "rationale": "no critic backend"}
+        # Build a proposal-formatted prompt that both MockCriticBackend
+        # (regex-driven REVIEW_VERDICT emission) and CriticAgentBackend
+        # (passes the whole prompt body through to ``prepare-review``)
+        # can consume. The ``msg_id`` is deterministic from the
+        # candidate id so MockCriticBackend's dedupe set is consistent.
+        # All-hex msg_id so MockCriticBackend's ``[a-f0-9]+`` regex
+        # captures it cleanly. Prefix would break the parse.
+        msg_id = hashlib.md5(
+            f"framework_pr:{cand_id}".encode(),
+        ).hexdigest()
+        payload = {
+            "action":     "framework_pr",
+            "candidate":  {
+                "candidate_id":     cand_id,
+                "pr_url":           str(candidate.get("pr_url") or ""),
+                "repo":             str(candidate.get("repo") or ""),
+                "ref":              str(candidate.get("ref") or ""),
+                "title":            str(candidate.get("title") or ""),
+                "framework":        str(candidate.get("framework") or ""),
+                "gap_canonical_id": str(candidate.get("gap_canonical_id") or ""),
+                "rationale":        str(candidate.get("rationale") or ""),
+            },
+            "batch_id":   candidate.get("batch_id") or "",
+        }
+        prompt = (
+            f"seq=1 msg_id={msg_id} from=coordinator topic=proposal "
+            f"payload={json.dumps(payload, sort_keys=True)}"
+        )
+        verdict_row: dict[str, str] = {
+            "verdict":   "abstain",
+            "rationale": "no verdict emitted",
+        }
+        try:
+            result = await critic_backend.run(
+                prompt=prompt,
+                system_prompt=None,
+                tools=[],
+                max_turns=1,
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.warning(
+                "FRAMEWORK_PR: critic call failed for candidate=%s: %r",
+                cand_id, exc,
+            )
+            verdict_row = {
+                "verdict":   "abstain",
+                "rationale": f"critic call failed: {exc!r}",
+            }
+        else:
+            for intent in getattr(result, "intents", []) or []:
+                itype = getattr(intent, "type", None)
+                itype_val = getattr(itype, "value", itype)
+                if str(itype_val) != "review_verdict":
+                    continue
+                ipayload = getattr(intent, "payload", {}) or {}
+                if not isinstance(ipayload, dict):
+                    continue
+                if str(ipayload.get("target_proposal_msg_id") or "") != msg_id:
+                    continue
+                v = str(ipayload.get("verdict") or "").strip().lower()
+                # Map the Critic verdict vocab onto the gate's
+                # {approve, reject, abstain}. ``redirect`` / ``advise`` /
+                # ``needs_review`` all fall through to abstain so the
+                # phase keeps moving instead of stalling.
+                if v == "approve":
+                    mapped = "approve"
+                elif v == "reject":
+                    mapped = "reject"
+                else:
+                    mapped = "abstain"
+                verdict_row = {
+                    "verdict":   mapped,
+                    "rationale": str(
+                        ipayload.get("reasoning")
+                        or ipayload.get("rationale")
+                        or "",
+                    ),
+                }
+                break
+        decisions = getattr(state, "framework_pr_critic_decisions", None)
+        if not isinstance(decisions, list):
+            decisions = []
+            state.framework_pr_critic_decisions = decisions
+        decisions.append({
+            "candidate_id": cand_id,
+            "batch_id":     candidate.get("batch_id") or "",
+            "verdict":      verdict_row["verdict"],
+            "rationale":    verdict_row["rationale"],
+            "ts":           datetime.now(timezone.utc).isoformat(),
+        })
+        state.save(self.session_dir)
+        return verdict_row
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """No-op KERNEL entry hook.
