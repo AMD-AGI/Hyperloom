@@ -441,9 +441,6 @@ jobs:
       - name: Publish session breakdown to perf-leaderboard
         if: always() && github.event.inputs.dry_run != 'true'
         continue-on-error: true
-        env:
-          PERF_API_ENDPOINT: ${{ secrets.PERF_API_ENDPOINT }}
-          PERF_API_TOKEN:    ${{ secrets.PERF_API_TOKEN }}
         run: |
           set -euo pipefail
           # Prefer the largest session_breakdown*.json under task-artifacts/
@@ -456,11 +453,18 @@ jobs:
             exit 0
           fi
           BD_SIZE=$(stat -c %s "$BD")
-          echo "publishing $BD (${BD_SIZE} bytes) to ${PERF_API_ENDPOINT:-<script default = dev>}"
-          # post_perf_runs.py reads PERF_API_ENDPOINT / PERF_API_TOKEN from
-          # env via argparse defaults — unset secrets fall back to the
-          # script's hardcoded dev defaults.
-          python3 scripts/post_perf_runs.py "$BD"
+          # Only override script's DEFAULT_ENDPOINT / DEFAULT_TOKEN when the
+          # secret is actually set. GHA injects an empty string (not unset)
+          # for missing secrets, which would otherwise bypass argparse's
+          # os.environ.get(..., DEFAULT) fallback. So we route through CLI
+          # args and skip them when the secret value is empty.
+          ARGS=("$BD")
+          EP='${{ secrets.PERF_API_ENDPOINT }}'
+          TK='${{ secrets.PERF_API_TOKEN }}'
+          if [ -n "$EP" ]; then ARGS+=(--endpoint "$EP"); fi
+          if [ -n "$TK" ]; then ARGS+=(--token "$TK"); fi
+          echo "publishing $BD (${BD_SIZE} bytes); endpoint=${EP:-<script default = dev>}"
+          python3 scripts/post_perf_runs.py "${ARGS[@]}"
 
       - name: Upload per-model manifest
         if: always()
