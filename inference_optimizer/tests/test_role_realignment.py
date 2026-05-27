@@ -168,6 +168,30 @@ def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
     assert out.count("elapsed=") == 2
 
 
+def test_shared_state_phase_budget_telemetry_includes_framework_pr():
+    # Regression for the hardcoded 5-phase tuple that swallowed
+    # FRAMEWORK_PR. The renderer should iterate ``PHASE_NAMES`` so
+    # any phase that appears in ``phase_history`` shows up.
+    s = SharedState(max_minutes=60)
+    s.record_phase_transition(
+        to_phase="PRELUDE", reason="phase_entered", evidence={},
+        ts="2026-05-19T00:00:00+00:00", ts_unix=1_000_000.0,
+    )
+    s.record_phase_transition(
+        to_phase="FRAMEWORK_PR", reason="prelude_done", evidence={},
+        ts="2026-05-19T00:01:00+00:00", ts_unix=1_000_060.0,
+    )
+    s.record_phase_transition(
+        to_phase="EXPLORE", reason="framework_pr_phase_done", evidence={},
+        ts="2026-05-19T00:03:00+00:00", ts_unix=1_000_180.0,
+    )
+    out = s.to_phase_budget_telemetry(now_unix=1_000_300.0)
+    assert "PRELUDE: elapsed=60s" in out
+    assert "FRAMEWORK_PR: elapsed=120s" in out
+    assert "EXPLORE: elapsed=120s" in out
+    assert out.count("elapsed=") == 3
+
+
 def test_shared_state_warm_start_summary_empty_when_no_recipe():
     assert SharedState().to_warm_start_summary() == ""
 
