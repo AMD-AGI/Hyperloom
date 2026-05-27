@@ -23,9 +23,6 @@ import respx
 
 from inference_optimizer.cortex_kb_client import (
     CortexKBClient,
-    CortexKBError,
-    attempt_canonical_id,
-    experiment_canonical_id,
     recipe_canonical_id,
 )
 from inference_optimizer.paths import make_session_dir
@@ -33,7 +30,6 @@ from inference_optimizer.session_paths import (
     cortex_audit_jsonl,
     cortex_dir,
     cortex_pending_ndjson,
-    cortex_sid_file,
 )
 
 
@@ -74,63 +70,17 @@ def test_canonical_id_derivations_are_idempotent():
     assert c == "recipe:deepseek-r1-0528:mi300x"
     assert recipe_canonical_id("", "") == "recipe:unknown_model:unknown_hw"
 
-    assert experiment_canonical_id("36", 1) == "exp:36:0001"
-    assert experiment_canonical_id("36", 42) == "exp:36:0042"
-    assert experiment_canonical_id("", 0) == "exp:0:0000"
-
-    assert attempt_canonical_id("36", "task-1") == "attempt.session-36.task-task-1"
-
 
 # ===========================================================================
 # CortexKBClient — sync success + NDJSON fallback
 # ===========================================================================
 def test_disabled_client_skips_all_writes(session_dir):
     client = CortexKBClient(session_dir=session_dir, enabled=False, kb_url=KB_URL)
-    assert client.session_begin(
-        workload="w", hw="mi300x", stack_fingerprint={"rocm": "x"},
-    ) == ""
-    assert client.propose_point(canonical_id="exp:s:0001", kind="experiment")[
+    assert client.propose_point(canonical_id="recipe:foo:bar", kind="recipe")[
         "status"
     ] == "skip_disabled"
-    assert client.hypothesize(
-        sid="", from_canonical="x", to_canonical="y",
-    )["tentative_edge_id"] == ""
+    assert client.update_recipe(model="m", hardware="h")["status"] == "skip_disabled"
     assert not cortex_pending_ndjson(session_dir).exists()
-
-
-def test_session_begin_parses_session_id(session_dir):
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/sessions/begin").mock(
-            return_value=httpx.Response(
-                200,
-                json={"session_id": 42, "thinking_style": "recommendation", "lens_schedule": []},
-            ),
-        )
-        sid = client.session_begin(
-            workload="w", hw="mi300x", stack_fingerprint={"rocm": "7.2.0"},
-        )
-    assert sid == "42"
-    assert cortex_sid_file(session_dir).read_text(encoding="utf-8").strip() == "42"
-    audit_lines = cortex_audit_jsonl(session_dir).read_text(encoding="utf-8").splitlines()
-    parsed = [json.loads(line) for line in audit_lines if line.strip()]
-    assert any(row.get("op") == "session_begin" and row.get("status") == "ok" for row in parsed)
-
-
-def test_session_begin_omits_task_field(session_dir):
-    """The HTTP schema removed ``task`` and forbids extras (§1.1)."""
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    with respx.mock(base_url=KB_URL) as router:
-        route = router.post("/v1/sessions/begin").mock(
-            return_value=httpx.Response(200, json={
-                "session_id": 1, "thinking_style": "recommendation", "lens_schedule": [],
-            }),
-        )
-        client.session_begin(workload="w", hw="mi300x")
-    body = json.loads(route.calls.last.request.content)
-    assert "task" not in body
-    assert body["goal"] == "find_recommendation"
-    assert body["initiator"]
 
 
 def test_propose_point_uses_evidence_refs_and_provenance(session_dir):
@@ -162,97 +112,12 @@ def test_propose_point_uses_evidence_refs_and_provenance(session_dir):
     assert body["authority"] == "EXPERIENTIAL"
 
 
-def test_hypothesize_resolves_canonical_to_point_id(session_dir):
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    with respx.mock(base_url=KB_URL) as router:
-        # Two query lookups (from + to), one hypothesize POST.
-        router.post("/v1/points/query").mock(side_effect=[
-            httpx.Response(200, json={"points": [{"id": 10, "canonical_id": "recipe:a:b"}]}),
-            httpx.Response(200, json={"points": [{"id": 11, "canonical_id": "exp:42:0001"}]}),
-        ])
-        hyp_route = router.post("/v1/sessions/42/hypothesize").mock(
-            return_value=httpx.Response(200, json={"tentative_edge_id": 99}),
-        )
-        outcome = client.hypothesize(
-            sid="42",
-            from_canonical="recipe:a:b",
-            to_canonical="exp:42:0001",
-            edge_type="hypothetical",
-            reason="test reason",
-        )
-    assert outcome["status"] == "ok"
-    assert outcome["tentative_edge_id"] == "99"
-    body = json.loads(hyp_route.calls.last.request.content)
-    assert body["from_point"] == 10
-    assert body["to_point"] == 11
-    assert body["edge_type"] == "hypothetical"
-
-
-def test_hypothesize_transport_failure_falls_back_to_ndjson(session_dir):
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/query").mock(
-            return_value=httpx.Response(500, json={"detail": "boom"}),
-        )
-        outcome = client.hypothesize(
-            sid="42",
-            from_canonical="recipe:foo:bar",
-            to_canonical="exp:42:0001",
-            reason="test reason",
-        )
-    assert outcome["status"] == "queued"
-    assert outcome["tentative_edge_id"] == ""
-    pending = cortex_pending_ndjson(session_dir).read_text(encoding="utf-8")
-    rows = [json.loads(line) for line in pending.splitlines() if line.strip()]
-    assert len(rows) == 1
-    assert rows[0]["op"] == "hypothesize"
-    assert rows[0]["payload"]["from"] == "recipe:foo:bar"
-    assert rows[0]["payload"]["to"] == "exp:42:0001"
-    assert rows[0]["attempts"] == 0
-    assert rows[0]["idempotency_key"]
-
-
-def test_ingest_attempt_always_enqueues(session_dir):
-    """ingest_attempt is async-by-design — no HTTP fires on the public API."""
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    with respx.mock(base_url=KB_URL):
-        # No respx routes registered — any HTTP would 404 / RouteNotFound.
-        res = client.ingest_attempt(
-            sid="42", iter_id=3, outcome="PASS",
-            metrics={"output_throughput": 1234.5},
-            plan_edge="e1", evidence=["log:demo"],
-        )
-    assert res == {"status": "queued"}
-    pending = cortex_pending_ndjson(session_dir).read_text(encoding="utf-8").splitlines()
-    rows = [json.loads(line) for line in pending if line.strip()]
-    assert len(rows) == 1
-    assert rows[0]["op"] == "ingest_attempt"
-    assert rows[0]["payload"]["outcome"] == "PASS"
-    assert rows[0]["payload"]["metrics"]["output_throughput"] == 1234.5
-
-
 def test_drain_pending_empty_queue_is_no_op(session_dir):
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
     out = client.drain_pending(timeout_sec=1.0)
     assert out["drained"] == 0
     assert out["remaining"] == 0
     assert out["dead_letter"] == 0
-
-
-def test_session_commit_parses_promoted_edges(session_dir):
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/sessions/42/commit").mock(
-            return_value=httpx.Response(200, json={
-                "status": "committed",
-                "promoted_edges": [1, 2, 3],
-                "derived_summary_id": None,
-            }),
-        )
-        summary = client.session_commit("42")
-    assert summary["status"] == "committed"
-    assert summary["promoted_edges"] == ["1", "2", "3"]
-    assert summary["derived_summary_id"] == ""
 
 
 def test_parse_kb_error_business_vs_validation(session_dir):
@@ -302,10 +167,9 @@ def test_smoke_env_tags_attrs_and_provenance(session_dir, monkeypatch):
 def test_kb_provenance_emits_stable_shape(session_dir):
     cortex_pending_ndjson(session_dir).write_text("", encoding="utf-8")
     cortex_audit_jsonl(session_dir).write_text(
-        json.dumps({"ts": "now", "op": "session_begin", "status": "ok"}) + "\n",
+        json.dumps({"ts": "now", "op": "propose_point", "status": "ok"}) + "\n",
         encoding="utf-8",
     )
-    cortex_sid_file(session_dir).write_text("42", encoding="utf-8")
 
     from inference_optimizer.breakdown.collectors import collect_kb_provenance
     warnings: list[str] = []
@@ -314,14 +178,6 @@ def test_kb_provenance_emits_stable_shape(session_dir):
         "warm_start_ts": "2026-05-19T00:00:00+00:00",
         "warm_start_recipe": {"raw": "recipe_node row 1"},
         "warm_start_pitfalls": [{"raw": "trap line"}],
-        "pending_kb_edges": [
-            {"proposal_msg_id": "msg-1", "edge_id": "e1", "action": "backends", "ts": "x"},
-        ],
-        "cortex_session_summary": {
-            "status": "committed",
-            "promoted_edges": ["e1", "e2"],
-            "derived_summary_id": "sum-1",
-        },
     }
     manifest = {"stack_fingerprint": {"rocm": "7.2.0", "sglang": "0.4.10"}}
     out = collect_kb_provenance(session_dir, state, manifest, warnings)
@@ -329,11 +185,7 @@ def test_kb_provenance_emits_stable_shape(session_dir):
     assert out["warm_start_recipe_seen"] is True
     assert out["warm_start_pitfall_count"] == 1
     assert out["stack_fingerprint"]["rocm"] == "7.2.0"
-    assert out["pending_edges"] == [
-        {"proposal_msg_id": "msg-1", "edge_id": "e1", "action": "backends", "ts": "x"},
-    ]
     assert out["queue"]["pending_lines"] == 0
-    assert out["commit_summary"]["promoted_edges"] == ["e1", "e2"]
     assert out["audit_status_counts"]["ok"] == 1
 
 

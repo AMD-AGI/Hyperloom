@@ -844,27 +844,19 @@ class Coordinator:
             return
         if drain_report.get("remaining", 0) > 0:
             log.warning(
-                "cortex T4 drain incomplete: %s remaining; commit will reflect "
-                "queued state. flusher daemon should drain on next pickup.",
+                "cortex T4 drain incomplete: %s remaining; flusher daemon "
+                "should drain on next pickup.",
                 drain_report,
             )
             if not self.shared_state.stop_reason:
                 self.shared_state.set_stop_reason("cortex_drain_failed")
-        # 2. Commit (sync). On failure we record commit_failed so resume
-        #    can re-attempt; we do NOT delete cortex_session_id so the
-        #    next coordinator wake-up picks up the same sid.
-        try:
-            summary = self.cortex_kb.session_commit(sid)
-        except CortexKBError as exc:
-            log.warning("cortex T4 session_commit failed: %s", exc)
-            if not self.shared_state.stop_reason:
-                self.shared_state.set_stop_reason("cortex_commit_failed")
-            summary = {"status": "commit_failed", "error": str(exc)[:512]}
-        self.shared_state.cortex_session_summary = dict(summary)
+        # KB session_commit was retired alongside the hypothesize/verify
+        # protocol — fact writes are session-less, so there is no remote
+        # session to close. The drain above is the only T4 KB action.
         try:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
-            log.exception("cortex T4 SharedState.save after commit failed")
+            log.exception("cortex T4 SharedState.save after drain failed")
 
     # ==================================================================
     # phase state machine
@@ -1859,36 +1851,9 @@ class Coordinator:
         else:
             await self._record_close_step("ndjson_drain", status="skipped")
 
-        # ---------------- Step 4: Cortex session commit ----------------
-        sid = (self.shared_state.cortex_session_id or "").strip()
-        if (
-            self.cortex_kb is not None
-            and self.cortex_kb.enabled
-            and sid
-            and not self.shared_state.cortex_session_summary
-        ):
-            try:
-                summary = self.cortex_kb.session_commit(sid)
-                self.shared_state.cortex_session_summary = dict(summary)
-                await self._record_close_step("cortex_commit", status="done")
-            except Exception as exc:  # noqa: BLE001 — defensive
-                log.exception("CLOSE step 4 (Cortex commit) failed")
-                # Match _cortex_t4_hook's failure semantics so
-                # observability is consistent across the two paths.
-                self.shared_state.cortex_session_summary = {
-                    "status": "commit_failed",
-                    "error":  str(exc)[:512],
-                }
-                if not self.shared_state.stop_reason:
-                    self.shared_state.set_stop_reason("cortex_commit_failed")
-                await self._record_close_step(
-                    "cortex_commit", status="failed",
-                    detail=repr(exc)[:240],
-                )
-        else:
-            # No Cortex wired / already committed / no sid → skip without
-            # error. ``cortex_t4_hook`` (Coordinator.stop) also skips.
-            await self._record_close_step("cortex_commit", status="skipped")
+        # (Step 4 — Cortex session commit — was retired alongside the
+        # T2/T3 hypothesize/verify protocol. Fact writes are session-less,
+        # so the only KB action at CLOSE is the NDJSON drain above.)
 
         # ---------------- Step 5: mark done ----------------
         self.shared_state.close_sequence_done = True
@@ -1902,8 +1867,7 @@ class Coordinator:
         # The wall-clock deadline path (``_enter_closing_phase``) sets
         # ``time_exhausted`` from the loop body (line ~1971); both
         # paths converge on the same vocab term per
-        # ``STOP_REASON_VOCAB``. The ``not stop_reason`` guard
-        # preserves Step 4's ``cortex_commit_failed`` setter.
+        # ``STOP_REASON_VOCAB``.
         if not self.shared_state.stop_reason:
             self.shared_state.set_stop_reason("time_exhausted")
         try:

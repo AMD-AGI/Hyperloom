@@ -738,16 +738,18 @@ class SharedState:
     # (Inv-1 single writer). LLM consumers read them indirectly via
     # prompt injection.
     #
-    # ``cortex_session_id`` is the sid returned by the Cortex
-    # ``session begin`` call at T0. Empty string means either
-    # ``--degraded-kb`` was selected for this run or the session has not
-    # yet reached T0. Written **once** in PRELUDE; never overwritten.
+    # ``cortex_session_id`` is the hyperloom-local session identifier
+    # carried into KB fact-write attrs (``source_session_id``) for
+    # cross-session traceability. It is **not** a KB-side session id
+    # (the KB session begin/commit protocol was retired); it now
+    # defaults to ``session_dir.name`` when T0 mints it.
     cortex_session_id: str = ""
-    # T4 ``session commit`` payload snapshot: ``{"status": "committed",
-    # "promoted_edges": [...], "negation_edges": [...],
-    # "derived_summary_id": "..."}``. Empty dict until commit succeeds.
-    # Drives the ``breakdown.kb_provenance.commit`` section and the
-    # operator-visible "what survived this session" summary.
+    # Retired: the KB ``session commit`` protocol was removed alongside
+    # T2/T3. The field is kept (always ``{}``) for state.json resume
+    # back-compat — the next ``state.save`` writes an empty dict and
+    # the breakdown collector tolerates a missing summary. The
+    # ``breakdown.kb_provenance.commit`` section is now derived from
+    # ``drain_pending`` results instead.
     cortex_session_summary: dict[str, Any] = field(default_factory=dict)
     # T0 snapshot of ``find-recipe`` raw output (CLI ``--format text``,
     # one entry per recipe row). v0.8 M1 only **records** this — it is

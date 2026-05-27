@@ -314,6 +314,13 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset({
 KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset({
     "mcp__cortex_kb__propose_point",
     "mcp__cortex_kb__propose_edge",
+    # The methods these tool names map to (hypothesize/ingest_attempt/
+    # verify/commit) have been retired from the client, but the tool
+    # names stay on the denylist because the safety contract — KB
+    # writes are Coordinator-owned, not specialist-callable — is
+    # independent of which methods currently exist. Specialists that
+    # attempt to invoke any of these get an immediate ``kb_write_unauthorized``
+    # denial rather than a confusing "tool not found" downstream.
     "mcp__cortex_kb__hypothesize",
     "mcp__cortex_kb__ingest_attempt",
     "mcp__cortex_kb__verify",
