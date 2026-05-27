@@ -50,14 +50,16 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Phase identifiers + ordering (Inv-2.1: monotonic chain)
 # ---------------------------------------------------------------------------
-PHASE_PRELUDE = "PRELUDE"
-PHASE_EXPLORE = "EXPLORE"
-PHASE_KERNEL  = "KERNEL"
-PHASE_SWEEP   = "SWEEP"
-PHASE_CLOSE   = "CLOSE"
+PHASE_PRELUDE      = "PRELUDE"
+PHASE_FRAMEWORK_PR = "FRAMEWORK_PR"
+PHASE_EXPLORE      = "EXPLORE"
+PHASE_KERNEL       = "KERNEL"
+PHASE_SWEEP        = "SWEEP"
+PHASE_CLOSE        = "CLOSE"
 
 PHASE_NAMES: tuple[str, ...] = (
     PHASE_PRELUDE,
+    PHASE_FRAMEWORK_PR,
     PHASE_EXPLORE,
     PHASE_KERNEL,
     PHASE_SWEEP,
@@ -108,6 +110,18 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # delegate is denied by PolicyGate's
         # ``analysis_action_not_llm_proposable`` rule for both names.
         "target_analysis", "baseline", "roofline", "profile", "recover",
+    }),
+    PHASE_FRAMEWORK_PR: frozenset({
+        # Coordinator-internal phase between PRELUDE and EXPLORE.
+        # ``framework_pr`` is enqueued per candidate; the executor uses
+        # the same single-variant ``run_grid`` path as ``integrate_patch``
+        # so the latter stays in the allowlist as the consume side of
+        # the Critic-gated patch flow. ``roofline`` / ``profile`` are
+        # auto-enqueued on watermark crossings here too (KEEP path
+        # writes ``cumulative_gain_validated`` via the same single-
+        # writer hook). LLM-side ``framework_pr`` proposes are denied
+        # by ``framework_pr_action_not_llm_proposable``.
+        "framework_pr", "integrate_patch", "roofline", "profile", "recover",
     }),
     PHASE_EXPLORE: frozenset({
         # v0.8 canonical: merged grid runner + LLM specialist dispatch.
@@ -187,6 +201,11 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
     "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
     "explore_force_exit_low_budget",    # EXPLORE → next phase when total remaining or phase remaining drops below operator-configured thresholds
+    # FRAMEWORK_PR phase transitions (PR-A1 / FRAMEWORK_PR phase).
+    "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
+    "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
+    "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
+    "framework_pr_skipped",             # PRELUDE → EXPLORE when --no-framework was set
 
     # Terminal exits (any phase → CLOSE)
     "robustness_escalated",
@@ -249,6 +268,10 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "no_kernel_skipped",
     "sweep_done",
     "explore_force_exit_low_budget",
+    "framework_pr_phase_done",
+    "framework_pr_plateau",
+    "framework_pr_force_exit_low_budget",
+    "framework_pr_skipped",
 })
 
 
@@ -268,6 +291,12 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     # initial roofline (profile + trace_analyze) in addition to
     # target_analysis + baseline. IR-6 force-exit thresholds only ever
     # gated EXPLORE, so this bump is the only budget knob affected.
+    #
+    # FRAMEWORK_PR is *not* given a phase budget pct — the time wall is
+    # ``force_exit_hours_remaining_ratio * max_hours`` instead (default
+    # 0.6), matching the design's "leave at least 60% for the rest of
+    # the session" intent. Adding a pct here would skim from EXPLORE's
+    # 0.57 slice which the operators already tuned.
     PHASE_PRELUDE: 0.08,
     PHASE_EXPLORE: 0.57,
     PHASE_KERNEL:  0.25,
@@ -308,6 +337,23 @@ DEFAULT_PLATEAU_KERNEL_LOOKBACK:          int   = 5
 # ``force_exit_hours_remaining`` / ``force_exit_budget_pct``).
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:      float = 0.20
+
+# FRAMEWORK_PR plateau / force-exit knobs.
+#
+# * ``DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK`` — number of consecutive
+#   ``fa phase-discover`` batches we look back at when deciding the
+#   plateau condition (default 3).
+# * ``DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT`` — minimum per-batch
+#   ``max_gain_pct_observed_in_batch`` that counts as "non-flat" (default
+#   1.0%). The plateau fires when every one of the last
+#   ``lookback`` batches sits below this threshold.
+# * ``DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO`` — when
+#   ``remaining_minutes()/60 < ratio * max_hours`` we hard-exit
+#   FRAMEWORK_PR so EXPLORE/KERNEL/SWEEP/CLOSE still have room to run
+#   (default 0.6 → leave 60% of the original budget for downstream).
+DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK:                 int   = 3
+DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT:            float = 1.0
+DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
 
 
 # ---------------------------------------------------------------------------
@@ -1175,6 +1221,92 @@ def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     return dict(overrides) if isinstance(overrides, dict) else {}
 
 
+def exit_normal_framework_pr(
+    state: Any,
+    *,
+    max_hours: float | None = None,
+    now_unix: float | None = None,
+    lookback: int = DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
+    plateau_keep_gain_pct: float = DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+    force_exit_hours_remaining_ratio: float = (
+        DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO
+    ),
+) -> tuple[str, dict[str, Any]] | None:
+    """FRAMEWORK_PR normal exit.
+
+    Priority order:
+
+    0. HARD force-exit — fires when the session's remaining wall-clock
+       drops below ``force_exit_hours_remaining_ratio * max_hours``.
+       Reason: ``framework_pr_force_exit_low_budget``. Matches the
+       design's "leave the rest of the session breathing room" intent.
+    1. Plateau — fires when the last ``lookback`` batches recorded in
+       ``state.framework_pr_batches`` each have
+       ``max_gain_pct_observed_in_batch < plateau_keep_gain_pct``.
+       Reason: ``framework_pr_plateau``.
+    2. Normal completion — fires when the Coordinator marked the phase
+       done by setting ``state.framework_pr_phase_done = True`` (no
+       more candidates to enqueue / ``fa phase-discover`` returned 0).
+       Reason: ``framework_pr_phase_done``.
+
+    Returns ``None`` when none of the above apply (the Coordinator
+    stays in FRAMEWORK_PR and enqueues the next batch).
+    """
+    # Priority 0 — force-exit on remaining wall-clock.
+    if max_hours and max_hours > 0:
+        remaining_min_fn = getattr(state, "remaining_minutes", None)
+        if callable(remaining_min_fn):
+            try:
+                remaining_minutes = float(remaining_min_fn(now_unix=now_unix))
+            except TypeError:
+                remaining_minutes = float(remaining_min_fn())
+            except Exception:  # noqa: BLE001
+                remaining_minutes = float("inf")
+        else:
+            remaining_minutes = float("inf")
+        threshold_minutes = float(force_exit_hours_remaining_ratio) * float(max_hours) * 60.0
+        if remaining_minutes < threshold_minutes:
+            return "framework_pr_force_exit_low_budget", {
+                "evidence":           "force_exit",
+                "remaining_minutes":  remaining_minutes,
+                "threshold_minutes":  threshold_minutes,
+                "hours_remaining_ratio": float(force_exit_hours_remaining_ratio),
+                "max_hours":          float(max_hours),
+            }
+
+    # Priority 1 — plateau over the last ``lookback`` batches.
+    batches = getattr(state, "framework_pr_batches", None) or []
+    if isinstance(batches, list) and len(batches) >= int(lookback) > 0:
+        tail = batches[-int(lookback):]
+        max_gains: list[float] = []
+        for entry in tail:
+            if not isinstance(entry, dict):
+                max_gains.append(0.0)
+                continue
+            try:
+                max_gains.append(
+                    float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
+                )
+            except (TypeError, ValueError):
+                max_gains.append(0.0)
+        if max_gains and all(g < float(plateau_keep_gain_pct) for g in max_gains):
+            return "framework_pr_plateau", {
+                "evidence":              "plateau_judgment",
+                "lookback":              int(lookback),
+                "keep_gain_pct_threshold": float(plateau_keep_gain_pct),
+                "batch_max_gains":       max_gains,
+            }
+
+    # Priority 2 — Coordinator-signalled normal completion.
+    if bool(getattr(state, "framework_pr_phase_done", False)):
+        return "framework_pr_phase_done", {
+            "evidence": "no_more_candidates",
+            "batch_count": len(batches) if isinstance(batches, list) else 0,
+        }
+
+    return None
+
+
 def compute_next_phase(
     state: Any,
     *,
@@ -1182,6 +1314,8 @@ def compute_next_phase(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
     disable_legacy_proxy: bool = False,
+    framework_phase_enabled: bool = False,
+    max_hours: float | None = None,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
@@ -1208,6 +1342,35 @@ def compute_next_phase(
         if term is not None:
             return PHASE_CLOSE, term[0], {"terminal": True, **term[1]}
         norm = exit_normal_prelude(state)
+        if norm is not None:
+            if framework_phase_enabled:
+                return PHASE_FRAMEWORK_PR, norm[0], norm[1]
+            # Framework phase off → straight through to EXPLORE with the
+            # historical ``prelude_done`` reason. (``framework_pr_skipped``
+            # is reserved for the Coordinator-internal path that enters
+            # FRAMEWORK_PR and finds zero candidates on the first
+            # ``fa phase-discover`` call.)
+            return PHASE_EXPLORE, norm[0], norm[1]
+        return None
+
+    if current == PHASE_FRAMEWORK_PR:
+        norm = exit_normal_framework_pr(
+            state,
+            max_hours=max_hours,
+            now_unix=now_unix,
+            lookback=int(overrides.get(
+                "framework_pr_lookback",
+                DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
+            )),
+            plateau_keep_gain_pct=float(overrides.get(
+                "framework_pr_keep_gain_pct",
+                DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+            )),
+            force_exit_hours_remaining_ratio=float(overrides.get(
+                "framework_pr_force_exit_hours_ratio",
+                DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO,
+            )),
+        )
         if norm is not None:
             return PHASE_EXPLORE, norm[0], norm[1]
         return None
@@ -1371,12 +1534,16 @@ __all__ = [
     "PHASE_CLOSE",
     "PHASE_EXIT_REASONS",
     "PHASE_EXPLORE",
+    "PHASE_FRAMEWORK_PR",
     "PHASE_INDEX",
     "PHASE_KERNEL",
     "PHASE_NAMES",
     "PHASE_PRELUDE",
     "PHASE_SWEEP",
     "STOP_REASON_VOCAB",
+    "DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK",
+    "DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT",
+    "DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO",
     "abort_prelude",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
@@ -1384,6 +1551,7 @@ __all__ = [
     "compute_plateau_explore",
     "compute_plateau_kernel",
     "exit_normal_explore",
+    "exit_normal_framework_pr",
     "exit_normal_kernel",
     "exit_normal_prelude",
     "exit_normal_sweep",
