@@ -988,8 +988,7 @@ def _register_executors(
         IntegratePatchExecutor(session_dir=session_dir),
     )
 
-    # FRAMEWORK_PR phase per-candidate executor. Promoted out of
-    # ``serving_specialist.framework_pr_scout``; Coordinator-internal
+    # FRAMEWORK_PR phase per-candidate executor — Coordinator-internal
     # only (PolicyGate denies LLM ``delegate{action='framework_pr'}``
     # via ``framework_pr_action_not_llm_proposable``).
     coordinator.sub.register_executor(
@@ -4386,9 +4385,9 @@ def _build_parser() -> argparse.ArgumentParser:
     def _env_default_on(env_var: str) -> bool:
         return os.environ.get(env_var, "1").strip() != "0"
 
-    # ``--framework-agent-enabled`` was retired together with the
-    # ``serving_specialist.framework_pr_scout`` sub_kind. Use
-    # ``--no-framework`` to disable the standalone FRAMEWORK_PR phase.
+    # The standalone FRAMEWORK_PR phase is on by default; use
+    # ``--no-framework`` to disable it (mirrors the install-side
+    # ``INFERENCE_OPTIMIZER_NO_FRAMEWORK=1`` opt-out).
     opt.add_argument(
         "--gain-driven-kernel-opt",
         dest="gain_driven_kernel_opt",
