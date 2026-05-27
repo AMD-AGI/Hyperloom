@@ -32,9 +32,10 @@ Design notes
   double-launch; on detected stale pid (process gone) we overwrite.
 * No persistent in-memory state — the on-disk NDJSON is the authority.
 * Each pending row is replayed via a single ``POST /v1/points/propose``
-  (or ``/v1/sessions/.../{hypothesize,verify}``). The KB
-  ``/v1/bulk/ingest`` endpoint is reserved for ``offline_pipeline``
-  source only, so the daemon never uses it.
+  or ``POST /v1/edges/propose``. The session-based hypothesize /
+  verify protocol was retired, so the daemon no longer replays
+  those ops. The KB ``/v1/bulk/ingest`` endpoint is reserved for
+  ``offline_pipeline`` source only.
 """
 from __future__ import annotations
 
