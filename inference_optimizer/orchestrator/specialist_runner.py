@@ -469,6 +469,9 @@ class SpecialistRunner:
                 warm_start_pitfalls=list(
                     params.get("warm_start_pitfalls") or []
                 ),
+                warm_start_lessons=list(
+                    params.get("warm_start_lessons") or []
+                ),
                 pr_feed=list(params.get("pr_feed") or []),
                 pr_monitor_available=bool(
                     params.get("pr_monitor_available", True)
