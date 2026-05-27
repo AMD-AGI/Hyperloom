@@ -61,6 +61,7 @@ from .orchestrator.action_executors import (
     sweep_executor,
 )
 from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
+from .orchestrator.action_executors.framework_pr import FrameworkPrExecutor
 from .orchestrator.action_executors.recover import recover_executor
 from .orchestrator.action_executors.profile import profile_executor
 from .orchestrator.action_executors.roofline import make_roofline_executor
@@ -643,9 +644,10 @@ def _seed_shared_state(
         enable_roofline=bool(
             getattr(args, "enable_roofline", True),
         ),
-        framework_agent_enabled=bool(
-            getattr(args, "framework_agent_enabled", True),
-        ),
+        # Standalone FRAMEWORK_PR phase (PRELUDE → FRAMEWORK_PR →
+        # EXPLORE). ``--no-framework`` skips it; default on. Mirrors
+        # the ``--no-kernel`` / ``kernel_enabled`` pattern.
+        framework_phase_enabled=not bool(getattr(args, "no_framework", False)),
         gain_driven_kernel_opt=bool(
             getattr(args, "gain_driven_kernel_opt", False),
         ),
@@ -984,6 +986,15 @@ def _register_executors(
     coordinator.sub.register_executor(
         "integrate_patch",
         IntegratePatchExecutor(session_dir=session_dir),
+    )
+
+    # FRAMEWORK_PR phase per-candidate executor. Promoted out of
+    # ``serving_specialist.framework_pr_scout``; Coordinator-internal
+    # only (PolicyGate denies LLM ``delegate{action='framework_pr'}``
+    # via ``framework_pr_action_not_llm_proposable``).
+    coordinator.sub.register_executor(
+        "framework_pr",
+        FrameworkPrExecutor(session_dir=session_dir),
     )
 
     # The composite ``roofline`` action runs profile + trace_analyze
@@ -3217,6 +3228,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if not state.kernel_enabled:
             args.no_kernel = True
             print("  kernel agent          : DISABLED (persisted from original run)")
+        # Same persistence contract for the FRAMEWORK_PR phase toggle.
+        if not bool(getattr(state, "framework_phase_enabled", True)):
+            args.no_framework = True
+            print("  framework phase       : DISABLED (persisted from original run)")
 
         # CRITICAL: a leftover stop_reason from the prior run (most often
         # "time_exhausted") fools Orchestration into thinking the work is
@@ -4031,6 +4046,14 @@ def _build_parser() -> argparse.ArgumentParser:
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
+    opt.add_argument("--no-framework", action="store_true", default=False,
+                      help="Skip the FRAMEWORK_PR phase (PRELUDE → EXPLORE "
+                           "directly). The phase pre-scans upstream sglang/"
+                           "vllm PRs via framework-agent and lands KEPT "
+                           "patches before EXPLORE starts. Disable when "
+                           "the framework-agent toolchain is unavailable "
+                           "or you want a faster cold start. "
+                           "Default: framework phase enabled.")
     opt.add_argument("--kernel-codex", action="store_true", default=True,
                       help="Use Codex backend for Kernel agent (default — faster). "
                            "Pass --kernel-claude to switch.")
@@ -4363,17 +4386,9 @@ def _build_parser() -> argparse.ArgumentParser:
     def _env_default_on(env_var: str) -> bool:
         return os.environ.get(env_var, "1").strip() != "0"
 
-    opt.add_argument(
-        "--framework-agent-enabled",
-        dest="framework_agent_enabled",
-        action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED"),
-        help="``serving_specialist`` may invoke ``fa candidates`` "
-             "and ``git fetch refs/pull/...`` via the "
-             "``framework_pr_scout`` sub_kind. On by default. Pass "
-             "``--no-framework-agent-enabled`` (or env "
-             "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0) to opt out.",
-    )
+    # ``--framework-agent-enabled`` was retired together with the
+    # ``serving_specialist.framework_pr_scout`` sub_kind. Use
+    # ``--no-framework`` to disable the standalone FRAMEWORK_PR phase.
     opt.add_argument(
         "--gain-driven-kernel-opt",
         dest="gain_driven_kernel_opt",
