@@ -428,8 +428,9 @@ class Coordinator:
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
         # Cortex KB client.  When
-        # ``None`` (legacy cli path or ``--degraded-kb``) all T2/T3/T4
-        # hooks become no-ops; the rest of the Coordinator behaves
+        # ``None`` (legacy cli path or ``--degraded-kb``) the
+        # ``_fact_write_hook`` and CLOSE-time fact-finalize become
+        # no-ops; the rest of the Coordinator behaves
         # identically to v0.6.  The client itself is stateless apart
         # from the per-session NDJSON queue, so it can be shared across
         # threads (the Coordinator is single-event-loop anyway).
@@ -788,28 +789,32 @@ class Coordinator:
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
-        # T4 anchor. Drains the
-        # NDJSON queue (timeout 60s) then commits the Cortex session.
-        # Failures are recorded on SharedState.stop_reason so the
-        # operator sees ``cortex_drain_failed`` / ``cortex_commit_failed``
-        # in the final summary; the SQLite close still runs so we don't
-        # leak fds.
+        # T4 safety net (only fires when the CLOSE phase sequencer
+        # did NOT get to run — e.g. Ctrl-C / crash mid-EXPLORE).
+        # Drains the NDJSON queue + runs the recipe / journal
+        # finalize. Failures are recorded on ``SharedState.stop_reason``
+        # so the operator sees ``cortex_drain_failed`` in the final
+        # summary; the SQLite close still runs so we don't leak fds.
         await self._cortex_t4_hook()
         self.db.close()
 
     async def _cortex_t4_hook(self) -> None:
-        """T4 — drain NDJSON pending + ``session commit``.
+        """T4 — drain NDJSON pending queue + finalize recipe.
 
         Called from :meth:`stop` once the reactor / dispatcher loops
-        have torn down. Idempotent: a second invocation with an empty
-        queue + already-committed session is a no-op (cortex-kb commit
-        is itself idempotent for a given sid).
+        have torn down. Acts as a safety net for the crash / Ctrl-C
+        path where the CLOSE phase sequencer did not get to run.
 
-        when the CLOSE phase
-        sequencer ran (``close_sequence_done=True``), steps 3 + 4
-        already drained + committed. We early-return so the hook is
-        a no-op in that case (and ``cortex_session_summary`` already
-        on SharedState is the authoritative one).
+        When the CLOSE phase sequencer ran
+        (``close_sequence_done=True``), it already drained the NDJSON
+        queue and called ``cortex_finalize_recipe_and_journal``
+        inline. We early-return so the hook is a no-op in that case
+        — the journal is already finalised and the recipe anchor
+        already carries this session.
+
+        The legacy ``session_commit`` step was retired alongside the
+        T2/T3 hypothesize/verify protocol; fact writes are session-
+        less, so there is no remote sid to close.
         """
         if self.cortex_kb is None or not self.cortex_kb.enabled:
             return
@@ -1713,24 +1718,30 @@ class Coordinator:
     CLOSE_NDJSON_DRAIN_TIMEOUT_SEC: float = 60.0
 
     async def _on_enter_close(self, *, from_phase: str) -> None:
-        """CLOSE phase 5-step sequencer.
+        """CLOSE phase sequencer.
 
-        Runs the fixed order the design contract requires:
+        Runs the fixed order:
 
-        1. ``report``                — generate markdown / json report
-        2. ``session_breakdown``     — write ``session_breakdown.json``
-        3. NDJSON drain              — flush async Cortex queue
-        4. Cortex ``session commit`` — promote hypothesize edges
-        5. mark ``close_sequence_done``
+        1. ``report``            — generate markdown / json report
+        2. ``session_breakdown`` — write ``session_breakdown.json``
+        2.5 ``fact_finalize``   — write final ``update_recipe`` to KB +
+                                  finalize the local optimization journal
+                                  (``total_gain_pct`` / ``final_throughput``)
+        3. ``ndjson_drain``     — flush the async Cortex write queue
+        4. mark ``close_sequence_done`` (and ``stop_reason``)
+
+        (The legacy step 4 ``cortex_commit`` step was retired alongside
+        the T2/T3 hypothesize/verify protocol — fact writes are session-
+        less so there is no remote sid to close.)
 
         Each step records a row under
         ``phase_history[-1].evidence.close_steps`` so the breakdown
         collector (and operators) can verify the sequence completed.
         Steps are best-effort: a failure in any step stamps
         ``status='failed' / 'timeout'`` evidence but does not abort
-        the remaining steps. Step 5 always runs (so the cli.finally
-        short-circuit is consistent even when steps 1-4 partly
-        failed).
+        the remaining steps. The final ``done`` step always runs so
+        the cli.finally short-circuit is consistent even when earlier
+        steps partly failed.
 
         Idempotence: report / session_breakdown enqueue uses fixed
         idempotency_keys (``internal-report-close_phase_entry`` /
@@ -6819,6 +6830,19 @@ class Coordinator:
         # filter by precision / parallelism / shape and pick a *closer*
         # historical recipe than ``same-family`` alone.
         workload_tags: dict[str, Any] = {}
+        # Framework + model_class — written here as a CLOSE-time
+        # backstop. T0 backfill writes the same fields, but if T0 was
+        # skipped (KB unreachable at PRELUDE) the anchor would
+        # otherwise land on KB without ``framework`` / ``model_class``
+        # tags, and future same-family / same-class fallback queries
+        # would never match this recipe. KB shallow-merges on the
+        # canonical_id so re-writing identical values is harmless.
+        framework = str(getattr(ss, "framework", "") or "").strip()
+        if framework:
+            workload_tags["framework"] = framework
+        model_class = str(getattr(ss, "model_class", "") or "").strip()
+        if model_class:
+            workload_tags["model_class"] = model_class
         for src_attr, dst_key in (
             ("precision",     "precision"),
             ("tp",            "tp"),
@@ -6833,9 +6857,8 @@ class Coordinator:
         # EP / PP — env-bound (no SharedState field). Match the T0
         # backfill's sourcing so the recipe stays consistent between
         # PRELUDE and CLOSE.
-        import os as _os
         for env_var, dst_key in (("EP", "ep"), ("PP", "pp")):
-            raw = (_os.environ.get(env_var) or "").strip()
+            raw = (os.environ.get(env_var) or "").strip()
             if not raw:
                 continue
             try:
