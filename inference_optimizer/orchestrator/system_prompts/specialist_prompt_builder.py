@@ -917,8 +917,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         (
             "- The Critic reviews each surviving variant against the KB "
             "before benchmarking, so a marginal-quality proposal costs you "
-            "a reject (and a refuted KB edge that will follow you on "
-            "future rounds)."
+            "a reject (and a pitfall fact that will warn future sessions "
+            "off the same dead-end)."
         ),
         "- ``patches_written`` (PR-A2) lists paths (relative to your",
         "  workspace or worktree) of any unified-diff patch files you",
@@ -927,8 +927,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "- ``empty=true`` is legitimate when you have no actionable proposals;",
         "  in that case ``proposal_set=[]`` and you must put the reason in",
         "  ``summary``.",
-        "- ``new_findings`` becomes HYPOTHESIZED KB edges at T4 commit even",
-        "  when not KEEP'd this round — surface anything you learned.",
+        "- ``new_findings`` is your free-form summary of anything you",
+        "  learned this round — Coordinator funnels it into the KB",
+        "  fact-write pipeline (lesson on KEEP, pitfall on REVERT).",
         "- ``residual_questions`` carries to the next specialist round.",
         "",
         "**Heartbeat (Channel B only):** When running in subprocess mode,",

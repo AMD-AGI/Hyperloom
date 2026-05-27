@@ -56,9 +56,9 @@ class CortexKBError(RuntimeError):
     Synchronous T0 (warm-start) treats this as fail-fast for the
     cli boot path (``sys.exit(2)``) and fail-soft for the Coordinator
     SDK fallback. Synchronous fact writes (``propose_lesson`` /
-    ``propose_pitfall`` / ``update_recipe`` / ``propose_edge``) catch
-    it internally and downgrade to an NDJSON enqueue so the
-    Coordinator dispatcher never crashes on a transient KB outage.
+    ``propose_pitfall`` / ``update_recipe``) catch it internally and
+    downgrade to an NDJSON enqueue so the Coordinator dispatcher
+    never crashes on a transient KB outage.
 
     ``category`` discriminates business / validation / transport /
     unknown so callers can decide retry vs surface vs dead-letter.
@@ -424,7 +424,6 @@ class CortexKBClient:
     initiator: str = C.DEFAULT_GENERATOR
 
     _transport: _HttpTransport | None = field(default=None, init=False, repr=False)
-    _point_id_cache: dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.session_dir = Path(self.session_dir)
@@ -578,34 +577,6 @@ class CortexKBClient:
                     ref = rest
             out.append({C.F_EV_KIND: kind, C.F_EV_REF: ref})
         return out
-
-    def _resolve_point_id(self, canonical_id: str) -> int:
-        """Look up the int ``point_id`` for ``canonical_id``.
-
-        Hits the in-memory cache first; on miss issues
-        ``POST /v1/points/query {canonical_id}`` and caches the result.
-        Raises :class:`CortexKBError` (``category="business"``) when KB
-        has no such point yet — caller decides retry / propose-first.
-        """
-        cached = self._point_id_cache.get(canonical_id)
-        if cached is not None:
-            return cached
-        body = {C.F_CANONICAL_ID: canonical_id, C.F_LIMIT: 1, C.F_NEIGHBOR_PREVIEW: False}
-        resp = self._post(C.PATH_QUERY_POINT, body)
-        points = resp.get(C.F_POINTS) or []
-        if not points:
-            raise CortexKBError(
-                f"canonical_id {canonical_id!r} not found in KB",
-                category="business", code="NOT_FOUND",
-            )
-        pid = int(points[0].get("id") or 0)
-        if pid <= 0:
-            raise CortexKBError(
-                f"canonical_id {canonical_id!r} resolved to invalid id",
-                category="business", code="INVALID_ID",
-            )
-        self._point_id_cache[canonical_id] = pid
-        return pid
 
     # ==================================================================
     # Public API — read side (T0)
@@ -1067,11 +1038,6 @@ class CortexKBClient:
                 proposal_id = resp.get(C.F_PROPOSAL_ID)
                 point_id = resp.get(C.F_POINT_ID, proposal_id)
                 status = str(resp.get(C.F_STATUS) or C.STATUS_AUTO_ACCEPTED)
-                if point_id is not None and canonical_id:
-                    try:
-                        self._point_id_cache[canonical_id] = int(point_id)
-                    except (TypeError, ValueError):
-                        pass
                 self._audit_record(
                     op="propose_point", status=status,
                     canonical_id=canonical_id, kind=kind,
@@ -1110,106 +1076,6 @@ class CortexKBClient:
     # session to register or commit (the legacy hypothesize/verify
     # protocol was retired).
     # ==================================================================
-    def propose_edge(
-        self,
-        *,
-        from_canonical_id: str,
-        to_canonical_id: str,
-        edge_type: str,
-        relation: str = "",
-        authority: str = C.AUTHORITY_EXPERIENTIAL,
-        attrs: Mapping[str, Any] | None = None,
-        evidence: list[str] | None = None,
-        source: str = C.SOURCE_AGENT_OBSERVATION,
-        idempotency_key: str | None = None,
-        prefer_sync: bool = True,
-        _enqueue_on_failure: bool = True,
-    ) -> dict[str, Any]:
-        """``POST /v1/edges/propose`` — direct, session-less edge write.
-
-        Use this when both endpoints already exist as KB points and you
-        want to record a structural / causal / empirical / negation /
-        evolutionary relation between them. This is the only edge-write
-        primitive (the legacy hypothesize/verify round-trip was retired).
-
-        ``relation`` is folded into ``attrs.relation`` so the propose-
-        edge validator can pair it with ``edge_type`` (see kg-usage-
-        guide §7.3 for the 10 allowed pairings; omitting it is allowed
-        but downstream renderers lose a hint).
-
-        Resolves canonical_ids to int point ids before posting. On HTTP
-        failure falls back to NDJSON enqueue and returns
-        ``{"status": "queued"}``; on success returns
-        ``{"status": ..., "edge_id": "<int>"}``.
-        """
-        if not self.enabled:
-            return {C.F_STATUS: "skip_disabled"}
-        idem = (
-            idempotency_key
-            or f"propose_edge:{from_canonical_id}->{to_canonical_id}:{edge_type}"
-        )
-        merged_attrs = self._smoke_attrs(attrs)
-        if relation:
-            merged_attrs.setdefault("relation", relation)
-        ev_refs = self._evidence_refs(evidence) or [
-            {C.F_EV_KIND: C.EV_KIND_LOG,
-             C.F_EV_REF:  f"hyperloom:{from_canonical_id}->{to_canonical_id}"},
-        ]
-        ndjson_payload = {
-            "from_canonical_id": from_canonical_id,
-            "to_canonical_id":   to_canonical_id,
-            "edge_type":         edge_type,
-            "relation":          relation,
-            "authority":         authority,
-            "attrs":             dict(attrs or {}),
-            "evidence":          list(evidence or []),
-            "source":            source,
-        }
-        if prefer_sync:
-            try:
-                from_id = self._resolve_point_id(from_canonical_id)
-                to_id = self._resolve_point_id(to_canonical_id)
-                body: dict[str, Any] = {
-                    C.F_FROM_POINT:    from_id,
-                    C.F_TO_POINT:      to_id,
-                    C.F_EDGE_TYPE:     edge_type,
-                    C.F_AUTHORITY:     authority,
-                    C.F_ATTRS:         merged_attrs,
-                    C.F_EVIDENCE_REFS: ev_refs,
-                    C.F_PROVENANCE:    {
-                        **self._provenance(),
-                        C.F_PV_SOURCE: source,
-                    },
-                }
-                resp = self._post(C.PATH_PROPOSE_EDGE, body)
-                edge_id = resp.get("edge_id") or resp.get(C.F_PROMOTED_EDGE_ID)
-                status = str(resp.get(C.F_STATUS) or C.STATUS_AUTO_ACCEPTED)
-                self._audit_record(
-                    op="propose_edge", status=status,
-                    edge_type=edge_type, relation=relation,
-                    from_canonical=from_canonical_id,
-                    to_canonical=to_canonical_id,
-                    edge_id=str(edge_id or ""),
-                )
-                return {
-                    C.F_STATUS: status,
-                    "edge_id":  str(edge_id) if edge_id is not None else "",
-                }
-            except CortexKBError as exc:
-                if not _enqueue_on_failure:
-                    raise
-                log.info("propose_edge sync failed (%s); enqueueing NDJSON", exc)
-        self._audit_record(
-            op="propose_edge", status="queued",
-            edge_type=edge_type, relation=relation,
-            from_canonical=from_canonical_id,
-            to_canonical=to_canonical_id,
-        )
-        self._enqueue(
-            op="propose_edge", payload=ndjson_payload, idempotency_key=idem,
-        )
-        return {C.F_STATUS: "queued"}
-
     def propose_lesson(
         self,
         *,
@@ -1561,20 +1427,12 @@ class CortexKBClient:
                     prefer_sync=True,
                     _enqueue_on_failure=False,
                 )
-            elif op == "propose_edge":
-                self.propose_edge(
-                    from_canonical_id=str(payload.get("from_canonical_id", "")),
-                    to_canonical_id=str(payload.get("to_canonical_id", "")),
-                    edge_type=str(payload.get("edge_type", "")),
-                    relation=str(payload.get("relation", "")),
-                    authority=str(payload.get("authority") or C.AUTHORITY_EXPERIENTIAL),
-                    attrs=payload.get("attrs") or {},
-                    evidence=list(payload.get("evidence") or []),
-                    source=str(payload.get("source") or C.SOURCE_AGENT_OBSERVATION),
-                    prefer_sync=True,
-                    _enqueue_on_failure=False,
-                )
             else:
+                # All KB writes funnel through propose_point (lessons,
+                # pitfalls, recipes — see propose_lesson / propose_pitfall
+                # / update_recipe). Edge writes were retired alongside
+                # the hypothesize/verify protocol; any legacy NDJSON row
+                # with op != "propose_point" is dead-lettered.
                 return "permanent"
         except CortexKBError as exc:
             log.info("flush_one %s deferred: %s", op, exc)
