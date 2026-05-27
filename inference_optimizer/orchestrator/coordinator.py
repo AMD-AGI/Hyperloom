@@ -3099,7 +3099,11 @@ class Coordinator:
             # only -- explore actions (params/backends/sweep/report) are
             # not blocked; only run_optimization is hard-gated on the
             # same cache by `_sequence_denial_for_request`.
-            cached = self.shared_state.last_select_kernels or {}
+            cached = (
+                self.shared_state.last_select_kernels
+                or self.shared_state.last_trace_analyze
+                or {}
+            )
             current_trace = self.shared_state.last_profile_trace
             cache_matches_trace = (
                 isinstance(cached, dict)

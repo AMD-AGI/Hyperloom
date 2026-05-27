@@ -108,6 +108,27 @@ def _seed_post_baseline(coord: Coordinator) -> None:
     }
 
 
+def test_trace_analyze_cache_satisfies_analyze_gate(session_dir):
+    """Roofline writes last_trace_analyze; KERNEL must not loop on select."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(coord.session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {}
+    s.last_trace_analyze = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "candidates_path": "/tmp/kernel_candidates.json",
+        "hot_kernels_top15": [],
+        "reusable_native_kernel_ids": [],
+    }
+
+    todo = coord._required_next_step()
+
+    assert "TODO 3/5" not in todo
+    assert "select_kernels" not in todo
+
+
 # ===========================================================================
 # target_analysis gate
 # ===========================================================================
