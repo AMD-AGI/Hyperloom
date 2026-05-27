@@ -504,6 +504,163 @@ async def test_explore_executor_safety_margin_param_overrides_default(
 
 
 @pytest.mark.asyncio
+async def test_explore_executor_roofline_hard_gate_drops_saturated_variants(
+    sub_agent_runner, tmp_path,
+):
+    """``roofline_hard_gate=True`` + a saturation snapshot drops variants
+    whose flags target only saturated directions; uncategorized / multi-
+    direction variants survive."""
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-roofline-gate"
+
+    benched_variants: list[str] = []
+
+    async def _spy_run_grid(*args, **kwargs):
+        from inference_optimizer.orchestrator.action_executors._grid_runner import (
+            VariantResult,
+        )
+        grid = list(kwargs.get("grid") or [])
+        # The executor calls run_grid once per variant (single-element grid).
+        assert len(grid) == 1
+        gv = grid[0]
+        benched_variants.append(gv.name)
+        slot = Path(kwargs["output_root"])
+        slot.mkdir(parents=True, exist_ok=True)
+        ws = _fake_workspace(slot, tput=805.0)
+        return [VariantResult(
+            name=gv.name,
+            extra_sglang_args=gv.extra_sglang_args,
+            extra_envs=dict(gv.extra_envs),
+            status="succeeded",
+            output_throughput=805.0,
+            workspace=str(ws),
+        )]
+
+    grid = [
+        {
+            "name": "host_only",
+            "extra_args": "--num-continuous-decode-steps 4",
+            "extra_envs": {},
+            "provenance": "default_grid",
+        },
+        {
+            "name": "memory_only",
+            "extra_args": "--max-running-requests 256",
+            "extra_envs": {},
+            "provenance": "default_grid",
+        },
+        {
+            "name": "uncategorized",
+            "extra_args": "--brand-new-flag",
+            "extra_envs": {},
+            "provenance": "default_grid",
+        },
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir":  str(output_dir),
+            "base_tput":   800.0,
+            "grid":        grid,
+            # Roofline says memory is at 92 % (saturated), host_overhead
+            # is at 18 % (plenty of headroom). The gate should drop
+            # `memory_only` and keep `host_only` + `uncategorized`.
+            "roofline_hard_gate": True,
+            "roofline_saturation_snapshot": {
+                "compute": 25.0, "memory": 92.0,
+                "host_overhead": 18.0, "comm": 0.0,
+            },
+        },
+        idempotency_key="ex-roofline-gate",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.explore.run_grid",
+        side_effect=_spy_run_grid,
+    ):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    out = res.result
+    # The inlined stack_rebench path re-benches a KEEP'd variant under
+    # ``<name>__stack_rebench`` — ignore that suffix when asserting which
+    # base variants the gate let through.
+    base_benched = {n.split("__")[0] for n in benched_variants}
+    assert base_benched == {"host_only", "uncategorized"}
+    skip_reasons = {
+        s.get("name"): s.get("reason") for s in out.get("skipped_dup", [])
+    }
+    assert skip_reasons.get("memory_only") == "roofline_saturated"
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_roofline_gate_disabled_by_default(
+    sub_agent_runner, tmp_path,
+):
+    """Without ``roofline_hard_gate=True``, the soft advisory path is the
+    only one in play and every variant runs (legacy behaviour)."""
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-roofline-default"
+
+    benched_variants: list[str] = []
+
+    async def _spy_run_grid(*args, **kwargs):
+        from inference_optimizer.orchestrator.action_executors._grid_runner import (
+            VariantResult,
+        )
+        gv = list(kwargs.get("grid") or [])[0]
+        benched_variants.append(gv.name)
+        slot = Path(kwargs["output_root"])
+        slot.mkdir(parents=True, exist_ok=True)
+        ws = _fake_workspace(slot, tput=805.0)
+        return [VariantResult(
+            name=gv.name,
+            extra_sglang_args=gv.extra_sglang_args,
+            extra_envs=dict(gv.extra_envs),
+            status="succeeded",
+            output_throughput=805.0,
+            workspace=str(ws),
+        )]
+
+    grid = [{
+        "name": "memory_only",
+        "extra_args": "--max-running-requests 256",
+        "extra_envs": {},
+        "provenance": "default_grid",
+    }]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir":  str(output_dir),
+            "base_tput":   800.0,
+            "grid":        grid,
+            # snapshot present, but flag is OFF (or omitted).
+            "roofline_saturation_snapshot": {
+                "compute": 5.0, "memory": 99.0,
+                "host_overhead": 5.0, "comm": 0.0,
+            },
+        },
+        idempotency_key="ex-roofline-off",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.explore.run_grid",
+        side_effect=_spy_run_grid,
+    ):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    base_benched = {n.split("__")[0] for n in benched_variants}
+    assert base_benched == {"memory_only"}
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_explicit_variant_timeout_wins(
     sub_agent_runner, tmp_path,
 ):

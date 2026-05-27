@@ -61,6 +61,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
+from ._explore_roofline_filter import filter_variants_by_roofline
 from ._grid_runner import (
     GridVariant,
     VariantResult,
@@ -537,6 +538,46 @@ class ExploreExecutor:
             "explore dedup: payload=%d → runnable=%d (ledger_dup+round_dup=%d)",
             len(grid), len(runnable), len(skipped_dup),
         )
+
+        # Opt-in roofline-categorized filter (PR-B).
+        # Coordinator-injected ``roofline_hard_gate=True`` together with a
+        # non-empty ``roofline_saturation_snapshot`` activates the gate;
+        # the executor drops variants whose flags target only directions
+        # the latest roofline run reports above the saturation threshold.
+        # Dropped variants land in ``skipped_dup`` with
+        # ``reason='roofline_saturated'`` so the per-variant outcomes
+        # collector and ``state.json`` audit trail surface them next to
+        # the dedup skips. Default is off — when ``roofline_hard_gate``
+        # is missing / falsy, the soft advisory remains the only signal
+        # (legacy behaviour).
+        if bool(params.get("roofline_hard_gate", False)) and runnable:
+            saturation_snapshot = params.get("roofline_saturation_snapshot")
+            if isinstance(saturation_snapshot, dict) and saturation_snapshot:
+                kept_runnable, dropped_by_roofline = filter_variants_by_roofline(
+                    runnable, saturation_snapshot,
+                )
+                if dropped_by_roofline:
+                    for entry in dropped_by_roofline:
+                        skipped_dup.append({
+                            "name": entry.get("name", ""),
+                            "extra_sglang_args": entry.get("extra_sglang_args", ""),
+                            "reason": "roofline_saturated",
+                            "categories": entry.get("categories", []),
+                            "saturated_directions": entry.get(
+                                "saturated_directions", [],
+                            ),
+                        })
+                    log.info(
+                        "explore roofline gate: %d/%d variants dropped "
+                        "(saturated=%s)",
+                        len(dropped_by_roofline),
+                        len(runnable),
+                        ",".join(sorted(
+                            d for d, p in saturation_snapshot.items()
+                            if isinstance(p, (int, float)) and float(p) >= 80.0
+                        )),
+                    )
+                runnable = kept_runnable
 
         round_id_seed = int(search.get("cursor") or 0) + 1
         round_id = f"explore-{round_id_seed:03d}"

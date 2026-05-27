@@ -5354,6 +5354,21 @@ class Coordinator:
                 params.setdefault(
                     "variant_timeout_safety_margin", safety_margin_override,
                 )
+            # Roofline hard gate (opt-in). When enabled, also forward the
+            # latest saturation snapshot so the ExploreExecutor can apply
+            # the filter without re-reading SharedState. Soft advisory is
+            # independent and untouched here.
+            if bool(getattr(
+                self.shared_state, "explore_roofline_hard_gate", False,
+            )):
+                params.setdefault("roofline_hard_gate", True)
+                history = list(getattr(
+                    self.shared_state, "roofline_saturation_history", [],
+                ) or [])
+                if history and isinstance(history[-1], dict):
+                    params.setdefault(
+                        "roofline_saturation_snapshot", dict(history[-1]),
+                    )
             # Mirror the sweep/integrate branches: inject ``base_tput`` (and
             # ``base_extra_args``) tied to current_best (or baseline_tput as
             # fallback) whenever Orchestration omits them. Without this the
@@ -5502,6 +5517,17 @@ class Coordinator:
                 params.setdefault(
                     "variant_timeout_safety_margin", safety_margin_override,
                 )
+            if bool(getattr(
+                self.shared_state, "explore_roofline_hard_gate", False,
+            )):
+                params.setdefault("roofline_hard_gate", True)
+                history = list(getattr(
+                    self.shared_state, "roofline_saturation_history", [],
+                ) or [])
+                if history and isinstance(history[-1], dict):
+                    params.setdefault(
+                        "roofline_saturation_snapshot", dict(history[-1]),
+                    )
         # IR-7 — ``assess_remaining_gaps`` is a thin wrapper: rewrite
         # the kind to ``specialist`` and force the
         # ``session_steward_specialist`` domain (LLM cannot pick any
