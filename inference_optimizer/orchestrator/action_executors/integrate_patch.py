@@ -585,13 +585,12 @@ class IntegratePatchExecutor:
     ) -> None:
         """F2-5: append a JSONL record to
         ``framework-agent/kb/framework_optimization/lessons.jsonl``
-        when the integrated patch came from the framework_pr_scout
-        sub-kind.
+        when the integrated patch came from the FRAMEWORK_PR phase.
 
         Strict no-op when the proposal carries any other provenance,
         or when the proposal is missing both ``fa_pr_url`` and
         ``fa_pr_sha`` (the dedup keys; without them the record is
-        useless to future ``fa candidates`` runs). Errors during
+        useless to future ``fa phase-discover`` runs). Errors during
         the write are logged + swallowed so a flaky shared filesystem
         cannot fail an otherwise-successful integrate.
         """
