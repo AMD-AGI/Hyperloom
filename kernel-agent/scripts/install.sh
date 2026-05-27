@@ -274,6 +274,70 @@ ensure_python() {
   python3 -m pip --version >/dev/null || die "pip is required"
 }
 
+# Pip constraint file emitted by ensure_rocm_torch_for_geak() that pins the
+# on-disk torch so GEAK pip installs cannot swap ROCm torch for PyPI CUDA torch.
+GEAK_PIP_CONSTRAINT_FILE=""
+
+ensure_rocm_torch_for_geak() {
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if [ "${KERNEL_AGENT_SKIP_TORCH_GATE:-0}" = "1" ]; then
+    warn "KERNEL_AGENT_SKIP_TORCH_GATE=1 set; not pinning torch for GEAK install"
+    return 0
+  fi
+  # Gate on rocm-smi: only enforce torch hygiene on actual ROCm pods.
+  # Non-ROCm hosts (CI/dev) get no interference, no pin.
+  if ! command -v rocm-smi >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! rocm-smi --showid >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Probe torch via importlib.metadata so the pinned version matches the
+  # dist-info string pip uses (torch.__version__ may drop local segments).
+  local probe status torch_version hip cuda_str
+  probe="$(python3 - <<'PY' 2>/dev/null || true
+import importlib.metadata as _m
+try:
+    import torch
+except Exception as exc:
+    print("import_error|||" + type(exc).__name__ + ": " + str(exc)[:160])
+else:
+    try:
+        ver = _m.version("torch")
+    except Exception:
+        ver = getattr(torch, "__version__", "")
+    print("|".join([
+        "ok",
+        ver,
+        getattr(torch.version, "hip", None) or "",
+        getattr(torch.version, "cuda", None) or "",
+    ]))
+PY
+)"
+  IFS='|' read -r status torch_version hip cuda_str <<< "$probe"
+  if [ "$status" != "ok" ]; then
+    warn "torch not importable from python3 on ROCm pod"
+    warn "GEAK rag-mcp would pull torch from PyPI (= NVIDIA CUDA wheel) and corrupt the ROCm stack"
+    warn "Fix: use the canonical ROCm Python (usually /opt/venv/bin/python3) or install ROCm torch first"
+    warn "Override (NOT recommended): KERNEL_AGENT_SKIP_TORCH_GATE=1"
+    die "refusing GEAK install on ROCm pod without an importable torch"
+  fi
+
+  # Pin the exact dist-info version (incl. +rocm... local segment) so GEAK
+  # transitive deps cannot silently swap the on-disk torch for PyPI CUDA torch.
+  GEAK_PIP_CONSTRAINT_FILE="${HYPERLOOM_RUNTIME_DIR}/geak_pip_constraints.txt"
+  mkdir -p "$(dirname "$GEAK_PIP_CONSTRAINT_FILE")"
+  printf 'torch==%s\n' "${torch_version}" > "$GEAK_PIP_CONSTRAINT_FILE"
+  if [ -z "$hip" ]; then
+    warn "torch=${torch_version} on ROCm pod is not a ROCm build (hip=none, cuda=${cuda_str:-none}); pinning to block replacement but ROCm stack may be broken"
+  else
+    log "pinned torch==${torch_version} (hip=${hip}) via ${GEAK_PIP_CONSTRAINT_FILE}"
+  fi
+}
+
 # PR-D §3: pin `git` and `patch` so the TraceLens server patcher has the
 # binaries it expects on every deployment.
 #
@@ -562,7 +626,12 @@ ensure_geak() {
     # branch needs --break-system-packages; pip in a venv treats it as a
     # no-op so the flag is safe to keep unconditionally).
     _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
-    run python3 -m pip install ${_PIP_FLAGS} "${HYPERLOOM_ROOT}/geak"
+    ensure_rocm_torch_for_geak
+    _PIP_CONSTRAINT_ARGS=""
+    if [ -n "${GEAK_PIP_CONSTRAINT_FILE:-}" ] && [ -f "${GEAK_PIP_CONSTRAINT_FILE}" ]; then
+      _PIP_CONSTRAINT_ARGS="--constraint ${GEAK_PIP_CONSTRAINT_FILE}"
+    fi
+    run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${HYPERLOOM_ROOT}/geak"
     # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
     # by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
@@ -578,7 +647,7 @@ ensure_geak() {
     # break install with "File ... does not exist".
     for _geak_mcp in rag-mcp profiler-mcp \
                     cross-session-memory-mcp automated-test-discovery; do
-      run python3 -m pip install ${_PIP_FLAGS} \
+      run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \
         "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
     done
     # Patch GEAK's bundled prompt YAML to remove the misleading
