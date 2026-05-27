@@ -1625,6 +1625,58 @@ class Coordinator:
             })
             state.save(self.session_dir)
 
+    _CRITIC_PRIORS_DECISION_TAIL: int = 5
+    _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
+
+    def _collect_framework_pr_priors(self) -> dict[str, Any]:
+        """Return compact session-local priors for the Critic gate.
+
+        Includes:
+        - ``recent_decisions``: last N rows from
+          ``framework_pr_critic_decisions`` (excluding the candidate
+          currently under review, since it has no row yet) so the
+          Critic sees its own recent verdicts and can stay consistent.
+        - ``recent_outcomes``: last N rows from
+          ``framework_pr_phase_progress`` filtered to terminal
+          statuses (``kept``, ``reverted``, ``no_patch``,
+          ``enqueue_failed``) so the Critic sees what the apply/bench
+          pipeline actually did with previously-approved candidates.
+
+        Best-effort: shape mismatches degrade to empty lists; the
+        Critic's prompt path must not crash if SharedState evolves.
+        """
+        state = self.shared_state
+        decisions: list[dict[str, Any]] = []
+        try:
+            raw_decisions = getattr(state, "framework_pr_critic_decisions", None) or []
+            for row in raw_decisions[-self._CRITIC_PRIORS_DECISION_TAIL:]:
+                if not isinstance(row, dict):
+                    continue
+                decisions.append({
+                    "candidate_id": str(row.get("candidate_id") or ""),
+                    "verdict":      str(row.get("verdict") or ""),
+                    "rationale":    str(row.get("rationale") or "")[:200],
+                })
+        except Exception:  # noqa: BLE001
+            decisions = []
+        outcomes: list[dict[str, Any]] = []
+        try:
+            raw_progress = getattr(state, "framework_pr_phase_progress", None) or []
+            terminal = {"kept", "reverted", "no_patch", "enqueue_failed", "critic_denied"}
+            tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
+            for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL:]:
+                outcomes.append({
+                    "candidate_id": str(row.get("candidate_id") or ""),
+                    "status":       str(row.get("status") or ""),
+                    "gain_pct":     row.get("gain_pct"),
+                })
+        except Exception:  # noqa: BLE001
+            outcomes = []
+        return {
+            "recent_decisions": decisions,
+            "recent_outcomes":  outcomes,
+        }
+
     async def _critic_review_framework_pr_candidate(
         self, candidate: dict[str, Any],
     ) -> dict[str, str]:
@@ -1676,6 +1728,7 @@ class Coordinator:
             "candidate":  {
                 "candidate_id":     cand_id,
                 "pr_url":           str(candidate.get("pr_url") or ""),
+                "diff_url":         str(candidate.get("diff_url") or ""),
                 "repo":             str(candidate.get("repo") or ""),
                 "ref":              str(candidate.get("ref") or ""),
                 "title":            str(candidate.get("title") or ""),
@@ -1684,6 +1737,13 @@ class Coordinator:
                 "rationale":        str(candidate.get("rationale") or ""),
             },
             "batch_id":   candidate.get("batch_id") or "",
+            # Session-local priors — every framework_pr candidate
+            # already classified plus the apply/bench outcomes from
+            # this session. Lets the Critic spot patterns like "the
+            # last 3 perf PRs from this repo all crashed at startup"
+            # without standing up a separate KB query. Bounded to the
+            # tail so the prompt stays compact.
+            "priors":     self._collect_framework_pr_priors(),
         }
         prompt = (
             f"seq=1 msg_id={msg_id} from=coordinator topic=proposal "
