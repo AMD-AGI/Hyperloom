@@ -1,0 +1,92 @@
+name: framework_pr
+family: shallow
+cost_minutes_p50: 12.0
+cost_minutes_p75: 30.0
+expected_gain_pct: [0.0, 15.0]
+accuracy_risk: 0.10
+crash_risk: 0.20
+prerequisites:
+  - baseline
+requires_lanes:
+  - server_lifecycle
+  - workspace_mutation
+  - benchmark_lane
+allowed_tools:
+  # framework_pr is a deterministic Python executor with no LLM driver.
+  # The tool list keeps the workspace_mutation invariant happy
+  # (``test_actions_with_workspace_lane_have_edit_tool``) even though
+  # the executor itself shells out to ``git apply``.
+  - emit_intent
+  - Read
+  - Bash
+  - Edit
+  - Write
+side_effects:
+  - workspace_write
+  - server_restart
+  - launches_server
+  - reads_server
+  - writes_results
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 4
+lease_ttl_sec: 3600
+description: "FRAMEWORK_PR-phase per-candidate executor: applies an upstream framework PR to framework_source_roots, runs throughput + accuracy gate, KEEPs or REVERTs. Coordinator-internal."
+pipeline_phase: explore
+typical_runtime_min: 12.0
+applicable_when:
+  - "phase == 'FRAMEWORK_PR'"
+  - "baseline_tput > 0"
+params_schema:
+  candidate:
+    type: object
+    description: |
+      Required. PR metadata row produced by ``fa phase-discover``:
+      ``{repo, pr_number, ref, title, diff_url, ...}``. The executor
+      curls ``candidate.diff_url`` into the per-task workspace and
+      ``git apply``s it against the resolved framework_source_root.
+  framework:
+    type: string
+    description: |
+      Optional. ``"sglang"`` / ``"vllm"``. Falls back to
+      ``candidate["framework"]`` then ``$INFERENCE_OPTIMIZER_FRAMEWORK``.
+  batch_id:
+    type: string
+    description: |
+      Optional. Phase-loop batch identifier; echoed back in the result
+      so ``framework_pr_phase_progress`` entries group correctly.
+  patches:
+    type: list
+    description: |
+      Optional. Explicit list of patch file paths to apply (skips the
+      diff_url fetch step). Each entry must be a unified diff readable
+      by ``git apply -p1``.
+  keep_threshold_pct:
+    type: number
+    description: |
+      Optional. KEEP threshold in percent (default 0.2). The patched
+      throughput must improve at least this much over baseline_tput to
+      be kept; otherwise REVERT.
+  base_tput:
+    type: number
+    description: |
+      Optional. Baseline throughput to compare against. Falls back to
+      ``SharedState.baseline_tput`` when zero.
+  accuracy_baseline:
+    type: number
+    description: |
+      Optional. Baseline accuracy score. When > 0, the executor runs the
+      parse_eval_results / accuracy_passed gate after the bench and
+      REVERTs on regression.
+  framework_source_root:
+    type: string
+    description: |
+      Optional. Explicit override for the ``git apply`` target.
+      Defaults to the first existing entry of
+      ``resolve_source_file_allowlist()``.
+  apply_only:
+    type: bool
+    description: |
+      Optional. Skip the benchmark step entirely (smoke / test mode).
+      The patch is still applied; the executor returns
+      ``status='applied_no_bench'``.
