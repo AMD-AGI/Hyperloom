@@ -38,11 +38,16 @@ from ..specialist_domains import (
 _NONE_PLACEHOLDER = "(none)"
 
 
-# Soft cap on how many entries a specialist may emit in its final
-# ``proposal_set``. Enforced via prompt instructions only (the Critic
-# rejects any marginal-quality survivors against KB priors). Override
-# per-task via ``SpecialistPromptInputs.max_proposals``.
-DEFAULT_SPECIALIST_MAX_PROPOSALS = 5
+# Cap on how many entries a specialist may emit in its final
+# ``proposal_set``. Re-exported from ``orchestrator/policy.py`` so the
+# prompt-side soft cap (self-curation instruction in Section 8) and the
+# SpecialistRunner-side hard truncate (write path) stay aligned. The
+# Critic separately rejects any marginal-quality survivors against KB
+# priors. Override per-task via ``SpecialistPromptInputs.max_proposals``
+# (still clamped to this value by the runner).
+from inference_optimizer.orchestrator.policy import (
+    DEFAULT_SPECIALIST_MAX_PROPOSALS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -573,10 +578,9 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     if not isinstance(ev, dict) or not ev:
         rows.append(
             "(none — no fresh roofline snapshot has been recorded yet. "
-            "The Coordinator auto-enqueues `roofline` on EXPLORE / "
-            "KERNEL entry when `--use-roofline-composite=true`; if you "
-            "are seeing this, either the toggle is off OR the snapshot "
-            "is still in-flight.)"
+            "The Coordinator auto-enqueues `roofline` at the end of "
+            "PRELUDE and again after every 10% watermark crossing; if "
+            "you are seeing this, the snapshot is still in-flight.)"
         )
         return rows
 

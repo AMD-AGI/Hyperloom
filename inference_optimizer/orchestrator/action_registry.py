@@ -123,7 +123,6 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     # exploration — everything else (run benchmarks / variants /
     # diagnostics to GENERATE data)
     "baseline":                "exploration",
-    "profile":                 "exploration",
     "roofline":                "exploration",
     "params":                  "exploration",
     "backends":                "exploration",

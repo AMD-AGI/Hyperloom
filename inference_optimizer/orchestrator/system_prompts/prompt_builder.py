@@ -44,8 +44,9 @@ from ..action_registry import (
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # analysis
-    "profile", "roofline", "deep_kernel_analysis",
+    # analysis — roofline is Coordinator-auto-enqueued (PRELUDE + watermark);
+    # not LLM-proposable. deep_kernel_analysis stays as a kernel-owned REQUEST.
+    "roofline", "deep_kernel_analysis",
     # explore
     #
     # v0.8 M3 + KB_gaps/Gap-10: the merged ``explore`` action is the
@@ -408,8 +409,14 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "value — orchestration LLM authored the grid from one "
             "prompt window without any specialist research — is now "
             "DENIED by PolicyGate (rule "
-            "'explore_requires_specialist_provenance'). The executor "
-            "dedups against SharedState.explore_search by "
+            "'explore_requires_specialist_provenance'). **Per-round "
+            "cap:** at most ONE variant in the grid may carry "
+            "provenance='specialist:*' (rule "
+            "'explore_specialist_grid_max_one'); pick the strongest "
+            "specialist proposal each round and defer the runners-up "
+            "to a subsequent round. provenance='default_grid' is "
+            "uncapped — cold-start rounds may emit several. The "
+            "executor dedups against SharedState.explore_search by "
             "canonical_fingerprint, so a rename of an already-tested "
             "(args, envs) collapses to the same row."
         )
@@ -487,15 +494,16 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   PolicyGate (``rule='action_deprecated'``) — route every grid attempt",
         "   through ``delegate{action_name='explore', params={grid: [...] }}``.",
     ]
-    if kernel_enabled:
-        lines.extend([
-            "4. **Profile**: if `last_profile_trace == ''`, propose `profile`. If the",
-            "   profile is fresh (matches `last_profile_args`) reuse it; do not re-profile.",
-        ])
-    else:
-        lines.append(
-            "4. (No-kernel run.) Skip profile — the Kernel agent is disabled in this run.",
-        )
+    lines.append(
+        "4. **Analysis is auto-managed**. Roofline (or profile under "
+        "``--no-enable-roofline``) is enqueued by the Coordinator at "
+        "PRELUDE and at every +10% validated-gain watermark crossing. "
+        "Do not propose ``profile`` or ``roofline`` — PolicyGate denies "
+        "both with ``rule='analysis_action_not_llm_proposable'``. While "
+        "the analysis task is in flight, ``specialist`` / ``explore`` / "
+        "kernel-owned dispatches are deferred until ``analysis.md`` / "
+        "``last_profile_trace`` refreshes.",
+    )
     lines.extend([
         "5. **Phase-aware action selection**. v0.8",
         "   retired the legacy ``Action scores`` block. There is no system-side",
@@ -518,8 +526,11 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "*qualitative* hints (what worked / what failed last time).",
         "   d. **specialist proposal_set** (M5+) — when an explore round just",
         "      finished, the proposal_set drives the next `explore` grid.",
-        "   e. **Mandatory MUST-FIRST rules**: baseline before anything else;",
-        "      profile before kernel_opt (when kernel_enabled).",
+        "   e. **Mandatory MUST-FIRST rules**: baseline before anything else.",
+        "      ``analysis.md`` / ``last_profile_trace`` arrive automatically",
+        "      from the Coordinator-owned analysis task at PRELUDE and at",
+        "      every +10% watermark crossing — do not gate ``kernel_opt`` on",
+        "      a manually-proposed profile.",
         "6. **Phase budget awareness**. The `=== Phase ===` block carries",
         "   ``phase_budget_remaining_pct``. As that number falls below 0.2,",
         "   prefer lower-cost / known-good actions (explore over kernel_opt).",
