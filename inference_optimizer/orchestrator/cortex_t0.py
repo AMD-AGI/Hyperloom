@@ -1,28 +1,20 @@
-"""Shared T0 (PRELUDE) Cortex anchor — KB_design §3.2 §5.1 / §3.13 M1 §5.1.
+"""Shared T0 (PRELUDE) Cortex anchor — KB warm-start only.
 
 The T0 anchor is the boot-time Cortex KB ritual every session must
-run before EXPLORE starts:
+run before EXPLORE starts. With the hypothesize/verify protocol
+retired (no more KB-side session), T0 is now a pure **read** plus
+a small recipe-anchor backfill:
 
-1. ``session begin`` (sync) — mints the Cortex ``session_id``;
-   reused across resume via ``.kb_sid`` + ``SharedState.cortex_session_id``.
-2. ``propose_point`` of the registered ``recipe`` kind (canonical id
-   ``recipe:{slug(model)}:{slug(hw)}``) — idempotent across sessions
-   for the same workload/hw pair; KB-explorer / warm-start can index it.
-3. ``find_recipe`` snapshot → ``.kb_warm.json`` +
-   ``SharedState.warm_start_recipe``.
-4. ``traps`` snapshot → ``.kb_pitfalls.json`` +
+1. ``find_recipe_with_fallback`` snapshot → ``.kb_warm.json`` +
+   ``SharedState.warm_start_recipe`` (graceful fallback ladder:
+   exact → same-family → same-class → same-hw → cross-hw).
+2. ``traps`` snapshot → ``.kb_pitfalls.json`` +
    ``SharedState.warm_start_pitfalls``.
-
-Historically this lived inside :func:`cli._bootstrap_cortex_kb` (a
-~150-line cli helper). KB_gaps/Gap-12 covers the consequence: an
-SDK / integration-test caller that constructs
-:class:`Coordinator` directly bypasses the cli path and ends up with
-an empty warm_start surface. v0.8 §3.2 §5.1 says T0 belongs to the
-PRELUDE phase the Coordinator owns; the canonical entry point is
-still cli (preserves fail-fast on Cortex outages, prints the boot
-banner the operator expects), but the same ritual is exposed here so
-the Coordinator can run a *defensive fallback* when it detects
-``cortex_kb`` is wired but ``cortex_session_id`` is still empty.
+3. (Optional) ``propose_point(kind=recipe)`` to backfill model-family
+   / model-class / framework attrs onto the recipe anchor when they
+   are missing — keeps PR-A10's same-family fallback queryable for
+   future sessions. The first KEEP / CLOSE update_recipe call will
+   create the anchor on demand anyway, so this step is best-effort.
 
 The two callers parameterise the helper via two knobs:
 
@@ -31,13 +23,16 @@ The two callers parameterise the helper via two knobs:
   ``warm_start={}`` instead of crashing inside a long-running
   reactor loop.
 * ``on_status``: cli supplies ``print`` so the operator sees the
-  ``Cortex KB        : session_id=...`` banner; Coordinator
-  supplies a ``log.info`` shim so the same line lands in the
-  session log without polluting stdout.
+  ``Cortex KB        : recipe=...`` banner; Coordinator supplies a
+  ``log.info`` shim so the same line lands in the session log
+  without polluting stdout.
 
-The helper is the **single source of truth** for the T0 ritual; any
-future change (e.g. extra ``propose_point`` for ``sweep_grid``)
-lives here and both entry points pick it up automatically.
+``cortex_session_id`` on SharedState is still maintained (as the
+hyperloom-local session identifier carried into fact-write
+``source_session_id`` attrs for traceability) but no longer
+corresponds to a KB-side session: it now uses the session_dir
+basename when present, otherwise falls back to the file-based
+``.kb_sid`` snapshot from earlier runs.
 """
 
 from __future__ import annotations
@@ -65,12 +60,11 @@ class T0Result:
     """Outcome of one :func:`run_t0_anchor` invocation.
 
     ``status`` ∈ {``"ok"``, ``"resumed"``, ``"skipped_disabled"``,
-    ``"skipped_already"``, ``"failed_session_begin"``}. The two
-    ``skipped_*`` outcomes are the no-op paths: ``skipped_disabled``
+    ``"skipped_already"``}. ``skipped_disabled`` is the no-op path
     when the client is disabled (``--degraded-kb`` / SDK without
-    Cortex), ``skipped_already`` when ``cortex_session_id`` was
-    already non-empty on entry (e.g. the cli T0 ran and the
-    Coordinator's fallback finds nothing to do).
+    Cortex); ``skipped_already`` when ``cortex_session_id`` was
+    already non-empty on entry (Coordinator's fallback no-op after
+    the cli T0 already ran).
     """
 
     status: str
@@ -118,14 +112,12 @@ def run_t0_anchor(
       keep the existing warm_start fields. Resume callers that
       *want* to refresh the warm_start surface should set
       ``shared_state.cortex_session_id = ""`` before invoking us.
-    * :class:`CortexKBError` on ``session_begin``:
-        - ``fail_fast=True``: re-raise so cli can ``sys.exit(2)``.
-        - ``fail_fast=False``: log warning + return
-          ``failed_session_begin``; downstream stays workable with
-          an empty warm_start.
-    * ``find_recipe`` / ``traps`` failures are *always* non-fatal
-      (warm_start is M5+ consumption,
-      stale data is preferable to a crashed PRELUDE).
+    * The KB session begin protocol was retired; this helper no
+      longer fail-fasts on session creation. ``fail_fast`` is kept
+      as a no-op for back-compat with cli callers.
+    * ``find_recipe`` / ``traps`` failures are *always* non-fatal —
+      warm_start is a hint, stale data is preferable to a crashed
+      PRELUDE.
 
     Args
     ----
@@ -170,61 +162,32 @@ def run_t0_anchor(
         emit("Cortex KB        : DISABLED (--degraded-kb)")
         return T0Result(status="skipped_disabled", workload=workload, hw=hw)
 
+    # Hyperloom-local session id (carried into fact-write attrs for
+    # traceability). The Cortex KB session protocol was retired, so
+    # ``cortex_session_id`` no longer corresponds to a remote sid;
+    # it is now whatever uniquely identifies this run.
     sid = (getattr(shared_state, "cortex_session_id", "") or "").strip()
-    sid_file = client.sid_path
-    if not sid and sid_file.exists():
-        try:
-            sid = sid_file.read_text(encoding="utf-8").strip()
-        except OSError:
-            sid = ""
+    if not sid and sd is not None:
+        sid = Path(sd).name
 
     workload = (workload or "").strip() or "unknown_model"
     hw = (hw or "").strip() or "unknown_gpu"
-    canonical = recipe_canonical_id(workload, hw)
 
-    began_now = False
-    if not sid:
-        try:
-            sid = client.session_begin(
-                workload=workload,
-                hw=hw,
-                image_digest=image_digest,
-                stack_fingerprint=stack_fingerprint,
-                extra_attrs=extra_attrs,
-            )
-        except CortexKBError as exc:
-            if fail_fast:
-                raise
-            log.warning(
-                "Cortex T0 skipped: session_begin failed (%s); "
-                "warm_start will stay empty for this session.",
-                exc,
-            )
-            return T0Result(
-                status="failed_session_begin",
-                workload=workload, hw=hw,
-                error=str(exc),
-            )
-        shared_state.cortex_session_id = sid
-        shared_state.warm_start_ts = datetime.now(timezone.utc).isoformat(
-            timespec="seconds",
-        )
-        began_now = True
-    else:
-        # Reuse path — either a prior cli T0 already ran (so we are
-        # the Coordinator fallback no-op) or this is a resume that
-        # carried .kb_sid forward.
+    if sid:
         shared_state.cortex_session_id = sid
         if resume:
             emit(f"Cortex KB        : resumed session_id={sid}")
+    began_now = not getattr(shared_state, "warm_start_ts", "")
+    if began_now:
+        shared_state.warm_start_ts = datetime.now(timezone.utc).isoformat(
+            timespec="seconds",
+        )
 
-    # Mint the recipe anchor — best-effort; KB validates canonical_id
-    # against the registered ``recipe`` kind schema, so this is the
-    # idempotent (model, hardware) anchor downstream warm-start /
-    # kb-explorer rely on.
-    # PR-A10: stamp model_class / model_family / framework into the
-    # recipe anchor so future T4 (same-class) / T3 (same-family)
-    # fallback lookups can succeed across sessions.
+    # Backfill model-family / model-class / framework attrs onto the
+    # recipe anchor so PR-A10 same-family fallback lookups can succeed
+    # for future sessions. Best-effort: the first KEEP / CLOSE
+    # update_recipe will create the point on demand anyway, so this
+    # backfill is purely a "make warm-start queryable earlier" hint.
     from ..cortex_kb_client import model_family as _model_family
     _model_class = (extra_attrs or {}).get("model_class") if isinstance(extra_attrs, Mapping) else ""
     _framework = (extra_attrs or {}).get("framework") if isinstance(extra_attrs, Mapping) else ""
@@ -232,24 +195,21 @@ def run_t0_anchor(
         "model":        workload,
         "hardware":     hw,
         "model_family": _model_family(workload),
-        "isl":          getattr(shared_state, "last_profile_args", "") or None,
     }
     if _model_class:
         _attrs["model_class"] = str(_model_class)
     if _framework:
         _attrs["framework"] = str(_framework)
     try:
-        client.propose_point(
-            canonical_id=canonical,
-            kind=C.KIND_RECIPE,
-            authority=C.AUTHORITY_EXPERIENTIAL,
-            attrs=_attrs,
-            evidence=[
-                f"log:hyperloom-session-{getattr(shared_state, 'session_id', '')}",
-            ],
+        client.update_recipe(
+            model=workload,
+            hardware=hw,
+            extra_attrs=_attrs,
         )
     except CortexKBError as exc:
-        log.warning("propose_point recipe anchor failed: %s", exc)
+        log.warning("update_recipe T0 backfill failed: %s", exc)
+    except Exception:  # noqa: BLE001 — defensive
+        log.exception("update_recipe T0 backfill raised unexpectedly")
 
     # warm_start_recipe — non-fatal. PR-A10: graceful fallback ladder
     # so a cold-start session for a model with no exact KB recipe can
@@ -343,7 +303,8 @@ def run_t0_anchor(
             "empty"
         )
         emit(
-            f"Cortex KB        : session_id={sid} workload={canonical} "
+            f"Cortex KB        : session_id={sid} "
+            f"workload={recipe_canonical_id(workload, hw)} "
             f"(warm={warm_label}, "
             f"traps={'hit' if traps_present else 'empty'})"
         )
