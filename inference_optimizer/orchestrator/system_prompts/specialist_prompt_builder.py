@@ -922,7 +922,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "   the throughput + accuracy gate. (PR-A2, Arbor-into-Hyperloom:",
         "   Inv-5.1 updated.)",
         "3. **NEVER** call ``cortex-kb`` write endpoints (propose-point /",
-        "   propose-edge / hypothesize / ingest-attempt / verify / commit)",
+        "   propose-edge / propose-lesson / propose-pitfall / update-recipe)",
         "   directly. The Coordinator owns KB writes (PolicyGate R4). KB",
         "   read context is pre-warmed into Section 4 of this prompt; the",
         "   specialist subprocess has no live KB connection.",
