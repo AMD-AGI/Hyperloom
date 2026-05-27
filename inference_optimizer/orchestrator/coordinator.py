@@ -3081,9 +3081,17 @@ class Coordinator:
         if "kernel" in self.role_registry:
             if not self.shared_state.last_profile_trace:
                 return (
-                    "TODO 2/5: profile is required now. Baseline exists but "
-                    "last_profile_trace is empty; propose/delegate only `profile`. "
-                    "Do not run backends/params/sweep yet."
+                    "TODO 2/5: waiting for the Coordinator-internal analysis "
+                    "task to populate ``last_profile_trace``. The Coordinator "
+                    "auto-enqueues `roofline` (default) or `profile` (under "
+                    "``--no-enable-roofline``) at the end of PRELUDE and on "
+                    "every +10% watermark crossing; PolicyGate denies any "
+                    "LLM-proposed roofline/profile with "
+                    "``rule='analysis_action_not_llm_proposable'``. If "
+                    "``auto_roofline_pending_task_id`` is stuck (failed / "
+                    "cancelled task that never cleared the field), emit "
+                    "`recover` as your escape hatch — the analysis lane is "
+                    "Coordinator-owned and not LLM-proposable."
                 )
             # analysis.md contract: require `select_kernels` to have
             # run against the current trace so analysis.md exists on disk
@@ -3461,7 +3469,16 @@ class Coordinator:
                 return PolicyDenied(
                     f"action={action!r} denied: profile must run before {action!r}",
                     rule="execution_order",
-                    hint="propose/delegate `profile`; last_profile_trace is empty",
+                    hint=(
+                        "wait for the Coordinator-internal analysis task "
+                        "(auto-enqueued at PRELUDE / on every +10% watermark "
+                        "crossing) to populate ``last_profile_trace``; "
+                        "PolicyGate denies LLM-proposed `profile` / "
+                        "`roofline` with "
+                        "``rule='analysis_action_not_llm_proposable'``. If "
+                        "``auto_roofline_pending_task_id`` is stuck on a "
+                        "failed task, emit `recover`."
+                    ),
                 )
             # integrate gate: kernel_opt KEEP awaiting integrate. Allow
             # integrate / report through; recover is not in
@@ -3579,7 +3596,17 @@ class Coordinator:
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: profile must run first",
                 rule="execution_order",
-                hint="propose/delegate `profile` before select_kernels/run_optimization",
+                hint=(
+                    "wait for the Coordinator-internal analysis task to "
+                    "populate ``last_profile_trace`` before requesting "
+                    "select_kernels / run_optimization; analysis is "
+                    "auto-enqueued at PRELUDE and on every +10% watermark "
+                    "crossing. The analysis lane is Coordinator-owned and not "
+                    "LLM-proposable (PolicyGate denies with "
+                    "``rule='analysis_action_not_llm_proposable'``). If "
+                    "``auto_roofline_pending_task_id`` is stuck, emit "
+                    "`recover` as the escape hatch."
+                ),
             )
         # Main M4 renamed the cache field from ``last_select_kernels`` to
         # ``last_trace_analyze``; this branch populates BOTH (legacy +
