@@ -290,6 +290,44 @@ def compute_backend_gain(attribution_src: Dict) -> Optional[float]:
     return round(float(backends), 2)
 
 
+def compute_geak_gain(attribution_src: Dict) -> Optional[float]:
+    """GEAK-source gain = attribution.source_breakdown.geak_pct_of_total."""
+    v = attribution_src.get("geak_pct_of_total")
+    if not isinstance(v, (int, float)):
+        return None
+    return round(float(v), 2)
+
+
+def compute_oob_gain(attribution_src: Dict) -> Optional[float]:
+    """OOB-source gain = attribution.source_breakdown.oob_pct_of_total."""
+    v = attribution_src.get("oob_pct_of_total")
+    if not isinstance(v, (int, float)):
+        return None
+    return round(float(v), 2)
+
+
+def compute_framework_gain(attribution: Dict) -> Optional[float]:
+    """Framework-source gain = SUM(delta_pct) over attribution.gain_per_stack_entry[]
+    where action='framework_pr'. Returns None when no such entry exists, so the
+    later normalisation step can collapse it to 0.00 alongside the other
+    *_gain columns.
+    """
+    entries = attribution.get("gain_per_stack_entry")
+    if not isinstance(entries, list):
+        return None
+    total = 0.0
+    found = False
+    for e in entries:
+        if isinstance(e, dict) and e.get("action") == "framework_pr":
+            delta = e.get("delta_pct")
+            if isinstance(delta, (int, float)):
+                total += float(delta)
+                found = True
+    if not found:
+        return None
+    return round(total, 2)
+
+
 # ---------------------------------------------------------------------------
 # Workload-dim defaults and framework_args parsing
 #
@@ -453,7 +491,8 @@ def extract_row(data: Dict) -> Dict[str, Any]:
     baseline = data.get("baseline") or {}
     final = data.get("final") or {}
     session = data.get("session") or {}
-    attribution_src = safe_get(data, "attribution", "source_breakdown", default={}) or {}
+    attribution = data.get("attribution") or {}
+    attribution_src = attribution.get("source_breakdown") or {}
 
     # workload.model_name occasionally arrives as a filesystem path (e.g.
     # "/wekafs/models/Qwen-Qwen3-30B-A3B"). Clean those prefixes so the
@@ -506,6 +545,9 @@ def extract_row(data: Dict) -> Dict[str, Any]:
         "kernel_gain":               compute_kernel_gain(attribution_src),
         "param_gain":                compute_param_gain(attribution_src),
         "backend_gain":              compute_backend_gain(attribution_src),
+        "geak_gain":                 compute_geak_gain(attribution_src),
+        "oob_gain":                  compute_oob_gain(attribution_src),
+        "framework_gain":            compute_framework_gain(attribution),
         "baseline_tok_per_s_per_gpu": baseline_tput,
         "opt_tok_per_s_per_gpu":     opt_tput,
         "tp":                        dims["tp"],
@@ -532,12 +574,26 @@ def extract_row(data: Dict) -> Dict[str, Any]:
     # Force missing attribution gains to 0.00 instead of NULL (per user
     # request: leaderboard column should never be empty). round to 2dp for
     # the NUMERIC(8,2) target column.
-    for key in ("kernel_gain", "param_gain", "backend_gain"):
+    for key in ("kernel_gain", "param_gain", "backend_gain",
+                "geak_gain", "oob_gain", "framework_gain"):
         v = row[key]
         if v is None:
             row[key] = 0.00
         elif isinstance(v, (int, float)):
             row[key] = round(float(v), 2)
+
+    # Clip negative gain values to 0 across every column. Only triggers when
+    # the field is present AND < 0 (per request: "需要 gain 存在并且小于 0
+    # 才做这个操作"). Process-history paths inside raw_data (e.g.
+    # optimization_stack[].delta_pct, unified_log[].key_metric) are NOT
+    # touched -- negative there is meaningful (a "REVERT"/"NEEDS_REVIEW"
+    # attempt). enrich_raw_data() mirrors this clip only on the
+    # display-facing nested paths to keep the column and raw_data in sync.
+    for key in ("gain", "kernel_gain", "param_gain", "backend_gain",
+                "geak_gain", "oob_gain", "framework_gain"):
+        v = row.get(key)
+        if isinstance(v, (int, float)) and v < 0:
+            row[key] = 0.0
 
     # raw_data is the original JSON + a `_enrichment` block of inferred values.
     # We pop `_meta` so it never reaches the SQL stage.
@@ -581,30 +637,84 @@ def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = 
     if not session_image_was_present and row.get("image"):
         session["image"] = row["image"]
 
+    session_duration_was_present = bool(session.get("session_duration_seconds"))
+    if not session_duration_was_present and row.get("duration_seconds"):
+        session["session_duration_seconds"] = row["duration_seconds"]
+
+    workload = enriched.get("workload")
+    if not isinstance(workload, dict):
+        workload = {}
+        enriched["workload"] = workload
+    workload_fallbacks_applied: Dict[str, Any] = {}
+    for wl_key, row_key in (
+        ("tp",        "tp"),
+        ("isl",       "isl"),
+        ("osl",       "osl"),
+        ("conc",      "conc"),
+        ("precision", "prec"),
+    ):
+        if not workload.get(wl_key):
+            workload[wl_key] = row[row_key]
+            workload_fallbacks_applied[wl_key] = row[row_key]
+
+    # Mirror the column-level gain clip into display-facing raw_data paths so
+    # downstream UIs that read `raw_data->'final'->>'cumulative_gain_pct_validated'`
+    # or `raw_data->'attribution'->'source_breakdown'->>'oob_pct_of_total'`
+    # see the same non-negative number as the matching column. Only triggers
+    # when the field is present and < 0. Process-history paths
+    # (optimization_stack[], gain_per_stack_entry[], unified_log[], kernels[],
+    # subagent_status.*.best_gain_pct) are intentionally left untouched.
+    raw_clip_applied: Dict[str, Any] = {}
+
+    def _clip_neg(container: Dict, key: str, full_path: str) -> None:
+        v = container.get(key)
+        if isinstance(v, (int, float)) and v < 0:
+            container[key] = 0
+            raw_clip_applied[full_path] = float(v)
+
+    final_block = enriched.get("final")
+    if isinstance(final_block, dict):
+        _clip_neg(final_block, "cumulative_gain_pct_validated",     "final.cumulative_gain_pct_validated")
+        _clip_neg(final_block, "cumulative_gain_pct_per_round_sum", "final.cumulative_gain_pct_per_round_sum")
+        _clip_neg(final_block, "e2e_gain_pct",                       "final.e2e_gain_pct")
+
+    attr_block = enriched.get("attribution")
+    if isinstance(attr_block, dict):
+        src_block = attr_block.get("source_breakdown")
+        if isinstance(src_block, dict):
+            _clip_neg(src_block, "oob_pct_of_total",  "attribution.source_breakdown.oob_pct_of_total")
+            _clip_neg(src_block, "geak_pct_of_total", "attribution.source_breakdown.geak_pct_of_total")
+
     meta = meta or {}
     enrichment = {
-        "imported_at_utc":        datetime.now(timezone.utc).isoformat(),
-        "importer":               IMPORTER_NAME,
-        "importer_version":       IMPORTER_VERSION,
-        "unique_key":             row["unique_key"],
-        "category":               row["category"],
-        "image_used":             row["image"],
-        "image_fallback_applied": not session_image_was_present,
-        "gain_pct":               row["gain"],
-        "gain_source":            meta.get("gain_source"),
-        "validated_gain_pct":     meta.get("validated_gain_pct"),
-        "throughput_delta_pct":   meta.get("throughput_delta_pct"),
-        "kernel_gain_pct":        row["kernel_gain"],
-        "param_gain_pct":         row["param_gain"],
-        "backend_gain_pct":       row["backend_gain"],
-        "duration_seconds":       row["duration_seconds"],
-        "duration_pretty":        format_duration_pretty(row["duration_seconds"]),
-        "baseline_tput":          row["baseline_tok_per_s_per_gpu"],
-        "opt_tput":               row["opt_tok_per_s_per_gpu"],
-        "status":                 row["status"],
-        "stop_reason":            session.get("stop_reason"),
-        "version":                row["version"],
-        "claw_session_id":        row.get("claw_session_id"),
+        "imported_at_utc":            datetime.now(timezone.utc).isoformat(),
+        "importer":                   IMPORTER_NAME,
+        "importer_version":           IMPORTER_VERSION,
+        "unique_key":                 row["unique_key"],
+        "category":                   row["category"],
+        "image_used":                 row["image"],
+        "image_fallback_applied":     not session_image_was_present,
+        "duration_fallback_applied":  not session_duration_was_present,
+        "workload_fallbacks_applied": workload_fallbacks_applied,
+        "gain_pct":                   row["gain"],
+        "gain_source":                meta.get("gain_source"),
+        "validated_gain_pct":         meta.get("validated_gain_pct"),
+        "throughput_delta_pct":       meta.get("throughput_delta_pct"),
+        "kernel_gain_pct":            row["kernel_gain"],
+        "param_gain_pct":             row["param_gain"],
+        "backend_gain_pct":           row["backend_gain"],
+        "geak_gain_pct":              row["geak_gain"],
+        "oob_gain_pct":               row["oob_gain"],
+        "framework_gain_pct":         row["framework_gain"],
+        "raw_data_neg_gain_clipped":  raw_clip_applied,
+        "duration_seconds":           row["duration_seconds"],
+        "duration_pretty":            format_duration_pretty(row["duration_seconds"]),
+        "baseline_tput":              row["baseline_tok_per_s_per_gpu"],
+        "opt_tput":                   row["opt_tok_per_s_per_gpu"],
+        "status":                     row["status"],
+        "stop_reason":                session.get("stop_reason"),
+        "version":                    row["version"],
+        "claw_session_id":            row.get("claw_session_id"),
     }
     enriched["_enrichment"] = enrichment
     return enriched
@@ -634,12 +744,14 @@ def build_upsert_sql(table: str) -> str:
 INSERT INTO {table} (
     model_name, framework, image, category, prec, gain, roofline,
     duration_seconds, kernel_gain, param_gain, backend_gain,
+    geak_gain, oob_gain, framework_gain,
     baseline_tok_per_s_per_gpu, opt_tok_per_s_per_gpu,
     tp, isl, osl, conc, status, raw_data, version, unique_key,
     claw_session_id
 ) VALUES (
     %(model_name)s, %(framework)s, %(image)s, %(category)s, %(prec)s, %(gain)s, %(roofline)s,
     %(duration_seconds)s, %(kernel_gain)s, %(param_gain)s, %(backend_gain)s,
+    %(geak_gain)s, %(oob_gain)s, %(framework_gain)s,
     %(baseline_tok_per_s_per_gpu)s, %(opt_tok_per_s_per_gpu)s,
     %(tp)s, %(isl)s, %(osl)s, %(conc)s, %(status)s, %(raw_data)s, %(version)s, %(unique_key)s,
     %(claw_session_id)s
@@ -656,6 +768,9 @@ ON CONFLICT (unique_key) DO UPDATE SET
     kernel_gain                = EXCLUDED.kernel_gain,
     param_gain                 = EXCLUDED.param_gain,
     backend_gain               = EXCLUDED.backend_gain,
+    geak_gain                  = EXCLUDED.geak_gain,
+    oob_gain                   = EXCLUDED.oob_gain,
+    framework_gain             = EXCLUDED.framework_gain,
     baseline_tok_per_s_per_gpu = EXCLUDED.baseline_tok_per_s_per_gpu,
     opt_tok_per_s_per_gpu      = EXCLUDED.opt_tok_per_s_per_gpu,
     tp                         = EXCLUDED.tp,
@@ -755,6 +870,7 @@ def build_upsert_statement_inline(row: Dict[str, Any], table: str) -> str:
         f"INSERT INTO {table} (\n"
         f"  model_name, framework, image, category, prec, gain, roofline,\n"
         f"  duration_seconds, kernel_gain, param_gain, backend_gain,\n"
+        f"  geak_gain, oob_gain, framework_gain,\n"
         f"  baseline_tok_per_s_per_gpu, opt_tok_per_s_per_gpu,\n"
         f"  tp, isl, osl, conc, status, raw_data, version, unique_key,\n"
         f"  claw_session_id\n"
@@ -770,6 +886,9 @@ def build_upsert_statement_inline(row: Dict[str, Any], table: str) -> str:
         f"  {_sql_number_literal(row['kernel_gain'])},\n"
         f"  {_sql_number_literal(row['param_gain'])},\n"
         f"  {_sql_number_literal(row['backend_gain'])},\n"
+        f"  {_sql_number_literal(row['geak_gain'])},\n"
+        f"  {_sql_number_literal(row['oob_gain'])},\n"
+        f"  {_sql_number_literal(row['framework_gain'])},\n"
         f"  {_sql_number_literal(row['baseline_tok_per_s_per_gpu'])},\n"
         f"  {_sql_number_literal(row['opt_tok_per_s_per_gpu'])},\n"
         f"  {_sql_number_literal(row['tp'])},\n"
@@ -794,6 +913,9 @@ def build_upsert_statement_inline(row: Dict[str, Any], table: str) -> str:
         f"  kernel_gain                = EXCLUDED.kernel_gain,\n"
         f"  param_gain                 = EXCLUDED.param_gain,\n"
         f"  backend_gain               = EXCLUDED.backend_gain,\n"
+        f"  geak_gain                  = EXCLUDED.geak_gain,\n"
+        f"  oob_gain                   = EXCLUDED.oob_gain,\n"
+        f"  framework_gain             = EXCLUDED.framework_gain,\n"
         f"  baseline_tok_per_s_per_gpu = EXCLUDED.baseline_tok_per_s_per_gpu,\n"
         f"  opt_tok_per_s_per_gpu      = EXCLUDED.opt_tok_per_s_per_gpu,\n"
         f"  tp                         = EXCLUDED.tp,\n"
@@ -1276,6 +1398,8 @@ def format_row_summary(row: Dict[str, Any]) -> str:
         f"  baseline={row['baseline_tok_per_s_per_gpu']} -> opt={row['opt_tok_per_s_per_gpu']}  "
         f"gain={row['gain']}%  kernel_gain={row['kernel_gain']}%  "
         f"param_gain={row['param_gain']}%  backend_gain={row['backend_gain']}%\n"
+        f"  geak_gain={row['geak_gain']}%  oob_gain={row['oob_gain']}%  "
+        f"framework_gain={row['framework_gain']}%\n"
         f"  tp={row['tp']} isl={row['isl']} osl={row['osl']} conc={row['conc']}  "
         f"duration={format_duration_pretty(row['duration_seconds'])}\n"
         f"  status={row['status']!r}  claw_session_id={row.get('claw_session_id')!r}\n"
