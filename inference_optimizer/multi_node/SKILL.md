@@ -71,12 +71,35 @@ Typical prompt fields and where they land:
 | `TP=N`, `EP=…` | `restart-server --tp N`; `optimize --tp` / `--ep` |
 | `ISL` / `OSL` / `CONC` / `PRECISION` | `export` + `optimize --isl` / `--osl` / `--conc` / `--precision` |
 | `KERNEL_OPT_*` / `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX` | `export` before `install.sh` / `optimize` |
+| prompt `env:` block lines (e.g. `PATH_TO_AINIC_TAR_PACKAGE=…`, `PATH_TO_BNXT_TAR_PACKAGE=…`, `NCCL_DEBUG=INFO`) | `create-rayjob --extra-env K=V` (one per line, repeatable); `optimize --rayjob-extra-env K=V` (same shape). Skip `*_API_KEY` / `*_BASE_URL` (credential fanout auto-injects) and `RAY_JOB_ENTRYPOINT` (reserved). CLI owns no defaults — values come verbatim from the prompt. **Do NOT forward sandbox-side tool source fields** (`OOB_SRC` / `INFERENCEX_PATH` / `TRACELENS_ROOT`) here — they are sandbox-only; see `inference_optimizer/SKILL.md` "Tool source fields". |
 | MoE JIT cold-start (often omitted in prompt) | `export HYPERLOOM_MN_POLL_TIMEOUT_S=1800` and `HYPERLOOM_MN_HEALTH_WAIT_S=1800` — see below |
 
 If the prompt already contains the first rows, **do not** claim the
 “environment block is incomplete”; wire them into `setsid nohup optimize`
 and `multi_node` subcommands. Only add exports the prompt did not cover
 (chiefly `HYPERLOOM_MN_*` for 30 min polls on large MoE RayJobs).
+
+**DO NOT `--rayjob-extra-env` these (sandbox-only):**
+
+These are consumed by `install.sh` / `inference_optimizer optimize` /
+`_workload_envs.py` running inside the **sandbox**; nothing inside the
+RayJob pod reads them. Forwarding them pollutes the pod env and risks
+shadowing real values.
+
+- `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX`, `KERNEL_OPT_*`
+- `NODE_TLS_REJECT_UNAUTHORIZED`
+- `RANDOM_RANGE_RATIO`, `RUN_EVAL`
+- `MODEL_PATH`, `FRAMEWORK`, `TP`, `EP`, `ISL`, `OSL`, `CONC`, `PRECISION`,
+  `TARGET_GAIN`, `MAX_HOURS`, `GPU_TYPE`, `NODES` (already passed as
+  `optimize` CLI flags)
+- `HYPERLOOM_MN_POLL_TIMEOUT_S`, `HYPERLOOM_MN_HEALTH_WAIT_S` (sandbox
+  CLI poll budget, not a pod env)
+
+Forward to `--rayjob-extra-env` **only** the prompt `env:` block lines
+(`NCCL_DEBUG`, `PATH_TO_*` etc.). `OOB_SRC` / `INFERENCEX_PATH` /
+`TRACELENS_ROOT` are sandbox-only and **must NOT** be forwarded (the
+RayJob pod does not consume them — kernel-bench is NodeAffinity-pinned
+to the head pod and the head pod does not invoke OOB CLI).
 
 Example `optimize` tail (**example only** — map each flag from the user
 Environment block / `setup_env.sh`; do not treat literals below as defaults):
@@ -105,6 +128,7 @@ setsid nohup inference_optimizer --verbose optimize \
   --max-hours "${MAX_HOURS:?set from prompt}" \
   ${KERNEL_CLAUDE:+--kernel-claude} \
   ${CLAUDE_MODEL:+--claude-model "$CLAUDE_MODEL"} \
+  $(for kv in "${RAYJOB_EXTRA_ENV[@]:-}"; do [ -n "$kv" ] && printf -- '--rayjob-extra-env %q ' "$kv"; done) \
   > "$RUN_LOG" 2>&1 < /dev/null &
 ```
 

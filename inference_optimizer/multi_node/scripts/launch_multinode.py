@@ -63,11 +63,22 @@ _INFERENCE_PORT = 8888
 # client, so the external service URL never changes between modes.
 _PD_PREFILL_PORT = 30000
 _PD_DECODE_PORT = 30001
-# Default sglang collective port (resolution: $RAYJOB_DIST_INIT_PORT > 5000).
+# Default sglang collective port (resolution: $RAYJOB_DIST_INIT_PORT > 29500).
+# Changed from 5000 → 29500 (PyTorch's torch.distributed standard) because
+# RayJob head pod runs with `hostNetwork: true` (see amd-ray-job-template
+# ConfigMap `dnsPolicy: ClusterFirstWithHostNet`), so the port lives in
+# the host namespace. When a previous sglang launch crashes mid-init,
+# torch.distributed's TCPStore leaves an orphan LISTEN socket on the
+# host that survives pod deletion (no SO_REUSEADDR); the next RayJob
+# scheduled onto the same host inherits the EADDRINUSE and fails
+# `torch.distributed.init_process_group` -> baseline_failed cascade.
+# 29500 is the PyTorch convention and is much less likely to collide
+# with any pre-existing host-side listener. Operators can still override
+# via $RAYJOB_DIST_INIT_PORT (e.g. --rayjob-extra-env RAYJOB_DIST_INIT_PORT=29501).
 # A second port is used for the decode group to avoid collision when
-# both groups happen to land on the same node (rare but possible).
-_DEFAULT_DIST_INIT_PORT = 5000
-_PD_DECODE_DIST_INIT_PORT = 5001
+# both PD groups happen to land on the same node (rare but possible).
+_DEFAULT_DIST_INIT_PORT = 29500
+_PD_DECODE_DIST_INIT_PORT = 29501
 # sglang PD bootstrap server port (KV transfer rendezvous). Default
 # matches the sglang docs example. Override per-call via --pd-bootstrap-port.
 _PD_DEFAULT_BOOTSTRAP_PORT = 8998
