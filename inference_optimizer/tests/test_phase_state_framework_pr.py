@@ -22,6 +22,7 @@ class _State:
         baseline_tput: float | None = 1500.0,
         framework_pr_batches: list[dict[str, Any]] | None = None,
         framework_pr_phase_done: bool = False,
+        framework_pr_phase_progress: list[dict[str, Any]] | None = None,
         remaining_minutes_value: float = 9999.0,
         phase_history: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -29,6 +30,7 @@ class _State:
         self.baseline_tput = baseline_tput
         self.framework_pr_batches = framework_pr_batches or []
         self.framework_pr_phase_done = framework_pr_phase_done
+        self.framework_pr_phase_progress = framework_pr_phase_progress or []
         self._rem_min = remaining_minutes_value
         self.phase_history = phase_history or []
         # Fields read by other branches we don't exercise here.
@@ -125,6 +127,111 @@ def test_exit_normal_framework_pr_no_plateau_when_recent_batch_above_threshold()
     ]
     state = _State(framework_pr_batches=batches)
     assert phase_state.exit_normal_framework_pr(state) is None
+
+
+def test_exit_normal_framework_pr_no_plateau_when_latest_batch_undrained():
+    """Regression for P1.a — a freshly-discovered batch whose first
+    candidate has not finished must NOT count toward plateau lookback,
+    even though its ``max_gain_pct_observed_in_batch`` defaults to 0.0
+    on creation. Without the drain check, three such 0.0 entries would
+    trip plateau the moment the pump enqueues the first candidate of
+    the third batch."""
+    batches = [
+        {
+            "batch_id": "b1",
+            "max_gain_pct_observed_in_batch": 0.0,
+            "candidates": [{"id": "c1a"}, {"id": "c1b"}],
+        },
+        {
+            "batch_id": "b2",
+            "max_gain_pct_observed_in_batch": 0.0,
+            "candidates": [{"id": "c2a"}, {"id": "c2b"}],
+        },
+        {
+            "batch_id": "b3",
+            "max_gain_pct_observed_in_batch": 0.0,
+            "candidates": [{"id": "c3a"}, {"id": "c3b"}, {"id": "c3c"}],
+        },
+    ]
+    # Only b1 and b2 are fully drained; b3 has 1 of 3 processed.
+    progress = [
+        {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
+        {"batch_id": "b1", "candidate_id": "c1b", "status": "reject"},
+        {"batch_id": "b2", "candidate_id": "c2a", "status": "reject"},
+        {"batch_id": "b2", "candidate_id": "c2b", "status": "reject"},
+        {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
+    ]
+    state = _State(
+        framework_pr_batches=batches,
+        framework_pr_phase_progress=progress,
+    )
+    assert phase_state.exit_normal_framework_pr(state) is None
+
+
+def test_exit_normal_framework_pr_plateau_fires_when_all_three_batches_complete():
+    """Regression for P1.a — once every batch in the lookback window is
+    fully drained AND below the keep-gain threshold, plateau still fires
+    as it did before the drain check was added."""
+    batches = [
+        {
+            "batch_id": "b1",
+            "max_gain_pct_observed_in_batch": 0.2,
+            "candidates": [{"id": "c1a"}, {"id": "c1b"}],
+        },
+        {
+            "batch_id": "b2",
+            "max_gain_pct_observed_in_batch": 0.5,
+            "candidates": [{"id": "c2a"}, {"id": "c2b"}],
+        },
+        {
+            "batch_id": "b3",
+            "max_gain_pct_observed_in_batch": 0.7,
+            "candidates": [{"id": "c3a"}, {"id": "c3b"}],
+        },
+    ]
+    progress = [
+        {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
+        {"batch_id": "b1", "candidate_id": "c1b", "status": "reject"},
+        {"batch_id": "b2", "candidate_id": "c2a", "status": "reject"},
+        {"batch_id": "b2", "candidate_id": "c2b", "status": "reject"},
+        {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
+        {"batch_id": "b3", "candidate_id": "c3b", "status": "reject"},
+    ]
+    state = _State(
+        framework_pr_batches=batches,
+        framework_pr_phase_progress=progress,
+    )
+    out = phase_state.exit_normal_framework_pr(state)
+    assert out is not None
+    reason, ev = out
+    assert reason == "framework_pr_plateau"
+    assert ev["lookback"] == 3
+
+
+def test_exit_normal_framework_pr_force_exit_evidence_carries_pending_count():
+    """Regression for P1.a — force-exit evidence must surface
+    ``pending_candidate_count`` so operators can see how many candidates
+    were skipped by the wall-clock guard."""
+    batches = [
+        {
+            "batch_id": "b1",
+            "max_gain_pct_observed_in_batch": 0.0,
+            "candidates": [{"id": "c1a"}, {"id": "c1b"}, {"id": "c1c"}],
+        },
+    ]
+    progress = [
+        {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
+    ]
+    state = _State(
+        framework_pr_batches=batches,
+        framework_pr_phase_progress=progress,
+        remaining_minutes_value=10.0,
+    )
+    out = phase_state.exit_normal_framework_pr(state, max_hours=2.0)
+    assert out is not None
+    reason, ev = out
+    assert reason == "framework_pr_force_exit_low_budget"
+    assert ev["pending_candidate_count"] == 2
 
 
 def test_exit_normal_framework_pr_phase_done_when_signalled():

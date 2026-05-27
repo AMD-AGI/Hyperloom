@@ -1222,6 +1222,59 @@ def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     return dict(overrides) if isinstance(overrides, dict) else {}
 
 
+def _framework_pr_batch_is_complete(
+    batch: dict[str, Any],
+    progress_by_batch: dict[str, int],
+) -> bool:
+    """A FRAMEWORK_PR batch is "complete" iff every candidate it carries
+    has a matching row in ``framework_pr_phase_progress`` (any terminal
+    status — KEEP / REVERT / apply_failed / enqueue_failed / critic_denied).
+
+    Used by the plateau judge so that a freshly-discovered batch whose
+    first candidate just got enqueued cannot cause an early exit. Without
+    this guard, ``max_gain_pct_observed_in_batch`` defaults to 0.0 on
+    creation, making the brand-new batch look like another "no gain"
+    data point and tripping plateau the moment ``lookback`` such 0.0
+    entries appear in the tail.
+    """
+    candidates = batch.get("candidates") or []
+    if not isinstance(candidates, list) or not candidates:
+        return True
+    total = sum(1 for c in candidates if isinstance(c, dict))
+    if total == 0:
+        return True
+    batch_id = str(batch.get("batch_id") or "")
+    processed = int(progress_by_batch.get(batch_id, 0))
+    return processed >= total
+
+
+def _framework_pr_pending_candidate_count(state: Any) -> int:
+    """Count candidates discovered into a batch but missing a progress
+    row. Surfaced in force-exit evidence so operators see how many
+    candidates were skipped by the wall-clock guard."""
+    batches = getattr(state, "framework_pr_batches", None) or []
+    if not isinstance(batches, list) or not batches:
+        return 0
+    progress = getattr(state, "framework_pr_phase_progress", None) or []
+    progress_by_batch: dict[str, int] = {}
+    for row in progress:
+        if isinstance(row, dict):
+            bid = str(row.get("batch_id") or "")
+            progress_by_batch[bid] = progress_by_batch.get(bid, 0) + 1
+    pending = 0
+    for batch in batches:
+        if not isinstance(batch, dict):
+            continue
+        candidates = batch.get("candidates") or []
+        if not isinstance(candidates, list):
+            continue
+        total = sum(1 for c in candidates if isinstance(c, dict))
+        bid = str(batch.get("batch_id") or "")
+        done = int(progress_by_batch.get(bid, 0))
+        pending += max(0, total - done)
+    return pending
+
+
 def exit_normal_framework_pr(
     state: Any,
     *,
@@ -1241,10 +1294,18 @@ def exit_normal_framework_pr(
        drops below ``force_exit_hours_remaining_ratio * max_hours``.
        Reason: ``framework_pr_force_exit_low_budget``. Matches the
        design's "leave the rest of the session breathing room" intent.
-    1. Plateau — fires when the last ``lookback`` batches recorded in
-       ``state.framework_pr_batches`` each have
-       ``max_gain_pct_observed_in_batch < plateau_keep_gain_pct``.
-       Reason: ``framework_pr_plateau``.
+       Evidence carries ``pending_candidate_count`` so operators see how
+       much was skipped.
+    1. Plateau — fires when the last ``lookback`` **fully-processed**
+       batches in ``state.framework_pr_batches`` each have
+       ``max_gain_pct_observed_in_batch < plateau_keep_gain_pct``. A
+       batch is fully-processed when every candidate it carries has a
+       matching row in ``framework_pr_phase_progress``; in-flight or
+       newly-discovered batches do NOT count toward the lookback. This
+       prevents the case where the pump enqueues the first candidate of
+       a fresh batch, ``max_gain_pct_observed_in_batch`` is still its
+       initial 0.0, and the plateau judge mistakes that for a real "no
+       gain" data point and exits early.
     2. Normal completion — fires when the Coordinator marked the phase
        done by setting ``state.framework_pr_phase_done = True`` (no
        more candidates to enqueue / ``fa phase-discover`` returned 0).
@@ -1268,35 +1329,51 @@ def exit_normal_framework_pr(
         threshold_minutes = float(force_exit_hours_remaining_ratio) * float(max_hours) * 60.0
         if remaining_minutes < threshold_minutes:
             return "framework_pr_force_exit_low_budget", {
-                "evidence":           "force_exit",
-                "remaining_minutes":  remaining_minutes,
-                "threshold_minutes":  threshold_minutes,
-                "hours_remaining_ratio": float(force_exit_hours_remaining_ratio),
-                "max_hours":          float(max_hours),
+                "evidence":               "force_exit",
+                "remaining_minutes":      remaining_minutes,
+                "threshold_minutes":      threshold_minutes,
+                "hours_remaining_ratio":  float(force_exit_hours_remaining_ratio),
+                "max_hours":              float(max_hours),
+                "pending_candidate_count": _framework_pr_pending_candidate_count(state),
             }
 
-    # Priority 1 — plateau over the last ``lookback`` batches.
+    # Priority 1 — plateau over the last ``lookback`` fully-processed batches.
     batches = getattr(state, "framework_pr_batches", None) or []
-    if isinstance(batches, list) and len(batches) >= int(lookback) > 0:
-        tail = batches[-int(lookback):]
-        max_gains: list[float] = []
-        for entry in tail:
+    lookback_int = int(lookback)
+    if isinstance(batches, list) and lookback_int > 0 and len(batches) >= lookback_int:
+        progress = getattr(state, "framework_pr_phase_progress", None) or []
+        progress_by_batch: dict[str, int] = {}
+        for row in progress:
+            if isinstance(row, dict):
+                bid = str(row.get("batch_id") or "")
+                progress_by_batch[bid] = progress_by_batch.get(bid, 0) + 1
+        complete_tail: list[dict[str, Any]] = []
+        # Walk newest-to-oldest, take the most recent ``lookback`` *complete*
+        # batches. Skipping incomplete batches means a still-pumping batch
+        # cannot count toward (or block) plateau.
+        for entry in reversed(batches):
             if not isinstance(entry, dict):
-                max_gains.append(0.0)
                 continue
-            try:
-                max_gains.append(
-                    float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
-                )
-            except (TypeError, ValueError):
-                max_gains.append(0.0)
-        if max_gains and all(g < float(plateau_keep_gain_pct) for g in max_gains):
-            return "framework_pr_plateau", {
-                "evidence":              "plateau_judgment",
-                "lookback":              int(lookback),
-                "keep_gain_pct_threshold": float(plateau_keep_gain_pct),
-                "batch_max_gains":       max_gains,
-            }
+            if _framework_pr_batch_is_complete(entry, progress_by_batch):
+                complete_tail.append(entry)
+                if len(complete_tail) >= lookback_int:
+                    break
+        if len(complete_tail) >= lookback_int:
+            max_gains: list[float] = []
+            for entry in complete_tail:
+                try:
+                    max_gains.append(
+                        float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
+                    )
+                except (TypeError, ValueError):
+                    max_gains.append(0.0)
+            if max_gains and all(g < float(plateau_keep_gain_pct) for g in max_gains):
+                return "framework_pr_plateau", {
+                    "evidence":              "plateau_judgment",
+                    "lookback":              lookback_int,
+                    "keep_gain_pct_threshold": float(plateau_keep_gain_pct),
+                    "batch_max_gains":       list(reversed(max_gains)),
+                }
 
     # Priority 2 — Coordinator-signalled normal completion.
     if bool(getattr(state, "framework_pr_phase_done", False)):
