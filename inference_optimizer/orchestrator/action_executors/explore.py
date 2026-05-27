@@ -409,10 +409,23 @@ class ExploreExecutor:
         if explicit_timeout is not None:
             timeout_sec = int(explicit_timeout)
         else:
+            # Operator-tunable headroom. When unset (or negative), fall back
+            # to the helper's default. Negative values clamp to 0 (no
+            # headroom — hard cap collapses onto the soft kill ratio).
+            safety_margin_raw = params.get("variant_timeout_safety_margin")
+            try:
+                safety_margin = (
+                    max(0.0, float(safety_margin_raw))
+                    if safety_margin_raw is not None
+                    else DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN
+                )
+            except (TypeError, ValueError):
+                safety_margin = DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN
             timeout_sec = _compute_explore_variant_timeout(
                 baseline_runtime_sec=baseline_runtime_sec,
                 kill_ratio=overtime_kill_ratio,
                 floor_sec=int(self.variant_timeout_sec),
+                safety_margin=safety_margin,
             )
 
         # Resolve framework from materialized YAML (informational only —
