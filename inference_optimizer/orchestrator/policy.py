@@ -493,19 +493,32 @@ SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
 
 
 # Multi-node profile trace shared dirs. In multi-node runs, server pods
-# write torch traces to a wekafs path that the sandbox also mounts; that
-# path lives outside session_dir but must be referenceable by trace_dir
-# / main_trace_path / trace_input so kernel-agent input flows work. The
-# allowlist intentionally only covers prefixes mkdir'd by the sandbox
-# CLI under our namespace; arbitrary wekafs writes remain blocked.
-TRACE_PATH_ALLOWLIST: tuple[str, ...] = (
-    "/wekafs/hyperloom/profile-traces/",
-)
+# write torch traces to a shared-FS path that the sandbox also mounts;
+# that path lives outside session_dir but must be referenceable by
+# trace_dir / main_trace_path / trace_input so kernel-agent input flows
+# work. The allowlist intentionally only covers prefixes mkdir'd by the
+# sandbox CLI under our namespace; arbitrary writes remain blocked.
+#
+# Runtime-resolved (via :func:`_trace_path_allowlist`) so the allowlist
+# follows ``$USER_DATA_PATH`` instead of hard-coding a cluster mount
+# point. See :func:`inference_optimizer.paths.mn_profile_trace_root`.
+def _trace_path_allowlist() -> tuple[str, ...]:
+    """Multi-node profile trace path-prefix allowlist (runtime-resolved).
 
-# Subset of PATH_LIKE_FIELDS for which TRACE_PATH_ALLOWLIST is also
-# accepted (in addition to session_dir containment). Other path fields
-# such as workspace, output_dir, report_path remain strictly session-
-# rooted to preserve sandbox-isolation guarantees.
+    Returns the set of path prefixes (each terminated by ``/``) that
+    PolicyGate accepts for ``TRACE_PATH_LIKE_FIELDS`` values escaping
+    ``session_dir``. The trailing ``/`` is load-bearing — without it a
+    ``str.startswith`` check would match a sibling dir whose name shares
+    the prefix as a substring.
+    """
+    from ..paths import mn_profile_trace_root
+    root = str(mn_profile_trace_root()).rstrip("/") + "/"
+    return (root,)
+
+# Subset of PATH_LIKE_FIELDS for which :func:`_trace_path_allowlist`
+# is also accepted (in addition to session_dir containment). Other path
+# fields such as workspace, output_dir, report_path remain strictly
+# session-rooted to preserve sandbox-isolation guarantees.
 TRACE_PATH_LIKE_FIELDS: frozenset[str] = frozenset({
     "trace_dir",
     "main_trace_path",
@@ -2212,13 +2225,15 @@ class PolicyGate:
         return any(s.startswith(p) for p in SOURCE_FILE_ALLOWLIST)
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
-        """Match a value against TRACE_PATH_ALLOWLIST prefixes.
+        """Match a value against runtime-resolved trace path prefixes.
 
         Used only for trace-input-style fields in multi-node mode where
-        the shared profile dir lives on wekafs outside session_dir.
+        the shared profile dir lives outside session_dir (on a cluster-
+        shared filesystem anchored on ``$USER_DATA_PATH``; see
+        :func:`_trace_path_allowlist`).
         """
         s = str(value)
-        return any(s.startswith(p) for p in TRACE_PATH_ALLOWLIST)
+        return any(s.startswith(p) for p in _trace_path_allowlist())
 
     def _validate_payload_paths(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any],
@@ -2259,9 +2274,10 @@ class PolicyGate:
             if key not in PATH_LIKE_FIELDS:
                 return
             if not self._path_under_session(node):
-                # Multi-node profile traces live on a shared wekafs path
+                # Multi-node profile traces live on a shared-FS path
                 # outside session_dir by design; allow only the specific
-                # trace-input fields, only against TRACE_PATH_ALLOWLIST.
+                # trace-input fields, only against the runtime-resolved
+                # trace path allowlist (anchored on $USER_DATA_PATH).
                 if (
                     key in TRACE_PATH_LIKE_FIELDS
                     and self._path_in_trace_allowlist(node)
@@ -2274,7 +2290,7 @@ class PolicyGate:
                     hint=("emit paths verbatim from SharedState (e.g. "
                           "last_profile_trace) or under SESSION_DIR; "
                           "multi-node trace fields may also resolve under "
-                          f"{list(TRACE_PATH_ALLOWLIST)!r}"),
+                          f"{list(_trace_path_allowlist())!r}"),
                 )
 
         visit(payload, ())
@@ -2319,7 +2335,6 @@ __all__ = [
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
     "SOURCE_FILE_ALLOWLIST",
-    "TRACE_PATH_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",
 ]
