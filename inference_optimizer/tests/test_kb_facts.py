@@ -354,6 +354,152 @@ def test_drain_pending_attempts_exhausted_becomes_dead_letter(session_dir):
     )
 
 
+# ===========================================================================
+# find_recipe_with_fallback — _has_real_config + workload-shape T2 tier
+# ===========================================================================
+def test_find_recipe_recognises_hyperloom_best_config_dict_shape(session_dir):
+    """Regression: ``_has_real_config`` must recognise the nested
+    ``best_config`` dict written by ``update_recipe`` (post T2/T3
+    retirement). Previously only the flat Arbor-shape
+    ``best_config_args`` / ``best_config_envs`` was recognised, so
+    every hyperloom-written recipe was silently filtered out and the
+    fallback ladder returned ``miss`` no matter how many sessions
+    had populated KB.
+    """
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    canonical = "recipe:deepseek-r1-0528:mi300x"
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={
+                "points": [{
+                    "id": 1,
+                    "canonical_id": canonical,
+                    "kind": "recipe",
+                    "attrs": {
+                        "model":    "DeepSeek-R1-0528",
+                        "hardware": "mi300x",
+                        "best_config": {
+                            "extra_sglang_args": "--attention-backend AITER",
+                            "name": "attn-aiter",
+                        },
+                        "best_throughput": 875.0,
+                    },
+                }],
+            }),
+        )
+        point, tier, conf = client.find_recipe_with_fallback(
+            workload="DeepSeek-R1-0528",
+            hw="mi300x",
+        )
+    assert tier == "T1_exact", f"expected T1_exact, got {tier}"
+    assert conf == 0.85
+    assert point["attrs"]["best_config"]["name"] == "attn-aiter"
+
+
+def test_find_recipe_t2_same_shape_prefers_matching_precision_tp(session_dir):
+    """A KB row with same family + same hw + same precision + same tp
+    must be returned as T2_same_shape (conf=0.70), preferred over a
+    bare same-family match. Same-precision-different-tp must NOT
+    match T2 because the dual filter is strict-AND in the KB query.
+    """
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        # T1 exact lookup → empty
+        # T2 same-shape lookup (filter precision=fp8 + tp=8) → match
+        router.post("/v1/points/query").mock(side_effect=[
+            httpx.Response(200, json={"points": []}),  # T1
+            httpx.Response(200, json={
+                "points": [{
+                    "id": 11,
+                    "canonical_id": "recipe:deepseek-v3:mi300x",
+                    "kind": "recipe",
+                    "attrs": {
+                        "model":     "DeepSeek-V3",
+                        "hardware":  "mi300x",
+                        "precision": "fp8",
+                        "tp":        8,
+                        "best_config": {"extra_sglang_args": "--xxx"},
+                    },
+                    "confidence": 0.9,
+                }],
+            }),
+        ])
+        point, tier, conf = client.find_recipe_with_fallback(
+            workload="DeepSeek-R1-0528",
+            hw="mi300x",
+            precision="fp8",
+            tp=8,
+        )
+    assert tier == "T2_same_shape"
+    assert conf == 0.70
+    assert point["canonical_id"] == "recipe:deepseek-v3:mi300x"
+
+
+def test_find_recipe_falls_through_to_t3_when_shape_misses(session_dir):
+    """When the workload-shape T2 query returns nothing, the ladder
+    must fall through to T3 same-family."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(side_effect=[
+            httpx.Response(200, json={"points": []}),  # T1 miss
+            httpx.Response(200, json={"points": []}),  # T2 miss
+            httpx.Response(200, json={
+                "points": [{
+                    "id": 22,
+                    "canonical_id": "recipe:deepseek-v3:mi300x",
+                    "kind": "recipe",
+                    "attrs": {
+                        "model":    "DeepSeek-V3",
+                        "hardware": "mi300x",
+                        "best_config": {"extra_sglang_args": "--y"},
+                    },
+                    "confidence": 0.5,
+                }],
+            }),  # T3 hit
+        ])
+        _point, tier, conf = client.find_recipe_with_fallback(
+            workload="DeepSeek-R1",
+            hw="mi300x",
+            precision="bf16",
+            tp=4,
+        )
+    assert tier == "T3_same_family"
+    assert conf == 0.55
+
+
+def test_update_recipe_with_extra_workload_attrs_lands_them_flat(session_dir):
+    """The workload-shape tags coordinator hoists into ``extra_attrs``
+    must land as top-level recipe attrs (so the KB ``attrs_filter``
+    can match them), NOT nested under a ``workload`` sub-dict."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
+            }),
+        )
+        client.update_recipe(
+            model="DeepSeek-R1",
+            hardware="MI300X",
+            best_config={"extra_sglang_args": "--x"},
+            extra_attrs={
+                "precision":         "fp8",
+                "tp":                8,
+                "isl":               1024,
+                "framework_version": "0.5.11",
+            },
+        )
+    body = json.loads(route.calls.last.request.content)
+    attrs = body["attrs"]
+    assert attrs["precision"] == "fp8"
+    assert attrs["tp"] == 8
+    assert attrs["isl"] == 1024
+    assert attrs["framework_version"] == "0.5.11"
+    # And the canonical_id is still keyed by (model, hardware) only —
+    # workload-shape tags are searchable but NOT part of identity.
+    assert body["canonical_id"] == "recipe:deepseek-r1:mi300x"
+
+
 def test_propose_edge_drain_replays_to_edge_endpoint(session_dir):
     """End-to-end fallback contract: when ``propose_edge`` sync failed
     and the row was enqueued, a later :meth:`drain_pending` must
