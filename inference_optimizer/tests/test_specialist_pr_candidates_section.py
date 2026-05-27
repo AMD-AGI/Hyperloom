@@ -125,7 +125,7 @@ def test_build_specialist_prompts_inserts_pr_candidates_after_pr_feed():
 @dataclass
 class _State:
     framework: str = "sglang"
-    framework_agent_enabled: bool = True
+    framework_phase_enabled: bool = True
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     gpu_type: str = ""
     tp: int = 0
@@ -150,127 +150,10 @@ def _make_coord(tmp_path: Path, *, state: _State) -> Coordinator:
     return c
 
 
-@pytest.mark.asyncio
-async def test_warm_calls_fetch_pr_candidates_for_framework_pr_scout(
-    tmp_path, monkeypatch,
-):
-    """When ``sub_kind=framework_pr_scout`` and
-    ``framework_agent_enabled=True``, the warmer calls
-    ``fetch_pr_candidates`` and stamps the result onto
-    ``params['pr_candidates']``."""
-    captured: dict[str, Any] = {}
-
-    async def fake_fetch(*, gap_description, framework, session_dir, **_kw):
-        captured["gap_description"] = gap_description
-        captured["framework"] = framework
-        captured["session_dir"] = session_dir
-        return [
-            {
-                "repo": "sgl-project/sglang",
-                "pr_number": 1,
-                "ref": "PR:1",
-                "title": "fake",
-                "summary": "",
-                "score": 0.1,
-                "diff_url": "",
-            },
-        ]
-
-    monkeypatch.setattr(
-        "inference_optimizer.orchestrator.framework_agent_client.fetch_pr_candidates",
-        fake_fetch,
-    )
-
-    coord = _make_coord(tmp_path, state=_State())
-    params: dict[str, Any] = {
-        "domain": "serving_specialist",
-        "sub_kind": "framework_pr_scout",
-        "gap_symptom": "MoE routing slow",
-        "gap_layer": "kernel",
-        "gap_canonical_id": "gap.moe.routing",
-    }
-    await coord._warm_specialist_params(params)
-
-    assert "pr_candidates" in params
-    assert len(params["pr_candidates"]) == 1
-    # gap_description = symptom + layer + canonical_id joined.
-    assert "MoE routing slow" in captured["gap_description"]
-    assert "kernel" in captured["gap_description"]
-    assert captured["framework"] == "sglang"
-
-
-@pytest.mark.asyncio
-async def test_warm_skips_pr_candidates_when_subkind_missing(
-    tmp_path, monkeypatch,
-):
-    """No ``sub_kind`` → no PR candidates pre-fetch (default
-    serving_specialist path)."""
-    called = False
-
-    async def fake_fetch(**_kw):
-        nonlocal called
-        called = True
-        return []
-
-    monkeypatch.setattr(
-        "inference_optimizer.orchestrator.framework_agent_client.fetch_pr_candidates",
-        fake_fetch,
-    )
-
-    coord = _make_coord(tmp_path, state=_State())
-    params: dict[str, Any] = {
-        "domain": "serving_specialist",
-        "gap_symptom": "x",
-    }
-    await coord._warm_specialist_params(params)
-    assert not called
-    assert "pr_candidates" not in params
-
-
-@pytest.mark.asyncio
-async def test_warm_skips_pr_candidates_when_toggle_off(tmp_path, monkeypatch):
-    """``framework_agent_enabled=False`` → no pre-fetch even with the
-    correct sub_kind."""
-    called = False
-
-    async def fake_fetch(**_kw):
-        nonlocal called
-        called = True
-        return []
-
-    monkeypatch.setattr(
-        "inference_optimizer.orchestrator.framework_agent_client.fetch_pr_candidates",
-        fake_fetch,
-    )
-
-    state = _State(framework_agent_enabled=False)
-    coord = _make_coord(tmp_path, state=state)
-    params: dict[str, Any] = {
-        "domain": "serving_specialist",
-        "sub_kind": "framework_pr_scout",
-        "gap_symptom": "x",
-    }
-    await coord._warm_specialist_params(params)
-    assert not called
-    assert "pr_candidates" not in params
-
-
-@pytest.mark.asyncio
-async def test_warm_graceful_when_pre_fetch_raises(tmp_path, monkeypatch):
-    """Exceptions from ``fetch_pr_candidates`` must not break the
-    dispatch — the warmer stamps an empty list and logs."""
-    async def boom(**_kw):
-        raise RuntimeError("simulated fa outage")
-
-    monkeypatch.setattr(
-        "inference_optimizer.orchestrator.framework_agent_client.fetch_pr_candidates",
-        boom,
-    )
-    coord = _make_coord(tmp_path, state=_State())
-    params: dict[str, Any] = {
-        "domain": "serving_specialist",
-        "sub_kind": "framework_pr_scout",
-        "gap_symptom": "x",
-    }
-    await coord._warm_specialist_params(params)
-    assert params.get("pr_candidates") == []
+# Coordinator-side ``_warm_specialist_params`` pre-fetch of PR
+# candidates was deleted when ``framework_pr_scout`` was retired in
+# favour of the standalone FRAMEWORK_PR phase. The remaining tests in
+# this file still validate the prompt-builder Section 6b rendering
+# (kept for any future call site that wants to surface PR candidates
+# in a specialist prompt, e.g. ``pr_intel_specialist``'s narrow
+# top-up dispatch).
