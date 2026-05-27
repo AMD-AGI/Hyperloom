@@ -138,6 +138,26 @@ _STEWARD_RECS: frozenset[str] = frozenset({
     "continue_explore", "advance_to_kernel", "stop_session",
 })
 
+# Actions whose output should observe the freshest ``analysis.md`` /
+# ``last_profile_trace`` snapshot. Every dispatch path
+# (``_handle_delegate`` / ``_handle_propose_action`` / the post-Critic
+# ``_materialize_approved_proposal``) consults
+# :meth:`Coordinator._auto_roofline_pending_denial` for these and defers
+# the dispatch while a Coordinator-internal roofline/profile task is
+# still in flight. The field is set by the PRELUDE bootstrap + the
+# +10% watermark crossing and cleared in
+# :meth:`Coordinator._promote_to_shared_state` once the analysis task
+# lands.
+_ROOFLINE_GATED_ACTIONS: frozenset[str] = frozenset({
+    "specialist",
+    "explore",
+    "kernel_opt",
+    "integrate",
+    "deep_kernel_analysis",
+    "operator_tuning",
+    "vendor_kernel_config",
+})
+
 
 def effective_closing_grace_sec(
     max_minutes: float | None,
@@ -556,6 +576,15 @@ class Coordinator:
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
+        # Critic-approved proposals deferred because an auto-roofline /
+        # auto-profile task was still in flight when
+        # :meth:`_materialize_approved_proposal` ran. Drained when the
+        # analysis task lands (both the ``profile`` and ``roofline``
+        # branches in :meth:`_promote_to_shared_state` call
+        # :meth:`_drain_proposals_awaiting_roofline`).
+        self._proposals_awaiting_roofline: list[
+            tuple[PendingProposal, set[str] | None]
+        ] = []
 
         # Per-agent consecutive ``BackendError`` streak. Successful turns
         # reset the counter for that agent; a streak crossing
@@ -1303,6 +1332,14 @@ class Coordinator:
             bs = str(last_bl.get("benchmark_script") or "").strip()
             if bs:
                 params["benchmark_script"] = bs
+        # The ``internal-analysis-<reason>`` key is intentionally
+        # kind-agnostic (roofline vs profile) so a mode flip across
+        # resume cannot double-enqueue for the same reason. We do NOT
+        # accept the old kind-specific spellings
+        # (``internal-roofline-*`` / ``internal-profile-*``) — sessions
+        # written by commits before this PR enqueue at most one extra
+        # analysis task on the first resume tick (no compat shim,
+        # acceptable per operator decision; see pr.md Migration notes).
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=kind,
             params=params,
@@ -1370,6 +1407,33 @@ class Coordinator:
                 "result lands."
             ),
         )
+
+    async def _drain_proposals_awaiting_roofline(self) -> None:
+        """Re-run materialise for proposals deferred by the analysis gate.
+
+        Called from :meth:`_promote_to_shared_state` once the
+        Coordinator-internal ``profile`` / ``roofline`` task clears
+        ``auto_roofline_pending_task_id``. Drains FIFO so the original
+        Critic-approval order is preserved. Each materialise re-checks
+        the gate, so if another analysis task slipped in between (rare
+        but possible) the proposal is re-queued instead of dispatched
+        before the freshest snapshot lands.
+        """
+        if not self._proposals_awaiting_roofline:
+            return
+        deferred = self._proposals_awaiting_roofline
+        self._proposals_awaiting_roofline = []
+        for pending, approved_variant_names in deferred:
+            try:
+                await self._materialize_approved_proposal(
+                    pending, approved_variant_names=approved_variant_names,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "drain_proposals_awaiting_roofline: re-materialise "
+                    "failed for proposal=%s action=%s",
+                    pending.proposal_msg_id, pending.action_name,
+                )
 
     def _record_phase_entry_evidence(self, **kvs: Any) -> None:
         """Merge ``kvs`` into the latest ``phase_history`` row's
@@ -3681,6 +3745,20 @@ class Coordinator:
                 {"kind": "proposal_pruned", "from": source, "action": action_name},
             )
             return
+        # Gate proposals on a pending auto-roofline / auto-profile task
+        # *before* paying for the Critic round-trip. This is the cheap
+        # path; ``_materialize_approved_proposal`` carries a symmetric
+        # check for the race where the watermark trips while a proposal
+        # is already in front of the Critic.
+        if action_name in _ROOFLINE_GATED_ACTIONS:
+            roofline_denied = await self._auto_roofline_pending_denial(
+                action_name=action_name,
+            )
+            if roofline_denied is not None:
+                await self._record_policy_denied(
+                    source, intent, roofline_denied, action_name=action_name,
+                )
+                return
         denied = self._sequence_denial_for_action(
             action_name,
             proposed_params=intent.payload.get("params"),
@@ -4411,6 +4489,39 @@ class Coordinator:
         dispatches only the 2 approved variants to the executor.
         ``None`` (legacy single-verdict path) keeps the full grid.
         """
+        # Safety net for the race where the watermark fires while a
+        # proposal is already in front of the Critic.
+        # ``_handle_propose_action`` carries the same check (the cheaper
+        # path); this one catches proposals the Critic approved between
+        # the watermark crossing and the dispatch tick. Defer rather
+        # than drop — the Critic already approved, so re-running the
+        # round-trip would be wasted budget.
+        if pending.action_name in _ROOFLINE_GATED_ACTIONS:
+            roofline_denied = await self._auto_roofline_pending_denial(
+                action_name=pending.action_name,
+            )
+            if roofline_denied is not None:
+                self._proposals_awaiting_roofline.append(
+                    (pending, approved_variant_names),
+                )
+                await self._record_observation(
+                    "coordinator", "observation",
+                    {
+                        "kind": "proposal_materialize_blocked",
+                        "reason": "wait_for_auto_roofline",
+                        "proposal_msg_id": pending.proposal_msg_id,
+                        "action_name": pending.action_name,
+                        "from_agent": pending.from_agent,
+                        "pending_roofline_task_id": (
+                            self.shared_state.auto_roofline_pending_task_id
+                            or ""
+                        ),
+                        "deferred_queue_depth": len(
+                            self._proposals_awaiting_roofline,
+                        ),
+                    },
+                )
+                return
         params = dict(pending.payload.get("params") or {})
         # stamp per-variant kb_edge_id into the
         # grid so the explore executor (which already reads
@@ -4667,20 +4778,11 @@ class Coordinator:
 
         # Auto-roofline gate. When the Coordinator has an in-flight
         # roofline task (PRELUDE bootstrap or 10% watermark crossing),
-        # refuse any dispatch whose output should observe the fresh
+        # Refuse any dispatch whose output should observe the fresh
         # ``analysis.md`` / ``last_profile_trace`` snapshot before it
-        # runs: specialists / explore grids and the KERNEL-owned
-        # actions. The field is cleared by ``_promote_to_shared_state``
-        # when the roofline task reaches a terminal state.
-        _ROOFLINE_GATED_ACTIONS = {
-            "specialist",
-            "explore",
-            "kernel_opt",
-            "integrate",
-            "deep_kernel_analysis",
-            "operator_tuning",
-            "vendor_kernel_config",
-        }
+        # runs. The gated action set is the module-level
+        # ``_ROOFLINE_GATED_ACTIONS`` so propose_action / materialize
+        # paths gate against the exact same names.
         if action_name in _ROOFLINE_GATED_ACTIONS:
             denied = await self._auto_roofline_pending_denial(
                 action_name=action_name,
@@ -7338,6 +7440,7 @@ class Coordinator:
             ):
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
+                await self._drain_proposals_awaiting_roofline()
         elif task_kind == "roofline":
             # F1-3 (Roofline-v2 / ): the
             # composite ``roofline`` action runs profile +
@@ -7435,6 +7538,7 @@ class Coordinator:
             ):
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
+                await self._drain_proposals_awaiting_roofline()
         elif task_kind == "explore":
             # v0.8 M3 + KB_gaps/Dead-A.5 (prerequisite to Gap-10) —
             # ``explore`` is the merged grid runner.
