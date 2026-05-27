@@ -638,6 +638,8 @@ class CortexKBClient:
         hw: str,
         model_class: str | None = None,
         framework: str | None = None,
+        precision: str | None = None,
+        tp: int | None = None,
     ) -> tuple[dict[str, Any], str, float]:
         """PR-A10 (Arbor-into-Hyperloom) — graceful warm-start fallback.
 
@@ -702,6 +704,24 @@ class CortexKBClient:
             don't surface empty warm-start to specialists.
             """
             attrs = (p or {}).get("attrs") or {}
+            # New hyperloom fact-write shape (post T2/T3 retirement):
+            # update_recipe writes ``best_config`` as a nested dict.
+            # Without this branch every hyperloom-written recipe would
+            # be classified as a "seed-only" record and the entire
+            # fallback ladder would silently return ``miss`` ── the
+            # warm-start surface would be dead.
+            bc = attrs.get("best_config")
+            if isinstance(bc, dict) and (
+                bc.get("extra_sglang_args")
+                or bc.get("extra_envs")
+                or bc.get("args")
+                or bc.get("envs")
+                or bc.get("name")
+            ):
+                return True
+            # Legacy Arbor shape: flat ``best_config_args`` /
+            # ``best_config_envs``. Kept so a recipe migrated from
+            # Arbor / offline ingest still counts as "real".
             if attrs.get("best_config_args") or attrs.get("best_config_envs"):
                 return True
             prov = attrs.get("_provenance") or {}
@@ -732,6 +752,32 @@ class CortexKBClient:
                 return p, "T1_exact", 0.85
         # T1 hit but empty attrs (smoke / seed record) → keep walking
         t1_seed = t1[0] if t1 else None
+
+        # ── T2: same family + same hw + same workload-shape ──────────
+        # Inserted between T1 (exact) and T3 (same-family) because a
+        # precision / TP match is dramatically more transferable than
+        # a same-family match alone — DeepSeek-R1 fp8 TP=8 and
+        # DeepSeek-R1 bf16 TP=4 share the architecture but their
+        # best_config will diverge sharply on attention backend +
+        # kv-cache-dtype + max-num-seqs.
+        if family and (precision or tp):
+            shape_filter: dict[str, Any] = {"hardware": slug_hw}
+            if precision:
+                shape_filter["precision"] = precision
+            if tp:
+                shape_filter["tp"] = int(tp)
+            cand = _query({
+                C.F_KIND:             C.KIND_RECIPE,
+                C.F_ATTRS_FILTER:     shape_filter,
+                C.F_LIMIT:            20,
+                C.F_NEIGHBOR_PREVIEW: False,
+            })
+            cand = [p for p in cand
+                    if model_family(((p.get("attrs") or {}).get("model") or "")) == family
+                    and _has_real_config(p)]
+            cand.sort(key=lambda p: float(p.get("confidence") or 0.0), reverse=True)
+            if cand:
+                return cand[0], "T2_same_shape", 0.70
 
         # ── T3: same family, same hardware ───────────────────────────
         if family:

@@ -6814,6 +6814,28 @@ class Coordinator:
             getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0
         )
         stack_fingerprint = getattr(ss, "stack_fingerprint", "") or ""
+        # Workload-shape tags (CLI / env supplied at session start).
+        # Plumbing these into recipe attrs lets future warm-start queries
+        # filter by precision / parallelism / shape and pick a *closer*
+        # historical recipe than ``same-family`` alone.
+        workload_tags: dict[str, Any] = {}
+        for src_attr, dst_key in (
+            ("precision",     "precision"),
+            ("tp",            "tp"),
+            ("conc",          "conc"),
+            ("isl",           "isl"),
+            ("osl",           "osl"),
+            ("max_model_len", "max_model_len"),
+        ):
+            v = getattr(ss, src_attr, None)
+            if v not in (None, "", 0):
+                workload_tags[dst_key] = v
+        # Framework version: lifted from stack_fingerprint when available.
+        # ``stack_fingerprint`` on SharedState is a SHA string (Coordinator
+        # writes ``state.stack_fingerprint = sha``); the per-component
+        # versions live on manifest.json. Coordinator does not read the
+        # manifest, so we leave framework_version unset here — the T0
+        # backfill (which has access to manifest via cortex_t0) writes it.
         return {
             "best_config":       best_config,
             "best_throughput":   float(current_best.get("tput", 0.0))
@@ -6822,6 +6844,7 @@ class Coordinator:
             "what_failed":       what_failed,
             "stack_fingerprint": {"sha": str(stack_fingerprint)} if stack_fingerprint else {},
             "last_profiled":     str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
+            "workload":          workload_tags,
             "sessions":          [{
                 "session_id":   str(getattr(ss, "cortex_session_id", "")
                                     or self.session_dir.name),
@@ -6873,6 +6896,12 @@ class Coordinator:
             return
         try:
             attrs = self._build_recipe_attrs_from_state()
+            # Hoist workload tags (precision / tp / conc / isl / osl / ...)
+            # into top-level recipe attrs so warm-start queries can
+            # filter on them. ``update_recipe.extra_attrs`` is shallow-
+            # merged into the propose_point body so the keys land flat
+            # on the recipe attrs, not nested under ``workload``.
+            workload_tags = attrs.get("workload") or {}
             self.cortex_kb.update_recipe(
                 model=model_name,
                 hardware=gpu_type,
@@ -6883,6 +6912,7 @@ class Coordinator:
                 stack_fingerprint=attrs["stack_fingerprint"],
                 last_profiled=attrs["last_profiled"],
                 sessions=attrs["sessions"],
+                extra_attrs=workload_tags if workload_tags else None,
                 evidence=[
                     f"log:session-{getattr(ss, 'cortex_session_id', '') or self.session_dir.name}",
                 ],
