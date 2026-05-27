@@ -592,14 +592,23 @@ _probe_framework_source_roots
 #
 # Install is ON by default to match the runtime default
 # (``SharedState.framework_phase_enabled = True``). Opt out by
-# exporting ``INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0`` before
-# install (the install-side env knob is preserved for back-compat with
-# operator scripts; the runtime side now uses the ``--no-framework``
-# CLI flag instead).
+# exporting ``INFERENCE_OPTIMIZER_NO_FRAMEWORK=1`` before install
+# (mirrors the runtime ``--no-framework`` CLI flag).
+#
+# Back-compat: the legacy ``INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0``
+# knob is still honoured for one release with a deprecation warning so
+# operator scripts don't break. Remove on the next cleanup pass.
 # ---------------------------------------------------------------------------
 ensure_framework_agent() {
-  if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-1}" = "0" ]; then
-    log "framework-agent: skipped (INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0)"
+  if [ -n "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-}" ]; then
+    warn "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED is deprecated; use INFERENCE_OPTIMIZER_NO_FRAMEWORK=1 to opt out"
+    if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED}" = "0" ]; then
+      log "framework-agent: skipped (legacy INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0)"
+      return 0
+    fi
+  fi
+  if [ "${INFERENCE_OPTIMIZER_NO_FRAMEWORK:-0}" = "1" ]; then
+    log "framework-agent: skipped (INFERENCE_OPTIMIZER_NO_FRAMEWORK=1)"
     return 0
   fi
   local fa_dir="${INFERENCE_OPTIMIZER_REPO:-$(pwd)}/framework-agent"
