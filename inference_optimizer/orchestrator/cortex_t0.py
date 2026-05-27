@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,11 +61,15 @@ class T0Result:
     """Outcome of one :func:`run_t0_anchor` invocation.
 
     ``status`` ∈ {``"ok"``, ``"resumed"``, ``"skipped_disabled"``,
-    ``"skipped_already"``}. ``skipped_disabled`` is the no-op path
-    when the client is disabled (``--degraded-kb`` / SDK without
-    Cortex); ``skipped_already`` when ``cortex_session_id`` was
-    already non-empty on entry (Coordinator's fallback no-op after
-    the cli T0 already ran).
+    ``"skipped_already"``}.
+
+    * ``skipped_disabled`` — client is disabled (``--degraded-kb``
+      / SDK without Cortex).
+    * ``skipped_already`` — ``cortex_session_id`` AND
+      ``warm_start_ts`` were both set on entry (Coordinator's
+      fallback no-op after the cli T0 already ran).
+    * ``ok`` — first anchor of this process.
+    * ``resumed`` — refreshed warm-start on a ``resume=True`` call.
     """
 
     status: str
@@ -107,11 +112,16 @@ def run_t0_anchor(
 
     * ``client.enabled is False`` → no-op, returns
       ``T0Result(status='skipped_disabled')``.
-    * ``shared_state.cortex_session_id`` already non-empty → no-op
-      (returns ``skipped_already``); we trust the prior anchor and
-      keep the existing warm_start fields. Resume callers that
-      *want* to refresh the warm_start surface should set
-      ``shared_state.cortex_session_id = ""`` before invoking us.
+    * Already-anchored short-circuit (``cortex_session_id`` AND
+      ``warm_start_ts`` both set, ``resume=False``) → no-op,
+      returns ``T0Result(status='skipped_already')``. Both
+      ``cli._bootstrap_cortex_kb`` and
+      ``Coordinator._ensure_cortex_t0_anchored`` call us in
+      sequence on a fresh launch; the second invocation hits this
+      short-circuit instead of re-issuing the 7+ KB HTTP requests.
+    * ``resume=True`` callers intentionally bypass the short-circuit
+      so a refreshed warm-start surface is fetched (the live KB may
+      have grown new recipes since the original run).
     * The KB session begin protocol was retired; this helper no
       longer fail-fasts on session creation. ``fail_fast`` is kept
       as a no-op for back-compat with cli callers.
@@ -267,9 +277,8 @@ def run_t0_anchor(
     # (multi-node path) and PP currently has no CLI surface. Read
     # both from env so a session that pinned EP via ``--ep N`` still
     # gets it stamped on the recipe anchor.
-    import os as _os
     for env_var, dst_key in (("EP", "ep"), ("PP", "pp")):
-        raw = (_os.environ.get(env_var) or "").strip()
+        raw = (os.environ.get(env_var) or "").strip()
         if not raw:
             continue
         try:
