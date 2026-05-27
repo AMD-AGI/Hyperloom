@@ -206,6 +206,13 @@ DEFAULT_HTTP_TIMEOUT_SEC:  Final[float] = 10.0
 DEFAULT_MAX_CONCURRENCY:   Final[int] = 8       # aligned with asyncpg pool
 DEFAULT_RETRY_ATTEMPTS:    Final[int] = 3
 DEFAULT_RETRY_BASE_MS:     Final[int] = 200     # 200ms × {1, 1.4, 4}
+# Maximum number of times a single NDJSON row may be re-attempted by
+# the drain loop before it is treated as permanent and moved to the
+# dead-letter counter. Protects against infinite retry loops when a
+# dependency (e.g. ``propose_point`` for an edge endpoint) never
+# becomes resolvable. ``attempts`` is incremented on every transient
+# (``transport`` / ``business:NOT_FOUND`` / ``unknown``) classification.
+MAX_FLUSH_ATTEMPTS:        Final[int] = 5
 DEFAULT_GENERATOR:         Final[str] = "hyperloom"
 SMOKE_GENERATOR:           Final[str] = "hyperloom-smoke"
 

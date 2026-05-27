@@ -175,6 +175,33 @@ def test_append_entry_dedupe_per_variant(session_dir: Path):
     assert len(j.entries) == 2
 
 
+def test_append_entry_dedupe_per_task_id(session_dir: Path):
+    """Two non-explore tasks scheduled in the same tick collide on
+    (phase, iter, kind, change, outcome) when summarize_change falls
+    back to the task kind string (e.g. two ``profile`` tasks or two
+    ``kernel_opt`` tasks). ``task_id`` must break the tie so the
+    second entry is preserved rather than silently dropped as a
+    "resume replay"."""
+    from inference_optimizer.orchestrator.optimization_journal import (
+        KIND_KERNEL_FILE,
+    )
+    j = Journal.load_or_create(
+        session_dir, session_id="s", model="m", hardware="h",
+    )
+    base_kwargs = dict(
+        phase="KERNEL", iter=5, kind=KIND_KERNEL_FILE,
+        change="kernel_opt", outcome=OUTCOME_KEEP,
+    )
+    assert j.append_entry(JournalEntry(task_id="task-1", **base_kwargs))
+    assert j.append_entry(JournalEntry(task_id="task-2", **base_kwargs))
+    assert len(j.entries) == 2
+    # Re-appending an identical (task_id) row IS treated as resume
+    # replay and skipped — the dedupe contract still holds within a
+    # single task_id.
+    assert not j.append_entry(JournalEntry(task_id="task-1", **base_kwargs))
+    assert len(j.entries) == 2
+
+
 def test_finalize_updates_only_summary_fields(session_dir: Path):
     j = Journal.load_or_create(
         session_dir, session_id="s", model="m", hardware="h",

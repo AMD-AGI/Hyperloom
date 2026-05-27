@@ -40,8 +40,6 @@ from .. import cortex_kb_constants as C_KB
 from ..cortex_kb_client import (
     CortexKBClient,
     CortexKBError,
-    attempt_canonical_id,
-    experiment_canonical_id,
 )
 from . import phase_state as _phase_state
 from .optimization_journal import (
@@ -380,42 +378,6 @@ class PendingProposal:
     payload: dict[str, Any]
     decided: bool = False
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
-    # tentative_edge_id returned by Cortex T2
-    # ``session hypothesize``.
-    # Empty when T2 failed sync and went to NDJSON; T3 then falls back
-    # to ``propose-edge + late_verified`` rather than ``verify``.
-    #
-    # Back-compat surface: when the proposal is a multi-variant
-    # ``explore`` grid, this field carries the
-    # *representative* edge_id (first variant) so the legacy T3 hook
-    # — which still verifies one edge per proposal — keeps working.
-    # The full per-variant map lives in :attr:`kb_edge_ids` below;
-    # Gap-08 will extend T3 to iterate that map.
-    kb_edge_id: str = ""
-    # The experiment canonical_id minted at T2
-    # (``exp:{sid}:{session_iter_index:04d}``). Stored on the proposal
-    # so the T3 verify path can still emit a ``propose-edge`` even when
-    # the sync hypothesize failed.
-    kb_opt_canonical: str = ""
-    # Monotonic experiment iter index assigned at T2 (mirrors
-    # ``SharedState.session_iter_index``). Per-variant grids reuse this
-    # parent iter and append ``.variant-{name}`` to the canonical_id.
-    experiment_iter_index: int = 0
-    # per-variant edge_ids minted
-    # by ``_cortex_t2_hook`` when the proposal is an ``explore``
-    # action with a non-empty ``params.grid``. Keyed by variant
-    # name; empty dict for non-grid proposals (kernel_opt / integrate
-    # / etc.). The explore executor reads each variant's
-    # ``kb_edge_id`` via :meth:`_materialize_approved_proposal`
-    # stamping, so cross-session KB queries can locate the exact
-    # variant that confirmed / refuted a hypothesis (instead of the
-    # M3 per-proposal aggregate).
-    kb_edge_ids: dict[str, str] = field(default_factory=dict)
-    # per-variant opt_canonical
-    # ids parallel to :attr:`kb_edge_ids`. Stored separately so the
-    # T3 hook can rebuild ``propose-edge`` fallbacks per variant
-    # (Gap-08) even when the synchronous T2 hypothesize failed.
-    kb_opt_canonicals: dict[str, str] = field(default_factory=dict)
     # per-variant verdicts
     # surfaced by the Critic agent's batch review (``verdict_map``).
     # Keyed by variant_name, value carries ``{verdict, rationale}``.
@@ -3852,321 +3814,10 @@ class Coordinator:
             predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
             payload=dict(intent.payload),
         )
-        # T2 anchor: mint optimization_node + hypothesize edge.
-        # Best-effort + isolated so a KB hiccup never blocks the
-        # Critic-review pipeline (Inv-6.2 + KB_design §3.13 M1 §5.2).
-        await self._cortex_t2_hook(pending)
+        # KB hypothesize/verify protocol retired — proposals enter the
+        # pending queue directly; KEEP/REVERT facts are written by
+        # ``_fact_write_hook`` after the task lands (see below).
         self.state.pending_proposals[msg.msg_id] = pending
-
-    async def _cortex_t2_hook(self, pending: PendingProposal) -> None:
-        """Mint optimization_node + hypothesize edge(s) for a propose_action.
-
-        Two paths:
-
-        * **explore + grid** (v0.8 KB_gaps/Gap-07 + KB_design §3.13 M5
-          §5 step 6): mints one optimization_node + one hypothesize
-          edge **per variant**, populating :attr:`PendingProposal.kb_edge_ids`
-          + :attr:`kb_opt_canonicals` keyed by variant name. The
-          representative variant (first one with a non-empty edge_id)
-          also lands on the legacy :attr:`kb_edge_id` /
-          :attr:`kb_opt_canonical` fields so the existing T3 hook
-          (per-proposal) keeps working until Gap-08 upgrades it.
-        * **non-grid** (kernel_opt / integrate / sweep / profile /
-          legacy backends / params): single optimization_node + single
-          hypothesize edge — identical to the legacy M1 behaviour.
-
-        Best-effort: every Cortex KB failure is downgraded to an NDJSON
-        enqueue by the client itself; partial failures within a
-        per-variant batch are logged but don't poison the other
-        variants in the same proposal.
-
-        Gap-anchor selection:
-        :meth:`_resolve_issue_canonical` consults
-        ``payload.gap_canonical_id`` and ``payload.params.gap_canonical_id``
-        before falling back to the M1 ``recipe_canonical_id``
-        anchor. Once Gap-09 lands the gaps[] ledger, the per-gap
-        canonical id will also be looked up here.
-        """
-        if self.cortex_kb is None or not self.cortex_kb.enabled:
-            return
-        sid = (self.shared_state.cortex_session_id or "").strip()
-        if not sid:
-            return
-
-        # Detect the per-variant path (v0.8 explore + grid).
-        params = pending.payload.get("params") or {}
-        grid = params.get("grid") if isinstance(params, dict) else None
-        if (
-            pending.action_name == "explore"
-            and isinstance(grid, list)
-            and grid
-        ):
-            await self._cortex_t2_hook_per_variant(pending, sid=sid, grid=grid)
-        else:
-            await self._cortex_t2_hook_single(pending, sid=sid)
-
-    async def _cortex_t2_hook_single(
-        self, pending: PendingProposal, *, sid: str,
-    ) -> None:
-        """Single optimization_node + single hypothesize edge.
-
-        v0.8 M1 path — preserved verbatim for non-grid proposals
-        (kernel_opt / integrate / sweep / profile / legacy
-        backends / params). Per-variant grid proposals route through
-        :meth:`_cortex_t2_hook_per_variant` instead.
-        """
-        iter_idx = self.shared_state.increment_session_iter_index()
-        pending.experiment_iter_index = iter_idx
-        opt_canonical = experiment_canonical_id(sid, iter_idx)
-        gap_canonical = self._resolve_issue_canonical(pending)
-        try:
-            self.cortex_kb.propose_point(
-                canonical_id=opt_canonical,
-                kind="experiment",
-                authority="HYPOTHESIZED",
-                attrs={
-                    "session_id":          sid,
-                    "iter_index":          iter_idx,
-                    "action":              pending.action_name,
-                    "from_agent":          pending.from_agent,
-                    "predicted_gain_pct":  pending.predicted_gain_pct,
-                    "proposal_msg_id":     pending.proposal_msg_id,
-                },
-                evidence=[f"log:proposal-{pending.proposal_msg_id}"],
-            )
-        except CortexKBError as exc:  # defensive (client already swallows)
-            log.warning("cortex T2 propose_point failed: %s", exc)
-        pending.kb_opt_canonical = opt_canonical
-        try:
-            outcome = self.cortex_kb.hypothesize(
-                sid=sid,
-                from_canonical=gap_canonical,
-                to_canonical=opt_canonical,
-                edge_type="hypothetical",
-                reason=str(pending.payload.get("reasoning") or "")[:512],
-                attrs={
-                    "role":   pending.from_agent,
-                    "action": pending.action_name,
-                    "proposal_msg_id": pending.proposal_msg_id,
-                    # phase provenance on every edge so
-                    # cross-session reachability queries can filter
-                    # by phase.
-                    "phase":  (self.shared_state.phase or "").upper() or "UNKNOWN",
-                },
-                evidence=[f"log:proposal-{pending.proposal_msg_id}"],
-            )
-        except CortexKBError as exc:
-            log.warning("cortex T2 hypothesize failed: %s", exc)
-            outcome = {}
-        edge_id = str(outcome.get("tentative_edge_id") or "").strip()
-        pending.kb_edge_id = edge_id
-        self._append_pending_kb_edge_row({
-            "proposal_msg_id": pending.proposal_msg_id,
-            "opt_canonical":   opt_canonical,
-            "gap_canonical":   gap_canonical,
-            "edge_id":         edge_id,
-            "action":          pending.action_name,
-            "ts":              datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        })
-
-    async def _cortex_t2_hook_per_variant(
-        self,
-        pending: PendingProposal,
-        *,
-        sid: str,
-        grid: list[Any],
-    ) -> None:
-        """Per-variant T2: one optimization_node + one hypothesize edge
-        per ``grid[i]``.
-
-        KB_design §3.13 M5 §5 step 6 / KB_gaps/Gap-07.
-        ``pending.kb_edge_ids`` / ``kb_opt_canonicals`` are populated
-        keyed by variant name. The legacy single-id fields
-        (``kb_edge_id`` / ``kb_opt_canonical``) carry the
-        *representative* variant's ids so the existing per-proposal
-        T3 hook continues to work until Gap-08 ships the per-variant
-        verify path.
-
-        Partial failures: a per-variant exception is logged and that
-        variant is skipped — other variants in the same proposal
-        still mint successfully. Variants without a ``name`` are
-        skipped (canonical id requires one).
-        """
-        gap_canonical = self._resolve_issue_canonical(pending)
-        phase = (self.shared_state.phase or "").upper() or "UNKNOWN"
-        reason = str(pending.payload.get("reasoning") or "")[:512]
-        ts_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        variant_edges: dict[str, str] = {}
-        variant_canonicals: dict[str, str] = {}
-        if pending.experiment_iter_index <= 0:
-            pending.experiment_iter_index = (
-                self.shared_state.increment_session_iter_index()
-            )
-        parent_exp_canonical = experiment_canonical_id(
-            sid, pending.experiment_iter_index,
-        )
-        # Anchor the registered ``experiment`` parent once (idempotent).
-        # Variants below pin to it via ``.variant-{name}`` canonical
-        # suffix on the unregistered ``optimization_node`` kind.
-        try:
-            self.cortex_kb.propose_point(
-                canonical_id=parent_exp_canonical,
-                kind="experiment",
-                authority="HYPOTHESIZED",
-                attrs={
-                    "session_id":         sid,
-                    "iter_index":         pending.experiment_iter_index,
-                    "action":             pending.action_name,
-                    "from_agent":         pending.from_agent,
-                    "predicted_gain_pct": pending.predicted_gain_pct,
-                    "proposal_msg_id":    pending.proposal_msg_id,
-                    "phase":              phase,
-                    "variants":           len(grid),
-                },
-                evidence=[f"log:proposal-{pending.proposal_msg_id}"],
-            )
-        except CortexKBError as exc:
-            log.warning("propose_point parent experiment failed: %s", exc)
-        for variant in grid:
-            if not isinstance(variant, dict):
-                continue
-            variant_name = str(variant.get("name") or "").strip()
-            if not variant_name:
-                # Skip nameless variants — the executor itself rejects
-                # them downstream, so we don't even mint a phantom edge.
-                continue
-            opt_canonical = f"{parent_exp_canonical}.variant-{variant_name}"
-            # 1. optimization_node per variant.
-            try:
-                self.cortex_kb.propose_point(
-                    canonical_id=opt_canonical,
-                    kind="optimization_node",
-                    authority="HYPOTHESIZED",
-                    attrs={
-                        "action":              pending.action_name,
-                        "from_agent":          pending.from_agent,
-                        "predicted_gain_pct":  pending.predicted_gain_pct,
-                        "proposal_msg_id":     pending.proposal_msg_id,
-                        "variant_name":        variant_name,
-                        "extra_sglang_args":   str(
-                            variant.get("extra_sglang_args")
-                            or variant.get("extra_args") or ""
-                        ),
-                        "extra_envs":          dict(
-                            variant.get("extra_envs") or {}
-                        ),
-                        # ``provenance`` was stamped by explore.py's
-                        # parser (``default_grid`` / ``llm_direct`` /
-                        # ``specialist:<domain>``); record it so KB
-                        # consumers can answer "did this variant come
-                        # from a specialist?".
-                        "provenance":          str(
-                            variant.get("provenance") or "llm_direct"
-                        ),
-                    },
-                    evidence=[
-                        f"log:proposal-{pending.proposal_msg_id}",
-                        f"variant:{variant_name}",
-                    ],
-                )
-            except CortexKBError as exc:
-                log.warning(
-                    "cortex T2 propose_point failed for variant=%s: %s",
-                    variant_name, exc,
-                )
-            except Exception as exc:  # noqa: BLE001 — defensive
-                log.exception(
-                    "cortex T2 propose_point unexpected error for variant=%s: %r",
-                    variant_name, exc,
-                )
-            variant_canonicals[variant_name] = opt_canonical
-
-            # 2. hypothesize edge per variant.
-            try:
-                outcome = self.cortex_kb.hypothesize(
-                    sid=sid,
-                    from_canonical=gap_canonical,
-                    to_canonical=opt_canonical,
-                    edge_type="hypothetical",
-                    reason=reason,
-                    attrs={
-                        "role":             pending.from_agent,
-                        "action":           pending.action_name,
-                        "proposal_msg_id":  pending.proposal_msg_id,
-                        "variant_name":     variant_name,
-                        "provenance":       str(
-                            variant.get("provenance") or "llm_direct"
-                        ),
-                        "phase":            phase,
-                    },
-                    evidence=[
-                        f"log:proposal-{pending.proposal_msg_id}",
-                        f"variant:{variant_name}",
-                    ],
-                )
-            except CortexKBError as exc:
-                log.warning(
-                    "cortex T2 hypothesize failed for variant=%s: %s",
-                    variant_name, exc,
-                )
-                outcome = {}
-            except Exception as exc:  # noqa: BLE001 — defensive
-                log.exception(
-                    "cortex T2 hypothesize unexpected error for variant=%s: %r",
-                    variant_name, exc,
-                )
-                outcome = {}
-            edge_id = str(outcome.get("tentative_edge_id") or "").strip()
-            variant_edges[variant_name] = edge_id
-
-        # Stash on PendingProposal for downstream consumers
-        # (``_materialize_approved_proposal`` stamps these into the
-        # grid; Gap-08 T3 will iterate the map).
-        pending.kb_opt_canonicals = variant_canonicals
-        pending.kb_edge_ids = variant_edges
-        # Representative legacy fields — first variant with a non-empty
-        # edge_id wins. Falls back to first variant when every edge
-        # failed (legacy T3 path treats empty edge_id as "late propose-edge
-        # fallback" anyway).
-        rep_name = next(
-            (n for n, eid in variant_edges.items() if eid),
-            next(iter(variant_edges), ""),
-        )
-        if rep_name:
-            pending.kb_edge_id = variant_edges.get(rep_name, "")
-            pending.kb_opt_canonical = variant_canonicals.get(rep_name, "")
-
-        # Record a single pending_kb_edges row for back-compat with the
-        # existing T3 hook. The full per-variant maps live in the
-        # ``variant_edges`` / ``variant_canonicals`` extension fields
-        # so Gap-08 can iterate without a schema bump.
-        self._append_pending_kb_edge_row({
-            "proposal_msg_id":    pending.proposal_msg_id,
-            "opt_canonical":      pending.kb_opt_canonical,
-            "gap_canonical":      gap_canonical,
-            "edge_id":            pending.kb_edge_id,
-            "action":             pending.action_name,
-            "variant_edges":      dict(variant_edges),
-            "variant_canonicals": dict(variant_canonicals),
-            "ts":                 ts_iso,
-        })
-
-    def _append_pending_kb_edge_row(self, row: dict[str, Any]) -> None:
-        """Append to ``shared_state.pending_kb_edges`` + persist.
-
-        Centralised so both T2 paths (single + per-variant) share the
-        same capping / save-error semantics.
-        """
-        pending_edges = list(self.shared_state.pending_kb_edges or [])
-        pending_edges.append(row)
-        # Cap to a reasonable size so resume doesn't pay quadratic costs.
-        if len(pending_edges) > 256:
-            pending_edges = pending_edges[-256:]
-        self.shared_state.pending_kb_edges = pending_edges
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive; T2 must not crash.
-            log.exception("cortex T2 SharedState.save failed")
 
     def _resolve_issue_canonical(self, pending: PendingProposal) -> str:
         """Find the issue_node canonical_id this proposal addresses.
@@ -4209,28 +3860,6 @@ class Coordinator:
         workload = self.shared_state.model_name or "unknown_model"
         hw = self.shared_state.gpu_type or "unknown_gpu"
         return recipe_canonical_id(workload, hw)
-
-    def _pop_pending_kb_edge(self, proposal_msg_id: str) -> dict[str, Any] | None:
-        """Remove + return the pending edge entry for a proposal_msg_id.
-
-        Used by T3 (KEEP/REVERT) to confirm or refute the matching
-        hypothetical edge. ``None`` when the entry is missing (resume
-        from a stale state.json, or the T2 hook was skipped).
-        """
-        edges = list(self.shared_state.pending_kb_edges or [])
-        found: dict[str, Any] | None = None
-        rest: list[dict[str, Any]] = []
-        for row in edges:
-            if not isinstance(row, dict):
-                continue
-            if found is None and row.get("proposal_msg_id") == proposal_msg_id:
-                found = row
-            else:
-                rest.append(row)
-        if found is None:
-            return None
-        self.shared_state.pending_kb_edges = rest
-        return found
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
         """Route a Critic ``review_verdict`` to the per-variant or
@@ -4366,10 +3995,11 @@ class Coordinator:
            rejected; ``needs_review`` otherwise) so legacy
            consumers (resume's verdict_by_target rebuild,
            breakdown.kb_writes_summary) keep their meaning.
-        3. Fires KB ``refuted`` for every rejected variant via
-           :meth:`_cortex_t3_critic_rejected` (Gap-11 §5.4) — the
-           critic's reject is itself negative KB evidence; we
-           don't need to wait for explore to run.
+        3. (KB ``refuted`` mirror for critic-rejected variants —
+           removed alongside the T2/T3 hypothesize/verify protocol.
+           Critic rejections are still recorded in the verdict event
+           and the breakdown collector; we no longer fan them out to
+           KB.)
         4. Materialises an ``explore`` task whose ``grid`` is the
            approved subset (passes the names down via
            :meth:`_materialize_approved_proposal`).
@@ -4454,19 +4084,10 @@ class Coordinator:
             in_reply_to=pending.proposal_msg_id,
         ))
 
-        # 3. KB refuted for critic-rejected variants (Gap-11 §5.4).
-        for vname, sub_rationale in rejected:
-            try:
-                await self._cortex_t3_critic_rejected(
-                    pending=pending,
-                    variant_name=vname,
-                    rationale=sub_rationale,
-                )
-            except Exception:  # noqa: BLE001 — best-effort KB write
-                log.exception(
-                    "cortex T3 critic-rejected failed for proposal=%s "
-                    "variant=%s", pending.proposal_msg_id, vname,
-                )
+        # (Step 3 — KB ``refuted`` mirror for critic-rejected variants —
+        # removed alongside the T2/T3 hypothesize/verify protocol. The
+        # critic rejection is still recorded in the verdict event and
+        # in breakdown collectors; we no longer fan it out to KB.)
 
         # 4. Materialise only the approved subset.
         if approved_names:
@@ -4486,60 +4107,6 @@ class Coordinator:
                     "rejected_variants": sorted(n for n, _ in rejected),
                     "unknown_variants":  sorted(unknown),
                 },
-            )
-
-    async def _cortex_t3_critic_rejected(
-        self,
-        *,
-        pending: "PendingProposal",
-        variant_name: str,
-        rationale: str,
-    ) -> None:
-        """KB ``refuted`` mirror for a critic-rejected variant.
-
-        KB_gaps/Gap-11 §5.4: when the Critic rejects a variant at
-        the verdict_map stage we record an immediate ``verify``
-        with ``outcome='refuted'`` on the matching T2 edge so the
-        Cortex view distinguishes "critic refused" from "executor
-        ran and failed". Depends on Gap-07's per-variant
-        ``kb_edge_ids`` map — a noop when the proposal predates
-        the T2 hook (no edge to refute).
-        """
-        if not variant_name:
-            return
-        edge_id = (pending.kb_edge_ids or {}).get(variant_name) or ""
-        if not edge_id:
-            # No per-variant edge — Gap-07 didn't fire (e.g. --no-
-            # cortex, or T2 hook was skipped). Skip; the explore
-            # executor never runs this variant either, so there's
-            # nothing to refute.
-            return
-        cortex = getattr(self, "cortex_kb", None)
-        if cortex is None or not getattr(cortex, "enabled", False):
-            return
-        sid = (self.shared_state.cortex_session_id or "").strip()
-        if not sid:
-            return
-        try:
-            cortex.verify(
-                sid=sid,
-                edge_id=edge_id,
-                outcome="refuted",
-                evidence=[
-                    f"proposal:{pending.proposal_msg_id}",
-                    f"variant:{variant_name}",
-                    "stage:critic",
-                    (f"rationale:{rationale[:200]}" if rationale else "rationale:none"),
-                ],
-                promote_authority=None,
-                idempotency_key=(
-                    f"verify_critic_reject:{sid}:{edge_id}:{variant_name}"
-                ),
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "cortex T3 critic-rejected verify failed for variant=%s",
-                variant_name,
             )
 
     async def _materialize_approved_proposal(
@@ -4596,12 +4163,12 @@ class Coordinator:
                 )
                 return
         params = dict(pending.payload.get("params") or {})
-        # stamp per-variant kb_edge_id into the
-        # grid so the explore executor (which already reads
-        # ``variant.get("kb_edge_id")``) can carry the id through to
-        # the result rows the ledger writer + T3 hook will consume.
-        # No-op when the proposal isn't ``explore`` or when the T2
-        # hook didn't populate the map (e.g. ``--degraded-kb`` runs).
+        # Filter the grid down to the Critic-approved subset (Gap-11).
+        # The per-variant ``kb_edge_id`` stamping the T2 hook used to do
+        # here was removed alongside the hypothesize/verify protocol —
+        # variant traceability is now carried by the local journal +
+        # KB fact-write ``source_session_id`` / ``source_task_id``
+        # attrs instead.
         if (
             pending.action_name == "explore"
             and isinstance(params.get("grid"), list)
@@ -4625,12 +4192,7 @@ class Coordinator:
                     and vname not in approved_variant_names
                 ):
                     continue
-                variant_copy = dict(variant)
-                if pending.kb_edge_ids:
-                    edge_id = pending.kb_edge_ids.get(vname, "")
-                    if edge_id and not variant_copy.get("kb_edge_id"):
-                        variant_copy["kb_edge_id"] = edge_id
-                stamped_grid.append(variant_copy)
+                stamped_grid.append(dict(variant))
             params["grid"] = stamped_grid
             # Audit hint for the executor: how many variants the
             # Critic filtered. Useful for the breakdown to surface
@@ -4763,8 +4325,9 @@ class Coordinator:
         # any benchmark runs. We re-route through ``_handle_propose_action``
         # so the proposal lands in ``pending_proposals``, the Critic emits a
         # ``verdict_map``, and ``_handle_verdict_map`` materialises only the
-        # approved subset (variants the Critic rejects fire a KB ``refuted``
-        # edge via ``_cortex_t3_critic_rejected`` and never reach the executor).
+        # approved subset (variants the Critic rejects never reach the
+        # executor; the KB ``refuted`` mirror they used to fire was removed
+        # with the T2/T3 hypothesize/verify protocol).
         # The proposal path re-runs is_pruned + _sequence_denial_for_action,
         # and ``_materialize_approved_proposal`` writes the task via
         # ``tasks.create_or_return_existing`` directly, so this re-route
@@ -5581,13 +5144,10 @@ class Coordinator:
         ``specialist_done.json`` artifact, so the audit trail
         survives even if SharedState persistence hiccups.
 
-        T2 per-variant hypothesize is
-        intentionally **not** triggered here — it belongs to
-        :ref:`Gap-07` which up-shifts the existing per-proposal
-        ``_cortex_t2_hook`` to per-variant. Threading a stub call
-        site now would silently no-op (the per-variant edge map
-        ``PendingProposal.kb_edge_ids`` doesn't exist yet); the
-        Gap-07 PR will add the call.
+        The legacy T2 per-variant hypothesize used to fire here was
+        removed when the hypothesize/verify protocol was retired;
+        specialist proposals now write facts only after the executor
+        produces a KEEP/REVERT outcome.
         """
         domain = str(done_payload.get("domain") or "").strip()
         proposals = done_payload.get("proposal_set") or []
@@ -6825,11 +6385,12 @@ class Coordinator:
                 )
                 self.shared_state.stop_reason = "report_emitted"
                 self.shared_state.save(self.session_dir)
-            # T3 anchor. Always called
-            # so KEEP / REVERT each get a corresponding ingest-attempt +
-            # verify pair. Best-effort: failures are absorbed into the
-            # NDJSON queue by the client.
-            await self._cortex_t3_hook(task=task, result=result, kept=kept)
+            # Fact-write hook. Always called so KEEP / REVERT lands
+            # in the local optimization_journal + (when enabled and the
+            # threshold matches) a KB lesson / pitfall write. The
+            # legacy T2/T3 hypothesize/verify protocol was retired;
+            # see ``_fact_write_hook`` for the surviving path.
+            await self._fact_write_hook(task=task, result=result, kept=kept)
             # explore-round gap update.
             # For explore tasks with per-variant outcomes, append each
             # variant's KEEP/REVERT to the matching gap's attempts log
@@ -6878,378 +6439,90 @@ class Coordinator:
         return True
 
     # ------------------------------------------------------------------
-    # Cortex KB T3 hook (KEEP / REVERT mirror)
+    # Fact-write dispatcher (KEEP / REVERT entry point)
     # ------------------------------------------------------------------
-    def _proposal_msg_id_for_task(self, task: "Task") -> str:
-        """Recover the original ``proposal_msg_id`` from a task.
+    # Replaces the legacy ``_cortex_t3_hook`` family (deleted alongside
+    # the T2/T3 hypothesize/verify protocol). Single responsibility:
+    # route every terminal task result to the journal + KB fact-write
+    # helpers (``_record_fact_per_task`` / ``_record_fact_per_variant``).
+    # ------------------------------------------------------------------
+    def _source_session_id(self) -> str:
+        """Return the hyperloom-local session identifier used as the
+        ``source_session_id`` field on KB fact writes.
 
-        ``_materialize_approved_proposal`` writes the task with
-        ``idempotency_key=f"approved-{proposal_msg_id}"`` (DESIGN §18,
-        also referenced by the resume path). Tasks created via direct
-        delegate (no review) carry a different idempotency_key shape;
-        for those we return ``""`` and the T3 hook falls back to
-        propose-edge (``late_verified``).
+        This is NOT a KB-side session id (the KB session protocol was
+        retired). It is whatever uniquely identifies *this* optimizer
+        run for cross-session traceability: prefer the cortex T0
+        session id when present (until that field is removed too),
+        otherwise fall back to ``session_dir.name`` which is the
+        per-launch UTC timestamp directory minted by ``paths.make_session_dir``.
         """
-        key = (task.idempotency_key or "").strip()
-        if key.startswith("approved-"):
-            return key[len("approved-"):]
-        return ""
+        return (
+            str(getattr(self.shared_state, "cortex_session_id", "") or "")
+            or self.session_dir.name
+        )
 
-    async def _cortex_t3_hook(
+    async def _fact_write_hook(
         self,
         *,
         task: "Task",
         result: Any,
         kept: bool,
     ) -> None:
-        """T3 dispatcher — KB_design §3.13 M5 §5 step 7 / KB_gaps/Gap-08.
+        """Per-task fact-write entry point.
 
-        When the task is an ``explore`` action that returned a non-empty
-        ``per_variant_outcomes`` list, fan out to the per-variant path:
-        one ``ingest_attempt`` + ``verify`` per variant, keyed by the
-        per-variant ``kb_edge_id`` minted in T2 (Gap-07).
-
-        Everything else (kernel_opt, integrate, baseline, profile,
-        backends, params, sweep, ...) keeps the legacy per-task path:
-        a single attempt + single verify against the representative
-        edge_id (still recorded by T2 for back-compat).
+        Dispatches to ``_record_fact_per_task`` (legacy single-result
+        path) or ``_record_fact_per_variant`` (explore-grid path with
+        ``per_variant_outcomes``). Best-effort: never raises back into
+        the dispatcher; SharedState save failures are logged but not
+        re-raised.
         """
-        if self.cortex_kb is None or not self.cortex_kb.enabled:
-            return
-        sid = (self.shared_state.cortex_session_id or "").strip()
-        if not sid:
-            return
         result_dict = result.result if hasattr(result, "result") else (result or {})
         if not isinstance(result_dict, dict):
             result_dict = {}
+        source_session_id = self._source_session_id()
         per_variant = result_dict.get("per_variant_outcomes")
         if (
             task.kind == "explore"
             and isinstance(per_variant, list)
             and per_variant
         ):
-            await self._cortex_t3_per_variant(
-                task=task, sid=sid, outcomes=per_variant,
-            )
-        else:
-            await self._cortex_t3_per_task(
-                task=task, sid=sid, result_dict=result_dict, kept=kept,
-            )
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive; T3 must not crash.
-            log.exception("cortex T3 SharedState.save failed")
-
-    async def _cortex_t3_per_task(
-        self,
-        *,
-        task: "Task",
-        sid: str,
-        result_dict: dict[str, Any],
-        kept: bool,
-    ) -> None:
-        """Legacy per-task T3 — one attempt + one verify per task.
-
-        Used by all non-explore actions (kernel_opt / integrate /
-        baseline / profile / backends / params / sweep / ...).
-        """
-        # Mint per-task attempt_node for cross-session reachability.
-        attempt_canonical = attempt_canonical_id(sid, task.task_id)
-        outcome_label = "PASS" if kept else "FAIL"
-        if not kept:
-            status = str(result_dict.get("status", "")).lower()
-            if status in ("partial", "needs_review"):
-                outcome_label = "PARTIAL"
-        metrics: dict[str, Any] = {}
-        for key in (
-            "output_throughput", "gain_pct", "validated_gain_pct",
-            "accuracy", "ttft_mean_ms", "e2el_mean_ms", "decision",
-            "variant_name", "error_class",
-        ):
-            if key in result_dict and result_dict[key] is not None:
-                metrics[key] = result_dict[key]
-        metrics.setdefault("task_kind", task.kind)
-        metrics.setdefault("task_id",   task.task_id)
-        try:
-            self.cortex_kb.propose_point(
-                canonical_id=attempt_canonical,
-                kind="attempt_node",
-                authority="EXPERIENTIAL",
-                attrs={
-                    "task_kind": task.kind,
-                    "task_id":   task.task_id,
-                    "outcome":   outcome_label,
-                },
-                evidence=[f"log:task-{task.task_id}"],
-            )
-        except CortexKBError as exc:
-            log.warning("cortex T3 propose_point attempt failed: %s", exc)
-        proposal_msg_id = self._proposal_msg_id_for_task(task)
-        edge_entry = (
-            self._pop_pending_kb_edge(proposal_msg_id) if proposal_msg_id else None
-        )
-        edge_id = (edge_entry or {}).get("edge_id", "") if edge_entry else ""
-        plan_edge = edge_id or ""
-        try:
-            self.cortex_kb.ingest_attempt(
-                sid=sid,
-                iter_id=int(self.shared_state.tick or 0),
-                outcome=outcome_label,
-                metrics=metrics,
-                plan_edge=plan_edge,
-                evidence=[
-                    f"log:task-{task.task_id}",
-                    f"point_id:{attempt_canonical}",
-                ],
-            )
-        except CortexKBError as exc:
-            log.warning("cortex T3 ingest_attempt failed: %s", exc)
-        if edge_entry and edge_id:
-            verify_outcome = "confirmed" if kept else "refuted"
-            promote_authority = "EXPERIENTIAL" if kept else None
-            try:
-                self.cortex_kb.verify(
-                    sid=sid,
-                    edge_id=edge_id,
-                    outcome=verify_outcome,
-                    evidence=[f"log:task-{task.task_id}"],
-                    promote_authority=promote_authority,
-                )
-            except CortexKBError as exc:
-                log.warning("cortex T3 verify failed: %s", exc)
-        elif edge_entry and not edge_id:
-            # T2 fell through to NDJSON without a sync edge id. Fall back
-            # to a late propose-edge: signal the verdict via attempt
-            # outcome only; the flusher will eventually replay the
-            # hypothesize NDJSON row and Cortex will dedup by canonical_id.
-            log.info(
-                "cortex T3 late_verified (no edge_id for proposal %s)",
-                proposal_msg_id or "(no msg_id)",
-            )
-        # Fact-write surface — JSON journal + (optional) KB lesson /
-        # pitfall write. Best-effort: never raise back into the T3
-        # dispatcher (which would crash the run loop).
-        try:
-            self._record_fact_per_task(
-                task=task,
-                sid=sid,
-                result_dict=result_dict,
-                kept=kept,
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("fact-write per-task failed (task=%s)", task.task_id)
-
-    async def _cortex_t3_per_variant(
-        self,
-        *,
-        task: "Task",
-        sid: str,
-        outcomes: list[dict[str, Any]],
-    ) -> None:
-        """Per-variant T3 — one attempt + one verify per variant.
-
-        KB_design §3.13 M5 §5 step 7 / KB_gaps/Gap-08. Iterates
-        ``per_variant_outcomes`` from the explore executor result and
-        binds each entry to the matching edge_id minted by T2 (Gap-07,
-        stored under ``pending_kb_edges[].variant_edges``).
-
-        Per-variant outcome → KB encoding:
-
-        * ``KEEP``           → attempt PASS + verify ``confirmed``
-                               (promote_authority=EXPERIENTIAL).
-        * ``REVERT`` /
-          ``FAILED`` /
-          ``KEEP_UNSTABLE``  → attempt FAIL + verify ``refuted``
-                               (no promotion).
-        * ``SKIPPED_DEDUP``  → no KB activity (no edge was minted).
-
-        Partial failures: a single variant's ``verify`` or
-        ``ingest_attempt`` exception is logged but does not abort the
-        remaining variants. The pending_kb_edges row is popped once
-        up front so resume + idempotency stay clean.
-        """
-        proposal_msg_id = self._proposal_msg_id_for_task(task)
-        edge_entry = (
-            self._pop_pending_kb_edge(proposal_msg_id) if proposal_msg_id else None
-        )
-        variant_edges_map: dict[str, str] = {}
-        if isinstance(edge_entry, dict):
-            raw = edge_entry.get("variant_edges") or {}
-            if isinstance(raw, dict):
-                variant_edges_map = {
-                    str(k): str(v or "") for k, v in raw.items()
-                }
-        if not edge_entry and not variant_edges_map:
-            # T2 hook never ran (e.g. --degraded-kb during materialize) or
-            # the row was already popped on a resume — fall back to the
-            # per-variant ``kb_edge_id`` stamped on the executor's
-            # result, which mirrors the same map.
-            for vo in outcomes:
-                name = str(vo.get("variant_name") or "")
-                edge_id = str(vo.get("kb_edge_id") or "")
-                if name and edge_id:
-                    variant_edges_map[name] = edge_id
-        if not variant_edges_map and isinstance(edge_entry, dict):
-            # Last-resort: only a single edge_id was recorded (e.g. the
-            # proposal pre-dates Gap-07). Map every KEEP/REVERT variant
-            # to it so we at least confirm/refute *something* — matches
-            # the per-task fallback behaviour.
-            single = str(edge_entry.get("edge_id") or "")
-            if single:
-                for vo in outcomes:
-                    name = str(vo.get("variant_name") or "")
-                    if name and vo.get("outcome") in (
-                        "KEEP", "REVERT", "FAILED", "KEEP_UNSTABLE",
-                    ):
-                        variant_edges_map[name] = single
-
-        any_terminal = False  # at least one KEEP/REVERT processed
-        for vo in outcomes:
-            variant_name = str(vo.get("variant_name") or "")
-            outcome = str(vo.get("outcome") or "")
-            if outcome == "SKIPPED_DEDUP":
-                continue
-            if not variant_name:
-                # Nameless variants slip through if the executor mutates
-                # the list — skip rather than mint a phantom attempt.
-                continue
-            any_terminal = True
-            if outcome == "KEEP":
-                attempt_outcome = "PASS"
-                verify_outcome = "confirmed"
-                promote_authority: str | None = "EXPERIENTIAL"
-            else:  # REVERT / FAILED / KEEP_UNSTABLE
-                attempt_outcome = "FAIL"
-                verify_outcome = "refuted"
-                promote_authority = None
-
-            # 1. Per-variant attempt_node — canonical id encodes the
-            #    variant name so cross-session diffs stay precise.
-            variant_attempt_canonical = (
-                f"{attempt_canonical_id(sid, task.task_id)}.variant-{variant_name}"
-            )
-            attempt_attrs = {
-                "task_kind":    task.kind,
-                "task_id":      task.task_id,
-                "variant_name": variant_name,
-                "outcome":      attempt_outcome,
-            }
-            if vo.get("provenance"):
-                attempt_attrs["provenance"] = str(vo.get("provenance"))
-            try:
-                self.cortex_kb.propose_point(
-                    canonical_id=variant_attempt_canonical,
-                    kind="attempt_node",
-                    authority="EXPERIENTIAL",
-                    attrs=attempt_attrs,
-                    evidence=[
-                        f"log:task-{task.task_id}",
-                        f"variant:{variant_name}",
-                    ],
-                )
-            except CortexKBError as exc:
-                log.warning(
-                    "cortex T3 propose_point attempt failed for variant=%s: %s",
-                    variant_name, exc,
-                )
-
-            # 2. ingest_attempt — carries per-variant metrics + plan_edge.
-            edge_id = variant_edges_map.get(variant_name, "")
-            metrics: dict[str, Any] = {
-                "task_kind":    task.kind,
-                "task_id":      task.task_id,
-                "variant_name": variant_name,
-            }
-            raw_metrics = vo.get("metrics") or {}
-            if isinstance(raw_metrics, dict):
-                for mk, mv in raw_metrics.items():
-                    if mv is not None:
-                        metrics[mk] = mv
-            if vo.get("reason"):
-                metrics["reason"] = str(vo.get("reason"))
-            try:
-                self.cortex_kb.ingest_attempt(
-                    sid=sid,
-                    iter_id=int(self.shared_state.tick or 0),
-                    outcome=attempt_outcome,
-                    metrics=metrics,
-                    plan_edge=edge_id,
-                    evidence=[
-                        f"log:task-{task.task_id}",
-                        f"variant:{variant_name}",
-                        f"point_id:{variant_attempt_canonical}",
-                    ],
-                    idempotency_key=(
-                        f"ingest_attempt:{sid}:{task.task_id}:{variant_name}"
-                    ),
-                )
-            except CortexKBError as exc:
-                log.warning(
-                    "cortex T3 ingest_attempt failed for variant=%s: %s",
-                    variant_name, exc,
-                )
-
-            # 3. verify — only when we have a real edge_id; otherwise
-            #    fall through (T2 NDJSON replay covers it eventually).
-            if edge_id:
+            for vo in per_variant:
                 try:
-                    self.cortex_kb.verify(
-                        sid=sid,
-                        edge_id=edge_id,
-                        outcome=verify_outcome,
-                        evidence=[
-                            f"log:task-{task.task_id}",
-                            f"variant:{variant_name}",
-                        ],
-                        promote_authority=promote_authority,
-                        idempotency_key=(
-                            f"verify:{sid}:{edge_id}:{variant_name}"
-                        ),
+                    self._record_fact_per_variant(
+                        task=task,
+                        source_session_id=source_session_id,
+                        variant_outcome=vo,
                     )
-                except CortexKBError as exc:
-                    log.warning(
-                        "cortex T3 verify failed for variant=%s: %s",
-                        variant_name, exc,
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "fact-write per-variant failed (task=%s)", task.task_id,
                     )
-            else:
-                log.info(
-                    "cortex T3 late_verified (no edge_id for variant=%s"
-                    " proposal=%s)",
-                    variant_name, proposal_msg_id or "(no msg_id)",
-                )
-
-            # Fact-write per variant — journal entry + maybe lesson /
-            # pitfall. Per-variant edges (kb_edge_id) are reused as the
-            # ``cited_citation_ids`` so the lesson can cite the exact
-            # experiment that evidenced it.
+        else:
             try:
-                self._record_fact_per_variant(
+                self._record_fact_per_task(
                     task=task,
-                    sid=sid,
-                    variant_outcome=vo,
-                    variant_edge_id=edge_id,
+                    source_session_id=source_session_id,
+                    result_dict=result_dict,
+                    kept=kept,
                 )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "fact-write per-variant failed (task=%s variant=%s)",
-                    task.task_id, variant_name,
+                    "fact-write per-task failed (task=%s)", task.task_id,
                 )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive; never crash on save
+            log.exception("fact-write SharedState.save failed")
 
-        if not any_terminal and edge_entry:
-            log.info(
-                "cortex T3 per-variant: all variants skipped for proposal=%s"
-                " (round was 100%% dedup); pending edge row dropped",
-                proposal_msg_id or "(no msg_id)",
-            )
 
     # ------------------------------------------------------------------
     # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes
     # ------------------------------------------------------------------
     # The methods below own the *fact* side of the KB integration —
     # everything we know to be true at KEEP / REVERT / CLOSE time.
-    # Hypothesis writes (propose_point/hypothesize/verify) live above
-    # and run regardless of ``_fact_writes_enabled``; only this block
-    # respects the CLI gate.
+    # ``_fact_writes_enabled`` (--no-fact-writes CLI flag) gates the
+    # KB writes only; the local optimization_journal is always written.
     # ------------------------------------------------------------------
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
 
@@ -7325,11 +6598,17 @@ class Coordinator:
         self,
         *,
         task: "Task",
-        sid: str,
+        source_session_id: str,
         result_dict: dict[str, Any],
         kept: bool,
     ) -> None:
-        """Per-task fact write — one journal row + maybe one KB fact."""
+        """Per-task fact write — one journal row + maybe one KB fact.
+
+        ``source_session_id`` is the hyperloom-local session identifier
+        carried into KB attrs for traceability; it's NOT a KB-side
+        session id (the KB hypothesize/verify session protocol was
+        retired alongside this hook).
+        """
         journal = self._ensure_journal()
         gain_raw = result_dict.get("gain_pct")
         try:
@@ -7369,56 +6648,60 @@ class Coordinator:
         if self.cortex_kb is None or not self.cortex_kb.enabled:
             return
 
-        experiment_cid = experiment_canonical_id(
-            sid, int(self.shared_state.tick or 0),
-        )
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
         hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        evidence_refs = [
-            f"log:task-{task.task_id}",
-            f"point_id:{experiment_cid}",
-        ]
+        # No KB upstream point to cite — T2 experiment_node minting is
+        # gone. evidence_refs (log:task-...) still gives full traceability
+        # because ``source_session_id`` lands in attrs.
+        evidence_refs = [f"log:task-{task.task_id}"]
+        # NOTE: propose_lesson / propose_pitfall do NOT raise
+        # CortexKBError on transport / business failures — the client
+        # swallows them and enqueues NDJSON instead. The caller of
+        # this method (``_fact_write_hook``) wraps the whole thing in
+        # ``except Exception`` so an unexpected error (OSError writing
+        # the pending file, programmer bug, …) still doesn't crash the
+        # dispatcher. Wrapping each call site in ``except CortexKBError``
+        # here would be dead code.
         if kept and gain_pct is not None and gain_pct > 0:
             statement = f"{change} → +{gain_pct:.2f}% on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
             impact = f"gain_pct={gain_pct:.2f} throughput_after={throughput_after}"
-            try:
-                self.cortex_kb.propose_lesson(
-                    statement=statement,
-                    measured_impact=impact,
-                    applicable_models=models,
-                    applicable_hardware=hardware,
-                    cited_citation_ids=[experiment_cid],
-                    evidence=evidence_refs,
-                )
-            except CortexKBError as exc:
-                log.warning("propose_lesson failed: %s", exc)
+            self.cortex_kb.propose_lesson(
+                statement=statement,
+                measured_impact=impact,
+                applicable_models=models,
+                applicable_hardware=hardware,
+                source_session_id=source_session_id,
+                source_task_id=task.task_id,
+                evidence=evidence_refs,
+            )
             return
 
         severity = self._pitfall_severity_for(result_dict)
         if severity is not None:
             description = f"{change} → {severity} on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
-            try:
-                self.cortex_kb.propose_pitfall(
-                    description=description,
-                    severity=severity,
-                    applicable_models=models,
-                    applicable_hardware=hardware,
-                    cited_citation_ids=[experiment_cid],
-                    evidence=evidence_refs,
-                )
-            except CortexKBError as exc:
-                log.warning("propose_pitfall failed: %s", exc)
+            self.cortex_kb.propose_pitfall(
+                description=description,
+                severity=severity,
+                applicable_models=models,
+                applicable_hardware=hardware,
+                source_session_id=source_session_id,
+                source_task_id=task.task_id,
+                evidence=evidence_refs,
+            )
 
     def _record_fact_per_variant(
         self,
         *,
         task: "Task",
-        sid: str,
+        source_session_id: str,
         variant_outcome: dict[str, Any],
-        variant_edge_id: str,
     ) -> None:
         """Per-variant fact write — mirror of :meth:`_record_fact_per_task`
-        for the explore action's per-variant decisions."""
+        for the explore action's per-variant decisions.
+
+        ``source_session_id`` is the hyperloom-local session identifier
+        carried into KB attrs for traceability (no KB-side session).
+        """
         journal = self._ensure_journal()
         outcome_raw = str(variant_outcome.get("outcome") or "")
         if outcome_raw == "KEEP":
@@ -7476,30 +6759,28 @@ class Coordinator:
 
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
         hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        cited = [variant_edge_id] if variant_edge_id else []
         evidence_refs = [
             f"log:task-{task.task_id}",
             f"variant:{variant_name}",
         ]
-        if variant_edge_id:
-            evidence_refs.append(f"edge_id:{variant_edge_id}")
 
+        # See note in ``_record_fact_per_task``: the client swallows
+        # CortexKBError internally and falls back to NDJSON, so no
+        # per-call except-block is needed here. ``_fact_write_hook``
+        # wraps the entire helper in ``except Exception``.
         if outcome == OUTCOME_KEEP and gain_pct is not None and gain_pct > 0:
             statement = f"{change} → +{gain_pct:.2f}% on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
             impact = f"gain_pct={gain_pct:.2f} throughput_after={throughput_after}"
-            try:
-                self.cortex_kb.propose_lesson(
-                    statement=statement,
-                    measured_impact=impact,
-                    applicable_models=models,
-                    applicable_hardware=hardware,
-                    cited_citation_ids=cited,
-                    evidence=evidence_refs,
-                )
-            except CortexKBError as exc:
-                log.warning(
-                    "propose_lesson (variant=%s) failed: %s", variant_name, exc,
-                )
+            self.cortex_kb.propose_lesson(
+                statement=statement,
+                measured_impact=impact,
+                applicable_models=models,
+                applicable_hardware=hardware,
+                source_session_id=source_session_id,
+                source_task_id=task.task_id,
+                source_variant_name=variant_name,
+                evidence=evidence_refs,
+            )
             return
 
         severity = self._pitfall_severity_for({
@@ -7509,19 +6790,16 @@ class Coordinator:
         })
         if severity is not None:
             description = f"{change} → {severity} on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
-            try:
-                self.cortex_kb.propose_pitfall(
-                    description=description,
-                    severity=severity,
-                    applicable_models=models,
-                    applicable_hardware=hardware,
-                    cited_citation_ids=cited,
-                    evidence=evidence_refs,
-                )
-            except CortexKBError as exc:
-                log.warning(
-                    "propose_pitfall (variant=%s) failed: %s", variant_name, exc,
-                )
+            self.cortex_kb.propose_pitfall(
+                description=description,
+                severity=severity,
+                applicable_models=models,
+                applicable_hardware=hardware,
+                source_session_id=source_session_id,
+                source_task_id=task.task_id,
+                source_variant_name=variant_name,
+                evidence=evidence_refs,
+            )
 
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
         """Materialise the recipe-shaped view of :class:`SharedState`.
@@ -7645,8 +6923,10 @@ class Coordinator:
                     f"log:session-{getattr(ss, 'cortex_session_id', '') or self.session_dir.name}",
                 ],
             )
-        except CortexKBError as exc:
-            log.warning("update_recipe failed: %s", exc)
+        # update_recipe → propose_point internally swallows CortexKBError
+        # and enqueues NDJSON, so this catch-all only matters for true
+        # programmer bugs (OSError writing pending file, attr lookups
+        # blowing up, …). Keeping it makes CLOSE step 2.5 best-effort.
         except Exception:  # noqa: BLE001 — defensive
             log.exception("update_recipe raised unexpectedly")
 
