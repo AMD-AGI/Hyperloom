@@ -1,19 +1,29 @@
 """FrameworkPrExecutor — FRAMEWORK_PR phase per-candidate executor.
 
 Counterpart to :class:`IntegratePatchExecutor` for the FRAMEWORK_PR
-phase. The phase loop (Coordinator-side) enumerates PR candidates via
-``fa phase-discover``, fetches each one's worktree via
-``fa phase-fetch``, runs the Critic gate on a synthesised
-specialist_done envelope, and dispatches **this** executor per
+phase. The Coordinator-side pump enumerates PR candidates via
+``fa phase-discover``, gates each one through the Critic
+(:meth:`Coordinator._critic_review_framework_pr_candidate` —
+``approve`` proceeds, ``reject`` short-circuits with a
+``critic_denied`` progress row), and dispatches **this** executor per
 approved candidate to:
 
-  1. Apply the PR's unified diff to the live framework_source_roots
-     via ``git apply`` (single integration channel, mirrors
-     ``integrate_patch``).
-  2. Bench the patched server with ``run_grid([GridVariant])`` (size=1,
+  1. Fetch the unified diff: when ``params.patches`` is provided, use
+     those paths directly; otherwise ``curl candidate.diff_url`` into
+     the per-task workspace. (We do NOT shell out to ``fa phase-fetch``
+     — apply happens in the live framework_source_roots, not in an
+     fa-managed worktree.)
+  2. Snapshot the live tree's pre-apply HEAD SHA via ``git rev-parse``
+     so the per-candidate REVERT path can ``git reset --hard`` back to
+     it without disturbing prior KEEP commits (PR-327 P1.c fix).
+  3. Apply the diff via ``git apply`` (single integration channel,
+     mirrors ``integrate_patch``).
+  4. Bench the patched server with ``run_grid([GridVariant])`` (size=1,
      same throughput + accuracy gate plumbing as ``integrate_patch``).
-  3. KEEP / REVERT decision; on REVERT, reverse-apply the patch so the
-     source tree returns to the baseline state.
+  5. KEEP / REVERT decision: KEEP commits the change to the live tree
+     so the next candidate stacks on top; REVERT runs
+     ``git reset --hard <pre_apply_sha>`` followed by ``git clean -fd``
+     to restore exactly the pre-apply state.
 
 This is a Coordinator-internal action (``framework_pr_action_not_llm_proposable``
 denies any LLM-side delegate / propose_action / request). It is

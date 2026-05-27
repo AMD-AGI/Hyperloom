@@ -1201,9 +1201,13 @@ class Coordinator:
 
         Currently wired:
 
-        * ``FRAMEWORK_PR`` — start the per-candidate pump that walks
-          ``fa phase-discover`` / ``phase-fetch`` /
-          ``phase-emit-proposal`` until the exit predicate fires.
+        * ``FRAMEWORK_PR`` — start the per-candidate pump that calls
+          ``fa phase-discover`` for batches, routes each candidate
+          through the Critic gate
+          (:meth:`_critic_review_framework_pr_candidate`), and
+          enqueues a ``framework_pr`` task per approved candidate
+          until the exit predicate fires (plateau / force-exit /
+          discover retries exhausted).
         * ``EXPLORE`` — pre-warm PR feed across every specialist
           domain. The first specialist dispatch after EXPLORE entry
           then sees a populated cache rather than a cold
