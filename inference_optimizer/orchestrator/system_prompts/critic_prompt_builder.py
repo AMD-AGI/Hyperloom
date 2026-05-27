@@ -74,7 +74,53 @@ def _section_run_context(
         "",
         "Per-tick dynamic context (inbox, proposals, KB priors) arrives in",
         "the user message as a judge bundle — not in this system prompt.",
+        "",
+        "Every `judge_bundle` you receive carries a `phase` field",
+        "(PRELUDE / EXPLORE / KERNEL / SWEEP / CLOSE). Use the phase-",
+        "specific review rules in §6 to interpret each proposal in",
+        "context. Reject proposals that mutate kernel source while the",
+        "run is in EXPLORE phase (rule = 'kernel-source-in-explore').",
     ]
+
+
+def _section_phase_review_contract() -> list[str]:
+    """Static phase-aware verdict contract (v0.8 §3.3 §4.3).
+
+    Mirrors the per-phase allowed-action map in
+    ``phase_state.PHASE_ALLOWED_ACTIONS`` so the Critic verdict
+    process stays aligned with PolicyGate R1's phase_incompatible
+    rule. The dynamic *current* phase is in ``judge_bundle.phase``
+    each tick.
+    """
+    from ..phase_state import PHASE_ALLOWED_ACTIONS, PHASE_NAMES
+
+    lines: list[str] = [
+        "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
+        "",
+        "Each `judge_bundle` carries a `phase` (PRELUDE / EXPLORE /",
+        "KERNEL / SWEEP / CLOSE). Phase-allowed action sets:",
+        "",
+    ]
+    for phase in PHASE_NAMES:
+        allowed = sorted(PHASE_ALLOWED_ACTIONS.get(phase, frozenset()))
+        lines.append(f"- **{phase}**: {', '.join(allowed)}")
+    lines.extend([
+        "",
+        "If the proposal's `action_name` is NOT in the bundle's phase",
+        "allowlist, return `reject` with",
+        "`reasoning='phase_incompatible: action <name> not allowed in",
+        "<phase>'`. PolicyGate R1 will have already blocked most such",
+        "proposals before they reach you, but the verdict closes the",
+        "loop and surfaces the denial in `policy_denial_history`.",
+        "",
+        "Specialist proposal_set packets (M5+) arrive bundled as a",
+        "single `propose_action='explore'` whose `payload.params.grid`",
+        "is a K-entry list. Respond with the legacy ``verdict_map``",
+        "shape (§7) so the Coordinator can dispatch only the approved",
+        "subset; missing entries are treated as `needs_review` and",
+        "skipped.",
+    ])
+    return lines
 
 
 def _actions_by_family(actions: list[ActionMetadata]) -> list[tuple[str, list[ActionMetadata]]]:
@@ -140,7 +186,7 @@ def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
 def _section_kernel_owned_carveout() -> list[str]:
     owned = ", ".join(sorted(KERNEL_OWNED_ACTIONS))
     return [
-        "## 5. KERNEL-OWNED CARVE-OUT",
+        "## 5b. KERNEL-OWNED CARVE-OUT",
         "",
         "These actions use `request{target_agent='kernel', kind=...}`, not",
         "`propose_action`. Your job is to OK the proposal flow:",
@@ -167,6 +213,17 @@ def _section_output_protocol() -> list[str]:
         "",
         "ALLOWED_VERDICTS = approve | reject | redirect | advise | needs_review",
         "",
+        "### Single-proposal shape (v0.6, kept for non-grid actions)",
+        "",
+        "Use this for kernel_opt / integrate / report / specialist dispatch",
+        "and any other single-action proposal:",
+        "",
+        "  emit_intent{intent_type='review_verdict', payload={",
+        "    target_proposal_msg_id: '<msg_id>',",
+        "    verdict: 'approve' | 'reject' | 'redirect' | 'advise' | 'needs_review',",
+        "    reasoning: '<one-paragraph rationale>',",
+        "  }}",
+        "",
         "Required per verdict:",
         "  - target_proposal_msg_id  (from judge_bundle.proposals[*].msg_id)",
         "  - verdict",
@@ -175,6 +232,37 @@ def _section_output_protocol() -> list[str]:
         "Optional: confidence, predicted_gain_pct (required for approve/redirect),",
         "kb_evidence[], packet_evidence[], risks[], required_evidence[],",
         "alternative_action (must be a §3 name when set), persist_to_kb, notes.",
+        "",
+        "### Batch shape — per-variant verdict_map (v0.8 KB_gaps/Gap-11)",
+        "",
+        "When the proposal is a multi-variant ``explore`` grid (specialist",
+        "proposal_set or LLM-direct), return one verdict *per variant* via",
+        "``verdict_map`` so the Coordinator can dispatch only the approved",
+        "subset (not the legacy all-or-nothing 'approve' / 'reject'):",
+        "",
+        "  emit_intent{intent_type='review_verdict', payload={",
+        "    target_proposal_msg_id: '<msg_id>',",
+        "    verdict_map: {",
+        "      '<variant_name_A>': {verdict: 'approve', rationale: '<why>'},",
+        "      '<variant_name_B>': {verdict: 'reject',  rationale: 'KB shows similar tried 3x, all failed'},",
+        "      '<variant_name_C>': {verdict: 'needs_review', rationale: '<missing context>'},",
+        "    },",
+        "    reasoning: '<round-level summary>',",
+        "  }}",
+        "",
+        "Rules:",
+        "",
+        "* ``verdict`` and ``verdict_map`` are MUTUALLY EXCLUSIVE — pick one.",
+        "* Each ``verdict_map[name].verdict`` must be in ALLOWED_VERDICTS.",
+        "* Keys MUST match a variant from the proposal's original ``grid``;",
+        "  unknown names are dropped + surfaced in the policy_denial",
+        "  observation log.",
+        "* Variants you ``reject`` are immediately recorded as ``refuted``",
+        "  in Cortex KB (no need to wait for explore to run). Use this to",
+        "  prune known-bad variants pre-dispatch.",
+        "* Variants you omit are treated as ``needs_review`` — neither",
+        "  dispatched nor refuted; they appear in the unknown bucket if",
+        "  also missing from the original grid.",
     ]
 
 
@@ -225,6 +313,9 @@ def build_critic_prompt(
         ),
         _section_known_actions(actions),
         _section_default_verdict(actions),
+        # phase review contract (per-phase allowlist +
+        # specialist batch verdict shape).
+        _section_phase_review_contract(),
     ]
     if kernel_enabled:
         sections.append(_section_kernel_owned_carveout())

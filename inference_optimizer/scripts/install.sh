@@ -15,15 +15,15 @@
 #   3. InferenceX checkout: clone latest from upstream (no SHA pin yet),
 #      sets INFERENCEX_PATH for runtime
 #   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
-#      bring-up, Node/npm, TraceLens, GEAK, OOB and the auth-proxy. kernel-agent
-#      itself is the canonical owner of those — we just chain to it
-#      so users have a single entry point.
+#      bring-up, Node/npm, TraceLens, GEAK, OOB and CLI auth-file setup.
+#      kernel-agent itself is the canonical owner of those — we just
+#      chain to it so users have a single entry point.
 #
 # kernel-agent's install.sh owns Ray + ray start, TraceLens, GEAK, OOB
-# auth-proxy. inference_optimizer's install.sh owns Magpie / InferenceX
-# / the inference_optimizer Python package itself. The two are
-# composable: kernel-agent works standalone; inference_optimizer drags
-# kernel-agent in via this script.
+# CLI auth files. inference_optimizer's install.sh owns Magpie /
+# InferenceX / the inference_optimizer Python package itself. The two
+# are composable: kernel-agent works standalone; inference_optimizer
+# drags kernel-agent in via this script.
 
 set -euo pipefail
 
@@ -35,8 +35,8 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 
 # Single artefact root: everything writable defaults to $USER_DATA_PATH so
 # operators can monitor a run end-to-end by tailing one directory. Magpie
-# clone, source mirrors, generated env / GEAK config, and the pod-local
-# auth-proxy state all derive from $HYPERLOOM_RUNTIME_DIR.
+# clone, source mirrors, and generated env / GEAK config all derive from
+# $HYPERLOOM_RUNTIME_DIR.
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
@@ -64,7 +64,7 @@ Installs:
   - Magpie (cloned to $HYPERLOOM_RUNTIME_DIR/Magpie by default)
   - Detects/exports INFERENCEX_PATH
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
-    Node/npm, TraceLens, GEAK, OOB CLI, and the OOB auth-proxy.
+    Node/npm, TraceLens, GEAK, and OOB CLI auth.
   - Chains to framework-agent/scripts/install.sh for the `fa` CLI
     used by the `framework_pr` bandit arm at optimize-time.
     framework-agent is fully standalone; the chain just makes the
@@ -501,7 +501,7 @@ chain_kernel_agent() {
     warn "kernel-agent installer not found at $script"
     return 0
   fi
-  log "delegating ray + TraceLens + GEAK + OOB + auth-proxy to ${script}"
+  log "delegating ray + TraceLens + GEAK + OOB CLI auth to ${script}"
   export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_DIR HYPERLOOM_ROOT
   export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
   export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
@@ -583,6 +583,46 @@ PY
 }
 
 _probe_framework_source_roots
+
+# ---------------------------------------------------------------------------
+# F2-1 — framework-agent (PR #280 sibling skill).
+#
+# The framework-agent ships as a sibling tool that ``serving_specialist``
+# subprocesses can shell out to (``fa candidates`` + ``git fetch refs/pull/...``)
+# under the ``framework_pr_scout`` sub_kind. It owns its own python deps
+# and venv layout; we only need to invoke its installer.
+#
+# Install is ON by default to match the orchestrator-side defaults
+# (``SharedState.framework_agent_enabled = True`` and the ``--framework-
+# agent-enabled`` CLI flag's ``_env_default_on`` semantics). Opt out by
+# exporting ``INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0`` before
+# install (the runtime CLI flag obeys the same env knob with the same
+# semantics, so flipping it to ``0`` keeps install + runtime aligned).
+# ---------------------------------------------------------------------------
+ensure_framework_agent() {
+  if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-1}" = "0" ]; then
+    log "framework-agent: skipped (INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0)"
+    return 0
+  fi
+  local fa_dir="${INFERENCE_OPTIMIZER_REPO:-$(pwd)}/framework-agent"
+  if [ ! -d "$fa_dir" ]; then
+    warn "framework-agent: directory missing at $fa_dir — skipping"
+    return 0
+  fi
+  if [ ! -f "$fa_dir/scripts/install.sh" ]; then
+    warn "framework-agent: $fa_dir/scripts/install.sh missing — skipping"
+    return 0
+  fi
+  log "framework-agent: installing from $fa_dir"
+  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+    log "would run: bash '$fa_dir/scripts/install.sh'"
+    return 0
+  fi
+  bash "$fa_dir/scripts/install.sh"
+  log "framework-agent: install complete"
+}
+
+ensure_framework_agent
 
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"

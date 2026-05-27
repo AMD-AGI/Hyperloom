@@ -138,22 +138,21 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         config.llm_rca_enabled = bool(options["llm_rca_enabled"])
     if "metrics_window_s" in options:
         config.metrics_window_s = int(options["metrics_window_s"])
-    # Auto-probe knobs let hosts/tests opt out of the default
-    # auth-proxy / inference-server health probes without having to
-    # configure ``health_probe_targets`` from scratch. Useful for the
-    # heartbeat tests (which run on hosts with no inference server) and
-    # for sandbox environments that audit health out-of-band.
-    if "auto_probe_auth_proxy" in options:
-        config.auto_probe_auth_proxy = bool(options["auto_probe_auth_proxy"])
+    # Auto-probe knob lets hosts/tests opt out of the default
+    # inference-server health probe without having to configure
+    # ``health_probe_targets`` from scratch. Useful for the heartbeat
+    # tests (which run on hosts with no inference server) and for
+    # sandbox environments that audit health out-of-band.
     if "auto_probe_inference_server" in options:
         config.auto_probe_inference_server = bool(
             options["auto_probe_inference_server"]
         )
-    # Allow the host to suppress the A6 ``ray_head_dead`` probe entirely
-    # (e.g. heartbeat e2e tests running on a sandbox with no Ray head,
-    # or sandbox environments where Ray availability is monitored
-    # out-of-band). When False, LocalProbe short-circuits ``ray status``
-    # so a missing Ray daemon does not fire the ``ray_head_dead`` ladder.
+    # The ``ray status`` probe was introduced in PR #239 and runs on
+    # every tick of the agent backend. Heartbeat tests (and any host
+    # without an in-sandbox Ray head) need to disable it to keep the
+    # default heartbeat envelope clean of false-positive
+    # ``ray_head_dead`` alerts. The Coordinator wiring mirrors
+    # ``auto_probe_*`` above.
     if "ray_probe_enabled" in options:
         config.ray_probe_enabled = bool(options["ray_probe_enabled"])
     # Whole-probe disable for the J ``external_deps`` signal (TraceLens

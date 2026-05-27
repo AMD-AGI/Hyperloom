@@ -1303,8 +1303,10 @@ def _load_manifest_extras(session_dir: Path | None) -> dict[str, Any]:
     return data
 
 
-# Tier mapping reused from ``orchestrator/roofline_integration.py`` —
-# kept as a private constant so the signal layer can compute the Amdahl
+# Tier mapping originally lifted from the retired
+# ``orchestrator/roofline_integration.py`` (PMC / rocprof gathering
+# was removed alongside the ``pmc_roofline`` action). Kept as a
+# private constant so the signal layer can compute the Amdahl
 # ceiling without importing the inference_optimizer package.
 _AMDAHL_TIER_FAMILIES: dict[str, str] = {
     "T1_TRITON":      "triton",
@@ -1699,8 +1701,8 @@ async def _probe_gateway_health(
     """GET ``$OPENAI_BASE_URL/models`` with Bearer; classify the response.
 
     A 401 here (with the same auth token that critic + kernel-agent
-    use) means the upstream gateway has revoked / lost the key — the
-    auth_proxy at :4002 is healthy, so F3 won't fire; J1 fills the gap.
+    use) means the upstream gateway has revoked / lost the key — J1
+    surfaces this distinct from generic local-server unreachable.
     """
     out: dict[str, Any] = {
         "url": url, "reachable": False, "status": "error",

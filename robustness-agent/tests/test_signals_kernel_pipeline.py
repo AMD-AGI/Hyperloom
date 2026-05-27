@@ -115,31 +115,14 @@ def test_f2_silent_when_marker_missing():
 
 
 # ---------------------------------------------------------------------------
-# F3 — auth_proxy_unhealthy
+# F3 (auth_proxy_unhealthy) was retired with the auth-proxy itself; the
+# AMD primus-safe gateway now accepts ``x-api-key`` directly, so the
+# proxy is no longer needed and the matching detector was removed.
 # ---------------------------------------------------------------------------
 
-def test_f3_auth_proxy_unhealthy_fires_on_4002():
-    data = SourceData(local_server_health=[
-        {"url": "http://127.0.0.1:4002/health", "reachable": False,
-         "status": "error", "error": "connect: ConnectError"},
-    ])
-    out = evaluate_kernel_pipeline_signals(_ctx(), data)
-    sym = next(s for s in out if s.name == "auth_proxy_unhealthy")
-    assert sym.severity is SymptomSeverity.HIGH
-    assert "127.0.0.1:4002" in sym.evidence["url"]
 
-
-def test_f3_silent_when_proxy_reachable():
-    data = SourceData(local_server_health=[
-        {"url": "http://127.0.0.1:4002/health", "reachable": True,
-         "status": "ok", "status_code": 200},
-    ])
-    out = evaluate_kernel_pipeline_signals(_ctx(), data)
-    assert all(s.name != "auth_proxy_unhealthy" for s in out)
-
-
-def test_f3_skips_non_auth_proxy_unreachable():
-    """Other unreachable urls don't get the auth_proxy alias."""
+def test_unreachable_local_servers_do_not_resurrect_auth_proxy_signal():
+    """Sanity-check: no symptom named ``auth_proxy_unhealthy`` survives."""
     data = SourceData(local_server_health=[
         {"url": "http://127.0.0.1:8000/health", "reachable": False,
          "status": "error"},

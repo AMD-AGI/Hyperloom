@@ -1,4 +1,4 @@
-"""ActionRegistry — DESIGN v0.6 §16.
+"""ActionRegistry
 
 Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per
 action). The corresponding markdown body at ``actions/<name>.md`` is
@@ -75,11 +75,11 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
     "prep",        # setup / classify / target_analysis / baseline
     "measure",     # baseline (gates explore)
     "explore",     # backends / params / sweep
-    "analysis",    # profile / pmc_roofline / deep_kernel_analysis
+    "analysis",    # profile / roofline / deep_kernel_analysis
     "deep",        # kernel_opt / integrate / operator_tuning / vendor_kernel_config
     "validate",    # validate_stack — apply optimization_stack + rebench
     "finalize",    # report
-    "support",     # dream / re_explore / recover / comm_optimization / compiler_tuning
+    "support",     # recover (v0.8 KB_design §3.15 §2.3 retired the rest)
 })
 
 # N38 (May 2026) — per-action verdict policy class. Drives the
@@ -129,7 +129,6 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "backends":                "exploration",
     "sweep":                   "exploration",
     "kernel_opt":              "exploration",
-    "pmc_roofline":            "exploration",
     "compiler_tuning":         "exploration",
     "comm_optimization":       "exploration",
     "operator_tuning":         "exploration",

@@ -11,7 +11,7 @@ two-phase loop from ``critic-agent/AGENTS.md``::
     3. python -m runtime.cli commit-review  --request request.json
        --review review.json --out emit.json
 
-That gets us the full Critic feature set the v0.6 design asks for:
+That gets us the full Critic feature set the legacy design asks for:
 
 * KB priors lookup with circuit-breaker for unreachable services
 * Per-session memory + idempotent ``reviewed_msg_ids`` (no double-verdict)
@@ -45,7 +45,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from ..intent_parser import (
     IntentValidationError,
@@ -54,6 +54,13 @@ from ..intent_parser import (
 )
 from ...session_paths import manifest_path
 from .base import BackendError, BackendTurnResult
+
+
+if TYPE_CHECKING:  # pragma: no cover
+    # critic-agent's runtime package only resolves once we've added the
+    # critic_agent_root to sys.path in __post_init__. The type-only import
+    # keeps annotations honest without forcing import order at runtime.
+    from runtime.web_tools import WebToolClients, WebToolsConfig
 
 
 log = logging.getLogger(__name__)
@@ -178,6 +185,33 @@ fake that writes the desired ``judge_bundle.json`` / ``emit.json`` to
 """
 
 
+def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
+    """Re-serialize an OpenAI assistant message that issued tool_calls.
+
+    The Chat Completions API requires every ``role:"tool"`` reply to be
+    preceded by the original assistant message containing the matching
+    ``tool_calls`` array. We reconstruct the minimum dict shape rather
+    than calling ``msg.model_dump()`` so the serializer stays compatible
+    with both pydantic v1 and v2 SDK builds.
+    """
+    return {
+        "role": "assistant",
+        "content": getattr(msg, "content", None),
+        "tool_calls": [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            for tc in (getattr(msg, "tool_calls", None) or [])
+            if tc.function is not None
+        ],
+    }
+
+
 def _default_runtime_caller(call: RuntimeCall) -> None:
     """Real implementation — runs ``python -m runtime.cli <phase> ...``."""
     cmd = [
@@ -290,6 +324,14 @@ class CriticAgentBackend:
     # ``{a.name: a.verdict_class for a in ActionRegistry().all()}``.
     action_verdict_policy: dict[str, str] = field(default_factory=dict)
     name: str = "critic-agent"
+    # ── #170 (May 2026) — optional web tools (web_search / web_fetch) ──
+    # When ``web_tools_config`` is None, configuration is read from env via
+    # ``WebToolsConfig.from_env()`` during ``__post_init__``. When
+    # ``web_tool_clients_factory`` is provided, tests can inject pre-built
+    # clients (with mock providers / mock httpx transports) instead of
+    # going through the default ``build_clients`` path.
+    web_tools_config: "WebToolsConfig | None" = None
+    web_tool_clients_factory: Callable[["WebToolsConfig"], "WebToolClients"] | None = None
 
     # Runtime state — populated in __post_init__ and mutated turn-over-turn.
     # NOTE: ``_runtime_caller`` is intentionally NOT declared as a dataclass
@@ -304,6 +346,11 @@ class CriticAgentBackend:
     _static_context: dict[str, Any] = field(
         default_factory=dict, init=False, repr=False,
     )
+    _web_tool_clients: Any = field(default=None, init=False, repr=False)
+    _web_tool_schemas: list[dict[str, Any]] = field(
+        default_factory=list, init=False, repr=False,
+    )
+    _web_tool_max_turns: int = field(default=0, init=False, repr=False)
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -315,6 +362,16 @@ class CriticAgentBackend:
                 f"{self.critic_agent_root!s} — set CRITIC_AGENT_ROOT or "
                 f"check the install"
             )
+        # critic-agent ships its runtime as a top-level ``runtime`` package
+        # that ``pytest.ini`` exposes via ``pythonpath = .``. The same
+        # in-process import is needed for #170's web-tools (web_search /
+        # web_fetch). Inserting once at the front so future imports of
+        # ``runtime.web_tools`` resolve against the configured critic-agent
+        # checkout — and so this never silently picks up a stale install
+        # elsewhere on the path.
+        critic_root_str = str(self.critic_agent_root)
+        if critic_root_str not in sys.path:
+            sys.path.insert(0, critic_root_str)
         if self.kb_mode not in ("inmemory", "live"):
             raise BackendError(
                 f"CriticAgentBackend: kb_mode={self.kb_mode!r} not in "
@@ -375,6 +432,105 @@ class CriticAgentBackend:
             "explicit" if self.static_context is not None else "manifest",
             sorted(self._static_context.keys()),
         )
+
+        # ── #170 — initialize web tools (no-op by default) ─────────────
+        self._init_web_tools()
+
+    def _init_web_tools(self) -> None:
+        """Resolve :class:`WebToolsConfig` + build clients + freeze schemas.
+
+        Failure during web-tools setup is logged but never raises: the
+        critic must keep running even if Tavily/Serper are unreachable.
+        ``_web_tool_clients`` stays None and ``_web_tool_schemas`` stays
+        empty so the reasoning loop transparently falls back to a single
+        no-tool ``chat.completions.create`` call.
+        """
+        # PEP 420 makes ``runtime/`` a namespace package as soon as any
+        # directory called ``runtime`` shows up on ``sys.path`` — even
+        # when it lacks ``__init__.py``. If a prior test (or another
+        # CriticAgentBackend instance) inserted a *different*
+        # critic_agent_root first, Python caches that namespace and
+        # ``from runtime.web_tools import ...`` looks only inside the
+        # stale path. Drop the cached entries when they don't cover our
+        # configured root so the import below resolves freshly.
+        self._evict_stale_runtime_modules()
+        try:
+            from runtime.web_tools import (
+                WebToolsConfig as _Cfg,
+                build_clients as _build_clients,
+                build_tool_schemas as _build_schemas,
+            )
+        except ImportError as exc:
+            log.warning(
+                "critic_agent_backend: runtime.web_tools not importable from "
+                "%s (%s); web tools disabled",
+                self.critic_agent_root, exc,
+            )
+            return
+
+        cfg = self.web_tools_config or _Cfg.from_env()
+        if not cfg.critic_web_tools_enabled:
+            log.info("critic_agent_backend: web tools disabled by config")
+            return
+
+        try:
+            clients = (
+                self.web_tool_clients_factory(cfg)
+                if self.web_tool_clients_factory is not None
+                else _build_clients(cfg)
+            )
+        except Exception as exc:  # noqa: BLE001 — never let setup kill critic
+            log.warning(
+                "critic_agent_backend: failed to construct web tool clients "
+                "(%s); web tools disabled", exc,
+            )
+            return
+
+        schemas = _build_schemas(cfg)
+        available_names: set[str] = set()
+        if clients.search is not None:
+            available_names.add("web_search")
+        if clients.fetch is not None:
+            available_names.add("web_fetch")
+        schemas = [
+            s for s in schemas
+            if s.get("function", {}).get("name") in available_names
+        ]
+        if not schemas or (clients.search is None and clients.fetch is None):
+            log.info(
+                "critic_agent_backend: web tools enabled by config but no "
+                "usable client/schema; falling back to no-tool reasoning",
+            )
+            return
+
+        self._web_tool_clients = clients
+        self._web_tool_schemas = schemas
+        self._web_tool_max_turns = cfg.critic_web_max_tool_turns
+        log.info(
+            "critic_agent_backend: web tools enabled tools=%s max_turns=%d",
+            [s["function"]["name"] for s in schemas],
+            self._web_tool_max_turns,
+        )
+
+    def _evict_stale_runtime_modules(self) -> None:
+        """Drop cached ``runtime`` / ``runtime.*`` modules that point
+        away from this backend's ``critic_agent_root``.
+
+        See ``_init_web_tools`` for why this exists. No-op when the
+        cached ``runtime.__path__`` already covers our root.
+        """
+        runtime_mod = sys.modules.get("runtime")
+        if runtime_mod is None:
+            return
+        expected = (self.critic_agent_root / "runtime").resolve()
+        try:
+            cached_paths = [Path(p).resolve() for p in (getattr(runtime_mod, "__path__", []) or [])]
+        except (OSError, ValueError):
+            cached_paths = []
+        if expected in cached_paths:
+            return
+        for key in [k for k in sys.modules if k == "runtime" or k.startswith("runtime.")]:
+            sys.modules.pop(key, None)
 
     # ------------------------------------------------------------------
     # Public API — Backend.run
@@ -728,18 +884,7 @@ class CriticAgentBackend:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_prompt})
 
-        try:
-            resp = await self._client.chat.completions.create(
-                model=self.codex_model,
-                messages=messages,
-                max_completion_tokens=CRITIC_AGENT_MAX_COMPLETION_TOKENS,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise BackendError(f"Codex API call failed (critic-agent reasoning): {exc!r}") from exc
-
-        choice = resp.choices[0]
-        text = choice.message.content or ""
-        finish = getattr(choice, "finish_reason", None)
+        text, finish = await self._run_reasoning_loop(messages)
 
         review = _extract_review_json(text)
         if review is None:
@@ -752,6 +897,102 @@ class CriticAgentBackend:
                 len(text), finish,
             )
         return review, text, finish
+
+    async def _run_reasoning_loop(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[str, str | None]:
+        """Run the Codex chat-completions loop, optionally with web tools.
+
+        When ``self._web_tool_schemas`` is empty the call is a single
+        no-tool round (the original critic-agent behaviour). Otherwise
+        we expose web_search / web_fetch and let the model interleave
+        tool calls up to ``self._web_tool_max_turns`` times before forcing
+        a final text-only response with ``tool_choice='none'``.
+
+        Returns ``(text, finish_reason)`` of the final assistant message.
+        Never raises for tool-execution failures — the failing tool call
+        is reported back to the model as a synthetic ``tool`` message so
+        it can react (mirrors Primus-Claw's behaviour).
+        """
+        tools = self._web_tool_schemas
+        max_turns = self._web_tool_max_turns if tools else 0
+
+        for turn in range(max_turns + 1):
+            kwargs: dict[str, Any] = {
+                "model": self.codex_model,
+                "messages": messages,
+                "max_completion_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+            }
+            if tools and turn < max_turns:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+
+            try:
+                resp = await self._client.chat.completions.create(**kwargs)
+            except Exception as exc:  # noqa: BLE001
+                raise BackendError(
+                    f"Codex API call failed (critic-agent reasoning): {exc!r}",
+                ) from exc
+
+            choice = resp.choices[0]
+            msg = choice.message
+            finish = getattr(choice, "finish_reason", None)
+            tool_calls = getattr(msg, "tool_calls", None) or []
+
+            if not tool_calls:
+                return msg.content or "", finish
+
+            log.info(
+                "critic_agent_backend tool-call turn=%d count=%d tools=%s",
+                turn, len(tool_calls),
+                [tc.function.name for tc in tool_calls if tc.function],
+            )
+            messages.append(_assistant_message_with_tool_calls(msg))
+            for tc in tool_calls:
+                tool_result = await self._execute_tool_call(tc)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tool_result,
+                })
+
+        # Exhausted max_turns mid-tool-use: force one final no-tool reply
+        # so the model emits the review JSON instead of looping forever.
+        try:
+            resp = await self._client.chat.completions.create(
+                model=self.codex_model,
+                messages=messages,
+                max_completion_tokens=CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(
+                f"Codex API call failed (critic-agent reasoning final turn): {exc!r}",
+            ) from exc
+        final = resp.choices[0]
+        return final.message.content or "", getattr(final, "finish_reason", None)
+
+    async def _execute_tool_call(self, tool_call: Any) -> str:
+        """Dispatch one OpenAI tool_call to the configured web client."""
+        fn = getattr(tool_call, "function", None)
+        name = getattr(fn, "name", "") if fn else ""
+        raw_args = getattr(fn, "arguments", "") if fn else ""
+        try:
+            args = json.loads(raw_args) if raw_args else {}
+        except json.JSONDecodeError as exc:
+            return f"Error: tool arguments are not valid JSON: {exc}"
+        if not isinstance(args, dict):
+            return "Error: tool arguments must be a JSON object"
+
+        clients = self._web_tool_clients
+        if clients is None:
+            return f"Error: tool {name!r} is not available (web tools disabled)"
+
+        if name == "web_search" and clients.search is not None:
+            return await asyncio.to_thread(clients.search.execute, args)
+        if name == "web_fetch" and clients.fetch is not None:
+            return await asyncio.to_thread(clients.fetch.execute, args)
+        return f"Error: unknown or disabled tool {name!r}"
 
     def _load_skill_preamble(self) -> str:
         if self._skill_preamble is not None:
@@ -775,6 +1016,7 @@ __all__ = [
     "CriticAgentBackend",
     "RuntimeCall",
     "RuntimeCaller",
+    "_assistant_message_with_tool_calls",
     "_default_runtime_caller",
     "_extract_review_json",
 ]
