@@ -47,7 +47,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 # ===========================================================================
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
-        "PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE",
+        "PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE",
     )
     # phase_index strictly increases.
     for i, name in enumerate(phase_state.PHASE_NAMES):
@@ -432,6 +432,11 @@ async def test_coordinator_advances_to_explore_when_baseline_present(
 ):
     c = coordinator_with_mocks
     try:
+        # Skip the FRAMEWORK_PR phase so the legacy PRELUDE→EXPLORE
+        # contract is what this test exercises (the FRAMEWORK_PR
+        # transition is covered separately in
+        # ``test_phase_state_framework_pr.py``).
+        c.shared_state.framework_phase_enabled = False
         # Simulate baseline KEEP without running the executor: write the
         # SharedState event that triggers the prelude_done condition.
         c.shared_state.baseline_tput = 1500.0
@@ -454,6 +459,7 @@ async def test_coordinator_phase_idempotent_within_same_tick(
 ):
     c = coordinator_with_mocks
     try:
+        c.shared_state.framework_phase_enabled = False
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
