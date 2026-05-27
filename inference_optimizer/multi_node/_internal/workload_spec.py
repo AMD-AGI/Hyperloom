@@ -43,7 +43,12 @@ Decisions baked in here that the caller cannot override:
   ``--extra-env`` when triaging. ``RAY_JOB_ENTRYPOINT`` is then set to
   base64(``tail -f /dev/null``) for the **KubeRay submitter**
   (``updateRayJob`` / ``spec.entrypoint``) and cannot be overridden by callers.
-  Legacy ``RAYJOB_LONG_LIVED`` is stripped from ``extra_env`` if present.
+* ``labels`` — caller-supplied labels are accepted with two carve-outs.
+  Brain-managed prefixes (``primus-safe.``, ``primus-claw/``) are stripped
+  from user input so callers cannot collide with platform bookkeeping.
+  ``primus-claw/session-id`` is injected by the builder when the caller
+  passes a non-empty ``session_id`` so Brain can correlate this RayJob
+  with its parent sandbox session.
 """
 
 from __future__ import annotations
@@ -60,10 +65,11 @@ _HEAD_ROLE_VALUE = "head"
 # updateRayJob). Signal-interruptable (vs sleep infinity).
 _SUBMITTER_BLOCK_ENTRYPOINT = "tail -f /dev/null"
 
-# Keys stripped from user ``extra_env`` before merge. Reserved keys are
-# overwritten below; legacy keys are dropped so old prompts cannot inject
-# deprecated SaFE toggles.
-_STRIP_FROM_USER_ENV = frozenset({"RAY_JOB_ENTRYPOINT", "RAYJOB_LONG_LIVED"})
+# Keys stripped from user ``extra_env`` before merge. The builder
+# overwrites these below, so accepting them from callers is misleading
+# (the user value would be silently ignored). Strip explicitly so the
+# contract is obvious.
+_STRIP_FROM_USER_ENV = frozenset({"RAY_JOB_ENTRYPOINT"})
 
 # Brain-managed label keys. Caller-supplied labels with these prefixes are
 # silently stripped to avoid colliding with SaFE / brain bookkeeping.
@@ -108,6 +114,7 @@ def build_rayjob_workload_body(
     ephemeral_gi_per_node: int,
     description: str | None = None,
     owner_id: str | None = None,
+    session_id: str | None = None,
     extra_env: dict[str, str] | None = None,
     extra_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -164,10 +171,17 @@ def build_rayjob_workload_body(
     env: dict[str, str] = _sanitize_extra_env(extra_env)
     env["RAY_JOB_ENTRYPOINT"] = _b64(_SUBMITTER_BLOCK_ENTRYPOINT)
 
-    # labels: caller-supplied first (sanitized), then a brain-managed
-    # marker so operators can find rayjob workloads created by this CLI.
+    # labels: caller-supplied first (sanitized), then the Brain
+    # correlation key. ``primus-claw/session-id`` is injected (when
+    # provided) so Brain can correlate this RayJob with its parent
+    # sandbox session for GC / dashboard linking; the value comes from
+    # the sandbox env via the CLI layer. SaFE-namespace labels are NOT
+    # written here -- SaFE strips ``primus-safe.amd.com/*`` from caller
+    # input on its way to the K8s RayJob CRD, so adding them would be a
+    # no-op (verified May 2026 against a live ``hl-glm5-...`` workload).
     labels = _sanitize_extra_labels(extra_labels)
-    labels["primus-safe.amd.com/created-by"] = "hyperloom-cli"
+    if session_id:
+        labels["primus-claw/session-id"] = session_id
 
     body: dict[str, Any] = {
         "displayName": display_name,
