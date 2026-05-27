@@ -230,9 +230,19 @@ def run_t0_anchor(
     # Tags written here:
     #   * model / hardware / model_family            — always
     #   * model_class / framework                    — from extra_attrs (cli)
-    #   * framework_version                          — from stack_fingerprint
+    #   * framework_version / rocm_version /         — from stack_fingerprint
+    #     aiter_version
+    #   * image_digest                               — from cli (manifest.image)
+    #   * marathon_dispatch_id / claw_session_id /   — from extra_attrs
+    #     sandbox_user_id (operator traceability)
     #   * precision / tp / conc / isl / osl /        — from SharedState (cli)
-    #     max_model_len
+    #     max_model_len / ep / pp
+    #
+    # The operator-traceability fields (marathon / claw / sandbox)
+    # are KB-merge-overwritten by the NEXT session that runs the same
+    # (model, hardware) — i.e. the recipe always carries the *most
+    # recent* tracing tuple. Historical tracing per session lives in
+    # ``recipe.sessions[]`` (CLOSE-time, read-modify-write merged).
     from ..cortex_kb_client import model_family as _model_family
     _extra: Mapping[str, Any] = extra_attrs if isinstance(extra_attrs, Mapping) else {}
     _model_class = str(_extra.get("model_class") or "").strip()
@@ -259,6 +269,19 @@ def run_t0_anchor(
     aiter_v = str(fp.get("aiter") or "").strip()
     if aiter_v and aiter_v != "unknown":
         _attrs["aiter_version"] = aiter_v
+    # Image digest (the docker image hyperloom is running in) — used
+    # to be written into the legacy ``session_begin`` attrs; preserve
+    # the operator-visible field on the recipe anchor for debugging
+    # "which image produced this best_config".
+    if image_digest and image_digest != "unknown":
+        _attrs["image_digest"] = str(image_digest).strip()
+    # Operator-tracing fields from extra_attrs whitelist — anything
+    # else in extra_attrs is intentionally ignored so an ad-hoc dict
+    # value doesn't accidentally pollute the recipe schema.
+    for src_key in ("marathon_dispatch_id", "claw_session_id", "sandbox_user_id"):
+        v = str(_extra.get(src_key) or "").strip()
+        if v:
+            _attrs[src_key] = v
     # Workload-shape tags — read from SharedState (cli already wrote
     # them via _seed_shared_state). Skipping empty / zero values so
     # KB query filter doesn't match "tp=0" placeholders.
