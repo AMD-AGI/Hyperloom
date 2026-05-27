@@ -585,19 +585,17 @@ PY
 _probe_framework_source_roots
 
 # ---------------------------------------------------------------------------
-# F2-1 — framework-agent (PR #280 sibling skill).
+# framework-agent (sibling skill — drives the standalone FRAMEWORK_PR
+# phase via ``fa phase-discover`` / ``phase-fetch`` / ``phase-emit-
+# proposal``). Owns its own python deps and venv layout; we only need
+# to invoke its installer.
 #
-# The framework-agent ships as a sibling tool that ``serving_specialist``
-# subprocesses can shell out to (``fa candidates`` + ``git fetch refs/pull/...``)
-# under the ``framework_pr_scout`` sub_kind. It owns its own python deps
-# and venv layout; we only need to invoke its installer.
-#
-# Install is ON by default to match the orchestrator-side defaults
-# (``SharedState.framework_agent_enabled = True`` and the ``--framework-
-# agent-enabled`` CLI flag's ``_env_default_on`` semantics). Opt out by
+# Install is ON by default to match the runtime default
+# (``SharedState.framework_phase_enabled = True``). Opt out by
 # exporting ``INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0`` before
-# install (the runtime CLI flag obeys the same env knob with the same
-# semantics, so flipping it to ``0`` keeps install + runtime aligned).
+# install (the install-side env knob is preserved for back-compat with
+# operator scripts; the runtime side now uses the ``--no-framework``
+# CLI flag instead).
 # ---------------------------------------------------------------------------
 ensure_framework_agent() {
   if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-1}" = "0" ]; then
