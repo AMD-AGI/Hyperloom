@@ -292,6 +292,42 @@ Coordinator hasn't fired yet. PolicyGate
 within `INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC`
 (default 1800s).
 
+### FRAMEWORK_PR phase
+
+Inserted between PRELUDE and EXPLORE. Gated by
+`SharedState.framework_phase_enabled` (CLI `--no-framework` opts
+out; default on). Coordinator owns the loop end-to-end — the LLM
+never proposes the `framework_pr` action; PolicyGate
+`framework_pr_action_not_llm_proposable` denies any attempt.
+
+Flow per tick (`_pump_framework_pr_phase`):
+1. If no pending/running `framework_pr` task and no current batch:
+   call `fa phase-discover` for a fresh candidate batch (model +
+   framework + gpu_type + `gaps[]`).
+2. Pop the next candidate; enqueue a `framework_pr` task with
+   `requires_lanes=[server_lifecycle, workspace_mutation, benchmark_lane]`.
+3. `FrameworkPrExecutor` (a) calls `fa phase-fetch` to apply the PR
+   into an isolated worktree, (b) shells `fa phase-emit-proposal`
+   to build a `specialist_done`-shaped envelope, (c) runs
+   `run_grid([single_variant])` for benchmarking.
+4. Result lands via `_promote_to_shared_state['framework_pr']` —
+   KEEP triggers a `cumulative_gain_validated` update + watermark
+   refresh (`_maybe_enqueue_watermark_roofline(reason="framework_pr_keep_watermark")`).
+5. Per-candidate row recorded in `framework_pr_phase_progress`;
+   batch totals in `framework_pr_batches`.
+
+Exit (`exit_normal_framework_pr`, 3-way precedence):
+- `framework_pr_force_exit_low_budget` — remaining wall-clock <
+  `0.6 × max_hours`.
+- `framework_pr_plateau` — 3 consecutive batches with
+  `max_gain_pct_observed_in_batch < 1.0`.
+- `framework_pr_phase_done` — `framework_pr_phase_done=True`
+  (set when `fa phase-discover` returns an empty batch).
+
+Resume: same shape as EXPLORE — completed candidates skip via the
+task registry idempotency key (`framework_pr:<batch_id>:<cand_id>`),
+in-flight ones are dropped + redone.
+
 ## Retired modules and rules (do not re-introduce)
 
 These orchestrator modules were intentionally removed; the
@@ -309,8 +345,11 @@ Related rules that look reasonable but break things:
 
 - **No `framework_pr first-explore priority` rule** in
   `system_prompts/orchestration.md` — conflicts with **IR-4**.
-  Framework-agent is invoked via `serving_specialist`'s
-  `framework_pr_scout` sub_kind.
+  Framework-agent runs in the dedicated **FRAMEWORK_PR** phase
+  before EXPLORE; the LLM never proposes the `framework_pr`
+  action (PolicyGate denies it via
+  `framework_pr_action_not_llm_proposable`). Use `--no-framework`
+  to skip the phase entirely.
 - **No `sequence_denial` rule** consuming `backends_attempts` /
   `params_attempts` — those fields have no writers and would
   permanently deny `kernel_opt`. Use
