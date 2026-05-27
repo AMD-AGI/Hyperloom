@@ -161,10 +161,9 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     framework = str(request.get("framework") or "sglang").strip().lower()
     repo_url = str(request.get("repo_url") or "").strip()
     if not repo_url:
-        # Fall back to the canonical mapping the coordinator-side client uses.
-        from inference_optimizer.orchestrator.framework_agent_client import (  # type: ignore
-            repo_url_for_framework,
-        )
+        # Fall back to the standalone repo_map (no reverse-import of
+        # inference_optimizer; framework-agent is a standalone package).
+        from framework_agent.repo_map import repo_url_for_framework
         repo_url = repo_url_for_framework(framework)
     if not repo_url:
         raise RuntimeAdapterError(
@@ -284,9 +283,7 @@ def _cmd_phase_fetch(args: argparse.Namespace) -> None:
     framework = str(request.get("framework") or "sglang").strip().lower()
     repo_url = str(request.get("repo_url") or "").strip()
     if not repo_url:
-        from inference_optimizer.orchestrator.framework_agent_client import (  # type: ignore
-            repo_url_for_framework,
-        )
+        from framework_agent.repo_map import repo_url_for_framework
         repo_url = repo_url_for_framework(framework)
     worktree_dir = Path(str(request.get("worktree_dir") or "")).expanduser()
     if not (pr_url or ref) or not worktree_dir:

@@ -30,19 +30,32 @@ log = logging.getLogger(__name__)
 # ``specialist_domains.SpecialistDomain.pr_repos`` for serving_specialist
 # but flattens it to the single repo URL each ``fa phase-*`` request
 # carries (the request schema accepts one ``repo_url`` per call).
-_FRAMEWORK_TO_REPO_URL: dict[str, str] = {
-    "sglang": "https://github.com/sgl-project/sglang.git",
-    "vllm":   "https://github.com/ROCm/vllm.git",
-}
+#
+# The canonical mapping lives in ``framework_agent.repo_map`` so the
+# standalone ``fa`` CLI can resolve repo URLs without reverse-importing
+# inference_optimizer. We delegate to that module when available
+# (the normal install path puts framework-agent on the same venv) and
+# fall back to an inline copy for IO-only test environments.
+try:
+    from framework_agent.repo_map import (  # type: ignore[import-not-found]
+        repo_url_for_framework,
+    )
+except ImportError:  # pragma: no cover — exercised only in IO-only test envs
 
+    _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
+        "sglang": "https://github.com/sgl-project/sglang.git",
+        "vllm":   "https://github.com/ROCm/vllm.git",
+    }
 
-def repo_url_for_framework(framework: str) -> str:
-    """Return the canonical GitHub repo URL for ``framework``.
+    def repo_url_for_framework(framework: str) -> str:
+        """Return the canonical GitHub repo URL for ``framework``.
 
-    Returns an empty string for unknown frameworks; the caller is
-    expected to bail out / log when this happens.
-    """
-    return _FRAMEWORK_TO_REPO_URL.get((framework or "").strip().lower(), "")
+        Returns an empty string for unknown frameworks; the caller is
+        expected to bail out / log when this happens.
+        """
+        return _FRAMEWORK_TO_REPO_URL.get(
+            (framework or "").strip().lower(), "",
+        )
 
 
 def _resolve_fa_binary() -> str | None:
