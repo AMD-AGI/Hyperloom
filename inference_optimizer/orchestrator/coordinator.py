@@ -1106,8 +1106,15 @@ class Coordinator:
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
             disable_legacy_proxy=self._legacy_plateau_proxy_disabled,
+            # Default is True to match SharedState.framework_phase_enabled
+            # and the CLI resume fallback at cli.py:3231 (which reads
+            # ``getattr(state, "framework_phase_enabled", True)``). The
+            # old ``False`` fallback here disagreed with both sites, so a
+            # resumed session whose state.json predated the field would
+            # silently skip FRAMEWORK_PR for one call only — confusing
+            # to debug.
             framework_phase_enabled=bool(
-                getattr(state, "framework_phase_enabled", False)
+                getattr(state, "framework_phase_enabled", True)
             ),
             max_hours=max_hours_arg,
         )
