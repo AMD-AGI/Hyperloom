@@ -298,6 +298,13 @@ class SharedState:
     # the current stack still matches the validated number, or whether
     # the TODO 4 stack-rebench guard should fire after new KEEPs landed.
     cumulative_gain_validated_stack_len: int = 0
+    # Tput (tok/s/GPU) measured at the most recent successful roofline
+    # task; serves as the watermark for the gain-driven roofline refresh
+    # policy. Coordinator enqueues a fresh roofline task whenever
+    # ``baseline_tput * (1 + cumulative_gain_validated/100) /
+    # last_roofline_tput >= 1.10`` (a 10% step over the last
+    # measurement, compound). Initialised from the PRELUDE roofline.
+    last_roofline_tput: float = 0.0
     stop_reason: str = ""
     # Closing phase — set when the wall-clock deadline fires. While True,
     # Coordinator skips reactor passes and only pumps the dispatcher to
@@ -359,13 +366,9 @@ class SharedState:
     # ``roofline_snapshot_id`` mirrors ``last_trace_analyze['roofline_snapshot_id']``
     # at the top level for fast PolicyGate / Coordinator access (avoids the
     # nested-dict lookup on hot paths).
-    #
-    # ``roofline_saturation_history`` is appended by F3-4's saturation
-    # advisory derivation; capped at 10 entries by the writer.
     # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
-    roofline_saturation_history: list[dict[str, Any]] = field(default_factory=list)
     # N27 — outer roofline failure counter. Bumped by
     # ``Coordinator._promote_to_shared_state`` on every failed
     # ``roofline`` task and reset to 0 on the next successful one.
@@ -377,26 +380,25 @@ class SharedState:
     roofline_failure_streak: int = 0
 
     # ------------------------------------------------------------------
-    # F1/F2/F3 integration toggles (default off).
-    #
-    # Each is mirrored from the matching ``cli.py`` flag at session start.
-    # F0-8 + F0-10 leave them at False so behavior is identical to tag
-    # ``pre-roofline-merge``; subsequent F-steps flip individual toggles
-    # to ``True`` only after their smoke gates pass.
+    # Feature toggles (mirrored from ``cli.py`` flags at session start).
     # ------------------------------------------------------------------
-    # The three Roofline-v2 / framework-agent toggles default to ON
-    # — RooflineExecutor is the canonical analysis path, framework-
-    # agent is wired by default, and PolicyGate's N9 rule denies the
-    # legacy ``profile`` propose path. Operators opt out via the
-    # matching ``--no-...`` CLI flags or env vars set to ``0``.
-    use_roofline_composite: bool = True
+    # framework-agent is on by default; the ``serving_specialist``
+    # ``framework_pr_scout`` sub_kind requires this. Operators opt out
+    # via ``--no-framework-agent-enabled``.
     framework_agent_enabled: bool = True
-    deny_direct_profile: bool = True
-    # Cheap-rounds gain gate + saturation advisory stay opt-in
-    # (default off) — both lock kernel_opt / mutate the prompt only
-    # when the operator has tuned the thresholds for their workload.
+    # When True (the default) the Coordinator's auto-managed analysis
+    # action — at PRELUDE bootstrap and on every +10% watermark
+    # crossing — is ``roofline`` (composite: profile + trace_analyze +
+    # analysis.md snapshot). When False the same trigger paths enqueue
+    # plain ``profile`` instead (no trace_analyze, no analysis.md);
+    # behaviour is otherwise identical (same idempotency keys, same
+    # pending-task gate, same watermark anchor update). Both kinds
+    # remain Coordinator-internal and are denied by PolicyGate when
+    # proposed by the LLM (``analysis_action_not_llm_proposable``).
+    enable_roofline: bool = True
+    # Cheap-rounds gain gate is opt-in — only locks ``kernel_opt`` when
+    # the operator has tuned the thresholds for their workload.
     gain_driven_kernel_opt: bool = False
-    roofline_saturation_advisory: bool = False
     # Per-variant overtime kill multiplier for ExploreExecutor: when
     # > 0 AND ``baseline_runtime_sec`` > 0, single-variant Magpie runs
     # in the explore loop are killed once their wall-clock exceeds
@@ -3729,29 +3731,10 @@ class SharedState:
             # compatibility with prompt-format-stable tests on either
             # side (legacy regression_locks expects `last_trace_analyze=`).
             f"last_trace_analyze={self._format_last_trace_analyze()}",
-            # F1-4 (Roofline-v2 /  F1): when the
-            # roofline composite toggle is on, surface the full TraceLens
-            # ``analysis.md`` (snapshot id + gain in the bookend header)
-            # so the orchestration LLM grounds propose_action decisions
-            # in the actual report. Toggle stays default-off through F1
-            # so the legacy ``last_select_kernels`` summary remains the
-            # single source of TraceLens-derived state for existing
-            # sessions; F1-6 flips the default once smoke clears.
-            *(
-                [f"analysis_md={self._format_analysis_md_full()}"]
-                if getattr(self, "use_roofline_composite", False)
-                else []
-            ),
-            # Roofline saturation soft advisory. The helper
-            # returns "" when the toggle is off, when no roofline has
-            # run yet, or when no direction crossed the saturation
-            # threshold — so the prompt section is entirely absent in
-            # the common case.
-            *(
-                [_advisory]
-                if (_advisory := self._format_roofline_saturation_advisory())
-                else []
-            ),
+            # Full TraceLens ``analysis.md`` (snapshot id + gain in the
+            # bookend header) so the orchestration LLM grounds
+            # propose_action decisions in the actual report.
+            f"analysis_md={self._format_analysis_md_full()}",
             # the streak counter is a *fact* the LLM may
             # read (KEEP/REVERT counts are explicitly allowed per
             # Inv-9.1); only system-side *priorities* (action_scores)
@@ -4127,65 +4110,6 @@ class SharedState:
             f"gain at snapshot = {gain_str}%) ===\n"
             f"{md_text}\n"
             f"=== End TraceLens Analysis ===\n"
-        )
-
-    def _format_roofline_saturation_advisory(self) -> str:
-        """F3-4 (Roofline-v2 /  F3): render a
-        soft 'diminishing returns' advisory for directions whose
-        saturation in the latest snapshot is at or above the threshold.
-
-        Returns the empty string when:
-
-        * the toggle ``roofline_saturation_advisory`` is off, or
-        * ``roofline_saturation_history`` is empty (no roofline run
-          yet), or
-        * no direction in the latest snapshot crossed the threshold.
-
-        This is **soft**: the advisory only flags the cost-vs-reward
-        trade-off; it never tells the LLM to stop dispatching toward
-        that direction. PolicyGate has no companion hard-gating rule
-        (deliberate decision per
-        ``F3_policygate_advisory.MD`` §2 — a
-        single noisy trace must not permanently close a direction).
-
-        Threshold + per-direction labels are pulled from
-        ``inference_optimizer.orchestrator.roofline_snapshot`` so the
-        producer (RooflineExecutor) and consumer (this renderer) share
-        one source of truth.
-        """
-        if not getattr(self, "roofline_saturation_advisory", False):
-            return ""
-        history = list(getattr(self, "roofline_saturation_history", []) or [])
-        if not history:
-            return ""
-        last = history[-1]
-        if not isinstance(last, dict):
-            return ""
-        from inference_optimizer.orchestrator.roofline_snapshot import (
-            SATURATION_ADVISORY_THRESHOLD_PCT,
-            _SATURATION_LABEL_MAP,
-        )
-        sat_lines: list[str] = []
-        for direction in _SATURATION_LABEL_MAP:
-            try:
-                pct = float(last.get(direction, 0.0) or 0.0)
-            except (TypeError, ValueError):
-                continue
-            if pct >= SATURATION_ADVISORY_THRESHOLD_PCT:
-                sat_lines.append(f"  - {direction}: {pct:.1f}% saturated")
-        if not sat_lines:
-            return ""
-        snap_id = last.get("snapshot_id", "?")
-        return (
-            f"=== Roofline Saturation Advisory (snapshot #{snap_id}) ===\n"
-            f"The following directions are at or above "
-            f"{SATURATION_ADVISORY_THRESHOLD_PCT:.0f}% saturation; further\n"
-            "work in these areas typically yields diminishing returns. You\n"
-            "MAY still dispatch into them when you have a specific hypothesis\n"
-            "(e.g. an upstream PR or a known refactor) — this is a soft hint,\n"
-            "not a hard rule.\n"
-            + "\n".join(sat_lines) + "\n"
-            "=== End Saturation Advisory ==="
         )
 
     def _format_last_select_kernels(self) -> str:

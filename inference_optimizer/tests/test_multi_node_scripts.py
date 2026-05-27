@@ -446,6 +446,10 @@ def test_build_rayjob_entrypoints_empty_submitter_tail():
     assert dec == "tail -f /dev/null"
 
 
+# ===========================================================================
+# (formerly test_multi_node_env_ray.py)
+# ===========================================================================
+
 # Common kwargs for builder tests below. Keeps each test focused on the
 # one field under test instead of repeating the 8 required arguments.
 _BUILDER_MIN_KWARGS = dict(
@@ -652,11 +656,6 @@ def test_write_rayjob_meta_best_effort_on_oserror(tmp_path, monkeypatch):
     # And no file should have been created.
     meta_path = tmp_path / "profile-traces" / "wid-abc" / "sess-1"
     assert not meta_path.exists()
-
-
-# ===========================================================================
-# (formerly test_multi_node_env_ray.py)
-# ===========================================================================
 
 
 def test_ray_gcs_address_from_state_prefers_ray_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
