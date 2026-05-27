@@ -1294,14 +1294,26 @@ def _sandbox_duration_seconds(last_task: dict) -> float | None:
 
 
 def _find_hyperloom_commit_sha(start: Path) -> str:
-    """Walk a few sibling locations to find ``hyperloom_source_commit.txt``.
+    """Resolve the Hyperloom git SHA the sandbox cloned (for audit fields).
 
-    The PERSIST step in ``ci/prompt_prefix.txt`` writes the SHA both at
-    ``$RESULT_DIR/hyperloom_source_commit.txt`` and inside the V2 session
-    dir, so by the time NFS Stage B pulls things back it can show up at
-    ``task_dir/hyperloom_source_commit.txt`` or
-    ``task_dir/session/hyperloom_source_commit.txt`` (depth varies by
-    which fallback collected the artifacts).
+    Strategy (tried in order, first hit wins):
+
+      1. ``hyperloom_source_commit.txt`` written by the agent inside the
+         sandbox. The PERSIST step in ``ci/prompt_prefix.txt`` writes it
+         at ``$RESULT_DIR/hyperloom_source_commit.txt`` and inside the V2
+         session dir, so by the time NFS Stage B pulls things back it can
+         show up at ``task_dir/hyperloom_source_commit.txt`` or
+         ``task_dir/session/hyperloom_source_commit.txt`` (depth varies
+         by which fallback collected the artifacts).
+
+      2. CI runner environment. The agent doesn't always write the txt
+         file (e.g. when it exits before the PERSIST snippet runs, or
+         when V2 cli's session_dir eats the file), but the runner that
+         dispatched the workflow ALWAYS knows the commit it pinned the
+         sandbox to: it's ``HYPERLOOM_SOURCE_REF`` (set by ``optimize-
+         submit.yml`` step 'Submit + wait + collect'), or ``GITHUB_SHA``
+         (the head of the branch the workflow ran on, identical to
+         ``HYPERLOOM_SOURCE_REF`` for any push-triggered run).
     """
     candidates = [
         start.parent / "hyperloom_source_commit.txt",
@@ -1319,6 +1331,16 @@ def _find_hyperloom_commit_sha(start: Path) -> str:
         # garbage from an empty / corrupted file.
         if 7 <= len(sha) <= 80 and all(c in "0123456789abcdef" for c in sha.lower()):
             return sha
+
+    # Fallback: ask the CI runner environment. HYPERLOOM_SOURCE_REF is the
+    # commit we explicitly pinned the sandbox to (preferred over GITHUB_SHA
+    # when set, because HYPERLOOM_SOURCE_REF survives even dispatch with a
+    # custom ref input). GITHUB_SHA is the unconditional fallback — every
+    # GitHub Actions step has it.
+    for env_var in ("HYPERLOOM_SOURCE_REF", "GITHUB_SHA"):
+        env_sha = (os.environ.get(env_var) or "").strip()
+        if 7 <= len(env_sha) <= 80 and all(c in "0123456789abcdef" for c in env_sha.lower()):
+            return env_sha
     return ""
 
 
