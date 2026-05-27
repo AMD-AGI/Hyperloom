@@ -131,7 +131,9 @@ class _StubTaskRegistry:
 
 
 class _StubCortex:
-    """Cortex KB double with controllable behaviour for steps 3+4."""
+    """Cortex KB double with controllable behaviour for the CLOSE
+    NDJSON drain step (session_commit was retired alongside the
+    T2/T3 hypothesize/verify protocol)."""
 
     enabled: bool = True
 
@@ -140,27 +142,20 @@ class _StubCortex:
         *,
         drain_remaining: int = 0,
         drain_raises: BaseException | None = None,
+        # Back-compat constructor kwargs for tests that still pass
+        # ``commit_summary`` / ``commit_raises``; the values are ignored.
         commit_raises: BaseException | None = None,
         commit_summary: dict | None = None,
     ):
         self.drain_calls: int = 0
-        self.commit_calls: int = 0
         self._drain_remaining = drain_remaining
         self._drain_raises = drain_raises
-        self._commit_raises = commit_raises
-        self._commit_summary = commit_summary or {"status": "committed"}
 
     def drain_pending(self, *, timeout_sec: float = 60.0) -> dict:
         self.drain_calls += 1
         if self._drain_raises is not None:
             raise self._drain_raises
         return {"remaining": self._drain_remaining}
-
-    def session_commit(self, sid: str) -> dict:
-        self.commit_calls += 1
-        if self._commit_raises is not None:
-            raise self._commit_raises
-        return dict(self._commit_summary)
 
 
 @pytest.fixture
@@ -324,7 +319,7 @@ async def test_enqueue_internal_session_breakdown_task(coord):
 # 5. End-to-end 5-step sequencer ordering
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_close_sequencer_runs_all_5_steps_in_order_happy_path(
+async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord,
 ):
     coord.shared_state.phase_history = [_close_phase_history_row()]
@@ -334,34 +329,28 @@ async def test_close_sequencer_runs_all_5_steps_in_order_happy_path(
     await coord._on_enter_close(from_phase="SWEEP")
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
-    # Step sequence: sequencer_started, report, session_breakdown,
-    # fact_finalize (step 2.5 — recipe + journal), ndjson_drain,
-    # cortex_commit, done. The fact_finalize step lives outside the
-    # 4-step KB design contract but is recorded for breakdown
-    # observability (see _on_enter_close docstring).
+    # Step sequence (post T2/T3 retirement — step 4 cortex_commit
+    # removed alongside the hypothesize/verify protocol):
+    # sequencer_started, report, session_breakdown,
+    # fact_finalize (step 2.5 — recipe + journal),
+    # ndjson_drain, done.
     steps = [r["step"] for r in rows]
     assert steps == [
         "sequencer_started", "report", "session_breakdown",
-        "fact_finalize", "ndjson_drain", "cortex_commit", "done",
+        "fact_finalize", "ndjson_drain", "done",
     ]
     # All effective steps succeeded.
     assert rows[1]["status"] == "done"   # report
     assert rows[2]["status"] == "done"   # session_breakdown
     assert rows[3]["status"] == "done"   # fact_finalize
     assert rows[4]["status"] == "done"   # ndjson_drain
-    assert rows[5]["status"] == "done"   # cortex_commit
-    assert rows[6]["status"] == "done"   # done
+    assert rows[5]["status"] == "done"   # done
     # close_sequence_done flag set.
     assert coord.shared_state.close_sequence_done is True
-    # Cortex commit ran exactly once.
-    assert coord.cortex_kb.commit_calls == 1
+    # Drain ran exactly once; session_commit was retired.
     assert coord.cortex_kb.drain_calls == 1
-    # session_summary populated from the commit return.
-    assert coord.shared_state.cortex_session_summary == {"status": "committed"}
-    # v0.8 §3.2 §5.5 — sequencer step 5 must set stop_reason so the
-    # main loop terminates on the next tick. Without this the loop
-    # keeps re-firing the report executor + robustness alerts (the
-    # bug we're closing here).
+    # v0.8 §3.2 §5.5 — sequencer last step must set stop_reason so
+    # the main loop terminates on the next tick.
     assert coord.shared_state.stop_reason == "time_exhausted"
 
 
@@ -384,17 +373,18 @@ async def test_close_sequencer_sets_time_exhausted_stop_reason(coord):
 async def test_close_sequencer_does_not_overwrite_existing_stop_reason(
     coord,
 ):
-    """If step 4 already set ``stop_reason='cortex_commit_failed'``
-    (or any other value), step 5's setter must leave it alone — the
-    earlier observation carries the more diagnostic information."""
+    """An operator-set ``stop_reason`` (set before the sequencer ran,
+    e.g. ``cortex_drain_failed`` stamped by the wall-clock path) must
+    survive the final step's setter — the earlier observation carries
+    the more diagnostic information."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.cortex_kb = _StubCortex(commit_raises=RuntimeError("synthetic"))
-    coord.shared_state.cortex_session_id = "sid"
+    coord.shared_state.set_stop_reason("cortex_drain_failed")
 
     await coord._on_enter_close(from_phase="SWEEP")
 
-    # Step 4 set this; step 5 must NOT overwrite to time_exhausted.
-    assert coord.shared_state.stop_reason == "cortex_commit_failed"
+    # Pre-set stop_reason survived; final step must NOT overwrite to
+    # time_exhausted.
+    assert coord.shared_state.stop_reason == "cortex_drain_failed"
 
 
 @pytest.mark.asyncio
@@ -425,24 +415,22 @@ async def test_close_sequencer_report_before_session_breakdown(coord):
 
 @pytest.mark.asyncio
 async def test_close_sequencer_skips_cortex_steps_when_no_cortex(coord):
-    """``--degraded-kb`` runs have cortex_kb=None: steps 3 + 4 must be
-    explicitly recorded as 'skipped' (not silent no-ops, so operators
-    can see the run was Cortex-less)."""
+    """``--degraded-kb`` runs have cortex_kb=None: the NDJSON drain
+    step must be explicitly recorded as 'skipped' (not silent no-op,
+    so operators can see the run was Cortex-less)."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
     await coord._on_enter_close(from_phase="SWEEP")
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
-    commit_row = next(r for r in rows if r["step"] == "cortex_commit")
     assert drain_row["status"] == "skipped"
-    assert commit_row["status"] == "skipped"
     # close_sequence_done still set so cli.finally short-circuits.
     assert coord.shared_state.close_sequence_done is True
 
 
 @pytest.mark.asyncio
 async def test_close_sequencer_records_drain_incomplete(coord):
-    """NDJSON drain returns ``remaining > 0`` → step 3 status='incomplete'
-    with detail of remaining count. Sequencer continues to step 4 / 5."""
+    """NDJSON drain returns ``remaining > 0`` → drain step status='incomplete'
+    with detail of remaining count. Sequencer continues to done."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.cortex_kb = _StubCortex(drain_remaining=12)
     coord.shared_state.cortex_session_id = "sid"
@@ -451,37 +439,14 @@ async def test_close_sequencer_records_drain_incomplete(coord):
     drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
     assert drain_row["status"] == "incomplete"
     assert "remaining=12" in drain_row["detail"]
-    # Commit still attempted.
-    assert coord.cortex_kb.commit_calls == 1
-    # done step still reached.
-    assert coord.shared_state.close_sequence_done is True
-
-
-@pytest.mark.asyncio
-async def test_close_sequencer_records_commit_failure(coord):
-    """Cortex commit raises → step 4 status='failed', summary records
-    ``status='commit_failed'``, stop_reason set to ``cortex_commit_failed``
-    if not already set (matches _cortex_t4_hook semantics)."""
-    coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.cortex_kb = _StubCortex(commit_raises=RuntimeError("synthetic outage"))
-    coord.shared_state.cortex_session_id = "sid"
-
-    await coord._on_enter_close(from_phase="SWEEP")
-
-    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
-    commit_row = next(r for r in rows if r["step"] == "cortex_commit")
-    assert commit_row["status"] == "failed"
-    assert "synthetic outage" in commit_row["detail"]
-    assert coord.shared_state.cortex_session_summary["status"] == "commit_failed"
-    assert coord.shared_state.stop_reason == "cortex_commit_failed"
     # done step still reached.
     assert coord.shared_state.close_sequence_done is True
 
 
 @pytest.mark.asyncio
 async def test_close_sequencer_records_drain_failure(coord):
-    """Drain raises → step 3 status='failed', sequencer continues to
-    step 4 / 5 anyway."""
+    """Drain raises → ndjson_drain step status='failed', sequencer still
+    reaches ``done`` so close_sequence_done flips."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.cortex_kb = _StubCortex(drain_raises=OSError("disk full"))
     coord.shared_state.cortex_session_id = "sid"
@@ -492,8 +457,8 @@ async def test_close_sequencer_records_drain_failure(coord):
     drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
     assert drain_row["status"] == "failed"
     assert "disk full" in drain_row["detail"]
-    # Cortex commit still attempted despite drain failure.
-    assert coord.cortex_kb.commit_calls == 1
+    # done step still reached.
+    assert coord.shared_state.close_sequence_done is True
 
 
 # ===========================================================================
@@ -596,9 +561,8 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_cortex_t4_hook_short_circuits_when_sequencer_done(tmp_path: Path):
-    """KB_gaps/Gap-06 acceptance: Cortex session_commit MUST be called
-    exactly once. If the CLOSE sequencer already committed, stop()'s
-    legacy _cortex_t4_hook must skip."""
+    """If the CLOSE sequencer already drained, stop()'s
+    ``_cortex_t4_hook`` safety-net must skip (avoids a double drain)."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -619,15 +583,14 @@ async def test_cortex_t4_hook_short_circuits_when_sequencer_done(tmp_path: Path)
     coord.shared_state.close_sequence_done = True
 
     await coord._cortex_t4_hook()
-    # Drain + commit both untouched.
+    # Drain untouched (commit was retired alongside T2/T3).
     assert coord.cortex_kb.drain_calls == 0
-    assert coord.cortex_kb.commit_calls == 0
 
 
 @pytest.mark.asyncio
 async def test_cortex_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path):
     """Crash / Ctrl-C path: sequencer didn't run, so stop()'s
-    _cortex_t4_hook MUST still drain + commit as a safety net."""
+    ``_cortex_t4_hook`` MUST still drain as a safety net."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -649,4 +612,3 @@ async def test_cortex_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path)
 
     await coord._cortex_t4_hook()
     assert coord.cortex_kb.drain_calls == 1
-    assert coord.cortex_kb.commit_calls == 1
