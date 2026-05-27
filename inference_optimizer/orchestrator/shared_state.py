@@ -413,6 +413,14 @@ class SharedState:
     # candidate in the latest batch has been tried). ``compute_next_phase``
     # consults this for the ``framework_pr_phase_done`` exit reason.
     framework_pr_phase_done: bool = False
+    # Consecutive ``fa phase-discover`` failures (timeout / non-zero
+    # exit / parse error). The Coordinator's discover loop bumps this
+    # on each failure and resets to 0 on a successful batch. Phase is
+    # only marked done after ``DISCOVER_FAILURE_RETRY_LIMIT`` (default
+    # 3) consecutive failures, so a transient network blip or a slow
+    # PR scan no longer collapses the whole FRAMEWORK_PR phase
+    # silently.
+    framework_pr_discover_failures: int = 0
     # When True (the default) the Coordinator's auto-managed analysis
     # action — at PRELUDE bootstrap and on every +10% watermark
     # crossing — is ``roofline`` (composite: profile + trace_analyze +

@@ -1309,12 +1309,24 @@ class Coordinator:
         # request a new batch if the previous one is exhausted.
         next_candidate = self._select_next_framework_pr_candidate()
         if next_candidate is None:
-            # Try to discover a fresh batch. Failure / empty result is a
-            # normal phase exit (sets framework_pr_phase_done).
+            # Try to discover a fresh batch. A transient discover
+            # failure (timeout / error) does NOT immediately collapse
+            # the phase; only ``DISCOVER_FAILURE_RETRY_LIMIT`` consecutive
+            # failures, or an empty-but-valid payload (genuine "no more
+            # PRs"), mark the phase done. See _discover_next_framework_pr_batch
+            # for the failure-counter semantics.
+            from . import framework_agent_client as _fa_client
             ok = await self._discover_next_framework_pr_batch()
             if not ok:
-                state.framework_pr_phase_done = True
-                state.save(self.session_dir)
+                failures = int(
+                    getattr(state, "framework_pr_discover_failures", 0) or 0
+                )
+                if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT or failures == 0:
+                    # Either we've exhausted retries (failures >= limit),
+                    # or the call returned a clean empty payload
+                    # (counter was reset to 0). Both are real exits.
+                    state.framework_pr_phase_done = True
+                    state.save(self.session_dir)
                 return
             next_candidate = self._select_next_framework_pr_candidate()
             if next_candidate is None:
@@ -1361,9 +1373,13 @@ class Coordinator:
     async def _discover_next_framework_pr_batch(self) -> bool:
         """Call ``fa phase-discover`` and append a batch to SharedState.
 
-        Returns True iff a non-empty batch was appended. Failure /
-        empty results return False so the caller can flip
-        ``framework_pr_phase_done``.
+        Returns True iff a non-empty batch was appended. Transient
+        failures (timeout, non-zero exit, parse error) return False
+        without flipping ``framework_pr_phase_done``; the caller
+        consults ``framework_pr_discover_failures`` to decide when to
+        finally give up — see ``DISCOVER_FAILURE_RETRY_LIMIT``.
+        Successful calls (including empty-but-valid responses) reset
+        the failure counter so an intermittent error never accumulates.
         """
         from . import framework_agent_client as _fa_client
 
@@ -1389,6 +1405,10 @@ class Coordinator:
             framework = str(getattr(state, "framework", "") or "").strip().lower()
         except Exception:  # noqa: BLE001
             framework = ""
+        timeout_sec = float(
+            getattr(self, "framework_pr_discover_timeout_sec", 0.0)
+            or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
+        )
         try:
             payload = await _fa_client.phase_discover(
                 model=str(getattr(state, "model", "") or ""),
@@ -1396,10 +1416,33 @@ class Coordinator:
                 gpu_type=str(getattr(state, "gpu_type", "") or ""),
                 gaps=gaps,
                 session_dir=self.session_dir,
+                timeout_sec=timeout_sec,
             )
         except Exception as exc:  # noqa: BLE001 — defensive
-            log.warning("fa phase-discover failed: %r", exc)
+            failures = int(getattr(state, "framework_pr_discover_failures", 0) or 0) + 1
+            state.framework_pr_discover_failures = failures
+            log.warning(
+                "fa phase-discover failed (attempt %d/%d): %r",
+                failures, _fa_client.DISCOVER_FAILURE_RETRY_LIMIT, exc,
+            )
+            try:
+                history = getattr(state, "phase_history", None)
+                if isinstance(history, list):
+                    history.append({
+                        "event":   "framework_pr_discover_failed",
+                        "attempt": failures,
+                        "limit":   _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
+                        "error":   repr(exc),
+                        "ts":      datetime.now(timezone.utc).isoformat(),
+                    })
+            except Exception:  # noqa: BLE001 — defensive
+                pass
+            state.save(self.session_dir)
             return False
+        # Successful call — reset failure counter regardless of whether
+        # the payload contained candidates.
+        if int(getattr(state, "framework_pr_discover_failures", 0) or 0) != 0:
+            state.framework_pr_discover_failures = 0
         candidates = (payload or {}).get("candidates") or []
         if not isinstance(candidates, list) or not candidates:
             return False

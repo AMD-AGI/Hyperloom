@@ -72,7 +72,13 @@ def _resolve_fa_binary() -> str | None:
     return None
 
 
-DEFAULT_FA_PHASE_TIMEOUT_SEC: float = 60.0
+DEFAULT_FA_PHASE_TIMEOUT_SEC: float = 180.0
+# Number of consecutive ``fa phase-discover`` failures the Coordinator
+# tolerates before marking ``framework_pr_phase_done = True`` and
+# advancing to EXPLORE. Bumped from the implicit-1 of the original
+# silent-collapse behaviour so a transient timeout or a slow PR scan
+# doesn't kill the whole phase.
+DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 
 def _run_fa_subcommand_sync(
@@ -254,6 +260,7 @@ async def phase_emit_proposal(
 
 __all__ = [
     "DEFAULT_FA_PHASE_TIMEOUT_SEC",
+    "DISCOVER_FAILURE_RETRY_LIMIT",
     "phase_discover",
     "phase_fetch",
     "phase_emit_proposal",
