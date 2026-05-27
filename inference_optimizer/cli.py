@@ -62,6 +62,7 @@ from .orchestrator.action_executors import (
 )
 from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
 from .orchestrator.action_executors.recover import recover_executor
+from .orchestrator.action_executors.profile import profile_executor
 from .orchestrator.action_executors.roofline import make_roofline_executor
 from .orchestrator.backends import (
     ClaudeBackend,
@@ -613,8 +614,8 @@ def _seed_shared_state(
         research_lane_capacity=research_lane_capacity,
         plateau_overrides=plateau_overrides,
         explore_overtime_kill_ratio=explore_overtime_kill_ratio,
-        force_roofline_after_baseline=bool(
-            getattr(args, "force_roofline_after_baseline", True),
+        enable_roofline=bool(
+            getattr(args, "enable_roofline", True),
         ),
         framework_agent_enabled=bool(
             getattr(args, "framework_agent_enabled", True),
@@ -694,6 +695,13 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 # task is ever queued.
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline":          baseline_executor,
+    # ``profile`` is registered so the Coordinator-internal task path
+    # (kind switched via ``--no-enable-roofline``) can dispatch it
+    # through SubAgentRunner. PolicyGate denies LLM-proposed
+    # delegate{action_name='profile'} via
+    # ``analysis_action_not_llm_proposable``, so this registration is
+    # effectively Coordinator-only.
+    "profile":           profile_executor,
     "explore":           explore_executor,
     "sweep":             sweep_executor,
     "report":            report_executor,
@@ -709,10 +717,13 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
 }
 
 # Kernel-only real executors. The composite ``roofline`` action is
-# registered separately by ``_register_executors`` below and is the
-# sole entry point that runs the profile sub-step (which calls
-# ``profile_executor`` internally without going through
-# SubAgentRunner). There is no LLM-proposable ``profile`` action.
+# registered separately by ``_register_executors`` below. ``profile``
+# is registered in ``_REAL_EXECUTORS_FULL`` so the Coordinator's
+# auto-managed analysis path can dispatch it through SubAgentRunner
+# when ``--no-enable-roofline`` is set; the same ``profile_executor``
+# is also called directly from RooflineExecutor's ``_wrap_profile_ctx``
+# in the default roofline mode. PolicyGate denies LLM-proposed
+# delegate{action_name='profile'} regardless of mode.
 _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {}
 
 # Kernel-owned action kinds dispatched via
@@ -4513,15 +4524,19 @@ def _build_parser() -> argparse.ArgumentParser:
              "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT=1.",
     )
     opt.add_argument(
-        "--force-roofline-after-baseline",
-        dest="force_roofline_after_baseline",
+        "--enable-roofline",
+        dest="enable_roofline",
         action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_FORCE_ROOFLINE_AFTER_BASELINE"),
-        help="Always enqueue the PRELUDE roofline once baseline lands "
-             "(the default). Pass ``--no-force-roofline-after-baseline`` "
-             "to skip the initial roofline when a prior session has "
-             "already populated ``last_roofline_tput`` (resume edge). "
-             "Env: INFERENCE_OPTIMIZER_FORCE_ROOFLINE_AFTER_BASELINE=0.",
+        default=_env_default_on("INFERENCE_OPTIMIZER_ENABLE_ROOFLINE"),
+        help="Select which analysis action the Coordinator enqueues at "
+             "PRELUDE bootstrap and on every +10% watermark crossing. "
+             "Default on: ``roofline`` (composite profile + "
+             "trace_analyze + analysis.md). Pass ``--no-enable-roofline`` "
+             "to use plain ``profile`` instead (lighter — captures the "
+             "trace only, skips trace_analyze). Behaviour is otherwise "
+             "identical (same idempotency keys, same pending-task "
+             "dispatch gate, same watermark anchor update). Env: "
+             "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
     )
     # ------------------------------------------------------------------
     # Fix E — per-variant explore overtime kill ratio.
