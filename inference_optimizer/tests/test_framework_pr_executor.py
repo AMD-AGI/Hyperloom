@@ -434,6 +434,131 @@ async def test_executor_bench_exception_triggers_revert(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# 3b. Serial-KEEP integrity — REJECT must not clobber prior KEPT patches
+# ---------------------------------------------------------------------------
+_PATCH_B_ADDS_FILE = """\
+diff --git a/new.py b/new.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/new.py
+@@ -0,0 +1,2 @@
++def g():
++    return 99
+"""
+
+
+@pytest.mark.asyncio
+async def test_reject_after_keep_preserves_kept_changes(tmp_path: Path):
+    """Regression for P1.c: two candidates against the same framework_root.
+    Candidate A KEEPs (commits) ``return 1 -> return 2`` on src.py.
+    Candidate B applies a different patch and is REJECTed by the gate.
+    The revert path must reset HEAD back to A's KEEP commit — NOT to the
+    original baseline — so A's change in src.py survives B's revert."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+
+    patch_a = tmp_path / "a.patch"
+    patch_a.write_text(_VALID_PATCH, encoding="utf-8")
+    patch_b = tmp_path / "b.patch"
+    patch_b.write_text(_PATCH_B_ADDS_FILE, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+
+    async def keep_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    async def reject_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 980.0},
+            {"accuracy_pass": None},
+        )
+
+    # Candidate A — KEEP.
+    ctx_a = _make_ctx("t-fp-keep-a", {
+        "candidate": _make_candidate(pr_number=101, title="A"),
+        "patches": [str(patch_a)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=keep_bench):
+        res_a = await executor(ctx_a)
+    assert res_a["status"] == "kept", res_a
+    assert res_a.get("keep_commit_sha"), "KEEP must record commit sha"
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+    # Candidate B — REJECT.
+    ctx_b = _make_ctx("t-fp-rej-b", {
+        "candidate": _make_candidate(pr_number=102, title="B"),
+        "patches": [str(patch_b)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=reject_bench):
+        res_b = await executor(ctx_b)
+    assert res_b["status"] == "reverted", res_b
+
+    # B's added file is gone; A's KEPT change in src.py survives.
+    assert not (repo / "new.py").exists()
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
+    """Companion to the test above: when candidate B's *apply* fails
+    (not the gate), the same reset-to-pre_apply_sha path is taken, and
+    A's KEPT commit must still survive."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+
+    patch_a = tmp_path / "a.patch"
+    patch_a.write_text(_VALID_PATCH, encoding="utf-8")
+    bad_patch = tmp_path / "bad.patch"
+    bad_patch.write_text(_BAD_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+
+    async def keep_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx_a = _make_ctx("t-fp-keep-a2", {
+        "candidate": _make_candidate(pr_number=201, title="A"),
+        "patches": [str(patch_a)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=keep_bench):
+        res_a = await executor(ctx_a)
+    assert res_a["status"] == "kept"
+
+    # B fails to apply (bad patch).
+    ctx_b = _make_ctx("t-fp-bad-b2", {
+        "candidate": _make_candidate(pr_number=202, title="B"),
+        "patches": [str(bad_patch)],
+        "framework_source_root": str(repo),
+        "apply_only": True,
+    })
+    res_b = await executor(ctx_b)
+    assert res_b["status"] == "apply_failed"
+
+    # A's KEPT change must still be there.
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+# ---------------------------------------------------------------------------
 # 4. Registration / import surface
 # ---------------------------------------------------------------------------
 def test_framework_pr_executor_imports_clean():

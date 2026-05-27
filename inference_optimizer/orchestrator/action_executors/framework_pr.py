@@ -77,8 +77,6 @@ from .integrate_patch import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_VARIANT_TIMEOUT_SEC,
     _git_apply,
-    _git_apply_reverse,
-    _git_checkout_clean,
     _resolve_framework_root,
 )
 
@@ -87,6 +85,83 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
+
+
+# ---------------------------------------------------------------------------
+# Git checkpoint helpers — FRAMEWORK_PR phase processes candidates serially
+# in the same framework_root. To prevent a failed REJECT from clobbering
+# previously KEPT patches that share the worktree, every KEEP is committed
+# (so it becomes the new HEAD) and every REJECT/failure resets HEAD to the
+# sha captured immediately before apply.
+# ---------------------------------------------------------------------------
+def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
+    """``git rev-parse HEAD`` in ``framework_root``. Returns
+    ``(sha, stderr)``; sha is None when the call fails."""
+    cmd = ["git", "-C", str(framework_root), "rev-parse", "HEAD"]
+    try:
+        cp = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30.0, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return None, f"git rev-parse spawn failed: {exc!r}"
+    if cp.returncode != 0:
+        return None, cp.stderr.strip()
+    return cp.stdout.strip() or None, ""
+
+
+def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
+    """Revert ``framework_root`` to ``sha``: ``git reset --hard <sha>``
+    followed by ``git clean -fd`` to also discard untracked files added
+    by the candidate (e.g. patches that create new files). Used as the
+    REVERT path so a failed candidate cannot leak partial state into
+    the next candidate's baseline."""
+    cmd = ["git", "-C", str(framework_root), "reset", "--hard", sha]
+    try:
+        cp = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60.0, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return False, f"git reset --hard spawn failed: {exc!r}"
+    if cp.returncode != 0:
+        return False, cp.stderr.strip()
+    clean_cmd = ["git", "-C", str(framework_root), "clean", "-fd"]
+    try:
+        cp2 = subprocess.run(
+            clean_cmd, capture_output=True, text=True, timeout=60.0, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return False, f"git clean -fd spawn failed: {exc!r}"
+    if cp2.returncode != 0:
+        return False, (cp2.stderr or "").strip()
+    return True, ""
+
+
+def _git_commit_keep(
+    framework_root: Path, message: str,
+) -> tuple[str | None, str]:
+    """``git commit -am <message>`` with hyperloom identity, then return
+    the new HEAD sha. Identity is forced via ``-c`` so callers don't need
+    to depend on whatever user.email is configured in the framework_root
+    git repo (Magpie clones may not have one)."""
+    cmd = [
+        "git",
+        "-c", "user.email=framework-pr@hyperloom.local",
+        "-c", "user.name=hyperloom framework_pr",
+        "-C", str(framework_root),
+        "commit", "-am", message,
+    ]
+    try:
+        cp = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60.0, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return None, f"git commit spawn failed: {exc!r}"
+    if cp.returncode != 0:
+        return None, cp.stderr.strip()
+    new_sha, err = _git_head_sha(framework_root)
+    if new_sha is None:
+        return None, err or "commit succeeded but HEAD unreadable"
+    return new_sha, ""
 
 
 def _candidate_slug(candidate: dict[str, Any]) -> str:
@@ -239,6 +314,26 @@ class FrameworkPrExecutor:
                 "workspace": str(output_root),
             }
 
+        # Capture HEAD before any apply so REVERT/REJECT can reset back
+        # cleanly. Previously-KEPT candidates in this phase are committed
+        # (see below), so they live in history past this sha and survive
+        # a reset.
+        pre_apply_sha, sha_err = _git_head_sha(framework_root)
+        if pre_apply_sha is None:
+            return {
+                "status": "apply_failed",
+                "error_class": "no_pre_apply_sha",
+                "error": (
+                    f"could not capture HEAD sha in {framework_root}: "
+                    f"{sha_err or 'unknown'}"
+                ),
+                "candidate": candidate,
+                "batch_id": batch_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "workspace": str(output_root),
+            }
+
         # Stage 1: apply patches (with -3 fallback like integrate_patch).
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
@@ -254,7 +349,9 @@ class FrameworkPrExecutor:
                     break
             applied.append(patch)
         if apply_errors:
-            reverted = self._revert_patches(framework_root, applied)
+            reverted = self._revert_patches(
+                framework_root, applied, pre_apply_sha=pre_apply_sha,
+            )
             return {
                 "status": "apply_failed",
                 "error_class": "git_apply_failed",
@@ -286,7 +383,9 @@ class FrameworkPrExecutor:
                 slug=slug,
             )
         except Exception as exc:  # noqa: BLE001
-            reverted = self._revert_patches(framework_root, applied)
+            reverted = self._revert_patches(
+                framework_root, applied, pre_apply_sha=pre_apply_sha,
+            )
             return {
                 "status": "reverted",
                 "error_class": "bench_exception",
@@ -324,7 +423,9 @@ class FrameworkPrExecutor:
         )
 
         if not gate_pass:
-            reverted = self._revert_patches(framework_root, applied)
+            reverted = self._revert_patches(
+                framework_root, applied, pre_apply_sha=pre_apply_sha,
+            )
             reasons: list[str] = []
             if delta_pct is None:
                 reasons.append("no measurable throughput")
@@ -351,6 +452,36 @@ class FrameworkPrExecutor:
                 "workspace": str(output_root),
             }
 
+        # KEEP: commit the applied patches in framework_root so they
+        # survive a subsequent candidate's REJECT (which resets to its
+        # own pre_apply_sha — that sha already includes this commit).
+        keep_message = f"framework_pr KEEP {slug}"
+        keep_sha, commit_err = _git_commit_keep(framework_root, keep_message)
+        if keep_sha is None:
+            # Commit failed — surface as an apply_failed result and reset
+            # to pre_apply_sha so we don't leave uncommitted changes that
+            # the next candidate would see as "dirty baseline".
+            reverted = self._revert_patches(
+                framework_root, applied, pre_apply_sha=pre_apply_sha,
+            )
+            return {
+                "status": "apply_failed",
+                "error_class": "keep_commit_failed",
+                "error": commit_err or "git commit returned no sha",
+                "candidate": candidate,
+                "batch_id": batch_id,
+                "patches_applied": [],
+                "patches_reverted": [str(p) for p in reverted],
+                "output_throughput": new_tput,
+                "delta_pct": delta_pct,
+                "accuracy_pass": accuracy_pass,
+                "base_tput": base_tput,
+                "keep_threshold_pct": keep_threshold_pct,
+                "reason": f"KEEP commit failed: {commit_err}",
+                "bench_result": bench_result,
+                "workspace": str(output_root),
+            }
+
         return {
             "status": "kept",
             "candidate": candidate,
@@ -362,6 +493,7 @@ class FrameworkPrExecutor:
             "accuracy_pass": accuracy_pass,
             "base_tput": base_tput,
             "keep_threshold_pct": keep_threshold_pct,
+            "keep_commit_sha": keep_sha,
             "reason": (
                 f"throughput delta {delta_pct:+.2f}% >= "
                 f"{keep_threshold_pct:.2f}%"
@@ -374,32 +506,38 @@ class FrameworkPrExecutor:
     # Helpers
     # ------------------------------------------------------------------
     def _revert_patches(
-        self, framework_root: Path | None, applied: list[Path],
+        self,
+        framework_root: Path | None,
+        applied: list[Path],
+        *,
+        pre_apply_sha: str,
     ) -> list[Path]:
-        """Reverse-apply the patches we already applied (mirrors
-        :meth:`IntegratePatchExecutor._revert_patches`)."""
-        reverted: list[Path] = []
+        """Roll back the current candidate's changes.
+
+        FRAMEWORK_PR processes candidates serially in the same
+        framework_root, and previously-KEPT candidates have been
+        committed (see ``_git_commit_keep``). So REVERT only needs to
+        discard what *this* candidate added on top of ``pre_apply_sha``
+        — ``git reset --hard <pre_apply_sha>`` does exactly that without
+        touching the kept history. This replaces the older reverse-apply
+        + ``git checkout -- .`` fallback, which could clobber uncommitted
+        changes from prior candidates if a future caller ever omitted
+        the per-KEEP commit.
+
+        Returns the list of patches reverted (currently the full
+        ``applied`` list when the reset succeeds, empty otherwise) for
+        downstream telemetry / result schema compat.
+        """
         if framework_root is None or not applied:
-            return reverted
-        for patch in reversed(applied):
-            ok, err = _git_apply_reverse(framework_root, patch)
-            if ok:
-                reverted.append(patch)
-            else:
-                log.warning(
-                    "framework_pr: git apply -R failed for %s: %s; "
-                    "falling back to git checkout",
-                    patch, err,
-                )
-                ok2, err2 = _git_checkout_clean(framework_root)
-                if ok2:
-                    reverted = list(applied)
-                    break
-                log.error(
-                    "framework_pr: git checkout fallback failed: %s", err2,
-                )
-                break
-        return reverted
+            return []
+        ok, err = _git_reset_hard(framework_root, pre_apply_sha)
+        if not ok:
+            log.error(
+                "framework_pr: git reset --hard %s failed in %s: %s",
+                pre_apply_sha, framework_root, err,
+            )
+            return []
+        return list(applied)
 
     async def _bench_candidate(
         self, *,
