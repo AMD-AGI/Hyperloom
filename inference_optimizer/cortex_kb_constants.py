@@ -130,7 +130,6 @@ STATUS_REJECTED:           Final[str] = "rejected"
 KIND_RECIPE:               Final[str] = "recipe"
 KIND_LESSON:               Final[str] = "lesson"
 KIND_PITFALL:              Final[str] = "pitfall"
-KIND_SOURCE_CITATION:      Final[str] = "source_citation"
 
 # Edge ``attrs.relation`` — semantic secondary labels (kg-usage-guide §7.3).
 # Must pair with a specific ``edge_type``; the propose-edge validator
@@ -260,7 +259,6 @@ __all__ = [
     "KIND_RECIPE",
     "KIND_LESSON",
     "KIND_PITFALL",
-    "KIND_SOURCE_CITATION",
     "DEFAULT_HTTP_TIMEOUT_SEC",
     "DEFAULT_MAX_CONCURRENCY",
     "DEFAULT_RETRY_ATTEMPTS",

@@ -7,8 +7,6 @@ contract (kg-usage-guide §3.2 / §3.4 / §3.5):
   ``pitfall`` points with the right canonical_id hashing.
 * ``update_recipe`` wraps ``propose_point`` with the recipe canonical_id
   derived from (model, hardware).
-* ``propose_edge`` posts to /v1/edges/propose with ``attrs.relation``
-  honoured and falls back to NDJSON on transport failure.
 * ``lesson_canonical_id`` / ``pitfall_canonical_id`` are stable under
   citation reorder and prefix-disjoint.
 
@@ -186,94 +184,42 @@ def test_update_recipe_omits_unset_fields_from_attrs(session_dir):
 
 
 # ===========================================================================
-# propose_edge — direct edge writes
+# NDJSON queue semantics — exercised via propose_lesson / propose_pitfall
+# (propose_point's higher-level wrappers). The queue is the only failure
+# domain shared by all KB writes, so testing it through one wrapper covers
+# the contract for all of them.
 # ===========================================================================
-def test_propose_edge_resolves_canonical_ids_and_carries_relation(session_dir):
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/query").mock(side_effect=[
-            httpx.Response(200, json={"points": [{"id": 10, "canonical_id": "lesson:abc"}]}),
-            httpx.Response(200, json={"points": [{"id": 20, "canonical_id": "exp:42:0001"}]}),
-        ])
-        edge_route = router.post("/v1/edges/propose").mock(
-            return_value=httpx.Response(200, json={
-                "edge_id": 99, "status": "auto_accepted",
-            }),
-        )
-        out = client.propose_edge(
-            from_canonical_id="lesson:abc",
-            to_canonical_id="exp:42:0001",
-            edge_type="empirical",
-            relation="cites",
-            authority="EXPERIENTIAL",
-            evidence=["log:task-1"],
-        )
-    assert out["status"] == "auto_accepted"
-    assert out["edge_id"] == "99"
-    body = json.loads(edge_route.calls.last.request.content)
-    assert body["from_point"] == 10
-    assert body["to_point"] == 20
-    assert body["edge_type"] == "empirical"
-    assert body["attrs"]["relation"] == "cites"
-    assert body["authority"] == "EXPERIENTIAL"
-    assert body["evidence_refs"][0]["kind"] == "log"
-
-
-def test_propose_edge_falls_back_to_ndjson_on_http_failure(session_dir):
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/query").mock(
-            return_value=httpx.Response(500, json={"detail": "boom"}),
-        )
-        out = client.propose_edge(
-            from_canonical_id="lesson:abc",
-            to_canonical_id="exp:42:0001",
-            edge_type="empirical",
-            relation="cites",
-        )
-    assert out["status"] == "queued"
-    pending = cortex_pending_ndjson(session_dir).read_text(encoding="utf-8")
-    rows = [json.loads(line) for line in pending.splitlines() if line.strip()]
-    assert len(rows) == 1
-    assert rows[0]["op"] == "propose_edge"
-    assert rows[0]["payload"]["from_canonical_id"] == "lesson:abc"
-    assert rows[0]["payload"]["to_canonical_id"] == "exp:42:0001"
-    assert rows[0]["payload"]["edge_type"] == "empirical"
-    assert rows[0]["payload"]["relation"] == "cites"
-
-
 def test_flush_one_does_not_duplicate_row_on_transient_failure(session_dir):
-    """When ``_flush_one`` re-runs an enqueued op (e.g. propose_edge)
-    and the KB is still unreachable, the row must NOT be silently
-    re-enqueued. Otherwise every drain duplicates the pending entry
-    and permanent errors loop forever.
+    """When ``_flush_one`` re-runs an enqueued op and the KB is still
+    unreachable, the row must NOT be silently re-enqueued. Otherwise
+    every drain duplicates the pending entry and permanent errors loop
+    forever.
 
     Regression test for the ``sync-with-fallback`` re-enqueue bug:
-    previously ``_flush_one`` called ``propose_edge(prefer_sync=True)``
+    previously ``_flush_one`` called ``propose_point(prefer_sync=True)``
     which internally caught CortexKBError and ``_enqueue()``-d a
     duplicate, then returned ``queued`` (a non-exception), causing
     ``_flush_one`` to mis-classify as ``ok``.
     """
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
     pending_path = cortex_pending_ndjson(session_dir)
-    # Seed one propose_edge row while KB is down.
+    # Seed one propose_lesson row while KB is down.
     with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/query").mock(
+        router.post("/v1/points/propose").mock(
             return_value=httpx.Response(500, json={"detail": "boom"}),
         )
-        client.propose_edge(
-            from_canonical_id="lesson:abc",
-            to_canonical_id="exp:42:0001",
-            edge_type="empirical",
-            relation="cites",
+        client.propose_lesson(
+            statement="boom-time lesson",
+            measured_impact="gain_pct=1.0",
+            applicable_models=["m"], applicable_hardware=["h"],
         )
     rows_before = pending_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(rows_before) == 1, rows_before
     # Drain while KB is still down — the row should be classified as
-    # transient (NOT_FOUND), counted in ``remaining`` exactly once,
-    # and the file must still hold exactly one line (no duplicate).
+    # transient (transport failure), counted in ``remaining`` exactly
+    # once, and the file must still hold exactly one line (no duplicate).
     with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/query").mock(
+        router.post("/v1/points/propose").mock(
             return_value=httpx.Response(500, json={"detail": "still boom"}),
         )
         report = client.drain_pending(timeout_sec=5.0)
@@ -287,36 +233,6 @@ def test_flush_one_does_not_duplicate_row_on_transient_failure(session_dir):
     assert envelope["attempts"] == 1
 
 
-def test_flush_one_not_found_is_transient_not_permanent(session_dir):
-    """``CortexKBError(category="business", code="NOT_FOUND")`` from
-    ``_resolve_point_id`` must be classified as transient — the row
-    that registers the missing ``canonical_id`` may still be ahead of
-    this one in the NDJSON queue. Previously NOT_FOUND was treated
-    as a permanent business error and dead-lettered immediately.
-    """
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    pending_path = cortex_pending_ndjson(session_dir)
-    with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/query").mock(
-            return_value=httpx.Response(500, json={"detail": "boom"}),
-        )
-        client.propose_edge(
-            from_canonical_id="lesson:abc",
-            to_canonical_id="exp:42:0001",
-            edge_type="empirical",
-            relation="cites",
-        )
-    # Now KB is reachable but the point genuinely does not exist yet
-    # (empty ``points`` array → business / NOT_FOUND).
-    with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/query").mock(
-            return_value=httpx.Response(200, json={"points": []}),
-        )
-        report = client.drain_pending(timeout_sec=5.0)
-    assert report["dead_letter"] == 0, "NOT_FOUND must NOT be dead-lettered"
-    assert report["remaining"] == 1
-
-
 def test_drain_pending_attempts_exhausted_becomes_dead_letter(session_dir):
     """After ``MAX_FLUSH_ATTEMPTS`` consecutive transient failures the
     row must be dead-lettered so the queue doesn't grow unbounded
@@ -324,34 +240,54 @@ def test_drain_pending_attempts_exhausted_becomes_dead_letter(session_dir):
     from inference_optimizer import cortex_kb_constants as C
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
     pending_path = cortex_pending_ndjson(session_dir)
-    # Seed one row.
     with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/query").mock(
+        router.post("/v1/points/propose").mock(
             return_value=httpx.Response(500, json={"detail": "boom"}),
         )
-        client.propose_edge(
-            from_canonical_id="lesson:abc",
-            to_canonical_id="exp:42:0001",
-            edge_type="empirical",
-            relation="cites",
+        client.propose_lesson(
+            statement="never-make-it lesson",
+            measured_impact="gain_pct=1.0",
+            applicable_models=["m"], applicable_hardware=["h"],
         )
     # Drain MAX_FLUSH_ATTEMPTS times while KB stays down. The last
     # iteration must dead-letter the row instead of restoring it.
     last_report = None
-    for i in range(C.MAX_FLUSH_ATTEMPTS):
+    for _ in range(C.MAX_FLUSH_ATTEMPTS):
         with respx.mock(base_url=KB_URL) as router:
-            router.post("/v1/points/query").mock(
+            router.post("/v1/points/propose").mock(
                 return_value=httpx.Response(500, json={"detail": "boom"}),
             )
             last_report = client.drain_pending(timeout_sec=5.0)
     assert last_report is not None
     assert last_report["dead_letter"] == 1, last_report
     assert last_report["remaining"] == 0, last_report
-    # The pending file is now empty / gone.
     assert (
         not pending_path.exists()
         or pending_path.read_text(encoding="utf-8").strip() == ""
     )
+
+
+def test_flush_one_dead_letters_unknown_op(session_dir):
+    """A legacy NDJSON envelope with ``op != "propose_point"`` (e.g.
+    leftover ``propose_edge`` row from a pre-cleanup run) must be
+    dead-lettered immediately — the drain handler only supports
+    propose_point after the edge protocol was retired."""
+    pending_path = cortex_pending_ndjson(session_dir)
+    pending_path.parent.mkdir(parents=True, exist_ok=True)
+    pending_path.write_text(
+        json.dumps({
+            "op":              "propose_edge",
+            "idempotency_key": "legacy:abc",
+            "attempts":        0,
+            "payload":         {"from_canonical_id": "x", "to_canonical_id": "y"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL):
+        report = client.drain_pending(timeout_sec=5.0)
+    assert report["dead_letter"] == 1
+    assert report["remaining"] == 0
 
 
 # ===========================================================================
@@ -1142,61 +1078,6 @@ def test_lessons_returns_empty_on_disabled_or_failure(session_dir):
         assert client.lessons(model="m", hardware="h") == []
 
 
-def test_propose_edge_drain_replays_to_edge_endpoint(session_dir):
-    """End-to-end fallback contract: when ``propose_edge`` sync failed
-    and the row was enqueued, a later :meth:`drain_pending` must
-    successfully replay it against ``/v1/edges/propose`` — NOT route
-    it to dead-letter.
-
-    Regression test: ``_flush_one`` previously had no ``propose_edge``
-    branch and fell through to ``return "permanent"``, silently
-    dropping every queued edge write the next time the KB recovered.
-    """
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    # Step 1 — enqueue with KB down.
-    with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/query").mock(
-            return_value=httpx.Response(500, json={"detail": "boom"}),
-        )
-        client.propose_edge(
-            from_canonical_id="lesson:abc",
-            to_canonical_id="exp:42:0001",
-            edge_type="empirical",
-            relation="cites",
-            evidence=["log:task-1"],
-        )
-    pending_path = cortex_pending_ndjson(session_dir)
-    assert pending_path.exists()
-    # Step 2 — KB recovers; drain should replay the row against the
-    # real edges endpoint and clear the pending file.
-    with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/query").mock(side_effect=[
-            httpx.Response(200, json={"points": [{"id": 10, "canonical_id": "lesson:abc"}]}),
-            httpx.Response(200, json={"points": [{"id": 20, "canonical_id": "exp:42:0001"}]}),
-        ])
-        edge_route = router.post("/v1/edges/propose").mock(
-            return_value=httpx.Response(200, json={
-                "edge_id": 99, "status": "auto_accepted",
-            }),
-        )
-        report = client.drain_pending(timeout_sec=5.0)
-    assert report["drained"] == 1
-    assert report["remaining"] == 0
-    assert report["dead_letter"] == 0
-    assert edge_route.called
-    body = json.loads(edge_route.calls.last.request.content)
-    assert body["from_point"] == 10
-    assert body["to_point"] == 20
-    assert body["edge_type"] == "empirical"
-    assert body["attrs"]["relation"] == "cites"
-    # Pending file is consumed (drain removes the snapshot when all
-    # rows succeed and leftover_lines is empty).
-    assert (
-        not pending_path.exists()
-        or pending_path.read_text(encoding="utf-8").strip() == ""
-    )
-
-
 # ===========================================================================
 # disabled client — fact writes are no-ops
 # ===========================================================================
@@ -1210,8 +1091,5 @@ def test_disabled_client_skips_fact_writes(session_dir):
     )["status"] == "skip_disabled"
     assert client.update_recipe(
         model="m", hardware="h",
-    )["status"] == "skip_disabled"
-    assert client.propose_edge(
-        from_canonical_id="a", to_canonical_id="b", edge_type="empirical",
     )["status"] == "skip_disabled"
     assert not cortex_pending_ndjson(session_dir).exists()
