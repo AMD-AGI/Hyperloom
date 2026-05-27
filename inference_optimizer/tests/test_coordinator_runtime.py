@@ -599,7 +599,10 @@ async def test_execution_checklist_is_in_orchestration_prompt(session_dir):
         prompt = await c._compose_prompt("orchestration")
 
         assert "Execution checklist" in prompt
-        assert "profile is required now" in prompt
+        # Post single-path refactor: the TODO is the wait-for-Coordinator-
+        # internal-analysis hint, not the legacy "profile is required now".
+        assert "Coordinator-internal analysis" in prompt
+        assert "last_profile_trace" in prompt
     finally:
         await c.stop()
 

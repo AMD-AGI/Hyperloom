@@ -195,6 +195,23 @@ EXPLORE_PERMISSIVE_PROVENANCE_LITERALS: frozenset[str] = frozenset({
     "default_grid",
 })
 
+# Specialist / Explore parallelism caps — single source of truth
+# imported by cli.py, specialist_runner.py, specialist_prompt_builder.py,
+# and prompt_builder.py so the limits never drift between layers.
+#   * ``MAX_RESEARCH_LANE_CAPACITY`` — hard cap on concurrent specialist
+#     sub-agents (the M6 ceiling; CLI clamps higher operator values down
+#     to this without warning).
+#   * ``DEFAULT_SPECIALIST_MAX_PROPOSALS`` — per-specialist proposal_set
+#     cap; enforced both in the specialist prompt (self-curation) and on
+#     the SpecialistRunner write path (hard truncate before persist).
+#   * ``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS`` — number of
+#     ``provenance='specialist:*'`` variants Orchestration may stack in
+#     one ``explore`` grid. ``default_grid`` variants are unaffected
+#     (cold-start path).
+MAX_RESEARCH_LANE_CAPACITY: int = 6
+DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 3
+MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS: int = 1
+
 # Verdicts that allow ``integrate_patch`` to proceed without an
 # explicit operator override. ``advise`` is treated as a soft
 # approval (Critic provided guidance but didn't block); ``approve``
@@ -252,6 +269,31 @@ DEPRECATED_ACTION_REPLACEMENTS: dict[str, str] = {
     "params":   "explore",
     "validate_stack": "explore (per-KEEP stack rebench is inlined)",
 }
+
+
+# ---------------------------------------------------------------------------
+# Analysis actions that are Coordinator-internal only
+#
+# ``roofline`` (composite: profile + trace_analyze + analysis.md
+# snapshot) and ``profile`` (lightweight trace capture) are auto-managed
+# by the Coordinator: enqueued at PRELUDE after baseline lands, and
+# again on every +10% watermark crossing of ``last_roofline_tput``.
+# Which kind runs is selected by ``shared_state.enable_roofline``
+# (CLI flag ``--enable-roofline`` / ``--no-enable-roofline``, default
+# on). The LLM does not propose either name; PolicyGate denies them at
+# the intent boundary so the policy_denial event in the prompt nudges
+# the LLM toward the proposable surface (``specialist`` / ``explore``
+# / ``integrate_patch``).
+#
+# The denial is symmetric across delegate / propose_action / request:
+# the rule fires *after* ``action_deprecated`` (no overlap today —
+# different name sets) but *before* the kernel-owned + phase + unknown
+# checks, so the canonical hint always wins.
+# ---------------------------------------------------------------------------
+INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset({
+    "roofline",
+    "profile",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +814,14 @@ class PolicyGate:
         # fired. Inv-11.3: one deprecated action triggers exactly one
         # rule.
         self._validate_action_not_deprecated(action_name, intent_kind="delegate")
+        # analysis_action_not_llm_proposable —
+        # roofline / profile are Coordinator-internal (PRELUDE bootstrap
+        # + watermark-triggered). Block the LLM from racing the auto
+        # path regardless of which channel (delegate / propose / request)
+        # it tries to smuggle the name through.
+        self._validate_action_not_llm_proposable(
+            action_name, intent_kind="delegate",
+        )
         # Plan A — kernel-owned actions are not directly delegatable.
         if action_name in KERNEL_OWNED_ACTIONS:
             raise PolicyDenied(
@@ -809,19 +859,16 @@ class PolicyGate:
         # for every round, matching Arbor's optimization loop.
         if action_name == EXPLORE_ACTION_NAME:
             self._validate_explore_provenance(payload)
+            self._validate_explore_grid_size(payload)
         # sweep_phase_singleton: deny LLM-emitted
         # sweep when the Coordinator's SWEEP-entry hook already
         # auto-enqueued one. Two concurrent sweep tasks crash both
         # vllm engines on init; see _validate_sweep_singleton.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # F3-1 / F3-2 / F3-5 (): same Roofline-v2
-        # propose_action gates also apply at the delegate channel so a
-        # task is never created on the legacy ``profile`` path while
-        # the operator has the Roofline composite + deny toggles on,
-        # and so kernel_opt cannot bypass the gain-driven /
-        # explore-minimum gates by skipping propose_action entirely.
-        self._validate_roofline_composite_supersedes_profile(action_name)
+        # Same gain-driven / explore-minimum gates apply at the
+        # delegate channel so kernel_opt cannot bypass them by skipping
+        # propose_action.
         self._validate_gain_driven_kernel_opt(action_name)
         self._validate_explore_minimum_before_kernel_opt(action_name)
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
@@ -890,6 +937,11 @@ class PolicyGate:
         # the policy_denial event surfaces in the prompt before the
         # delegate is even attempted.
         self._validate_action_not_deprecated(action_name, intent_kind="propose_action")
+        # analysis_action_not_llm_proposable
+        # (propose channel) — same rule, same hint.
+        self._validate_action_not_llm_proposable(
+            action_name, intent_kind="propose_action",
+        )
         # Soft check — propose is advisory; only reject if registry is wired
         # AND the name is unknown AND it's not a kernel-owned action (which
         # are listed in metadata under their canonical names).
@@ -910,13 +962,17 @@ class PolicyGate:
             self._validate_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
-        # F3-1 (Roofline-v2 N9): deny direct ``profile`` when the
-        # operator has flipped --use-roofline-composite + --deny-direct-profile
-        # on. Forces atomic ``roofline`` use so the snapshot_id counter
-        # stays monotonic and ``last_trace_analyze.analysis_md_text`` stays
-        # aligned with the trace path it was derived from. See
-        # ``action_executors/roofline.py`` §5/§8.5 stale-cache invariant.
-        self._validate_roofline_composite_supersedes_profile(action_name)
+        # PR-A9 + explore_specialist_grid_max_one — same explore-grid
+        # gates as the delegate channel. Without these, an LLM that
+        # cannot delegate{action_name='explore', ...} (e.g. wrong role
+        # or phase guard fires first) can still propose_action an
+        # explore grid full of llm_direct or many specialist:* variants
+        # and have the Coordinator materialise it. Mirror both rules
+        # here so the propose advisory path can never sidestep PR-A9
+        # or the new per-round specialist cap.
+        if action_name == EXPLORE_ACTION_NAME:
+            self._validate_explore_provenance(payload)
+            self._validate_explore_grid_size(payload)
         # F3-2 (Roofline-v2 N19c): gain-driven kernel_opt lock — until
         # cheap rounds have plateaued, kernel_opt is denied so we don't
         # spend a 30 min GPU lane on a cheap-still-earning frontier.
@@ -938,75 +994,12 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # F3-1 / F3-2 / Roofline-v2 propose_action gates
-    # (F3_policygate_advisory.MD)
-    #
-    # These three sub-rules are validated together inside
-    # :meth:`_validate_propose_action` so an out-of-the-box session
-    # (every Roofline-v2 toggle off) sees zero behavioural change. Only
-    # an operator who explicitly opts into one of the toggles trips the
-    # corresponding rule. Each helper is a no-op when its toggle is off.
+    # Propose_action sub-gates (F3 series)
     #
     # Reading order in the dispatch path:
-    #   1. _validate_roofline_composite_supersedes_profile (N9)
-    #   2. _validate_gain_driven_kernel_opt                 (N19c)
-    #   3. _validate_explore_minimum_before_kernel_opt      (F3-5)
-    #
-    # Independent toggles let operators A/B test each rule in isolation
-    # before committing to the next; this is the design rationale in
-    # README.md §3 and the reason none of the
-    # rules is hard-coded "always on".
+    #   1. _validate_gain_driven_kernel_opt                 (N19c)
+    #   2. _validate_explore_minimum_before_kernel_opt      (F3-5)
     # ------------------------------------------------------------------
-    _N9_BLOCKED_ACTIONS: frozenset[str] = frozenset({"profile"})
-
-    def _validate_roofline_composite_supersedes_profile(
-        self, action_name: str,
-    ) -> None:
-        """F3-1 (N9): deny direct ``profile`` propose_action when
-        composite is on.
-
-        Two-toggle gate: both ``use_roofline_composite`` AND
-        ``deny_direct_profile`` must be on. The second toggle is the
-        operator escape hatch — flipping ``use_roofline_composite`` on
-        first lets the LLM exercise both paths in parallel, then
-        flipping ``deny_direct_profile`` on closes the legacy path.
-
-        Defers to the phase allowlist when the action is proposed in a
-        phase that disallows it (e.g. ``profile`` in PRELUDE) — the
-        ``phase_incompatible`` rule's hint is more actionable there
-        and the LLM should learn the phase contract first.
-        """
-        if action_name not in self._N9_BLOCKED_ACTIONS:
-            return
-        ss = getattr(self, "shared_state", None)
-        if ss is None:
-            return
-        if not bool(getattr(ss, "use_roofline_composite", False)):
-            return
-        if not bool(getattr(ss, "deny_direct_profile", False)):
-            return
-        # Defer to phase_incompatible when the action is not in the
-        # current phase's allow-set (single source of truth: phase_state
-        # PHASE_ALLOWED_ACTIONS). Avoids competing denials racing for
-        # the same intent.
-        from .phase_state import PHASE_ALLOWED_ACTIONS
-        current_phase = str(getattr(ss, "phase", "") or "")
-        allowed = PHASE_ALLOWED_ACTIONS.get(current_phase)
-        if allowed is not None and action_name not in allowed:
-            return
-        raise PolicyDenied(
-            f"propose_action: action_name={action_name!r} is denied "
-            f"while --use-roofline-composite + --deny-direct-profile "
-            f"are both on; use action_name='roofline' for an atomic "
-            f"profile + trace_analyze + analysis.md snapshot.",
-            rule="n9_deny_direct_profile_when_composite_on",
-            hint=(
-                "Re-emit propose_action{action_name='roofline'} (the "
-                "composite action runs profile + trace_analyze "
-                "atomically and produces last_trace_analyze."
-                "analysis_md_text + a fresh roofline_snapshot_id)."
-            ),
-        )
 
     _N19C_HISTORY_WINDOW: int = 3
     _N19C_EPSILON_PCT: float = 0.5
@@ -1182,6 +1175,10 @@ class PolicyGate:
         # extension that re-uses one of the legacy names via
         # ``request.kind`` would still be caught here.
         self._validate_action_not_deprecated(kind, intent_kind="request")
+        # analysis_action_not_llm_proposable —
+        # defense in depth: nobody REQUESTs roofline/profile today, but
+        # an extension that does would race the auto-managed gate.
+        self._validate_action_not_llm_proposable(kind, intent_kind="request")
         # R1 phase_incompatible. For
         # orchestration → kernel REQUEST we treat the request *kind* as
         # the action name (kernel-owned actions named identically to
@@ -1310,6 +1307,51 @@ class PolicyGate:
                 f"KB_design §3.4 / §3.15 §2.3 — v0.8 merged "
                 f"backends/params/validate_stack into the single "
                 f"explore action with per-KEEP stack rebench inlined."
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # analysis_action_not_llm_proposable —
+    # deny LLM proposals of ``roofline`` / ``profile``
+    # ------------------------------------------------------------------
+    def _validate_action_not_llm_proposable(
+        self,
+        action_name: str,
+        *,
+        intent_kind: str,
+    ) -> None:
+        """Reject LLM-proposed analysis actions.
+
+        ``roofline`` and ``profile`` are Coordinator-auto-managed at
+        PRELUDE bootstrap and on every +10% watermark crossing; the
+        kind selected is controlled by
+        :attr:`SharedState.enable_roofline` (``--enable-roofline`` /
+        ``--no-enable-roofline``). The LLM has no business proposing
+        either name — doing so would race the auto-managed pending-task
+        gate and could double-enqueue.
+
+        No-op when ``action_name`` isn't in
+        :data:`INTERNAL_ONLY_ACTION_NAMES`. Fires *after*
+        ``action_deprecated`` (the two sets are disjoint today) but
+        *before* the kernel-owned / phase / unknown gates, so the
+        canonical hint always wins.
+        """
+        if not action_name:
+            return
+        if action_name not in INTERNAL_ONLY_ACTION_NAMES:
+            return
+        raise PolicyDenied(
+            f"action {action_name!r} is Coordinator-internal; the LLM "
+            f"must not propose it ({intent_kind})",
+            rule="analysis_action_not_llm_proposable",
+            hint=(
+                "roofline / profile are auto-enqueued at PRELUDE and on "
+                "every +10% gain crossing. Selection is controlled by "
+                "``--enable-roofline`` / ``--no-enable-roofline`` (default "
+                "on → roofline; off → profile). Propose ``specialist`` "
+                "or ``explore`` instead — the analysis snapshot will be "
+                "refreshed automatically the next time the watermark "
+                "trips."
             ),
         )
 
@@ -1631,6 +1673,45 @@ class PolicyGate:
                     "  2. stamp every cold-start variant with "
                     "provenance='default_grid' (signals 'no specialist "
                     "yet — use the executor's built-in grid')."
+                ),
+            )
+
+    # ------------------------------------------------------------------
+    # ``explore_specialist_grid_max_one`` — cap on how many
+    # ``provenance='specialist:*'`` variants Orchestration may stack
+    # into one explore round. ``default_grid`` variants are unaffected
+    # (cold-start path). Backstops the prompt instruction by hard-denying
+    # at PolicyGate so an over-eager LLM cannot ship a 5-way grid even
+    # if the orchestration prompt is later softened.
+    # ------------------------------------------------------------------
+    def _validate_explore_grid_size(
+        self, payload: dict[str, Any],
+    ) -> None:
+        params = payload.get("params") or {}
+        if not isinstance(params, dict):
+            return
+        grid = params.get("grid")
+        if not isinstance(grid, list) or not grid:
+            return
+        specialist_sourced = sum(
+            1 for v in grid
+            if isinstance(v, dict)
+            and str(v.get("provenance") or "").startswith("specialist:")
+        )
+        if specialist_sourced > MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS:
+            raise PolicyDenied(
+                f"explore: grid contains {specialist_sourced} "
+                f"specialist-sourced variants; max "
+                f"{MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS} per round.",
+                rule="explore_specialist_grid_max_one",
+                hint=(
+                    "Across all specialist_done.proposal_set entries in "
+                    "the inbox, select AT MOST one variant per explore "
+                    "round to stamp provenance='specialist:<domain>'. "
+                    "If multiple specialist proposals look attractive, "
+                    "defer the runners-up to a subsequent explore round. "
+                    "``default_grid`` variants are unaffected (cold-start "
+                    "path)."
                 ),
             )
 
@@ -2241,6 +2322,7 @@ __all__ = [
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "DEPRECATED_ACTION_NAMES",
     "DEPRECATED_ACTION_REPLACEMENTS",
+    "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",
     "KILL_TASK_SOURCE_ALLOWLIST",
