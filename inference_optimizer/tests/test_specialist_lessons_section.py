@@ -34,6 +34,7 @@ from inference_optimizer.orchestrator.specialist_domains import (
 from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     _section_lessons,
+    _section_pitfalls,
     build_specialist_prompts,
 )
 
@@ -107,11 +108,15 @@ async def test_warm_specialist_params_omits_warm_start_lessons_when_empty(
 # ---------------------------------------------------------------------------
 # Prompt section
 # ---------------------------------------------------------------------------
-def _make_inp(lessons: list[dict[str, Any]] | None = None) -> SpecialistPromptInputs:
+def _make_inp(
+    lessons: list[dict[str, Any]] | None = None,
+    pitfalls: list[dict[str, Any]] | None = None,
+) -> SpecialistPromptInputs:
     return SpecialistPromptInputs(
         task_id="t-1",
         domain=get_domain("serving_specialist"),
         warm_start_lessons=lessons or [],
+        warm_start_pitfalls=pitfalls or [],
     )
 
 
@@ -171,7 +176,7 @@ def test_section_lessons_skips_lessons_with_empty_statement():
 
 def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_feed():
     """End-to-end: build_specialist_prompts inserts section 5b after
-    section 5 (recipe) and before section 6 (PR feed)."""
+    section 5 (recipe) and before section 5c (pitfalls)."""
     inp = _make_inp([
         {"canonical_id": "lesson:x",
          "attrs": {"statement": "x → +1%"}},
@@ -179,5 +184,66 @@ def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_feed():
     _system, user = build_specialist_prompts(inp)
     recipe_idx = user.index("## 5. WARM-START RECIPE SUMMARY")
     lessons_idx = user.index("## 5b. RELATED LESSONS")
+    pitfalls_idx = user.index("## 5c. KNOWN PITFALLS")
     pr_idx = user.index("## 6. PR FEED")
-    assert recipe_idx < lessons_idx < pr_idx
+    assert recipe_idx < lessons_idx < pitfalls_idx < pr_idx
+
+
+# ---------------------------------------------------------------------------
+# § 5c pitfalls section — symmetric mirror of § 5b lessons
+# ---------------------------------------------------------------------------
+def test_section_pitfalls_empty_falls_back_to_placeholder():
+    rows = _section_pitfalls(_make_inp())
+    text = "\n".join(rows)
+    assert "## 5c. KNOWN PITFALLS" in text
+    assert "do NOT repeat" in text  # negative framing is critical
+    assert "(none" in text
+
+
+def test_section_pitfalls_renders_each_pitfall_with_metadata():
+    pitfalls = [
+        {
+            "canonical_id": "pitfall:abc",
+            "confidence": 0.7,
+            "attrs": {
+                "description":       "VLLM_ROCM_USE_AITER_FP4BMM=1 → crash on gfx942",
+                "severity":          "crash",
+                "source_session_id": "session-A",
+            },
+        },
+        {
+            "canonical_id": "pitfall:def",
+            "confidence": 0.4,
+            "attrs": {
+                "description": "--max-num-seqs 1024 on MoE → -8% regress",
+                "severity":    "regress",
+            },
+        },
+    ]
+    rows = _section_pitfalls(_make_inp(pitfalls=pitfalls))
+    text = "\n".join(rows)
+    assert "VLLM_ROCM_USE_AITER_FP4BMM=1 → crash on gfx942" in text
+    assert "severity=crash" in text
+    assert "conf=0.70" in text
+    assert "src=session-A" in text
+    assert "--max-num-seqs 1024 on MoE → -8% regress" in text
+    assert "severity=regress" in text
+
+
+def test_section_pitfalls_skips_pitfalls_with_empty_description():
+    """Defensive against partial / legacy rows (e.g. resumed sessions
+    with the pre-fix ``[{"raw": <json_blob>}]`` shape that lacks
+    ``attrs.description``)."""
+    pitfalls = [
+        {"canonical_id": "pitfall:empty", "attrs": {"description": ""}},
+        # Legacy shape from the broken traps(symptom=) era.
+        {"raw": "{\"points\":[...legacy json blob...]}"},
+        {"canonical_id": "pitfall:real",
+         "attrs": {"description": "real one", "severity": "crash"}},
+    ]
+    rows = _section_pitfalls(_make_inp(pitfalls=pitfalls))
+    text = "\n".join(rows)
+    assert "real one" in text
+    assert "**** " not in text
+    # No legacy-blob leakage.
+    assert "legacy json blob" not in text

@@ -1207,6 +1207,71 @@ def test_lessons_returns_empty_on_disabled_or_failure(session_dir):
 
 
 # ===========================================================================
+# client.pitfalls() — strict mirror of lessons(), replaces broken traps()
+# ===========================================================================
+def test_pitfalls_query_filters_by_model_hardware_framework(session_dir):
+    """``pitfalls()`` posts an ``attrs_filter`` matching what
+    ``propose_pitfall`` writes (applicable_models / applicable_hardware
+    + framework from extra_attrs). Regression guard: the old
+    ``traps(symptom=...)`` API filtered on an ``attrs.symptom`` field
+    that propose_pitfall never wrote, so every query returned empty."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={"points": []}),
+        )
+        client.pitfalls(model="DeepSeek-R1", hardware="mi300x", framework="sglang")
+    body = json.loads(route.calls.last.request.content)
+    assert body["kind"] == "pitfall"
+    assert body["attrs_filter"]["applicable_models"] == "DeepSeek-R1"
+    assert body["attrs_filter"]["applicable_hardware"] == "mi300x"
+    assert body["attrs_filter"]["framework"] == "sglang"
+
+
+def test_pitfalls_returns_points_sorted_by_confidence_desc(session_dir):
+    """Higher-confidence pitfalls surface first so the specialist
+    prompt's truncated list emphasises the most authoritative ones."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={
+                "points": [
+                    {"id": 1, "canonical_id": "pitfall:a", "kind": "pitfall",
+                     "attrs": {"description": "low-conf",
+                               "severity": "regress"},
+                     "confidence": 0.3},
+                    {"id": 2, "canonical_id": "pitfall:b", "kind": "pitfall",
+                     "attrs": {"description": "high-conf",
+                               "severity": "crash"},
+                     "confidence": 0.95},
+                ],
+            }),
+        )
+        out = client.pitfalls(model="m", hardware="h")
+    ids = [p["canonical_id"] for p in out]
+    assert ids == ["pitfall:b", "pitfall:a"]
+
+
+def test_pitfalls_returns_empty_on_disabled_or_failure(session_dir):
+    disabled = CortexKBClient(session_dir=session_dir, enabled=False, kb_url=KB_URL)
+    assert disabled.pitfalls(model="m", hardware="h") == []
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(500, json={"detail": "boom"}),
+        )
+        assert client.pitfalls(model="m", hardware="h") == []
+
+
+def test_traps_method_was_removed(session_dir):
+    """``traps(symptom=...)`` was removed in favor of ``pitfalls()``.
+    Lock the surface so a future revert doesn't bring back the broken
+    symptom-filtered API."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    assert not hasattr(client, "traps")
+
+
+# ===========================================================================
 # disabled client — fact writes are no-ops
 # ===========================================================================
 def test_disabled_client_skips_fact_writes(session_dir):

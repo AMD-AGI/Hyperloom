@@ -893,23 +893,69 @@ class CortexKBClient:
             return t1_seed, "T1_seed_only", 0.0
         return empty
 
-    def traps(self, *, symptom: str) -> str:
-        """T0 — query ``kind=pitfall`` filtered by symptom.
+    def pitfalls(
+        self,
+        *,
+        model: str,
+        hardware: str,
+        framework: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """T0 — query ``kind=pitfall`` points relevant to ``(model, hardware)``.
 
-        Returns JSON-encoded response body. Failures non-fatal.
+        Strict mirror of :meth:`lessons` — same surface, different
+        kind. Returns a list of KB point dicts; empty list on failure
+        (non-fatal — warm-start pitfalls are priors, not invariants).
+
+        Replaces the legacy ``traps(symptom=...)`` API. ``traps`` filtered
+        by an ``attrs.symptom`` field that ``propose_pitfall`` never wrote,
+        so the query matched nothing on KB backends that exact-match
+        missing keys. The new shape mirrors ``propose_pitfall``'s actual
+        attrs (``applicable_models`` / ``applicable_hardware`` /
+        ``framework`` from ``_collect_workload_tags``) so writer and
+        reader are aligned.
+
+        Filtering strategy matches :meth:`lessons`:
+
+        * ``applicable_models`` / ``applicable_hardware`` are lists on
+          the KB point; ``attrs_filter`` semantics on lists is "any-of
+          contains" on most KB backends, so passing a scalar matches
+          rows whose list contains it.
+        * ``framework`` (optional) — written into ``attrs`` by
+          ``_record_fact_per_task`` / ``_record_fact_per_variant`` via
+          ``extra_attrs``. Pass ``None`` (default) to skip framework
+          filtering when the backend is strict.
         """
         if not self.enabled:
-            return ""
+            return []
+        attrs_filter: dict[str, Any] = {}
+        if model:
+            attrs_filter["applicable_models"] = model
+        if hardware:
+            attrs_filter["applicable_hardware"] = hardware
+        if framework:
+            attrs_filter["framework"] = framework
         body = {
             C.F_KIND:         C.KIND_PITFALL,
-            C.F_ATTRS_FILTER: {"symptom": symptom} if symptom else {},
-            C.F_LIMIT:        50,
+            C.F_ATTRS_FILTER: attrs_filter,
+            C.F_LIMIT:        int(limit),
         }
         try:
             resp = self._post(C.PATH_QUERY_POINT, body)
-        except CortexKBError:
-            return ""
-        return json.dumps(resp, sort_keys=True)
+        except CortexKBError as exc:
+            log.info("pitfalls query failed: %s", exc)
+            return []
+        points = resp.get(C.F_POINTS) or resp.get("points") or []
+        if not isinstance(points, list):
+            return []
+        # Sort by KB-side confidence desc so the most authoritative
+        # pitfalls land first in the specialist prompt section.
+        sorted_points = sorted(
+            (p for p in points if isinstance(p, dict)),
+            key=lambda p: float(p.get("confidence") or 0.0),
+            reverse=True,
+        )
+        return sorted_points
 
     def lessons(
         self,
