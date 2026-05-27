@@ -31,11 +31,12 @@ Design notes
 * Restart safety: opening the pid file in exclusive mode prevents
   double-launch; on detected stale pid (process gone) we overwrite.
 * No persistent in-memory state — the on-disk NDJSON is the authority.
-* Each pending row is replayed via a single ``POST /v1/points/propose``
-  or ``POST /v1/edges/propose``. The session-based hypothesize /
-  verify protocol was retired, so the daemon no longer replays
-  those ops. The KB ``/v1/bulk/ingest`` endpoint is reserved for
-  ``offline_pipeline`` source only.
+* Each pending row is replayed via a single ``POST /v1/points/propose``.
+  The session-based hypothesize / verify protocol AND the direct
+  ``/v1/edges/propose`` write surface have both been retired, so the
+  daemon only replays ``propose_point`` rows; any legacy ``propose_edge``
+  envelope still on disk is dead-lettered. The KB ``/v1/bulk/ingest``
+  endpoint is reserved for ``offline_pipeline`` source only.
 """
 from __future__ import annotations
 
