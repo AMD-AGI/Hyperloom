@@ -567,7 +567,6 @@ class SharedState:
     #                                      # explore round finishes
     #     "proposals_rejected": int,
     #     "proposals_skipped": int,
-    #     "kb_edge_ids": [str, ...],       # M5 simplified; M6 per-variant
     #     "confidence_avg": float | None,
     #     "domain_breakdown": {domain_key: {...}},
     #     "notes": [str, ...],
@@ -695,11 +694,6 @@ class SharedState:
     # ``Coordinator.run()`` / ``Coordinator.tick(n)`` iteration; kept
     # so plateau / phase budget math has a stable monotonic anchor.
     tick: int = 0
-    # Monotonic per-session experiment counter. Bumped once per
-    # ``propose_action`` (T2) so :func:`experiment_canonical_id`
-    # produces a stable ``exp:{sid}:{iter:04d}`` aligned with the KB
-    # ``experiment`` kind schema.
-    session_iter_index: int = 0
     # Remaining gain-pct target gap (0.0 means "no target"). Coordinator
     # refreshes this when the run objective is ``gain_pct=N``. Kept
     # because the prompt builder + breakdown rely on it for the
@@ -755,15 +749,6 @@ class SharedState:
     # Drives the ``breakdown.kb_provenance.commit`` section and the
     # operator-visible "what survived this session" summary.
     cortex_session_summary: dict[str, Any] = field(default_factory=dict)
-    # Tentative edge_ids created by T2 ``session hypothesize`` that have
-    # not yet been ``verify``-d by T3. Crash-recovery rule (KB_design
-    # §3.13 M1 §7 "resume"): on resume the Coordinator inspects this
-    # list and routes orphans through ``propose-edge + late_verified``
-    # rather than ``verify`` (avoids 404 from a stale edge that never
-    # made it past the NDJSON queue). Capped indirectly by the in-flight
-    # proposal count — proposals removed from ``pending_proposals`` also
-    # drop their edge_id here.
-    pending_kb_edges: list[dict[str, Any]] = field(default_factory=list)
     # T0 snapshot of ``find-recipe`` raw output (CLI ``--format text``,
     # one entry per recipe row). v0.8 M1 only **records** this — it is
     # not yet injected into the orchestration prompt; that happens in M5
@@ -3261,11 +3246,6 @@ class SharedState:
         """Bump the Coordinator tick counter and return the new value."""
         self.tick = int(self.tick or 0) + 1
         return self.tick
-
-    def increment_session_iter_index(self) -> int:
-        """Bump the per-session experiment iter counter and return it."""
-        self.session_iter_index = int(self.session_iter_index or 0) + 1
-        return self.session_iter_index
 
     # Note: main commit 8e69732 also ports ``to_action_scores_summary``
     # — a render helper for the legacy ``Action scores`` prompt block.
