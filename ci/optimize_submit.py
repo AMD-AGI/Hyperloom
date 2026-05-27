@@ -1454,6 +1454,100 @@ def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
+    """Reverse-write the audit fields back to the wekafs SOURCE files so
+    operators ssh-ing into /wekafs/users/<uid>/<sess>/ see them directly
+    without going through GHA artifact zips.
+
+    Without this, the audit fields landed only in CI-runner-local
+    artifacts/<task_id>/ci_metrics.json. wekafs originals stayed bare
+    because they were written by the sandbox agent / V2 cli, neither of
+    which knows the image/category/duration (those are SaFE-side facts
+    only the CI runner sees after wait_task_done).
+
+    Match strategy mirrors _nfs_user_session_fallback (Stage B):
+      * exact `model` field match in the candidate ci_metrics.json, or
+      * conservative session-dir-name match via _record_matches_session_dir.
+    Only sessions modified in the last 24h are considered, to avoid
+    backfilling stale runs on the same uid.
+
+    Files updated per matching session: ci_metrics.json, manifest.json,
+    session_breakdown.json, session_breakdown_v2.json (also under
+    phase10_report/, results/, v2_session/ subdirs). Each is fed through
+    _backfill_ci_metrics_file which already knows the right shape per
+    filename — and which no-ops on files whose fields are already set.
+
+    No-op when wekafs is not mounted (e.g. CI runner doesn't have NFS).
+    """
+    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    users_root = os.path.join(nfs_root, "users")
+    if not os.path.isdir(users_root):
+        return 0
+    target = _norm_token((rec.model or "").split("/")[-1])
+    if not target:
+        return 0
+
+    fresh_cutoff = time.time() - 24 * 3600
+    targets = ("ci_metrics.json", "manifest.json",
+               "session_breakdown.json", "session_breakdown_v2.json")
+    subdirs = ("", "phase10_report", "results", "v2_session")
+
+    n = 0
+    for uid_dir in os.listdir(users_root):
+        uid_path = os.path.join(users_root, uid_dir)
+        if not os.path.isdir(uid_path):
+            continue
+        for sess in os.listdir(uid_path):
+            sess_path = os.path.join(uid_path, sess)
+            if not os.path.isdir(sess_path):
+                continue
+            try:
+                if os.path.getmtime(sess_path) < fresh_cutoff:
+                    continue
+            except OSError:
+                continue
+            # Confirm this session belongs to our task: a `model` field
+            # match in any ci_metrics.json is the strongest signal; else
+            # fall back to the conservative session-dir-name heuristic.
+            matched = False
+            for sub in subdirs:
+                ci = os.path.join(sess_path, sub, "ci_metrics.json") if sub \
+                    else os.path.join(sess_path, "ci_metrics.json")
+                if not os.path.isfile(ci):
+                    continue
+                try:
+                    d = json.loads(Path(ci).read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                mf = str(d.get("model") or d.get("model_name") or "")
+                if mf and _norm_token(mf.split("/")[-1]) == target:
+                    matched = True
+                    break
+            if not matched and _record_matches_session_dir(rec, sess):
+                matched = True
+            if not matched:
+                continue
+            for sub in subdirs:
+                base = os.path.join(sess_path, sub) if sub else sess_path
+                if not os.path.isdir(base):
+                    continue
+                for fn in targets:
+                    p = Path(base) / fn
+                    if not p.is_file():
+                        continue
+                    try:
+                        before = p.read_bytes()
+                        _backfill_ci_metrics_file(p, rec)
+                        if p.read_bytes() != before:
+                            n += 1
+                            log.info("[task %s] wekafs backfill: %s",
+                                     rec.task_id, p)
+                    except Exception as e:
+                        log.warning("[task %s] wekafs backfill failed for %s: %s",
+                                    rec.task_id, p, e)
+    return n
+
+
 def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
     """Conservative directory-name match for /wekafs/users fallback.
 
@@ -1834,6 +1928,19 @@ def wait_and_collect_one(
             log.info("[task %s] NFS fallback added %d files", rec.task_id, n_added)
         else:
             log.info("[task %s] NFS fallback found nothing", rec.task_id)
+
+    # Stage 3: reverse-backfill the audit fields directly into the wekafs
+    # SOURCE files so operators ssh-ing into /wekafs/users/<uid>/<sess>/
+    # see image/hyperloom_commit/category/sandbox_duration_seconds without
+    # downloading the GHA artifact zip. No-op when wekafs isn't mounted.
+    try:
+        n_wkfs = _backfill_wekafs_in_place(rec)
+        if n_wkfs:
+            log.info("[task %s] wekafs in-place backfill updated %d file(s)",
+                     rec.task_id, n_wkfs)
+    except Exception as e:
+        log.warning("[task %s] wekafs in-place backfill skipped due to %s: %s",
+                    rec.task_id, type(e).__name__, e)
     return rec
 
 
