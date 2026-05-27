@@ -6830,6 +6830,20 @@ class Coordinator:
             v = getattr(ss, src_attr, None)
             if v not in (None, "", 0):
                 workload_tags[dst_key] = v
+        # EP / PP — env-bound (no SharedState field). Match the T0
+        # backfill's sourcing so the recipe stays consistent between
+        # PRELUDE and CLOSE.
+        import os as _os
+        for env_var, dst_key in (("EP", "ep"), ("PP", "pp")):
+            raw = (_os.environ.get(env_var) or "").strip()
+            if not raw:
+                continue
+            try:
+                n = int(raw)
+            except ValueError:
+                continue
+            if n > 0:
+                workload_tags[dst_key] = n
         # Framework version: lifted from stack_fingerprint when available.
         # ``stack_fingerprint`` on SharedState is a SHA string (Coordinator
         # writes ``state.stack_fingerprint = sha``); the per-component
@@ -6902,6 +6916,45 @@ class Coordinator:
             # merged into the propose_point body so the keys land flat
             # on the recipe attrs, not nested under ``workload``.
             workload_tags = attrs.get("workload") or {}
+
+            # ----- sessions[] read-modify-write -----
+            # KB does shallow new-wins merge on attrs, so a naive
+            # ``update_recipe(sessions=[my_entry])`` would obliterate
+            # every prior session entry on the anchor — we'd lose the
+            # "this recipe was tested by N sessions" history that
+            # specialist prompts + claw-stats-service consume.
+            # Read the current anchor, drop any prior entry sharing
+            # our own session_id (resume / retry safety), append our
+            # new entry, then write the merged list back.
+            #
+            # Known race: two sessions finalising the same recipe
+            # concurrently both read the prior state and one of their
+            # writes overwrites the other. Tolerated for now — single-
+            # session finalize is by far the common case; the next
+            # session that finalises will pick up the previously-lost
+            # entry's traces from the audit log if forensic recovery
+            # is ever needed.
+            my_sessions = list(attrs["sessions"] or [])
+            my_session_ids = {
+                str((s or {}).get("session_id") or "")
+                for s in my_sessions if isinstance(s, dict)
+            }
+            existing_point = self.cortex_kb.read_recipe_exact(
+                model=model_name, hardware=gpu_type,
+            )
+            existing_sessions: list[dict[str, Any]] = []
+            prior_attrs = existing_point.get("attrs") or {}
+            for row in (prior_attrs.get("sessions") or []):
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("session_id") or "") in my_session_ids:
+                    # Resume / retry of the same session — our new entry
+                    # supersedes the prior one (carries the latest
+                    # gain_pct / stack_len). Skip the historical copy.
+                    continue
+                existing_sessions.append(dict(row))
+            merged_sessions = existing_sessions + my_sessions
+
             self.cortex_kb.update_recipe(
                 model=model_name,
                 hardware=gpu_type,
@@ -6911,7 +6964,7 @@ class Coordinator:
                 what_failed=attrs["what_failed"],
                 stack_fingerprint=attrs["stack_fingerprint"],
                 last_profiled=attrs["last_profiled"],
-                sessions=attrs["sessions"],
+                sessions=merged_sessions,
                 extra_attrs=workload_tags if workload_tags else None,
                 evidence=[
                     f"log:session-{getattr(ss, 'cortex_session_id', '') or self.session_dir.name}",
