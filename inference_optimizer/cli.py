@@ -3668,6 +3668,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if not no_kernel:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
+    # ``fa phase-discover`` timeout override. ``framework_agent_client``
+    # uses DEFAULT_FA_PHASE_TIMEOUT_SEC (180s) when this is missing /
+    # falsy.
+    try:
+        coordinator.framework_pr_discover_timeout_sec = float(
+            getattr(args, "framework_pr_discover_timeout_sec", 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        coordinator.framework_pr_discover_timeout_sec = 0.0
     # v0.8 §3.5 + build specialist executor when the
     # research_lane capacity is non-zero. ``args.research_lane_capacity``
     # is already clamped to [0, 32] by ``_seed_shared_state``; a value
@@ -4065,6 +4074,14 @@ def _build_parser() -> argparse.ArgumentParser:
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
+    opt.add_argument("--framework-pr-discover-timeout-sec", type=float,
+                      default=0.0,
+                      help="Override the per-call timeout for "
+                           "``fa phase-discover``. 0 (the default) uses "
+                           "framework_agent_client.DEFAULT_FA_PHASE_TIMEOUT_SEC "
+                           "(180s). The Coordinator retries discover up to "
+                           "DISCOVER_FAILURE_RETRY_LIMIT (3) consecutive "
+                           "failures before marking FRAMEWORK_PR done.")
     opt.add_argument("--no-framework", action="store_true",
                       default=os.environ.get(
                           "INFERENCE_OPTIMIZER_NO_FRAMEWORK", "0",
