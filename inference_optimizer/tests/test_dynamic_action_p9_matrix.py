@@ -81,6 +81,8 @@ _FILE_BUCKET: dict[str, str] = {
     "test_dynamic_action_p9_matrix.py":            "unit",
     # G2 / G13 — dispatch_history closed-schema writer.
     "test_dynamic_action_history.py":              "unit",
+    # G5 — CLI knob smoke tests.
+    "test_dynamic_action_cli.py":                  "unit",
 }
 
 
