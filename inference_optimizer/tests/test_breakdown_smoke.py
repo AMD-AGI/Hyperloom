@@ -119,7 +119,7 @@ def _build_fixture(sd: Path) -> None:
             {"ts": "2026-05-14T08:30:00+00:00", "task_id": "v1",
              "status": "succeeded", "decision": "promoted", "key_metric": 84.2},
         ],
-        "last_select_kernels": {"hot_kernels_top15": [
+        "last_trace_analyze": {"hot_kernels_top15": [
             {"kernel_id": "k001", "name": "fused_rmsnorm", "gpu_pct": 18.2,
              "bottleneck": "memory", "arithmetic_intensity": 4.0,
              "source_file": "/path/to/rmsnorm.py", "reusable_native_kernel": True,

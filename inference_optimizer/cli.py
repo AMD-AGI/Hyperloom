@@ -1673,7 +1673,7 @@ def _check_tracelens_cli() -> None:
     robustness agent's J3 signal at tick ~6 (HIGH severity
     ``tracelens_cli_missing``) — after baseline had already completed
     (or hung) and a multi-minute setup cost was wasted.
-    ``select_kernels`` / ``kernel_opt`` then fail downstream when they
+    ``trace_analyze`` / ``kernel_opt`` then fail downstream when they
     shell out to ``tracelens_analysis.py``.
 
     Moving discovery to launch — mirroring ``_gate_claude_model``
