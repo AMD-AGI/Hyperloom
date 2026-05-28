@@ -3096,24 +3096,71 @@ class SharedState:
         cumulative_gain: float | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        """dynamic_action.MD P5 §6 — update the summary row keyed by
-        ``dyn_id`` with the latest lifecycle outcome.
+        """dynamic_action.MD P5 §6 + P6 §4 — transition-validated
+        update of the summary row keyed by ``dyn_id``.
 
-        Coordinator-only writer (CORE_STATE_FIELDS guards it). The
-        existing summary dict is preserved field-by-field; only the
-        keys passed in are touched so multiple lifecycle steps can
-        layer their data without clobbering prior writes.
+        Coordinator-only writer (CORE_STATE_FIELDS guards it from LLM
+        ``UPDATE_STATE``). The existing summary dict is preserved
+        field-by-field; only the keys passed in are touched.
 
-        Idempotent: replaying the same outcome on the same dyn_id is
-        a no-op aside from the ``last_updated_at`` timestamp.
+        ``last_outcome`` defaults to the P6 §8 prompt-friendly label
+        for ``status`` when the caller omits it. ``last_updated_at``
+        is always refreshed (used by the prompt-section renderer for
+        the recency cap).
+
+        Illegal transitions (e.g. trying to escape a terminal state)
+        are logged + skipped; the in-memory summary stays at the last
+        legal value so a buggy hook can never silently corrupt the
+        audit trail.
         """
+        # Local import — module-level import would create a cycle
+        # (dynamic_action_proposal already imports from this file).
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            LAST_OUTCOME_BY_STATUS,
+            can_transition,
+        )
+
         key = str(dyn_id or "").strip()
         if not key:
             return
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        try:
+            target_status = DynamicActionStatus(
+                str(status or "").strip(),
+            )
+        except ValueError:
+            _log.warning(
+                "record_dynamic_action_outcome: unknown status=%r for "
+                "dyn_id=%s; dropping write",
+                status, key,
+            )
+            return
         existing = dict(self.dynamic_actions.get(key) or {})
-        existing["status"] = str(status or "").strip()
-        if last_outcome is not None:
-            existing["last_outcome"] = str(last_outcome)
+        current_status_raw = existing.get("status")
+        current_status: DynamicActionStatus | None
+        if current_status_raw:
+            try:
+                current_status = DynamicActionStatus(str(current_status_raw))
+            except ValueError:
+                current_status = None
+        else:
+            current_status = None
+        if not can_transition(current_status, target_status):
+            _log.warning(
+                "record_dynamic_action_outcome: illegal transition "
+                "%s → %s for dyn_id=%s; preserving prior state",
+                current_status_raw or "(none)", target_status.value, key,
+            )
+            return
+        existing.setdefault("dyn_id", key)
+        existing["status"] = target_status.value
+        existing["last_outcome"] = str(
+            last_outcome
+            if last_outcome is not None
+            else LAST_OUTCOME_BY_STATUS.get(target_status, target_status.value.lower()),
+        )
         if cumulative_gain is not None:
             existing["cumulative_gain"] = float(cumulative_gain)
         if extra:
@@ -3121,6 +3168,92 @@ class SharedState:
                 existing[k] = v
         existing["last_updated_at"] = _now_iso()
         self.dynamic_actions[key] = existing
+
+    def to_dynamic_actions_prompt_section(
+        self,
+        *,
+        max_entries: int = 5,
+        title: str = "Dynamic Action History",
+    ) -> str:
+        """dynamic_action.MD P6 §7 — compact ``=== <title> ===`` block
+        for orchestration prompt injection.
+
+        Renders the most recent ``max_entries`` summaries (by
+        ``last_updated_at`` descending, with a stable tiebreak on
+        ``dyn_id`` for determinism). Older rows are collapsed into an
+        elision marker pointing at the on-disk artefact dir. Returns
+        the empty string when no dynamic_actions exist so callers can
+        skip the section entirely.
+        """
+        summaries = self.dynamic_actions or {}
+        if not summaries:
+            return ""
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            LAST_OUTCOME_BY_STATUS,
+        )
+
+        ordered = sorted(
+            summaries.items(),
+            key=lambda kv: (
+                str(kv[1].get("last_updated_at") or ""),
+                str(kv[0]),
+            ),
+            reverse=True,
+        )
+        recent = ordered[: max(0, int(max_entries))]
+        older = ordered[max(0, int(max_entries)):]
+        lines: list[str] = [f"=== {title} ==="]
+        for _dyn_id, summary in recent:
+            lines.append(self._format_dynamic_action_summary_row(
+                summary,
+                _last_outcome_lookup=LAST_OUTCOME_BY_STATUS,
+                _status_enum=DynamicActionStatus,
+            ))
+        if older:
+            lines.append(
+                f"... ({len(older)} more older entries; full list in "
+                f"$SESSION_DIR/agents/orchestration/dynamic_actions/)"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_dynamic_action_summary_row(
+        summary: dict[str, Any],
+        *,
+        _last_outcome_lookup: dict | None = None,
+        _status_enum: Any | None = None,
+    ) -> str:
+        """Render one P6 §7.2 compact summary row.
+
+        Format (≈ 50 tokens each)::
+
+            - <dyn_id> [<STATUS>, gain=<delta>%] scope=[d1,d2]
+              motivation: "<motivation_gap_short>"
+              artifact: <artifact_path>
+        """
+        dyn_id = str(summary.get("dyn_id") or "(unknown)")
+        status = str(summary.get("status") or "(unknown)")
+        scope = list(summary.get("scope_domains") or ())
+        motivation = str(summary.get("motivation_gap_short") or "").strip()
+        if not motivation:
+            motivation = "(no motivation summary)"
+        gain = summary.get("cumulative_gain")
+        gain_text = (
+            f"gain={gain:+.2f}%" if isinstance(gain, (int, float)) else "gain=n/a"
+        )
+        artifact = str(summary.get("artifact_path") or "(missing)")
+        last_outcome = str(summary.get("last_outcome") or "")
+        last_outcome_suffix = (
+            f" outcome={last_outcome}" if last_outcome else ""
+        )
+        head = (
+            f"- {dyn_id} [{status}, {gain_text}{last_outcome_suffix}] "
+            f"scope={scope!r}"
+        )
+        body = f'  motivation: "{motivation}"'
+        tail = f"  artifact: {artifact}"
+        return "\n".join((head, body, tail))
 
     def record_specialist_patch_verdict(
         self, specialist_task_id: str, verdict: str,
