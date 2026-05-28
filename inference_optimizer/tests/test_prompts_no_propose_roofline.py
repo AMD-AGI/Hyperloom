@@ -31,6 +31,17 @@ _PROMPT_ROOTS = (
     Path("inference_optimizer/orchestrator/system_prompts"),
 )
 
+# Files outside the prompt directories whose user-visible string
+# literals end up inside the per-tick orchestration prompt via
+# ``SharedState.format_for_prompt()`` / runtime hint composition.
+# Scanned in addition to ``_PROMPT_ROOTS`` to catch the case where a
+# fallback message like "(no snapshot yet — propose `roofline` ...)"
+# is rendered straight into LLM context but lives in code rather than
+# a prompt template.
+_PROMPT_AUX_FILES = (
+    Path("inference_optimizer/orchestrator/shared_state.py"),
+)
+
 # Allow-list: these files *describe* the denial rule and necessarily
 # quote the forbidden pattern in fenced code or inline backticks. They
 # are not instructing the LLM to propose — they are documenting that
@@ -71,6 +82,10 @@ def _iter_prompt_files(repo_root: Path):
         for path in base.rglob("*"):
             if path.suffix.lower() in {".md", ".yaml", ".yml", ".py", ".txt"}:
                 yield path
+    for aux in _PROMPT_AUX_FILES:
+        candidate = repo_root / aux
+        if candidate.exists():
+            yield candidate
 
 
 def _line_is_negation(line: str) -> bool:
@@ -102,4 +117,32 @@ def test_no_prompt_instructs_llm_to_propose_analysis_action():
         "roofline/profile (PolicyGate will deny on every session). "
         "Offending sites:\n  "
         + "\n  ".join(f"{p}:{ln}: {body!r}" for p, ln, body in hits)
+    )
+
+
+def test_shared_state_empty_analysis_md_does_not_tell_llm_to_propose():
+    """``SharedState._format_analysis_md_full`` renders straight into
+    the per-tick orchestration prompt via ``format_for_prompt``. When
+    no analysis snapshot exists yet, the fallback string must NOT tell
+    the LLM to propose ``roofline`` / ``profile`` — PolicyGate denies
+    that with ``analysis_action_not_llm_proposable``. Pin the exact
+    output so the grep guard above (line-based regex) is reinforced
+    by an end-to-end behaviour check."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    state = SharedState()
+    state.last_trace_analyze = {}
+    rendered = state._format_analysis_md_full()
+    low = rendered.lower()
+    assert "propose `roofline`" not in low
+    assert "propose `profile`" not in low
+    assert "propose roofline" not in low
+    assert "propose profile" not in low
+    # Positive contract: the fallback must point at the auto-enqueue
+    # path or name the denial rule so the LLM knows why it cannot
+    # propose itself.
+    assert (
+        "auto-enqueued" in low
+        or "coordinator" in low
+        or "analysis_action_not_llm_proposable" in low
     )

@@ -52,6 +52,10 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # EXPLORE-phase serving-lane-locked patch integration step.
     "explore":              "shallow",
     "integrate_patch":      "shallow",
+    # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor.
+    # Mirrors integrate_patch's role for the new phase; LLM may not
+    # propose it (framework_pr_action_not_llm_proposable, Stage 3).
+    "framework_pr":         "shallow",
     "sweep":                "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
