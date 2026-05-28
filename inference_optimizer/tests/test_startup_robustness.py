@@ -14,9 +14,6 @@ Covers five independent surfaces that all live in ``cli.py``:
 * ``_clean_stale_aiter_locks`` — sweep stale aiter JIT lock files
   left behind by killed runs (root cause of the three failed
   Qwen3-30B-A3B mi355x launches).
-* ``_spawn_robustness_monitor`` — fork the robustness monitor as a
-  setsid'd background daemon so a long run survives unexpected
-  crashes without the operator remembering the cookbook.
 
 These are pure-function entry points; the heavier integration of these
 helpers into ``_run_optimize`` is exercised by the broader cli + auth
@@ -251,20 +248,6 @@ def test_parser_does_not_expose_removed_bypass_flags():
         ])
 
 
-def test_parser_robustness_monitor_default_on():
-    parser = cli._build_parser()
-    ns = parser.parse_args(["optimize", "--model", "/m"])
-    assert ns.robustness_monitor is True
-
-
-def test_parser_robustness_monitor_can_be_disabled():
-    parser = cli._build_parser()
-    ns = parser.parse_args([
-        "optimize", "--model", "/m", "--no-robustness-monitor",
-    ])
-    assert ns.robustness_monitor is False
-
-
 # ---------------------------------------------------------------------------
 # _clean_stale_aiter_locks
 # ---------------------------------------------------------------------------
@@ -379,129 +362,3 @@ def test_clean_stale_aiter_locks_auto_discovers_via_env_override(
     assert stats["dir"] in {str(tmp_path), str(tmp_path / "build")}
     assert stats["deleted"] == 1
     assert not stale_lock.exists()
-
-
-# ---------------------------------------------------------------------------
-# _spawn_robustness_monitor
-# ---------------------------------------------------------------------------
-def test_spawn_robustness_monitor_missing_template_returns_none(
-    tmp_path, capsys,
-):
-    """No template -> warn-only, return None (optimize must still run)."""
-    repo_root = tmp_path / "fake_repo"
-    repo_root.mkdir()
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    info = cli._spawn_robustness_monitor(
-        session_dir=session_dir,
-        optimizer_pid=99999,
-        repo_root=repo_root,
-        max_hours=1.0,
-        target_gain=10,
-        user_data_path=str(tmp_path),
-    )
-    assert info is None
-    err = capsys.readouterr().err
-    assert "robustness_monitor.sh.example not found" in err
-
-
-def test_spawn_robustness_monitor_happy_path(tmp_path, capsys):
-    """Template present -> copy + chmod + fork bash; monitor exits
-    immediately because the optimizer pid is already dead (the session
-    has no state.json so ``is_terminal_session`` exits non-zero, then
-    /proc/<dead-pid> check forces a resume attempt; we kill the spawned
-    subprocess before it actually re-execs anything).
-    """
-    repo_root = tmp_path / "repo"
-    optimizer_runs = repo_root / "optimizer_runs"
-    optimizer_runs.mkdir(parents=True)
-    template = optimizer_runs / "robustness_monitor.sh.example"
-    template.write_text(
-        "#!/usr/bin/env bash\n"
-        "echo \"PID_FILE=$PID_FILE\"\n"
-        "echo \"REPO_ROOT=$REPO_ROOT\"\n"
-        "echo \"INFERENCE_OPTIMIZER_SESSION_DIR=$INFERENCE_OPTIMIZER_SESSION_DIR\"\n"
-        "echo \"MAX_HOURS=$MAX_HOURS\"\n"
-        "echo \"TARGET_GAIN=$TARGET_GAIN\"\n"
-        "exit 0\n"
-    )
-    os.chmod(template, 0o755)
-
-    session_dir = tmp_path / "session_xyz"
-    session_dir.mkdir()
-
-    info = cli._spawn_robustness_monitor(
-        session_dir=session_dir,
-        optimizer_pid=99999,
-        repo_root=repo_root,
-        max_hours=2.5,
-        target_gain=20,
-        user_data_path=str(tmp_path),
-    )
-    assert info is not None
-    assert info["pid"] > 0
-    monitor_script = session_dir / "optimizer_runs" / "robustness_monitor.sh"
-    assert monitor_script.is_file()
-    assert os.access(monitor_script, os.X_OK)
-    pid_file = session_dir / "optimizer_runs" / "optimizer.pid"
-    assert pid_file.read_text() == "99999"
-
-    # The child is a short-lived stub; wait for it so its log is flushed.
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        try:
-            os.kill(info["pid"], 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.05)
-    log_text = ""
-    if (log_path := info.get("monitor_log")):
-        # Log may have been written by the now-dead bash; capture and
-        # verify it received the env we passed.
-        try:
-            log_text = open(log_path).read()
-        except FileNotFoundError:
-            log_text = ""
-    assert f"PID_FILE={pid_file}" in log_text
-    assert f"REPO_ROOT={repo_root}" in log_text
-    assert f"INFERENCE_OPTIMIZER_SESSION_DIR={session_dir}" in log_text
-    assert "MAX_HOURS=2.5" in log_text
-    assert "TARGET_GAIN=20" in log_text
-
-
-def test_spawn_robustness_monitor_skips_target_gain_when_zero(tmp_path):
-    """target_gain=0 / None means the operator did not set a percent
-    target (likely using --target-tput instead); the monitor should
-    NOT carry over a meaningless TARGET_GAIN=0 to the resume launch
-    where it would override the legitimate per-throughput target.
-    """
-    repo_root = tmp_path / "repo"
-    optimizer_runs = repo_root / "optimizer_runs"
-    optimizer_runs.mkdir(parents=True)
-    template = optimizer_runs / "robustness_monitor.sh.example"
-    template.write_text(
-        "#!/usr/bin/env bash\n"
-        "echo \"TARGET_GAIN=${TARGET_GAIN:-<unset>}\"\n"
-        "exit 0\n"
-    )
-    os.chmod(template, 0o755)
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    info = cli._spawn_robustness_monitor(
-        session_dir=session_dir,
-        optimizer_pid=99999,
-        repo_root=repo_root,
-        max_hours=1.0,
-        target_gain=0,
-        user_data_path=str(tmp_path),
-    )
-    assert info is not None
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        try:
-            os.kill(info["pid"], 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.05)
-    log_text = open(info["monitor_log"]).read()
-    assert "TARGET_GAIN=<unset>" in log_text

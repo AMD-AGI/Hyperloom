@@ -39,6 +39,43 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 # $HYPERLOOM_RUNTIME_DIR.
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+DOTENV_LOADED_COUNT=0
+
+load_dotenv_no_clobber() {
+  DOTENV_LOADED_COUNT=0
+  [ -f "$REPO_ROOT/.env" ] || return 0
+  local loaded=0
+  local raw key value
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    [ -z "$raw" ] && continue
+    case "$raw" in \#*) continue ;; esac
+    case "$raw" in export\ *) raw="${raw#export }" ;; esac
+    case "$raw" in *=*) ;; *) continue ;; esac
+    key="${raw%%=*}"
+    value="${raw#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    [ -z "$key" ] && continue
+    if [ -z "${!key:-}" ]; then
+      export "$key=$value"
+      loaded=$((loaded + 1))
+    fi
+  done < "$REPO_ROOT/.env"
+  DOTENV_LOADED_COUNT="$loaded"
+  return 0
+}
+
+# Load .env before deriving USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR so a
+# freshly-copied .env.template can be the single configuration entrypoint.
+# The loader is no-clobber: explicit shell exports always win.
+load_dotenv_no_clobber
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
@@ -125,23 +162,10 @@ run() {
 # Strict mode by design: --check-only / --dry-run is the only path that
 # downgrades the die to a warn (introspection mode, no install runs).
 preflight_load_dotenv() {
-  if [ -n "${SAFE_API_KEY:-}" ] && [ -n "${OPENAI_BASE_URL:-}" ]; then
-    return 0
+  load_dotenv_no_clobber
+  if [ "${DOTENV_LOADED_COUNT:-0}" -gt 0 ]; then
+    log "loaded ${DOTENV_LOADED_COUNT} missing var(s) from $REPO_ROOT/.env (env wins)"
   fi
-  if [ ! -f "$REPO_ROOT/.env" ]; then
-    return 0
-  fi
-  local _snap_safe="${SAFE_API_KEY-}"
-  local _snap_url="${OPENAI_BASE_URL-}"
-  local _snap_cursor="${CURSOR_API_KEY-}"
-  set -a
-  # shellcheck disable=SC1091
-  . "$REPO_ROOT/.env"
-  set +a
-  [ -n "$_snap_safe" ]   && export SAFE_API_KEY="$_snap_safe"
-  [ -n "$_snap_url" ]    && export OPENAI_BASE_URL="$_snap_url"
-  [ -n "$_snap_cursor" ] && export CURSOR_API_KEY="$_snap_cursor"
-  log "loaded credentials fallback from $REPO_ROOT/.env (env wins)"
 }
 
 preflight_validate_credentials() {

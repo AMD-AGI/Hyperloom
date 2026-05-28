@@ -38,6 +38,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -509,7 +510,9 @@ def _emit_launch_info(
         "framework": framework,
         "model": model,
     }
-    kv_body = " ".join(f"{k}={v}" for k, v in launch_info.items())
+    kv_body = " ".join(
+        f"{k}={shlex.quote(str(v))}" for k, v in launch_info.items()
+    )
     print(f"HYPERLOOM_LAUNCH {kv_body}")
     if launch_info_file:
         path = Path(launch_info_file)
@@ -629,129 +632,6 @@ def _clean_stale_aiter_locks(
                 stats["errors"] += 1
 
     return stats
-
-
-def _spawn_robustness_monitor(
-    *,
-    session_dir: Path,
-    optimizer_pid: int,
-    repo_root: Path,
-    max_hours: float,
-    target_gain: float | int | None,
-    user_data_path: str,
-) -> dict[str, Any] | None:
-    """Fork the robustness monitor as a setsid'd background daemon.
-
-    Replaces the SKILL.md cookbook step that asked operators to manually
-    ``cp robustness_monitor.sh.example`` + ``setsid nohup bash ...``
-    before every run. With this helper, ``inference_optimizer optimize``
-    is a self-contained launch: the monitor follows the same lifecycle
-    as the optimizer (independent process group, polls every 300s,
-    auto-resumes on unexpected crash, exits when the session reaches
-    a terminal stop_reason / phase=CLOSE / final.md).
-
-    The monitor script ships in the repo at
-    ``<repo>/optimizer_runs/robustness_monitor.sh.example`` and is
-    copied (idempotent; chmod +x) into
-    ``<session_dir>/optimizer_runs/robustness_monitor.sh`` so it
-    travels with the session artefacts.
-
-    Required env passed to the monitor:
-      * PID_FILE                       path to the optimizer pidfile
-      * REPO_ROOT                      Hyperloom checkout root
-      * INFERENCE_OPTIMIZER_SESSION_DIR  session dir holding state.json
-      * MAX_HOURS, TARGET_GAIN         forwarded to ``--resume`` launches
-
-    Returns a dict ``{pid, monitor_log, pid_file, script}`` for the
-    launch banner. Returns None when the monitor cannot be spawned
-    (example script missing, /optimizer_runs/ unwritable, etc.) so the
-    caller can warn but the optimize run is not aborted: the monitor is
-    a resilience layer, not a hard requirement.
-    """
-    monitor_example = repo_root / "optimizer_runs" / "robustness_monitor.sh.example"
-    if not monitor_example.is_file():
-        print(
-            f"WARN: robustness_monitor.sh.example not found at "
-            f"{monitor_example}; skipping auto-spawn. Pass "
-            f"--no-robustness-monitor to silence this warning, or "
-            f"set REPO_ROOT to a Hyperloom checkout that has the "
-            f"template.",
-            file=sys.stderr,
-        )
-        return None
-
-    run_dir = Path(session_dir) / "optimizer_runs"
-    try:
-        run_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        print(
-            f"WARN: cannot create {run_dir} ({exc}); robustness "
-            f"monitor not spawned.",
-            file=sys.stderr,
-        )
-        return None
-
-    monitor_script = run_dir / "robustness_monitor.sh"
-    if not monitor_script.exists():
-        try:
-            shutil.copy2(monitor_example, monitor_script)
-            os.chmod(monitor_script, 0o755)
-        except OSError as exc:
-            print(
-                f"WARN: cannot copy monitor template to {monitor_script} "
-                f"({exc}); robustness monitor not spawned.",
-                file=sys.stderr,
-            )
-            return None
-
-    pid_file = run_dir / "optimizer.pid"
-    try:
-        pid_file.write_text(str(optimizer_pid))
-    except OSError as exc:
-        print(
-            f"WARN: cannot write {pid_file} ({exc}); robustness "
-            f"monitor not spawned.",
-            file=sys.stderr,
-        )
-        return None
-
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    monitor_log = run_dir / f"robustness_monitor_{ts}.log"
-
-    monitor_env = os.environ.copy()
-    monitor_env["PID_FILE"] = str(pid_file)
-    monitor_env["REPO_ROOT"] = str(repo_root)
-    monitor_env["INFERENCE_OPTIMIZER_SESSION_DIR"] = str(session_dir)
-    monitor_env["MAX_HOURS"] = str(max_hours)
-    if target_gain is not None and float(target_gain) > 0:
-        monitor_env["TARGET_GAIN"] = str(target_gain)
-    monitor_env.setdefault("USER_DATA_PATH", user_data_path)
-
-    try:
-        log_fh = open(monitor_log, "ab", buffering=0)
-        proc = subprocess.Popen(
-            ["bash", str(monitor_script)],
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            env=monitor_env,
-            start_new_session=True,
-            close_fds=True,
-        )
-    except OSError as exc:
-        print(
-            f"WARN: failed to spawn robustness monitor ({exc}); "
-            f"continuing without auto-resume.",
-            file=sys.stderr,
-        )
-        return None
-
-    return {
-        "pid": proc.pid,
-        "monitor_log": str(monitor_log),
-        "pid_file": str(pid_file),
-        "script": str(monitor_script),
-    }
 
 
 def _autodetect_gpu_type() -> str | None:
@@ -4059,32 +3939,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             model=str(args.model) if args.model else "",
             launch_info_file=getattr(args, "launch_info_file", None),
         )
-
-        # Auto-spawn the robustness monitor so a long run survives an
-        # unexpected crash without the operator having to remember to
-        # ``setsid nohup bash robustness_monitor.sh`` themselves. The
-        # monitor is independent from the optimizer process group
-        # (start_new_session=True) so killing the optimizer with -TERM
-        # does not also kill the watchdog mid-resume. Disable with
-        # ``--no-robustness-monitor`` for one-shot debug runs that should
-        # NOT auto-resume on crash.
-        if getattr(args, "robustness_monitor", True):
-            from .paths import PACKAGE_ROOT
-            monitor_info = _spawn_robustness_monitor(
-                session_dir=session_dir,
-                optimizer_pid=os.getpid(),
-                repo_root=PACKAGE_ROOT.parent,
-                max_hours=float(args.max_hours),
-                target_gain=getattr(args, "target_gain", None),
-                user_data_path=os.environ.get("USER_DATA_PATH", "") or str(
-                    Path(session_dir).parent.parent
-                ),
-            )
-            if monitor_info:
-                print(
-                    f"Robustness mon  : pid={monitor_info['pid']} "
-                    f"log={monitor_info['monitor_log']}"
-                )
         _seed_shared_state(
             session_dir, args, session_id=manifest["session_id"],
         )
@@ -4790,18 +4644,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "pgrep'ing. Always emitted alongside the ``HYPERLOOM_LAUNCH "
              "<key=value> ...`` single-line sentinel that is printed to "
              "stdout for stream-based parsers.",
-    )
-    opt.add_argument(
-        "--robustness-monitor", action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Auto-spawn the robustness monitor (background daemon that "
-             "polls state.json every 300s and re-launches the optimizer "
-             "with --resume on unexpected crash). Default ON. Pass "
-             "--no-robustness-monitor to skip the spawn for one-shot "
-             "debug runs that should NOT auto-resume on crash. The "
-             "monitor template lives at $REPO_ROOT/optimizer_runs/"
-             "robustness_monitor.sh.example and is copied per session to "
-             "$SESSION_DIR/optimizer_runs/robustness_monitor.sh.",
     )
     opt.add_argument("--framework-pr-discover-timeout-sec", type=float,
                       default=0.0,
