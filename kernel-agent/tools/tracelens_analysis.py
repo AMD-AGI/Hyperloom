@@ -682,9 +682,24 @@ def _looks_like_flydsl_source(source_file: str) -> bool:
     return any(marker in head for marker in _FLYDSL_SOURCE_MARKERS)
 
 
+_FLYDSL_PSEUDO_OP_NAME_MARKERS = (
+    "pseudo_op::moe_flydsl_",
+    "pseudo_op::flydsl_",
+)
+
+
 def source_type_for(name: str, source_file: str) -> str:
     lower_name = name.lower()
     lower_file = source_file.lower()
+    # PR #668 (TraceLens) injects ``pseudo_op::moe_flydsl_stage1`` /
+    # ``pseudo_op::moe_flydsl_stage2`` above ``aiter::fused_moe_`` events
+    # whose subtree contains FlyDSL stage markers. The pseudo-op carries
+    # no source_file (it is synthetic) so content sniffing returns
+    # ``unknown``. Match the upstream pseudo-op name prefix directly so
+    # the candidate gets ``source_type=flydsl`` without needing a
+    # resolvable .py path.
+    if any(marker in lower_name for marker in _FLYDSL_PSEUDO_OP_NAME_MARKERS):
+        return "flydsl"
     if is_runtime_generated_kernel(name, source_file):
         return "runtime_generated"
     if source_file.endswith((".cu", ".cuh", ".hip", ".cpp", ".h", ".hpp")):

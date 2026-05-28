@@ -413,3 +413,44 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
+    """PR #668 pseudo_op names must be classified as FlyDSL.
+
+    TraceLens PR #668 injects ``pseudo_op::moe_flydsl_stage1`` /
+    ``pseudo_op::moe_flydsl_stage2`` synthetic events above
+    ``aiter::fused_moe_`` parents whose subtree carries FlyDSL stage
+    markers. These pseudo ops have no on-disk source file, so the
+    pre-existing ``_looks_like_flydsl_source`` content sniffer returns
+    False for them. The classifier must still surface them as
+    ``source_type='flydsl'`` via direct name-prefix match so Hyperloom
+    sends them to GEAK with ``kernel_type='flydsl'``.
+    """
+
+    def test_pseudo_op_moe_flydsl_stage1_recognised(self) -> None:
+        self.assertEqual(
+            source_type_for("pseudo_op::moe_flydsl_stage1", ""), "flydsl",
+        )
+
+    def test_pseudo_op_moe_flydsl_stage2_recognised(self) -> None:
+        self.assertEqual(
+            source_type_for("pseudo_op::moe_flydsl_stage2", ""), "flydsl",
+        )
+
+    def test_generic_pseudo_op_flydsl_recognised(self) -> None:
+        self.assertEqual(
+            source_type_for("pseudo_op::flydsl_custom_kernel", ""), "flydsl",
+        )
+
+    def test_pseudo_op_marker_wins_over_empty_source(self) -> None:
+        """Empty source_file must not block the name-based match."""
+        self.assertEqual(
+            source_type_for("pseudo_op::moe_flydsl_stage1", ""), "flydsl",
+        )
+
+    def test_unrelated_pseudo_op_falls_back_to_unknown(self) -> None:
+        """Only flydsl-flavoured pseudo ops should be claimed."""
+        self.assertEqual(
+            source_type_for("pseudo_op::moe_fused_aiter", ""), "unknown",
+        )
