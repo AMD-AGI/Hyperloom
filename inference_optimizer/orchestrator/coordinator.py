@@ -273,6 +273,96 @@ def _summarize_failed_variants(
     return failed
 
 
+def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
+    """Extract KB tag fields from a baseline-materialized Magpie YAML.
+
+    Looks for the workload-shape fields that materially affect
+    ``best_config`` but live OUTSIDE the small set already covered by
+    ``_collect_workload_tags`` (precision / tp / conc / isl / osl /
+    max_model_len / pp / ep). Surface area picked to maximise warm-
+    start ranking precision without exploding the canonical_id space.
+
+    Returns a dict shaped::
+
+        {
+            "max_running_requests": 128,
+            "max_num_seqs":         256,
+            "chunked_prefill_enabled": True,
+            "enable_torch_compile":    False,
+            "quant_scheme":  "per-tensor",
+            "workload_mode": "streaming",
+        }
+
+    Missing fields are simply absent from the dict (KB attrs filters
+    tolerate missing keys). The YAML is read defensively — parse errors
+    return an empty dict so the rest of the baseline promote path is
+    unaffected.
+
+    The fields are parsed from two places:
+
+    * ``benchmark.envs`` — Magpie's "operator-supplied environment"
+      block; ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS`` carry the
+      ``--max-running-requests`` / ``--max-num-seqs`` /
+      ``--chunked-prefill`` flags as one big string we light-parse.
+    * top-level ``benchmark`` — ``benchmark_script`` / ``workload_mode``
+      / ``quant_scheme`` if the operator added them as explicit fields.
+    """
+    import yaml as _yaml
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            cfg = _yaml.safe_load(f) or {}
+    except (OSError, _yaml.YAMLError):
+        return {}
+    out: dict[str, Any] = {}
+    bm = cfg.get("benchmark") if isinstance(cfg, dict) else None
+    if not isinstance(bm, dict):
+        return out
+    # Direct fields on benchmark — only present when operator added them.
+    for src, dst in (
+        ("workload_mode", "workload_mode"),
+        ("quant_scheme",  "quant_scheme"),
+    ):
+        v = bm.get(src)
+        if v not in (None, "", 0):
+            out[dst] = v
+    envs = bm.get("envs") if isinstance(bm.get("envs"), dict) else {}
+    # Pick the framework-appropriate extra args blob.
+    extra_args_str = ""
+    for env_key in ("EXTRA_SGLANG_ARGS", "EXTRA_VLLM_ARGS"):
+        v = envs.get(env_key)
+        if isinstance(v, str) and v.strip():
+            extra_args_str = v.strip()
+            break
+    # Light parsing — operator typically writes
+    # ``--max-running-requests 128 --max-num-seqs 256 --enable-chunked-prefill``
+    tokens = extra_args_str.split() if extra_args_str else []
+    for i, tok in enumerate(tokens):
+        if tok in ("--max-running-requests",) and i + 1 < len(tokens):
+            try:
+                out["max_running_requests"] = int(tokens[i + 1])
+            except ValueError:
+                pass
+        elif tok in ("--max-num-seqs",) and i + 1 < len(tokens):
+            try:
+                out["max_num_seqs"] = int(tokens[i + 1])
+            except ValueError:
+                pass
+        elif tok == "--enable-chunked-prefill":
+            out["chunked_prefill_enabled"] = True
+        elif tok == "--disable-chunked-prefill":
+            out["chunked_prefill_enabled"] = False
+        elif tok == "--enable-torch-compile":
+            out["enable_torch_compile"] = True
+    # Torch compile env can also live as a separate env var.
+    if "enable_torch_compile" not in out:
+        tc_env = envs.get("ENABLE_TORCH_COMPILE")
+        if isinstance(tc_env, str):
+            out["enable_torch_compile"] = tc_env.strip().lower() in (
+                "1", "true", "yes", "on",
+            )
+    return out
+
+
 def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
     """Project ``params`` to the keys that determine baseline behavior.
 
@@ -424,6 +514,9 @@ class Coordinator:
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
         fact_writes_enabled: bool = True,
+        warm_replay_enabled: bool = True,
+        warm_replay_min_confidence: float = 0.7,
+        warm_replay_min_reproduce_pct: float = 0.8,
     ):
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
@@ -447,6 +540,14 @@ class Coordinator:
         # the journal active but skips every KB fact-write call — used
         # for soak runs that don't want to pollute the shared KB.
         self._fact_writes_enabled: bool = bool(fact_writes_enabled)
+        # GAP 1 — warm-recipe replay controls (PRELUDE auto-apply of
+        # the KB best_config). ``warm_replay_enabled=False`` flips the
+        # gate off so the warm_start_recipe is rendered into prompts
+        # but never auto-run. The threshold / confidence knobs let
+        # operators tune the fire / drift rule.
+        self._warm_replay_enabled: bool = bool(warm_replay_enabled)
+        self._warm_replay_min_confidence: float = float(warm_replay_min_confidence)
+        self._warm_replay_min_reproduce_pct: float = float(warm_replay_min_reproduce_pct)
         # KnowledgePlane facade.
         # When non-None, ``_handle_delegate`` pre-warms ``pr_feed`` +
         # ``kb_subgraph`` for ``delegate{action='specialist'}`` tasks
@@ -1286,6 +1387,470 @@ class Coordinator:
         return "roofline" if bool(
             getattr(self.shared_state, "enable_roofline", True),
         ) else "profile"
+
+    def _inject_warm_recipe_history_into_ledger(self) -> int:
+        """GAP 1 supporting helper — pre-fill ``explore_search.rejected``
+        with the warm-start recipe's historical ``what_failed`` rows.
+
+        Replays the operator-confirmed intent ("already-tested KEEP /
+        REVERT shouldn't be re-tested"): every variant a prior session
+        recorded as a failure for this (model, framework, hardware) is
+        stamped with a canonical fingerprint and appended to the
+        ledger, so PolicyGate's existing dedup gate denies any
+        specialist / LLM proposal that lands on the same content.
+
+        Decoupled from :meth:`_maybe_enqueue_warm_replay`:
+
+        * Fires unconditionally after baseline (so ``--no-warm-replay``
+          still benefits from negative-history filtering).
+        * Idempotent — guarded by ``warm_history_injected`` flag so
+          resume doesn't double-inject.
+        * Skipped silently when KB is disabled / warm_start_recipe
+          empty / no what_failed rows.
+
+        Returns the number of rows newly added to the ledger (for
+        logging + breakdown). Best-effort: any unexpected error is
+        logged and swallowed so a bad warm-start payload never breaks
+        the PRELUDE bootstrap.
+        """
+        state = self.shared_state
+        if getattr(state, "warm_history_injected", False):
+            return 0
+        warm = state.warm_start_recipe or {}
+        if not isinstance(warm, dict) or not warm:
+            state.warm_history_injected = True
+            return 0
+        recipe = warm.get("recipe") or {}
+        recipe_attrs = (recipe.get("attrs") or {}) if isinstance(recipe, dict) else {}
+        what_failed = recipe_attrs.get("what_failed") or []
+        if not isinstance(what_failed, list) or not what_failed:
+            state.warm_history_injected = True
+            return 0
+
+        from .action_executors._canonical_fingerprint import (
+            canonical_fingerprint,
+        )
+
+        es_raw = getattr(state, "explore_search", None) or {}
+        es = dict(es_raw) if isinstance(es_raw, dict) else {}
+        rejected = list(es.get("rejected") or [])
+        existing_fps = {
+            str(r.get("fingerprint") or "")
+            for r in rejected
+            if isinstance(r, dict)
+        }
+        existing_fps.discard("")
+        added = 0
+        tier = str((warm or {}).get("tier") or "")
+        for row in what_failed:
+            if not isinstance(row, dict):
+                continue
+            args = str(
+                row.get("extra_sglang_args")
+                or row.get("args")
+                or "",
+            ).strip()
+            envs = row.get("extra_envs") or row.get("envs") or {}
+            if not isinstance(envs, dict):
+                envs = {}
+            if not args and not envs:
+                continue
+            fp = canonical_fingerprint(args, envs)
+            if fp in existing_fps:
+                continue
+            existing_fps.add(fp)
+            rejected.append({
+                "name":              str(row.get("name") or "")[:120],
+                "fingerprint":       fp,
+                "reason":            "warm_recipe_what_failed",
+                "extra_sglang_args": args,
+                "extra_envs":        dict(envs),
+                "source":            "warm_start_recipe",
+                "source_tier":       tier,
+                # Whatever the recipe carried (gain_pct / error_class /
+                # reason) is preserved for forensics; not strictly used
+                # by the dedup gate.
+                "gain_pct":          row.get("gain_pct"),
+                "error_class":       row.get("error_class") or row.get("reason"),
+            })
+            added += 1
+
+        if added:
+            es["rejected"] = rejected
+            state.explore_search = es
+            log.info(
+                "warm-recipe history: injected %d what_failed rows into "
+                "explore_search.rejected (tier=%s)",
+                added, tier,
+            )
+        state.warm_history_injected = True
+        return added
+
+    async def _maybe_enqueue_warm_replay(
+        self, *, baseline_tput: float,
+    ) -> "Task | None":
+        """GAP 1 — enqueue a one-shot ``replay_warm_recipe`` task when
+        the T0 warm-start ladder returned a high-confidence prior.
+
+        Lifecycle:
+        1. ``--no-warm-replay`` or ``warm_replay_attempted=True`` (resume
+           safety) → skip silently.
+        2. No ``warm_start_recipe`` / confidence below threshold /
+           best_config missing args+envs → skip with structured outcome.
+        3. Otherwise mint a Coordinator-internal task whose params
+           carry the warm best_config's ``extra_sglang_args`` /
+           ``extra_envs`` so :class:`BaselineExecutor` runs the same
+           Magpie subprocess as the baseline, but with the KB config
+           applied. The baseline_config_path is forwarded so the
+           workload contract (CONC / ISL / OSL / TP / ...) is
+           identical to the baseline that just landed.
+
+        Returns the created Task (or ``None`` when skipped). Idempotent
+        via the fixed ``warm-replay-prelude`` idempotency key.
+        """
+        state = self.shared_state
+        if not getattr(self, "_warm_replay_enabled", True):
+            state.warm_replay_outcome = {
+                "status": "skipped",
+                "reason": "disabled_by_flag",
+            }
+            # Flip the one-shot guard even on disabled-skip so that
+            # a robustness resume without ``--no-warm-replay`` (which
+            # is the common case — operators don't re-export every
+            # flag on resume) cannot retroactively trigger a replay
+            # against the operator's original intent. The guard
+            # persists in state.json across robustness restarts.
+            state.warm_replay_attempted = True
+            return None
+        if state.warm_replay_attempted:
+            # Resume safety: a previous boot already enqueued / ran the
+            # replay. The outcome (if any) is preserved in
+            # ``warm_replay_outcome``; nothing more to do.
+            return None
+        warm = state.warm_start_recipe or {}
+        if not isinstance(warm, dict) or not warm:
+            state.warm_replay_outcome = {
+                "status": "skipped",
+                "reason": "no_warm_start_recipe",
+            }
+            state.warm_replay_attempted = True
+            return None
+        # tier / conf were stamped at T0 by ``find_recipe_with_fallback``.
+        tier = str(warm.get("tier") or "").strip()
+        try:
+            conf = float(warm.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        min_conf = float(getattr(self, "_warm_replay_min_confidence", 0.7) or 0.7)
+        if conf < min_conf:
+            state.warm_replay_outcome = {
+                "status": "skipped",
+                "reason": f"confidence_below_threshold ({conf:.2f} < {min_conf:.2f})",
+                "warm_recipe_tier": tier,
+                "warm_recipe_conf": conf,
+            }
+            state.warm_replay_attempted = True
+            return None
+        recipe = warm.get("recipe") or {}
+        if not isinstance(recipe, dict):
+            recipe = {}
+        recipe_attrs = recipe.get("attrs") or {}
+        best_config = recipe_attrs.get("best_config") or {}
+        if not isinstance(best_config, dict):
+            best_config = {}
+        # Need at least one of args / envs to be worth replaying.
+        bc_args = str(best_config.get("extra_sglang_args") or best_config.get("args") or "").strip()
+        bc_envs = best_config.get("extra_envs") or best_config.get("envs") or {}
+        if not isinstance(bc_envs, dict):
+            bc_envs = {}
+        if not bc_args and not bc_envs:
+            state.warm_replay_outcome = {
+                "status": "skipped",
+                "reason": "best_config_empty",
+                "warm_recipe_tier": tier,
+                "warm_recipe_conf": conf,
+            }
+            state.warm_replay_attempted = True
+            return None
+        # Historical gain anchor — used by ``_promote_warm_replay`` to
+        # judge "reproduced" vs "drift". The recipe schema records gain
+        # per session in ``attrs.sessions[]`` (each entry is
+        # ``{session_id, gain_pct, stack_len}``, written by
+        # ``cortex_finalize_recipe_and_journal``). We take the MAX
+        # across known sessions to reflect "the best a prior session
+        # ever achieved with this recipe" — that's the upper bound a
+        # reproduce should still meet.
+        #
+        # Fallback: 0.0 (recipe imported from a non-hyperloom source
+        # without per-session gain — accept any positive measurement
+        # in ``_promote_warm_replay``).
+        expected_gain = 0.0
+        sessions_field = recipe_attrs.get("sessions")
+        if isinstance(sessions_field, list):
+            session_gains: list[float] = []
+            for s in sessions_field:
+                if not isinstance(s, dict):
+                    continue
+                try:
+                    g = float(s.get("gain_pct") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                session_gains.append(g)
+            if session_gains:
+                expected_gain = max(session_gains)
+        # Last-chance fallback for offline-ingested seed rows that
+        # carry a flat ``gain_pct`` attr (Arbor compat shape).
+        if expected_gain <= 0:
+            try:
+                fallback = float(recipe_attrs.get("gain_pct") or 0.0)
+            except (TypeError, ValueError):
+                fallback = 0.0
+            if fallback > 0:
+                expected_gain = fallback
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": "warm_replay_prelude",
+            "extra_sglang_args": bc_args,
+            "extra_envs": dict(bc_envs),
+            # Reuse the baseline's workload contract (CONC/ISL/OSL/TP/...).
+            # Without this the replay would render from the YAML's smoke
+            # defaults and the gain comparison would be meaningless.
+            "config_path": str(state.baseline_config_path or ""),
+            # Carry the historical-gain anchor forward so the promote
+            # path can compute the reproduce ratio without re-reading
+            # warm_start_recipe.
+            "warm_expected_gain_pct": expected_gain,
+            "warm_recipe_tier": tier,
+            "warm_recipe_conf": conf,
+            "baseline_tput_anchor": float(baseline_tput),
+        }
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="replay_warm_recipe",
+            params=params,
+            idempotency_key="warm-replay-prelude",
+        )
+        if not was_existing:
+            log.info(
+                "PRELUDE: warm-replay enqueued task=%s (tier=%s conf=%.2f "
+                "expected_gain=%.2f baseline_tput=%.2f)",
+                task.task_id, tier, conf, expected_gain, baseline_tput,
+            )
+        state.warm_replay_attempted = True
+        # Outcome stays empty until promote fills it in.
+        state.warm_replay_outcome = {
+            "status": "in_flight",
+            "warm_recipe_tier": tier,
+            "warm_recipe_conf": conf,
+            "expected_gain_pct": expected_gain,
+            "replay_task_id": task.task_id,
+        }
+        return task
+
+    def _promote_warm_replay(
+        self, result: dict, *, task: "Task | None" = None,
+    ) -> None:
+        """GAP 1 — interpret the result of a ``replay_warm_recipe`` task.
+
+        Two paths:
+
+        * ``status=="succeeded"`` with a positive tput → compute the
+          measured gain vs baseline_tput; if it reproduces
+          ≥ ``warm_replay_min_reproduce_pct`` of the recipe's expected
+          gain, push the warm config onto :attr:`optimization_stack`
+          (so the rest of the session inherits it as a "free" starting
+          point) and update ``current_best``. Otherwise tag as
+          ``status="drift"`` — no stack push, EXPLORE will start
+          from a clean baseline.
+
+        * Anything else (timeout / nonzero / OOM / invalid measurement)
+          → tag as ``status="failed"`` with the error_class verbatim.
+          No journal lesson / pitfall is written (the replay outcome
+          is a compat / environment signal, not a knowledge fact —
+          see PR rationale on GAP 1).
+
+        Best-effort: failures are logged but never propagate back into
+        the dispatcher (mirroring ``cortex_finalize_recipe_and_journal``).
+        """
+        state = self.shared_state
+        outcome = dict(state.warm_replay_outcome or {})
+        expected_gain = float(outcome.get("expected_gain_pct") or 0.0)
+        if not isinstance(result, dict):
+            outcome["status"] = "failed"
+            outcome["reason"] = "non_dict_result"
+            state.warm_replay_outcome = outcome
+            state.save(self.session_dir)
+            return
+        status = str(result.get("status") or "")
+        if status != "succeeded":
+            outcome["status"] = "failed"
+            outcome["error_class"] = str(result.get("error_class") or "")
+            outcome["reason"] = str(result.get("error") or result.get("reason") or "")[:240]
+            state.warm_replay_outcome = outcome
+            state.save(self.session_dir)
+            log.info(
+                "warm-replay failed (status=%s, error_class=%s)",
+                status, outcome.get("error_class"),
+            )
+            return
+        tput_raw = result.get("output_throughput")
+        try:
+            tput = float(tput_raw) if tput_raw is not None else 0.0
+        except (TypeError, ValueError):
+            tput = 0.0
+        # Use the baseline_tput captured at enqueue time (carried via
+        # task.params) so a hypothetical baseline rerun mid-replay
+        # can't shift the comparison anchor. Fall back to live
+        # ``state.baseline_tput`` when the anchor wasn't plumbed
+        # (defensive: legacy tests that build task params by hand).
+        anchor_raw = None
+        if task is not None and isinstance(getattr(task, "params", None), dict):
+            anchor_raw = task.params.get("baseline_tput_anchor")
+        try:
+            baseline_tput = float(anchor_raw) if anchor_raw is not None else 0.0
+        except (TypeError, ValueError):
+            baseline_tput = 0.0
+        if baseline_tput <= 0:
+            baseline_tput = float(state.baseline_tput or 0.0)
+        if tput <= 0 or baseline_tput <= 0:
+            outcome["status"] = "failed"
+            outcome["reason"] = f"invalid_tput tput={tput} baseline={baseline_tput}"
+            state.warm_replay_outcome = outcome
+            state.save(self.session_dir)
+            return
+        measured_gain = (tput / baseline_tput - 1.0) * 100.0
+        min_reproduce = float(
+            getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
+        )
+        # Two acceptance rules:
+        # 1. If the recipe had a recorded historical gain, we want at
+        #    least ``min_reproduce`` of that figure.
+        # 2. If the recipe didn't carry one (expected_gain=0), any
+        #    positive measurement counts (we trust the recipe at face
+        #    value because nothing else to compare to).
+        reproduced = False
+        if expected_gain > 0:
+            reproduced = measured_gain >= (expected_gain * min_reproduce)
+        else:
+            reproduced = measured_gain > 0
+        outcome["actual_gain_pct"] = round(measured_gain, 3)
+        outcome["throughput_after"] = tput
+        if reproduced:
+            outcome["status"] = "reproduced"
+            # Push warm best_config onto the stack so the rest of the
+            # session inherits it. We synthesize a stack entry matching
+            # the shape ``_lift_to_current_best`` writes for normal
+            # EXPLORE KEEPs.
+            params = (task.params if task is not None else {}) or {}
+            warm_args = str(params.get("extra_sglang_args") or "").strip()
+            warm_envs = dict(params.get("extra_envs") or {})
+            # Stack entry schema mirrors what kernel-integrate /
+            # explore-KEEP append (see lines 6520+ / 8030+). Fields are
+            # what session_breakdown's attribution + capability_summary
+            # consume; missing any of these (``ts`` / ``workspace`` /
+            # ``gain_pct``) renders the entry as anonymous "stack
+            # increment" in the final report.
+            stack_entry = {
+                "action":            "replay_warm_recipe",
+                "name":              "warm_replay",
+                "variant_name":      "warm_replay",
+                "extra_sglang_args": warm_args,
+                "extra_envs":        warm_envs,
+                "tput":              float(tput),
+                "gain_pct":          round(measured_gain, 3),
+                "workspace":         str(result.get("workspace") or ""),
+                "ts":                datetime.now(timezone.utc).isoformat(),
+                # ``source_session_id`` here points at the warm-recipe
+                # tier that produced this entry (T1_exact / T1_exact_legacy
+                # / T2_same_shape) — useful for the session_breakdown
+                # "where did this gain come from" attribution.
+                "source_tier":       outcome.get("warm_recipe_tier", ""),
+                "source_confidence": outcome.get("warm_recipe_conf", 0.0),
+            }
+            # Resume safety: in the canonical PRELUDE → warm_replay
+            # flow ``optimization_stack`` is empty when we land here
+            # (baseline doesn't push onto stack). But a robustness
+            # restart that lost ``warm_replay_attempted=True`` could
+            # in theory call us with a non-empty stack — DO NOT clobber
+            # the existing entries. Recompute cumulative gain from
+            # baseline_tput → current tput instead of treating this
+            # entry's measured_gain as the absolute total.
+            state.optimization_stack = list(state.optimization_stack or [])
+            # Idempotency guard: if a prior promote run already pushed
+            # the warm_replay entry (resume mid-promote), DO NOT push
+            # again. Detect via action="replay_warm_recipe".
+            already_pushed = any(
+                isinstance(e, dict) and e.get("action") == "replay_warm_recipe"
+                for e in state.optimization_stack
+            )
+            if already_pushed:
+                log.info(
+                    "warm-replay promote: stack already carries the entry; "
+                    "skipping duplicate push (likely resume mid-promote)",
+                )
+                state.warm_replay_outcome = outcome
+                state.save(self.session_dir)
+                return
+            state.optimization_stack.append(stack_entry)
+            # gain_per_stack_entry runs in lock-step with optimization_stack.
+            gp = list(getattr(state, "gain_per_stack_entry", []) or [])
+            gp.append(round(measured_gain, 3))
+            state.gain_per_stack_entry = gp
+            # Cumulative gain — derived from absolute tput / baseline,
+            # not from summing per-entry gains (Hyperloom's stack is a
+            # superposition rather than additive deltas, so the
+            # ``current_tput / baseline_tput - 1`` formula is the
+            # authoritative measure).
+            total_gain = (tput / baseline_tput - 1.0) * 100.0
+            state.cumulative_gain = round(total_gain, 3)
+            state.cumulative_gain_validated = round(total_gain, 3)
+            state.cumulative_gain_validated_stack_len = len(
+                state.optimization_stack
+            )
+            state.current_best = {
+                "action": "warm_replay",
+                "name": "warm_replay",
+                "tput": tput,
+                "extra_sglang_args": warm_args,
+                "extra_envs": warm_envs,
+            }
+            log.info(
+                "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%, "
+                "min_required=+%.2f%%); pushed warm_replay onto stack",
+                measured_gain,
+                expected_gain,
+                expected_gain * min_reproduce if expected_gain > 0 else 0.0,
+            )
+            # Journal the warm-replay as a synthetic KEEP entry so the
+            # session report shows the inherited gain. We do NOT write
+            # a KB lesson — the warm replay is a verification, not a
+            # new fact (the recipe already exists in the KB).
+            try:
+                journal = self._ensure_journal()
+                from .optimization_journal import KIND_OTHER, OUTCOME_KEEP
+                journal.append_entry(JournalEntry(
+                    phase=str(getattr(state, "phase", "PRELUDE")).upper() or "PRELUDE",
+                    iter=int(state.tick or 0),
+                    kind=KIND_OTHER,
+                    change=f"warm_replay({outcome.get('warm_recipe_tier', '?')}): {warm_args}",
+                    outcome=OUTCOME_KEEP,
+                    gain_pct=round(measured_gain, 3),
+                    throughput_after=tput,
+                    task_id=str(task.task_id if task is not None else ""),
+                ))
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("warm-replay journal append failed")
+        else:
+            outcome["status"] = "drift"
+            outcome["reason"] = (
+                f"measured +{measured_gain:.2f}% below {min_reproduce * 100:.0f}%"
+                f" of expected +{expected_gain:.2f}%"
+            )
+            log.info(
+                "warm-replay DRIFT: measured=+%.2f%% < expected=+%.2f%% × %.0f%%",
+                measured_gain, expected_gain, min_reproduce * 100,
+            )
+        state.warm_replay_outcome = outcome
+        state.save(self.session_dir)
 
     async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
         """Build + enqueue a Coordinator-internal analysis task.
@@ -3839,11 +4404,16 @@ class Coordinator:
         ``issue_node`` anchors keyed by gap descriptors. Centralising
         the derivation here keeps the migration to M5 a single-line
         change.
+
+        Framework is plumbed so sglang and vLLM gaps anchor on
+        different recipe rows — matching the new framework-scoped
+        canonical id shape introduced alongside the warm-replay PR.
         """
         from ..cortex_kb_client import recipe_canonical_id
         workload = self.shared_state.model_name or "unknown_model"
         hw = self.shared_state.gpu_type or "unknown_gpu"
-        return recipe_canonical_id(workload, hw)
+        framework = str(getattr(self.shared_state, "framework", "") or "")
+        return recipe_canonical_id(workload, hw, framework)
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
         """Route a Critic ``review_verdict`` to the per-variant or
@@ -4615,6 +5185,21 @@ class Coordinator:
             params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
         if state.warm_start_lessons and "warm_start_lessons" not in params:
             params["warm_start_lessons"] = list(state.warm_start_lessons)
+        # GAP 8 — runtime framework / version so the prompt's
+        # ``_format_version_note`` can annotate version-mismatched
+        # lessons / pitfalls (e.g. "from sglang@0.4, you're on 0.5").
+        if "framework" not in params:
+            fw = str(getattr(state, "framework", "") or "").strip()
+            if fw:
+                params["framework"] = fw
+        if "framework_version" not in params:
+            fp_meta = getattr(state, "stack_fingerprint_meta", None) or {}
+            if isinstance(fp_meta, dict):
+                fw = str(params.get("framework") or getattr(state, "framework", "") or "").lower()
+                if fw in ("sglang", "vllm"):
+                    v = str(fp_meta.get(fw) or "").strip()
+                    if v and v != "unknown":
+                        params["framework_version"] = v
 
         # session_steward gets a panoramic state digest inlined into
         # its prompt (the steward needs stack depth, gain trajectory,
@@ -6389,7 +6974,16 @@ class Coordinator:
             # threshold matches) a KB lesson / pitfall write. The
             # legacy T2/T3 hypothesize/verify protocol was retired;
             # see ``_fact_write_hook`` for the surviving path.
-            await self._fact_write_hook(task=task, result=result, kept=kept)
+            #
+            # ``replay_warm_recipe`` is excluded: it's a verification of
+            # an existing KB recipe, not a new fact. The dedicated
+            # ``_promote_warm_replay`` already writes its own journal
+            # entry; routing it through the fact-write hook would
+            # double-journal it AND write a misleading "warm config
+            # gave +N%" lesson that would overwrite the original
+            # recipe's measured_impact on KB shallow-merge.
+            if task.kind != "replay_warm_recipe":
+                await self._fact_write_hook(task=task, result=result, kept=kept)
             # explore-round gap update.
             # For explore tasks with per-variant outcomes, append each
             # variant's KEEP/REVERT to the matching gap's attempts log
@@ -6524,6 +7118,50 @@ class Coordinator:
     # KB writes only; the local optimization_journal is always written.
     # ------------------------------------------------------------------
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
+    # GAP 4 — read-modify-write source_session_ids cap. Bounded so the
+    # KB row doesn't bloat indefinitely; the bounded-list semantic still
+    # gives us "how many recent sessions validated this lesson" while
+    # keeping the per-row JSON small enough to read on every write.
+    FACT_RECENT_SESSIONS_CAP: int = 10
+
+    def _merge_recent_session_ids(
+        self,
+        existing_attrs: Mapping[str, Any] | None,
+        my_session_id: str,
+    ) -> tuple[list[str], int]:
+        """Read-modify-write helper for ``source_session_ids[]`` +
+        ``validated_count``.
+
+        Pulls the prior list off ``existing_attrs`` (which the caller
+        obtained via :meth:`CortexKBClient.read_lesson_exact` /
+        :meth:`read_pitfall_exact`), removes any prior occurrence of
+        ``my_session_id`` (resume / retry safety so we don't double-
+        count the same session) and appends a fresh entry at the end.
+        Caps the list at :data:`FACT_RECENT_SESSIONS_CAP` to keep the
+        KB row bounded.
+
+        ``validated_count`` is computed as ``len(merged_list)`` rather
+        than ``prior_count + 1`` because the cap means raw "+1" would
+        eventually undercount (10 sessions write, the 11th writes, cap
+        drops the oldest, count=10 looks the same as before). Using
+        ``len`` exposes the "saturated at the cap" semantic correctly
+        for the prompt renderer.
+
+        Returns ``(merged_list, validated_count)``.
+        """
+        attrs = dict(existing_attrs or {})
+        prior_ids = attrs.get("source_session_ids")
+        if not isinstance(prior_ids, list):
+            prior_ids = []
+        cleaned: list[str] = [
+            str(s) for s in prior_ids
+            if s and str(s) != my_session_id
+        ]
+        my_id = str(my_session_id).strip()
+        if my_id:
+            cleaned.append(my_id)
+        cleaned = cleaned[-self.FACT_RECENT_SESSIONS_CAP:]
+        return cleaned, len(cleaned)
 
     def _ensure_journal(self) -> Journal:
         """Lazy-instantiate the per-session :class:`Journal`.
@@ -6667,9 +7305,30 @@ class Coordinator:
         # the pending file, programmer bug, …) still doesn't crash the
         # dispatcher. Wrapping each call site in ``except CortexKBError``
         # here would be dead code.
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if kept and gain_pct is not None and gain_pct > 0:
-            statement = f"{change} → +{gain_pct:.2f}% on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
-            impact = f"gain_pct={gain_pct:.2f} throughput_after={throughput_after}"
+            statement = self._build_statement(
+                change=change, gain_pct=gain_pct, kind="lesson",
+            )
+            impact = self._build_measured_impact(
+                gain_pct=gain_pct,
+                throughput_after=throughput_after,
+                stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
+                measured_at=now_iso,
+            )
+            # GAP 4 read-modify-write: merge source_session_ids[] so
+            # subsequent sessions accumulate validators rather than
+            # overwriting via KB shallow new-wins.
+            prior_lesson = self.cortex_kb.read_lesson_exact(statement=statement)
+            recent_ids, validated_count = self._merge_recent_session_ids(
+                prior_lesson.get("attrs"), source_session_id,
+            )
+            lesson_extra = dict(extra or {})
+            lesson_extra.update({
+                "source_session_ids": recent_ids,
+                "validated_count": validated_count,
+                "last_validated_at": now_iso,
+            })
             self.cortex_kb.propose_lesson(
                 statement=statement,
                 measured_impact=impact,
@@ -6678,13 +7337,25 @@ class Coordinator:
                 source_session_id=source_session_id,
                 source_task_id=task.task_id,
                 evidence=evidence_refs,
-                extra_attrs=extra,
+                extra_attrs=lesson_extra,
             )
             return
 
         severity = self._pitfall_severity_for(result_dict)
         if severity is not None:
-            description = f"{change} → {severity} on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
+            description = self._build_statement(
+                change=change, severity=severity, kind="pitfall",
+            )
+            prior_pitfall = self.cortex_kb.read_pitfall_exact(description=description)
+            recent_ids, validated_count = self._merge_recent_session_ids(
+                prior_pitfall.get("attrs"), source_session_id,
+            )
+            pitfall_extra = dict(extra or {})
+            pitfall_extra.update({
+                "source_session_ids": recent_ids,
+                "validated_count": validated_count,
+                "last_validated_at": now_iso,
+            })
             self.cortex_kb.propose_pitfall(
                 description=description,
                 severity=severity,
@@ -6693,8 +7364,83 @@ class Coordinator:
                 source_session_id=source_session_id,
                 source_task_id=task.task_id,
                 evidence=evidence_refs,
-                extra_attrs=extra,
+                extra_attrs=pitfall_extra,
             )
+
+    def _build_statement(
+        self,
+        *,
+        change: str,
+        kind: str,
+        gain_pct: float | None = None,
+        severity: str | None = None,
+    ) -> str:
+        """GAP 4 (FIX-4) — build the lesson statement / pitfall
+        description used to derive the KB canonical_id.
+
+        Framework is intentionally included in the visible text so the
+        canonical_id (a hash of the statement) differs across
+        framework even when the variant args happen to collide. Without
+        this guard, a sglang ``--enable-chunked-prefill`` lesson and a
+        vLLM ``--enable-chunked-prefill`` lesson would hash to the
+        same row → KB shallow-merge would have the later writer
+        overwrite the earlier one's measured_impact / source_session
+        triple, AND ``attrs.framework`` would flip-flop on every write.
+
+        Output shape:
+
+        * ``[<framework>] <change> → +<gain>% on <model>/<hw>`` for lessons.
+        * ``[<framework>] <change> → <severity> on <model>/<hw>`` for pitfalls.
+
+        Framework is rendered as ``[?]`` (sentinel) when SharedState
+        doesn't know it, so legacy / mock callers still produce a
+        stable canonical_id without the brackets disappearing entirely
+        (otherwise pre-PR rows and post-PR rows would still collide).
+        """
+        framework = str(getattr(self.shared_state, "framework", "") or "").strip()
+        fw_tag = f"[{framework or '?'}] "
+        model = self.shared_state.model_name or "?"
+        hw = self.shared_state.gpu_type or "?"
+        if kind == "lesson":
+            assert gain_pct is not None  # caller contract
+            return f"{fw_tag}{change} → +{gain_pct:.2f}% on {model}/{hw}"
+        # kind == "pitfall"
+        return f"{fw_tag}{change} → {severity or '?'} on {model}/{hw}"
+
+    @staticmethod
+    def _build_measured_impact(
+        *,
+        gain_pct: float | None,
+        throughput_after: float | None,
+        stack_depth: int,
+        measured_at: str,
+        throughput_before: float | None = None,
+    ) -> dict[str, Any]:
+        """GAP 3 — structured ``measured_impact`` payload.
+
+        Returns a dict instead of the legacy ``f"gain_pct=... ..."``
+        string so downstream consumers (specialist prompt renderer,
+        dashboard scripts, future analytical jobs) can parse the
+        fields without regex. The prompt builder keeps a back-compat
+        renderer for old string-form ``measured_impact`` values.
+
+        ``stack_depth`` is the length of the current optimization
+        stack BEFORE this lesson lands — useful for downstream tools
+        to discount lessons stacked on top of many other knobs (a
+        +10% at depth 0 is more valuable than a +10% at depth 5).
+        """
+        out: dict[str, Any] = {
+            "gain_pct": float(gain_pct) if gain_pct is not None else None,
+            "stack_depth_at_apply": int(stack_depth),
+            "measured_at": measured_at,
+        }
+        if throughput_after is not None:
+            out["throughput_after"] = float(throughput_after)
+        if throughput_before is not None:
+            out["throughput_before"] = float(throughput_before)
+        # Strip None for compactness (prompt section relies on
+        # ``.get`` so missing keys are tolerated naturally).
+        return {k: v for k, v in out.items() if v is not None}
 
     def _record_fact_per_variant(
         self,
@@ -6779,9 +7525,27 @@ class Coordinator:
         # CortexKBError internally and falls back to NDJSON, so no
         # per-call except-block is needed here. ``_fact_write_hook``
         # wraps the entire helper in ``except Exception``.
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if outcome == OUTCOME_KEEP and gain_pct is not None and gain_pct > 0:
-            statement = f"{change} → +{gain_pct:.2f}% on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
-            impact = f"gain_pct={gain_pct:.2f} throughput_after={throughput_after}"
+            statement = self._build_statement(
+                change=change, gain_pct=gain_pct, kind="lesson",
+            )
+            impact = self._build_measured_impact(
+                gain_pct=gain_pct,
+                throughput_after=throughput_after,
+                stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
+                measured_at=now_iso,
+            )
+            prior_lesson = self.cortex_kb.read_lesson_exact(statement=statement)
+            recent_ids, validated_count = self._merge_recent_session_ids(
+                prior_lesson.get("attrs"), source_session_id,
+            )
+            lesson_extra = dict(extra or {})
+            lesson_extra.update({
+                "source_session_ids": recent_ids,
+                "validated_count": validated_count,
+                "last_validated_at": now_iso,
+            })
             self.cortex_kb.propose_lesson(
                 statement=statement,
                 measured_impact=impact,
@@ -6791,7 +7555,7 @@ class Coordinator:
                 source_task_id=task.task_id,
                 source_variant_name=variant_name,
                 evidence=evidence_refs,
-                extra_attrs=extra,
+                extra_attrs=lesson_extra,
             )
             return
 
@@ -6801,7 +7565,19 @@ class Coordinator:
             "status":      variant_outcome.get("outcome"),
         })
         if severity is not None:
-            description = f"{change} → {severity} on {self.shared_state.model_name or '?'}/{self.shared_state.gpu_type or '?'}"
+            description = self._build_statement(
+                change=change, severity=severity, kind="pitfall",
+            )
+            prior_pitfall = self.cortex_kb.read_pitfall_exact(description=description)
+            recent_ids, validated_count = self._merge_recent_session_ids(
+                prior_pitfall.get("attrs"), source_session_id,
+            )
+            pitfall_extra = dict(extra or {})
+            pitfall_extra.update({
+                "source_session_ids": recent_ids,
+                "validated_count": validated_count,
+                "last_validated_at": now_iso,
+            })
             self.cortex_kb.propose_pitfall(
                 description=description,
                 severity=severity,
@@ -6811,7 +7587,7 @@ class Coordinator:
                 source_task_id=task.task_id,
                 source_variant_name=variant_name,
                 evidence=evidence_refs,
-                extra_attrs=extra,
+                extra_attrs=pitfall_extra,
             )
 
     def _build_session_snapshot(self) -> dict[str, Any]:
@@ -6890,6 +7666,15 @@ class Coordinator:
                 "rule":   str(d.get("rule") or ""),
                 "reason": str(d.get("reason") or "")[:120],
             })
+        # GAP 1 — surface warm-replay outcome to the steward so its
+        # "continue / stop / advance" decision can distinguish gain
+        # that came from inheriting a KB recipe vs. gain that came
+        # from EXPLORE work this session. Without this, +25%
+        # cumulative_gain at tick=0 looks identical to +25% earned
+        # over 30 EXPLORE rounds — the steward might wrongly conclude
+        # we already have a long stack worth keeping.
+        warm_replay = dict(getattr(ss, "warm_replay_outcome", {}) or {})
+        warm_replay_status = str(warm_replay.get("status") or "")
         return {
             "phase":                            str(getattr(ss, "phase", "") or ""),
             "tick":                             int(getattr(ss, "tick", 0) or 0),
@@ -6913,6 +7698,10 @@ class Coordinator:
             "steward_continuation_used":        bool(
                 getattr(ss, "steward_continuation_used", False)
             ),
+            "warm_replay_status":               warm_replay_status,
+            "warm_replay_actual_gain_pct":      float(
+                warm_replay.get("actual_gain_pct") or 0.0,
+            ),
         }
 
     def _collect_workload_tags(self) -> dict[str, Any]:
@@ -6934,6 +7723,16 @@ class Coordinator:
         ``pp`` has no SharedState field at all because there is no CLI
         surface for it).
 
+        GAP 5 (May 2026) — added ``model_family`` / ``framework_version``
+        / ``rocm_version`` / ``aiter_version`` / ``image_digest`` plus
+        the per-baseline extras (``max_running_requests`` /
+        ``max_num_seqs`` / ``chunked_prefill_enabled`` /
+        ``enable_torch_compile`` / ``quant_scheme`` / ``workload_mode``)
+        so lesson / pitfall writes carry the same shape filters the
+        recipe row gets. Without this symmetry the warm-start reader
+        ``client.lessons(framework=..., ...)`` would silently drop
+        rows on framework-version drift.
+
         Defensive ``getattr`` reads keep this helper safe against the
         ``Coordinator.__new__`` stubs the close-phase tests use.
         """
@@ -6945,6 +7744,18 @@ class Coordinator:
         model_class = str(getattr(ss, "model_class", "") or "").strip()
         if model_class:
             out["model_class"] = model_class
+        # Model family — derived from model_name so future warm-start
+        # queries (``find_recipe_with_fallback`` T3 / T6) can match on
+        # family without re-running the slug logic at read time.
+        model_name = str(getattr(ss, "model_name", "") or "").strip()
+        if model_name:
+            try:
+                from ..cortex_kb_client import model_family as _model_family
+                fam = _model_family(model_name)
+                if fam:
+                    out["model_family"] = fam
+            except Exception:  # noqa: BLE001 — defensive
+                pass
         for src_attr, dst_key in (
             ("precision",     "precision"),
             ("tp",            "tp"),
@@ -6975,6 +7786,52 @@ class Coordinator:
             pp_n = 0
         if pp_n > 0:
             out["pp"] = pp_n
+        # GAP 5 — runtime version tags. cli writes these into
+        # ``stack_fingerprint_meta`` from manifest / install fingerprint
+        # at boot; resume reads them back from state.json verbatim.
+        fp_meta = getattr(ss, "stack_fingerprint_meta", None) or {}
+        if isinstance(fp_meta, dict):
+            # framework_version is whichever of sglang/vllm is active.
+            fw_lc = framework.lower()
+            if fw_lc in ("sglang", "vllm"):
+                v = str(fp_meta.get(fw_lc) or "").strip()
+                if v and v != "unknown":
+                    out["framework_version"] = v
+            for src_key, dst_key in (
+                ("rocm",         "rocm_version"),
+                ("aiter",        "aiter_version"),
+                ("image_digest", "image_digest"),
+            ):
+                v = str(fp_meta.get(src_key) or "").strip()
+                if v and v != "unknown":
+                    out[dst_key] = v
+        # GAP 5 — per-baseline workload extras (parsed from the
+        # materialized YAML in BaselineExecutor). Empty dict before
+        # the first baseline; downstream readers tolerate missing keys.
+        #
+        # Skip rule per field:
+        #   * ``max_*`` integer fields → skip 0 / None (placeholder)
+        #   * ``*_enabled`` / ``enable_*`` bools → skip None ONLY
+        #     (``False`` is a meaningful "operator explicitly disabled"
+        #     signal); without this guard Python's ``False == 0`` would
+        #     erase the field from KB attrs and a future warm-start
+        #     query couldn't differentiate "enabled=False" from
+        #     "field never set".
+        #   * string fields → skip "" / None
+        wl_extra = getattr(ss, "baseline_workload_extra", None) or {}
+        if isinstance(wl_extra, dict):
+            for k in ("max_running_requests", "max_num_seqs"):
+                v = wl_extra.get(k)
+                if isinstance(v, int) and v > 0:
+                    out[k] = v
+            for k in ("chunked_prefill_enabled", "enable_torch_compile"):
+                v = wl_extra.get(k)
+                if isinstance(v, bool):
+                    out[k] = v
+            for k in ("quant_scheme", "workload_mode"):
+                v = wl_extra.get(k)
+                if isinstance(v, str) and v.strip():
+                    out[k] = v.strip()
         return out
 
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
@@ -7133,7 +7990,9 @@ class Coordinator:
                 for s in my_sessions if isinstance(s, dict)
             }
             existing_point = self.cortex_kb.read_recipe_exact(
-                model=model_name, hardware=gpu_type,
+                model=model_name,
+                hardware=gpu_type,
+                framework=str(getattr(ss, "framework", "") or ""),
             )
             existing_sessions: list[dict[str, Any]] = []
             prior_attrs = existing_point.get("attrs") or {}
@@ -7151,6 +8010,7 @@ class Coordinator:
             self.cortex_kb.update_recipe(
                 model=model_name,
                 hardware=gpu_type,
+                framework=str(getattr(ss, "framework", "") or ""),
                 best_config=attrs["best_config"],
                 best_throughput=attrs["best_throughput"],
                 what_worked=attrs["what_worked"],
@@ -7307,6 +8167,21 @@ class Coordinator:
             if isinstance(materialized, str) and materialized:
                 self.shared_state.baseline_config_path = materialized
                 changed = True
+                # GAP 5 — parse workload-shape extras from the YAML so
+                # subsequent lesson / pitfall writes can stamp them
+                # onto attrs. Best-effort: parse errors fall back to
+                # an empty dict so the rest of the promote path is
+                # unaffected.
+                try:
+                    parsed = _parse_baseline_workload_extra(materialized)
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "baseline workload extra parsing failed for %s",
+                        materialized,
+                    )
+                    parsed = {}
+                if parsed:
+                    self.shared_state.baseline_workload_extra = parsed
             # Fix E: promote the baseline Magpie wall-clock so the
             # ExploreExecutor can derive a per-variant overtime kill
             # deadline (``baseline_runtime_sec * explore_overtime_kill_ratio``).
@@ -7348,12 +8223,22 @@ class Coordinator:
             # seed the gaps[] ledger from baseline.
             # Best-effort; failure is logged + absorbed inside the helper.
             await self._refresh_gaps(reason="baseline_done")
-            # PRELUDE bootstrap: enqueue the first analysis action
-            # (kind picked by ``shared_state.enable_roofline``:
-            # ``roofline`` by default, ``profile`` when
-            # ``--no-enable-roofline``). Idempotency-keyed via the
-            # fixed ``prelude_initial`` reason so a resume after the
-            # baseline completion edge does not double-enqueue.
+            # PRELUDE bootstrap (post-baseline):
+            #
+            #   Step 1. Inject warm-recipe history into dedup ledger
+            #           (so already-tested REVERTs from past sessions
+            #            can't be re-proposed). Cheap + KB-disabled-safe.
+            #   Step 2. Enqueue warm-replay (operates on server lifecycle
+            #            lane; reproduces the historical best_config).
+            #   Step 3. Enqueue auto-analysis (operates on profile_lane;
+            #            different lane → runs in parallel with replay).
+            #
+            # Ordering rationale: history-inject before warm-replay is
+            # mandatory (the replay task must inherit the up-to-date
+            # ledger). Warm-replay before analysis is preferred so that
+            # the first cumulative_gain bump and the optimization_stack
+            # seed are recorded BEFORE specialist dispatch (specialist
+            # prompts read state.json at dispatch time).
             #
             # Skip conditions:
             # * baseline tput missing or invalid;
@@ -7362,6 +8247,25 @@ class Coordinator:
                 isinstance(tput, (int, float)) and tput > 0
                 and not (self.shared_state.auto_roofline_pending_task_id or "").strip()
             ):
+                # Step 1 — history injection (fires regardless of
+                # ``--no-warm-replay``).
+                try:
+                    self._inject_warm_recipe_history_into_ledger()
+                except Exception as exc:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "PRELUDE: warm-recipe history injection failed: %r",
+                        exc,
+                    )
+                # Step 2 — warm-recipe replay.
+                try:
+                    await self._maybe_enqueue_warm_replay(
+                        baseline_tput=float(tput),
+                    )
+                except Exception as exc:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "PRELUDE: failed to enqueue warm-replay task: %r", exc,
+                    )
+                # Step 3 — auto-analysis (roofline / profile).
                 try:
                     rl_task = await self._enqueue_internal_analysis_task(
                         reason="prelude_initial",
@@ -7377,6 +8281,15 @@ class Coordinator:
                         "PRELUDE: failed to enqueue initial analysis task "
                         "after baseline: %r", exc,
                     )
+        elif task_kind == "replay_warm_recipe":
+            # GAP 1 — separate promote path so the replay result does
+            # NOT overwrite ``baseline_tput`` / ``current_best`` via
+            # the regular baseline branch. The dedicated helper does
+            # its own KEEP / REVERT bookkeeping.
+            try:
+                self._promote_warm_replay(result, task=task)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("warm-replay promote failed")
         elif task_kind == "profile":
             audit_decision = "promoted"
             audit_extras = {

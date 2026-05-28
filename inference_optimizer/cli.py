@@ -525,6 +525,82 @@ def _build_backends(
     return backends
 
 
+def _resume_safe_flag(
+    args: argparse.Namespace,
+    arg_name: str,
+    manifest: dict | None,
+    manifest_key: str,
+    *,
+    default: bool,
+    invert: bool = False,
+) -> bool:
+    """Resolve a boolean CLI flag with resume-safe manifest fallback.
+
+    Resolution order:
+      1. If ``args`` carries the flag *explicitly* (i.e. the user set
+         ``store_true=True`` on this run), that value wins. We detect
+         "explicitly set" as "non-default value" because argparse
+         stores ``False`` by default for ``store_true``.
+      2. Otherwise, fall back to ``manifest[manifest_key]`` (recorded
+         on the first launch, persists across resume).
+      3. Otherwise, fall back to ``default``.
+
+    ``invert=True`` is for the common ``--no-*`` pattern: ``args.no_X``
+    is ``True`` when user disables, but ``manifest.X_enabled`` is the
+    positive form. The helper inverts on the way in.
+
+    This is what makes robustness_monitor.sh resume preserve the
+    operator's original ``--no-warm-replay`` / ``--no-fact-writes``
+    intent without re-passing the flag.
+    """
+    raw_arg = getattr(args, arg_name, None)
+    # ``--no-*`` flag → user passed it → True; default is False.
+    # If ``invert``, ``True`` here means "disable feature".
+    if isinstance(raw_arg, bool) and raw_arg:
+        # User explicitly disabled on THIS launch — honor it.
+        return (not raw_arg) if invert else raw_arg
+    # User didn't pass the flag — check manifest.
+    if manifest is not None and manifest_key in manifest:
+        stored = manifest.get(manifest_key)
+        if isinstance(stored, bool):
+            return stored
+    return default
+
+
+def _resume_safe_numeric(
+    args: argparse.Namespace,
+    arg_name: str,
+    manifest: dict | None,
+    manifest_key: str,
+    *,
+    default: float,
+) -> float:
+    """Same as :func:`_resume_safe_flag` for float-valued CLI options.
+
+    Resolution order: explicit non-default arg → manifest → default.
+    Argparse fills in the registered default when the flag isn't
+    passed, so we detect "explicitly set" as "value differs from
+    default" — fragile but matches the existing pattern in cli.py.
+    """
+    raw_arg = getattr(args, arg_name, None)
+    if raw_arg is not None:
+        try:
+            v = float(raw_arg)
+        except (TypeError, ValueError):
+            v = None
+        # We use ``!= default`` as the "user explicitly set" heuristic.
+        # When the manifest carries a different value, we still prefer
+        # the explicit flag on the current command line.
+        if v is not None and v != default:
+            return v
+    if manifest is not None and manifest_key in manifest:
+        try:
+            return float(manifest.get(manifest_key) or default)
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -725,6 +801,15 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 # task is ever queued.
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline":          baseline_executor,
+    # GAP 1 — ``replay_warm_recipe`` runs the same Magpie subprocess
+    # as ``baseline`` but applies ``warm_start_recipe.best_config``
+    # (extra_sglang_args + extra_envs) via ``task.params``. We reuse
+    # the BaselineExecutor instance because the subprocess pipeline,
+    # the cold-start timeout logic, the rescue-path salvage, and the
+    # measurement parser are all identical — the only thing that
+    # differs is which params get passed in (and the Coordinator-side
+    # interpretation of the result, see ``_promote_replay_warm_recipe``).
+    "replay_warm_recipe": baseline_executor,
     # ``profile`` is registered so the Coordinator-internal task path
     # (kind switched via ``--no-enable-roofline``) can dispatch it
     # through SubAgentRunner. PolicyGate denies LLM-proposed
@@ -2336,6 +2421,20 @@ def _bootstrap_cortex_kb(
     hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
     stack_fp = manifest.get("stack_fingerprint") or {}
     image_digest = manifest.get("image") or ""
+    # GAP 5 — mirror version + image fingerprint onto SharedState so
+    # lesson / pitfall writes (coordinator._collect_workload_tags) can
+    # stamp them onto KB attrs WITHOUT re-reading manifest at every
+    # fact-write. Resume reads ``stack_fingerprint_meta`` back from
+    # state.json verbatim.
+    if isinstance(stack_fp, dict) and stack_fp:
+        merged_meta = dict(getattr(state, "stack_fingerprint_meta", {}) or {})
+        for key, value in stack_fp.items():
+            if value not in (None, "", "unknown"):
+                merged_meta[str(key)] = value
+        if image_digest and image_digest != "unknown":
+            merged_meta["image_digest"] = image_digest
+        if merged_meta:
+            state.stack_fingerprint_meta = merged_meta
     extra_attrs = {
         "marathon_dispatch_id": manifest.get("session_id", ""),
         "framework":            state.framework or manifest.get("framework", ""),
@@ -3629,7 +3728,34 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # update_recipe). Default ON; ``--no-fact-writes`` flips it
         # OFF for soak runs that should not pollute the shared KB.
         # The local optimization_journal is independent of this gate.
-        fact_writes_enabled=not bool(getattr(args, "no_fact_writes", False)),
+        #
+        # Resume-safety: when ``--no-fact-writes`` was NOT supplied on
+        # the resume command line, fall back to the value recorded in
+        # manifest.json so robustness_monitor.sh resume preserves the
+        # operator's original intent (manifest is the persistent
+        # authority across restarts).
+        fact_writes_enabled=_resume_safe_flag(
+            args, "no_fact_writes", manifest, "fact_writes_enabled",
+            default=True, invert=True,
+        ),
+        # GAP 1 — Warm-recipe replay controls. Default ON, fires when
+        # warm_start_recipe.confidence >= min_confidence and the
+        # measured gain reproduces at least min_reproduce_pct of the
+        # recipe's historical claim. Same resume-safety semantics as
+        # ``--no-fact-writes`` — manifest is the authority across
+        # restarts.
+        warm_replay_enabled=_resume_safe_flag(
+            args, "no_warm_replay", manifest, "warm_replay_enabled",
+            default=True, invert=True,
+        ),
+        warm_replay_min_confidence=_resume_safe_numeric(
+            args, "warm_replay_min_confidence", manifest,
+            "warm_replay_min_confidence", default=0.7,
+        ),
+        warm_replay_min_reproduce_pct=_resume_safe_numeric(
+            args, "warm_replay_min_reproduce_pct", manifest,
+            "warm_replay_min_reproduce_pct", default=0.8,
+        ),
     )
     framework_for_prompt = (
         os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
@@ -4194,6 +4320,51 @@ def _build_parser() -> argparse.ArgumentParser:
              "propose_pitfall / update_recipe) at KEEP / REVERT / "
              "CLOSE. Hypothesis writes (T2/T3) and the local "
              "reports/optimization_journal.json are unaffected.",
+    )
+    # GAP 1 — Warm-recipe replay (PRELUDE auto-applies the KB best_config
+    # before EXPLORE starts). Three flags control the behavior:
+    #
+    # 1. ``--no-warm-replay``         — disable the auto-enqueue entirely.
+    # 2. ``--warm-replay-min-confidence`` — minimum warm_start tier conf
+    #    to trigger (default 0.7 → only T1 / T2 fires).
+    # 3. ``--warm-replay-min-reproduce-pct`` — fraction of the
+    #    recipe's historical gain we need to reproduce to count as
+    #    "reproduced" (default 0.8 → +25% historical, +20% counts).
+    opt.add_argument(
+        "--no-warm-replay",
+        dest="no_warm_replay",
+        action="store_true",
+        default=False,
+        help="Disable the PRELUDE auto-replay of KB warm-start "
+             "``best_config``. The warm_start_recipe is still rendered "
+             "into the specialist prompt as priors, but the Coordinator "
+             "will NOT auto-run the historical best_config. Use this "
+             "for cold debugging / ablation runs.",
+    )
+    opt.add_argument(
+        "--warm-replay-min-confidence",
+        dest="warm_replay_min_confidence",
+        type=float,
+        default=0.7,
+        help="Minimum ``warm_start_recipe.confidence`` required to "
+             "trigger the auto-replay. Default 0.7 means only T1_exact "
+             "(0.85) / T1_exact_legacy (0.80) / T2_same_shape (0.70) "
+             "fire; same-class / same-hw / cross-hw fall-throughs do "
+             "not (their best_config is too far from this workload to "
+             "be worth a verify spend).",
+    )
+    opt.add_argument(
+        "--warm-replay-min-reproduce-pct",
+        dest="warm_replay_min_reproduce_pct",
+        type=float,
+        default=0.8,
+        help="Minimum fraction of the recipe's recorded gain we need "
+             "to reproduce to count as ``status=reproduced`` and push "
+             "the warm config onto the optimization stack. Default "
+             "0.8 — a recipe claiming +25%% counts if we measure "
+             "+20%% or more. Below the threshold we record "
+             "``status=drift`` and continue with the regular EXPLORE "
+             "flow without inheriting the warm config.",
     )
     # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle. The cli
     # spawns ``scripts.cortex_kb_flusher`` after the T0 anchor (so the

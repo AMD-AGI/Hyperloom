@@ -3274,12 +3274,27 @@ def collect_kb_provenance(
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
     pitfalls = state.get("warm_start_pitfalls") or []
+    lessons = state.get("warm_start_lessons") or []
+    # GAP 1 — warm-recipe replay outcome (one-shot reproduce of the KB
+    # best_config at PRELUDE). Empty dict before the replay completes /
+    # when ``--no-warm-replay`` was set; otherwise carries:
+    #   {status, expected_gain_pct, actual_gain_pct,
+    #    warm_recipe_tier, warm_recipe_conf, replay_task_id, reason}
+    warm_replay_outcome = state.get("warm_replay_outcome") or {}
 
     out: dict[str, Any] = {
         "cortex_session_id":      cortex_sid,
         "warm_start_ts":          state.get("warm_start_ts") or "",
         "warm_start_recipe_seen": bool(warm and warm.get("raw")),
+        "warm_start_recipe_tier": str(warm.get("tier") or "") if isinstance(warm, dict) else "",
         "warm_start_pitfall_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
+        "warm_start_lesson_count": len(lessons) if isinstance(lessons, list) else 0,
+        # GAP 1 — operator-visible replay summary. The outcome dict is
+        # passed through verbatim so dashboards can render status
+        # transitions over time.
+        "warm_replay": dict(warm_replay_outcome) if isinstance(warm_replay_outcome, dict) else {},
+        "warm_replay_attempted":   bool(state.get("warm_replay_attempted")),
+        "warm_history_injected":   bool(state.get("warm_history_injected")),
         "stack_fingerprint":      manifest.get("stack_fingerprint") or {},
         # Always-empty back-compat lists (T2 hypothesize protocol retired).
         # Consumers that diff session_breakdown.json for "pending edges"

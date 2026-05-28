@@ -314,6 +314,15 @@ class SpecialistPromptInputs:
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
+    # GAP 5 / GAP 8 — runtime fingerprint surfaced into prompts so the
+    # specialist can judge "is this lesson from an old framework still
+    # applicable?". ``framework`` is the active backend (sglang / vllm);
+    # ``framework_version`` is the precise install version (e.g. "0.5.11").
+    # Both empty when SharedState doesn't carry them (legacy SDK
+    # callers / pre-PR sessions); the prompt renderer treats absent
+    # values as "no version annotation".
+    framework: str = ""
+    framework_version: str = ""
 
     # Gap statement (§3.5 §6 part 3)
     gap_canonical_id: str = ""
@@ -705,23 +714,98 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         statement = str(attrs.get("statement") or "").strip()
         if not statement:
             continue
-        impact = str(attrs.get("measured_impact") or "").strip()
-        # Optional: confidence + source session hint for "how
-        # transferable is this lesson?"
+        impact_str = _render_measured_impact(attrs.get("measured_impact"))
+        # Optional: confidence + source session hint + validator count
+        # for "how transferable is this lesson?".
         conf = point.get("confidence")
         meta_bits: list[str] = []
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        src_sid = str(attrs.get("source_session_id") or "").strip()
-        if src_sid:
-            meta_bits.append(f"src={src_sid}")
+        # GAP 4 — surface the validated_count first because "5 sessions
+        # confirmed this" is the strongest cross-session signal. Fall
+        # back to the singular ``source_session_id`` for legacy rows.
+        vc = attrs.get("validated_count")
+        if isinstance(vc, int) and vc > 1:
+            meta_bits.append(f"validated={vc}")
+        recent_ids = attrs.get("source_session_ids")
+        if isinstance(recent_ids, list) and recent_ids:
+            meta_bits.append(f"recent={recent_ids[-1]}")
+        else:
+            src_sid = str(attrs.get("source_session_id") or "").strip()
+            if src_sid:
+                meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        rows.append(f"- **{statement}**{meta}")
-        if impact:
-            rows.append(f"    impact: {impact}")
+        # GAP 8 — version mismatch annotation. Surface this AFTER the
+        # statement so the LLM sees ``- **X works on sglang** [from
+        # sglang@0.4.5, you're on 0.5.11]`` and can decide if the
+        # lesson still applies. Client-side ranking already downweighted
+        # the lesson, but the LLM gets the final call.
+        version_note = _format_version_note(inp, attrs)
+        rows.append(f"- **{statement}**{meta}{version_note}")
+        if impact_str:
+            rows.append(f"    impact: {impact_str}")
     if len(rows) == 2:  # only the header + blank line, all lessons filtered out
         rows.append(_NONE_PLACEHOLDER)
     return rows
+
+
+def _format_version_note(
+    inp: SpecialistPromptInputs, lesson_attrs: dict[str, Any],
+) -> str:
+    """GAP 8 — render a ``[from sglang@X.Y, you're on A.B]`` annotation
+    when the lesson's framework_version differs from the current session.
+
+    Returns an empty string when:
+
+    * The lesson didn't carry a framework_version (legacy / pre-PR row).
+    * The current session doesn't know its own framework_version
+      (legacy SDK caller without manifest stack_fingerprint).
+    * The versions match exactly.
+
+    Format is intentionally compact (single bracket pair) so it
+    doesn't dominate the bullet line; the meaningful action is "LLM
+    still gets to decide".
+    """
+    lesson_fv = str(lesson_attrs.get("framework_version") or "").strip()
+    current_fv = (inp.framework_version or "").strip()
+    if not lesson_fv or not current_fv:
+        return ""
+    if lesson_fv == current_fv:
+        return ""
+    framework_label = (inp.framework or "framework").strip() or "framework"
+    return f" [from {framework_label}@{lesson_fv}, you're on {current_fv}]"
+
+
+def _render_measured_impact(raw: Any) -> str:
+    """Back-compat renderer for ``attrs.measured_impact``.
+
+    Two shapes accepted:
+
+    * Dict (GAP 3 — new shape): formatted as
+      ``+12.3% (tput=678.0, depth=3, 2026-05-26)``.
+    * String (legacy): returned verbatim.
+    * Anything else (None / numbers): returned as ``str(raw)`` or "".
+    """
+    if isinstance(raw, dict):
+        parts: list[str] = []
+        gain = raw.get("gain_pct")
+        if isinstance(gain, (int, float)):
+            parts.append(f"+{float(gain):.2f}%")
+        tput = raw.get("throughput_after")
+        if isinstance(tput, (int, float)):
+            parts.append(f"tput={float(tput):.1f}")
+        depth = raw.get("stack_depth_at_apply")
+        if isinstance(depth, int):
+            parts.append(f"depth={depth}")
+        when = str(raw.get("measured_at") or "").strip()
+        if when:
+            parts.append(when[:10])  # keep yyyy-mm-dd for compactness
+        return ", ".join(parts)
+    if isinstance(raw, str):
+        return raw.strip()
+    if raw is None:
+        return ""
+    return str(raw).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -788,11 +872,20 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
             meta_bits.append(f"severity={severity}")
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        src_sid = str(attrs.get("source_session_id") or "").strip()
-        if src_sid:
-            meta_bits.append(f"src={src_sid}")
+        # GAP 4 — repeat observations strengthen the "don't try this" signal.
+        vc = attrs.get("validated_count")
+        if isinstance(vc, int) and vc > 1:
+            meta_bits.append(f"observed={vc}")
+        recent_ids = attrs.get("source_session_ids")
+        if isinstance(recent_ids, list) and recent_ids:
+            meta_bits.append(f"recent={recent_ids[-1]}")
+        else:
+            src_sid = str(attrs.get("source_session_id") or "").strip()
+            if src_sid:
+                meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        rows.append(f"- **{description}**{meta}")
+        version_note = _format_version_note(inp, attrs)
+        rows.append(f"- **{description}**{meta}{version_note}")
     if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
         rows.append(_NONE_PLACEHOLDER)
     return rows

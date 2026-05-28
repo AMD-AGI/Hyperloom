@@ -323,10 +323,15 @@ def run_t0_anchor(
     # and enqueues NDJSON, so an explicit ``except CortexKBError`` here
     # would be dead code. The catch-all only matters for true programmer
     # bugs (OSError writing pending file, attr lookups blowing up, …).
+    #
+    # Framework is plumbed into the canonical_id so sglang / vLLM rows
+    # on the same (model, hw) stay separate — their best_config blobs
+    # are framework-incompatible and would crash the server if mixed.
     try:
         client.update_recipe(
             model=workload,
             hardware=hw,
+            framework=_framework or "",
             extra_attrs=_attrs,
         )
     except Exception:  # noqa: BLE001 — defensive
@@ -400,6 +405,32 @@ def run_t0_anchor(
     # broken (filtered on an ``attrs.symptom`` field that
     # ``propose_pitfall`` never wrote) — see the pitfall reader-
     # symmetry fix.
+    # GAP 7+8 — workload-shape + framework-version are forwarded to
+    # the client so the returned lessons / pitfalls are ranked by
+    # similarity-to-current-session (not just KB confidence). The
+    # shape dict mirrors what ``_collect_workload_tags`` writes on
+    # lesson / pitfall attrs (post-PR), so writer + reader agree.
+    _current_shape: dict[str, Any] = {}
+    for src_attr, dst_key in (
+        ("precision",     "precision"),
+        ("tp",            "tp"),
+        ("ep",            "ep"),
+        ("conc",          "conc"),
+        ("isl",           "isl"),
+        ("osl",           "osl"),
+        ("max_model_len", "max_model_len"),
+    ):
+        v = getattr(shared_state, src_attr, None)
+        if v not in (None, "", 0):
+            _current_shape[dst_key] = v
+    # framework_version from the same stack_fingerprint backfill we
+    # already do for the recipe row.
+    _current_fw_version = ""
+    if _framework in ("sglang", "vllm"):
+        _current_fw_version = str(fp.get(_framework) or "").strip()
+        if _current_fw_version == "unknown":
+            _current_fw_version = ""
+
     pitfalls_list: list[dict[str, Any]] = []
     try:
         pitfalls_list = client.pitfalls(
@@ -407,6 +438,8 @@ def run_t0_anchor(
             hardware=hw,
             framework=_framework or None,
             limit=20,
+            current_workload_shape=_current_shape or None,
+            current_framework_version=_current_fw_version,
         )
     except CortexKBError as exc:
         log.info("pitfalls non-fatal failure: %s", exc)
@@ -442,6 +475,8 @@ def run_t0_anchor(
             hardware=hw,
             framework=_framework or None,
             limit=20,
+            current_workload_shape=_current_shape or None,
+            current_framework_version=_current_fw_version,
         )
     except CortexKBError as exc:
         log.info("lessons non-fatal failure: %s", exc)
@@ -492,7 +527,7 @@ def run_t0_anchor(
         )
         emit(
             f"Cortex KB        : session_id={sid} "
-            f"workload={recipe_canonical_id(workload, hw)} "
+            f"workload={recipe_canonical_id(workload, hw, _framework or '')} "
             f"(warm={warm_label}, "
             f"pitfalls={len(pitfalls_list)}, "
             f"lessons={len(lessons_list)})"

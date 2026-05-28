@@ -72,6 +72,11 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # only fallback ``support`` entry.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline",
+    # GAP 1 — Coordinator-internal warm-recipe replay. Same workspace
+    # shape as ``baseline`` (under ``runs/replay_warm_recipe/<task_id>/``);
+    # included so the registry-loader-failure path still pre-mkdirs the
+    # workspace for the replay task that the PRELUDE hook will enqueue.
+    "replay_warm_recipe",
     # Coordinator-internal analysis actions. Which one runs is chosen
     # by ``shared_state.enable_roofline`` (``--enable-roofline`` /
     # ``--no-enable-roofline``, default on): ``roofline`` is the

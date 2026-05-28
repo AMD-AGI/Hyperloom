@@ -498,6 +498,12 @@ class SpecialistRunner:
                 isl=int(params.get("isl") or 0),
                 osl=int(params.get("osl") or 0),
                 max_model_len=int(params.get("max_model_len") or 0),
+                # GAP 8 — runtime fingerprint surfaced to the prompt so
+                # ``_format_version_note`` can annotate version-mismatched
+                # lessons / pitfalls. Both empty when the Coordinator
+                # didn't warm them (legacy callers / pre-PR sessions).
+                framework=str(params.get("framework") or ""),
+                framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(
                     str(workspace_for_prompt) if workspace_for_prompt else ""
                 ),
