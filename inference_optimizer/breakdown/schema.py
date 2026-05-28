@@ -58,7 +58,7 @@ class WorkloadObjective(TypedDict, total=False):
 
 
 class Workload(TypedDict, total=False):
-    framework: str                # sglang / vllm
+    framework: str                # sglang / vllm / atom
     framework_version: str
     model_name: str
     model_path: str
