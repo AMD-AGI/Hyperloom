@@ -52,19 +52,26 @@ TERMINAL_REASONS: dict[DynamicRunnerTerminalState, frozenset[str]] = {
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle states (P5 §6 + P6 hint)
+# Lifecycle states (P5 §6 + P6 §4 — full 11+1 state machine)
 # ---------------------------------------------------------------------------
 class DynamicActionStatus(str, Enum):
     """SharedState.dynamic_actions[dyn_id].status vocabulary.
 
-    Closed enum; covers every row of P5 §6's failure-attribution table.
-    The mapping from :class:`DynamicRunnerTerminalState` is captured by
-    :data:`RUNNER_STATE_TO_STATUS`; later lifecycle steps (critic +
-    integrate_patch) overwrite the status via
-    :meth:`SharedState.record_dynamic_action_outcome`.
+    Closed enum covering every node of the P6 §4 state machine:
+
+    * Non-terminal: ``DISPATCHED`` → ``SUB_AGENT_RUNNING`` →
+      ``SUB_AGENT_DONE`` → ``AWAITING_CRITIC`` → ``INTEGRATING``;
+    * Terminal: ``COMPLETED_EMPTY`` / ``TIMED_OUT`` / ``FAILED`` /
+      ``CRITIC_REJECTED`` / ``INTEGRATE_FAILED`` / ``KEPT`` /
+      ``REVERTED`` (7);
+    * Special terminal: ``ABANDONED`` set by the P8 resume sweep.
     """
 
     DISPATCHED = "DISPATCHED"
+    SUB_AGENT_RUNNING = "SUB_AGENT_RUNNING"
+    SUB_AGENT_DONE = "SUB_AGENT_DONE"
+    AWAITING_CRITIC = "AWAITING_CRITIC"
+    INTEGRATING = "INTEGRATING"
     TIMED_OUT = "TIMED_OUT"
     FAILED = "FAILED"
     COMPLETED_EMPTY = "COMPLETED_EMPTY"
@@ -75,8 +82,11 @@ class DynamicActionStatus(str, Enum):
     ABANDONED = "ABANDONED"
 
 
+# Initial status mapping for the dispatcher hook (P5 §5 node B).
+# COMPLETED maps to AWAITING_CRITIC because the runner-done →
+# critic-bound step is synchronous (P6 §5 node B note).
 RUNNER_STATE_TO_STATUS: dict[DynamicRunnerTerminalState, DynamicActionStatus] = {
-    DynamicRunnerTerminalState.COMPLETED: DynamicActionStatus.DISPATCHED,
+    DynamicRunnerTerminalState.COMPLETED: DynamicActionStatus.AWAITING_CRITIC,
     DynamicRunnerTerminalState.COMPLETED_EMPTY: DynamicActionStatus.COMPLETED_EMPTY,
     DynamicRunnerTerminalState.TIMED_OUT: DynamicActionStatus.TIMED_OUT,
     DynamicRunnerTerminalState.FAILED: DynamicActionStatus.FAILED,
@@ -94,6 +104,120 @@ TERMINAL_LIFECYCLE_STATUSES: frozenset[DynamicActionStatus] = frozenset({
     DynamicActionStatus.KEPT,
     DynamicActionStatus.ABANDONED,
 })
+
+
+# ---------------------------------------------------------------------------
+# Transition table (P6 §4.3) — Coordinator-only writes; terminal states
+# never transition out.
+# ---------------------------------------------------------------------------
+ALLOWED_TRANSITIONS: dict[DynamicActionStatus, frozenset[DynamicActionStatus]] = {
+    DynamicActionStatus.DISPATCHED: frozenset({
+        DynamicActionStatus.SUB_AGENT_RUNNING,
+        # Runner can fail before the runtime ever starts (lane setup
+        # crash) — fold into the same terminal flow.
+        DynamicActionStatus.TIMED_OUT,
+        DynamicActionStatus.FAILED,
+        DynamicActionStatus.ABANDONED,
+    }),
+    DynamicActionStatus.SUB_AGENT_RUNNING: frozenset({
+        DynamicActionStatus.SUB_AGENT_DONE,
+        DynamicActionStatus.COMPLETED_EMPTY,
+        DynamicActionStatus.TIMED_OUT,
+        DynamicActionStatus.FAILED,
+        DynamicActionStatus.ABANDONED,
+    }),
+    DynamicActionStatus.SUB_AGENT_DONE: frozenset({
+        DynamicActionStatus.AWAITING_CRITIC,
+        DynamicActionStatus.CRITIC_REJECTED,
+        DynamicActionStatus.ABANDONED,
+    }),
+    DynamicActionStatus.AWAITING_CRITIC: frozenset({
+        DynamicActionStatus.INTEGRATING,
+        DynamicActionStatus.CRITIC_REJECTED,
+        DynamicActionStatus.ABANDONED,
+    }),
+    DynamicActionStatus.INTEGRATING: frozenset({
+        DynamicActionStatus.KEPT,
+        DynamicActionStatus.REVERTED,
+        DynamicActionStatus.INTEGRATE_FAILED,
+        DynamicActionStatus.ABANDONED,
+    }),
+}
+# Terminal states implicitly map to an empty allowed-set (locked).
+for _terminal in TERMINAL_LIFECYCLE_STATUSES:
+    ALLOWED_TRANSITIONS.setdefault(_terminal, frozenset())
+
+
+def can_transition(
+    from_state: DynamicActionStatus | str | None,
+    to_state: DynamicActionStatus | str,
+) -> bool:
+    """Return True iff ``from_state → to_state`` is permitted.
+
+    Missing source (no prior summary) is treated as DISPATCHED
+    creation; only DISPATCHED is a legal first state.
+    """
+    target = (
+        to_state if isinstance(to_state, DynamicActionStatus)
+        else DynamicActionStatus(str(to_state))
+    )
+    if from_state is None or from_state == "":
+        return target == DynamicActionStatus.DISPATCHED
+    src = (
+        from_state if isinstance(from_state, DynamicActionStatus)
+        else DynamicActionStatus(str(from_state))
+    )
+    if src == target:
+        # Idempotent re-write of the same status is always allowed
+        # (Coordinator hooks can fire twice on duplicate events).
+        return True
+    allowed = ALLOWED_TRANSITIONS.get(src, frozenset())
+    return target in allowed
+
+
+# ---------------------------------------------------------------------------
+# last_outcome map (P6 §8) — prompt-friendly flattened label.
+# ---------------------------------------------------------------------------
+LAST_OUTCOME_BY_STATUS: dict[DynamicActionStatus, str] = {
+    DynamicActionStatus.DISPATCHED: "running",
+    DynamicActionStatus.SUB_AGENT_RUNNING: "running",
+    DynamicActionStatus.AWAITING_CRITIC: "awaiting_review",
+    DynamicActionStatus.SUB_AGENT_DONE: "awaiting_review",
+    DynamicActionStatus.INTEGRATING: "evaluating",
+    DynamicActionStatus.COMPLETED_EMPTY: "empty",
+    DynamicActionStatus.TIMED_OUT: "timeout",
+    DynamicActionStatus.FAILED: "failed",
+    DynamicActionStatus.CRITIC_REJECTED: "rejected",
+    DynamicActionStatus.INTEGRATE_FAILED: "apply_failed",
+    DynamicActionStatus.KEPT: "success",
+    DynamicActionStatus.REVERTED: "no_gain",
+    DynamicActionStatus.ABANDONED: "abandoned",
+}
+
+
+# ---------------------------------------------------------------------------
+# Prompt projection schema (P6 §3 + §7) — fields the orchestration
+# prompt section renders. Closed enum; additions require a P6 design
+# change. On-disk summary may carry extra audit fields (critic_verdict,
+# integrate_status, ...) for the artefact trail, but those never leak
+# into the prompt.
+# ---------------------------------------------------------------------------
+SUMMARY_PROMPT_FIELDS: frozenset[str] = frozenset({
+    "dyn_id",
+    "status",
+    "dispatched_at",
+    "round_index",
+    "scope_domains",
+    "motivation_gap_short",
+    "verdict",
+    "cumulative_gain",
+    "last_outcome",
+    "artifact_path",
+    "updated_at",
+})
+
+# P6 §3 motivation_gap_short hard cap.
+MOTIVATION_GAP_SHORT_MAX_CHARS: int = 200
 
 
 # ---------------------------------------------------------------------------
@@ -333,17 +457,22 @@ def build_proposal_set_payload(
 
 __all__ = [
     "ALLOWED_PROPOSAL_FIELDS",
+    "ALLOWED_TRANSITIONS",
     "DynamicActionStatus",
     "DynamicRunnerTerminalState",
     "EXPECTED_PROVENANCE",
     "FORBIDDEN_PROPOSAL_FIELDS",
+    "LAST_OUTCOME_BY_STATUS",
     "MAX_PROPOSAL_REJECTS",
     "MAX_PROPOSAL_SET_LEN",
+    "MOTIVATION_GAP_SHORT_MAX_CHARS",
     "ProposalValidationResult",
     "REQUIRED_PROPOSAL_FIELDS",
     "RUNNER_STATE_TO_STATUS",
+    "SUMMARY_PROMPT_FIELDS",
     "TERMINAL_LIFECYCLE_STATUSES",
     "TERMINAL_REASONS",
     "build_proposal_set_payload",
+    "can_transition",
     "validate_proposal",
 ]
