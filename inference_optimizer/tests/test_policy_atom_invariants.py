@@ -1,21 +1,19 @@
-"""atom-PolicyGate anti-regression guards (atom_plan/phase3_open_framework_agent 3.2).
+"""atom-PolicyGate anti-regression guards.
 
-The framework-agent enablement phase deleted the
-``framework_atom_action_unsupported`` rule scaffold from
-``inference_optimizer.orchestrator.policy``:
+The ``framework_atom_action_unsupported`` rule scaffold was deleted
+from ``inference_optimizer.orchestrator.policy``:
 
 * ``_ATOM_UNSUPPORTED_ACTIONS`` constant — gone.
 * ``_validate_framework_atom_action_unsupported`` helper — gone.
 * The two dispatch sites in ``_validate_delegate`` /
   ``_validate_propose_action`` — gone.
 
-After Phase 2 (kernel-agent enablement) and Phase 3 (framework-agent
-enablement), atom no longer has any action that needs framework-
-specific denial at this layer:
+atom no longer has any action that needs framework-specific denial at
+this layer:
 
 * ``kernel_opt`` / ``integrate_patch`` — atom source roots are in
   PolicyGate's allowlist, ``_REUSABLE_SOURCE_ROOTS``, and the
-  server-flag pre-flight probe (Phase 2).
+  server-flag pre-flight probe.
 * ``framework_pr`` — Coordinator-driven, not LLM-proposable
   regardless of framework. The cross-framework
   ``framework_pr_action_not_llm_proposable`` rule still fires for
@@ -23,9 +21,8 @@ specific denial at this layer:
 * ``--nodes >= 2`` — guarded at the CLI level
   (``_apply_atom_auto_tighten``).
 
-This test file is the renamed successor of
-``test_policy_atom_action_gate.py`` (deleted in Phase 3). Its only
-job is to make a future reintroduction of the rule intentional.
+This file's only job is to make a future reintroduction of the rule
+intentional.
 """
 
 from __future__ import annotations
@@ -57,9 +54,9 @@ def test_no_atom_unsupported_actions_constant_in_source():
     (e.g. release-notes context) is fine and explicitly tolerated."""
     src = _POLICY_PATH.read_text(encoding="utf-8")
     assert "_ATOM_UNSUPPORTED_ACTIONS:" not in src, (
-        "_ATOM_UNSUPPORTED_ACTIONS constant was removed in "
-        "atom_plan/phase3_open_framework_agent; re-introducing it "
-        "must be intentional (and should re-add a dispatch site too)."
+        "_ATOM_UNSUPPORTED_ACTIONS constant was removed; "
+        "re-introducing it must be intentional (and should re-add a "
+        "dispatch site too)."
     )
 
 
@@ -67,8 +64,7 @@ def test_no_validate_framework_atom_action_unsupported_helper_in_source():
     """The validator helper must not be defined in policy.py."""
     src = _POLICY_PATH.read_text(encoding="utf-8")
     assert "def _validate_framework_atom_action_unsupported" not in src, (
-        "_validate_framework_atom_action_unsupported helper was removed "
-        "in atom_plan/phase3_open_framework_agent."
+        "_validate_framework_atom_action_unsupported helper was removed."
     )
 
 
@@ -86,7 +82,7 @@ def test_no_framework_atom_action_unsupported_rule_name_in_source():
 def test_atom_unsupported_actions_attribute_removed_from_policy_gate():
     """Runtime-level guard: PolicyGate must not expose the constant."""
     assert not hasattr(PolicyGate, "_ATOM_UNSUPPORTED_ACTIONS"), (
-        "PolicyGate._ATOM_UNSUPPORTED_ACTIONS was removed in Phase 3; "
+        "PolicyGate._ATOM_UNSUPPORTED_ACTIONS was removed; "
         "reintroducing requires updating this guard intentionally."
     )
 
@@ -95,18 +91,18 @@ def test_validate_helper_removed_from_policy_gate():
     """Runtime-level guard: PolicyGate must not expose the validator."""
     assert not hasattr(PolicyGate, "_validate_framework_atom_action_unsupported"), (
         "PolicyGate._validate_framework_atom_action_unsupported was "
-        "removed in Phase 3."
+        "removed."
     )
 
 
 def test_historical_rule_name_mention_is_documented_provenance_only():
-    """Gap G6: the rule name ``framework_atom_action_unsupported``
-    DOES still appear in ``policy.py`` — but only inside an explanatory
-    block-comment (``# NOTE: the historical ...``) that documents
-    *why* the rule was removed. This test pins that the bare mention
-    is documentation (no surrounding ``def`` / ``rule=`` / constant
-    assignment) so a future reader doesn't accidentally tighten the
-    guard above and trip on the provenance comment.
+    """The rule name ``framework_atom_action_unsupported`` DOES still
+    appear in ``policy.py`` — but only inside an explanatory NOTE
+    block-comment that documents *why* the rule does not exist. This
+    test pins that the bare mention is documentation (no surrounding
+    ``def`` / ``rule=`` / constant assignment) so a future reader
+    doesn't accidentally tighten the guard above and trip on the
+    provenance comment.
 
     If you ever physically delete the explanatory comment, you can
     also delete this test — the three guards above will continue to
@@ -115,24 +111,23 @@ def test_historical_rule_name_mention_is_documented_provenance_only():
     src = _POLICY_PATH.read_text(encoding="utf-8")
     # The rule name appears.
     assert "framework_atom_action_unsupported" in src, (
-        "Phase 3 NOTE comment was removed; if intentional, drop this "
-        "test together with it. The other three guards above will "
-        "continue to enforce that no rule of this name is emitted."
+        "NOTE provenance comment was removed; if intentional, drop "
+        "this test together with it. The other three guards above "
+        "will continue to enforce that no rule of this name is emitted."
     )
-    # ...but only inside a comment block that explicitly frames it as
-    # historical context (the words ``historical`` + ``removed``
-    # appear together in the surrounding 30 lines).
+    # ...but only inside a NOTE comment block (the word ``NOTE``
+    # appears in the surrounding ~30 lines).
     idx = src.find("framework_atom_action_unsupported")
     window = src[max(0, idx - 600): idx + 600]
-    assert "historical" in window.lower(), (
+    assert "NOTE" in window, (
         "framework_atom_action_unsupported mention is no longer "
         "documented as historical provenance; if you re-add the rule, "
         "drop this guard AND update the other three guards above."
     )
-    assert "removed" in window.lower(), (
-        "framework_atom_action_unsupported mention is not framed as a "
-        "removal note; see the comment block at the top of the rule "
-        "section in policy.py."
+    assert "no" in window.lower() and "exists" in window.lower(), (
+        "framework_atom_action_unsupported mention is not framed as "
+        "a 'no such rule exists' note; see the comment block at the "
+        "top of the rule section in policy.py."
     )
 
 
@@ -193,8 +188,8 @@ def test_framework_pr_still_denied_via_action_not_llm_proposable_under_atom(
 
 @pytest.mark.parametrize("action_name", ["kernel_opt", "integrate_patch"])
 def test_kernel_actions_not_denied_by_removed_atom_rule(action_name, monkeypatch):
-    """Phase 2 contract preserved: ``kernel_opt`` and ``integrate_patch``
-    have real execution paths on atom. They may still be denied for
+    """``kernel_opt`` and ``integrate_patch`` have real execution paths
+    on atom. They may still be denied for
     unrelated reasons (e.g. ``kernel_owned_by_kernel_agent``), but the
     removed atom rule must not be the source of denial."""
     monkeypatch.setenv("FRAMEWORK", "atom")

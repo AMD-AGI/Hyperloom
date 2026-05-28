@@ -222,15 +222,15 @@ class TestProbeFrameworkSourceRootsForEnv:
 
 
 # ===========================================================================
-# Phase 2.1: atom enablement
+# atom enablement
 # ===========================================================================
 
 class TestDefaultSourceRootsIncludesAtom:
     def test_atom_root_present_in_defaults(self):
-        """Phase 2.1: /app/ATOM/atom/ must be in the PolicyGate
-        source-file allowlist so specialists can read atom source files
-        on an atom session. Without this, ``Read`` / ``Bash cat`` calls
-        against /app/ATOM/atom/... would hit ``source_file_not_in_allowlist``."""
+        """/app/ATOM/atom/ must be in the PolicyGate source-file
+        allowlist so specialists can read atom source files on an atom
+        session. Without this, ``Read`` / ``Bash cat`` calls against
+        /app/ATOM/atom/... would hit ``source_file_not_in_allowlist``."""
         assert any(
             "/app/ATOM/atom" in r for r in fp._DEFAULT_SOURCE_ROOTS
         ), (
@@ -336,8 +336,7 @@ class TestProbeIncludesAtomWhenInstalled:
 class TestFrameworkPathsThreeFrameworksSymmetric:
     """Static guard: all three first-class frameworks have a matching
     arg-utils resolver, and each returns the documented ``(Path, str)``
-    contract on the env-override path. Phase 2.6 / G2 cross-cutting
-    guard equivalent for the resolvers slice."""
+    contract on the env-override path."""
 
     @pytest.mark.parametrize(
         "resolver_name",
@@ -372,8 +371,8 @@ class TestFrameworkPathsThreeFrameworksSymmetric:
 
 class TestSummariseFrameworkRootDiscovery:
     def test_buckets_atom_ok(self):
-        """Phase 2.2: the install.sh log helper must report atom=ok
-        when an atom root appears in the discovery string."""
+        """The install.sh log helper must report atom=ok when an atom
+        root appears in the discovery string."""
         out = fp.summarise_framework_root_discovery(
             "/sgl-workspace/aiter/:/sgl-workspace/sglang/:/sgl-workspace/vllm/"
             ":/app/ATOM/atom/"
@@ -411,8 +410,7 @@ class TestSummariseFrameworkRootDiscovery:
 
 
 class TestAtomPathPresentInAllThreeLocations:
-    """G2 (cross-cutting from atom_plan/phase2_open_kernel_agent/2.6):
-    pin atom-source-path entries across the three sister lists so a
+    """Pin atom-source-path entries across the three sister lists so a
     future cleanup cannot accidentally drop one and leave the other
     two stale."""
 
@@ -465,8 +463,7 @@ class TestAtomPathPresentInAllThreeLocations:
         )
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
-        """Gap G8 / atom_plan/phase2_open_kernel_agent 2.6 G2 strict
-        subset-equality: every atom entry in
+        """Strict subset-equality: every atom entry in
         ``kernel_request_handlers._REUSABLE_SOURCE_ROOTS`` must also
         appear verbatim in the kernel-agent's tracelens_analysis
         ``_REUSABLE_SOURCE_ROOTS`` (and vice versa).

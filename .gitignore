@@ -69,3 +69,5 @@ inference_optimizer/remain_robustness_todo.md
 # claude files
 *.claude
 CLAUDE.md
+boost_trap_files
+atom_boost_tutorials.md

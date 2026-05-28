@@ -6,12 +6,11 @@ packaged Python project, so the shim is duplicated here rather than
 imported across package boundaries — this matches the existing
 isolation pattern (``framework_agent.repo_map``).
 
-Phase 4 of ``atom_plan/`` renamed the payload-surface field
-``extra_sglang_args`` -> ``extra_server_args``. The
-``repeated_payload`` signal hashes per-family payload projections to
-detect same-fingerprint retries; if a legacy event arrives mid-streak
-the helper lets the signal still produce a stable hash by reading
-either key transparently.
+The payload-surface field ``extra_sglang_args`` was renamed to
+``extra_server_args``. The ``repeated_payload`` signal hashes
+per-family payload projections to detect same-fingerprint retries; if
+a legacy event arrives mid-streak the helper lets the signal still
+produce a stable hash by reading either key transparently.
 
 Removal target: in lockstep with Hyperloom's own compat helper.
 """

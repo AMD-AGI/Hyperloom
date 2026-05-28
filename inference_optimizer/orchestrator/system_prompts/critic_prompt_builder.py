@@ -285,10 +285,9 @@ def build_critic_prompt(
         Action names enabled for this run (same set as orchestration).
     framework:
         ``sglang`` / ``vllm`` / ``atom`` — printed in RUN CONTEXT
-        verbatim. atom was added in atom_plan/phase3_open_framework_agent;
-        the value is rendered as-is into the prompt with no framework-
-        specific rule text, so atom candidates are reviewed against the
-        same generic rule set as sglang / vllm.
+        verbatim. The value is rendered as-is into the prompt with no
+        framework-specific rule text, so atom candidates are reviewed
+        against the same generic rule set as sglang / vllm.
     kernel_enabled:
         When ``None``, derived from whether any KERNEL_OWNED action is
         in ``enabled_actions``.

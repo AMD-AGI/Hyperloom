@@ -1,5 +1,5 @@
-"""Phase 6.1 — specialist prompt hint blocks switch to atom paths
-when the active session framework is ``atom``.
+"""Specialist prompt hint blocks switch to atom paths when the active
+session framework is ``atom``.
 
 Three contracts pinned here:
 

@@ -178,22 +178,21 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
 
 
 # ---------------------------------------------------------------------------
-# Phase 6.2 — Atom default grid seed
+# Atom default grid seed
 #
 # ``_atom_default_grid`` returns a curated list of ``GridVariant`` objects
-# seeded from atom's CLI flag space (audited Phase 2.3 via
-# ``EngineArgs.add_cli_args``). Sglang and vllm don't have analogous
-# helpers today — the LLM is hinted via system-prompt prose to emit
-# variants from their flag spaces — so ``_default_grid_for_framework``
-# only dispatches a non-empty grid for atom. Sglang / vllm callers
-# receive ``[]`` and continue to rely on the LLM-emitted ``default_grid``
-# provenance variants.
+# seeded from atom's CLI flag space (via ``EngineArgs.add_cli_args``).
+# Sglang and vllm don't have analogous helpers today — the LLM is hinted
+# via system-prompt prose to emit variants from their flag spaces — so
+# ``_default_grid_for_framework`` only dispatches a non-empty grid for
+# atom. Sglang / vllm callers receive ``[]`` and continue to rely on the
+# LLM-emitted ``default_grid`` provenance variants.
 #
 # Each variant is gated *up-front* on ``model_class`` so MoE / MLA / MTP
 # variants are NOT emitted for dense models. ``apply_compatibility_filter``
 # (see ``_grid_runner.py``) is a second-line gate that drops any variant
-# whose flag literal is missing from ``atom --help`` — for the atom box
-# this works because Phase 2.3 wired the atom help-text probe.
+# whose flag literal is missing from ``atom --help`` (the atom help-text
+# probe is wired into ``apply_compatibility_filter``).
 # ---------------------------------------------------------------------------
 
 # Curated MTP-capable model class set. MTP requires the model architecture
@@ -215,8 +214,7 @@ def _atom_default_grid(
 ) -> list[GridVariant]:
     """Atom EXPLORE default grid, seeded from atom's known perf knobs.
 
-    Phase 6.2 (Atom UX polish). The variants below cover the atom CLI
-    surface audited during Phase 2.3:
+    The variants below cover the atom CLI surface:
 
     * compile / cudagraph bracket (``--level``,
       ``--cudagraph-capture-sizes``)
@@ -256,8 +254,16 @@ def _atom_default_grid(
         gv.provenance = "default_grid"  # type: ignore[attr-defined]
         variants.append(gv)
 
+    # ``atom_level_3`` (PIECEWISE + cudagraph) is atom's upstream default
+    # and Magpie's atom_mi*x.sh injects ``--level 3`` as the bare
+    # baseline; adding a level-3 variant here would A/B against itself
+    # and waste ~3-5 min of EXPLORE budget. Keep ``atom_level_2``
+    # (DYNAMO_ONCE) as the off-default contrast variant. (Level 2 has a
+    # latent ``compile_sizes is None`` crash in
+    # cuda_piecewise_backend.py:54 *only when combined with
+    # ``--torch-profiler-dir``*; plain EXPLORE variants don't pass the
+    # profiler dir so this remains safe.)
     _add("atom_level_2", "--level 2")
-    _add("atom_level_3", "--level 3")
     _add("atom_prefix_cache", "--enable_prefix_caching")
 
     if is_fp8:
@@ -301,13 +307,12 @@ def _default_grid_for_framework(
     isl: int = 0,
     osl: int = 0,
 ) -> list[GridVariant]:
-    """Phase 6.2 framework-keyed default grid dispatch.
+    """Framework-keyed default grid dispatch.
 
     Atom returns a curated seed grid (see :func:`_atom_default_grid`).
     Sglang / vllm continue to rely on LLM-emitted variants stamped with
     ``provenance='default_grid'`` — no programmatic seed exists for
-    those frameworks today and adding one is out of scope for the
-    atom UX polish phase. Unknown frameworks also return ``[]``.
+    those frameworks today. Unknown frameworks also return ``[]``.
 
     Callers MUST treat an empty list as "no programmatic seed for this
     framework"; the EXPLORE flow continues to accept LLM-emitted
@@ -471,10 +476,10 @@ class ExploreExecutor:
             overtime_deadline_sec = None
 
         # Resolve framework from materialized YAML. Used both for the
-        # informational ledger and (Phase 6.2, gap G1) for the
-        # cold-start seed-grid fallback below — atom is the only
-        # framework with a programmatic seed today; sglang / vllm
-        # still rely on the LLM-emitted ``default_grid`` variants.
+        # informational ledger and for the cold-start seed-grid fallback
+        # below — atom is the only framework with a programmatic seed
+        # today; sglang / vllm still rely on the LLM-emitted
+        # ``default_grid`` variants.
         try:
             with config_path.open(encoding="utf-8") as _f:
                 _cfg = yaml.safe_load(_f) or {}
@@ -493,10 +498,10 @@ class ExploreExecutor:
         # ----- Variant grid ------------------------------------------------
         grid_payload = params.get("grid") or []
         if not isinstance(grid_payload, list) or not grid_payload:
-            # Phase 6.2 / gap G1: when no LLM-emitted variants arrived
-            # AND a programmatic seed grid exists for the active
-            # framework, fall through to the seed instead of failing
-            # the task. Stamps each variant with
+            # When no LLM-emitted variants arrived AND a programmatic
+            # seed grid exists for the active framework, fall through
+            # to the seed instead of failing the task. Stamps each
+            # variant with
             # ``provenance='default_grid'`` so PolicyGate's
             # ``explore_requires_specialist_provenance`` rule (which
             # accepts ``specialist:*`` OR ``default_grid``) is
