@@ -4985,6 +4985,20 @@ class Coordinator:
                     "PR-A7: failed to mirror critic verdict for "
                     "specialist task=%s", sid_candidate,
                 )
+        # dynamic_action.MD P5 — when the verdict targets a dyn_id
+        # (routed via the synthesised ``dyn-<id>`` specialist_task_id),
+        # persist the critic_verdict.json envelope + flip the dyn_id
+        # lifecycle status so reject/revise short-circuits the
+        # integrate_patch dispatch and approve advances to DISPATCHED.
+        try:
+            self._mirror_critic_verdict_to_dynamic_action(
+                pending=pending, verdict=verdict, reasoning=reasoning,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: critic-verdict mirror failed for "
+                "proposal_msg_id=%s", pending.proposal_msg_id,
+            )
         if verdict == "approve":
             await self._materialize_approved_proposal(pending)
 
@@ -5875,6 +5889,385 @@ class Coordinator:
             return int(cursor or 0)
         except (TypeError, ValueError):
             return 0
+
+    # ------------------------------------------------------------------
+    # dynamic_action.MD P5 — runner / critic / integrate lifecycle hooks
+    # ------------------------------------------------------------------
+    async def _handle_dynamic_action_runner_result(
+        self,
+        *,
+        task: Task,
+        result: SubAgentResult,
+    ) -> None:
+        """Advance the dyn_id lifecycle after the runner returns.
+
+        Three branches:
+
+        * Non-COMPLETED terminal state → write the status (TIMED_OUT
+          / FAILED / COMPLETED_EMPTY / ABANDONED) onto the summary,
+          done. No critic, no integrate, no proposal_set materialisation.
+        * COMPLETED but mechanical floor (P4) says reject/revise →
+          write the critic verdict envelope to
+          ``critic_verdict.json``, mark status CRITIC_REJECTED, done.
+        * COMPLETED + mechanical floor passes → materialise the
+          patch into a specialist-shaped workspace, synthesise an
+          integrate_patch proposal, push it through the standard
+          PendingProposal pipeline so the Critic + integrate_patch
+          executor handle it without any main-chain change.
+        """
+        from .dynamic_action_pipeline import (
+            DYNAMIC_SPECIALIST_TASK_ID_PREFIX,
+            build_integrate_patch_proposal_payload,
+            compose_critic_verdict_envelope,
+            materialize_dynamic_patch_workspace,
+            read_runner_proposal_set,
+            runner_status_to_lifecycle,
+        )
+        from .dynamic_action_critic import write_critic_verdict
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            DynamicRunnerTerminalState,
+        )
+        from ..session_paths import dynamic_action_spec_path
+
+        params = task.params or {}
+        dyn_id = str(params.get("dyn_id") or "").strip()
+        if not dyn_id:
+            log.warning(
+                "dynamic_action runner result without dyn_id; task=%s",
+                task.task_id,
+            )
+            return
+        result_dict = result.result if isinstance(result.result, dict) else {}
+        terminal_state_raw = str(
+            result_dict.get("terminal_state") or "",
+        ).strip()
+        try:
+            terminal_state = DynamicRunnerTerminalState(terminal_state_raw)
+        except ValueError:
+            terminal_state = DynamicRunnerTerminalState.FAILED
+        reason = str(result_dict.get("reason") or "")
+        turns_used = int(result_dict.get("turns_used") or 0)
+        lifecycle = runner_status_to_lifecycle(terminal_state)
+
+        extra = {
+            "runner_terminal_state": terminal_state.value,
+            "runner_reason": reason,
+            "turns_used": turns_used,
+            "journal_path": str(result_dict.get("journal_path") or ""),
+        }
+        # Non-COMPLETED → terminal status; skip critic + integrate.
+        if terminal_state != DynamicRunnerTerminalState.COMPLETED:
+            self.shared_state.record_dynamic_action_outcome(
+                dyn_id,
+                status=lifecycle.value,
+                last_outcome=reason or terminal_state.value.lower(),
+                extra=extra,
+            )
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: save after non-completed runner "
+                    "result failed for dyn_id=%s", dyn_id,
+                )
+            return
+
+        # COMPLETED — load the proposal_set the runner wrote.
+        runner_payload = read_runner_proposal_set(self.session_dir, dyn_id)
+        proposal_set: list[dict[str, Any]] = []
+        if isinstance(runner_payload, dict):
+            raw = runner_payload.get("proposal_set") or []
+            if isinstance(raw, list):
+                proposal_set = [p for p in raw if isinstance(p, dict)]
+        if not proposal_set:
+            # COMPLETED but empty proposal_set (runner contract
+            # mismatch); collapse to COMPLETED_EMPTY for the
+            # lifecycle so downstream consumers see the canonical
+            # empty signal.
+            self.shared_state.record_dynamic_action_outcome(
+                dyn_id,
+                status=DynamicActionStatus.COMPLETED_EMPTY.value,
+                last_outcome="emit_empty",
+                extra=extra,
+            )
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: save after empty proposal_set "
+                    "failed for dyn_id=%s", dyn_id,
+                )
+            return
+        proposal = proposal_set[0]
+
+        # Load spec.json for scope_domains (mechanical-check truth set).
+        spec_path = dynamic_action_spec_path(self.session_dir, dyn_id)
+        spec_payload: dict[str, Any] = {}
+        try:
+            spec_dict = json.loads(spec_path.read_text(encoding="utf-8"))
+            spec_payload = spec_dict.get("payload") or {}
+        except (OSError, json.JSONDecodeError):
+            log.warning(
+                "dynamic_action: could not read spec.json for "
+                "dyn_id=%s; mechanical scope check falls back to "
+                "the proposal's own scope_domains",
+                dyn_id,
+            )
+            spec_payload = {
+                "scope_domains": list(proposal.get("scope_domains") or ()),
+            }
+
+        # Mechanical floor (P4 §7). If it blocks, we never invoke the
+        # LLM-critic — write the envelope + flip the status.
+        envelope, lifecycle_after_mech = compose_critic_verdict_envelope(
+            dyn_id=dyn_id,
+            proposal=proposal,
+            spec_scope_domains=list(spec_payload.get("scope_domains") or ()),
+            llm_verdict=None,
+        )
+        if envelope["verdict"] != "approve":
+            write_critic_verdict(self.session_dir, dyn_id, envelope)
+            self.shared_state.record_dynamic_action_outcome(
+                dyn_id,
+                status=DynamicActionStatus.CRITIC_REJECTED.value,
+                last_outcome=envelope["reason_codes"][0]
+                    if envelope["reason_codes"] else "critic_rejected",
+                extra={
+                    **extra,
+                    "critic_verdict": envelope["verdict"],
+                    "critic_reason_codes": list(envelope["reason_codes"]),
+                    "critic_path": str(
+                        self.session_dir
+                        / "agents/orchestration/dynamic_actions"
+                        / dyn_id / "critic_verdict.json",
+                    ),
+                },
+            )
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: save after mechanical critic "
+                    "block failed for dyn_id=%s", dyn_id,
+                )
+            return
+
+        # Mechanical floor passed — materialise the specialist-shaped
+        # workspace + push the proposal onto the bus for the Critic
+        # to score. The PR-A7 mirror on _handle_single_verdict will
+        # write the verdict into specialist_patch_verdicts so the
+        # PolicyGate gate on the eventual integrate_patch delegate
+        # passes.
+        specialist_task_id, _patches = materialize_dynamic_patch_workspace(
+            session_dir=self.session_dir,
+            dyn_id=dyn_id,
+            proposal=proposal,
+        )
+        propose_payload = build_integrate_patch_proposal_payload(
+            dyn_id=dyn_id,
+            specialist_task_id=specialist_task_id,
+            proposal=proposal,
+            spec_payload=spec_payload,
+        )
+        # Push a synthetic ``proposal`` event so the Critic agent's
+        # reactor pulls it and emits a review_verdict on the next
+        # tick. Bypassing PolicyGate is safe here — the message is
+        # coordinator-internal and never re-enters the validate_intent
+        # path.
+        msg = Message.new(
+            "coordinator", "*", "proposal",
+            {**propose_payload, "needs_review": True},
+            priority=1,
+        )
+        await self.bus.append_and_seq(msg)
+        pending = PendingProposal(
+            proposal_msg_id=msg.msg_id,
+            from_agent="coordinator",
+            action_name="integrate_patch",
+            predicted_gain_pct=0.0,
+            payload=dict(propose_payload),
+        )
+        self.state.pending_proposals[msg.msg_id] = pending
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id,
+            status=DynamicActionStatus.DISPATCHED.value,
+            last_outcome="awaiting_critic",
+            extra={
+                **extra,
+                "specialist_task_id": specialist_task_id,
+                "proposal_msg_id": msg.msg_id,
+                "specialist_task_id_prefix": (
+                    DYNAMIC_SPECIALIST_TASK_ID_PREFIX
+                ),
+            },
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: save after critic dispatch failed "
+                "for dyn_id=%s", dyn_id,
+            )
+
+    def _mirror_critic_verdict_to_dynamic_action(
+        self,
+        *,
+        pending: "PendingProposal",
+        verdict: str,
+        reasoning: str,
+    ) -> None:
+        """Compose + persist the critic_verdict.json envelope when a
+        single-verdict review targets a dyn_id-shaped proposal.
+
+        Detection key: ``payload.params.specialist_task_id`` starts
+        with the synthesised ``dyn-`` prefix. When that's not the
+        case (i.e. legacy specialist patches), the helper is a no-op
+        and the existing PR-A7 mirror path runs unchanged.
+
+        For approve verdicts the dyn_id status stays DISPATCHED — the
+        integrate_patch completion hook flips it to KEPT / REVERTED
+        / INTEGRATE_FAILED. For reject / revise the helper flips the
+        status to CRITIC_REJECTED so the dispatch never reaches the
+        integrate executor.
+        """
+        from .dynamic_action_pipeline import (
+            compose_critic_verdict_envelope,
+            is_dynamic_specialist_task_id,
+        )
+        from .dynamic_action_critic import write_critic_verdict
+        from .dynamic_action_proposal import DynamicActionStatus
+        from ..session_paths import dynamic_action_spec_path
+
+        params = pending.payload.get("params") or {}
+        sid = str(params.get("specialist_task_id") or "").strip()
+        if not is_dynamic_specialist_task_id(sid):
+            return
+        dyn_id = str(params.get("dyn_id") or sid).strip()
+        if not dyn_id:
+            return
+        # Re-load the on-disk proposal_set + spec so the envelope is
+        # composed against the same data the dispatcher hook used.
+        from .dynamic_action_pipeline import read_runner_proposal_set
+        runner_payload = read_runner_proposal_set(self.session_dir, dyn_id)
+        proposal: dict[str, Any] = {}
+        if isinstance(runner_payload, dict):
+            raw = runner_payload.get("proposal_set") or []
+            if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+                proposal = raw[0]
+        spec_payload: dict[str, Any] = {}
+        try:
+            spec_dict = json.loads(
+                dynamic_action_spec_path(self.session_dir, dyn_id).read_text(
+                    encoding="utf-8",
+                ),
+            )
+            spec_payload = spec_dict.get("payload") or {}
+        except (OSError, json.JSONDecodeError):
+            spec_payload = {
+                "scope_domains": list(proposal.get("scope_domains") or ()),
+            }
+        envelope, lifecycle = compose_critic_verdict_envelope(
+            dyn_id=dyn_id,
+            proposal=proposal,
+            spec_scope_domains=list(spec_payload.get("scope_domains") or ()),
+            llm_verdict=verdict,
+            llm_reason=reasoning,
+        )
+        write_critic_verdict(self.session_dir, dyn_id, envelope)
+        new_status = lifecycle.value
+        last_outcome = (
+            envelope["reason_codes"][0]
+            if envelope["reason_codes"]
+            else (verdict or "").lower()
+        )
+        extra = {
+            "critic_verdict": envelope["verdict"],
+            "critic_reason_codes": list(envelope["reason_codes"]),
+            "critic_proposal_msg_id": pending.proposal_msg_id,
+        }
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id, status=new_status,
+            last_outcome=last_outcome, extra=extra,
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: save after critic verdict mirror "
+                "failed for dyn_id=%s", dyn_id,
+            )
+
+    def _maybe_update_dynamic_action_after_integrate(
+        self,
+        *,
+        task: Task,
+        result: SubAgentResult,
+    ) -> None:
+        """Translate an ``integrate_patch`` result to the dyn_id
+        summary when the task targets a synthesised dynamic workspace.
+
+        Routing key is ``params.specialist_task_id`` — when it starts
+        with ``dyn-`` (set by
+        :func:`materialize_dynamic_patch_workspace`) we own the
+        translation; otherwise the legacy PR-A7 path keeps running.
+        """
+        from .dynamic_action_pipeline import (
+            integrate_status_to_lifecycle,
+            is_dynamic_specialist_task_id,
+        )
+        from .dynamic_action_proposal import DynamicActionStatus
+
+        params = task.params or {}
+        sid = str(params.get("specialist_task_id") or "").strip()
+        if not is_dynamic_specialist_task_id(sid):
+            return
+        dyn_id = str(params.get("dyn_id") or sid).strip()
+        result_dict = result.result if isinstance(result.result, dict) else {}
+        integrate_status = str(result_dict.get("status") or "").strip()
+        lifecycle = integrate_status_to_lifecycle(integrate_status)
+        delta_pct = result_dict.get("delta_pct")
+        extra = {
+            "integrate_task_id": task.task_id,
+            "integrate_status": integrate_status,
+            "patches_applied": list(result_dict.get("patches_applied") or ()),
+            "patches_reverted": list(result_dict.get("patches_reverted") or ()),
+            "output_throughput": result_dict.get("output_throughput"),
+            "accuracy_pass": result_dict.get("accuracy_pass"),
+        }
+        gain_value: float | None = None
+        if isinstance(delta_pct, (int, float)):
+            gain_value = float(delta_pct)
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id,
+            status=lifecycle.value,
+            last_outcome=integrate_status or lifecycle.value.lower(),
+            cumulative_gain=gain_value,
+            extra=extra,
+        )
+        # Tag the intervention ledger with a dynamic-specific action
+        # name so post-hoc analytics can split KEEP rate by source
+        # without scraping logs (P5 §11 #4 + #5).
+        if lifecycle == DynamicActionStatus.KEPT:
+            try:
+                self.shared_state.record_intervention(
+                    change_type="code_patch",
+                    action="dynamic_action_integrate",
+                    task_id=task.task_id,
+                    delta_pct=gain_value,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: record_intervention failed for "
+                    "dyn_id=%s", dyn_id,
+                )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: save after integrate completion "
+                "failed for dyn_id=%s", dyn_id,
+            )
 
     # ------------------------------------------------------------------
     # v0.8 §3.5 + specialist pre-dispatch warmup
@@ -7646,6 +8039,22 @@ class Coordinator:
                     self.shared_state.bump_specialist_dispatched()
                 except Exception:  # noqa: BLE001
                     log.exception("PR-A8: bump_specialist_dispatched failed")
+            # dynamic_action.MD P5 §4 — once the DynamicActionRunner
+            # returns, advance the lifecycle: write the runner status
+            # onto the dyn_id summary and (on COMPLETED) either reject
+            # via mechanical floor or push a critic-bound proposal so
+            # the existing single-verdict path takes the patch through
+            # integrate_patch / grid / promote unchanged.
+            if task.kind == DYNAMIC_ACTION_NAME:
+                try:
+                    await self._handle_dynamic_action_runner_result(
+                        task=task, result=result,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "dynamic_action lifecycle hook failed for task=%s",
+                        task.task_id,
+                    )
             # PR-A8 — intervention-mix ledger: when an explore or
             # integrate_patch task succeeds with a kept variant, log
             # the change_type so Robustness can see config-only
@@ -7657,6 +8066,21 @@ class Coordinator:
                 except Exception:  # noqa: BLE001
                     log.exception(
                         "PR-A8: intervention ledger update failed for task=%s",
+                        task.task_id,
+                    )
+            # dynamic_action.MD P5 §6 — when an integrate_patch task
+            # finishes and its specialist_task_id matches the
+            # dyn-<id> prefix, update the dyn_id summary with the
+            # final KEPT / REVERTED / INTEGRATE_FAILED status.
+            if task.kind == "integrate_patch":
+                try:
+                    self._maybe_update_dynamic_action_after_integrate(
+                        task=task, result=result,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "dynamic_action integrate-completion hook "
+                        "failed for task=%s",
                         task.task_id,
                     )
             # Auto-promote certain succeeded results into SharedState core
