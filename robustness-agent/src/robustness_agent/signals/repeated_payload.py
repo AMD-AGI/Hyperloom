@@ -20,7 +20,7 @@ Hash dimensions per action family:
 
 * ``validate_stack`` — ``optimization_stack`` content + ``config_path``
 * ``backends`` / ``params`` — sorted ``grid`` + ``extra_envs``
-* ``integrate`` — ``kernel_id`` + ``patch_path`` + ``extra_sglang_args``
+* ``integrate`` — ``kernel_id`` + ``patch_path`` + ``extra_server_args``
 * ``baseline`` — falls back to ``_BASELINE_FINGERPRINT_KEYS`` so we
   stay aligned with the upstream policy denial fingerprint.
 
@@ -70,13 +70,13 @@ _FAMILY_PROJECTIONS: dict[str, tuple[str, ...]] = {
     "integrate": (
         "params.kernel_id",
         "params.patch_path",
-        "params.extra_sglang_args",
+        "params.extra_server_args",
         "params.extra_envs",
     ),
     "baseline": (
         "params.benchmark_script",
         "params.result_dir",
-        "params.extra_sglang_args",
+        "params.extra_server_args",
         "params.extra_envs",
         "params.model_path",
         "params.gpu_type",

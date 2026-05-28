@@ -727,10 +727,10 @@ def test_build_prompt_metadata_is_backward_compatible():
     }
 
 
-def test_build_prompt_metadata_extracts_extra_sglang_args():
+def test_build_prompt_metadata_extracts_extra_server_args():
     args = _args(
         source_file="",
-        extra_sglang_args=(
+        extra_server_args=(
             "--kv-cache-dtype fp8 --page-size 16 --attention-backend aiter "
             "--decode-attention-backend aiter --disable-cuda-graph "
             "--cuda-graph-max-bs 128 --num-continuous-decode-steps 4"

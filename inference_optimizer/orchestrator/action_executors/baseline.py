@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ...compat.payload_aliases import read_extra_server_args
 from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
@@ -361,12 +362,7 @@ class BaselineExecutor:
         config_path = materialize_config_with_envs(
             config_path,
             output_dir,
-            extra_sglang_args=str(params.get("extra_sglang_args") or ""),
-            extra_server_args=str(
-                params.get("extra_server_args")
-                or params.get("extra_vllm_args")
-                or ""
-            ),
+            extra_server_args=read_extra_server_args(params),
             extra_envs=dict(params.get("extra_envs") or {}),
             model_path=resolved_model,
             gpu_type=resolved_gpu,
@@ -453,7 +449,7 @@ class BaselineExecutor:
                 # this call site identical between colocated and
                 # disaggregated runs (the agent only changes CLI flags).
                 await restart_server_for_round(
-                    extra_sglang_args=str(params.get("extra_sglang_args") or ""),
+                    extra_server_args=read_extra_server_args(params),
                     framework=os.environ.get("FRAMEWORK") or None,
                     model_path=resolved_model or None,
                     tp=int(os.environ.get("TP") or 0) or None,

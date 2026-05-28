@@ -564,7 +564,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   `error_excerpt` / `workspace` / `raw_result_path` /",
         "   `extras.fingerprint`. The fingerprint is the canonical hash of",
         "   the eight params fields that determine baseline behavior:",
-        "   `benchmark_script` / `result_dir` / `extra_sglang_args` /",
+        "   `benchmark_script` / `result_dir` / `extra_server_args` /",
         "   `extra_envs` / `model_path` / `gpu_type` / `config_path` /",
         "   `disable_run_eval`.",
         "2. **`last_action_failures`** (global rolling log capped at the last",
@@ -584,7 +584,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "  `rule='baseline_self_loop'`. Bump at least one of: `params.benchmark_script`",
         "  (a sanitized `*.sh` file name — Magpie's `dsr1_fp8_mi300x.sh` hardcodes",
         "  `--result-dir /workspace/`, but `sglang_mi300x.sh` respects",
-        "  `$RESULT_DIR`), `params.result_dir`, `params.extra_sglang_args`, or",
+        "  `$RESULT_DIR`), `params.result_dir`, `params.extra_server_args`, or",
         "  `params.extra_envs`.",
         "* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`",
         "  warning ⇒ leak salvage missed.** The script wrote results outside the",
@@ -629,14 +629,23 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "`params.synergy_mode='auto'`) on the next `delegate`:",
         "",
         "**Variant identity is content-based.** The executor hashes",
-        "`(sorted(extra_sglang_args tokens), sorted(extra_envs pairs))` and",
+        "`(sorted(extra_server_args tokens), sorted(extra_envs pairs))` and",
         "indexes `SharedState.explore_search.tested` by that",
         "fingerprint. Renaming an already-tested variant (e.g. `attn_aiter`",
         "→ `attn_aiter_v2`) does NOT bypass dedup — your grid entry will be",
-        "dropped before launch. To re-test, change the actual `extra_sglang_args`",
+        "dropped before launch. To re-test, change the actual `extra_server_args`",
         "or `extra_envs`. The unified `explore_search` ledger (KB_design",
         "§3.4 §4.3) is the authoritative dedup source and filters BOTH",
         "default grids and LLM-supplied `params.grid` uniformly.",
+        "",
+        "**`extra_server_args` is framework-neutral.** It is the payload-",
+        "surface field that carries arbitrary server-launch flags into the",
+        "Magpie wrapper. Under `--framework sglang` its value is routed",
+        "into `EXTRA_SGLANG_ARGS`; under `vllm`, `EXTRA_VLLM_ARGS`; under",
+        "`atom`, `EXTRA_ATOM_ARGS`. The historical key name",
+        "`extra_sglang_args` (sglang-era) is accepted on read for one",
+        "release with a deprecation warning; emit new proposals with the",
+        "canonical name only.",
         "",
         "**Use the numeric `gain_pct` on every row.** The `*_search` and",
         "`backend_winners_history` blocks now render `±x.xx%` per variant.",
@@ -783,7 +792,7 @@ until the patch lands on `optimization_stack`. Payload:
 
   request{target_agent: 'kernel', kind: 'integrate',
           params: {kernel_id, patch_path, target_file, base_tput,
-                   extra_sglang_args, config_path}}
+                   extra_server_args, config_path}}
 
 If you omit `base_tput`, the Coordinator auto-fills it from
 `current_best.tput` so chained integrates (multi-KEEP drain, see below)

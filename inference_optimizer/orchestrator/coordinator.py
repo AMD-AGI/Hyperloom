@@ -102,7 +102,7 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 #
 # Orchestration can recover from a baseline failure by proposing a fresh
 # baseline with overrides (``params.benchmark_script`` /
-# ``params.result_dir`` / different ``extra_sglang_args`` / etc. — see
+# ``params.result_dir`` / different ``extra_server_args`` / etc. — see
 # SKILL.md "Magpie leak-path salvage"). What it MUST NOT do is propose
 # the *same* params after the same failure mode has fired N times in a
 # row — the PolicyGate stop-loss below promotes that into a
@@ -120,7 +120,7 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "benchmark_script",
     "result_dir",
-    "extra_sglang_args",
+    "extra_server_args",
     "extra_envs",
     "model_path",
     "gpu_type",
@@ -228,7 +228,7 @@ def _summarize_failed_variants(
     """Project the ``status=='failed'`` rows of a grid_runner result list.
 
     Returns a compact ``[{name, error_class, error_excerpt,
-    extra_sglang_args}, ...]`` so the audit-trail extras can carry
+    extra_server_args}, ...]`` so the audit-trail extras can carry
     per-variant failure context without ballooning the prompt context.
 
     Why this exists: explore / sweep executors run a multi-variant grid
@@ -258,7 +258,7 @@ def _summarize_failed_variants(
             "name": str(row.get("name") or ""),
             "error_class": str(row.get("error_class") or "") or None,
             "error_excerpt": err[:400] if err else None,
-            "extra_sglang_args": str(row.get("extra_sglang_args") or ""),
+            "extra_server_args": str(row.get("extra_server_args") or ""),
         })
         if len(failed) >= max_entries:
             break
@@ -297,14 +297,14 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
     return out
 
 
-def _dedupe_extra_sglang_args(args_str: str) -> str:
+def _dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string.
 
     SGLang / vLLM argparse uses ``action="store"`` for almost every
     knob, so if ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128
     --cuda-graph-max-bs 256`` end up on the same command line, only the
     last value is honored. The original cmdline still works, but
-    ``final.extra_sglang_args`` exists for dashboard / replay use and
+    ``final.extra_server_args`` exists for dashboard / replay use and
     looking at it with the same flag repeated 3-15 times is misleading
     (it reads as "this run actually used N values" when really only the
     last won).
@@ -1977,7 +1977,7 @@ class Coordinator:
         }
         cb = state.current_best or {}
         if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_sglang_args") or "")
+            cb_args = str(cb.get("extra_server_args") or "")
             if cb_args:
                 params["base_extra_args"] = cb_args
         last_bl = state.last_baseline or {}
@@ -2232,7 +2232,7 @@ class Coordinator:
             params["config_path"] = state.baseline_config_path
         cb = state.current_best or {}
         if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_sglang_args") or "")
+            cb_args = str(cb.get("extra_server_args") or "")
             if cb_args:
                 params["base_extra_args"] = cb_args
         # Mirror the last-baseline benchmark_script when present so a
@@ -3897,7 +3897,7 @@ class Coordinator:
 
         The Orchestration prompt's FAILURE RECOVERY section instructs the
         LLM to introduce a new ``benchmark_script`` / ``result_dir`` /
-        ``extra_sglang_args`` override after a baseline failure. This
+        ``extra_server_args`` override after a baseline failure. This
         method is the PolicyGate stop-loss that fires when the LLM
         ignores that instruction.
 
@@ -3955,7 +3955,7 @@ class Coordinator:
             "e.g. \"sglang_mi300x.sh\" to bypass dsr1_fp8_mi300x.sh's "
             "hardcoded --result-dir), params.result_dir (sanitized path; "
             "Coordinator already defaults RESULT_DIR=<workspace>), or "
-            "extra_sglang_args / extra_envs."
+            "extra_server_args / extra_envs."
         )
         return PolicyDenied(
             "action='baseline' denied: same-fingerprint failure streak",
@@ -4683,8 +4683,8 @@ class Coordinator:
                         "predicted_gain_pct":  pending.predicted_gain_pct,
                         "proposal_msg_id":     pending.proposal_msg_id,
                         "variant_name":        variant_name,
-                        "extra_sglang_args":   str(
-                            variant.get("extra_sglang_args")
+                        "extra_server_args":   str(
+                            variant.get("extra_server_args")
                             or variant.get("extra_args") or ""
                         ),
                         "extra_envs":          dict(
@@ -5299,7 +5299,7 @@ class Coordinator:
                 )
         cb = self.shared_state.current_best or {}
         cb_args = (
-            str(cb.get("extra_sglang_args") or "")
+            str(cb.get("extra_server_args") or "")
             if isinstance(cb, dict) else ""
         )
         if pending.action_name == "profile":
@@ -6614,7 +6614,7 @@ class Coordinator:
                             "kernel_id": rejected.get("kernel_id"),
                             "patch_path": rejected.get("patch_path"),
                             "target_file": rejected.get("target_file"),
-                            "extra_sglang_args": rejected.get("extra_sglang_args", ""),
+                            "extra_server_args": rejected.get("extra_server_args", ""),
                             "attempt_count": rejected.get("attempt_count"),
                             "best_gain_pct": rejected.get("best_gain_pct"),
                             "reason": rejected.get("reason"),
@@ -7046,8 +7046,8 @@ class Coordinator:
 
         cb = self.shared_state.current_best or {}
         extra_args = str(
-            result.get("extra_sglang_args")
-            or (cb.get("extra_sglang_args") if isinstance(cb, dict) else "")
+            result.get("extra_server_args")
+            or (cb.get("extra_server_args") if isinstance(cb, dict) else "")
             or ""
         ).strip()
         apply_result = result.get("apply_result") or {}
@@ -7083,7 +7083,7 @@ class Coordinator:
                 action="integrate",
                 variant_name=entry.get("kernel_id"),
                 new_tput=new_tput,
-                extra_sglang_args=extra_args,
+                extra_server_args=extra_args,
                 ts=entry["ts"],
             )
 
@@ -7091,7 +7091,7 @@ class Coordinator:
             "action": "integrate",
             "tput": float(new_tput),
             "kernel_id": result.get("kernel_id"),
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": result.get("ttft_mean_ms"),
             "e2el_mean_ms": result.get("e2el_mean_ms"),
@@ -7856,17 +7856,17 @@ class Coordinator:
 
         base_args = ""
         if isinstance(previous, dict):
-            base_args = str(previous.get("extra_sglang_args") or "").strip()
+            base_args = str(previous.get("extra_server_args") or "").strip()
         candidate_args = ""
         if isinstance(bv, dict):
             candidate_args = str(
-                bv.get("candidate_extra_sglang_args")
-                or bv.get("extra_sglang_args")
+                bv.get("candidate_extra_server_args")
+                or bv.get("extra_server_args")
                 or ""
             ).strip()
         full_args = ""
         if isinstance(bv, dict):
-            full_args = str(bv.get("extra_sglang_args") or "").strip()
+            full_args = str(bv.get("extra_server_args") or "").strip()
         if base_args and candidate_args and full_args == candidate_args:
             full_args = " ".join((base_args, candidate_args))
         elif not full_args:
@@ -7874,14 +7874,14 @@ class Coordinator:
                 part for part in (base_args, candidate_args) if part
             )
         # Dedupe repeated ``--flag value`` pairs so the cumulative
-        # extra_sglang_args reflects what argparse will actually honor
+        # extra_server_args reflects what argparse will actually honor
         # (last value wins). Without this, every promote that re-applies
         # a multi-value combo candidate (e.g.
         # ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128 --cuda-graph-max-bs 256``)
         # leaves multiple copies of the same flag in the final args
         # string, which breaks reproduce-launch dashboards and the
-        # final.extra_sglang_args field surfaced by session_breakdown.
-        full_args = _dedupe_extra_sglang_args(full_args)
+        # final.extra_server_args field surfaced by session_breakdown.
+        full_args = _dedupe_extra_server_args(full_args)
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
@@ -7895,7 +7895,7 @@ class Coordinator:
                 self.shared_state.optimization_stack.append({
                     "action": task_kind,
                     "variant_name": variant_name,
-                    "candidate_extra_sglang_args": candidate_args,
+                    "candidate_extra_server_args": candidate_args,
                     "extra_envs": (
                         dict(bv.get("extra_envs") or {})
                         if isinstance(bv, dict) else {}
@@ -7913,14 +7913,14 @@ class Coordinator:
                     action=task_kind,
                     variant_name=variant_name,
                     new_tput=best_tput,
-                    extra_sglang_args=full_args,
+                    extra_server_args=full_args,
                 )
 
         self.shared_state.current_best = {
             "action": task_kind,
             "tput": float(best_tput),
             "variant_name": variant_name,
-            "extra_sglang_args": full_args,
+            "extra_server_args": full_args,
             "extra_envs": (
                 dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
             ),
@@ -8488,7 +8488,7 @@ class Coordinator:
                 lift = {
                     "name":              f"framework-pr:{cand_id}",
                     "variant_name":      cand_id,
-                    "candidate_extra_sglang_args": "",
+                    "candidate_extra_server_args": "",
                     "extra_envs":        {},
                     "workspace":         result.get("workspace"),
                 }

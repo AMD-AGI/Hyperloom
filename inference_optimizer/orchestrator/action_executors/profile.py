@@ -572,7 +572,7 @@ class ProfileExecutor(BaselineExecutor):
                 # PD knobs auto-resolved by the helper from $PD_* env
                 # (cli.py exported them). See baseline.py for rationale.
                 await restart_server_for_round(
-                    extra_sglang_args=str(params.get("extra_sglang_args") or ""),
+                    extra_server_args=str(params.get("extra_server_args") or ""),
                     torch_profiler_dir=round_trace_root,
                     framework=os.environ.get("FRAMEWORK") or None,
                     model_path=(

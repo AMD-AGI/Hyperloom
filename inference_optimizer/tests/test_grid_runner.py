@@ -156,7 +156,7 @@ def test_grid_runner_emits_expected_error_class_labels():
 def test_variant_result_carries_error_class_field():
     vr = _grid_runner.VariantResult(
         name="x",
-        extra_sglang_args="--foo",
+        extra_server_args="--foo",
         extra_envs={},
         status="failed",
         error="boom",
@@ -167,7 +167,7 @@ def test_variant_result_carries_error_class_field():
     assert d["status"] == "failed"
 
     vr_ok = _grid_runner.VariantResult(
-        name="ok", extra_sglang_args="", extra_envs={}, status="succeeded",
+        name="ok", extra_server_args="", extra_envs={}, status="succeeded",
     )
     assert vr_ok.to_dict()["error_class"] == ""
 
@@ -208,7 +208,7 @@ class TestParseSkipSpec:
 class TestMultiNodeInvalidFilter:
     def test_short_circuits_in_single_node(self, monkeypatch):
         grid = [
-            GridVariant(name="a", extra_sglang_args="--cuda-graph-max-bs 8"),
+            GridVariant(name="a", extra_server_args="--cuda-graph-max-bs 8"),
         ]
         kept, dropped = apply_multi_node_invalid_variants(grid)
         assert kept == grid
@@ -223,8 +223,8 @@ class TestMultiNodeInvalidFilter:
         monkeypatch.setattr(mne, "is_multi_node", lambda: True)
         monkeypatch.setenv("CONC", "64")
         grid = [
-            GridVariant(name="bad", extra_sglang_args="--cuda-graph-max-bs 8"),
-            GridVariant(name="ok",  extra_sglang_args="--max-num-seqs 128"),
+            GridVariant(name="bad", extra_server_args="--cuda-graph-max-bs 8"),
+            GridVariant(name="ok",  extra_server_args="--max-num-seqs 128"),
         ]
         kept, dropped = apply_multi_node_invalid_variants(grid)
         assert [k.name for k in kept] == ["ok"]
@@ -235,10 +235,10 @@ class TestMultiNodeInvalidFilter:
 class TestSingleNodeInvalidFilter:
     def test_drops_multi_node_only_in_single_node(self):
         grid = [
-            GridVariant(name="legacy", extra_sglang_args="--foo 1"),
+            GridVariant(name="legacy", extra_server_args="--foo 1"),
             GridVariant(
                 name="mn_only",
-                extra_sglang_args="--enable-deepep-moe",
+                extra_server_args="--enable-deepep-moe",
                 note="multi_node_only_moe",
             ),
         ]
@@ -255,7 +255,7 @@ class TestSingleNodeInvalidFilter:
         grid = [
             GridVariant(
                 name="mn_only",
-                extra_sglang_args="--enable-deepep-moe",
+                extra_server_args="--enable-deepep-moe",
                 note="multi_node_only_moe",
             ),
         ]
@@ -293,7 +293,7 @@ class TestApplyUserSkipList:
 class TestVariantResultToDict:
     def test_succeeded_default_shape(self):
         vr = VariantResult(
-            name="v", extra_sglang_args="--foo 1", extra_envs={"A": "1"},
+            name="v", extra_server_args="--foo 1", extra_envs={"A": "1"},
             status="succeeded",
         )
         out = vr.to_dict()
@@ -302,7 +302,7 @@ class TestVariantResultToDict:
 
     def test_failed_round_trip_carries_error_class(self):
         vr = VariantResult(
-            name="v", extra_sglang_args="", extra_envs={},
+            name="v", extra_server_args="", extra_envs={},
             status="failed", error="boom", error_class="benchmark_report_missing",
         )
         out = vr.to_dict()
@@ -888,11 +888,11 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     # references a sglang-only flag (dropped).
     kept_variant = GridVariant(
         name="atom_compatible",
-        extra_sglang_args="--enable-deepep-moe",
+        extra_server_args="--enable-deepep-moe",
     )
     dropped_variant = GridVariant(
         name="sglang_only",
-        extra_sglang_args="--enable-flashinfer-mla",
+        extra_server_args="--enable-flashinfer-mla",
     )
     kept, dropped = _grid_runner.apply_compatibility_filter(
         [kept_variant, dropped_variant],

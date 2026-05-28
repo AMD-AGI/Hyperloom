@@ -135,7 +135,7 @@ def test_baseline_family_uses_dedicated_projection():
         "params": {
             "benchmark_script": "sglang_mi300x.sh",
             "result_dir": "/workspace/hyperloom",
-            "extra_sglang_args": ["--tp", "8"],
+            "extra_server_args": ["--tp", "8"],
             "extra_envs": {"CONC": "8"},
             "model_path": "/wekafs/models/dsr1",
             "gpu_type": "mi300x",

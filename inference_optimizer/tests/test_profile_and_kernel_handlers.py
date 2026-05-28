@@ -2263,7 +2263,7 @@ async def test_run_optimization_handler_dry_run(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
+async def test_run_optimization_handler_forwards_extra_server_args(session_dir):
     captured: dict[str, object] = {}
 
     async def fake_run(cmd, *, timeout_sec):
@@ -2275,7 +2275,7 @@ async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
         "kernel_id": "fake_kernel_1",
         "session_id": session_dir.name,
         "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
-        "extra_sglang_args": "--kv-cache-dtype fp8 --page-size 16",
+        "extra_server_args": "--kv-cache-dtype fp8 --page-size 16",
         "dry_run": True,
         "_single_kernel": True,
     }

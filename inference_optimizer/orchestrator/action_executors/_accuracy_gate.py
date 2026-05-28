@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 ACCURACY_THRESHOLD = 0.05  # 5% allowed deviation
 
 # Flags / env vars that indicate accuracy risk > 0.
-# If a variant's extra_sglang_args or extra_envs matches any of these
+# If a variant's extra_server_args or extra_envs matches any of these
 # patterns, the variant must pass accuracy gate before being promoted.
 _HIGH_RISK_CLI_PATTERNS: tuple[str, ...] = (
     "--kv-cache-dtype",

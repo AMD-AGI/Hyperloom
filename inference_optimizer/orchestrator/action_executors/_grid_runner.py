@@ -1,7 +1,7 @@
 """Shared helper for backends / params executors.
 
 Each runner's job is essentially: take a base Magpie YAML + a list of
-(name, extra_sglang_args, extra_envs) variants, run Magpie once per
+(name, extra_server_args, extra_envs) variants, run Magpie once per
 variant, parse `benchmark_report.json`, return the winners.
 
 We share the "run one Magpie variant" loop here so backends.py / params.py
@@ -61,16 +61,16 @@ log = logging.getLogger(__name__)
 #     ledger while staying compact in ``state.json`` and prompt summaries.
 # ---------------------------------------------------------------------------
 def variant_fingerprint(
-    extra_sglang_args: str | None,
+    extra_server_args: str | None,
     extra_envs: dict[str, Any] | None,
 ) -> str:
-    """Stable content fingerprint for a (extra_sglang_args, extra_envs) pair.
+    """Stable content fingerprint for a (extra_server_args, extra_envs) pair.
 
     See module-level rationale. Name and note are intentionally NOT part of
     the input — two variants with identical content but different names
     (e.g. ``A`` and ``A_v2``) must collapse to the same fingerprint.
     """
-    args_text = str(extra_sglang_args or "")
+    args_text = str(extra_server_args or "")
     try:
         args_tokens = sorted(shlex.split(args_text))
     except ValueError:
@@ -237,7 +237,7 @@ def apply_multi_node_invalid_variants(
     kept: list[GridVariant] = []
     dropped: list[dict] = []
     for v in grid:
-        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_sglang_args or "")
+        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
         if m and int(m.group(1)) < conc:
             dropped.append({
                 "name": v.name,
@@ -385,7 +385,7 @@ def apply_single_node_invalid_variants(
 
 
 # Multi-node-hot sglang flags that depend on model class (MLA / MoE) or
-# sglang version. Each entry maps a substring of ``extra_sglang_args`` to
+# sglang version. Each entry maps a substring of ``extra_server_args`` to
 # a compatibility predicate. Keep this list small and well-documented;
 # anything more dynamic should live in the action_registry's
 # ``applicable_when`` schema instead.
@@ -549,7 +549,7 @@ def apply_compatibility_filter(
     kept: list[GridVariant] = []
     dropped: list[dict] = []
     for v in grid:
-        args = v.extra_sglang_args or ""
+        args = v.extra_server_args or ""
         skip_reason: str | None = None
         for flag, required_class in _COMPATIBILITY_FLAG_RULES:
             if flag not in args:
@@ -625,19 +625,50 @@ def apply_user_skip_list(
     return kept, dropped
 
 
-@dataclass
+@dataclass(init=False)
 class GridVariant:
     """One row of the grid we're going to test."""
 
     name: str                                    # human-readable label
-    extra_sglang_args: str = ""                  # appended via EXTRA_SGLANG_ARGS env
+    extra_server_args: str = ""                  # appended via EXTRA_{SGLANG,VLLM,ATOM}_ARGS env
     extra_envs: dict[str, str] = field(default_factory=dict)
     note: str = ""                                # optional reason / category
+
+    def __init__(
+        self,
+        name: str,
+        extra_server_args: str = "",
+        extra_envs: dict[str, str] | None = None,
+        note: str = "",
+        *,
+        extra_sglang_args: str | None = None,
+    ) -> None:
+        # Phase 4 of atom_plan/: back-compat keyword alias for the
+        # historical ``extra_sglang_args`` kwarg name. Operators /
+        # tests / third-party callers may still construct
+        # ``GridVariant(extra_sglang_args="x")``; route that into the
+        # canonical attribute with a single DeprecationWarning so the
+        # callsite shows up in audit logs.
+        if extra_sglang_args is not None:
+            import warnings as _warnings
+            _warnings.warn(
+                "GridVariant(extra_sglang_args=...) is a deprecation "
+                "alias for GridVariant(extra_server_args=...) and will "
+                "be removed in the next Hyperloom release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if not extra_server_args:
+                extra_server_args = extra_sglang_args
+        self.name = name
+        self.extra_server_args = extra_server_args
+        self.extra_envs = dict(extra_envs) if extra_envs is not None else {}
+        self.note = note
 
     @property
     def fingerprint(self) -> str:
         """Content fingerprint used as dedup-ledger key. See module doc."""
-        return variant_fingerprint(self.extra_sglang_args, self.extra_envs)
+        return variant_fingerprint(self.extra_server_args, self.extra_envs)
 
 
 @dataclass
@@ -645,7 +676,7 @@ class VariantResult:
     """One bench run's parsed result."""
 
     name: str
-    extra_sglang_args: str
+    extra_server_args: str
     extra_envs: dict[str, str]
     status: str
     output_throughput: float | None = None
@@ -688,12 +719,12 @@ class VariantResult:
     @property
     def fingerprint(self) -> str:
         """Same fingerprint scheme as :class:`GridVariant`."""
-        return variant_fingerprint(self.extra_sglang_args, self.extra_envs)
+        return variant_fingerprint(self.extra_server_args, self.extra_envs)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name":               self.name,
-            "extra_sglang_args":  self.extra_sglang_args,
+            "extra_server_args":  self.extra_server_args,
             "extra_envs":         self.extra_envs,
             "fingerprint":        self.fingerprint,
             "status":             self.status,
@@ -921,7 +952,7 @@ def _build_variant_yaml(
     combined = merge_server_args(
         str(envs.get(extra_args_env, "")),
         base_extra_args,
-        variant.extra_sglang_args,
+        variant.extra_server_args,
     )
     if combined:
         envs[extra_args_env] = combined
@@ -1191,10 +1222,10 @@ async def run_grid(
                 variant_name=variant.name,
                 error_class="yaml_build_error",
                 error_summary=repr(exc),
-                extra_args=variant.extra_sglang_args,
+                extra_args=variant.extra_server_args,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed", error=f"yaml_build_error: {exc!r}",
                 error_class="yaml_build_error",
@@ -1212,7 +1243,7 @@ async def run_grid(
         )
         log.info(
             "grid_runner: variant %d/%d name=%s args=%s",
-            i + 1, len(grid), variant.name, variant.extra_sglang_args,
+            i + 1, len(grid), variant.name, variant.extra_server_args,
         )
 
         # Multi-node only: restart sglang/vllm with this variant's
@@ -1229,8 +1260,8 @@ async def run_grid(
             # the grid surface), so PD config stays constant across
             # variants within one run.
             await restart_server_for_round(
-                extra_sglang_args=merge_server_args(
-                    base_extra_args, variant.extra_sglang_args,
+                extra_server_args=merge_server_args(
+                    base_extra_args, variant.extra_server_args,
                 ),
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
@@ -1246,10 +1277,10 @@ async def run_grid(
                 variant_name=variant.name,
                 error_class="mn_server_restart_failed",
                 error_summary=str(exc),
-                extra_args=variant.extra_sglang_args,
+                extra_args=variant.extra_server_args,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 error=f"mn_server_restart_failed: {exc}",
@@ -1299,10 +1330,10 @@ async def run_grid(
                 variant_name=variant.name,
                 error_class="magpie_timeout",
                 error_summary=str(exc),
-                extra_args=variant.extra_sglang_args,
+                extra_args=variant.extra_server_args,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed", error=f"timeout: {exc}",
                 error_class="magpie_timeout",
@@ -1339,7 +1370,7 @@ async def run_grid(
                 subprocess_started_unix=variant_started_unix,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 returncode=rc,
@@ -1404,10 +1435,10 @@ async def run_grid(
                 variant_name=variant.name,
                 error_class="no_benchmark_workspace",
                 error_summary=no_ws_error_summary,
-                extra_args=variant.extra_sglang_args,
+                extra_args=variant.extra_server_args,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 returncode=rc,
@@ -1453,10 +1484,10 @@ async def run_grid(
                 variant_name=variant.name,
                 error_class=invalid_class,
                 error_summary=error,
-                extra_args=variant.extra_sglang_args,
+                extra_args=variant.extra_server_args,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 workspace=str(workspace),
@@ -1475,7 +1506,7 @@ async def run_grid(
             continue
 
         results.append(VariantResult(
-            name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+            name=variant.name, extra_server_args=variant.extra_server_args,
             extra_envs=dict(variant.extra_envs),
             status="succeeded",
             output_throughput=measurement.get("output_throughput"),

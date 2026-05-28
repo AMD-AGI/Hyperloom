@@ -145,7 +145,7 @@ def test_explore_search_migration_unions_legacy_ledgers():
             "tested": {
                 fp_attn: {
                     "name": "attn_aiter",
-                    "extra_sglang_args": "--attention-backend aiter",
+                    "extra_server_args": "--attention-backend aiter",
                     "extra_envs": {},
                     "status": "succeeded",
                     "tput": 1500.0, "gain_pct": 5.0,
@@ -153,7 +153,7 @@ def test_explore_search_migration_unions_legacy_ledgers():
                 },
                 fp_triton: {
                     "name": "decode_triton",
-                    "extra_sglang_args": "--decode-attention-backend triton",
+                    "extra_server_args": "--decode-attention-backend triton",
                     "extra_envs": {},
                     "status": "succeeded",
                     "tput": 750.0, "gain_pct": -25.0,
@@ -162,14 +162,14 @@ def test_explore_search_migration_unions_legacy_ledgers():
             },
             "accepted": [{
                 "name": "attn_aiter",
-                "extra_sglang_args": "--attention-backend aiter",
+                "extra_server_args": "--attention-backend aiter",
                 "extra_envs": {},
                 "fingerprint": fp_attn,
                 "gain_pct": 5.0,
             }],
             "rejected": [{
                 "name": "decode_triton",
-                "extra_sglang_args": "--decode-attention-backend triton",
+                "extra_server_args": "--decode-attention-backend triton",
                 "extra_envs": {},
                 "fingerprint": fp_triton,
                 "reason": "not_keep", "gain_pct": -25.0,
@@ -181,7 +181,7 @@ def test_explore_search_migration_unions_legacy_ledgers():
             "tested": {
                 fp_max_seqs: {
                     "name": "max_seqs_512",
-                    "extra_sglang_args": "--max-num-seqs 512",
+                    "extra_server_args": "--max-num-seqs 512",
                     "extra_envs": {},
                     "gain_pct": 2.5,
                     "round_id": "params-001",
@@ -189,7 +189,7 @@ def test_explore_search_migration_unions_legacy_ledgers():
             },
             "accepted": [{
                 "name": "max_seqs_512",
-                "extra_sglang_args": "--max-num-seqs 512",
+                "extra_server_args": "--max-num-seqs 512",
                 "extra_envs": {},
                 "fingerprint": fp_max_seqs,
                 "gain_pct": 2.5,
@@ -200,7 +200,7 @@ def test_explore_search_migration_unions_legacy_ledgers():
             "round_id": "backends-001",
             "variant_name": "attn_aiter",
             "gain_pct": 5.0,
-            "extra_sglang_args": "--attention-backend aiter",
+            "extra_server_args": "--attention-backend aiter",
             "extra_envs": {},
             "ts": "2026-05-01T00:00:30",
         }],
@@ -243,7 +243,7 @@ def test_explore_search_migration_is_idempotent():
             "schema_version": 1,
             "tested": {fp_attn: {
                 "name": "attn_aiter",
-                "extra_sglang_args": "--attention-backend aiter",
+                "extra_server_args": "--attention-backend aiter",
                 "extra_envs": {},
                 "status": "succeeded",
                 "tput": 1500.0, "gain_pct": 5.0,
@@ -267,7 +267,7 @@ def test_record_explore_accepted_dedup_by_fingerprint():
     state = SharedState()
     variant = {
         "name": "vllm_kv_fp8",
-        "extra_sglang_args": "--kv-cache-dtype fp8",
+        "extra_server_args": "--kv-cache-dtype fp8",
         "extra_envs": {},
         "output_throughput": 1500.0,
         "gain_pct": 4.0,
@@ -284,7 +284,7 @@ def test_apply_explore_search_update_preserves_accepted():
     state = SharedState()
     state.record_explore_accepted({
         "name": "a",
-        "extra_sglang_args": "--flag-a",
+        "extra_server_args": "--flag-a",
         "fingerprint": "aa" * 8,
         "gain_pct": 3.0,
     })
@@ -293,7 +293,7 @@ def test_apply_explore_search_update_preserves_accepted():
     state.apply_explore_search_update({
         "schema_version": 1,
         "tested": {"bb" * 8: {
-            "name": "b", "extra_sglang_args": "--flag-b",
+            "name": "b", "extra_server_args": "--flag-b",
             "extra_envs": {}, "outcome": "REVERT",
         }},
         "rejected": [{
@@ -436,7 +436,7 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
                 "tested": {fp_dup: {
                     "fingerprint": fp_dup,
                     "name": "previous_run_name",
-                    "extra_sglang_args": "--dup-flag",
+                    "extra_server_args": "--dup-flag",
                     "extra_envs": {},
                     "outcome": "REVERT",
                 }},

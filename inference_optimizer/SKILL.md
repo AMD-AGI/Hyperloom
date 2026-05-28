@@ -744,7 +744,7 @@ Orchestration can route per-task via two `task.params` knobs
   known leak destination already on `$INFERENCE_OPTIMIZER_RESCUE_PATHS`.
 
 Coordinator stamps the canonical `_baseline_params_fingerprint` (a
-projection over `benchmark_script` / `result_dir` / `extra_sglang_args` /
+projection over `benchmark_script` / `result_dir` / `extra_server_args` /
 `extra_envs` / `model_path` / `gpu_type` / `config_path` /
 `disable_run_eval`) on every baseline audit entry (success path in
 `_promote_to_shared_state`, failure path in `_handle_unpromotable_result`).
@@ -1070,7 +1070,7 @@ The optimizer should:
 5. Require compile + correctness + microbench/E2E evidence before KEEP.
 6. Use `explore_search` to test parameters incrementally and remember
   rejected candidates across resume. The ledger keys entries by
-  **content fingerprint** (a sha1 hash of sorted `extra_sglang_args` +
+  **content fingerprint** (a sha1 hash of sorted `extra_server_args` +
   sorted `extra_envs`), so renaming an already-tested variant does not
   bypass dedup — LLM-supplied `params.grid` is filtered through the same
   ledger as the default seed grid.
