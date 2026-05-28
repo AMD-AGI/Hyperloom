@@ -6151,6 +6151,7 @@ class Coordinator:
         from .dynamic_action_history import (
             DispatchHistoryEvent,
             append_dispatch_history_row,
+            write_dynamic_action_telemetry,
         )
         from .dynamic_action_proposal import (
             DynamicActionStatus,
@@ -6229,6 +6230,18 @@ class Coordinator:
                 extra=extra,
             )
             try:
+                write_dynamic_action_telemetry(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    lifecycle=lifecycle,
+                    round_index=self._dynamic_action_round_id(),
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: telemetry write failed for dyn_id=%s "
+                    "(non-completed terminal)", dyn_id,
+                )
+            try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
@@ -6279,6 +6292,18 @@ class Coordinator:
                 last_outcome="emit_empty",
                 extra=extra,
             )
+            try:
+                write_dynamic_action_telemetry(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    lifecycle=DynamicActionStatus.COMPLETED_EMPTY,
+                    round_index=self._dynamic_action_round_id(),
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: telemetry write failed for dyn_id=%s "
+                    "(COMPLETED_EMPTY)", dyn_id,
+                )
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — defensive
@@ -6358,6 +6383,18 @@ class Coordinator:
                     ),
                 },
             )
+            try:
+                write_dynamic_action_telemetry(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    lifecycle=DynamicActionStatus.CRITIC_REJECTED,
+                    round_index=self._dynamic_action_round_id(),
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: telemetry write failed for dyn_id=%s "
+                    "(mechanical CRITIC_REJECTED)", dyn_id,
+                )
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — defensive
@@ -6452,8 +6489,12 @@ class Coordinator:
         from .dynamic_action_history import (
             DispatchHistoryEvent,
             append_dispatch_history_row,
+            write_dynamic_action_telemetry,
         )
-        from .dynamic_action_proposal import DynamicActionStatus
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            TERMINAL_LIFECYCLE_STATUSES,
+        )
         from ..session_paths import dynamic_action_spec_path
 
         params = pending.payload.get("params") or {}
@@ -6533,6 +6574,20 @@ class Coordinator:
             last_outcome=last_outcome, extra=extra,
         )
         try:
+            new_status_enum = DynamicActionStatus(new_status)
+            if new_status_enum in TERMINAL_LIFECYCLE_STATUSES:
+                write_dynamic_action_telemetry(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    lifecycle=new_status_enum,
+                    round_index=self._dynamic_action_round_id(),
+                )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: telemetry write failed for dyn_id=%s "
+                "(critic verdict mirror)", dyn_id,
+            )
+        try:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
@@ -6561,6 +6616,7 @@ class Coordinator:
         from .dynamic_action_history import (
             DispatchHistoryEvent,
             append_dispatch_history_row,
+            write_dynamic_action_telemetry,
         )
         from .dynamic_action_proposal import DynamicActionStatus
 
@@ -6623,6 +6679,19 @@ class Coordinator:
             log.exception(
                 "dynamic_action: history INTEGRATE_RESULT write failed "
                 "for dyn_id=%s", dyn_id,
+            )
+        try:
+            write_dynamic_action_telemetry(
+                session_dir=self.session_dir,
+                dyn_id=dyn_id,
+                lifecycle=lifecycle,
+                gain_pct=gain_value,
+                round_index=self._dynamic_action_round_id(),
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: telemetry write failed for dyn_id=%s "
+                "(integrate completion)", dyn_id,
             )
         # Tag the intervention ledger with a dynamic-specific action
         # name so post-hoc analytics can split KEEP rate by source
