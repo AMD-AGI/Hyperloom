@@ -3087,6 +3087,41 @@ class SharedState:
         """
         self.dynamic_action_round_count = 0
 
+    def record_dynamic_action_outcome(
+        self,
+        dyn_id: str,
+        *,
+        status: str,
+        last_outcome: str | None = None,
+        cumulative_gain: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """dynamic_action.MD P5 §6 — update the summary row keyed by
+        ``dyn_id`` with the latest lifecycle outcome.
+
+        Coordinator-only writer (CORE_STATE_FIELDS guards it). The
+        existing summary dict is preserved field-by-field; only the
+        keys passed in are touched so multiple lifecycle steps can
+        layer their data without clobbering prior writes.
+
+        Idempotent: replaying the same outcome on the same dyn_id is
+        a no-op aside from the ``last_updated_at`` timestamp.
+        """
+        key = str(dyn_id or "").strip()
+        if not key:
+            return
+        existing = dict(self.dynamic_actions.get(key) or {})
+        existing["status"] = str(status or "").strip()
+        if last_outcome is not None:
+            existing["last_outcome"] = str(last_outcome)
+        if cumulative_gain is not None:
+            existing["cumulative_gain"] = float(cumulative_gain)
+        if extra:
+            for k, v in extra.items():
+                existing[k] = v
+        existing["last_updated_at"] = _now_iso()
+        self.dynamic_actions[key] = existing
+
     def record_specialist_patch_verdict(
         self, specialist_task_id: str, verdict: str,
     ) -> None:
