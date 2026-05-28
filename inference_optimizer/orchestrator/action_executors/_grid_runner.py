@@ -28,6 +28,8 @@ from typing import Any
 
 import yaml
 
+from ._robustness_pulse import pulse as _robustness_pulse
+from ._subprocess_kill import OVERTIME_KILL_RETURNCODE, run_with_session_kill
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
@@ -99,10 +101,11 @@ def _resolve_magpie_python() -> str:
 
     def _can_import_magpie(py: str) -> bool:
         try:
-            return subprocess.run(
+            proc = run_with_session_kill(
                 [py, "-c", "import Magpie"],
                 capture_output=True, timeout=10,
-            ).returncode == 0
+            )
+            return getattr(proc, "returncode", 1) == 0
         except Exception:
             return False
 
@@ -131,6 +134,435 @@ def _resolve_session_dir() -> Path:
 
 _MAGPIE_CWD_DEFAULT = "/tmp"
 _VARIANT_TIMEOUT_SEC_DEFAULT = 2400
+
+
+# ---------------------------------------------------------------------------
+# User-declared variant skip list
+#
+# Operators (or the brain agent via the prompt's Environment block) can
+# pre-prune the search grid by declaring SKIP_VARIANTS. The value is a
+# comma/whitespace-separated list of variant patterns; each pattern is
+# matched against ``GridVariant.name`` either exactly or as a fnmatch glob
+# (``*`` / ``?`` / ``[abc]`` supported). Empty patterns are ignored.
+#
+# Examples
+# --------
+#   SKIP_VARIANTS=attn_aiter                 # exact name
+#   SKIP_VARIANTS=attn_aiter,sched_dfs       # two exact names
+#   SKIP_VARIANTS=attn_*,vllm_aiter_fp8bmm   # glob + exact mixed
+#
+# Resolution order (most-specific wins):
+#   params["skip_variants"]  >  $SKIP_VARIANTS  >  ""
+#
+# The helper is intentionally *only* a name-based filter; no model/TP
+# predicates here. Model-aware static rules live in each executor's own
+# ``_filter_incompatible_variants`` (kept as a safety net) and will
+# eventually migrate to the KB.
+import fnmatch as _fnmatch  # noqa: E402  (kept near callers for grep-ability)
+
+
+def resolve_skip_spec(params: dict | None) -> str:
+    """Resolve the active skip spec from task params + process env.
+
+    ``params["skip_variants"]`` may be a list[str] or a single str; both are
+    flattened to comma-joined form before pattern parsing.
+    """
+    val = ""
+    if params and "skip_variants" in params:
+        raw = params.get("skip_variants")
+        if isinstance(raw, (list, tuple)):
+            val = ",".join(str(x) for x in raw if x is not None)
+        elif raw is not None:
+            val = str(raw)
+    if not val.strip():
+        val = os.environ.get("SKIP_VARIANTS", "")
+    return (val or "").strip()
+
+
+def _parse_skip_spec(spec: str) -> list[str]:
+    """Split ``spec`` on commas and whitespace; drop empties."""
+    if not spec:
+        return []
+    out: list[str] = []
+    for token in spec.replace("\n", ",").split(","):
+        for sub in token.split():
+            t = sub.strip()
+            if t:
+                out.append(t)
+    return out
+
+
+# Compiled here so callers don't re-compile per grid iteration.
+# Matches both ``--cuda-graph-max-bs 64`` (space-separated) and
+# ``--cuda_graph_max_bs=64`` (underscore + equals) so glob-style or
+# pep8-style flag strings both parse. Captures the integer value.
+_RE_CUDA_GRAPH_MAX_BS = re.compile(
+    r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)"
+)
+
+
+def apply_multi_node_invalid_variants(
+    grid: list["GridVariant"],
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Drop variants known to underperform in multi-node mode.
+
+    Currently enforces one rule, which has been confirmed empirically
+    on the GLM-5 TP16 multi-node setup:
+
+      - ``--cuda-graph-max-bs N`` where ``N < $CONC`` is auto-skipped.
+        Justification: the cuda graph cache can hold only ``N`` distinct
+        batch sizes; when the bench runs with concurrency > N, every
+        cross-node decode tick misses the graph cache and falls back to
+        eager mode, costing ~50% throughput. Three runs at
+        ``max_bs`` ∈ {8, 16, 32} with CONC=64 produced ~245 tok/s vs the
+        baseline 549 tok/s — i.e. 35-40 min per variant of certain
+        regression. Single-node has the same theoretical issue but the
+        per-variant cost is small enough (~10 min) that empirical
+        confirmation is still useful, so the filter is multi-node-only.
+
+    Returns ``(kept, dropped)`` matching ``apply_user_skip_list``'s
+    shape. Single-node short-circuits to ``(list(grid), [])`` so the
+    call site stays branch-free; the per-variant ``log.info`` in callers
+    only fires for actual multi-node drops.
+    """
+    from ._multi_node_env import is_multi_node
+    if not is_multi_node():
+        return list(grid), []
+    try:
+        conc = int(os.environ.get("CONC", "64") or 64)
+    except ValueError:
+        conc = 64
+    if conc <= 0:
+        return list(grid), []
+    kept: list[GridVariant] = []
+    dropped: list[dict] = []
+    for v in grid:
+        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_sglang_args or "")
+        if m and int(m.group(1)) < conc:
+            dropped.append({
+                "name": v.name,
+                "source": "multi_node_invalid",
+                "reason": (
+                    f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
+                    "(multi-node graph-cache miss → known regression)"
+                ),
+            })
+        else:
+            kept.append(v)
+    return kept, dropped
+
+
+# Multi-node likely-winner priority for grid reordering. Tags are matched
+# against ``GridVariant.name`` and ``GridVariant.note`` as case-insensitive
+# substrings; earlier tags win. Rationale per tag:
+#
+# Params (`_MN_PARAMS_PRIORITY`):
+#   * cuda_graph_max_bs — matches CONC is the empirical single best
+#     server-param lever in multi-node TP runs (24ldn implied +0.93%
+#     vs baseline; A1 already pre-filters bs<CONC, leaving only the
+#     viable cap as the leading candidate).
+#   * mem_fraction — bumping mem-fraction-static unlocks KV-cache
+#     headroom for long-context workloads; cheap to test, sometimes
+#     big.
+#   * max_num_seqs — marathon KB validated +84% on Kimi-K2.5; tier-1
+#     KV-cache class param.
+#   * decode_steps — continuous decode steps; modest leverage.
+#   * schedule / nccl — historically marginal or negative.
+#
+# Backends (`_MN_BACKENDS_PRIORITY`):
+#   * aiter — covers attn_aiter / decode_aiter / moe_aiter, the largest
+#     historical multi-node wins (+10-30%).
+#   * tier3_fusion — enable_fused_moe / enable_mixed_chunk.
+#   * tier2_schedule — lpm / dfs / overlap policies.
+#   * tier5_comm — custom_ar (small leverage, expensive to test).
+#
+# Names not matching any tag sort to the end in original order.
+_MN_PARAMS_PRIORITY: tuple[str, ...] = (
+    "cuda_graph_max_bs",
+    "mem_fraction",
+    "max_num_seqs",
+    "decode_steps",
+    "schedule",
+    "nccl",
+)
+_MN_BACKENDS_PRIORITY: tuple[str, ...] = (
+    "aiter",
+    "tier3_fusion",
+    "tier2_schedule",
+    "tier5_comm",
+)
+
+
+def reorder_grid_for_multi_node(
+    grid: list["GridVariant"],
+    *,
+    priority_tags: tuple[str, ...],
+) -> list["GridVariant"]:
+    """Reorder grid so likely-winners run first in multi-node mode.
+
+    Single-node short-circuits to ``list(grid)`` (preserves the original
+    DEFAULT_*_GRID order bit-for-bit). Multi-node sorts each variant
+    into a bucket by the first ``priority_tag`` that appears as a
+    case-insensitive substring of ``variant.name`` or ``variant.note``.
+    Variants matching no tag land at the end. Sort is stable so ties
+    preserve original grid order.
+
+    Why this matters for multi-node only: each variant costs ~35-40 min
+    (cmd_restart_server + bench + cleanup), so a 5-6 hr grid easily
+    hits the run's ``--max-hours`` cap before the likely winners get a
+    chance. Reordering surfaces empirically-strong candidates in the
+    first 1-3 rounds, leaving the long-tail variants to optional later
+    rounds.
+    """
+    from ._multi_node_env import is_multi_node
+    if not is_multi_node():
+        return list(grid)
+
+    def _priority(v: GridVariant) -> int:
+        haystack = f"{v.name} {v.note or ''}".lower()
+        for i, tag in enumerate(priority_tags):
+            if tag.lower() in haystack:
+                return i
+        return len(priority_tags)
+
+    return sorted(grid, key=_priority)
+
+
+# ---------------------------------------------------------------------------
+# Single-node + compatibility filters (companion to A1's multi-node filter).
+#
+# These two helpers protect single-node and incompatible-model paths from
+# wasted sglang restarts on variants whose flags either (a) only make sense
+# in multi-node, or (b) require a model class / sglang version that the
+# current run does not have. Each fires BEFORE the variant is dispatched
+# to a real benchmark, so a 5-10 min restart per filtered variant is saved.
+#
+# Both are conservative: probe failures (e.g. ``sglang --help`` not
+# importable in the sandbox) fall through to "no filtering" so the
+# downstream grid_runner's ``status="failed"`` + rejected-ledger path
+# still handles the bad variant gracefully. Net effect: in the best
+# case we save the time, in the worst case we waste one restart per
+# bad variant (same as the no-filter baseline).
+# ---------------------------------------------------------------------------
+
+
+def apply_single_node_invalid_variants(
+    grid: list["GridVariant"],
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Drop variants whose ``note`` is ``multi_node_only_*`` when single-node.
+
+    Companion to :func:`apply_multi_node_invalid_variants`. Variants the
+    grid library has tagged with ``note="multi_node_only_..."`` (e.g.
+    DeepEP MoE, ep_moe — flags that NCCL-cross-node-distribute MoE
+    expert shards) are silently dropped in single-node mode where they
+    would either reject the flag or no-op silently. Multi-node path
+    returns ``(list(grid), [])`` so the multi-node grid is preserved
+    bit-for-bit.
+
+    The convention ``note="multi_node_only_*"`` is owned by the grid
+    library (``params.py`` / ``backends.py``); we never invent the
+    classification here.
+    """
+    from ._multi_node_env import is_multi_node
+    if is_multi_node():
+        return list(grid), []
+    kept: list[GridVariant] = []
+    dropped: list[dict] = []
+    for v in grid:
+        note_l = (v.note or "").lower()
+        if note_l.startswith("multi_node_only"):
+            dropped.append({
+                "name": v.name,
+                "source": "single_node_invalid",
+                "reason": (
+                    f"variant note={v.note!r} is multi-node-only "
+                    "(silently dropped in single-node path)"
+                ),
+            })
+        else:
+            kept.append(v)
+    return kept, dropped
+
+
+# Multi-node-hot sglang flags that depend on model class (MLA / MoE) or
+# sglang version. Each entry maps a substring of ``extra_sglang_args`` to
+# a compatibility predicate. Keep this list small and well-documented;
+# anything more dynamic should live in the action_registry's
+# ``applicable_when`` schema instead.
+_COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
+    ("--enable-flashinfer-mla", "mla"),
+    ("--enable-deepep-moe",      "moe"),
+    ("--enable-ep-moe",          "moe"),
+)
+
+
+# Cache for ``_probe_sglang_help_text`` — populated on first call so we
+# avoid spawning a subprocess per-variant. Cleared by ``importlib.reload``
+# during tests. Sentinel ``None`` = not yet probed.
+_SGLANG_HELP_CACHE: str | None = None
+
+
+def _probe_sglang_help_text() -> str:
+    """Best-effort fetch of ``sglang launch_server --help`` text.
+
+    Returns ``""`` on ANY failure (subprocess timeout, sglang not
+    importable in the current Python, sandbox without sglang installed,
+    test-time subprocess mocks that mis-handle this probe's argv shape,
+    ValueError from a too-strict mock side_effect, etc.). Callers MUST
+    treat empty as "I don't know what sglang supports" and fall through
+    to NOT filtering (defer to graceful runtime failure).
+
+    The broad ``except Exception`` is deliberate: this probe is purely
+    a perf optimisation (saves a wasted 10-min sglang restart per
+    incompatible variant). It must NEVER crash the optimizer or fail
+    a unit test that mocks ``subprocess.run`` for unrelated reasons.
+    """
+    global _SGLANG_HELP_CACHE
+    if _SGLANG_HELP_CACHE is not None:
+        return _SGLANG_HELP_CACHE
+    try:
+        proc = subprocess.run(
+            ["python3", "-c",
+             "from sglang.launch_server import parser; parser.print_help()"],
+            capture_output=True, text=True, timeout=10,
+        )
+        _SGLANG_HELP_CACHE = (proc.stdout or "") + (proc.stderr or "")
+    except Exception:  # noqa: BLE001 — best-effort, see docstring
+        _SGLANG_HELP_CACHE = ""
+    return _SGLANG_HELP_CACHE
+
+
+def _detect_model_class(model_path: str) -> tuple[bool, bool]:
+    """Heuristic detect of (is_mla_model, is_moe_model) from model path.
+
+    Uses lowercased substring match on the model path. This is a cheap
+    O(N) check intended to filter out an obviously-wrong variant before
+    spending 10 min on a doomed sglang restart. False negatives (model
+    we don't recognise) defer to graceful runtime failure; false
+    positives (we mis-classify a model as MLA/MoE) cost one restart
+    same as if we hadn't filtered.
+
+    Known MLA models: DeepSeek (V2/V3/R1), GLM-5, Kimi-K2 — all share
+    MLA-style multi-head latent attention. Known MoE models: anything
+    in the MLA set + Qwen3-MoE.
+    """
+    p = model_path.lower()
+    mla_keys = ("glm-5", "glm5", "deepseek", "kimi-k2", "kimi_k2", "kimi")
+    moe_keys = (
+        "glm-5", "glm5", "deepseek-v2", "deepseek-v3", "deepseek-r1",
+        "kimi", "qwen3-moe", "qwen3_moe", "mixtral",
+    )
+    is_mla = any(k in p for k in mla_keys)
+    is_moe = any(k in p for k in moe_keys)
+    return is_mla, is_moe
+
+
+def apply_compatibility_filter(
+    grid: list["GridVariant"],
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Skip variants known to be incompatible with current model/sglang.
+
+    Two filter dimensions, each conservative on probe failure:
+
+    1. **Model class** — variants requiring MLA attention (e.g.
+       ``--enable-flashinfer-mla``) or expert-parallel MoE (e.g.
+       ``--enable-deepep-moe``) are dropped when ``$MODEL_PATH`` lacks
+       the corresponding model-family keyword. If ``$MODEL_PATH`` is
+       unset, both predicates are assumed True (let the variant try).
+    2. **sglang version** — variants whose flag literal does NOT appear
+       in ``sglang launch_server --help`` output are dropped. If the
+       help text can't be fetched (sglang not importable in sandbox),
+       both predicates are assumed True (defer to graceful failure).
+
+    Returns the same ``(kept, dropped)`` shape as
+    ``apply_user_skip_list`` so callers can merge dropped entries
+    uniformly.
+    """
+    model_path = os.environ.get("MODEL_PATH", "")
+    if model_path:
+        is_mla, is_moe = _detect_model_class(model_path)
+    else:
+        # No MODEL_PATH set -> can't detect -> assume compatible.
+        is_mla, is_moe = True, True
+
+    sglang_help = _probe_sglang_help_text()
+    sglang_help_available = bool(sglang_help)
+
+    kept: list[GridVariant] = []
+    dropped: list[dict] = []
+    for v in grid:
+        args = v.extra_sglang_args or ""
+        skip_reason: str | None = None
+        for flag, required_class in _COMPATIBILITY_FLAG_RULES:
+            if flag not in args:
+                continue
+            # Model-class predicate
+            class_ok = (
+                (required_class == "mla" and is_mla)
+                or (required_class == "moe" and is_moe)
+            )
+            if not class_ok:
+                skip_reason = (
+                    f"{flag} requires {required_class.upper()} model; "
+                    f"MODEL_PATH={model_path!r} not recognised as "
+                    f"{required_class.upper()}-class"
+                )
+                break
+            # sglang flag-support predicate (only when help is readable)
+            if sglang_help_available and flag not in sglang_help:
+                skip_reason = (
+                    f"{flag} not present in `sglang --help` output; "
+                    "current sglang version likely too old"
+                )
+                break
+        if skip_reason:
+            dropped.append({
+                "name": v.name,
+                "source": "compatibility_filter",
+                "reason": skip_reason,
+            })
+        else:
+            kept.append(v)
+    return kept, dropped
+
+
+def apply_user_skip_list(
+    grid: list["GridVariant"],
+    *,
+    skip_spec: str,
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Drop variants whose name matches any pattern in ``skip_spec``.
+
+    Returns ``(kept, dropped)`` where each dropped entry is
+    ``{"name", "reason", "source"}`` with source=``"user_skip"`` so
+    callers can distinguish user-driven skips from model/kernel
+    incompatibility skips when both layers run.
+    """
+    patterns = _parse_skip_spec(skip_spec)
+    if not patterns:
+        return list(grid), []
+
+    kept: list[GridVariant] = []
+    dropped: list[dict] = []
+    for v in grid:
+        matched_pat: str | None = None
+        for pat in patterns:
+            # Exact name first (cheaper, more common), then fnmatch for
+            # globs. fnmatch also accepts plain names so the second branch
+            # alone would suffice, but keeping the fast-path makes logs
+            # explicit ("matched 'attn_aiter'" vs "matched 'attn_*'").
+            if pat == v.name or _fnmatch.fnmatchcase(v.name, pat):
+                matched_pat = pat
+                break
+        if matched_pat is None:
+            kept.append(v)
+            continue
+        dropped.append({
+            "name": v.name,
+            "source": "user_skip",
+            "reason": f"matched SKIP_VARIANTS pattern '{matched_pat}'",
+        })
+    return kept, dropped
 
 
 @dataclass
@@ -170,7 +602,28 @@ class VariantResult:
     returncode: int | None = None
     nonfatal_warnings: list[str] = field(default_factory=list)
     error: str | None = None
+    # Short tag for failure classification — matches the label used by
+    # ``_write_variant_abort_marker`` (e.g. ``mn_server_restart_failed``,
+    # ``magpie_timeout``, ``yaml_build_error``, ``no_benchmark_workspace``,
+    # ``magpie_nonzero_invalid_measurement``, ``benchmark_report_missing``,
+    # ``benchmark_report_invalid_metric``). Empty string for succeeded
+    # variants. Threaded into ``coordinator._summarize_failed_variants``
+    # so the LLM critic prompt sees ``failed_variants[*].error_class``
+    # instead of a generic ``None``.
+    error_class: str = ""
     note: str = ""
+    # Fix-E (Q3 — Q3c): wall-clock seconds the Magpie subprocess
+    # actually consumed. Populated on success AND on the
+    # ``killed_overtime`` path so the ExploreExecutor can record
+    # ``runtime_sec`` + ``wall_clock_ratio_vs_baseline`` against the
+    # variant ledger without re-measuring.
+    runtime_sec: float | None = None
+    # Fix-E: True iff this variant was reaped by the
+    # ``baseline_runtime_sec * explore_overtime_kill_ratio`` soft
+    # deadline (vs a regular crash / hard timeout / success). Caller
+    # is expected to demote this to a synthetic outcome
+    # ``KILLED_OVERTIME`` (no tput, no fingerprint promotion).
+    killed_overtime: bool = False
 
     @property
     def fingerprint(self) -> str:
@@ -198,7 +651,10 @@ class VariantResult:
             "returncode":         self.returncode,
             "nonfatal_warnings":  self.nonfatal_warnings,
             "error":              self.error,
+            "error_class":        self.error_class,
             "note":               self.note,
+            "runtime_sec":        self.runtime_sec,
+            "killed_overtime":    self.killed_overtime,
         }
 
 
@@ -266,6 +722,11 @@ def sanitize_result_dir(value: Any) -> str | None:
 def server_args_env_name(framework: str | None) -> str:
     """Return the Magpie env var used to append backend server args."""
     name = str(framework or "").strip().lower()
+    # atom check first: "atom" is not a substring of vllm/sglang, but keep
+    # ordering explicit so future framework names with overlapping substrings
+    # cannot accidentally match the wrong branch.
+    if "atom" in name:
+        return "EXTRA_ATOM_ARGS"
     if "vllm" in name:
         return "EXTRA_VLLM_ARGS"
     return "EXTRA_SGLANG_ARGS"
@@ -440,7 +901,17 @@ def _kill_stale_servers() -> None:
 
     NOTE: uses /proc scan instead of `subprocess.run(["pgrep",...])` to avoid
     conflicting with test mocks that patch subprocess.run for Magpie calls.
+
+    Multi-node short-circuit: in --nodes>=2 mode the inference servers run
+    inside the RayJob pods, NOT in this sandbox. Scanning sandbox /proc
+    finds nothing matching, and clearing sandbox /dev/shm/vllm* would only
+    remove unrelated state. Skip the whole sweep + the 2s settle sleep —
+    server lifecycle there is owned by `multi_node restart-server`.
     """
+    from ._multi_node_env import is_multi_node
+    if is_multi_node():
+        return
+
     import signal
     import glob
     import time
@@ -486,6 +957,7 @@ def _run_magpie(
     timeout_sec: int,
     cwd: str,
     result_dir: str | None = None,
+    soft_deadline_sec: float | None = None,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
@@ -495,6 +967,13 @@ def _run_magpie(
     when caller doesn't override) so even a Magpie script that respects
     ``$RESULT_DIR`` writes ``inferencex_result.json`` into the per-task
     workspace rather than ``/workspace/``.
+
+    ``soft_deadline_sec`` is the Fix-E per-variant overtime cap. When
+    set, ``run_with_session_kill`` reaps the tree once the deadline
+    elapses and returns a sentinel ``returncode = OVERTIME_KILL_RETURNCODE``
+    instead of raising ``TimeoutExpired``. The caller distinguishes
+    "overtime kill" (returncode sentinel) from "hard timeout"
+    (TimeoutExpired) and from "crash" (any other nonzero).
     """
     # Pre-clean: kill lingering server processes + clear shared memory so the
     # next vLLM/SGLang startup doesn't collide with stale resources.
@@ -507,6 +986,27 @@ def _run_magpie(
     magpie_dir = os.environ.get("MAGPIE_DIR", "")
     if magpie_dir:
         env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
+
+    # Multi-node mode: tell Magpie to skip its local-server launch and
+    # point benchmark_serving at the head pod's ClusterIP. Returns {} in
+    # single-node mode so the env stays exactly as before (no-op guard).
+    from ._multi_node_env import magpie_remote_env
+    env.update(magpie_remote_env())
+
+    # #210 (Deval, comment 8): pin Magpie's InferenceX-resolution to
+    # ``$INFERENCEX_PATH`` so Magpie loads the SAME InferenceX checkout
+    # that Hyperloom's ``_inferencex_patcher`` has patched. Without
+    # this, Magpie's ``_resolve_default_inferencex_dir`` falls through
+    # to ``./InferenceX`` next to its repo or
+    # ``$XDG_CACHE_HOME/magpie/InferenceX``, either of which may be a
+    # separate, unpatched checkout — the symptom reported in #210
+    # comments 4 + 6. ``MAGPIE_INFERENCEX_PATH`` is the highest-
+    # precedence resolution rung in Magpie itself
+    # (``Magpie/modes/benchmark/inferencex.py:43``), so this is the
+    # documented contract for tying the two checkouts together.
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+    if inferencex_path:
+        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
     # Always-on RESULT_DIR default: covers Magpie scripts that respect
     # the env var (and would otherwise fall back to a hardcoded path).
     # Scripts that ignore RESULT_DIR (e.g. ``dsr1_fp8_mi300x.sh`` with its
@@ -532,9 +1032,16 @@ def _run_magpie(
         "--output-dir", str(output_dir),
         "--run-mode", "local",
     ]
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout_sec,
-        env=env, cwd=cwd,
+    # ``run_with_session_kill`` (imported at module level so tests can
+    # patch it as ``_grid_runner.run_with_session_kill``) is the
+    # ``subprocess.run``-compatible wrapper that launches Magpie in its
+    # own POSIX session and tears down the whole descendant tree on
+    # every exit path (bugs.md §B — leaked vLLM / SGLang servers across
+    # grid variants were what later sourced half-truncated benchmark
+    # scripts in bugs.md §C #1). See ``_subprocess_kill.py``.
+    proc = run_with_session_kill(
+        cmd, env=env, cwd=cwd, timeout=timeout_sec,
+        soft_deadline_sec=soft_deadline_sec,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -554,6 +1061,7 @@ async def run_grid(
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
     result_dir: str | None = None,
+    soft_deadline_sec: float | None = None,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -578,10 +1086,32 @@ async def run_grid(
     ``$RESULT_DIR`` so scripts that respect the env var write into the
     variant slot. The salvage path is still wired in (mtime-gated per
     variant below) for scripts that ignore both knobs.
+
+    ``soft_deadline_sec`` (Fix E — per-variant overtime kill): when
+    set, every variant's Magpie subprocess is reaped once its
+    wall-clock exceeds this many seconds; the resulting
+    :class:`VariantResult` has ``status='failed'``,
+    ``killed_overtime=True`` and ``runtime_sec`` populated. Caller
+    (ExploreExecutor) demotes those to the synthetic
+    ``KILLED_OVERTIME`` outcome instead of running them through the
+    normal KEEP / REVERT / FAILED ladder. None / 0 = disabled (legacy
+    behaviour, only ``variant_timeout_sec`` is enforced).
     """
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
     results: list[VariantResult] = []
+    # Variant-boundary robustness pulse — runs a bounded deterministic
+    # robustness tick after every variant (success OR failure) so that a
+    # mid-grid GPU leak, SGLang crash, or ROCm error spike surfaces
+    # between variants instead of waiting for the whole grid (often
+    # 30+ minutes) to finish. Best-effort, ≤ ``_PULSE_TIMEOUT_SEC``;
+    # see ``_robustness_pulse.py`` for the contract.
+    async def _pulse_after_variant(idx: int) -> None:
+        try:
+            await _robustness_pulse(tick_index=idx)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("robustness pulse swallowed: %r", exc)
+
     for i, variant in enumerate(grid):
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
         try:
@@ -592,20 +1122,83 @@ async def run_grid(
                 benchmark_script=benchmark_script,
             )
         except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: yaml_build_error: %r",
+                i + 1, len(grid), variant.name, exc,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="yaml_build_error",
+                error_summary=repr(exc),
+                extra_args=variant.extra_sglang_args,
+            )
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed", error=f"yaml_build_error: {exc!r}",
+                error_class="yaml_build_error",
+                note=variant.note,
+            ))
+            await _pulse_after_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
+
+        from ._multi_node_env import log_mn_banner
+        log_mn_banner(
+            "grid_runner", log,
+            variant=f"{i+1}/{len(grid)}:{variant.name}",
+        )
+        log.info(
+            "grid_runner: variant %d/%d name=%s args=%s",
+            i + 1, len(grid), variant.name, variant.extra_sglang_args,
+        )
+
+        # Multi-node only: restart sglang/vllm with this variant's
+        # server-side flags so each grid row runs against a fresh server
+        # (parity with single-node Magpie's PHASE=all). No-op in
+        # single-node mode — the helper short-circuits when nodes<2.
+        from ._multi_node_server_lifecycle import (
+            ServerRestartFailed,
+            restart_server_for_round,
+        )
+        try:
+            # PD knobs auto-resolved by the helper from $PD_* env. The
+            # grid runner doesn't sweep PD ratio yet (see params.py for
+            # the grid surface), so PD config stays constant across
+            # variants within one run.
+            await restart_server_for_round(
+                extra_sglang_args=merge_server_args(
+                    base_extra_args, variant.extra_sglang_args,
+                ),
+                model_path=model_path,
+                ep=int(os.environ.get("EP") or 0) or None,
+            )
+        except ServerRestartFailed as exc:
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: "
+                "mn_server_restart_failed: %s",
+                i + 1, len(grid), variant.name, exc,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="mn_server_restart_failed",
+                error_summary=str(exc),
+                extra_args=variant.extra_sglang_args,
+            )
+            results.append(VariantResult(
+                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                extra_envs=dict(variant.extra_envs),
+                status="failed",
+                error=f"mn_server_restart_failed: {exc}",
+                error_class="mn_server_restart_failed",
                 note=variant.note,
             ))
             if not keep_going_on_failure:
                 break
             continue
-
-        log.info(
-            "grid_runner: variant %d/%d name=%s args=%s",
-            i + 1, len(grid), variant.name, variant.extra_sglang_args,
-        )
 
         # Snapshot wall-clock immediately before launch so the salvage
         # path can mtime-gate documented Magpie leak destinations
@@ -623,6 +1216,7 @@ async def run_grid(
                 timeout_sec=variant_timeout_sec,
                 cwd=cwd,
                 result_dir=result_dir,
+                soft_deadline_sec=soft_deadline_sec,
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks (``server.log`` / GPU metrics /
@@ -635,15 +1229,79 @@ async def run_grid(
                 to_destination,
                 subprocess_started_unix=variant_started_unix,
             )
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: "
+                "magpie timeout (timeout_sec=%d): %s",
+                i + 1, len(grid), variant.name, variant_timeout_sec, exc,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="magpie_timeout",
+                error_summary=str(exc),
+                extra_args=variant.extra_sglang_args,
+            )
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
-                status="failed", error=f"timeout: {exc}", note=variant.note,
+                status="failed", error=f"timeout: {exc}",
+                error_class="magpie_timeout",
+                note=variant.note,
+                runtime_sec=round(
+                    max(0.0, time.time() - variant_started_unix), 2,
+                ),
                 nonfatal_warnings=[
                     f"harvested_leaked_artifact:{src}"
                     for src, _ in to_harvested
                 ],
             ))
+            await _pulse_after_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
+
+        # Fix E (Q3c): the soft overtime gate fired. Record a synthetic
+        # ``killed_overtime=True`` VariantResult with no tput / report
+        # so the ExploreExecutor can demote this variant to the
+        # ``KILLED_OVERTIME`` ledger outcome (no fingerprint promotion,
+        # no stack advance). We still run harvest_leaked_artifacts so
+        # any server.log / GPU metrics the wrapper managed to write
+        # before being reaped land alongside ``variant_NN_<name>/`` for
+        # post-mortem.
+        if rc == OVERTIME_KILL_RETURNCODE:
+            variant_runtime_sec = round(
+                max(0.0, time.time() - variant_started_unix), 2,
+            )
+            ok_candidates = sorted(slot.glob("benchmark_*"))
+            ok_destination = ok_candidates[-1] if ok_candidates else slot
+            ok_harvested = harvest_leaked_artifacts(
+                ok_destination,
+                subprocess_started_unix=variant_started_unix,
+            )
+            results.append(VariantResult(
+                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                extra_envs=dict(variant.extra_envs),
+                status="failed",
+                returncode=rc,
+                killed_overtime=True,
+                runtime_sec=variant_runtime_sec,
+                error=(
+                    f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
+                    f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
+                ),
+                note=variant.note,
+                nonfatal_warnings=[
+                    f"harvested_leaked_artifact:{src}"
+                    for src, _ in ok_harvested
+                ],
+            ))
+            log.info(
+                "_grid_runner: variant %s killed_overtime "
+                "(runtime=%.1fs deadline=%.1fs)",
+                variant.name, variant_runtime_sec,
+                float(soft_deadline_sec or 0.0),
+            )
+            await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -672,18 +1330,33 @@ async def run_grid(
             )
         if not candidates:
             harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
+            no_ws_error_summary = (
+                (stderr or stdout)[-2000:]
+                if rc != 0 else "no benchmark_* workspace produced"
+            )
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: "
+                "no_benchmark_workspace (rc=%s)",
+                i + 1, len(grid), variant.name, rc,
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="no_benchmark_workspace",
+                error_summary=no_ws_error_summary,
+                extra_args=variant.extra_sglang_args,
+            )
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 returncode=rc,
-                error=(
-                    (stderr or stdout)[-2000:]
-                    if rc != 0 else "no benchmark_* workspace produced"
-                ),
+                error=no_ws_error_summary,
+                error_class="no_benchmark_workspace",
                 nonfatal_warnings=harvest_tags,
                 note=variant.note,
             ))
+            await _pulse_after_variant(i)
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
@@ -704,10 +1377,24 @@ async def run_grid(
         if not measurement.get("valid_measurement"):
             if rc != 0:
                 error = (stderr or stdout)[-2000:]
+                invalid_class = "magpie_nonzero_invalid_measurement"
             elif not report:
                 error = "benchmark_report missing"
+                invalid_class = "benchmark_report_missing"
             else:
                 error = "benchmark_report missing valid throughput/completed requests"
+                invalid_class = "benchmark_report_invalid_metric"
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s): %s",
+                i + 1, len(grid), variant.name, invalid_class, rc, error[:200],
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class=invalid_class,
+                error_summary=error,
+                extra_args=variant.extra_sglang_args,
+            )
             results.append(VariantResult(
                 name=variant.name, extra_sglang_args=variant.extra_sglang_args,
                 extra_envs=dict(variant.extra_envs),
@@ -719,8 +1406,10 @@ async def run_grid(
                 returncode=rc,
                 nonfatal_warnings=warnings,
                 error=error,
+                error_class=invalid_class,
                 note=variant.note,
             ))
+            await _pulse_after_variant(i)
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
@@ -744,22 +1433,56 @@ async def run_grid(
             nonfatal_warnings=warnings,
             error=(stderr or stdout)[-2000:] if rc != 0 else None,
             note=variant.note,
+            runtime_sec=round(
+                max(0.0, time.time() - variant_started_unix), 2,
+            ),
         ))
         log.info(
             "grid_runner: variant %s tput=%.1f tok/s",
             variant.name, results[-1].output_throughput or 0.0,
         )
+        await _pulse_after_variant(i)
     return results
+
+
+SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 1.0
+MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 2.0
 
 
 def pick_winners(
     results: list[VariantResult],
     baseline_tput: float,
     *,
-    keep_threshold_pct: float = 1.0,
+    keep_threshold_pct: float | None = None,
 ) -> list[VariantResult]:
-    """Filter the variants whose throughput beats ``baseline_tput`` by
-    ``keep_threshold_pct`` percent (marathon §params: > 1% = KEEP)."""
+    """Filter variants whose throughput beats ``baseline_tput`` by
+    ``keep_threshold_pct`` percent (marathon §params: > 1% = KEEP).
+
+    Resolution order for ``keep_threshold_pct``:
+
+    1. Explicit caller value (any float, including 0.5/1.0/3.0) wins.
+       This preserves legacy single-node behaviour bit-for-bit (callers
+       like the params executor still pass their own 0.5% default).
+    2. ``None`` (i.e. caller did not pass a value) falls back to:
+       * **multi-node**: ``MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT`` (2.0%).
+         Multi-node noise floor is empirically ~1-2% (jitter from
+         cross-node RDMA + Ray scheduling + GPU clock drift), so the
+         1.0% single-node default produced false positives that wasted
+         a ~40-min ``validate_stack`` round each.
+       * **single-node**: ``SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT``
+         (1.0%) — identical to the pre-multi-node-aware default.
+
+    Single-node call sites are bit-for-bit equivalent: ``is_multi_node()``
+    short-circuits to False without touching state, so the cutoff math
+    is unchanged.
+    """
+    if keep_threshold_pct is None:
+        from ._multi_node_env import is_multi_node
+        keep_threshold_pct = (
+            MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT
+            if is_multi_node()
+            else SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT
+        )
     cutoff = baseline_tput * (1.0 + keep_threshold_pct / 100.0)
     return [
         r for r in results
@@ -774,11 +1497,67 @@ def _safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 
+def _write_variant_abort_marker(
+    slot: Path,
+    *,
+    variant_name: str,
+    error_class: str,
+    error_summary: str,
+    extra_args: str = "",
+) -> None:
+    """Write ``abort_reason.json`` into the variant slot directory.
+
+    Why this exists: when a variant aborts before benchmark_report.json
+    is produced (ServerRestartFailed / yaml_build_error / magpie timeout
+    / no benchmark_* workspace / invalid measurement), the slot dir is
+    left with only ``config.yaml`` and a session reader cannot tell
+    "tested-but-failed" from "untested / skipped". The final-report
+    renderer and any later post-mortem tool then under-report grid
+    coverage.
+
+    Drop a small JSON marker so:
+
+    * final-report / breakdown can count failed-but-tested variants;
+    * a session reader inspecting ``runs/<action>/<task_id>/<variant>/``
+      sees an explicit reason even after the main process log was
+      rotated or truncated;
+    * the marker pairs with the ``log.warning`` line emitted next to
+      each catch site for grep-from-log triage.
+
+    Failure to write the marker is non-fatal — log and continue so a
+    full-disk / permissions issue can't escalate a single-variant
+    abort into a whole-grid abort.
+    """
+    try:
+        slot.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "variant": variant_name,
+            "error_class": error_class,
+            "error": (error_summary or "")[:2000],
+            "extra_args": extra_args,
+            "aborted_at_utc": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(),
+            ),
+        }
+        (slot / "abort_reason.json").write_text(
+            json.dumps(marker, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning(
+            "_grid_runner: failed to write abort_reason.json at %s: %s",
+            slot, exc,
+        )
+
+
 __all__ = [
     "GridVariant",
+    "MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
+    "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
     "apply_runtime_benchmark_overrides",
     "pick_winners",
+    "reorder_grid_for_multi_node",
     "run_grid",
     "sanitize_result_dir",
     "sanitize_script_name",

@@ -17,7 +17,13 @@ human operators.
 
 from __future__ import annotations
 
-from .exporter import BREAKDOWN_FILENAME, EXPORTER_VERSION, build, write_breakdown_json
+from .exporter import (
+    BREAKDOWN_FILENAME,
+    EXPORTER_VERSION,
+    build,
+    write_breakdown_json,
+    write_minimal_final_report,
+)
 from .schema import SCHEMA_VERSION
 
 __all__ = [
@@ -26,4 +32,5 @@ __all__ = [
     "SCHEMA_VERSION",
     "build",
     "write_breakdown_json",
+    "write_minimal_final_report",
 ]

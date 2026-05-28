@@ -1,0 +1,41 @@
+name: Tests with Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .[test] pytest pytest-cov coverage
+
+      - name: Run tests with coverage
+        run: |
+          pytest --cov=. --cov-report=xml --cov-report=term
+
+      - name: Coverage summary
+        run: |
+          coverage report --skip-empty | tee /tmp/coverage.txt
+          TOTAL_LINE=$(grep -E '^TOTAL ' /tmp/coverage.txt | tail -1)
+          TOTAL=$(echo "$TOTAL_LINE" | awk '{print $NF}')
+          {
+            echo "## Coverage";
+            echo "";
+            echo "Total: ${TOTAL:-unknown}";
+          } >> "$GITHUB_STEP_SUMMARY"

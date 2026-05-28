@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from inference_optimizer.orchestrator.action_executors import _inferencex_patcher
 from inference_optimizer.orchestrator.action_executors._inferencex_patcher import (
     ensure_benchmark_lib_patched,
 )
@@ -419,3 +420,181 @@ def test_benchmark_serving_patched_line_is_executable_python(
         }
     finally:
         os.environ.pop("PROFILE_EXTRA_BODY", None)
+
+
+# ===========================================================================
+# #210 fix (Deval comments 4 + 6): patch every InferenceX root, not just
+# $INFERENCEX_PATH. Magpie loads its bundled $MAGPIE_DIR/InferenceX at
+# runtime regardless of $INFERENCEX_PATH; patching only one of the two
+# leaves Magpie's actual runtime copy unpatched → profile_by_stage
+# leaks → trace_split has _extend_* / _decode_* instead of
+# _steady_state_*. These tests pin the multi-root contract.
+# ===========================================================================
+def _make_inferencex_tree_with_serving(
+    root: Path, profile_by_stage: bool = True,
+) -> Path:
+    """Build a minimal ``<root>/utils/bench_serving/benchmark_serving.py``
+    fixture so the patcher has something concrete to rewrite."""
+    bench_dir = root / "utils" / "bench_serving"
+    bench_dir.mkdir(parents=True, exist_ok=True)
+    f = bench_dir / "benchmark_serving.py"
+    f.write_text(
+        "async def x():\n"
+        "    await async_request(\n"
+        "                                         api_url=base + \"/start_profile\",\n"
+        "                                         prompt_len=test_prompt_len,\n"
+        "                                         output_len=test_output_len,\n"
+        '                                         extra_body={"num_steps": 1, '
+        '"merge_profiles": True, "profile_by_stage": True},\n'
+        "    )\n",
+        encoding="utf-8",
+    )
+    f.chmod(0o644)
+    return f
+
+
+def test_discover_inferencex_roots_dedupes_when_paths_resolve_same(
+    tmp_path, monkeypatch,
+):
+    """When ``$INFERENCEX_PATH`` and ``$MAGPIE_DIR/InferenceX`` resolve
+    to the SAME directory (the standard install layout where
+    ``ensure_inferencex`` set ``INFERENCEX_PATH=$MAGPIE_DIR/InferenceX``),
+    the discovery returns one entry, not two. Otherwise we'd patch
+    the same file twice (idempotent so harmless, but visually
+    confusing in logs)."""
+    inferencex = tmp_path / "InferenceX"
+    inferencex.mkdir()
+    magpie = tmp_path / "Magpie"
+    magpie.mkdir()
+    # Standard layout: Magpie bundles InferenceX as a sibling.
+    (magpie / "InferenceX").symlink_to(inferencex)
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
+    monkeypatch.setenv("MAGPIE_DIR", str(magpie))
+    roots = _inferencex_patcher._discover_inferencex_roots(None)
+    assert len(roots) == 1, f"expected dedup to one root, got {roots}"
+    assert roots[0] == inferencex.resolve()
+
+
+def test_discover_inferencex_roots_includes_both_when_paths_differ(
+    tmp_path, monkeypatch,
+):
+    """The #210 case: ``$INFERENCEX_PATH`` points elsewhere (e.g. a
+    /wekafs path) while Magpie loads its OWN bundled checkout from
+    ``$MAGPIE_DIR/InferenceX``. Both paths must show up so both
+    files get patched."""
+    inferencex_external = tmp_path / "external" / "InferenceX"
+    inferencex_external.mkdir(parents=True)
+    magpie_dir = tmp_path / "workspace" / "Magpie"
+    (magpie_dir / "InferenceX").mkdir(parents=True)
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_external))
+    monkeypatch.setenv("MAGPIE_DIR", str(magpie_dir))
+    roots = _inferencex_patcher._discover_inferencex_roots(None)
+    assert len(roots) == 2, f"expected 2 distinct roots, got {roots}"
+    resolved = {p.resolve() for p in roots}
+    assert inferencex_external.resolve() in resolved
+    assert (magpie_dir / "InferenceX").resolve() in resolved
+
+
+def test_discover_inferencex_roots_when_only_magpie_dir_set(
+    tmp_path, monkeypatch,
+):
+    """If operator set only ``$MAGPIE_DIR`` (no ``$INFERENCEX_PATH``),
+    Magpie's bundled InferenceX is still discovered. This is the
+    fail-safe path: patcher functions even when the env layout drifts."""
+    magpie_dir = tmp_path / "Magpie"
+    (magpie_dir / "InferenceX").mkdir(parents=True)
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.setenv("MAGPIE_DIR", str(magpie_dir))
+    roots = _inferencex_patcher._discover_inferencex_roots(None)
+    assert len(roots) == 1
+    assert roots[0] == (magpie_dir / "InferenceX").resolve()
+
+
+def test_discover_inferencex_roots_returns_empty_when_nothing_set(monkeypatch):
+    """No env, no caller arg → empty list (caller fail-softs)."""
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    assert _inferencex_patcher._discover_inferencex_roots(None) == []
+
+
+def test_ensure_benchmark_serving_patched_patches_both_roots_when_they_differ(
+    tmp_path, monkeypatch,
+):
+    """End-to-end: when ``$INFERENCEX_PATH`` and
+    ``$MAGPIE_DIR/InferenceX`` are different on-disk paths, both
+    ``benchmark_serving.py`` files MUST get patched. This is the
+    exact #210 invariant — patching only one leaves Magpie's runtime
+    copy on the unpatched legacy line."""
+    external = tmp_path / "external" / "InferenceX"
+    external.mkdir(parents=True)
+    magpie = tmp_path / "Magpie"
+    (magpie / "InferenceX").mkdir(parents=True)
+    f_external = _make_inferencex_tree_with_serving(external)
+    f_magpie = _make_inferencex_tree_with_serving(magpie / "InferenceX")
+    monkeypatch.setenv("INFERENCEX_PATH", str(external))
+    monkeypatch.setenv("MAGPIE_DIR", str(magpie))
+
+    rc = ensure_benchmark_serving_patched()
+    assert rc is True
+    text_external = f_external.read_text(encoding="utf-8")
+    text_magpie = f_magpie.read_text(encoding="utf-8")
+    assert "PROFILE_EXTRA_BODY" in text_external, (
+        "$INFERENCEX_PATH file must be patched"
+    )
+    assert "PROFILE_EXTRA_BODY" in text_magpie, (
+        "$MAGPIE_DIR/InferenceX file must ALSO be patched (the #210 fix)"
+    )
+
+
+def test_ensure_benchmark_serving_patched_returns_true_when_only_magpie_path_present(
+    tmp_path, monkeypatch,
+):
+    """Symmetry test: when ``$INFERENCEX_PATH`` exists but lacks the
+    ``benchmark_serving.py`` (broken / partial checkout) and Magpie's
+    bundled InferenceX has it, the patcher still patches Magpie's
+    copy and reports success."""
+    external = tmp_path / "external" / "InferenceX"
+    external.mkdir(parents=True)  # no benchmark_serving.py here
+    magpie = tmp_path / "Magpie"
+    (magpie / "InferenceX").mkdir(parents=True)
+    f_magpie = _make_inferencex_tree_with_serving(magpie / "InferenceX")
+    monkeypatch.setenv("INFERENCEX_PATH", str(external))
+    monkeypatch.setenv("MAGPIE_DIR", str(magpie))
+
+    rc = ensure_benchmark_serving_patched()
+    assert rc is True
+    assert "PROFILE_EXTRA_BODY" in f_magpie.read_text(encoding="utf-8")
+
+
+def test_ensure_benchmark_lib_patched_patches_both_roots_when_they_differ(
+    tmp_path, monkeypatch,
+):
+    """Same multi-root contract for ``benchmark_lib.sh``."""
+    # Build two InferenceX-like roots, each with the legacy line.
+    legacy = (
+        "#!/usr/bin/env bash\n"
+        "run_benchmark_serving() {\n"
+        "    local num_prompts=\"\"\n"
+        "    local max_concurrency=\"\"\n"
+        "    if [[ \"${PROFILE:-}\" == \"1\" ]]; then\n"
+        "        num_prompts=\"$max_concurrency\"\n"
+        "    fi\n"
+        "}\n"
+    )
+    external = tmp_path / "external" / "InferenceX"
+    (external / "benchmarks").mkdir(parents=True)
+    f_external = external / "benchmarks" / "benchmark_lib.sh"
+    f_external.write_text(legacy, encoding="utf-8")
+    magpie = tmp_path / "Magpie"
+    (magpie / "InferenceX" / "benchmarks").mkdir(parents=True)
+    f_magpie = magpie / "InferenceX" / "benchmarks" / "benchmark_lib.sh"
+    f_magpie.write_text(legacy, encoding="utf-8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(external))
+    monkeypatch.setenv("MAGPIE_DIR", str(magpie))
+
+    rc = ensure_benchmark_lib_patched()
+    assert rc is True
+    assert "${NUM_PROMPTS:-$max_concurrency}" in f_external.read_text(encoding="utf-8")
+    assert "${NUM_PROMPTS:-$max_concurrency}" in f_magpie.read_text(encoding="utf-8"), (
+        "Magpie's bundled InferenceX benchmark_lib.sh must ALSO be patched"
+    )

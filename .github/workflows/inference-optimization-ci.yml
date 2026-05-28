@@ -14,6 +14,9 @@ on:
         required: false
         default: 'manual'
 
+permissions:
+  contents: read
+
 env:
   SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
   NFS_ROOT: ${{ secrets.NFS_ROOT }}
@@ -31,7 +34,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Generate matrix
         id: matrix
@@ -46,14 +49,18 @@ jobs:
     name: "${{ matrix.key }}"
     needs: prepare
     runs-on: hyperloom-mh826
-    timeout-minutes: 510
+    # InferenceX-comparable models are the small fixed corpus in
+    # ci/ci-config.yaml. They are allowed to run much longer than the
+    # production_1000 optimize-submit pool because they are used for
+    # InferenceX PR / benchmark comparison work.
+    timeout-minutes: 4320
     strategy:
       fail-fast: false
       max-parallel: 6
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Report latest InferenceX image versions
         continue-on-error: true
@@ -61,6 +68,7 @@ jobs:
           SCRIPT="$GITHUB_WORKSPACE/inference_optimization/InferenceX/utils/check_image_versions.py"
           for INFERENCEX_CONFIG in \
             "${NFS_ROOT}/InferenceX/.github/configs/amd-master.yaml" \
+            /wekafs/hyperloom/InferenceX/.github/configs/amd-master.yaml \
             /wekafs/InferenceX/.github/configs/amd-master.yaml \
             /hyperloom/InferenceX/.github/configs/amd-master.yaml; do
             if [ -f "$INFERENCEX_CONFIG" ]; then
@@ -98,10 +106,7 @@ jobs:
         with:
           name: report-${{ matrix.key }}
           path: |
-            ci-output/ci_report.md
-            ci-output/ci_summary_${{ matrix.key }}.json
-            ci-output/github_summary.md
-            ci-output/*/optimization_report.md
+            ci-output/**
           retention-days: 90
 
   submit-inferenceX-pr:
@@ -110,10 +115,10 @@ jobs:
     runs-on: hyperloom-mh826
     if: always() && !cancelled()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all model reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ci-output
           pattern: report-*
@@ -161,7 +166,7 @@ jobs:
     if: github.event_name == 'schedule'
     steps:
       - name: Restore cached SHA
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .inferenceX_last_sha
           key: inferenceX-sha
@@ -184,7 +189,7 @@ jobs:
 
       - name: Save cached SHA
         if: steps.check.outputs.changed == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: .inferenceX_last_sha
           key: inferenceX-sha-${{ steps.check.outputs.latest }}

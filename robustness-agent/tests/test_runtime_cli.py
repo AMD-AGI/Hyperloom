@@ -57,7 +57,25 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
     from robustness_agent.runtime.cli import _coerce_request, _run_tick
 
     request = _coerce_request(
-        {**_REQUEST_HEARTBEAT, "options": {"session_dir": str(tmp_path)}}
+        {
+            **_REQUEST_HEARTBEAT,
+            "options": {
+                "session_dir": str(tmp_path),
+                "auto_probe_inference_server": False,
+                # Heartbeat path runs on inert CI hosts without a Ray
+                # head. Without this opt-out the LocalProbe A6 sub-probe
+                # fires ``ray_head_dead`` after the 5s timeout and the
+                # ladder appends alert + prune_branch +
+                # escalate_strategy_change intents that mask the
+                # expected ``send_message{heartbeat}`` envelope.
+                "ray_probe_enabled": False,
+                # CI containers lack the TraceLens CLI and WekaFS mounts
+                # the J external_deps probe expects. Disable the whole
+                # probe so it does not enqueue ``tracelens_cli_missing``
+                # / ``wekafs_degraded`` alerts alongside the heartbeat.
+                "external_deps_enabled": False,
+            },
+        }
     )
     emit = await _run_tick(request)
     assert emit["session_id"] == "sess-runtime-1"
@@ -162,7 +180,19 @@ def test_subprocess_tick_emits_heartbeat(tmp_path: Path):
     out_path = tmp_path / "emit.json"
     request = {
         **_REQUEST_HEARTBEAT,
-        "options": {"session_dir": str(tmp_path / "sess")},
+        "options": {
+            "session_dir": str(tmp_path / "sess"),
+            "auto_probe_inference_server": False,
+            # Heartbeat path is exercised on CI/dev hosts with no Ray
+            # head running, where ``ray status`` hangs / times out and
+            # the LocalProbe ladder would otherwise fire alert + prune
+            # intents alongside the heartbeat. Disable the A6 probe so
+            # the envelope stays focused on the heartbeat contract.
+            "ray_probe_enabled": False,
+            # Same rationale for the J external_deps probe — CI lacks
+            # the TraceLens CLI / WekaFS mounts it expects.
+            "external_deps_enabled": False,
+        },
     }
     proc = _run_subprocess(request, request_path, out_path)
     assert proc.returncode == 0, f"stderr={proc.stderr}"

@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -65,6 +66,11 @@ def load_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         env[key.strip()] = value.strip().strip('"').strip("'")
+    if "SAFE_API_KEY" in env:
+        env.setdefault("OOB_API_KEY", env["SAFE_API_KEY"])
+        env.setdefault("ANTHROPIC_API_KEY", env["SAFE_API_KEY"])
+        env.setdefault("OPENAI_API_KEY", env["SAFE_API_KEY"])
+        env.setdefault("ANTHROPIC_AUTH_TOKEN", env["SAFE_API_KEY"])
     if "ANTHROPIC_AUTH_TOKEN" in env:
         env.setdefault("ANTHROPIC_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
         env.setdefault("OPENAI_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
@@ -73,7 +79,11 @@ def load_env_file(path: Path) -> dict[str, str]:
         env.setdefault("AMD_LLM_API_KEY", env["AMD_API_KEY"])
         env.setdefault("LLM_API_KEY", env["AMD_API_KEY"])
         env.setdefault("GEAK_API_KEY", env["AMD_API_KEY"])
-    if "ANTHROPIC_BASE_URL" in env:
+    if "OPENAI_BASE_URL" in env:
+        env.setdefault("ANTHROPIC_BASE_URL", env["OPENAI_BASE_URL"])
+        env.setdefault("OOB_BASE_URL", env["OPENAI_BASE_URL"])
+        env.setdefault("LLM_API_BASE", env["OPENAI_BASE_URL"])
+    elif "ANTHROPIC_BASE_URL" in env:
         env.setdefault("OPENAI_BASE_URL", env["ANTHROPIC_BASE_URL"])
         env.setdefault("OOB_BASE_URL", env["ANTHROPIC_BASE_URL"])
         env.setdefault("LLM_API_BASE", env["ANTHROPIC_BASE_URL"])
@@ -284,12 +294,17 @@ def main() -> int:
                              "soon as they hit >=1.50x with passing correctness; "
                              "otherwise they iterate up to ~85%% of this budget "
                              "and SIGTERM at 100%%.")
-    parser.add_argument("--geak-budget-min", type=float, default=90,
+    # Default tracks $GEAK_RUN_MODE (exported by install.sh / env.sh):
+    # quick -> 70 min, full -> 130 min. Both aligned with yaml
+    # run.budgets.<mode>.total_s + finalize_grace + kill_buffer + safety.
+    _geak_budget_default = 70 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130
+    parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
                         help="Per-attempt wall-clock budget for GEAK only "
-                             "(default 90 min). GEAK runs N sub-agent tasks "
-                             "serially + a select_patch round; 60 min "
-                             "consistently SIGTERMs the select_patch round "
-                             "(observed r38/r39).")
+                             "(default tracks $GEAK_RUN_MODE: full -> 130, "
+                             "quick -> 70; aligned with yaml "
+                             "run.budgets.<mode>.total_s + finalize_grace + "
+                             "kill_buffer + safety so the prompt-quoted "
+                             "budget triggers the matching GEAK mode).")
     parser.add_argument("--replicas-per-backend", type=int, default=2)
     parser.add_argument("--backends", default=None,
                         help="Comma list of agentic backends. Defaults to "

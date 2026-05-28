@@ -1,6 +1,6 @@
 """Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark.
 
-DESIGN v0.6 §15.2 + §16.1 baseline action.
+ + §16.1 baseline action.
 
 Wire-up:
 
@@ -47,6 +47,7 @@ from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from ._grid_runner import sanitize_result_dir, sanitize_script_name
+from ._subprocess_kill import run_with_session_kill
 from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
@@ -391,6 +392,20 @@ class BaselineExecutor:
         # `python3` resolves to one with torch+rocm. Magpie YAML also sets
         # this but defending in depth costs nothing.
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+        # #210 (Deval, comment 8): pin Magpie's InferenceX-resolution
+        # to ``$INFERENCEX_PATH`` so Magpie loads the SAME InferenceX
+        # checkout that Hyperloom's ``_inferencex_patcher`` has
+        # patched. ``MAGPIE_INFERENCEX_PATH`` is the highest-precedence
+        # resolution rung in Magpie's
+        # ``_resolve_default_inferencex_dir`` (``Magpie/modes/
+        # benchmark/inferencex.py:43``); without setting it, Magpie
+        # falls through to ``./InferenceX`` next to its repo or the
+        # ``$XDG_CACHE_HOME/magpie/InferenceX`` cache, either of which
+        # may be a separate, unpatched checkout (the symptom reported
+        # in #210 comments 4 + 6).
+        inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+        if inferencex_path:
+            env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Always-on ``$RESULT_DIR`` default: covers Magpie scripts that
         # respect the env var (and would otherwise fall back to a
         # hardcoded path under ``/workspace/``). Scripts that ignore
@@ -409,27 +424,74 @@ class BaselineExecutor:
         env["SERVER_LOG"] = str(output_dir / "server.log")
         env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
 
+        # Multi-node mode (--nodes >= 2): inject MAGPIE_RUN_PHASE=client
+        # + BENCHMARK_BASE_URL=<head pod ClusterIP> so Magpie skips its
+        # own server launch and benchmark_serving targets the RayJob
+        # head. ``magpie_remote_env()`` returns {} in single-node, so
+        # ``env`` is unchanged on the default path.
+        from ._multi_node_env import magpie_remote_env
+        env.update(magpie_remote_env())
+
+        # Multi-node only: restart sglang/vllm with this round's flags
+        # so every benchmark runs against a fresh server (parity with
+        # single-node Magpie's PHASE=all server lifecycle). No-op in
+        # single-node. Profile rounds set ctx.extra["mn_round_restarted"]
+        # before super().__call__() to claim the restart; honour that
+        # flag so each Magpie spawn corresponds to exactly one server
+        # boot.
+        from ._multi_node_server_lifecycle import (
+            ServerRestartFailed,
+            restart_server_for_round,
+        )
+        ctx_extra = getattr(ctx, "extra", None) or {}
+        if not ctx_extra.get("mn_round_restarted"):
+            try:
+                # PD knobs (pd_mode / pd_prefill_nodes / pd_decode_nodes
+                # / pd_prefill_tp / pd_decode_tp / pd_transfer_backend /
+                # pd_ib_device) are resolved by the helper from $PD_* env
+                # (set by cli.py) and fall back to state.json — keeping
+                # this call site identical between colocated and
+                # disaggregated runs (the agent only changes CLI flags).
+                await restart_server_for_round(
+                    extra_sglang_args=str(params.get("extra_sglang_args") or ""),
+                    framework=os.environ.get("FRAMEWORK") or None,
+                    model_path=resolved_model or None,
+                    tp=int(os.environ.get("TP") or 0) or None,
+                    ep=int(os.environ.get("EP") or 0) or None,
+                )
+            except ServerRestartFailed as exc:
+                return {
+                    "status": "failed",
+                    "error_class": "mn_server_restart_failed",
+                    "error": str(exc),
+                    "output_dir": str(output_dir),
+                }
+
+        from ._multi_node_env import log_mn_banner
+        log_mn_banner("baseline_executor", log, output_dir=str(output_dir))
         log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s",
                  cmd, output_dir)
 
-        # subprocess.run is sync — wrap in asyncio.to_thread so we don't
-        # block the Coordinator reactor loop. We snapshot the wall-clock
-        # immediately before launch so extract_benchmark_measurement can
-        # mtime-gate the documented Magpie leak destinations (e.g.
-        # ``/workspace/inferencex_result.json``) — only files written
-        # *after* this run started are valid salvage candidates.
+        # Magpie is launched via ``run_with_session_kill`` (a
+        # ``subprocess.run``-compatible wrapper that ALSO tears down
+        # the entire descendant tree on every exit path — success,
+        # nonzero, timeout, exception). Plain ``subprocess.run`` leaks
+        # vLLM / SGLang server processes for any wrapper that
+        # ``nohup`` / ``setsid`` / daemonizes the server (bugs.md §B);
+        # those leaks were the root cause of the bash-source race in
+        # bugs.md §C #1, where a leaked bash re-sources a benchmark
+        # script while the next Magpie subprocess is mid-
+        # ``shutil.copy2``. See ``_subprocess_kill.py``.
         subprocess_started_unix = time.time()
         try:
             proc = await asyncio.to_thread(
-                subprocess.run, cmd,
-                capture_output=True, text=True, timeout=timeout_sec,
-                env=env, cwd=str(self.cwd),
+                run_with_session_kill, cmd,
+                env=env, cwd=str(self.cwd), timeout=timeout_sec,
+            )
+            subprocess_runtime_sec = max(
+                0.0, time.time() - subprocess_started_unix,
             )
         except subprocess.TimeoutExpired as exc:
-            # Harvest whatever the wrapper managed to write before the
-            # timer fired — particularly ``server.log`` (often the
-            # smoking gun: "failed to allocate memory" / "could not
-            # load checkpoint" etc.) and ``gpu_metrics.csv``.
             timeout_candidates = sorted(output_dir.glob("benchmark_*"))
             timeout_destination = (
                 timeout_candidates[-1] if timeout_candidates else output_dir
@@ -449,6 +511,9 @@ class BaselineExecutor:
                     for src, _ in timeout_harvested
                 ],
             }
+        proc_returncode = proc.returncode
+        proc_stdout = proc.stdout
+        proc_stderr = proc.stderr
 
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
@@ -481,12 +546,12 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
             }
-            if proc.returncode != 0:
-                tail = (proc.stderr or proc.stdout or "")[-2000:]
+            if proc_returncode != 0:
+                tail = (proc_stderr or proc_stdout or "")[-2000:]
                 return {
                     "status": "failed",
                     "error_class": "subprocess_nonzero",
-                    "returncode": proc.returncode,
+                    "returncode": proc_returncode,
                     "error": tail,
                     **failure_extras,
                 }
@@ -513,14 +578,14 @@ class BaselineExecutor:
             subprocess_started_unix=subprocess_started_unix,
         )
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
-        if proc.returncode != 0:
+        if proc_returncode != 0:
             warnings.append("magpie_nonzero_after_valid_measurement")
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
-            if proc.returncode != 0:
-                tail = (proc.stderr or proc.stdout or "")[-2000:]
+            if proc_returncode != 0:
+                tail = (proc_stderr or proc_stdout or "")[-2000:]
                 error_class = "subprocess_nonzero"
                 error = tail
             elif not report_path.exists():
@@ -532,7 +597,7 @@ class BaselineExecutor:
             return {
                 "status": "failed",
                 "error_class": error_class,
-                "returncode": proc.returncode,
+                "returncode": proc_returncode,
                 "error": error,
                 "output_dir": str(output_dir),
                 "workspace": str(workspace),
@@ -545,7 +610,7 @@ class BaselineExecutor:
             "status": "succeeded",
             **measurement,
             "nonfatal_warnings": warnings,
-            "returncode": proc.returncode,
+            "returncode": proc_returncode,
             "report_path": str(report_path) if report_path.exists() else None,
             "workspace": str(workspace),
             # Path to the materialized YAML used for THIS baseline. Coordinator
@@ -556,6 +621,17 @@ class BaselineExecutor:
             # OSL=256/TP=1) and produce ~10x lower throughput than baseline.
             # See `_workload_envs.py` for the bug history.
             "materialized_config": str(materialized_config_path),
+            # Wall-clock of the Magpie subprocess (success path only).
+            # Coordinator promotes this into
+            # ``SharedState.baseline_runtime_sec`` so the explore
+            # overtime-kill gate (``--explore-overtime-kill-ratio``)
+            # can derive a per-variant deadline of
+            # ``baseline_runtime_sec * ratio``. Measured around the
+            # ``run_with_session_kill`` call only; not exposed on the
+            # failure paths (timeout / nonzero / no_workspace /
+            # no_report / invalid_measurement) so a botched baseline
+            # cannot accidentally seed a tiny / huge deadline.
+            "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
         }
 
         # Parse accuracy eval results (GSM8K). RUN_EVAL=true was injected

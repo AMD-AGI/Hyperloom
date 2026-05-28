@@ -1,6 +1,6 @@
 ---
 name: robustness-agent
-description: Independent guardian daemon for Hyperloom inference optimization. Implements the inference_optimizer "robustness" reactor (DESIGN v0.6) so the Coordinator can call it as a Backend, plus a standalone loop for dev. Owns continuous health monitoring, RCA, and scheduling-police capabilities (kill_task / force_dispatch / prune_branch / escalate_strategy_change).
+description: Independent guardian daemon for Hyperloom inference optimization. Implements the inference_optimizer "robustness" reactor so the Coordinator can call it as a Backend, plus a standalone loop for dev. Owns continuous health monitoring, RCA, and scheduling-police capabilities (kill_task / force_dispatch / prune_branch / escalate_strategy_change).
 ---
 
 # Robustness Agent
@@ -209,6 +209,42 @@ Fields: `tick_index`, `timestamp_unix`, `symptom_name`, `severity`,
 These records are the M5 hand-off point: a future milestone POSTs them
 to the robustness-server for dashboards / alerting; in M1 they remain
 local-only.
+
+## Session-end postmortem (L1 + L2)
+
+When the Coordinator sets `state.json::stop_reason` (run wind-down)
+the reactor fires :class:`robustness_agent.finalize.PostmortemFinalizer`
+exactly once. It aggregates the in-session findings + per-task
+`runs/<action>/<task_id>/result.json` into:
+
+```
+{session_dir}/reports/robustness_postmortem.md   # flashpoint + catalogue + per-action summary
+{session_dir}/reports/decision_trace.json        # machine-readable per-task ledger
+{session_dir}/reports/.robustness_finalized      # idempotency marker
+```
+
+Disable via `Config.finalize_enabled=False`. Operators can re-run the
+finalizer post-hoc via
+`robustness_agent.finalize.postmortem.finalize_session(session_dir, session_id=...)`
+(noop when the marker exists).
+
+## Critic feedback loop (L4)
+
+The Critic agent's `prepare-review` phase reads the most recent N HIGH-
+severity findings from `findings/<session>.jsonl` and injects them
+into `JudgeBundle.robustness_priors` so the LLM sees "what already
+broke this session" before producing a fresh proposal. Discovery
+order:
+
+1. `$CRITIC_ROBUSTNESS_FINDINGS_DIR` — directory containing
+   `<session>.jsonl` (explicit override).
+2. `$ROBUSTNESS_AGENT_SESSION_DIR` — robustness-agent's `session_dir`;
+   the runtime CLI exports this automatically so co-deployed
+   Critic + Robustness picks up findings without operator setup.
+
+Knobs (env): `CRITIC_ROBUSTNESS_PRIORS_LIMIT` (default 5),
+`CRITIC_ROBUSTNESS_PRIORS_MIN_SEVERITY` (default `high`),
+`CRITIC_ROBUSTNESS_PRIORS_DISABLED=1` (kill switch).
 
 ## Roadmap beyond M1.5
 

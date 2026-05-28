@@ -89,11 +89,50 @@ DEFAULT_VOLUME = "/wekafs"
 DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 # Cluster-aware defaults: SaFE backend's NormalizePromptConfig uses MI355X /
 # /hyperloom/InferenceX which are wrong for core42 (it's MI300X and the
-# InferenceX checkout actually lives on /wekafs). Without overriding here the
-# generated prompt sends the agent on a 5-10 min wild goose chase looking for
+# canonical hyperloom-managed InferenceX checkout lives at
+# /wekafs/hyperloom/InferenceX). Without overriding here the generated prompt
+# sends the agent on a 5-10 min wild goose chase looking for
 # /hyperloom/InferenceX, and it picks GPU-architecture-wrong heuristics later.
+#
+# /wekafs/hyperloom/InferenceX is the same priority path that:
+#   - inference_optimizer/cli.py:1586          uses as the V2 skill default
+#   - inference_optimizer/scripts/install.sh   bootstraps into
+#   - .github/workflows/inference-optimization-ci.yml lists FIRST after
+#     ${NFS_ROOT}/InferenceX in the config-file probe loop
+# Keeping this aligned avoids the agent landing on a stale /wekafs/InferenceX
+# checkout (left over from earlier non-hyperloom layouts on some sandboxes).
 DEFAULT_GPU_TYPE = "MI300X"
-DEFAULT_INFERENCEX_PATH = "/wekafs/InferenceX"
+DEFAULT_INFERENCEX_PATH = "/wekafs/hyperloom/InferenceX"
+
+# Canonical prompt prefix lives in ci/prompt_prefix.txt next to this script.
+# Single source of truth — same file is read by the GitHub workflow Submit
+# step (.github/workflows/optimize-submit.yml) as the schedule-trigger
+# fallback, and also serves as the argparse default here so any direct
+# CLI invocation (manual debugging, peer scripts, etc.) gets the same
+# prefix without having to set $SAFE_OPTIMIZE_PROMPT_PREFIX every time.
+_PROMPT_PREFIX_FILE = Path(__file__).resolve().parent / "prompt_prefix.txt"
+
+
+def _load_default_prompt_prefix() -> str:
+    """Resolve the default prompt prefix for ``--prompt-prefix``.
+
+    Resolution order:
+      1. ``$SAFE_OPTIMIZE_PROMPT_PREFIX`` (lets ops override per-run without
+         editing the file or argparse call)
+      2. ``ci/prompt_prefix.txt`` next to this script (canonical content)
+      3. empty string (caller is responsible — submit then refuses to ship
+         an empty prefix)
+    """
+
+    env_value = os.environ.get("SAFE_OPTIMIZE_PROMPT_PREFIX", "")
+    if env_value:
+        return env_value
+    try:
+        if _PROMPT_PREFIX_FILE.is_file():
+            return _PROMPT_PREFIX_FILE.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return ""
 
 # Architectures well-supported by SGLang on ROCm 7.x.
 SGLANG_ARCHS: set[str] = {
@@ -963,7 +1002,12 @@ class SubmissionRecord:
     display_name: str | None = None
     detected: dict | None = None
     overrides: dict = field(default_factory=dict)
+    pool: dict = field(default_factory=dict)
     error: str | None = None
+    # Audit fields surfaced through manifest / ci_metrics / session_breakdown
+    # so each persisted artifact is self-describing.
+    category: str | None = None             # moe / dense / "" — from detected.arch
+    sandbox_duration_seconds: float | None = None  # SaFE startedAt -> finishedAt
     # Filled in by process_completion when --wait-for-completion is on.
     final_status: str | None = None    # SaFE: Succeeded/Failed/Interrupted/Timeout
     final_phase: int | None = None     # currentPhase at terminal moment
@@ -990,10 +1034,12 @@ def process_model(
     inferencex_path: str | None = None,
     prompt_prefix: str | None = None,
     prompt_suffix: str | None = None,
+    pool_metadata: dict | None = None,
 ) -> SubmissionRecord:
     rec = SubmissionRecord(
         model=repo_id,
         overrides={k: v for k, v in overrides.items() if v is not None},
+        pool={k: v for k, v in (pool_metadata or {}).items() if v not in (None, "")},
     )
 
     detected = None if manual_mode else auto_detect(hf, repo_id)
@@ -1007,6 +1053,7 @@ def process_model(
         return rec
     if detected:
         rec.detected = asdict(detected)
+        rec.category = _category_from_arch(rec.detected.get("arch", ""))
 
     framework = overrides.get("framework") or (detected.framework if detected else "")
     precision = overrides.get("precision") or (detected.precision if detected else "FP8")
@@ -1125,6 +1172,12 @@ def process_model(
 DEFAULT_ARTIFACT_PATTERNS = (
     "optimization_report",   # matches optimization_report.md / *-optimization_report.md / etc.
     "ci_metrics.json",
+    # Promoted to a key result alongside optimization_report.md +
+    # ci_metrics.json in 2026-05 — claw-stats-service / V2 dashboard prefer
+    # this over ci_metrics.json. Now part of ``_KEY_RESULT_SUFFIXES``, so
+    # missing it WILL trigger the wekafs NFS fallback (same as the other
+    # two contract files).
+    "session_breakdown.json",
     "baseline_summary.json",
     "sweep_results.csv",
     "sweep_results.txt",
@@ -1155,7 +1208,17 @@ def _safe_local_path(artifacts_dir: Path, task_id: str, remote_path: str) -> Pat
     return artifacts_dir / task_id / Path(*parts) if parts else artifacts_dir / task_id / "artifact.bin"
 
 
-_KEY_RESULT_SUFFIXES: tuple[str, ...] = ("optimization_report.md", "ci_metrics.json")
+# Files that MUST be present in the task directory for the run to count as
+# "delivered". session_breakdown.json was promoted from optional/audit to a
+# key result in 2026-05 because claw-stats-service / the V2 dashboard prefer
+# it over ci_metrics.json. NFS legacy fallback scans for any of these
+# suffixes; missing any one of them is what triggers the wekafs PERSIST_DIR
+# rescue path in `_nfs_user_session_fallback`.
+_KEY_RESULT_SUFFIXES: tuple[str, ...] = (
+    "optimization_report.md",
+    "ci_metrics.json",
+    "session_breakdown.json",
+)
 
 
 def _norm_token(s: str) -> str:
@@ -1191,36 +1254,320 @@ def _metrics_have_positive_throughput(path: str) -> bool:
         return False
 
 
-def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
-    """Add task metadata to ci_metrics.json when the agent omitted it.
+def _category_from_arch(arch: str | None) -> str:
+    """Coarse model-shape classification used for cron pool reporting.
 
-    Missing ``model`` was the reason Run 25813519878 could not be correlated
-    from /wekafs/users even though the metrics existed. The summary pipeline
-    does not require this field, but publishing/debugging does, and adding it
-    here makes downstream artifacts self-describing.
+    HF `architectures[0]` follows a stable naming convention: anything with
+    "Moe" in the class name is a Mixture-of-Experts variant; everything
+    else (Llama/Qwen/Mistral/Gemma/...) is a dense transformer. Returns
+    ``""`` when arch is unknown so downstream JSON stays "n/a" rather than
+    a misleading "dense".
     """
-    if path.name != "ci_metrics.json" or not path.exists():
+    if not arch:
+        return ""
+    return "moe" if "moe" in arch.lower() else "dense"
+
+
+def _sandbox_duration_seconds(last_task: dict) -> float | None:
+    """SaFE-side sandbox wallclock = finishedAt - startedAt.
+
+    Both timestamps come from SaFE's optimization-task API
+    (``startedAt`` is when the K8s sandbox pod actually transitioned to
+    Running; ``finishedAt`` is when the agent process exited and SaFE
+    sealed the task). Returns None when either field is missing or
+    unparseable so we don't fabricate a duration.
+    """
+    from datetime import datetime
+    start = (last_task or {}).get("startedAt") or ""
+    end = (last_task or {}).get("finishedAt") or ""
+    if not start or not end:
+        return None
+    try:
+        # SaFE serializes UTC with trailing 'Z' — Python's fromisoformat
+        # only accepts '+00:00', so normalise first.
+        s = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        e = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    delta = (e - s).total_seconds()
+    return round(delta, 1) if delta >= 0 else None
+
+
+def _find_hyperloom_commit_sha(start: Path) -> str:
+    """Resolve the Hyperloom git SHA the sandbox cloned (for audit fields).
+
+    Strategy (tried in order, first hit wins):
+
+      1. ``hyperloom_source_commit.txt`` written by the agent inside the
+         sandbox. The PERSIST step in ``ci/prompt_prefix.txt`` writes it
+         at ``$RESULT_DIR/hyperloom_source_commit.txt`` and inside the V2
+         session dir, so by the time NFS Stage B pulls things back it can
+         show up at ``task_dir/hyperloom_source_commit.txt`` or
+         ``task_dir/session/hyperloom_source_commit.txt`` (depth varies
+         by which fallback collected the artifacts).
+
+      2. CI runner environment. The agent doesn't always write the txt
+         file (e.g. when it exits before the PERSIST snippet runs, or
+         when V2 cli's session_dir eats the file), but the runner that
+         dispatched the workflow ALWAYS knows the commit it pinned the
+         sandbox to: it's ``HYPERLOOM_SOURCE_REF`` (set by ``optimize-
+         submit.yml`` step 'Submit + wait + collect'), or ``GITHUB_SHA``
+         (the head of the branch the workflow ran on, identical to
+         ``HYPERLOOM_SOURCE_REF`` for any push-triggered run).
+    """
+    candidates = [
+        start.parent / "hyperloom_source_commit.txt",
+        start.parent / "session" / "hyperloom_source_commit.txt",
+        start.parent.parent / "hyperloom_source_commit.txt",
+    ]
+    for sha_path in candidates:
+        if not sha_path.exists():
+            continue
+        try:
+            sha = sha_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            continue
+        # accept anything that looks like a SHA (or short SHA) — never trust
+        # garbage from an empty / corrupted file.
+        if 7 <= len(sha) <= 80 and all(c in "0123456789abcdef" for c in sha.lower()):
+            return sha
+
+    # Fallback: ask the CI runner environment. HYPERLOOM_SOURCE_REF is the
+    # commit we explicitly pinned the sandbox to (preferred over GITHUB_SHA
+    # when set, because HYPERLOOM_SOURCE_REF survives even dispatch with a
+    # custom ref input). GITHUB_SHA is the unconditional fallback — every
+    # GitHub Actions step has it.
+    for env_var in ("HYPERLOOM_SOURCE_REF", "GITHUB_SHA"):
+        env_sha = (os.environ.get(env_var) or "").strip()
+        if 7 <= len(env_sha) <= 80 and all(c in "0123456789abcdef" for c in env_sha.lower()):
+            return env_sha
+    return ""
+
+
+def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
+    """Backfill task metadata into the three persisted-artifact shapes
+    (ci_metrics.json / session_breakdown.json / manifest.json) so each is
+    self-describing without cross-referencing GitHub Actions logs.
+
+    Originally added because missing ``model`` blocked correlation with
+    /wekafs/users entries (Run 25813519878). Extended in 2026-05 to also
+    cover audit fields the sandbox / V2 cli collectors don't always reach:
+
+    * ``image``                     — registry-qualified container image
+                                      (auto-detected at register time)
+    * ``hyperloom_commit``          — git SHA of the Hyperloom source tree
+                                      the agent actually cloned
+    * ``category``                  — moe / dense (from detected arch)
+    * ``sandbox_duration_seconds``  — SaFE startedAt → finishedAt wallclock
+
+    The function sniffs the filename and writes the right shape:
+    * ``ci_metrics.json``       → flat top-level keys
+    * ``session_breakdown.json``→ under ``session_meta`` sub-dict
+    * ``manifest.json``         → flat top-level (matches the V2 cli
+                                  schema v3 used by ``inference_optimizer/
+                                  manifest.py``); ``category`` /
+                                  ``sandbox_duration_seconds`` are extra
+                                  keys we add — V2 cli ignores unknown
+                                  fields on re-read.
+    """
+    if path.name not in ("ci_metrics.json", "session_breakdown.json", "manifest.json"):
+        return
+    if not path.exists():
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return
+    if not isinstance(data, dict):
+        return
+
     changed = False
-    for key, value in {
-        "model": rec.model,
-        "task_id": rec.task_id,
-        "claw_session_id": rec.claw_session_id,
-    }.items():
-        if value and not data.get(key):
-            data[key] = value
-            changed = True
     detected = rec.detected or {}
-    for key in ("framework", "tp"):
-        if detected.get(key) is not None and data.get(key) is None:
-            data[key] = detected.get(key)
+    image = detected.get("image") or ""
+    hyperloom_sha = _find_hyperloom_commit_sha(path)
+    image_tag = image.split("/")[-1] if image else ""
+
+    if path.name == "ci_metrics.json":
+        for key, value in {
+            "model": rec.model,
+            "task_id": rec.task_id,
+            "claw_session_id": rec.claw_session_id,
+        }.items():
+            if value and not data.get(key):
+                data[key] = value
+                changed = True
+        for key in ("framework", "tp"):
+            if detected.get(key) is not None and data.get(key) is None:
+                data[key] = detected.get(key)
+                changed = True
+        if image and not data.get("image"):
+            data["image"] = image
             changed = True
+        if hyperloom_sha and not data.get("hyperloom_commit"):
+            data["hyperloom_commit"] = hyperloom_sha
+            changed = True
+        if rec.category and not data.get("category"):
+            data["category"] = rec.category
+            changed = True
+        if rec.sandbox_duration_seconds is not None and not data.get("sandbox_duration_seconds"):
+            data["sandbox_duration_seconds"] = rec.sandbox_duration_seconds
+            changed = True
+
+    elif path.name == "session_breakdown.json":
+        # The breakdown is keyed by a `session_meta` sub-dict (see
+        # inference_optimizer/breakdown/schema.py::SessionMeta). Only write
+        # when the field is currently empty so we don't overwrite anything
+        # the V2 collectors did fill in.
+        meta = data.get("session_meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            data["session_meta"] = meta
+        if image and not meta.get("image"):
+            meta["image"] = image
+            changed = True
+        if image_tag and not meta.get("image_id"):
+            meta["image_id"] = image_tag
+            changed = True
+        if hyperloom_sha and not meta.get("code_revision"):
+            meta["code_revision"] = hyperloom_sha
+            changed = True
+        # session_duration_seconds is already declared in the v1.1 schema,
+        # we just need to set it when the V2 collector left it blank.
+        if rec.sandbox_duration_seconds is not None and not meta.get("session_duration_seconds"):
+            meta["session_duration_seconds"] = rec.sandbox_duration_seconds
+            changed = True
+        # `category` isn't in the schema today but unknown fields are
+        # tolerated; dashboards can pick it up without a schema bump.
+        if rec.category and not meta.get("category"):
+            meta["category"] = rec.category
+            changed = True
+
+    elif path.name == "manifest.json":
+        # V2 cli schema (inference_optimizer/manifest.py): flat top-level
+        # keys for image / code_revision / framework / tp / model_name.
+        # These often ship as null when the sandbox didn't set the
+        # HYPERLOOM_IMAGE env or when cwd-based `git rev-parse` failed;
+        # we authoritatively backfill them from the CI side.
+        for key, value in {
+            "model_name": rec.model,
+            "claw_session_id": rec.claw_session_id,
+        }.items():
+            if value and not data.get(key):
+                data[key] = value
+                changed = True
+        for key in ("framework", "tp"):
+            if detected.get(key) is not None and not data.get(key):
+                data[key] = detected.get(key)
+                changed = True
+        if image and not data.get("image"):
+            data["image"] = image
+            changed = True
+        if hyperloom_sha and not data.get("code_revision"):
+            data["code_revision"] = hyperloom_sha
+            changed = True
+        if rec.category and not data.get("category"):
+            data["category"] = rec.category
+            changed = True
+        if rec.sandbox_duration_seconds is not None and not data.get("sandbox_duration_seconds"):
+            data["sandbox_duration_seconds"] = rec.sandbox_duration_seconds
+            changed = True
+
     if changed:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
+    """Reverse-write the audit fields back to the wekafs SOURCE files so
+    operators ssh-ing into /wekafs/users/<uid>/<sess>/ see them directly
+    without going through GHA artifact zips.
+
+    Without this, the audit fields landed only in CI-runner-local
+    artifacts/<task_id>/ci_metrics.json. wekafs originals stayed bare
+    because they were written by the sandbox agent / V2 cli, neither of
+    which knows the image/category/duration (those are SaFE-side facts
+    only the CI runner sees after wait_task_done).
+
+    Match strategy mirrors _nfs_user_session_fallback (Stage B):
+      * exact `model` field match in the candidate ci_metrics.json, or
+      * conservative session-dir-name match via _record_matches_session_dir.
+    Only sessions modified in the last 24h are considered, to avoid
+    backfilling stale runs on the same uid.
+
+    Files updated per matching session: ci_metrics.json, manifest.json,
+    session_breakdown.json, session_breakdown_v2.json (also under
+    phase10_report/, results/, v2_session/ subdirs). Each is fed through
+    _backfill_ci_metrics_file which already knows the right shape per
+    filename — and which no-ops on files whose fields are already set.
+
+    No-op when wekafs is not mounted (e.g. CI runner doesn't have NFS).
+    """
+    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    users_root = os.path.join(nfs_root, "users")
+    if not os.path.isdir(users_root):
+        return 0
+    target = _norm_token((rec.model or "").split("/")[-1])
+    if not target:
+        return 0
+
+    fresh_cutoff = time.time() - 24 * 3600
+    targets = ("ci_metrics.json", "manifest.json",
+               "session_breakdown.json", "session_breakdown_v2.json")
+    subdirs = ("", "phase10_report", "results", "v2_session")
+
+    n = 0
+    for uid_dir in os.listdir(users_root):
+        uid_path = os.path.join(users_root, uid_dir)
+        if not os.path.isdir(uid_path):
+            continue
+        for sess in os.listdir(uid_path):
+            sess_path = os.path.join(uid_path, sess)
+            if not os.path.isdir(sess_path):
+                continue
+            try:
+                if os.path.getmtime(sess_path) < fresh_cutoff:
+                    continue
+            except OSError:
+                continue
+            # Confirm this session belongs to our task: a `model` field
+            # match in any ci_metrics.json is the strongest signal; else
+            # fall back to the conservative session-dir-name heuristic.
+            matched = False
+            for sub in subdirs:
+                ci = os.path.join(sess_path, sub, "ci_metrics.json") if sub \
+                    else os.path.join(sess_path, "ci_metrics.json")
+                if not os.path.isfile(ci):
+                    continue
+                try:
+                    d = json.loads(Path(ci).read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                mf = str(d.get("model") or d.get("model_name") or "")
+                if mf and _norm_token(mf.split("/")[-1]) == target:
+                    matched = True
+                    break
+            if not matched and _record_matches_session_dir(rec, sess):
+                matched = True
+            if not matched:
+                continue
+            for sub in subdirs:
+                base = os.path.join(sess_path, sub) if sub else sess_path
+                if not os.path.isdir(base):
+                    continue
+                for fn in targets:
+                    p = Path(base) / fn
+                    if not p.is_file():
+                        continue
+                    try:
+                        before = p.read_bytes()
+                        _backfill_ci_metrics_file(p, rec)
+                        if p.read_bytes() != before:
+                            n += 1
+                            log.info("[task %s] wekafs backfill: %s",
+                                     rec.task_id, p)
+                    except Exception as e:
+                        log.warning("[task %s] wekafs backfill failed for %s: %s",
+                                    rec.task_id, p, e)
+    return n
 
 
 def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
@@ -1255,7 +1602,48 @@ def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
     return True
 
 
-def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {
+        "1", "true", "yes", "y", "on",
+    }
+
+
+def _copy_session_tree(src_dir: str, dst_dir: Path) -> int:
+    """Copy an entire persisted session directory into ``dst_dir``.
+
+    Returns the number of files copied. Existing files are left untouched so
+    previously downloaded SaFE artifacts keep their timestamp/content.
+    """
+    copied = 0
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for root, dirnames, filenames in os.walk(src_dir):
+        # Avoid recursively copying accidental nested CI artifact dirs.
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in {".git", "__pycache__", ".pytest_cache"}
+        ]
+        rel_root = os.path.relpath(root, src_dir)
+        out_root = dst_dir if rel_root == "." else dst_dir / rel_root
+        out_root.mkdir(parents=True, exist_ok=True)
+        for fname in filenames:
+            src = os.path.join(root, fname)
+            dst = out_root / fname
+            if dst.exists():
+                continue
+            try:
+                shutil.copy2(src, dst)
+            except Exception as e:
+                log.warning("full-session copy failed %s -> %s: %s", src, dst, e)
+                continue
+            copied += 1
+    return copied
+
+
+def _nfs_fallback_collect(
+    rec: SubmissionRecord,
+    artifacts_dir: Path,
+    copy_full_session: bool = False,
+) -> int:
     """Scan NFS result directories for files matching this model.
 
     Used when Claw API list_artifacts returned nothing useful (the very common
@@ -1425,6 +1813,14 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
         if os.path.isfile(cand):
             targets.append(cand)
             break
+    # Optional audit artifact — pull it back when the agent emitted it.
+    for cand in [
+        os.path.join(best_sess, "session_breakdown.json"),
+        os.path.join(best_sess, "phase10_report", "session_breakdown.json"),
+    ]:
+        if os.path.isfile(cand):
+            targets.append(cand)
+            break
 
     for src in targets:
         dst_name = ("optimization_report.md"
@@ -1444,6 +1840,19 @@ def _nfs_fallback_collect(rec: SubmissionRecord, artifacts_dir: Path) -> int:
         copied += 1
         log.info("[task %s] NFS user-session: copied %s -> %s",
                  rec.task_id, src, dst)
+
+    if copy_full_session:
+        session_dst = task_dir / "session"
+        n_full = _copy_session_tree(best_sess, session_dst)
+        if n_full:
+            copied += n_full
+            rec.artifact_count += n_full
+            rec.artifact_files.append(str(session_dst))
+            log.info("[task %s] NFS full-session: copied %d file(s) %s -> %s",
+                     rec.task_id, n_full, best_sess, session_dst)
+        else:
+            log.info("[task %s] NFS full-session: no new files copied from %s",
+                     rec.task_id, best_sess)
 
     return copied
 
@@ -1473,8 +1882,11 @@ def wait_and_collect_one(
     rec.final_phase = last_task.get("currentPhase")
     rec.final_message = (last_task.get("message") or "")[:500] or None
     rec.claw_session_id = (last_task.get("clawSessionId") or "").strip() or None
+    rec.sandbox_duration_seconds = _sandbox_duration_seconds(last_task)
     if rec.claw_session_id:
-        log.info("[task %s] clawSessionId=%s", rec.task_id, rec.claw_session_id)
+        log.info("[task %s] clawSessionId=%s duration=%ss",
+                 rec.task_id, rec.claw_session_id,
+                 rec.sandbox_duration_seconds if rec.sandbox_duration_seconds is not None else "?")
 
     if not collect:
         return rec
@@ -1530,11 +1942,27 @@ def wait_and_collect_one(
     if not (has_metrics and has_report):
         log.info("[task %s] missing key files (metrics=%s report=%s) — trying NFS fallback",
                  rec.task_id, has_metrics, has_report)
-        n_added = _nfs_fallback_collect(rec, artifacts_dir)
+        copy_full_session = all_artifacts or _env_truthy("SAFE_OPTIMIZE_COPY_FULL_SESSION")
+        n_added = _nfs_fallback_collect(
+            rec, artifacts_dir, copy_full_session=copy_full_session,
+        )
         if n_added:
             log.info("[task %s] NFS fallback added %d files", rec.task_id, n_added)
         else:
             log.info("[task %s] NFS fallback found nothing", rec.task_id)
+
+    # Stage 3: reverse-backfill the audit fields directly into the wekafs
+    # SOURCE files so operators ssh-ing into /wekafs/users/<uid>/<sess>/
+    # see image/hyperloom_commit/category/sandbox_duration_seconds without
+    # downloading the GHA artifact zip. No-op when wekafs isn't mounted.
+    try:
+        n_wkfs = _backfill_wekafs_in_place(rec)
+        if n_wkfs:
+            log.info("[task %s] wekafs in-place backfill updated %d file(s)",
+                     rec.task_id, n_wkfs)
+    except Exception as e:
+        log.warning("[task %s] wekafs in-place backfill skipped due to %s: %s",
+                    rec.task_id, type(e).__name__, e)
     return rec
 
 
@@ -1610,8 +2038,8 @@ def write_manifest(
         f"- Volume: `{volume}`",
         f"- Submitted at: {payload['submitted_at']}",
         "",
-        "| Model | Submit | Final | Phase | Task ID | Display Name | Artifacts | Note |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Pool | Model | Category | Image | Duration | Submit | Final | Phase | Task ID | Display Name | Artifacts | Note |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in records:
         # Final status only meaningful when --wait-for-completion was on.
@@ -1627,8 +2055,33 @@ def write_manifest(
         if r.final_message:
             note_parts.append(r.final_message)
         note = " \\| ".join(note_parts).replace("|", "\\|")[:200]
+        pool_cell = "-"
+        if r.pool:
+            pool_id = r.pool.get("pool_id") or "-"
+            pool_idx = r.pool.get("pool_index")
+            batch_idx = r.pool.get("batch_index")
+            batch_size = r.pool.get("batch_size")
+            pool_cell = (
+                f"`{pool_id}`"
+                f"<br/>idx={pool_idx if pool_idx not in (None, '') else '-'}"
+                f"<br/>batch={batch_idx if batch_idx not in (None, '') else '-'}/"
+                f"{batch_size if batch_size not in (None, '') else '-'}"
+            )
+        # Image cell: keep just the tag suffix (e.g. `sglang:v0.5.11-rocm720-mi30x`)
+        # so the manifest is readable; full registry path is in JSON.
+        image_cell = "-"
+        image_full = (r.detected or {}).get("image", "") if r.detected else ""
+        if image_full:
+            image_cell = "`" + image_full.split("/")[-1] + "`"
+        # Duration cell: rounded minutes for readability, ms-precision in JSON.
+        duration_cell = "-"
+        if r.sandbox_duration_seconds is not None:
+            mins = r.sandbox_duration_seconds / 60.0
+            duration_cell = f"{mins:.1f}m"
+        category_cell = r.category or "-"
         md.append(
-            f"| `{r.model}` | {r.status} | {final or '-'} | {phase} | "
+            f"| {pool_cell} | `{r.model}` | {category_cell} | {image_cell} | {duration_cell} | "
+            f"{r.status} | {final or '-'} | {phase} | "
             f"`{r.task_id or '-'}` | {r.display_name or '-'} | {artifacts_cell} | {note} |"
         )
     (out_dir / "submission_manifest.md").write_text("\n".join(md) + "\n")
@@ -1705,17 +2158,26 @@ def _build_parser() -> argparse.ArgumentParser:
                              f"'{DEFAULT_INFERENCEX_PATH}'). SaFE backend default is "
                              f"/hyperloom/InferenceX which doesn't exist on core42.")
     parser.add_argument("--prompt-prefix",
-                        default=os.environ.get("SAFE_OPTIMIZE_PROMPT_PREFIX", ""),
-                        help="Optional free-form prefix prepended to the SaFE-generated "
-                             "Hyperloom prompt. The CI batch uses this to point the skill "
-                             "at /wekafs/HyperloomV2/inference_optimizer/SKILL.md before "
-                             "the auto-generated body. (env: $SAFE_OPTIMIZE_PROMPT_PREFIX)")
+                        default=_load_default_prompt_prefix(),
+                        help="Free-form prefix prepended to the SaFE-generated "
+                             "Hyperloom prompt. Default resolves to "
+                             "$SAFE_OPTIMIZE_PROMPT_PREFIX -> ci/prompt_prefix.txt "
+                             "-> empty. Pass an empty string explicitly to suppress.")
     parser.add_argument("--prompt-suffix",
                         default=os.environ.get("SAFE_OPTIMIZE_PROMPT_SUFFIX", ""),
                         help="Optional free-form suffix appended to the SaFE-generated "
                              "Hyperloom prompt. (env: $SAFE_OPTIMIZE_PROMPT_SUFFIX)")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="HuggingFace token (or set $HF_TOKEN)")
+
+    # Production-pool audit metadata. These fields do not affect submission;
+    # they are copied into submission_manifest.json so we can answer "which
+    # fixed leaderboard pool entry did this task rerun?" after the fact.
+    parser.add_argument("--pool-id", default=os.environ.get("HYPERLOOM_POOL_ID", ""))
+    parser.add_argument("--pool-index", default=os.environ.get("HYPERLOOM_POOL_INDEX", ""))
+    parser.add_argument("--pool-batch-index", default=os.environ.get("HYPERLOOM_POOL_BATCH_INDEX", ""))
+    parser.add_argument("--pool-batch-size", default=os.environ.get("HYPERLOOM_POOL_BATCH_SIZE", ""))
+    parser.add_argument("--pool-source-task-id", default=os.environ.get("HYPERLOOM_POOL_SOURCE_TASK_ID", ""))
 
     parser.add_argument("--dry-run", action="store_true",
                         help="Auto-detect and print plan without registering or submitting")
@@ -1852,6 +2314,13 @@ def main() -> int:
         "concurrency": args.concurrency,
         "image": args.image,
     }
+    pool_metadata = {
+        "pool_id": args.pool_id,
+        "pool_index": args.pool_index,
+        "batch_index": args.pool_batch_index,
+        "batch_size": args.pool_batch_size,
+        "source_task_id": args.pool_source_task_id,
+    }
 
     records: list[SubmissionRecord] = []
     for repo in repos:
@@ -1866,6 +2335,7 @@ def main() -> int:
             inferencex_path=inferencex_path,
             prompt_prefix=args.prompt_prefix or None,
             prompt_suffix=args.prompt_suffix or None,
+            pool_metadata=pool_metadata,
         )
         records.append(rec)
 
