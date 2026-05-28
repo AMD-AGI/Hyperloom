@@ -154,3 +154,22 @@ def test_framework_choices_reject_unknown_value():
         parser.parse_args([
             "optimize", "--model", "/tmp/m", "--framework", "tensorrt",
         ])
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.6 G4 cross-cutting guard: auto-tighten log is operator-readable
+# ---------------------------------------------------------------------------
+def test_atom_auto_tighten_log_line_is_single_line(capsys):
+    """Operator-readability gate: the auto-disable log must emit
+    exactly ONE line so a `grep auto-disabling kernel-agent.env.sh`
+    returns a single record."""
+    args = _fresh_args()
+    optimizer_cli._apply_atom_auto_tighten(args)
+    out = capsys.readouterr().out
+    auto_disable_lines = [
+        l for l in out.splitlines() if "auto-disabling" in l
+    ]
+    assert len(auto_disable_lines) == 1, (
+        f"expected exactly one auto-disabling line, got "
+        f"{len(auto_disable_lines)}: {auto_disable_lines!r}"
+    )
