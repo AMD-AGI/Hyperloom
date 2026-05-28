@@ -439,6 +439,86 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
     return auto_disabled
 
 
+def _resolve_gpu_type(
+    user_specified: str,
+    probed: str,
+) -> tuple[str, list[str]]:
+    """Resolve the effective gpu_type given a user hint and a hardware probe.
+
+    Pure function so it can be unit tested without monkey-patching half of
+    ``_run_optimize``. ``user_specified`` and ``probed`` are expected to
+    already be lower-cased and stripped.
+
+    Probe always wins when both are present and disagree. This is the
+    strict version of the historical "operator value > probe" priority,
+    which silently produced corrupted baseline + KB rows when --gpu-type
+    was wrong for the host (e.g. mi300x flag on an MI355X box). Probe
+    failure (CPU sandbox, container without rocm-smi) is the only path
+    that keeps the user-supplied value.
+
+    Returns ``(effective_gpu_type, warnings)``. Effective gpu_type is the
+    string the rest of the cli should write into ``args``/``state``/
+    ``manifest``; ``warnings`` is a list of human-readable lines that the
+    caller should ``print(..., file=sys.stderr)`` so the operator sees
+    them but they do not pollute stdout (which now carries the machine-
+    readable ``HYPERLOOM_LAUNCH`` sentinel).
+    """
+    warnings: list[str] = []
+    if probed and user_specified and probed != user_specified:
+        warnings.append(
+            f"WARN: --gpu-type={user_specified!r} disagrees with probed "
+            f"{probed!r}; using probed {probed!r}. The probe wins because "
+            f"Magpie runner_type + KB recipe rows must match the actual "
+            f"hardware to keep baseline numbers comparable across sessions."
+        )
+        return probed, warnings
+    return (probed or user_specified), warnings
+
+
+def _emit_launch_info(
+    *,
+    pid: int,
+    session_dir: Path,
+    session_id: str,
+    run_log: str,
+    gpu_type: str,
+    framework: str,
+    model: str,
+    launch_info_file: str | None,
+) -> dict[str, Any]:
+    """Print the machine-readable HYPERLOOM_LAUNCH stdout line and
+    optionally write the same payload to ``launch_info_file`` as JSON.
+
+    Returns the launch_info dict so callers / tests can inspect what was
+    emitted. Side effects:
+
+    * ``print("HYPERLOOM_LAUNCH key=value ...")`` to stdout (single line,
+      grep-friendly, sed/eval-parseable).
+    * When ``launch_info_file`` is set, the same payload is JSON-dumped to
+      that path (parent dirs created on demand) so launcher scripts can
+      ``jq -r .pid`` instead of grepping the log.
+    """
+    launch_info: dict[str, Any] = {
+        "event": "launch",
+        "pid": pid,
+        "session_dir": str(session_dir),
+        "session_id": session_id,
+        "run_log": run_log,
+        "manifest": str(session_dir / "manifest.json"),
+        "gpu_type": gpu_type,
+        "framework": framework,
+        "model": model,
+    }
+    kv_body = " ".join(f"{k}={v}" for k, v in launch_info.items())
+    print(f"HYPERLOOM_LAUNCH {kv_body}")
+    if launch_info_file:
+        path = Path(launch_info_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(launch_info, indent=2))
+        print(f"Launch info file: {path}")
+    return launch_info
+
+
 def _autodetect_gpu_type() -> str | None:
     """Return mi300x|mi325x|mi355x or None if undetectable.
 
@@ -1260,6 +1340,49 @@ def _reset_claude_config_to_upstream(
     )
 
 
+def _validate_credentials() -> None:
+    """Fail fast when SAFE_API_KEY or OPENAI_BASE_URL is missing.
+
+    Mirrors the gate in ``kernel-agent/scripts/install.sh`` and
+    ``inference_optimizer/scripts/install.sh`` so the same missing-credentials
+    failure surfaces at the same point regardless of whether the operator
+    ran the installers or jumped straight to ``inference_optimizer optimize``.
+    Without this, the cli would happily import Coordinator, spin up KB / Ray /
+    catalog probes, and only blow up when a specialist agent or the catalog
+    probe finally tries to authenticate.
+
+    Strict mode by design: no bypass flag or env var. Specialist agents,
+    GEAK, and the catalog probe all require live credentials, so a run
+    without them cannot finish anyway. Failing here keeps the failure
+    message attached to the actual cause.
+    """
+    missing: list[str] = []
+    if not os.environ.get("SAFE_API_KEY"):
+        missing.append("SAFE_API_KEY")
+    if not os.environ.get("OPENAI_BASE_URL"):
+        missing.append("OPENAI_BASE_URL")
+    if not missing:
+        return
+    repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
+    env_file = Path(repo_root) / ".env"
+    env_status = "present" if env_file.exists() else "not found"
+    print(
+        "\nERROR: Missing required credential(s): "
+        f"{', '.join(missing)}\n\n"
+        "Tried loading from:\n"
+        "  - shell environment\n"
+        f"  - $REPO_ROOT/.env  ({env_status}: {env_file})\n\n"
+        "Fix one of:\n"
+        "  1. Copy .env from a working worktree into this one:\n"
+        f"       cp /path/to/main-worktree/.env {env_file}\n"
+        "  2. Export directly into the shell before re-running:\n"
+        "       export SAFE_API_KEY=sk-xxxxx\n"
+        "       export OPENAI_BASE_URL=https://gateway.example.com/v1",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def _load_dotenv_fallback() -> None:
     """Env always wins over .env. If SAFE_API_KEY or OPENAI_BASE_URL is
     missing from os.environ, source ``$REPO_ROOT/.env`` (defaults to
@@ -2003,6 +2126,13 @@ def _preflight(
     """
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
+
+    # Fail fast when credentials are missing. Must run after the fallback
+    # loaders (so .env / $USER_DATA_PATH/runtime/kernel-agent.env.sh have
+    # had their chance) but before any code that would otherwise burn
+    # cycles on auth-alias propagation, SDK install, ROCm probing, and
+    # the upstream catalog probe.
+    _validate_credentials()
 
     # --- Auth alias export ---
     safe_key = os.environ.get("SAFE_API_KEY", "")
@@ -3590,14 +3720,32 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if framework == "atom":
             _apply_atom_auto_tighten(args)
 
-        # Resolve real target GPU: --gpu-type > $GPU_TYPE > rocm-smi probe.
-        # Keep the real type in args/SharedState so TraceLens and GEAK prompts
-        # see MI325X, while mapping only Magpie's runner env to mi300x.
-        gpu_type = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
-        if not gpu_type:
-            gpu_type = _autodetect_gpu_type() or ""
-            if gpu_type:
-                print(f"GPU type        : {gpu_type} (auto-detected)")
+        # Resolve real target GPU. Order of precedence:
+        #   1. rocm-smi / torch probe (always runs when hardware is reachable)
+        #   2. --gpu-type CLI flag / $GPU_TYPE env (used as a hint only)
+        #   3. --gpu-type-force / HYPERLOOM_GPU_TYPE_FORCE=1 lets the operator
+        #      override a successful probe (CI, mock, cross-arch testing).
+        #
+        # Rationale: the old "operator-specified > probe" priority was a
+        # silent footgun. A typo like --gpu-type mi300x on an MI355X host
+        # made Magpie pick the wrong runner_type without any warning, which
+        # produced bogus baseline numbers and corrupted the KB. Probing
+        # first and treating the flag as a hint catches that immediately;
+        # the force-override knob preserves the escape hatch for legitimate
+        # use cases (containers that mock rocm-smi, dev laptops without a
+        # GPU, etc.).
+        user_specified = (
+            (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
+        )
+        probed = _autodetect_gpu_type() or ""
+        gpu_type, gpu_warnings = _resolve_gpu_type(
+            user_specified=user_specified,
+            probed=probed,
+        )
+        for line in gpu_warnings:
+            print(line, file=sys.stderr)
+        if probed and not user_specified:
+            print(f"GPU type        : {gpu_type} (auto-detected)")
         runner_gpu_type = _gpu_runner_type(gpu_type)
         if gpu_type and runner_gpu_type != gpu_type:
             print(
@@ -3638,6 +3786,25 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Session dir     : {session_dir}")
         print(f"Session id      : {manifest['session_id']}  (manifest label only)")
         _print_session_skeleton(session_dir)
+
+        # Machine-readable launch info. The human-friendly prints above are
+        # column-aligned for log reading; this one-liner gives launcher
+        # scripts (robustness_monitor, health-check loops, kill scripts)
+        # a stable single point to harvest pid + session_dir + run_log
+        # without resorting to ``pgrep -af inference_optimizer`` and
+        # ``ls -d $USER_DATA_PATH/<model>/*T*Z | tail -1``, both of which
+        # break when several sessions overlap on the same host. See
+        # ``_emit_launch_info`` for the wire format.
+        _emit_launch_info(
+            pid=os.getpid(),
+            session_dir=session_dir,
+            session_id=str(manifest["session_id"]),
+            run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
+            gpu_type=gpu_type or "",
+            framework=args.framework or "",
+            model=str(args.model) if args.model else "",
+            launch_info_file=getattr(args, "launch_info_file", None),
+        )
         _seed_shared_state(
             session_dir, args, session_id=manifest["session_id"],
         )
@@ -4064,10 +4231,13 @@ def _build_parser() -> argparse.ArgumentParser:
                            "state.json)")
     opt.add_argument(
         "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
-        help="Override the real target GPU for TraceLens/GEAK prompts. Magpie "
-             "runner_type is derived separately; mi325x currently runs with "
-             "mi300x runner scripts because Magpie does not yet ship "
-             "sglang_mi325x.sh / vllm_mi325x.sh.",
+        help="Hint for the real target GPU. The rocm-smi probe always "
+             "wins when both are present and disagree; a WARN is "
+             "emitted to stderr so the operator sees the typo. Used "
+             "verbatim only when the probe fails (CPU sandbox / no "
+             "rocm-smi). Magpie runner_type is derived separately; "
+             "mi325x currently runs with mi300x runner scripts because "
+             "Magpie does not yet ship sglang_mi325x.sh / vllm_mi325x.sh.",
     )
     opt.add_argument(
         "--framework", choices=["sglang", "vllm", "atom"], default=None,
@@ -4331,6 +4501,16 @@ def _build_parser() -> argparse.ArgumentParser:
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
+    opt.add_argument(
+        "--launch-info-file", type=str, default=None,
+        help="Write a JSON file with the launched session's pid, "
+             "session_dir, session_id, run_log, manifest path, gpu_type, "
+             "framework and model. Launcher scripts can ``jq -r .pid`` / "
+             "``jq -r .session_dir`` instead of grepping stdout or "
+             "pgrep'ing. Always emitted alongside the ``HYPERLOOM_LAUNCH "
+             "<key=value> ...`` single-line sentinel that is printed to "
+             "stdout for stream-based parsers.",
+    )
     opt.add_argument("--framework-pr-discover-timeout-sec", type=float,
                       default=0.0,
                       help="Override the per-call timeout for "

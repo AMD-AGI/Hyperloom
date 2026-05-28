@@ -111,6 +111,79 @@ run() {
   fi
 }
 
+# Preflight credential validation. Mirrors the gate in
+# kernel-agent/scripts/install.sh so users invoking the inference-optimizer
+# installer directly (the canonical entrypoint) get the same fail-fast
+# behaviour as users running kernel-agent on its own. Without this, a
+# missing SAFE_API_KEY / OPENAI_BASE_URL slips past pip install, Magpie
+# clone, InferenceX clone (~10+ minutes of work) and only surfaces when the
+# chained kernel-agent installer reaches GEAK config generation.
+#
+# Loader (env wins; never overwrites a key that is already set):
+#   env > $REPO_ROOT/.env
+#
+# Strict mode by design: --check-only / --dry-run is the only path that
+# downgrades the die to a warn (introspection mode, no install runs).
+preflight_load_dotenv() {
+  if [ -n "${SAFE_API_KEY:-}" ] && [ -n "${OPENAI_BASE_URL:-}" ]; then
+    return 0
+  fi
+  if [ ! -f "$REPO_ROOT/.env" ]; then
+    return 0
+  fi
+  local _snap_safe="${SAFE_API_KEY-}"
+  local _snap_url="${OPENAI_BASE_URL-}"
+  local _snap_cursor="${CURSOR_API_KEY-}"
+  set -a
+  # shellcheck disable=SC1091
+  . "$REPO_ROOT/.env"
+  set +a
+  [ -n "$_snap_safe" ]   && export SAFE_API_KEY="$_snap_safe"
+  [ -n "$_snap_url" ]    && export OPENAI_BASE_URL="$_snap_url"
+  [ -n "$_snap_cursor" ] && export CURSOR_API_KEY="$_snap_cursor"
+  log "loaded credentials fallback from $REPO_ROOT/.env (env wins)"
+}
+
+preflight_validate_credentials() {
+  preflight_load_dotenv
+  local missing=()
+  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
+  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
+  if [ "${#missing[@]}" -eq 0 ]; then
+    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+    return 0
+  fi
+  local env_file_status
+  if [ -f "$REPO_ROOT/.env" ]; then
+    env_file_status="present"
+  else
+    env_file_status="not found"
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
+         "continuing because --check-only / --dry-run is active. The " \
+         "chained kernel-agent installer will still fail later unless " \
+         "these are set before a real install."
+    return 0
+  fi
+  cat >&2 <<EOF
+[inference-optimizer ERROR] Missing required credential(s): ${missing[*]}
+
+Tried loading from:
+  - shell environment
+  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+
+Fix one of:
+  1. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
+  2. Export directly into the shell before re-running:
+       export SAFE_API_KEY=sk-xxxxx
+       export OPENAI_BASE_URL=https://gateway.example.com/v1
+EOF
+  exit 2
+}
+preflight_validate_credentials
+
 # --- 0. Resolve PYTHON ---
 # On hyperloom / sgl-workspace containers the canonical ROCm stack lives in
 # /opt/venv (preinstalled torch+rocm, sglang, vllm, aiter, sgl_kernel,
