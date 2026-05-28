@@ -277,10 +277,12 @@ async def test_p3_scenario_06_read_source_outside_roots(tmp_path: Path):
 
 
 # ===========================================================================
-# §10 #7 — run_bench with unregistered id
+# §10 #7 — run_bench is gated off in v1 (G1); runner rejects as
+# unknown_tool since BENCH_TOOL_ENABLED_V1=False removes it from the
+# live resource-tool surface
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_p3_scenario_07_run_bench_unregistered(tmp_path: Path):
+async def test_p3_scenario_07_run_bench_disabled_in_v1(tmp_path: Path):
     _seed_dispatch(tmp_path)
     plan = ScriptedPlan(turns=[
         MockTurn(raw_text=_tool_block("run_bench", {"bench_id": "nope"})),
@@ -288,7 +290,7 @@ async def test_p3_scenario_07_run_bench_unregistered(tmp_path: Path):
     ])
     result = await _runner(plan).run(_ctx(tmp_path))
     journal = Path(result.journal_path).read_text(encoding="utf-8")
-    assert "unknown_bench_id" in journal or "worktree_unavailable" in journal
+    assert "unknown_tool" in journal
 
 
 # ===========================================================================
@@ -329,13 +331,16 @@ async def test_p3_scenario_09_unparsable_output_repeated_fails(
 
 # ===========================================================================
 # §10 #10 — bench single-call > 60s → timed_out
-# (Covered in test_dynamic_action_tools.test_run_bench_times_out)
+# (v1 disabled; the 60s ceiling stays declared on
+# ``MAX_BENCH_WALL_CLOCK_SEC`` so v2 inherits the cap; the timeout
+# behaviour itself is regression-covered by the re-enable smoke test
+# in test_dynamic_action_tools).
 # ===========================================================================
 def test_p3_scenario_10_bench_timeout_covered_in_tools_module():
-    """Sanity: the tool-level test already pins the 60s ceiling. We
-    keep this marker so the §10 mapping table stays complete."""
+    """Sanity: the tool-level test asserts re-enable still respects the
+    cap. Marker stays so the §10 mapping table is complete."""
     from inference_optimizer.tests.test_dynamic_action_tools import (  # noqa: F401
-        test_run_bench_times_out,
+        test_run_bench_re_enabled_path_executes_script,
     )
 
 
