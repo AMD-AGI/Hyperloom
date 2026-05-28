@@ -597,6 +597,56 @@ def test_write_reports_writes_kernel_roofline_sidecar(tmp_path):
     assert row["bandwidth_utilization_pct"] is None
 
 
+class TestKernelRooflinePathForRunPRCLayout:
+    """PR-C: tracelens_analysis writes under
+    ``.../runs/<session_id>/<ts>_<run_id>/`` (per-invocation sub-dir)
+    so PRELUDE + every watermark refresh keeps its own analysis.md /
+    kernel_candidates / trace_split etc. The ``kernel_roofline_path_
+    for_run`` helper must walk one extra level to reach the kernel-
+    agent root in the new layout, while staying backward-compat with
+    the pre-PR-C ``.../runs/<session_id>/`` layout for legacy
+    callers / older tests."""
+
+    def test_new_layout_resolves_to_session_level_latest_pointer(
+        self, tmp_path,
+    ):
+        from pathlib import Path
+        session = tmp_path / "session"
+        run_dir = (
+            session
+            / "kernel-agent"
+            / "runs"
+            / "sid"
+            / "20260528T200512Z_tl-abcd1234"
+        )
+        run_dir.mkdir(parents=True, exist_ok=True)
+        out = tla.kernel_roofline_path_for_run(run_dir)
+        # Walks 3 levels up (sub_dir -> session_id -> runs -> kernel-agent),
+        # then session_dir.parent → root session, then reports/.
+        assert out == session / "reports" / "kernel_roofline.json"
+
+    def test_pre_prc_layout_still_resolves(self, tmp_path):
+        """Backward-compat: the legacy ``.../runs/<session_id>/`` shape
+        used by the existing test_write_reports test continues to
+        resolve to the same session-level latest pointer."""
+        from pathlib import Path
+        session = tmp_path / "session"
+        run_dir = session / "kernel-agent" / "runs" / "sid"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        out = tla.kernel_roofline_path_for_run(run_dir)
+        assert out == session / "reports" / "kernel_roofline.json"
+
+    def test_unknown_layout_falls_back_to_run_local_reports(self, tmp_path):
+        """When neither the PR-C nor legacy layout matches (e.g. a
+        bare ``/tmp/run`` path from an isolated unit test), fall back
+        to ``run_dir/reports/kernel_roofline.json`` so the helper
+        never raises."""
+        run_dir = tmp_path / "isolated_run"
+        run_dir.mkdir()
+        out = tla.kernel_roofline_path_for_run(run_dir)
+        assert out == run_dir / "reports" / "kernel_roofline.json"
+
+
 def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     """#203: Hyperloom must not rewrite the upstream report's contents.
     Verifying byte-identity here prevents a future refactor from

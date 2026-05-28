@@ -1770,16 +1770,43 @@ def build_kernel_roofline_payload(
 
 
 def kernel_roofline_path_for_run(run_dir: Path) -> Path:
-    """Return the session-level kernel roofline report path."""
+    """Return the session-level kernel roofline report path (latest pointer).
+
+    PR-C: ``run_dir`` is now ``.../runs/<session_id>/<ts>_<run_id>/`` so
+    we walk one extra level up to reach the kernel-agent root.
+    Pre-PR-C layout (``.../runs/<session_id>/``) is still supported via
+    the fallback branch in case a caller invokes this with an old-shape
+    path.
+
+    The session-level path remains the dashboard's stable entry point
+    (one path, always the latest). Per-snapshot analysis.md /
+    kernel_candidates.json etc. live under the per-invocation run_dir
+    and are stamped into ``roofline_snapshots[i].analysis_md_path``
+    so historical snapshots survive intact.
+    """
     try:
-        runs_dir = run_dir.parent
+        # PR-C layout: .../runs/<session_id>/<ts>_<run_id>/
+        session_sub = run_dir.parent
+        runs_dir = session_sub.parent
         kernel_agent_dir = runs_dir.parent
-    except IndexError:
+    except (IndexError, AttributeError):
         return run_dir / "reports" / "kernel_roofline.json"
-    if runs_dir.name != "runs" or kernel_agent_dir.name != "kernel-agent":
+    if runs_dir.name == "runs" and kernel_agent_dir.name == "kernel-agent":
+        session_dir = kernel_agent_dir.parent
+        return session_dir / "reports" / "kernel_roofline.json"
+    # Backward-compat: pre-PR-C layout (.../runs/<session_id>/)
+    try:
+        runs_dir_legacy = run_dir.parent
+        kernel_agent_dir_legacy = runs_dir_legacy.parent
+    except (IndexError, AttributeError):
         return run_dir / "reports" / "kernel_roofline.json"
-    session_dir = kernel_agent_dir.parent
-    return session_dir / "reports" / "kernel_roofline.json"
+    if (
+        runs_dir_legacy.name == "runs"
+        and kernel_agent_dir_legacy.name == "kernel-agent"
+    ):
+        session_dir = kernel_agent_dir_legacy.parent
+        return session_dir / "reports" / "kernel_roofline.json"
+    return run_dir / "reports" / "kernel_roofline.json"
 
 
 def _candidate_model_config_paths(model_name: str) -> list[Path]:
@@ -2353,8 +2380,20 @@ def main() -> int:
     session_id = args.session_id or uuid.uuid4().hex[:12]
     run_id = f"tl-{uuid.uuid4().hex[:8]}"
     started_at = utc_now()
+    # PR-C: per-tracelens-invocation sub-directory so PRELUDE + every
+    # watermark refresh keeps its own analysis.md / kernel_candidates /
+    # trace_split / etc. instead of overwriting the previous run's
+    # files. Format ``<compact_timestamp>_<run_id>`` — sorts
+    # chronologically, run_id keeps uniqueness across same-second
+    # invocations. Pre-PR-C readers walking ``.../runs/<session_id>/``
+    # directly will need to descend one more level; ``kernel_roofline_
+    # path_for_run`` has been updated to handle both layouts.
+    ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0]
+    if not ts_compact.endswith("Z"):
+        ts_compact = ts_compact + "Z"
+    sub_dir = f"{ts_compact}_{run_id}"
     root = Path(args.workspace_path) / "kernel-agent"
-    run_dir = root / "runs" / session_id
+    run_dir = root / "runs" / session_id / sub_dir
     log_path = run_dir / "logs" / "tracelens_analysis" / f"{run_id}.log"
     status_path = run_dir / "status" / "tracelens_analysis" / f"{run_id}.json"
     artifacts: dict[str, str] = {}
