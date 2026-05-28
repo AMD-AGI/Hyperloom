@@ -1,12 +1,8 @@
-"""dynamic_action.MD P2 — seed kit assembler + dispatch artefact tests.
-
-action_dynamic_plan/P2_session_artifact_seed_kit.md §9 lists 7
-acceptance scenarios; each is mapped to a test below (TIDs match
-``test_p2_scenario_N``).
+"""Tests for the seed-kit assembler + dispatch artefact wiring.
 
 The assembler is exercised against a thin SharedState double so the
-deterministic selection rules can be tightly pinned without spinning
-up a real Coordinator.
+deterministic selection rules can be pinned without spinning up a
+real Coordinator.
 """
 
 from __future__ import annotations
@@ -84,9 +80,8 @@ def _coordinator_double(tmp_path: Path, state: SharedState) -> Coordinator:
 # Seed kit invariants
 # ===========================================================================
 def test_seed_kit_fields_are_closed_set():
-    """P2 §5.2.d — adding a top-level field outside the canonical set
-    must be a design change, not a code change. The frozenset pins the
-    surface so reviewers see drift immediately."""
+    """The seed-kit top-level field set is frozen so any new field is
+    visible in the diff."""
     assert SEED_KIT_FIELDS == frozenset({
         "motivation_gap_text",
         "roofline_summary",
@@ -220,9 +215,8 @@ def test_profile_keyslices_capped_and_sorted_by_gpu_pct():
 
 
 def test_kept_patches_filter_drops_kernel_only_entries():
-    """P2 §5.3 — kernel-owned action entries never leak into the kept
-    patches summary (defense in depth even though PolicyGate rejects
-    kernel-only scope_domains)."""
+    """Kernel-owned action entries are filtered out of the kept-patches
+    section even though PolicyGate already rejects kernel-only scope."""
     state = _StateDouble(
         explore_search={
             "accepted": [
@@ -266,7 +260,7 @@ def test_estimate_tokens_monotonic(text: str, expected_min: int):
 
 
 # ===========================================================================
-# P2 §9 — dispatch-time integration scenarios
+# Dispatch-time integration scenarios
 # ===========================================================================
 def _state_with_round(round_idx: int = 0) -> SharedState:
     state = SharedState(session_id="test")
@@ -452,9 +446,8 @@ async def test_stub_executor_writes_into_artifact_dir(tmp_path: Path):
     artefact = dynamic_action_artifact_dir(tmp_path, dyn_id)
     history = (artefact / "dispatch_history.jsonl").read_text(encoding="utf-8")
     parsed = [json.loads(l) for l in history.splitlines() if l.strip()]
-    # G2 — dispatch_history now uses closed schemas:
-    # prepare hook writes DISPATCHED row, stub executor writes
-    # SUB_AGENT_DONE row.
+    # Closed-schema dispatch_history: the prepare hook writes
+    # ``DISPATCHED``, the stub executor writes ``SUB_AGENT_DONE``.
     events = [r["event"] for r in parsed]
     assert events == ["dispatched", "sub_agent_done"]
     assert parsed[1]["terminal_state"] == "COMPLETED_EMPTY"

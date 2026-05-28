@@ -1,22 +1,19 @@
-"""dynamic_action.MD P3 §4 — tool whitelist for the dynamic sub-agent.
+"""Tool whitelist for the dynamic_action sub-agent.
 
-Three live resource tools + one terminal signal + ``run_bench`` gated
-off in v1 (see :data:`BENCH_TOOL_ENABLED_V1`).
+* ``read_source``             — files inside ``framework_source_roots``
+                                 (capped by ``MAX_READ_SOURCE_CHARS``).
+* ``read_session_artifact``   — paths under prefix whitelist with deny
+                                 segments + cross-``dyn_id`` isolation.
+* ``apply_patch_in_worktree`` — ``git apply`` inside the per-dispatch
+                                 worktree only.
+* ``emit_proposal``           — terminal signal; validated by
+                                 :mod:`dynamic_action_proposal`.
+* ``run_bench``               — gated by :data:`BENCH_TOOL_ENABLED_V1`;
+                                 excluded from :data:`ALL_DYNAMIC_TOOLS`
+                                 and returns ``bench_tool_disabled_v1``
+                                 while the registry is empty.
 
-* ``read_source``                  — path inside framework_source_roots
-                                      + ``MAX_READ_SOURCE_CHARS``
-* ``read_session_artifact``        — whitelist roots + blacklist guards
-* ``apply_patch_in_worktree``      — ``git apply`` inside the worktree
-                                      only; out-of-tree paths denied
-* ``emit_proposal``                — terminal signal; validation lives
-                                      in :mod:`dynamic_action_proposal`.
-* ``run_bench`` (DISABLED IN v1)   — until real probes land
-  (``dynamic_action_gaps.md`` G1), the tool is excluded from
-  :data:`ALL_DYNAMIC_TOOLS`, :data:`BENCH_REGISTRY` is empty, and
-  any call returns ``bench_tool_disabled_v1``.
-
-Each tool returns a JSON-serialisable dict so the runner can both
-journal the result and feed it back to the LLM verbatim.
+Each tool returns a JSON-serialisable dict.
 """
 
 from __future__ import annotations
@@ -47,11 +44,8 @@ TOOL_RUN_BENCH: str = "run_bench"
 TOOL_APPLY_PATCH_IN_WORKTREE: str = "apply_patch_in_worktree"
 TOOL_EMIT_PROPOSAL: str = "emit_proposal"
 
-# v1 disable flag for the bench tool (dynamic_action_gaps.md G1). When
-# False, ``run_bench`` is removed from the sub-agent's tool surface,
-# :data:`BENCH_REGISTRY` is empty, and the runner treats any
-# ``run_bench`` call as an unknown tool. Flip to True together with
-# real probe implementations.
+# When False, ``run_bench`` is excluded from the tool surface and
+# ``BENCH_REGISTRY`` is empty; flip together with real probe bodies.
 BENCH_TOOL_ENABLED_V1: bool = False
 
 ALL_DYNAMIC_TOOLS: frozenset[str] = frozenset(
@@ -64,22 +58,18 @@ ALL_DYNAMIC_TOOLS: frozenset[str] = frozenset(
 )
 DYNAMIC_RESOURCE_TOOLS: frozenset[str] = ALL_DYNAMIC_TOOLS - {TOOL_EMIT_PROPOSAL}
 
-# P3 §4.1.a — single read_source response is hard-capped (≈4K tokens at
-# 4 chars per token).
+# Per-call response size cap for ``read_source``.
 MAX_READ_SOURCE_CHARS: int = 16_000
 
-# P3 §4.1.b — relative paths under SESSION_DIR that the sub-agent may
-# read. Anything not matching one of these prefixes is denied.
+# Session-relative path prefixes the sub-agent may read.
 SESSION_ARTIFACT_ALLOWED_PREFIXES: tuple[str, ...] = (
     "runs/grid/",
     "agents/orchestration/dynamic_actions/",
     "runs/dynamic/",
 )
 
-# P3 §4.1.b — explicit deny list. ``read_session_artifact`` rejects any
-# path containing these segments even when the prefix would otherwise
-# allow it (matters when ``agents/orchestration/dynamic_actions/<dyn_id>/``
-# accidentally addresses a *different* dyn_id).
+# Segments denied even when the prefix matches; the cross-``dyn_id``
+# check below is layered on top of this list.
 SESSION_ARTIFACT_DENY_SEGMENTS: tuple[str, ...] = (
     "inbox.jsonl",
     "outbox.jsonl",
@@ -93,13 +83,8 @@ SESSION_ARTIFACT_DENY_SEGMENTS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class BenchSpec:
-    """One entry in the bench whitelist.
-
-    The registry is a code-level constant; sub-agents cannot extend it
-    at runtime. ``script_path`` is intentionally relative — the runner
-    resolves it against the package's ``benches/`` dir at call time so
-    tests can monkey-patch with a stub script.
-    """
+    """One entry in the bench whitelist; ``script_path`` is resolved
+    against the package's ``benches/`` directory at call time."""
 
     bench_id: str
     description: str
@@ -107,16 +92,11 @@ class BenchSpec:
     script_path: str
 
 
-# v1 registry — empty until real probes land (see G1 + BENCH_TOOL_ENABLED_V1).
-# v2 candidates (kept here as docstring + commented descriptor so the
-# next implementation pass has the schema target):
-#   * kernel_attention_timing      — Single attention layer forward timing
-#   * kernel_gemm_timing           — GEMM op timing + occupancy
-#   * kernel_kvcache_layout        — KV cache layout read/write throughput
-#   * inference_short_prompt       — Short prompt end-to-end latency
+# Populated alongside real probe implementations; the gate above
+# guards the empty case.
 BENCH_REGISTRY: dict[str, BenchSpec] = {}
 
-# Absolute hard ceiling regardless of per-bench config (Q2 decision).
+# Hard ceiling on a single ``run_bench`` invocation.
 MAX_BENCH_WALL_CLOCK_SEC: float = 60.0
 
 
@@ -124,8 +104,7 @@ MAX_BENCH_WALL_CLOCK_SEC: float = 60.0
 # Helpers
 # ---------------------------------------------------------------------------
 def _error(reason: str, **extra: Any) -> dict[str, Any]:
-    """Standardise the tool error envelope. Sub-agent always sees
-    {ok: False, reason, ...} so the loop logic is symmetric."""
+    """Standard tool error envelope: ``{ok: False, reason, ...}``."""
     return {"ok": False, "reason": reason, **extra}
 
 
@@ -148,10 +127,10 @@ def _path_under(child: Path, parent: Path) -> bool:
 # read_source
 # ---------------------------------------------------------------------------
 def read_source(path: str) -> dict[str, Any]:
-    """Read a framework_source_roots file. P3 §4.1.a contract.
+    """Read a file under ``framework_source_roots``.
 
-    Failures (path outside roots, missing file, oversize, etc.) come
-    back as ``_error`` envelopes so the sub-agent can self-correct
+    Failures (path outside roots, missing file, oversize, etc.) are
+    returned as ``_error`` envelopes so the sub-agent can self-correct
     without aborting the turn loop.
     """
     raw = str(path or "").strip()
@@ -193,9 +172,8 @@ def read_session_artifact(
 ) -> dict[str, Any]:
     """Read a whitelisted artefact under ``session_dir``.
 
-    ``dyn_id`` is the current dispatch's id; reads addressed at *other*
-    ``dynamic_actions/<other_id>/`` directories are denied even when
-    the prefix matches (P3 §4.1.b black-list).
+    ``dyn_id`` is the current dispatch's id; reads addressed at any
+    *other* ``dynamic_actions/<other_id>/`` directory are denied.
     """
     raw = str(relative_path or "").strip()
     if not raw:
@@ -209,8 +187,6 @@ def read_session_artifact(
     for seg in SESSION_ARTIFACT_DENY_SEGMENTS:
         if seg in raw:
             return _error("path_in_deny_list", path=raw, segment=seg)
-    # Cross-dyn_id isolation: any read addressed at
-    # ``agents/orchestration/dynamic_actions/<other>/`` rejected.
     if raw.startswith("agents/orchestration/dynamic_actions/"):
         suffix = raw[len("agents/orchestration/dynamic_actions/"):]
         head = suffix.split("/", 1)[0]
@@ -256,19 +232,17 @@ async def run_bench(
 ) -> dict[str, Any]:
     """Execute a registered micro-bench inside the worktree.
 
-    ``bench_dir_root`` lets tests stub the script discovery root; in
-    production it defaults to ``<package>/benches``.     Output lands under
-    ``worktree/scratch/bench/<bench_id>/<call_id>/`` and is *not*
-    recovered (P3 §6 recovery whitelist).
+    Output lands under ``worktree/scratch/bench/<bench_id>/<call_id>/``
+    and is destroyed with the worktree (never surfaces in artefacts).
+    ``bench_dir_root`` overrides the script discovery root for tests.
     """
     if not BENCH_TOOL_ENABLED_V1:
         return _error(
             "bench_tool_disabled_v1",
             bench_id=bench_id,
             note=(
-                "run_bench is gated off in v1 until real probes land "
-                "(dynamic_action_gaps.md G1). Proceed using read_source "
-                "+ read_session_artifact only."
+                "run_bench is disabled; use read_source + "
+                "read_session_artifact for exploration."
             ),
         )
     bench = BENCH_REGISTRY.get(bench_id)
@@ -346,7 +320,6 @@ def apply_patch_in_worktree(
     worktree = Path(worktree)
     if not worktree.is_dir():
         return _error("worktree_missing", path=str(worktree))
-    # Reject patches that try to touch out-of-tree paths.
     for hit in _PATCH_PATH_RE.finditer(patch_text):
         cand = hit.group("path").strip()
         if cand.startswith("/") or ".." in Path(cand).parts:
@@ -368,8 +341,6 @@ def apply_patch_in_worktree(
             "git_apply_rejected",
             stderr_tail=(proc.stderr or "").strip()[-2000:],
         )
-    # The --check pass succeeded; do the real apply so the sub-agent can
-    # iterate. The runner will git reset --hard on termination.
     try:
         proc2 = subprocess.run(
             ["git", "apply", "-"],
@@ -391,18 +362,12 @@ def apply_patch_in_worktree(
 
 
 def capture_worktree_cumulative_diff(worktree: Path) -> str | None:
-    """Return ``git diff HEAD`` output for ``worktree`` (gap G6).
+    """Return ``git diff HEAD`` output for ``worktree``.
 
-    Used by the runner at ``emit_proposal`` time to validate that the
-    proposal's ``patch_text`` matches the current worktree state when
-    the sub-agent has applied one or more patches during iteration.
-
-    Returns:
-    * ``""``     — clean worktree (no uncommitted changes).
+    * ``""``     — clean worktree.
     * ``<diff>`` — uncommitted-change diff.
-    * ``None``   — git failure (worktree not a repo / timeout); the
-                   caller skips the cumulative-diff check rather than
-                   bricking the dispatch.
+    * ``None``   — git failure / not a repo; callers skip the
+                   cumulative-diff check rather than aborting.
     """
     worktree = Path(worktree)
     if not worktree.is_dir():
@@ -420,8 +385,7 @@ def capture_worktree_cumulative_diff(worktree: Path) -> str | None:
 
 
 def reset_worktree(worktree: Path) -> None:
-    """Roll the worktree back to a clean state (used on runner exit so
-    the next dispatch sees a fresh tree)."""
+    """Discard uncommitted changes + untracked files in ``worktree``."""
     worktree = Path(worktree)
     if not worktree.is_dir():
         return
