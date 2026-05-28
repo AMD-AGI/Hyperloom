@@ -37,7 +37,7 @@ SWEEP / CLOSE). Your activity window is essentially limited to
   per tick. **Do NOT** initiate any action; this is an invariant.
 - In **KERNEL**: act normally — the Coordinator runs a single
   `profile` at phase entry to refresh `last_profile_trace`; you should
-  use that trace verbatim in `select_kernels` REQUEST handling. The
+  use that trace verbatim in `trace_analyze` REQUEST handling. The
   retry caps (`_DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2`) and integrate
   discipline still apply.
 
