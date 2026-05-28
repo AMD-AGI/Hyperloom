@@ -91,6 +91,11 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     # ``explore`` already includes it in the registry-derived set, the
     # fallback only matters when the yaml can't be loaded.
     "integrate_patch",
+    # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor
+    # mirroring integrate_patch (applies an upstream PR + benches +
+    # KEEP/REVERT). pipeline_phase=explore puts it in the registry-derived
+    # runs/<kind>/ set; the fallback only matters on registry load failure.
+    "framework_pr",
     # IR-7 (Saturday May 2026): ``assess_remaining_gaps`` is a thin
     # wrapper that dispatches the ``session_steward_specialist``
     # domain. Pipeline_phase ``explore`` includes it in the

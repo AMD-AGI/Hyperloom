@@ -23,7 +23,7 @@ Schema v3 (dependencies added)::
       "image":             "<registry>/<repo>:<tag>" or null,
       "model_path":        "...",
       "model_name":        "...",
-      "framework":         "sglang|vllm",
+      "framework":         "sglang|vllm|atom",
       "gpu_type":          "mi300x|mi325x|mi355x|''",
       "tp":                N or null,
       "workload":          {"isl":..., "osl":..., "max_model_len":...,

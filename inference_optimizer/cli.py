@@ -61,6 +61,7 @@ from .orchestrator.action_executors import (
     sweep_executor,
 )
 from .orchestrator.action_executors.integrate_patch import IntegratePatchExecutor
+from .orchestrator.action_executors.framework_pr import FrameworkPrExecutor
 from .orchestrator.action_executors.recover import recover_executor
 from .orchestrator.action_executors.profile import profile_executor
 from .orchestrator.action_executors.roofline import make_roofline_executor
@@ -390,6 +391,54 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         sys.exit(2)
 
 
+def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
+    """B3: tighten incompatible CLI knobs when --framework atom is selected.
+
+    atom in Magpie v1 has neither a torch_profiler integration (so
+    roofline cannot produce a trace) nor a source-patcher for the
+    framework-agent's PR loop (the kernel-agent / framework-agent assume
+    sglang/vllm source layouts). Auto-disabling kernel-agent +
+    framework-agent + roofline phases keeps the rest of the run sensible
+    without forcing the operator to remember three extra flags. Explicit
+    user opt-in for any of these is preserved (we only flip a value when
+    it is still at its enabled default).
+
+    atom multi-node is also unsupported (Magpie wrapper / atom server
+    have no multi-node TP wiring) — fail-fast on ``--nodes >= 2`` so
+    operators don't burn a ~6-min cold start on a doomed run.
+
+    Returns the list of flag names auto-disabled (for callers that want
+    to log / assert). Calls ``sys.exit(2)`` on the multi-node guard
+    failure.
+    """
+    auto_disabled: list[str] = []
+    if not getattr(args, "no_kernel", False):
+        args.no_kernel = True
+        auto_disabled.append("--no-kernel")
+    if not getattr(args, "no_framework", False):
+        args.no_framework = True
+        auto_disabled.append("--no-framework")
+    if getattr(args, "enable_roofline", True):
+        args.enable_roofline = False
+        auto_disabled.append("--no-enable-roofline")
+    if auto_disabled:
+        print(
+            f"  framework=atom: auto-disabling "
+            f"{', '.join(auto_disabled)} (atom has no profiler / "
+            "sglang/vllm-specific source patcher; see "
+            "atom_boost_tutorials.md §6)"
+        )
+    if int(getattr(args, "nodes", 1) or 1) >= 2:
+        print(
+            "ERROR: --framework atom does not support multi-node "
+            "(--nodes >= 2). atom multi-node TP wiring is deferred; "
+            "drop to --nodes 1 or pick --framework sglang/vllm.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return auto_disabled
+
+
 def _autodetect_gpu_type() -> str | None:
     """Return mi300x|mi325x|mi355x or None if undetectable.
 
@@ -643,9 +692,10 @@ def _seed_shared_state(
         enable_roofline=bool(
             getattr(args, "enable_roofline", True),
         ),
-        framework_agent_enabled=bool(
-            getattr(args, "framework_agent_enabled", True),
-        ),
+        # Standalone FRAMEWORK_PR phase (PRELUDE → FRAMEWORK_PR →
+        # EXPLORE). ``--no-framework`` skips it; default on. Mirrors
+        # the ``--no-kernel`` / ``kernel_enabled`` pattern.
+        framework_phase_enabled=not bool(getattr(args, "no_framework", False)),
         gain_driven_kernel_opt=bool(
             getattr(args, "gain_driven_kernel_opt", False),
         ),
@@ -984,6 +1034,14 @@ def _register_executors(
     coordinator.sub.register_executor(
         "integrate_patch",
         IntegratePatchExecutor(session_dir=session_dir),
+    )
+
+    # FRAMEWORK_PR phase per-candidate executor — Coordinator-internal
+    # only (PolicyGate denies LLM ``delegate{action='framework_pr'}``
+    # via ``framework_pr_action_not_llm_proposable``).
+    coordinator.sub.register_executor(
+        "framework_pr",
+        FrameworkPrExecutor(session_dir=session_dir),
     )
 
     # The composite ``roofline`` action runs profile + trace_analyze
@@ -3226,6 +3284,30 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if not state.kernel_enabled:
             args.no_kernel = True
             print("  kernel agent          : DISABLED (persisted from original run)")
+        # Same persistence contract for the FRAMEWORK_PR phase toggle.
+        if not bool(getattr(state, "framework_phase_enabled", True)):
+            args.no_framework = True
+            print("  framework phase       : DISABLED (persisted from original run)")
+        elif bool(getattr(args, "no_framework", False)):
+            # Inverse direction (P2.d): persisted state still has the
+            # phase enabled, but the operator passed ``--no-framework``
+            # on resume. Only honour this when the original session has
+            # not yet entered FRAMEWORK_PR (or anything past it) —
+            # retroactively skipping a phase we are in/past is
+            # incoherent.
+            cur_phase = (getattr(state, "phase", "") or "").strip().upper()
+            if cur_phase in ("", "PRELUDE"):
+                state.framework_phase_enabled = False
+                print(
+                    "  framework phase       : DISABLING for resume "
+                    "(--no-framework + phase=PRELUDE)"
+                )
+            else:
+                print(
+                    f"  framework phase       : WARN --no-framework ignored; "
+                    f"session is already in phase={cur_phase!r} "
+                    f"(cannot retroactively skip)"
+                )
 
         # CRITICAL: a leftover stop_reason from the prior run (most often
         # "time_exhausted") fools Orchestration into thinking the work is
@@ -3352,20 +3434,26 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["MODEL_PATH"] = str(args.model)
 
         # Resolve framework: --framework > $FRAMEWORK env > "sglang".
-        # Session-wide; mixing sglang/vllm in one session is not supported.
+        # Session-wide; mixing frameworks in one session is not supported.
         framework = (
             (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
             or "sglang"
         )
-        if framework not in ("sglang", "vllm"):
+        if framework not in ("sglang", "vllm", "atom"):
             print(
-                f"ERROR: --framework must be sglang or vllm (got {framework!r}); "
-                "set $FRAMEWORK accordingly or pass --framework",
+                f"ERROR: --framework must be sglang, vllm, or atom "
+                f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
+                "--framework",
                 file=sys.stderr,
             )
             sys.exit(2)
         os.environ["FRAMEWORK"] = framework
         print(f"Framework       : {framework}")
+
+        # B3: --framework atom auto-tightens incompatible phases. See
+        # _apply_atom_auto_tighten for rationale.
+        if framework == "atom":
+            _apply_atom_auto_tighten(args)
 
         # Resolve real target GPU: --gpu-type > $GPU_TYPE > rocm-smi probe.
         # Keep the real type in args/SharedState so TraceLens and GEAK prompts
@@ -3643,6 +3731,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if not no_kernel:
         prompts["kernel"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
+    # ``fa phase-discover`` timeout override. ``framework_agent_client``
+    # uses DEFAULT_FA_PHASE_TIMEOUT_SEC (180s) when this is missing /
+    # falsy.
+    try:
+        coordinator.framework_pr_discover_timeout_sec = float(
+            getattr(args, "framework_pr_discover_timeout_sec", 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        coordinator.framework_pr_discover_timeout_sec = 0.0
     # v0.8 §3.5 + build specialist executor when the
     # research_lane capacity is non-zero. ``args.research_lane_capacity``
     # is already clamped to [0, 32] by ``_seed_shared_state``; a value
@@ -3806,11 +3903,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "sglang_mi325x.sh / vllm_mi325x.sh.",
     )
     opt.add_argument(
-        "--framework", choices=["sglang", "vllm"], default=None,
+        "--framework", choices=["sglang", "vllm", "atom"], default=None,
         help="Inference framework to benchmark / optimize. Resolution order: "
              "--framework > $FRAMEWORK env > sglang (default). Selection is "
-             "session-wide; mixing sglang and vllm in a single session is "
-             "not supported.",
+             "session-wide; mixing frameworks in a single session is not "
+             "supported. NOTE: --framework atom is single-node-only and has "
+             "no profiler / framework-source-patcher integration; B3 "
+             "auto-tightens incompatible phases off when atom is selected.",
     )
     opt.add_argument(
         "--nodes", type=int,
@@ -4065,6 +4164,26 @@ def _build_parser() -> argparse.ArgumentParser:
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
+    opt.add_argument("--framework-pr-discover-timeout-sec", type=float,
+                      default=0.0,
+                      help="Override the per-call timeout for "
+                           "``fa phase-discover``. 0 (the default) uses "
+                           "framework_agent_client.DEFAULT_FA_PHASE_TIMEOUT_SEC "
+                           "(180s). The Coordinator retries discover up to "
+                           "DISCOVER_FAILURE_RETRY_LIMIT (3) consecutive "
+                           "failures before marking FRAMEWORK_PR done.")
+    opt.add_argument("--no-framework", action="store_true",
+                      default=os.environ.get(
+                          "INFERENCE_OPTIMIZER_NO_FRAMEWORK", "0",
+                      ).strip() in ("1", "true", "True", "TRUE", "yes"),
+                      help="Skip the FRAMEWORK_PR phase (PRELUDE → EXPLORE "
+                           "directly). The phase pre-scans upstream sglang/"
+                           "vllm PRs via framework-agent and lands KEPT "
+                           "patches before EXPLORE starts. Disable when "
+                           "the framework-agent toolchain is unavailable "
+                           "or you want a faster cold start. Also read from "
+                           "$INFERENCE_OPTIMIZER_NO_FRAMEWORK=1. "
+                           "Default: framework phase enabled.")
     opt.add_argument("--kernel-codex", action="store_true", default=True,
                       help="Use Codex backend for Kernel agent (default — faster). "
                            "Pass --kernel-claude to switch.")
@@ -4397,17 +4516,9 @@ def _build_parser() -> argparse.ArgumentParser:
     def _env_default_on(env_var: str) -> bool:
         return os.environ.get(env_var, "1").strip() != "0"
 
-    opt.add_argument(
-        "--framework-agent-enabled",
-        dest="framework_agent_enabled",
-        action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED"),
-        help="``serving_specialist`` may invoke ``fa candidates`` "
-             "and ``git fetch refs/pull/...`` via the "
-             "``framework_pr_scout`` sub_kind. On by default. Pass "
-             "``--no-framework-agent-enabled`` (or env "
-             "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0) to opt out.",
-    )
+    # The standalone FRAMEWORK_PR phase is on by default; use
+    # ``--no-framework`` to disable it (mirrors the install-side
+    # ``INFERENCE_OPTIMIZER_NO_FRAMEWORK=1`` opt-out).
     opt.add_argument(
         "--gain-driven-kernel-opt",
         dest="gain_driven_kernel_opt",
