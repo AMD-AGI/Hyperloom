@@ -278,7 +278,14 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     framework = str(bench.get("framework") or "").strip().lower()
-    server_key = "EXTRA_VLLM_ARGS" if framework == "vllm" else "EXTRA_SGLANG_ARGS"
+    # atom_gap2.md B1 fix: route through the single source of truth for
+    # the per-framework env name so an atom session correctly reads
+    # ``EXTRA_ATOM_ARGS`` (the previous ``EXTRA_VLLM_ARGS`` / else
+    # ``EXTRA_SGLANG_ARGS`` ternary silently dropped every atom-side
+    # flag, which then surfaced to TraceLens / GEAK / Cursor as an
+    # empty ``server_args`` context).
+    from .action_executors._grid_runner import server_args_env_name
+    server_key = server_args_env_name(framework)
     server_args = str(envs.get(server_key) or "").strip()
     workload = {
         out_key: _coerce_runtime_value(envs[src_key])
