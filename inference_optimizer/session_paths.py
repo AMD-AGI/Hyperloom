@@ -294,6 +294,50 @@ def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# dynamic_action.MD P2 §3 — orchestration-owned dispatch artefacts.
+# ---------------------------------------------------------------------------
+def dynamic_actions_root(session_dir: Path) -> Path:
+    """``<sd>/agents/orchestration/dynamic_actions/`` — parent of every
+    per-dyn_id artefact dir. Pre-created by ``make_session_dir``; this
+    helper only computes the path."""
+    return agent_dir(session_dir, "orchestration") / "dynamic_actions"
+
+
+def dynamic_action_artifact_dir(session_dir: Path, dyn_id: str) -> Path:
+    """``<sd>/agents/orchestration/dynamic_actions/<dyn_id>/`` —
+    dispatch-time artefact root for one dynamic_action.
+
+    Houses ``spec.json`` + ``seed_kit.json`` (P2 §3.1) plus future
+    ``sub_agent_journal.md`` / ``proposal_set.json`` / ``critic_verdict.json``
+    / ``dispatch_history.jsonl`` / ``telemetry.json`` written by P3 / P4
+    / P5 / P6. Caller is expected to ``mkdir(parents=True, exist_ok=True)``
+    before writing; Coordinator's dispatch hook does this once per dyn_id.
+    """
+    did = str(dyn_id or "").strip() or "unknown"
+    return dynamic_actions_root(session_dir) / did
+
+
+def dynamic_action_spec_path(session_dir: Path, dyn_id: str) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "spec.json"
+
+
+def dynamic_action_seed_kit_path(session_dir: Path, dyn_id: str) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "seed_kit.json"
+
+
+def dynamic_action_dispatch_history_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "dispatch_history.jsonl"
+
+
+def dynamic_action_proposal_set_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "proposal_set.json"
+
+
+# ---------------------------------------------------------------------------
 # External baseline comparison artefacts (DESIGN: target_analysis is report-only)
 # ---------------------------------------------------------------------------
 # These paths sit under a dedicated top-level subdir rather than
@@ -454,6 +498,12 @@ __all__ = [
     "cortex_pitfalls_json",
     "cortex_sid_file",
     "cortex_warm_json",
+    "dynamic_action_artifact_dir",
+    "dynamic_action_dispatch_history_path",
+    "dynamic_action_proposal_set_path",
+    "dynamic_action_seed_kit_path",
+    "dynamic_action_spec_path",
+    "dynamic_actions_root",
     "kernel_agent_runs_dir",
     "kernel_workspace",
     "logs_dir",
