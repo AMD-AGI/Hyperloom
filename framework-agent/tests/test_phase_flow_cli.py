@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 import framework_agent.runtime.cli as cli
 from framework_agent.models import Candidate

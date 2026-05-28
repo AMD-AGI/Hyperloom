@@ -6,7 +6,6 @@ integration breakdown tests skip over.
 
 from __future__ import annotations
 
-import pytest
 
 from inference_optimizer.breakdown.reporters._renderers import param_search as ps_mod
 from inference_optimizer.breakdown.reporters.base import RenderedSection
