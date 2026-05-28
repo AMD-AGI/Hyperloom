@@ -399,49 +399,35 @@ def cortex_audit_jsonl(session_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# recipe-snapshot v2 — new client per-session bookkeeping.
+# recipe-snapshot v2 — per-session bookkeeping.
 #
 # Lives under a separate ``runtime/recipe_snapshot/`` subtree (NOT
-# ``runtime/cortex/``) so the new client can be developed and exercised
-# in parallel with the legacy ``/v1/points`` ``CortexKBClient``. Phase 2
-# of the cutover deletes the legacy client and its ``runtime/cortex/``
-# producers; ``runtime/recipe_snapshot/`` then becomes the sole KB
-# bookkeeping root.
+# ``runtime/cortex/``) so the v2 dispatcher can stay decoupled from
+# the legacy ``/v1/points`` client during the gradual cutover.
+#
+# History: under the original Phase 1 design this directory also held
+# ``.pending.ndjson`` / ``.flushed.ndjson`` / ``.dead_letter.ndjson``
+# queues for failed central-server writes. Those have been retired —
+# under the local-write design (commit "feat(recipe_kb): local-only
+# recipe-snapshot store with history archival") writes never go to
+# the central server, so the failed-write fan-out has nothing to
+# queue. Only the read-side audit log (``.audit.jsonl``) and the
+# directory itself survive; both are kept for the dispatcher's
+# remote-failure logging path.
 # ---------------------------------------------------------------------------
 def recipe_snapshot_dir(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_snapshot/`` — recipe-snapshot client root."""
+    """``<sd>/runtime/recipe_snapshot/`` — dispatcher / remote-client
+    per-session bookkeeping root.
+    """
     return Path(session_dir) / "runtime" / "recipe_snapshot"
-
-
-def recipe_snapshot_pending_ndjson(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_snapshot/.pending.ndjson`` — append-only
-    queue for ``PUT /recipes/{cid}`` calls that failed synchronously on
-    the main loop. Drained by a background flusher (Phase 3 of the
-    cutover) and at session close.
-    """
-    return recipe_snapshot_dir(session_dir) / ".pending.ndjson"
-
-
-def recipe_snapshot_flushed_ndjson(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_snapshot/.flushed.ndjson`` — successfully-
-    POSTed rows, kept around for offline audit / breakdown collection.
-    """
-    return recipe_snapshot_dir(session_dir) / ".flushed.ndjson"
-
-
-def recipe_snapshot_dead_letter_ndjson(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_snapshot/.dead_letter.ndjson`` — rows that
-    failed permanently (HTTP 4xx business-logic rejects, after
-    ``MAX_FLUSH_ATTEMPTS`` retries).
-    """
-    return recipe_snapshot_dir(session_dir) / ".dead_letter.ndjson"
 
 
 def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
     """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only
-    synchronous audit of every recipe-snapshot HTTP call (success or
-    failure) the Coordinator made directly, independent of NDJSON
-    fan-out.
+    synchronous audit of every recipe-snapshot remote READ call
+    (success or failure) the dispatcher made directly. Writes are
+    local-only and don't traverse this audit (the local store has
+    its own atomic write contract).
     """
     return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
 
