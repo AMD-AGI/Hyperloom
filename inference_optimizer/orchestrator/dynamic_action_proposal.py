@@ -52,6 +52,51 @@ TERMINAL_REASONS: dict[DynamicRunnerTerminalState, frozenset[str]] = {
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle states (P5 §6 + P6 hint)
+# ---------------------------------------------------------------------------
+class DynamicActionStatus(str, Enum):
+    """SharedState.dynamic_actions[dyn_id].status vocabulary.
+
+    Closed enum; covers every row of P5 §6's failure-attribution table.
+    The mapping from :class:`DynamicRunnerTerminalState` is captured by
+    :data:`RUNNER_STATE_TO_STATUS`; later lifecycle steps (critic +
+    integrate_patch) overwrite the status via
+    :meth:`SharedState.record_dynamic_action_outcome`.
+    """
+
+    DISPATCHED = "DISPATCHED"
+    TIMED_OUT = "TIMED_OUT"
+    FAILED = "FAILED"
+    COMPLETED_EMPTY = "COMPLETED_EMPTY"
+    CRITIC_REJECTED = "CRITIC_REJECTED"
+    INTEGRATE_FAILED = "INTEGRATE_FAILED"
+    REVERTED = "REVERTED"
+    KEPT = "KEPT"
+    ABANDONED = "ABANDONED"
+
+
+RUNNER_STATE_TO_STATUS: dict[DynamicRunnerTerminalState, DynamicActionStatus] = {
+    DynamicRunnerTerminalState.COMPLETED: DynamicActionStatus.DISPATCHED,
+    DynamicRunnerTerminalState.COMPLETED_EMPTY: DynamicActionStatus.COMPLETED_EMPTY,
+    DynamicRunnerTerminalState.TIMED_OUT: DynamicActionStatus.TIMED_OUT,
+    DynamicRunnerTerminalState.FAILED: DynamicActionStatus.FAILED,
+    DynamicRunnerTerminalState.ABANDONED: DynamicActionStatus.ABANDONED,
+}
+
+
+TERMINAL_LIFECYCLE_STATUSES: frozenset[DynamicActionStatus] = frozenset({
+    DynamicActionStatus.TIMED_OUT,
+    DynamicActionStatus.FAILED,
+    DynamicActionStatus.COMPLETED_EMPTY,
+    DynamicActionStatus.CRITIC_REJECTED,
+    DynamicActionStatus.INTEGRATE_FAILED,
+    DynamicActionStatus.REVERTED,
+    DynamicActionStatus.KEPT,
+    DynamicActionStatus.ABANDONED,
+})
+
+
+# ---------------------------------------------------------------------------
 # Proposal schema (P3 §5)
 # ---------------------------------------------------------------------------
 ALLOWED_PROPOSAL_FIELDS: frozenset[str] = frozenset({
@@ -288,6 +333,7 @@ def build_proposal_set_payload(
 
 __all__ = [
     "ALLOWED_PROPOSAL_FIELDS",
+    "DynamicActionStatus",
     "DynamicRunnerTerminalState",
     "EXPECTED_PROVENANCE",
     "FORBIDDEN_PROPOSAL_FIELDS",
@@ -295,6 +341,8 @@ __all__ = [
     "MAX_PROPOSAL_SET_LEN",
     "ProposalValidationResult",
     "REQUIRED_PROPOSAL_FIELDS",
+    "RUNNER_STATE_TO_STATUS",
+    "TERMINAL_LIFECYCLE_STATUSES",
     "TERMINAL_REASONS",
     "build_proposal_set_payload",
     "validate_proposal",
