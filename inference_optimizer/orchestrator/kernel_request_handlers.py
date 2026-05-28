@@ -1646,7 +1646,12 @@ async def integrate_handler(
         }
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
-    extra_args = str(payload.get("extra_server_args", "") or "").strip()
+    # ``payload`` arrives via the integrate_patch sub-agent envelope;
+    # route the read through the Phase 4 compat helper so a legacy
+    # ``extra_sglang_args`` envelope still resolves (with a single
+    # DeprecationWarning logged via stacklevel=3).
+    from ..compat.payload_aliases import read_extra_server_args
+    extra_args = read_extra_server_args(payload).strip()
 
     # Build a Task wrapper around BaselineExecutor (which expects an
     # RunnerContext with a Task in it). The "extra_server_args" hand-
