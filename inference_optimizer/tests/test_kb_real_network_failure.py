@@ -172,6 +172,77 @@ def test_failed_write_returns_within_a_few_seconds(tmp_path, fast_retry):
 
 
 # ===========================================================================
+# Side-channel mode — foreground client fails fast
+# ===========================================================================
+def test_foreground_client_fails_fast_against_dead_kb(tmp_path):
+    """``foreground=True`` (used by the Coordinator main loop) MUST
+    bound a single failed write to ~3s (2s timeout + 1 try, no retries
+    above 1). This is the contract that keeps a sick KB from
+    blocking the optimizer for ~5min per EXPLORE round."""
+    client = CortexKBClient(
+        session_dir=tmp_path / "s",
+        kb_url="http://127.0.0.1:1",
+        foreground=True,
+    )
+    # Verify the resolved profile.
+    assert client.timeout_sec == 2.0
+    assert client.retry_attempts == 1
+
+    start = time.monotonic()
+    out = client.propose_lesson(
+        statement="X", measured_impact="y",
+        applicable_models=["M"], applicable_hardware=["H"],
+    )
+    elapsed = time.monotonic() - start
+    assert out["status"] == "queued"
+    assert elapsed < 3.0, (
+        f"foreground propose_lesson took {elapsed:.2f}s — the contract "
+        f"requires < 3s on a dead KB. Check timeout_sec / retry_attempts "
+        f"profile."
+    )
+
+
+def test_background_client_uses_legacy_retry_budget(tmp_path):
+    """``foreground=False`` (kb_flusher daemon, CLOSE-time drain) keeps
+    the legacy 10s × 3 retries so transient blips still commit."""
+    client = CortexKBClient(
+        session_dir=tmp_path / "s",
+        kb_url="http://kb-test.local",
+        # foreground defaults to False — explicit here for clarity.
+        foreground=False,
+    )
+    assert client.timeout_sec == 10.0
+    assert client.retry_attempts == 3
+
+
+def test_foreground_round_trip_in_explore_size_burst(tmp_path):
+    """Worst-case main-loop burst: an EXPLORE round emits one
+    fact-write per variant (~10 / round). With the foreground budget
+    a 10-variant burst against a DEAD KB must complete in < 30s so the
+    Coordinator can move on to the next round without operator-visible
+    stall."""
+    client = CortexKBClient(
+        session_dir=tmp_path / "s",
+        kb_url="http://127.0.0.1:1",
+        foreground=True,
+    )
+    start = time.monotonic()
+    for i in range(10):
+        client.propose_lesson(
+            statement=f"X{i}", measured_impact=f"y{i}",
+            applicable_models=["M"], applicable_hardware=["H"],
+        )
+    elapsed = time.monotonic() - start
+    # 10 writes × ~2.5s = ~25s upper bound; assert < 30s with safety.
+    # The legacy budget (10s × 3 = ~32s/write) would have made this
+    # take ~5min — the regression guard.
+    assert elapsed < 30.0, (
+        f"10-write foreground burst took {elapsed:.1f}s; "
+        f"main loop will stall in EXPLORE rounds."
+    )
+
+
+# ===========================================================================
 # Scenario E — disabled client never touches the network
 # ===========================================================================
 def test_disabled_client_no_network_call_even_with_bad_url(tmp_path):
