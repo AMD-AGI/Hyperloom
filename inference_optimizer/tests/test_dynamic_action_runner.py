@@ -1,6 +1,6 @@
-"""dynamic_action.MD P3 §10 — runner acceptance matrix.
+"""Acceptance tests for :class:`DynamicActionRunner`.
 
-12 named tests map 1:1 to P3 §10. Auxiliary tests pin the parsing
+Auxiliary tests pin the parsing
 contract + journal output + COMPLETED_EMPTY path.
 
 The runner is driven against MockBackend so each scenario plays out

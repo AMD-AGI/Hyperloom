@@ -25,8 +25,8 @@ applicable_when:
   - "phase == 'EXPLORE'"
 # dynamic_action — supplementary EXPLORE channel for cross-domain
 # patch combinations specialists cannot cover. Payload schema is
-# closed; PolicyGate's ``_validate_dynamic_action_dispatch`` enforces
-# the §1.2 red lines at dispatch time.
+# closed; ``PolicyGate._validate_dynamic_action_dispatch`` enforces
+# the red-line checks at dispatch time.
 params_schema:
   motivation_gap_text:
     type: string

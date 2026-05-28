@@ -1,17 +1,10 @@
-"""dynamic_action.MD P3 §3.1 + §3.2 — multi-turn prompt assembler.
+"""Multi-turn prompt assembler for the ``dynamic_action`` sub-agent.
 
-Every turn's prompt is composed deterministically by the runner from:
-
-* the immutable seed kit (P2);
-* the running journal of prior turns + tool results;
-* the previous turn's tool result (if any).
-
-When the journal grows past ``JOURNAL_TRUNCATE_RATIO * INPUT_TOKEN_CAP``
-the builder mechanically clips the middle (P3 §3.2 keep-first-N +
-keep-last-N rule) — no LLM summarisation, no new tool call.
-
-Public surface is one function (:func:`build_turn_prompt`) so the
-runner can hold zero state about prompt assembly.
+Every turn's prompt is composed deterministically from the immutable
+seed kit + the running journal of prior turns + tool results. When
+the journal exceeds ``JOURNAL_TRUNCATE_RATIO * INPUT_TOKEN_CAP`` the
+builder clips the middle (keep first N + last N) — no LLM summary,
+no new tool call. Public surface is :func:`build_turn_prompt`.
 """
 
 from __future__ import annotations
@@ -32,19 +25,18 @@ from ..dynamic_action_tools import (
 )
 
 
-# Single-turn token budget mirrors P3 §3.3 #3 / §11 #3.
+# Single-turn token budget.
 INPUT_TOKEN_CAP: int = 32_000
 OUTPUT_TOKEN_CAP: int = 4_000
 
-# When the journal section alone would exceed this fraction of the
-# input cap, ``build_turn_prompt`` clips the middle.
+# Journal section is clipped when it would exceed this fraction of
+# the input cap.
 JOURNAL_TRUNCATE_RATIO: float = 0.70
 
-# P3 §11 #6 — keep this many earliest + latest turns when truncating.
+# Earliest + latest turns kept when truncating.
 JOURNAL_KEEP_HEAD: int = 2
 JOURNAL_KEEP_TAIL: int = 4
 
-# Coarse char-to-token estimator (matches the seed-kit assembler).
 _CHARS_PER_TOKEN: float = 4.0
 
 
@@ -56,10 +48,9 @@ def _estimate_tokens(text: str) -> int:
 
 @dataclass
 class JournalTurn:
-    """One row in the journal — what the LLM emitted plus what the
-    runner did with it. ``tool_result`` is filled in by the runner
-    after a tool dispatch; ``proposal_validation`` after an
-    ``emit_proposal`` rejection."""
+    """One journal row: LLM text + parsed action + the result the
+    runner attached (tool_result for resource tools,
+    proposal_validation for ``emit_proposal``)."""
 
     turn: int
     llm_text: str = ""
@@ -154,7 +145,8 @@ def _render_journal_section(journal: list[JournalTurn]) -> str:
 def _truncate_journal(
     journal: list[JournalTurn],
 ) -> list[JournalTurn]:
-    """Mechanical clip when journal would dominate the prompt."""
+    """Drop middle journal turns when the section would dominate the
+    prompt; keep head + tail and insert an elision marker."""
     if len(journal) <= JOURNAL_KEEP_HEAD + JOURNAL_KEEP_TAIL:
         return list(journal)
     head = journal[:JOURNAL_KEEP_HEAD]
@@ -190,7 +182,7 @@ def build_system_prompt(turn_cap: int) -> str:
         f"each call is hard-killed at {MAX_BENCH_WALL_CLOCK_SEC:.0f}s "
         f"wall-clock.\n"
         if BENCH_REGISTRY else
-        "- run_bench is DISABLED in v1; rely on read_source +\n"
+        "- run_bench is DISABLED; rely on read_source +\n"
         "  read_session_artifact for hypothesis exploration.\n"
     )
     micro_bench_line = (
