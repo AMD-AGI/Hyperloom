@@ -19,7 +19,6 @@ import pytest
 from robustness_agent.role.envelope import (
     ALERT_SEVERITIES,
     BackendTurnResult,
-    Intent,
     IntentType,
     KILL_TASK_ALLOWED_SCOPES,
     PAYLOAD_REQUIRED,
