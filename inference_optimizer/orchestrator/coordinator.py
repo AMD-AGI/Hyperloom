@@ -8050,12 +8050,33 @@ class Coordinator:
                         "after baseline: %r", exc,
                     )
         elif task_kind == "profile":
-            audit_decision = "promoted"
-            audit_extras = {
-                "trace_path": None,
-                "profile_args": None,
-                "output_throughput": result.get("output_throughput"),
-            }
+            # B2 (atom): profile_executor short-circuits to
+            # status="skipped" with error_class="atom_no_profiler" when
+            # FRAMEWORK=atom. Audit the no-op as "skipped" so the action
+            # ledger doesn't claim a fake promotion, and don't write any
+            # trace / profile_status fields. Still drop the pending gate
+            # for THIS task id so downstream proposals are not stuck.
+            if str(result.get("status") or "") == "skipped":
+                audit_decision = "skipped"
+                audit_extras = {
+                    "error_class": result.get("error_class"),
+                    "error": result.get("error"),
+                }
+                if (
+                    task is not None
+                    and self.shared_state.auto_roofline_pending_task_id
+                    == task.task_id
+                ):
+                    self.shared_state.auto_roofline_pending_task_id = ""
+                    changed = True
+                    await self._drain_proposals_awaiting_roofline()
+            else:
+                audit_decision = "promoted"
+                audit_extras = {
+                    "trace_path": None,
+                    "profile_args": None,
+                    "output_throughput": result.get("output_throughput"),
+                }
             # Bug C fix: surface the trace path produced by ProfileExecutor
             # to SharedState so Orch can pass a real path to the kernel
             # `select_kernels` REQUEST instead of fabricating one.
@@ -8156,7 +8177,32 @@ class Coordinator:
             # decision, and bump ``changed`` so the post-promote
             # save() path persists the executor's mutations to disk.
             status = str(result.get("status") or "")
-            if status == "succeeded":
+            if status == "skipped":
+                # B2 (atom): the roofline composite short-circuits to
+                # status="skipped" with error_class="atom_no_profiler"
+                # when FRAMEWORK=atom (no torch_profiler in Magpie v1).
+                # This is a structured no-op, not a failure: do NOT bump
+                # ``roofline_failure_streak`` and do NOT touch the
+                # watermark / trace_analyze snapshot. Audit as skipped so
+                # the action ledger reflects the no-op rather than a
+                # spurious "discarded" decision.
+                audit_decision = "skipped"
+                audit_extras = {
+                    "error_class": result.get("error_class"),
+                    "error": result.get("error"),
+                }
+                # Still clear any pending gate keyed to this task id so
+                # downstream proposals are not held by
+                # ``_auto_roofline_pending_denial``.
+                if (
+                    task is not None
+                    and self.shared_state.auto_roofline_pending_task_id
+                    == task.task_id
+                ):
+                    self.shared_state.auto_roofline_pending_task_id = ""
+                    changed = True
+                    await self._drain_proposals_awaiting_roofline()
+            elif status == "succeeded":
                 audit_decision = "promoted"
                 # N10: prefer the executor's already-published
                 # ``last_trace_analyze`` snapshot fields over the
