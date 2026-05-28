@@ -201,6 +201,13 @@ LAST_OUTCOME_BY_STATUS: dict[DynamicActionStatus, str] = {
 # change. On-disk summary may carry extra audit fields (critic_verdict,
 # integrate_status, ...) for the artefact trail, but those never leak
 # into the prompt.
+#
+# ``cumulative_gain`` semantics (gap G9): v1 dispatches are one-shot
+# (no re-dispatch loop yet), so the field holds the **single integrate
+# delta_pct** for the dyn_id rather than a multi-run cumulative sum.
+# The "cumulative" name is kept for forward compatibility — when v2
+# introduces sub-agent re-dispatch, the same field becomes the actual
+# running total without a prompt-schema change.
 # ---------------------------------------------------------------------------
 SUMMARY_PROMPT_FIELDS: frozenset[str] = frozenset({
     "dyn_id",
