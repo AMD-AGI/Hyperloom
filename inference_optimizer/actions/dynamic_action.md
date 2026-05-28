@@ -18,10 +18,8 @@ independent round-cap so the two pools cannot starve each other.
 - Source role: `orchestration` only. Any other source is rejected with
   `dynamic_source_violation`.
 
-PolicyGate's `_validate_dynamic_action_dispatch` enforces the §1.2 red
-lines at dispatch time. See `dynamic_action.MD` §1.2 and
-`action_dynamic_plan/P1_dispatch_skeleton.md` §4 for the canonical
-rule set.
+PolicyGate's `_validate_dynamic_action_dispatch` enforces the red-line
+checks at dispatch time.
 
 ## Payload schema (closed)
 
@@ -33,7 +31,7 @@ rule set.
 | `budget_hint`           | string | no       | `low` / `medium` / `high`; default `medium`. |
 
 The field set is intentionally closed; no `notes` / `extra` / free
-extension slots. See P1 §3.
+extension slots.
 
 `side_effects_declared` may not contain any kernel-owned action, any
 metric/accuracy_gate/server lifecycle category, or every entry in
@@ -57,23 +55,25 @@ delegate{
 
 ## Capacity
 
-| Knob                              | Default | Source       |
-|-----------------------------------|---------|--------------|
-| `MAX_DYNAMIC_PER_ROUND`           | 1       | P1 §4.3 + §10 |
-| `MAX_DYNAMIC_SOURCED_VARIANTS`    | 1       | P0 Q3 → P1 §4.3 |
-| `scope_domains` min length        | 2       | P1 §3 |
-| `MAX_RESEARCH_LANE_CAPACITY`      | 6       | shared with specialists |
+| Knob                              | Default |
+|-----------------------------------|---------|
+| `MAX_DYNAMIC_PER_ROUND`           | 1       |
+| `MAX_DYNAMIC_SOURCED_VARIANTS`    | 1       |
+| `scope_domains` min length        | 2       |
+| `MAX_RESEARCH_LANE_CAPACITY`      | 6 (shared with specialists) |
 
-Failed dispatches do NOT consume `MAX_DYNAMIC_PER_ROUND` (see P1 §4.2):
-PolicyGate rejects come back with a structured reason; only successful
-dispatches bump the round counter.
+Failed dispatches do NOT consume `MAX_DYNAMIC_PER_ROUND`: PolicyGate
+rejects come back with a structured reason; only successful dispatches
+bump the round counter.
 
 ## Output
 
-P1 ships a stub executor (`StubDynamicActionExecutor`) that returns
+When no Claude backend is configured, the stub executor returns
 `{proposal_set: [], dyn_id: <generated>, outcome: "stub_empty"}` and
-appends one line to `dispatch_history.jsonl`. The empty `proposal_set`
-flows through the specialist-equivalent empty path; nothing reaches
-the critic or grid runner in P1.
+appends one closed-schema `SUB_AGENT_DONE` row to
+`dispatch_history.jsonl`. The empty `proposal_set` flows through the
+specialist-equivalent empty path; nothing reaches the critic or grid
+runner.
 
-The real multi-turn ReAct runner replaces this stub at P3.
+The multi-turn ReAct runner :class:`DynamicActionRunner` replaces the
+stub when a backend is wired.

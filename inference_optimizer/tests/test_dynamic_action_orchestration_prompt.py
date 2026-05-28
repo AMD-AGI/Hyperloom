@@ -1,6 +1,5 @@
-"""dynamic_action.MD P7 §9 — orchestration prompt entry tests.
-
-Each ``test_p7_scenario_*`` test maps 1:1 to one row of P7 §9.
+"""Tests for the orchestration prompt's ``dynamic_action`` entry +
+the emit-hint catalogue row.
 Auxiliary tests pin the §1.7 design-philosophy guards (no
 examples / no triggering heuristics / no specialist-failure
 fallback hint / no negative cost guidance) so a prompt regression
@@ -27,9 +26,8 @@ from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
 )
 
 
-# Reason codes the dynamic_action emit hint must surface (P1 §4 /
-# P7 §5.1 — give the LLM a complete denial vocabulary so it can
-# self-correct on the next turn instead of trial-and-error).
+# PolicyGate reason codes the emit hint must surface so the LLM can
+# self-correct on the next turn rather than retrying blindly.
 EXPECTED_REASON_CODES: tuple[str, ...] = (
     "dynamic_phase_violation",
     "dynamic_source_violation",
@@ -101,7 +99,7 @@ def test_p7_scenario_01_dynamic_action_block_present(prompt: str):
     estimated_tokens = len(body) // 4
     assert estimated_tokens <= 300, (
         f"Dynamic Action block estimated tokens={estimated_tokens} "
-        f"exceeds the conservative 300-token ceiling (P7 §3.1 declaration "
+        f"exceeds the conservative 300-token ceiling (declaration "
         f"+ §6 ordering combined)"
     )
 
@@ -144,7 +142,7 @@ def test_no_kernel_prompt_also_lists_dynamic_action(no_kernel_prompt: str):
 # reason codes)
 # ===========================================================================
 def test_p7_scenario_03_emit_hint_payload_fields(prompt: str):
-    """Payload field table must enumerate every P1 §3 field by name
+    """Payload field table must enumerate every dispatch field by name
     so the LLM has a single source of truth."""
     hint_snippet = re.search(
         r"delegate\{action_name='dynamic_action'[^\n]*",
@@ -188,7 +186,7 @@ def test_p7_scenario_03c_emit_hint_includes_every_reason_code(
 # documentation marker so the §9 mapping table stays complete.
 # ===========================================================================
 def test_p7_scenario_04_marker_covered_by_dispatch_tests():
-    """P1 §9 #1 (test_p1_scenario_01_valid_dispatch_passes) already
+    """The dispatch happy-path test already
     pins that a payload-valid dispatch in EXPLORE phase passes
     PolicyGate. This marker keeps the §9 mapping table complete."""
     from inference_optimizer.tests.test_dynamic_action_dispatch import (  # noqa: F401
@@ -197,7 +195,7 @@ def test_p7_scenario_04_marker_covered_by_dispatch_tests():
 
 
 def test_p7_scenario_05_marker_phase_denial_feedback_loop():
-    """P1 §9 #2 (PRELUDE-phase dispatch → ``dynamic_phase_violation``)
+    """The PRELUDE-phase dispatch → ``dynamic_phase_violation`` test
     is the closed-loop feedback case. We additionally assert here
     that the prompt actually advertises this reason code so the LLM
     *can* recognise the denial and recover."""
@@ -220,7 +218,7 @@ def test_p7_scenario_06_marker_empty_summary_omits_section():
 
 
 # ===========================================================================
-# §9 #7 — 6 history entries → exactly 5 in the prompt (P6 §7 contract).
+# 6 history entries render as exactly 5 rows + an elision marker.
 # ===========================================================================
 def test_p7_scenario_07_marker_history_caps_at_five():
     from inference_optimizer.tests.test_dynamic_action_summary import (  # noqa: F401
@@ -246,7 +244,7 @@ def test_p7_scenario_08_prompt_volume_delta_within_budget(
     delta_tokens = delta_chars // 4
     assert delta_tokens <= 500, (
         f"orchestration prompt grew by {delta_tokens} tokens "
-        f"({delta_chars} chars) — exceeds P7 §9 #8 budget of 500"
+        f"({delta_chars} chars) — exceeds 500-char budget"
     )
     # And the delta must actually be positive (we did add content).
     assert delta_tokens > 0

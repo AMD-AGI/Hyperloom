@@ -1,25 +1,23 @@
-"""dynamic_action.MD P2 §5 — seed kit assembler.
+"""Seed-kit assembler for the ``dynamic_action`` sub-agent.
 
-Closed field set, deterministic selection rules, hard token cap. The
-sub-agent's whole input surface is what this module returns.
+The sub-agent's whole input surface is what this module returns.
+Closed field set, deterministic selection rules, hard token cap.
 
 Public surface:
 
 * :data:`SEED_KIT_FIELDS` — frozenset of allowed top-level keys; any
-  caller-introduced field name not in this set is a P2 §5.2 violation.
-* :data:`MAX_SEED_KIT_TOKENS` / per-section caps — DEFAULT values from
-  ``action_dynamic_plan/00_README.md §3``.
-* :class:`SeedKitAssemblyError` — raised on any invariant violation
-  (token overflow, schema mismatch). The Coordinator treats this as
-  a non-retryable dispatch failure.
-* :func:`assemble_seed_kit(state, payload)` — returns the dict that
-  will be JSON-dumped into ``seed_kit.json``. Side-effect free.
-* :func:`estimate_tokens(text)` — char-based estimator (≈ 4 chars
-  per token) used for the cap check.
+  other key in the output is rejected.
+* :data:`MAX_SEED_KIT_TOKENS` / per-section caps — token budget.
+* :class:`SeedKitAssemblyError` — raised on token overflow or schema
+  mismatch; the Coordinator treats this as a non-retryable dispatch
+  failure.
+* :func:`assemble_seed_kit(state, payload)` — side-effect-free; returns
+  the dict that will be JSON-dumped into ``seed_kit.json``.
+* :func:`estimate_tokens(text)` — char-based estimator (~4 chars per
+  token).
 
-Selection rules are deterministic (P2 §5.2 b): no LLM scoring, no
-randomness. Adding a new selection signal requires bumping the
-schema version + extending :data:`SEED_KIT_FIELDS`.
+Selection is deterministic (no LLM scoring, no randomness). A new
+selection signal requires extending :data:`SEED_KIT_FIELDS`.
 """
 
 from __future__ import annotations
@@ -41,33 +39,29 @@ SEED_KIT_FIELDS: frozenset[str] = frozenset({
     "source_root_hints",
 })
 
-# P2 §5.1 — total seed kit budget.
+# Total seed-kit budget.
 MAX_SEED_KIT_TOKENS: int = 8_000
 
-# Per-section item caps. Combined with the per-item token caps below,
-# these enforce P2 §5.1 column "量级上限".
+# Per-section item count caps.
 MAX_PROFILE_KEYSLICES: int = 6
 MAX_KEPT_PATCHES: int = 20
 MAX_REVERTED_PATCHES: int = 10
 MAX_KB_PITFALLS: int = 10
 
-# Soft per-section caps (chars; converted to tokens at the end). Used
-# to keep the overall budget well below MAX_SEED_KIT_TOKENS.
+# Per-section char budgets (≈ 4 chars per token), kept well below
+# ``MAX_SEED_KIT_TOKENS`` so all sections combined stay within budget.
 _MAX_MOTIVATION_CHARS: int = 4_000
 _MAX_ROOFLINE_CHARS: int = 4_000
 _MAX_PITFALL_CHARS_EACH: int = 600
 _MAX_RATIONALE_CHARS_EACH: int = 240
 
-# Char-to-token estimator: GPT-family tokenisers average ~4 chars per
-# English token. A coarse estimator is sufficient for an enforcement
-# floor — actual tokenisation happens at the sub-agent boundary.
 _CHARS_PER_TOKEN: float = 4.0
 
 
 class SeedKitAssemblyError(RuntimeError):
-    """Raised when the seed kit cannot be assembled within the
-    declared invariants (token cap, schema closure, etc.). The
-    Coordinator catches this and rolls back the dispatch."""
+    """Token overflow or schema violation during seed-kit assembly.
+
+    The Coordinator catches this and rolls back the dispatch."""
 
 
 @dataclass(frozen=True)
@@ -80,7 +74,7 @@ class SeedKitResult:
 
 
 def estimate_tokens(text: str) -> int:
-    """Coarse char-based token estimator (≈ 4 chars per token)."""
+    """Char-based token estimator (~4 chars per token)."""
     if not text:
         return 0
     return int(len(text) / _CHARS_PER_TOKEN) + 1
@@ -94,23 +88,20 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 def _is_kernel_only_entry(entry: dict[str, Any]) -> bool:
-    """``scope_domains == ['kernel']`` is denied at PolicyGate (P1 §4.1
-    group C), but the assembler still defensively filters any patch /
-    pitfall that names a kernel-only domain so the closed contract
-    survives schema drift in upstream data sources."""
+    """True for patches whose action is kernel-only; defensively
+    filtered out of the seed kit even though PolicyGate already
+    rejects kernel-only scope at dispatch."""
     action = str(entry.get("action") or "").strip().lower()
     return action.startswith("kernel_") or action == "integrate"
 
 
 # ---------------------------------------------------------------------------
-# Section assemblers — every helper returns a serialisable list/string
-# obeying the per-section caps; the orchestrator-side ``assemble_seed_kit``
-# is the only public composer.
+# Section assemblers
 # ---------------------------------------------------------------------------
 def _roofline_summary(state: Any) -> str:
-    """One-paragraph roofline digest sourced from
-    ``last_trace_analyze.analysis_md_text`` (the verbatim
-    Coordinator-cached roofline text). Empty when the cache is cold."""
+    """One-paragraph roofline digest from
+    ``last_trace_analyze.analysis_md_text``; empty when the cache is
+    cold."""
     snap = getattr(state, "last_trace_analyze", None) or {}
     if not isinstance(snap, dict):
         return ""
@@ -119,13 +110,9 @@ def _roofline_summary(state: Any) -> str:
 
 
 def _profile_keyslices(state: Any, scope_domains: list[str]) -> list[dict[str, Any]]:
-    """Top-N hot kernels from ``last_trace_analyze.hot_kernels_top15``.
-
-    Selection rule: take entries with the highest ``gpu_pct``; emit
-    name / gpu_pct / bottleneck / arithmetic_intensity / source_file.
-    ``scope_domains`` is passed for future filtering (P3 may narrow
-    by domain affinity); P2 keeps the deterministic top-N rule.
-    """
+    """Top-N hot kernels from ``last_trace_analyze.hot_kernels_top15``,
+    sorted by ``gpu_pct`` descending. ``scope_domains`` is reserved
+    for future domain-affinity filtering."""
     snap = getattr(state, "last_trace_analyze", None) or {}
     if not isinstance(snap, dict):
         return []
@@ -148,12 +135,9 @@ def _profile_keyslices(state: Any, scope_domains: list[str]) -> list[dict[str, A
 
 
 def _kept_patches(state: Any) -> list[dict[str, Any]]:
-    """The most recent KEEP'd variants. Sources, in order:
-
-    1. ``explore_search.accepted`` (canonical promote ledger).
-    2. ``optimization_stack`` (fallback for legacy sessions without
-       ``explore_search``).
-    """
+    """Most recent KEEP'd variants from ``explore_search.accepted``;
+    falls back to ``optimization_stack`` when ``explore_search`` is
+    absent."""
     accepted = []
     search = getattr(state, "explore_search", None) or {}
     if isinstance(search, dict):
@@ -200,13 +184,11 @@ def _reverted_patches(state: Any) -> list[dict[str, Any]]:
 def _kb_pitfalls(
     state: Any, scope_domains: list[str], motivation: str,
 ) -> list[dict[str, Any]]:
-    """Filter ``warm_start_pitfalls`` by keyword overlap with
+    """Filter ``warm_start_pitfalls`` by substring overlap with
     ``scope_domains`` ∪ keywords extracted from ``motivation``.
 
-    The matcher is intentionally simple substring containment — the
-    KB pitfall objects are free-form text blobs and P2 §5.2 b forbids
-    LLM scoring. Top-K returned in source order; the warm cache is
-    already ranked by Cortex relevance."""
+    Substring containment only (no LLM scoring). Top-K returned in
+    source order; the warm cache is already ranked by relevance."""
     raw = getattr(state, "warm_start_pitfalls", None) or []
     if not isinstance(raw, list) or not raw:
         return []
@@ -239,8 +221,8 @@ def _kb_pitfalls(
 
 
 def _source_root_hints() -> list[str]:
-    """Framework source roots (env-resolved). Empty list when
-    ``INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`` is unset."""
+    """Resolved framework source roots; empty when the env var is
+    unset."""
     return list(resolve_source_file_allowlist())
 
 
@@ -250,29 +232,20 @@ def _source_root_hints() -> list[str]:
 def assemble_seed_kit(
     state: Any, payload: dict[str, Any],
 ) -> SeedKitResult:
-    """Compose the closed seed kit dict for one dynamic_action dispatch.
+    """Compose the closed seed-kit dict for one dispatch.
 
-    Inputs:
+    ``state`` is a SharedState snapshot; only ``last_trace_analyze``
+    / ``explore_search`` / ``optimization_stack`` /
+    ``warm_start_pitfalls`` are consulted (thin doubles tolerated).
 
-    * ``state``    — a SharedState snapshot; only ``last_trace_analyze``
-      / ``explore_search`` / ``optimization_stack`` / ``warm_start_pitfalls``
-      are consulted. Defensively tolerates a thin double for tests.
-    * ``payload``  — the validated dispatch payload (P1 §3); must carry
-      ``motivation_gap_text`` (non-empty) and ``scope_domains``
-      (list ≥ 2). PolicyGate has already enforced both invariants by
-      the time this function is reached.
+    ``payload`` is the validated dispatch payload; PolicyGate has
+    already enforced the non-empty ``motivation_gap_text`` + ≥ 2
+    ``scope_domains`` invariants.
 
-    Output:
-
-    * :class:`SeedKitResult` with ``payload`` ready for JSON dump,
-      ``degraded`` flag (True iff one or more best-effort sources
-      returned empty), and ``total_tokens`` for audit.
-
-    Raises:
-
-    * :class:`SeedKitAssemblyError` — total tokens > MAX_SEED_KIT_TOKENS
-      or any produced field is not in :data:`SEED_KIT_FIELDS`. The
-      Coordinator rolls back the dispatch.
+    Returns a :class:`SeedKitResult` with ``degraded=True`` when one
+    or more best-effort sources came back empty. Raises
+    :class:`SeedKitAssemblyError` on token overflow or schema
+    violation; the Coordinator rolls back the dispatch.
     """
     motivation_raw = str(payload.get("motivation_gap_text") or "").strip()
     if not motivation_raw:

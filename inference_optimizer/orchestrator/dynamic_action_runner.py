@@ -1,13 +1,10 @@
-"""dynamic_action.MD P3 — multi-turn ReAct sub-agent runner.
+"""Multi-turn ReAct sub-agent runner for ``dynamic_action`` dispatches.
 
-Sibling to :class:`SpecialistRunner` (NOT a subclass — P3 §3.4 explicit).
-Shared infrastructure (TaskRegistry, worktree helpers, lane lease) is
-reused; prompt loop, journal shape, tool whitelist, budget, and
-recovery rules are owned here.
-
-One :class:`DynamicActionRunner` instance is reusable across many
-dispatches in the same session (each ``run`` call carries the per-
-dispatch ``RunnerContext``).
+Sibling to :class:`SpecialistRunner`: shared infrastructure
+(TaskRegistry, worktree helpers, lane lease) is reused; prompt loop,
+journal shape, tool whitelist, budget, and recovery rules are owned
+here. One instance is reusable across many dispatches; each
+``run`` call carries its own :class:`RunnerContext`.
 """
 
 from __future__ import annotations
@@ -70,14 +67,14 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Budget defaults (P3 §3.3 / §11)
+# Budget defaults
 # ---------------------------------------------------------------------------
 DEFAULT_WALL_CLOCK_BUDGET_SEC: float = 15 * 60.0
 DEFAULT_TURN_CAP: int = 12
 
 
 # ---------------------------------------------------------------------------
-# Action parsing — narrow window: one fenced JSON block per turn
+# Action parsing — exactly one fenced JSON block per turn
 # ---------------------------------------------------------------------------
 _ACTION_BLOCK_RE: re.Pattern[str] = re.compile(
     r"```(?:json)?\s*(\{.*?\})\s*```", re.S,
@@ -99,7 +96,7 @@ def parse_llm_action(text: str) -> ParsedAction:
     """Extract the single ``{"tool": ..., "args": ...}`` JSON block.
 
     Falls back to parsing the whole text as JSON when no fenced block
-    is present (helps tests that drive MockBackend with bare JSON).
+    is present.
     """
     candidates: list[str] = [m.group(1) for m in _ACTION_BLOCK_RE.finditer(text or "")]
     if not candidates:
@@ -164,9 +161,9 @@ def _now_iso() -> str:
 class DynamicActionRunner:
     """ReAct loop driver for one ``delegate{action='dynamic_action'}``.
 
-    Construction is cheap; one instance per cli session is the usual
+    Construction is cheap; one instance per CLI session is the usual
     pattern (the runner caches no per-dispatch state). The Coordinator
-    invokes :meth:`run` from the SubAgentRunner executor adapter
+    invokes :meth:`run` via the SubAgentRunner executor adapter
     registered for ``kind='dynamic_action'``.
     """
 
@@ -293,10 +290,9 @@ class DynamicActionRunner:
                             "emit_empty", None,
                         )
                         break
-                    # G6 — when the worktree has uncommitted changes
-                    # (sub-agent applied patches during iteration),
-                    # the proposal patch_text must equal git diff HEAD.
-                    # A clean worktree skips the check.
+                    # Require the emitted ``patch_text`` to match the
+                    # worktree's ``git diff HEAD`` when uncommitted
+                    # changes exist; a clean worktree skips the check.
                     cumulative_diff = (
                         capture_worktree_cumulative_diff(worktree)
                         if worktree is not None else None
@@ -357,8 +353,7 @@ class DynamicActionRunner:
                         break
                     continue
 
-                # Successful tool dispatch resets the consecutive-reject
-                # counter — sub-agent is making forward progress.
+                # Forward progress resets the consecutive-reject counter.
                 consecutive_rejects = 0
                 tool_result = await self._dispatch_tool(
                     action=action, session_dir=session_dir,
@@ -414,9 +409,8 @@ class DynamicActionRunner:
     def _load_dispatch_inputs(
         self, ctx: RunnerContext, artefact_dir: Path,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """Pull spec.payload + seed_kit JSON written by the Coordinator
-        prepare hook (P2). Returns ``(spec_payload, seed_kit)`` or
-        ``(None, None)`` on any I/O failure."""
+        """Load ``spec.payload`` + ``seed_kit`` JSON; return
+        ``(None, None)`` on any I/O or parse failure."""
         spec_path = ctx.task.params.get("spec_path")
         seed_kit_path = ctx.task.params.get("seed_kit_path")
         if not spec_path:
@@ -455,11 +449,11 @@ class DynamicActionRunner:
     def _setup_worktree(
         self, session_dir: Path, dyn_id: str,
     ) -> tuple[Path | None, Path | None, str]:
-        """P3 §7 — create ``runs/dynamic/<dyn_id>/worktree/`` on top of
-        the first available framework_source_root. Returns
-        ``(worktree, base, note)``; ``note`` is non-empty when setup
-        could not produce an isolated worktree (runner still proceeds,
-        but the apply_patch tool will fail until a worktree exists)."""
+        """Create ``runs/dynamic/<dyn_id>/worktree/`` over the first
+        available ``framework_source_root``. Returns
+        ``(worktree, base, note)``; ``note`` is non-empty when no
+        isolated worktree could be set up (runner still proceeds but
+        ``apply_patch_in_worktree`` will fail)."""
         base = _pick_worktree_base(self.framework_source_roots)
         if base is None:
             return None, None, (
@@ -540,13 +534,11 @@ class DynamicActionRunner:
         error: str = "",
         turns_used: int = 0,
     ) -> DynamicRunResult:
-        """Write proposal_set.json + journal.md + teardown worktree.
-
-        P3 §6 — only ``proposal_set.json`` + ``sub_agent_journal.md``
-        come back to the artefact dir; everything else in the worktree
-        is destroyed on teardown."""
-        # Journal first: every terminal state must have a journal on
-        # disk for audit (even FAILED with zero turns).
+        """Write ``proposal_set.json`` + ``sub_agent_journal.md`` and
+        tear down the worktree. Only these two files are recovered;
+        every other in-worktree artefact is destroyed."""
+        # Every terminal state gets a journal on disk for audit, even
+        # FAILED with zero turns.
         try:
             Path(journal_path).write_text(
                 _render_journal_markdown(dyn_id, state, reason, journal),

@@ -1257,9 +1257,8 @@ class Coordinator:
         :meth:`_needs_roofline_for_watermark`. EXPLORE entry no
         longer enqueues roofline.
 
-        dynamic_action.MD P1 §4.3 — reset the per-round dynamic_action
-        cap counter so a fresh EXPLORE entry restores the
-        ``MAX_DYNAMIC_PER_ROUND`` budget.
+        Resets the per-round ``dynamic_action`` cap counter so a fresh
+        EXPLORE entry restores the ``MAX_DYNAMIC_PER_ROUND`` budget.
         """
         try:
             self.shared_state.reset_dynamic_action_round_count()
@@ -2884,11 +2883,9 @@ class Coordinator:
             # any that are still blocked.
             if self._proposals_awaiting_roofline:
                 await self._drain_proposals_awaiting_roofline()
-            # dynamic_action.MD P8 — independent of the proposal
-            # replay path: walk the dynamic_actions artefact dir +
-            # SharedState summary map, transition every non-terminal
-            # dyn_id to ABANDONED, and clean up the orphan worktree +
-            # git branch a runner-side normal exit would have done.
+            # Sweep non-terminal dynamic_action dispatches: walk the
+            # artefact dir + SharedState summary, transition each to
+            # ABANDONED, and clean up the orphan worktree + git branch.
             self._resume_abandon_dynamic_actions()
         for _ in range(n):
             self.shared_state.increment_tick()
@@ -2976,9 +2973,8 @@ class Coordinator:
             # queued would never re-dispatch them.
             if self._proposals_awaiting_roofline:
                 await self._drain_proposals_awaiting_roofline()
-            # dynamic_action.MD P8 — see ``tick(...)`` for the
-            # rationale. Same hook fires for the long-run path so
-            # the sweep is symmetric across both entry points.
+            # Symmetric dynamic_action resume sweep for the long-run
+            # entry point.
             self._resume_abandon_dynamic_actions()
 
         tick_n = 0
@@ -3583,10 +3579,9 @@ class Coordinator:
             denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
             if denial_summary:
                 sections.append(denial_summary)
-            # dynamic_action.MD P6 §7 — surface the most recent N
-            # dynamic_action summaries so orchestration sees its own
-            # dispatch outcomes on the next tick without paying the
-            # token cost of the full ledger.
+            # Compact projection of the most recent ``dynamic_action``
+            # summaries so orchestration sees its own dispatch outcomes
+            # without paying the token cost of the full ledger.
             dyn_section = self.shared_state.to_dynamic_actions_prompt_section()
             if dyn_section:
                 sections.append(dyn_section)
@@ -5003,11 +4998,10 @@ class Coordinator:
                     "PR-A7: failed to mirror critic verdict for "
                     "specialist task=%s", sid_candidate,
                 )
-        # dynamic_action.MD P5 — when the verdict targets a dyn_id
-        # (routed via the synthesised ``dyn-<id>`` specialist_task_id),
-        # persist the critic_verdict.json envelope + flip the dyn_id
-        # lifecycle status so reject/revise short-circuits the
-        # integrate_patch dispatch and approve advances to DISPATCHED.
+        # When the verdict targets a dyn_id (routed via the synthesised
+        # ``dyn-<id>`` specialist_task_id), persist the
+        # ``critic_verdict.json`` envelope and flip the dyn_id lifecycle
+        # status so reject/revise short-circuits the integrate dispatch.
         try:
             self._mirror_critic_verdict_to_dynamic_action(
                 pending=pending, verdict=verdict, reasoning=reasoning,
@@ -5576,15 +5570,12 @@ class Coordinator:
         # supply values; we only fill the gaps.
         if action_name == "specialist":
             await self._warm_specialist_params(params)
-        # dynamic_action.MD P1 §6 + P2 §6 — generate dyn_id, mkdir the
-        # P2 §3.1 artefact dir, write spec.json + seed_kit.json before
-        # the task is enqueued. PolicyGate has already validated the
-        # payload + cap; this branch assigns the identifier, builds
-        # the seed kit, and on assembly failure rolls back the
-        # dispatch (no task created, no round-cap bump).
-        # ``record_dynamic_action_dispatch`` runs *after* the task is
-        # queued so a failed ``create_or_return_existing`` does not
-        # bump the round cap either.
+        # For dynamic_action: generate the dyn_id, mkdir the artefact
+        # dir, and write spec.json + seed_kit.json before the task is
+        # enqueued. PolicyGate has already validated payload + cap;
+        # on seed-kit assembly failure the dispatch is rolled back
+        # (no task, no round-cap bump). The shared-state record is
+        # written only after the task is successfully queued.
         dynamic_action_dispatch_meta: dict[str, Any] | None = None
         if action_name == DYNAMIC_ACTION_NAME:
             try:
@@ -5704,33 +5695,29 @@ class Coordinator:
         ))
 
     # ------------------------------------------------------------------
-    # dynamic_action — action_dynamic_plan/P1 + P2 dispatch hook
+    # dynamic_action dispatch hooks
     # ------------------------------------------------------------------
     def _prepare_dynamic_action_dispatch(
         self, params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Build the dispatch-time artefact bundle for one dynamic_action.
+        """Build the dispatch-time artefact bundle for one dispatch.
 
-        Steps (all dispatch-time, before any task row exists):
+        Steps:
 
-        1. Generate ``dyn-<round>-<seq>`` and detect dyn_id collisions
-           against ``SharedState.dynamic_actions`` (P2 §3.4 fail-fast).
-        2. mkdir ``agents/orchestration/dynamic_actions/<dyn_id>/``.
-        3. Assemble the seed kit (P2 §5). A SeedKitAssemblyError
-           aborts the dispatch — caller catches and surfaces as a
-           PolicyDenied so the round cap is not consumed.
-        4. Write ``spec.json`` (P2 §4.1 closed schema, including the
-           PolicyGate decision snapshot + ``degraded_dispatch`` flag).
-        5. Write ``seed_kit.json``.
-        6. Inject ``dyn_id`` / ``artifact_path`` / ``spec_path`` /
-           ``seed_kit_path`` into ``params`` so the stub executor +
-           future runners can locate the artefacts without traversal.
+        1. Generate ``dyn-<round>-<seq>`` and fail-fast on collision.
+        2. Mkdir the artefact dir.
+        3. Assemble the seed kit; a :class:`SeedKitAssemblyError` is
+           re-raised as :class:`PolicyDenied` so the round cap is not
+           consumed.
+        4. Write ``spec.json`` + ``seed_kit.json``.
+        5. Inject ``dyn_id`` / ``artifact_path`` / ``spec_path`` /
+           ``seed_kit_path`` into ``params`` so the executor can
+           locate the artefacts without traversal.
 
         Returns the meta dict consumed by
-        :meth:`_finalize_dynamic_action_dispatch` once the task row
-        lands. On any failure the partial artefact dir is removed
-        and the raised :class:`PolicyDenied` carries a structured
-        reason code for the orchestration prompt.
+        :meth:`_finalize_dynamic_action_dispatch` once the task lands.
+        Any failure removes the partial artefact dir and raises a
+        structured :class:`PolicyDenied`.
         """
         from .dynamic_action_seed_kit import (
             SeedKitAssemblyError,
@@ -5862,7 +5849,7 @@ class Coordinator:
                 dynamic_action_seed_kit_path(self.session_dir, dyn_id),
             )
 
-        # dispatch_history.jsonl — DISPATCHED row (G2 closed schema).
+        # Append the ``DISPATCHED`` row to dispatch_history.jsonl.
         from .dynamic_action_history import (
             DispatchHistoryEvent,
             append_dispatch_history_row,
@@ -5890,11 +5877,9 @@ class Coordinator:
                     "failed for dyn_id=%s", dyn_id,
                 )
 
-        # P6 §3 — populate the closed prompt-projection fields at
-        # dispatch time. Anything beyond SUMMARY_PROMPT_FIELDS is
-        # private audit metadata (degraded_dispatch / seed_kit_tokens
-        # / side_effects_declared) that lives on disk but never leaks
-        # into the prompt section.
+        # Populate the closed prompt-projection fields at dispatch
+        # time; anything beyond ``SUMMARY_PROMPT_FIELDS`` is private
+        # audit metadata that lives on disk only.
         from .dynamic_action_proposal import (
             DynamicActionStatus,
             LAST_OUTCOME_BY_STATUS,
@@ -5966,7 +5951,7 @@ class Coordinator:
             return 0
 
     # ------------------------------------------------------------------
-    # dynamic_action.MD P8 — resume-time abandoned sweep
+    # Resume-time abandoned sweep wrapper
     # ------------------------------------------------------------------
     def _resume_abandon_dynamic_actions(self) -> None:
         """Consolidate every non-terminal dyn_id into ABANDONED at
@@ -6009,7 +5994,7 @@ class Coordinator:
                 )
 
     # ------------------------------------------------------------------
-    # dynamic_action.MD P5 — runner / critic / integrate lifecycle hooks
+    # dynamic_action runner / critic / integrate lifecycle hooks
     # ------------------------------------------------------------------
     def _ensure_dynamic_action_dispatched_row(
         self,
@@ -6018,16 +6003,15 @@ class Coordinator:
         params: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        """Make sure ``dynamic_actions[dyn_id]`` has a DISPATCHED row
-        before the lifecycle hooks walk to a downstream state.
+        """Ensure ``dynamic_actions[dyn_id]`` carries a ``DISPATCHED``
+        row before downstream lifecycle hooks run.
 
-        Coordinator-side wiring normally creates the row at dispatch
-        (P2). This helper is the defensive fallback for the rare path
-        where the row is missing — runner crash before dispatch
-        finalise, resume-with-no-summary, test setups, etc. — and
-        also enriches a freshly-seeded row with the P6 §3
-        prompt-projection fields (motivation_gap_short / scope_domains
-        / artifact_path) when ``params`` / ``extra`` carry them.
+        The dispatch hook normally creates this row; this helper is a
+        defensive fallback for paths where it is missing (runner
+        crash before dispatch finalise, resume with no summary, test
+        setups). When ``params`` / ``extra`` carry them, the seeded
+        row is also enriched with the prompt-projection fields
+        (motivation_gap_short / scope_domains / artifact_path).
         """
         from .dynamic_action_proposal import (
             DynamicActionStatus,
@@ -6195,12 +6179,10 @@ class Coordinator:
             "turns_used": turns_used,
             "journal_path": str(result_dict.get("journal_path") or ""),
         }
-        # P6 §4 — walk the state machine deliberately so the audit
-        # trail captures DISPATCHED → SUB_AGENT_RUNNING transitions
-        # even when the runner finished in one tick. Defensive: if the
-        # row is missing (dispatch hook never landed), create it as
-        # DISPATCHED first so the writer's transition validator is
-        # happy.
+        # Walk the state machine deliberately so the audit trail
+        # captures DISPATCHED → SUB_AGENT_RUNNING transitions even when
+        # the runner finished in one tick. Seed the DISPATCHED row
+        # first if missing so the writer's transition validator passes.
         self._ensure_dynamic_action_dispatched_row(
             dyn_id=dyn_id,
             params=params,
@@ -6209,9 +6191,9 @@ class Coordinator:
         self.shared_state.record_dynamic_action_outcome(
             dyn_id, status=DynamicActionStatus.SUB_AGENT_RUNNING.value,
         )
-        # dispatch_history.jsonl — SUB_AGENT_TERMINATED for the
-        # non-COMPLETED terminal states; SUB_AGENT_DONE lands later
-        # after we count the materialised proposal_set.
+        # Non-COMPLETED terminal states emit ``SUB_AGENT_TERMINATED``;
+        # ``SUB_AGENT_DONE`` lands later after the proposal_set count
+        # is known.
         if terminal_state != DynamicRunnerTerminalState.COMPLETED:
             try:
                 append_dispatch_history_row(
@@ -6267,11 +6249,9 @@ class Coordinator:
             raw = runner_payload.get("proposal_set") or []
             if isinstance(raw, list):
                 proposal_set = [p for p in raw if isinstance(p, dict)]
-        # G8 — runner already enforces MAX_PROPOSAL_SET_LEN = 1 by
-        # breaking out of the ReAct loop on the first emit_proposal.
-        # Defense-in-depth here: if a schema drift produces extras,
-        # truncate to the cap and log; downstream materialise only
-        # reads [0].
+        # The runner already breaks on the first emit_proposal; this
+        # is a defensive truncate in case a schema drift produces
+        # extras (downstream materialise only reads [0]).
         from .dynamic_action_proposal import MAX_PROPOSAL_SET_LEN
         if len(proposal_set) > MAX_PROPOSAL_SET_LEN:
             log.warning(
@@ -6281,9 +6261,9 @@ class Coordinator:
                 MAX_PROPOSAL_SET_LEN,
             )
             proposal_set = proposal_set[:MAX_PROPOSAL_SET_LEN]
-        # dispatch_history.jsonl — SUB_AGENT_DONE row carrying the
-        # post-load proposal_count (0 collapses to COMPLETED_EMPTY
-        # downstream; 1 proceeds to critic).
+        # ``SUB_AGENT_DONE`` row carries the post-load proposal_count
+        # (0 collapses to COMPLETED_EMPTY downstream; 1 proceeds to
+        # the critic).
         try:
             append_dispatch_history_row(
                 session_dir=self.session_dir,
@@ -6337,7 +6317,7 @@ class Coordinator:
                 )
             return
         proposal = proposal_set[0]
-        # P6 §4 — walk SUB_AGENT_RUNNING → SUB_AGENT_DONE before
+        # Step through SUB_AGENT_RUNNING → SUB_AGENT_DONE before
         # AWAITING_CRITIC so the state-machine audit trail captures
         # the runner-done event distinctly from the critic dispatch.
         self.shared_state.record_dynamic_action_outcome(
@@ -6361,8 +6341,8 @@ class Coordinator:
                 "scope_domains": list(proposal.get("scope_domains") or ()),
             }
 
-        # Mechanical floor (P4 §7). If it blocks, we never invoke the
-        # LLM-critic — write the envelope + flip the status.
+        # Mechanical-floor verdict: if it blocks, skip the LLM critic
+        # — write the envelope and flip the status here.
         envelope, lifecycle_after_mech = compose_critic_verdict_envelope(
             dyn_id=dyn_id,
             proposal=proposal,
@@ -6587,9 +6567,9 @@ class Coordinator:
             "critic_proposal_msg_id": pending.proposal_msg_id,
             "verdict": envelope["verdict"],
         }
-        # P6 §4 — ensure we land on AWAITING_CRITIC before the verdict
-        # transition (covers replays where the runner-done hook did
-        # not advance the state for any reason).
+        # Ensure the state machine reaches AWAITING_CRITIC before the
+        # verdict transition (covers replays where the runner-done
+        # hook never advanced the state).
         self._walk_dynamic_action_to_state(
             dyn_id, target_status=DynamicActionStatus.AWAITING_CRITIC,
         )
@@ -6664,12 +6644,10 @@ class Coordinator:
         gain_value: float | None = None
         if isinstance(delta_pct, (int, float)):
             gain_value = float(delta_pct)
-        # P6 §4 — the integrate completion is the
-        # INTEGRATING → {KEPT, REVERTED, INTEGRATE_FAILED} step.
-        # Walk the canonical state-machine path so the audit trail
-        # captures every intermediate transition even if upstream
-        # hooks happened to skip a state (test setups that seed
-        # DISPATCHED directly, resume-after-crash flows, etc.).
+        # The integrate completion is the INTEGRATING →
+        # {KEPT, REVERTED, INTEGRATE_FAILED} step. Walk the canonical
+        # path so the audit trail captures every intermediate
+        # transition even when upstream hooks skipped a state.
         self._walk_dynamic_action_to_state(
             dyn_id,
             target_status=DynamicActionStatus.INTEGRATING,
@@ -6718,8 +6696,8 @@ class Coordinator:
                 "(integrate completion)", dyn_id,
             )
         # Tag the intervention ledger with a dynamic-specific action
-        # name so post-hoc analytics can split KEEP rate by source
-        # without scraping logs (P5 §11 #4 + #5).
+        # name so analytics can split KEEP rate by source without
+        # scraping logs.
         if lifecycle == DynamicActionStatus.KEPT:
             try:
                 self.shared_state.record_intervention(
@@ -8511,12 +8489,10 @@ class Coordinator:
                     self.shared_state.bump_specialist_dispatched()
                 except Exception:  # noqa: BLE001
                     log.exception("PR-A8: bump_specialist_dispatched failed")
-            # dynamic_action.MD P5 §4 — once the DynamicActionRunner
-            # returns, advance the lifecycle: write the runner status
-            # onto the dyn_id summary and (on COMPLETED) either reject
-            # via mechanical floor or push a critic-bound proposal so
-            # the existing single-verdict path takes the patch through
-            # integrate_patch / grid / promote unchanged.
+            # When the dynamic_action runner returns: write the runner
+            # status onto the dyn_id summary and on COMPLETED either
+            # reject via the mechanical floor or push a critic-bound
+            # proposal through the existing single-verdict path.
             if task.kind == DYNAMIC_ACTION_NAME:
                 try:
                     await self._handle_dynamic_action_runner_result(
@@ -8540,9 +8516,8 @@ class Coordinator:
                         "PR-A8: intervention ledger update failed for task=%s",
                         task.task_id,
                     )
-            # dynamic_action.MD P5 §6 — when an integrate_patch task
-            # finishes and its specialist_task_id matches the
-            # dyn-<id> prefix, update the dyn_id summary with the
+            # When an integrate_patch task completes with a dyn-<id>
+            # specialist_task_id, update the dyn_id summary with the
             # final KEPT / REVERTED / INTEGRATE_FAILED status.
             if task.kind == "integrate_patch":
                 try:
