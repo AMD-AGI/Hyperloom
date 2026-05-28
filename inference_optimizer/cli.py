@@ -2396,10 +2396,20 @@ def _bootstrap_cortex_kb(
     """
     enabled = bool(getattr(args, "cortex_enabled", True))
     kb_url = (getattr(args, "cortex_kb_url", None) or "").strip() or None
+    # ``foreground=True`` → 2s timeout + 1 retry. This client is
+    # handed to the Coordinator and gets called synchronously on the
+    # main loop (every KEEP / REVERT triggers one fact write). The
+    # tight budget enforces the side-channel contract — a slow / sick
+    # KB falls through to NDJSON in ~2s instead of blocking the
+    # optimizer for up to ~32s per call (= ~5min per EXPLORE round).
+    # CLI T0 anchor is called once at startup, so it tolerates the
+    # short budget; the kb_flusher daemon constructs its own client
+    # without foreground=True so it keeps the legacy retry budget.
     client = CortexKBClient(
         session_dir=session_dir,
         kb_url=kb_url,
         enabled=enabled,
+        foreground=True,
     )
     if not enabled:
         print("Cortex KB        : DISABLED (--degraded-kb)")
