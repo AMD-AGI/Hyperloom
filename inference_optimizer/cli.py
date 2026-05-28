@@ -392,48 +392,44 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """IR-8: tighten incompatible CLI knobs when --framework atom is selected.
+    """IR-8: validate atom-specific CLI knob compatibility.
 
-    atom's framework-agent PR loop ships separately (Phase 3 of the
-    atom_plan/ lift). Until that lands, ``--no-framework`` is
-    auto-flipped on fresh atom launches so the FRAMEWORK_PR phase
-    is skipped cleanly. Explicit user opt-in is preserved — we only
-    flip a value when it's still at its enabled default.
+    After Phase 3 of atom_plan/ (framework-agent enablement) the
+    function's only remaining responsibility is the multi-node
+    fail-fast guard. Kept under the original name for git-blame
+    continuity with the historical ``--no-kernel`` / ``--no-framework``
+    auto-flip; the body is now narrower than the name suggests.
 
-    Kernel-agent works on atom now (atom_plan/phase2_open_kernel_agent):
-    PolicyGate's allowlist, ``_REUSABLE_SOURCE_ROOTS``, and the
-    server-flag pre-flight probe all recognise atom source paths and
-    atom's ``EngineArgs`` parser. The historical ``--no-kernel``
-    auto-flip was removed at the same time; operators can still pass
-    ``--no-kernel`` explicitly to opt out per-session.
+    What works on atom today (NO auto-tightening applied):
 
-    atom multi-node is unsupported (Magpie wrapper / atom server have
-    no multi-node TP wiring) — fail-fast on ``--nodes >= 2`` so
-    operators don't burn a ~6-min cold start on a doomed run.
+    * kernel-agent — atom_plan/phase2_open_kernel_agent wired atom
+      source roots into PolicyGate's allowlist,
+      ``_REUSABLE_SOURCE_ROOTS``, and the server-flag pre-flight
+      probe; ``--no-kernel`` is preserved at its False default.
+    * framework-agent — atom_plan/phase3_open_framework_agent added
+      atom's repo URL (https://github.com/ROCm/ATOM.git) to
+      ``framework_agent.repo_map``; ``--no-framework`` is preserved
+      at its False default, so the FRAMEWORK_PR phase runs.
+    * profile / roofline / TraceLens — atom's OpenAI-compatible
+      server exposes /start_profile and /stop_profile HTTP endpoints,
+      the atom engine takes a ``--torch-profiler-dir`` CLI flag, and
+      Magpie's ``atom_mi*x.sh`` bridges ``PROFILE=1`` to that flag.
+      atom writes standard ``*.pt.trace.json.gz`` chrome traces which
+      TraceLens consumes unchanged.
 
-    NOTE — profile / roofline / TraceLens are NOT auto-tightened off
-    for atom either. atom's OpenAI-compatible server exposes
-    /start_profile and /stop_profile HTTP endpoints, the atom engine
-    takes a ``--torch-profiler-dir`` CLI flag, and Magpie's
-    ``atom_mi*x.sh`` bridges ``PROFILE=1`` to that flag. atom writes
-    standard ``*.pt.trace.json.gz`` chrome traces which TraceLens
-    consumes unchanged.
+    What still fails fast on atom:
 
-    Returns the list of flag names auto-disabled (for callers that want
-    to log / assert). Calls ``sys.exit(2)`` on the multi-node guard
-    failure.
+    * ``--nodes >= 2`` — atom multi-node TP wiring is not yet
+      implemented in either the Magpie wrapper or the atom server.
+      ``sys.exit(2)`` so operators don't burn a ~6-min cold start on
+      a doomed run.
+
+    Returns the list of flag names auto-disabled — always empty after
+    Phase 3 since no defaults are flipped any more. The return type
+    is preserved so callers that historically appended to / logged
+    the list keep working unchanged.
     """
     auto_disabled: list[str] = []
-    if not getattr(args, "no_framework", False):
-        args.no_framework = True
-        auto_disabled.append("--no-framework")
-    if auto_disabled:
-        print(
-            f"  framework=atom: auto-disabling "
-            f"{', '.join(auto_disabled)} (atom framework-agent PR loop "
-            "pending Phase 3; kernel-agent + profile / roofline / "
-            "TraceLens stay enabled — see SKILL.md IR-8)"
-        )
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
             "ERROR: --framework atom does not support multi-node "
@@ -442,6 +438,11 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
             file=sys.stderr,
         )
         sys.exit(2)
+    print(
+        "  framework=atom: no auto-disable applied (kernel-agent + "
+        "framework-agent + profile / roofline / TraceLens all wired "
+        "for atom); --nodes>=2 guard active — see SKILL.md IR-8"
+    )
     return auto_disabled
 
 
