@@ -1,19 +1,31 @@
-"""IR-8 tests: --framework atom auto-tightens incompatible phases and
-fails fast on multi-node.
+"""IR-8 tests: --framework atom validates multi-node guard but no
+longer auto-flips any kernel / framework phase knobs.
 
 Targets ``_apply_atom_auto_tighten`` in inference_optimizer.cli.
 
-History: pre-Magpie-atom-PROFILE-wiring, ``--no-enable-roofline`` was
-also auto-flipped here. Once Magpie's ``atom_mi*x.sh`` learned to
-bridge ``PROFILE=1`` to atom's ``--torch-profiler-dir``, profile /
-roofline / TraceLens started working on atom natively and the
-roofline auto-disable was removed. The tests now assert that
-``--enable-roofline`` is *preserved* at its default for atom.
+History:
+* pre-Magpie-atom-PROFILE-wiring, ``--no-enable-roofline`` was
+  auto-flipped here. Once Magpie's ``atom_mi*x.sh`` learned to bridge
+  ``PROFILE=1`` to atom's ``--torch-profiler-dir``, profile / roofline /
+  TraceLens started working on atom natively and the roofline auto-
+  disable was removed.
+* atom_plan/phase2_open_kernel_agent removed the ``--no-kernel`` auto-
+  flip (kernel-agent now wired for atom — source roots, reusable-
+  kernel ledger, server-flag pre-flight probe).
+* atom_plan/phase3_open_framework_agent removed the ``--no-framework``
+  auto-flip (framework-agent now wired for atom — repo URL points at
+  https://github.com/ROCm/ATOM.git; the policy gate for
+  ``framework_atom_action_unsupported`` was also fully removed).
+
+After Phase 3 the only remaining behaviour is the ``--nodes >= 2``
+fail-fast guard. Multi-node TP wiring on atom is deferred; the guard
+saves operators a ~6-min cold start on a doomed run.
 """
 
 from __future__ import annotations
 
 import argparse
+import inspect
 
 import pytest
 
@@ -33,54 +45,46 @@ def _fresh_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def test_atom_auto_tighten_flips_framework_only_when_at_defaults(capsys):
-    """Vanilla ``--framework atom`` (no other phase flags) must auto-flip
-    no_framework only — kernel-agent is wired for atom in Phase 2 of the
-    atom_plan/ lift, so ``--no-kernel`` is preserved at its False
-    default. ``enable_roofline`` also stays at True (profile / roofline
-    / TraceLens work on atom)."""
+def test_atom_auto_tighten_only_guards_multi_node(capsys):
+    """Vanilla ``--framework atom`` (no other phase flags) must NOT
+    auto-flip any phase knobs after Phase 3. kernel-agent + framework-
+    agent + profile / roofline / TraceLens are all wired for atom; the
+    function's only remaining purpose is the ``--nodes >= 2`` fail-
+    fast guard. The returned auto-disabled list is empty."""
     args = _fresh_args()
     disabled = optimizer_cli._apply_atom_auto_tighten(args)
-    # Kernel-agent now works on atom (atom_plan/phase2_open_kernel_agent).
+    # No flags auto-flipped any more.
     assert args.no_kernel is False
-    assert args.no_framework is True
+    assert args.no_framework is False
     assert args.enable_roofline is True
-    assert "--no-kernel" not in disabled
-    assert "--no-framework" in disabled
-    assert "--no-enable-roofline" not in disabled
+    assert disabled == []
     out = capsys.readouterr().out
+    # Operator-readable log line still emitted so the operator can grep
+    # for the atom-tighten signal in launch logs.
     assert "framework=atom" in out
-    assert "--no-framework" in out
-    # Regression guard: the log line must not mention --no-kernel either
-    # as an auto-disable target or as a "still disabled" leftover.
+    assert "no auto-disable applied" in out
+    # Regression guards: none of the historical flip targets remain.
     assert "--no-kernel" not in out
+    assert "--no-framework" not in out
+    assert "--no-enable-roofline" not in out
 
 
-def test_atom_auto_tighten_log_line_mentions_framework_only(capsys):
-    """The single auto-disabling log line names only ``--no-framework``
-    after Phase 2. Operator readability gate."""
-    args = _fresh_args()
+def test_atom_no_framework_flag_preserved_when_user_passes_it(capsys):
+    """Explicit ``--no-framework --framework atom`` keeps
+    ``args.no_framework`` True; auto-tighten does NOT fight an explicit
+    operator choice (this was implicit in the previous behaviour; pin
+    it here so a future re-introduction of an auto-flip remembers to
+    respect the operator's value)."""
+    args = _fresh_args(no_framework=True)
     optimizer_cli._apply_atom_auto_tighten(args)
-    out = capsys.readouterr().out
-    auto_lines = [l for l in out.splitlines() if "auto-disabling" in l]
-    # Exactly one auto-disable line for the framework knob.
-    assert len(auto_lines) == 1, (
-        f"expected exactly one auto-disabling line; got {auto_lines!r}"
-    )
-    assert "--no-framework" in auto_lines[0]
-    assert "--no-kernel" not in auto_lines[0]
+    assert args.no_framework is True
 
 
-def test_atom_auto_tighten_preserves_explicit_no_kernel():
-    """Explicit ``--no-kernel`` from the operator must not be reverted.
-    Auto-tighten only flips defaults; it never overrides an
-    operator-supplied value, regardless of direction."""
+def test_atom_no_kernel_flag_preserved_when_user_passes_it():
+    """Same regression guard for ``--no-kernel``."""
     args = _fresh_args(no_kernel=True)
-    disabled = optimizer_cli._apply_atom_auto_tighten(args)
+    optimizer_cli._apply_atom_auto_tighten(args)
     assert args.no_kernel is True
-    # --no-kernel was already set; it should NOT appear in the
-    # auto-disabled list (which is "what we flipped").
-    assert "--no-kernel" not in disabled
 
 
 def test_atom_auto_tighten_does_not_touch_enable_roofline(capsys):
@@ -94,28 +98,6 @@ def test_atom_auto_tighten_does_not_touch_enable_roofline(capsys):
         assert args.enable_roofline is initial, (
             f"enable_roofline={initial} must not be flipped by atom auto-tighten"
         )
-
-
-def test_atom_auto_tighten_idempotent_when_flags_already_set(capsys):
-    """If the operator already passed --no-kernel / --no-framework,
-    no flip happens and no log line is emitted."""
-    args = _fresh_args(no_kernel=True, no_framework=True)
-    disabled = optimizer_cli._apply_atom_auto_tighten(args)
-    assert disabled == []
-    out = capsys.readouterr().out
-    assert "auto-disabling" not in out
-
-
-def test_atom_auto_tighten_preserves_explicit_partial_override(capsys):
-    """If the operator passed --no-kernel but left framework at the
-    enabled default, we still flip framework — no_kernel stays at its
-    operator-supplied True."""
-    args = _fresh_args(no_kernel=True)
-    disabled = optimizer_cli._apply_atom_auto_tighten(args)
-    assert args.no_kernel is True
-    assert args.no_framework is True
-    assert "--no-kernel" not in disabled  # already set, not auto-flipped
-    assert "--no-framework" in disabled
 
 
 def test_atom_auto_tighten_rejects_multi_node():
@@ -157,19 +139,40 @@ def test_framework_choices_reject_unknown_value():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.6 G4 cross-cutting guard: auto-tighten log is operator-readable
+# Phase 3.5 G3 cross-cutting static guard:
+# _apply_atom_auto_tighten purpose narrowed to multi-node guard only.
 # ---------------------------------------------------------------------------
+def test_atom_auto_tighten_only_purpose_is_multi_node_guard():
+    """Source-level guard: the function body must not mention any of the
+    historical flip targets (no_kernel / no_framework / enable_roofline)
+    so a future edit that re-introduces an auto-flip has to be intentional.
+    ``nodes`` must remain as the multi-node guard signal."""
+    src = inspect.getsource(optimizer_cli._apply_atom_auto_tighten)
+    # Strip the docstring before checking — the docstring is allowed to
+    # reference the historical flips for context.
+    body_only = src.split('"""', 2)[-1] if '"""' in src else src
+    assert "args.no_kernel = True" not in body_only, (
+        "auto-tighten body must not flip no_kernel after Phase 2"
+    )
+    assert "args.no_framework = True" not in body_only, (
+        "auto-tighten body must not flip no_framework after Phase 3"
+    )
+    assert "args.enable_roofline" not in body_only, (
+        "auto-tighten body must not touch enable_roofline"
+    )
+    # The multi-node guard literal stays.
+    assert "nodes" in body_only
+
+
 def test_atom_auto_tighten_log_line_is_single_line(capsys):
-    """Operator-readability gate: the auto-disable log must emit
-    exactly ONE line so a `grep auto-disabling kernel-agent.env.sh`
-    returns a single record."""
+    """Operator-readability gate: emit exactly ONE atom-context log
+    line so a `grep framework=atom kernel-agent.env.sh` returns a
+    single record."""
     args = _fresh_args()
     optimizer_cli._apply_atom_auto_tighten(args)
     out = capsys.readouterr().out
-    auto_disable_lines = [
-        l for l in out.splitlines() if "auto-disabling" in l
-    ]
-    assert len(auto_disable_lines) == 1, (
-        f"expected exactly one auto-disabling line, got "
-        f"{len(auto_disable_lines)}: {auto_disable_lines!r}"
+    atom_lines = [l for l in out.splitlines() if "framework=atom" in l]
+    assert len(atom_lines) == 1, (
+        f"expected exactly one atom-context line, got "
+        f"{len(atom_lines)}: {atom_lines!r}"
     )
