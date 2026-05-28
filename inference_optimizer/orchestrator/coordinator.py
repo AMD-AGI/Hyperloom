@@ -5177,6 +5177,60 @@ class Coordinator:
                 variant_name,
             )
 
+    def _inject_explore_runtime_params(self, params: dict) -> None:
+        """Inject explore-task operational knobs from SharedState into ``params``.
+
+        Called from both ``_materialize_approved_proposal`` (Critic-gated path)
+        and ``_handle_delegate`` (direct-delegate path that bypasses the
+        verdict map: legacy resume, tests that delegate explore directly) so
+        a single source of truth controls what gets forwarded to the
+        ExploreExecutor. ``setdefault`` preserves any LLM-supplied override
+        for one-off rebench / debug variants.
+
+        Knobs:
+          * ``baseline_runtime_sec`` + ``explore_overtime_kill_ratio`` —
+            Fix E (Q1/Q5): the executor derives ``soft_deadline_sec =
+            baseline_runtime_sec * explore_overtime_kill_ratio`` for the
+            single-variant phase (stack rebench bypasses this gate per Q4).
+          * ``variant_timeout_sec`` — operator-pinned hard timeout
+            (``0`` = auto-derive in ExploreExecutor).
+          * ``variant_timeout_safety_margin`` — auto-derive headroom (no
+            effect when ``variant_timeout_sec`` is pinned above).
+          * ``roofline_hard_gate`` (+ snapshot) — opt-in saturation filter;
+            soft advisory is independent and untouched here.
+        """
+        br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
+        if br > 0:
+            params.setdefault("baseline_runtime_sec", br)
+        kill_ratio = float(getattr(
+            self.shared_state, "explore_overtime_kill_ratio", 0.0,
+        ) or 0.0)
+        if kill_ratio > 0:
+            params.setdefault("explore_overtime_kill_ratio", kill_ratio)
+        variant_timeout_override = int(getattr(
+            self.shared_state, "explore_variant_timeout_sec_override", 0,
+        ) or 0)
+        if variant_timeout_override > 0:
+            params.setdefault("variant_timeout_sec", variant_timeout_override)
+        safety_margin_override = float(getattr(
+            self.shared_state, "explore_variant_timeout_safety_margin", -1.0,
+        ))
+        if safety_margin_override >= 0:
+            params.setdefault(
+                "variant_timeout_safety_margin", safety_margin_override,
+            )
+        if bool(getattr(
+            self.shared_state, "explore_roofline_hard_gate", False,
+        )):
+            params.setdefault("roofline_hard_gate", True)
+            history = list(getattr(
+                self.shared_state, "roofline_saturation_history", [],
+            ) or [])
+            if history and isinstance(history[-1], dict):
+                params.setdefault(
+                    "roofline_saturation_snapshot", dict(history[-1]),
+                )
+
     async def _materialize_approved_proposal(
         self,
         pending: PendingProposal,
@@ -5318,23 +5372,7 @@ class Coordinator:
                     "config_path", self.shared_state.baseline_config_path
                 )
         if pending.action_name == "explore":
-            # Fix E (per-variant overtime kill — Q1 baseline-anchored,
-            # Q5 default-on-with-flag). These two fields are NOT LLM
-            # strategy: they're operational knobs the Coordinator
-            # owns. We always inject them so the ExploreExecutor can
-            # derive ``soft_deadline_sec = baseline_runtime_sec *
-            # explore_overtime_kill_ratio`` for the single-variant
-            # phase (stack rebench intentionally bypasses this gate
-            # — Q4). ``setdefault`` leaves an LLM-supplied override
-            # in place for one-off rebench / debug variants.
-            br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
-            if br > 0:
-                params.setdefault("baseline_runtime_sec", br)
-            kill_ratio = float(getattr(
-                self.shared_state, "explore_overtime_kill_ratio", 0.0,
-            ) or 0.0)
-            if kill_ratio > 0:
-                params.setdefault("explore_overtime_kill_ratio", kill_ratio)
+            self._inject_explore_runtime_params(params)
             # Mirror the sweep/integrate branches: inject ``base_tput`` (and
             # ``base_extra_args``) tied to current_best (or baseline_tput as
             # fallback) whenever Orchestration omits them. Without this the
@@ -5457,20 +5495,11 @@ class Coordinator:
             params.setdefault(
                 "config_path", self.shared_state.baseline_config_path
             )
-        # Fix E (parity with _materialize_approved_proposal): inject
-        # overtime-kill operational knobs for direct explore delegates
-        # too. The common path is the Critic-gated reroute above, but
-        # this branch covers anything that bypasses the verdict map
-        # (legacy resume, tests that delegate explore directly).
+        # Parity with _materialize_approved_proposal: direct delegates
+        # bypass the verdict map (legacy resume, tests that delegate
+        # explore directly) but still need the same operational knobs.
         if action_name == "explore":
-            br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
-            if br > 0:
-                params.setdefault("baseline_runtime_sec", br)
-            kill_ratio = float(getattr(
-                self.shared_state, "explore_overtime_kill_ratio", 0.0,
-            ) or 0.0)
-            if kill_ratio > 0:
-                params.setdefault("explore_overtime_kill_ratio", kill_ratio)
+            self._inject_explore_runtime_params(params)
         # IR-7 — ``assess_remaining_gaps`` is a thin wrapper: rewrite
         # the kind to ``specialist`` and force the
         # ``session_steward_specialist`` domain (LLM cannot pick any
