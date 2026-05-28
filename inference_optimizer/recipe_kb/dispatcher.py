@@ -3,20 +3,48 @@
 Routes calls between the local store and the central kb-service
 according to the design fixed in 2026-05-28:
 
-* **Writes go LOCAL ONLY** — :meth:`put_recipe`,
-  :meth:`append_attempt`, :meth:`delete_recipe` are all forwarded
-  verbatim to :class:`LocalRecipeStore`. The remote client never
-  sees a write request, by construction (it doesn't expose write
-  methods at all).
-* **Reads prefer the central kb-service when configured AND
-  reachable, falling back to the local store on any failure.** The
-  fallback is silent at the call-site (the dispatcher logs a
-  WARNING) so warm-start / search paths don't have to unwrap a
-  RemoteRecipeClientError on every call.
-* **Reads go local-only when no remote is configured.** A caller
-  who passes ``remote=None`` (e.g. ``--degraded-kb`` or no
-  ``--cortex-kb-url``) sees the same dispatcher API; reads just
-  short-circuit to the local store.
+Writes — local-only:
+    :meth:`put_recipe`, :meth:`append_attempt`,
+    :meth:`delete_recipe` are forwarded verbatim to
+    :class:`LocalRecipeStore`. The remote client never sees a
+    write request, by construction (it doesn't expose write
+    methods at all). The local store is the authoritative place
+    new rows land.
+
+Reads — remote-first, fall through to local on absence / failure:
+    1. If ``remote`` is configured AND enabled → call the central
+       kb-service first.
+    2. If the remote answer carries a non-empty result, return it
+       as-is. The central server is the wider corpus (it
+       aggregates rows written by other operators / older runs
+       that shipped to ``/v1/points``); a hit there is most
+       informative.
+    3. If the remote answer is "absence" (None / empty list /
+       404) we fall through to the local store. Rationale: the
+       remote can lag arbitrarily behind local writes (writes go
+       local-only under this design — the central server only
+       picks up rows via separately-scheduled bulk ingest), so
+       "remote says no" is not the same as "this row never
+       existed". A local hit completes the read; a local miss
+       returns the same absence shape the remote produced.
+    4. If the remote raises :class:`RemoteRecipeClientError`
+       (transport / 4xx / 5xx) we log + invoke the optional
+       ``on_remote_failure`` callback, then fall through to the
+       local store. Callers therefore never have to unwrap remote
+       errors.
+
+Reads — local-only mode:
+    A dispatcher constructed with ``remote=None`` (e.g.
+    ``--degraded-kb`` or no ``--cortex-kb-url``) skips step 1
+    entirely; reads go directly to the local store. A
+    ``remote.enabled=False`` client behaves the same way (the
+    client itself short-circuits each call to "no info").
+
+NB: We do NOT merge remote + local results. Each read is
+satisfied by exactly one source. Merging would double-count rows
+that exist in both stores at slightly different versions, and
+silently obscure the fact that the central corpus is stale
+relative to local writes.
 
 This dispatcher is the only object the rest of the optimizer
 should construct directly — the local store + remote client are
@@ -170,21 +198,23 @@ class RecipeKB:
         canonical_id: str,
         version: int | None = None,
     ) -> dict[str, Any] | None:
-        """Read recipe row.
+        """Read recipe row, remote-first with local fall-through.
 
-        * If ``remote`` is active, try it first.
-        * On any :class:`RemoteRecipeClientError`, log + fall through
-          to the local store.
-        * On a remote 404 (returned as ``None``), DO NOT fall through
-          — the central server is the canonical source for "this id
-          was never registered there", and the local row (if any) is
-          a parallel-universe artifact the caller should still see if
-          they ask the dispatcher again with ``--degraded-kb``.
-          Behaviour is: ``remote=None`` + local hit → return local;
-          ``remote=hit`` → return remote; ``remote=miss`` → return
-          local (so a freshly-bootstrapped remote can't shadow our
-          local-of-truth). This is intentional and matches the
-          local-write design: the local store is authoritative.
+        Resolution order (matches the class-level docstring):
+
+        1. Remote enabled → ``remote.get_recipe(...)``.
+           A non-None response is returned verbatim.
+        2. Remote returned ``None`` (server replied 404 → row
+           absent on central) → check the local store. The local
+           row may exist if this operator wrote it but the central
+           ingest hasn't caught up yet.
+        3. Remote raised → log + ``on_remote_failure`` callback,
+           then check the local store.
+        4. Remote disabled / not configured → local-only.
+
+        Returns ``None`` only when both stores agree the row is
+        absent. ``version=N`` is forwarded to whichever store
+        ends up satisfying the call.
         """
         if self._remote_active():
             try:
@@ -251,13 +281,20 @@ class RecipeKB:
         order_by: str = "updated_at DESC",
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        """Filtered search.
+        """Filtered search, remote-first with local fall-through.
 
-        We do NOT merge remote + local results — central server is
-        the authoritative search corpus when reachable. Local
-        fallback only fires when remote is absent / unhealthy.
-        Merging would risk double-counting recipes that exist in
-        both stores at slightly different versions.
+        Single-source-of-record per call (no merging across stores
+        — see the class docstring for why). Resolution:
+
+        1. Remote returned a non-empty list → that list is
+           returned verbatim.
+        2. Remote returned ``[]`` → fall through to local. A
+           genuinely-empty central corpus matching this filter is
+           rare; an empty result is more often "the central
+           hasn't ingested our recent local writes yet", and
+           callers nearly always benefit from seeing local matches
+           in that case.
+        3. Remote raised → log + fall through.
         """
         if self._remote_active():
             try:
