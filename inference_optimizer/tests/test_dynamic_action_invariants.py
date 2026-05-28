@@ -709,6 +709,45 @@ class TestInvariant_RoundCap:
         assert MAX_DYNAMIC_PER_ROUND == 1
         assert MAX_DYNAMIC_SOURCED_VARIANTS == 1
 
+    def test_inv_dynamic_sourced_cap_enforced_at_explore_dispatch(self):
+        """G4 — the IR-4 sourced-variant cap is mechanically enforced
+        on every explore-grid delegate, independent of MAX_DYNAMIC_PER_ROUND."""
+        gate = _gate()
+        bad = Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "explore",
+                "params": {
+                    "grid": [
+                        {"name": "v1", "provenance": "dynamic"},
+                        {"name": "v2", "provenance": "dynamic"},
+                    ],
+                    "config_path": "/tmp/baseline.yaml",
+                },
+            },
+        )
+        with pytest.raises(PolicyDenied) as excinfo:
+            gate.validate_intent("orchestration", bad)
+        assert excinfo.value.rule == "dynamic_sourced_variant_cap_exceeded"
+
+    def test_inv_single_dynamic_sourced_variant_passes(self):
+        """A single dynamic-sourced variant within the cap should pass
+        the new gate (no regression)."""
+        gate = _gate()
+        ok = Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "explore",
+                "params": {
+                    "grid": [
+                        {"name": "v1", "provenance": "dynamic"},
+                    ],
+                    "config_path": "/tmp/baseline.yaml",
+                },
+            },
+        )
+        gate.validate_intent("orchestration", ok)
+
     def test_inv_round_cap_exhausted_rejected(self):
         state = _State(dynamic_action_round_count=MAX_DYNAMIC_PER_ROUND)
         gate = _gate(state)
