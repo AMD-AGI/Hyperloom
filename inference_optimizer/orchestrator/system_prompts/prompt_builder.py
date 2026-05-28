@@ -920,10 +920,19 @@ def _read_rules_fragment(path: Path | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# dynamic_action.MD P7 §3 — entry declaration. Strictly follows §1.7:
-# state that the channel exists + when it is appropriate + that it is
-# NOT the default; no triggering heuristics, no examples, no negative
-# guidance about cost / cooldown / specialist failure fallback.
+# dynamic_action.MD P7 §3 — entry declaration. Strictly follows §1.7;
+# the canonical source-of-truth text is the §1.7 quote below.
+#
+# > "如果你认为存在一组跨多个 domain 的 patch 组合，且任何单个
+# > specialist 在其 domain prompt 边界内都不可能提出来，可派发一条
+# > dynamic action。一般情况下应当依赖 specialist 体系；dynamic action
+# > 是补充通道，不是默认通道。"
+#
+# The English rendering below conveys the same intent while staying
+# consistent with the rest of the orchestration prompt's voice. No
+# triggering heuristics, no examples, no negative guidance about cost
+# / cooldown / specialist failure fallback — those would shift dynamic
+# from "supplementary" to "default fallback".
 # ---------------------------------------------------------------------------
 def _section_dynamic_action(actions: list[ActionMetadata]) -> list[str] | None:
     if not any(a.name == "dynamic_action" for a in actions):

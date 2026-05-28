@@ -193,20 +193,32 @@ orchestration 的 prompt 中**仅声明入口存在**，不附详细使用指引
 
 ---
 
-## 2. 详细设计（待补）
+## 2. 详细设计
 
-下列子章节将在后续迭代中展开。**章节列表已按 §1.9 的 P0 决策更新**：
+§1.9 P0 决策固化后的 10 个实施面均已在 `action_dynamic_plan/` 下
+逐阶段落地；本节是各小节到具体阶段文档的索引（**单一来源**：阶段
+文档；本节不重复内容）。每阶段文档同时给出实现锚点（产线源文件 +
+关键 invariants），避免本设计稿与代码漂移。
 
-- 2.1 `delegate(action_name="dynamic_action")` 的 payload schema
-- 2.2 PolicyGate 早期校验规则清单（含 IR-4 provenance 白名单扩展）
-- 2.3 Dynamic sub-agent 的 ReAct 工具集、回收路径白名单与 budget
-- 2.4 Seed kit 装配逻辑（Coordinator 侧 helper）
-- 2.5 Critic `patch_landing` + `cross_domain=true` 附加审查规则
-- 2.6 `integrate_patch` 对 dynamic 来源 patch 的额外校验
-- 2.7 `_grid_runner` 调度对 dynamic variant 的 fairness 处理
-- 2.8 SharedState `dynamic_actions` summary 字段定义与受保护字段集成员关系
-- 2.9 Resume 语义（非终态 dynamic action 在 Coordinator 重启后的处理）
-- 2.10 Orchestration prompt 增量 + 入口声明文本
+| § | 主题 | 阶段文档 | 主要产线源文件 |
+|---|---|---|---|
+| 2.1 | `delegate(action_name="dynamic_action")` payload schema | [P1](action_dynamic_plan/P1_dispatch_skeleton.md) | `orchestrator/policy.py` (DYNAMIC_ACTION_*), `actions/_meta/dynamic_action.yaml` |
+| 2.2 | PolicyGate 早期校验 + IR-4 provenance 白名单扩展 | [P1](action_dynamic_plan/P1_dispatch_skeleton.md) | `_validate_dynamic_action_dispatch` + `_validate_explore_grid_size` (G4) |
+| 2.3 | Sub-agent ReAct 工具集 / 回收白名单 / budget | [P3](action_dynamic_plan/P3_subagent_runner.md) | `dynamic_action_tools.py`, `dynamic_action_runner.py` |
+| 2.4 | Seed kit 装配（Coordinator 侧 helper） | [P2](action_dynamic_plan/P2_session_artifact_seed_kit.md) | `dynamic_action_seed_kit.py` |
+| 2.5 | Critic `patch_landing` + `cross_domain=true` 附加规则 | [P4](action_dynamic_plan/P4_critic_cross_domain.md) | `dynamic_action_critic.py`, `system_prompts/critic.md` |
+| 2.6 | `integrate_patch` 对 dynamic 来源 patch 的额外校验 | [P5](action_dynamic_plan/P5_e2e_wiring.md) | `dynamic_action_pipeline.materialize_dynamic_patch_workspace` |
+| 2.7 | `_grid_runner` 对 dynamic variant 的 fairness 处理 | [P5](action_dynamic_plan/P5_e2e_wiring.md) | `coordinator._maybe_update_dynamic_action_after_integrate` |
+| 2.8 | SharedState `dynamic_actions` summary 字段定义 + 写保护 | [P6](action_dynamic_plan/P6_sharedstate_summary.md) | `shared_state.record_dynamic_action_outcome`, `SUMMARY_PROMPT_FIELDS` |
+| 2.9 | Resume 语义（非终态 → ABANDONED） | [P8](action_dynamic_plan/P8_resume_semantics.md) | `dynamic_action_resume.py` |
+| 2.10 | Orchestration prompt 增量 + 入口声明 | [P7](action_dynamic_plan/P7_orchestration_prompt.md) | `system_prompts/prompt_builder._section_dynamic_action` |
+
+附加 (实施期发现的)：
+
+| § | 主题 | 文档 | 产线源 |
+|---|---|---|---|
+| 2.A | dispatch_history.jsonl + telemetry.json 落盘 | [gaps G2/G3/G13](dynamic_action_gaps.md) | `dynamic_action_history.py` |
+| 2.B | 测试矩阵（单元 / 集成 / 不变量 三层金字塔） | [P9](action_dynamic_plan/P9_test_matrix.md) | `tests/test_dynamic_action_*.py` (426 tests) |
 
 ---
 
