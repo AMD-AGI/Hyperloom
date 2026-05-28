@@ -137,6 +137,11 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # this internally on plateau (bypasses PolicyGate); LLM-side
         # proposes are throttled by ``assess_remaining_gaps_throttle``.
         "assess_remaining_gaps",
+        # dynamic_action.MD P1 — supplementary cross-domain ReAct
+        # sub-agent channel; orchestration-only dispatch, capped at
+        # MAX_DYNAMIC_PER_ROUND per EXPLORE round. See PolicyGate
+        # ``_validate_dynamic_action_dispatch``.
+        "dynamic_action",
         # ``roofline`` / ``profile`` are Coordinator-auto-enqueued mid-
         # EXPLORE whenever the watermark check at the
         # cumulative_gain_validated writer fires (10% step compound vs
