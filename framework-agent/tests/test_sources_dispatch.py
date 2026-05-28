@@ -25,10 +25,9 @@ def _minimal_request(**overrides) -> ExploreRequest:
 
 
 # Per-framework repo URLs used to parametrise the dispatch tests over
-# every framework the framework-agent CLI accepts. Gap G5 / Phase 3.3
-# regression: the original test file defaulted ``framework: "sglang"``
-# everywhere; this map plus the parametrize decorator below ensure
-# every dispatch path is exercised for sglang AND vllm AND atom so a
+# every framework the framework-agent CLI accepts. This map plus the
+# parametrize decorator below ensure every dispatch path is exercised
+# for sglang AND vllm AND atom so a
 # future regression that silently routes only one framework correctly
 # fails the suite.
 _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
@@ -48,10 +47,9 @@ def test_dispatch_explicit_refs_only() -> None:
     assert sources == {"explicit"}
 
 
-# Gap G5 / Phase 3.3 — parametrise the dispatch path over every
-# framework the CLI accepts so a future regression that silently
-# routes only one framework correctly fails the suite. The original
-# file defaulted ``framework="sglang"`` for every test; the
+# Parametrise the dispatch path over every framework the CLI accepts
+# so a future regression that silently routes only one framework
+# correctly fails the suite. The
 # parametrised guard below covers sglang / vllm / atom.
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
 def test_dispatch_explicit_refs_only_across_frameworks(framework: str) -> None:
@@ -431,8 +429,8 @@ def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# Phase-1 (fa-as-io-arm): Candidate.score field must carry the rerank score
-# across the subprocess JSON boundary so the IO framework_pr arm can log it.
+# Candidate.score must carry the rerank score across the subprocess JSON
+# boundary so the IO framework_pr arm can log it.
 # ---------------------------------------------------------------------------
 
 
