@@ -898,6 +898,127 @@ def test_default_grid_for_framework_non_atom_returns_empty(framework):
     assert grid == []
 
 
+def _write_atom_baseline_yaml(path: Path) -> None:
+    """Atom-flavoured base YAML for gap-G1 cold-start wiring tests."""
+    cfg = {
+        "benchmark": {
+            "framework": "atom",
+            "model": "/wekafs/models/Qwen-Qwen3-32B",
+            "precision": "fp8",
+            "run_mode": "local",
+            "envs": {"TP": 4, "CONC": 64, "ISL": 1024, "OSL": 1024},
+            "benchmark_script": "atom_mi355x.sh",
+            "timeout_seconds": 600,
+            "profiler": {
+                "torch_profiler": {"enabled": False},
+                "system_profiler": {"enabled": False},
+                "tracelens": {"enabled": False},
+            },
+            "gpu_selection": {"auto": False},
+        },
+    }
+    with path.open("w") as f:
+        yaml.safe_dump(cfg, f)
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_atom_empty_grid_seeds_default_grid(
+    sub_agent_runner, tmp_path, monkeypatch,
+):
+    """G1 (atom_gap1.md): when the orchestration LLM emits an empty
+    grid on an atom session, ExploreExecutor must NOT return
+    ``error_class='empty_grid'`` — it must fall through to
+    ``_default_grid_for_framework('atom', ...)`` and run those
+    variants.
+
+    Bench is mocked so the test asserts *only* the wiring (empty grid
+    → seed grid loaded, executor proceeds to grid runner), not the
+    seed's per-variant outcome which is gated by the Magpie / atom
+    server.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base_atom.yaml"
+    _write_atom_baseline_yaml(base)
+
+    # Sandbox MODEL_PATH so compatibility_filter doesn't auto-drop
+    # MoE/MLA variants.
+    monkeypatch.setenv("MODEL_PATH", "/wekafs/models/Qwen-Qwen3-32B")
+    monkeypatch.setenv("FRAMEWORK", "atom")
+
+    received_grid: list[list[str]] = []
+
+    # Monkeypatch the ``run_grid`` symbol bound INSIDE the explore
+    # module (the executor imports it at module-load time, so
+    # patching ``_grid_runner.run_grid`` would miss the call site).
+    from inference_optimizer.orchestrator.action_executors import (
+        explore as explore_mod,
+    )
+
+    async def _capture_run_grid(**kwargs):
+        received_grid.append([v.name for v in (kwargs.get("grid") or [])])
+        return []
+
+    monkeypatch.setattr(explore_mod, "run_grid", _capture_run_grid)
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "base_tput":   800.0,
+            "grid":        [],
+            "model_class": "moe_mla",
+        },
+        idempotency_key="ex-atom-empty-seeded",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+
+    await sub.run_task(task)
+
+    # ``run_grid`` is called once per variant (variants stream one at
+    # a time through the executor). Each invocation should carry
+    # exactly one atom_ seed variant.
+    assert received_grid, "run_grid was not invoked by the seed path"
+    flat_names = [n for sub in received_grid for n in sub]
+    assert all(n.startswith("atom_") for n in flat_names), (
+        f"non-atom variants reached run_grid via the seed: {flat_names!r}"
+    )
+    # The full seed for moe_mla + CONC>0 has at least 5 variants; the
+    # executor may have stopped earlier (every per-variant call
+    # returned []), so we assert lower-bound coverage.
+    assert "atom_level_2" in flat_names
+    assert "atom_ep" in flat_names
+    assert "atom_dp_attn" in flat_names
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
+    sub_agent_runner, tmp_path,
+):
+    """Inverse of the atom test: sglang / vllm have NO programmatic
+    seed today (intentional — see ``_default_grid_for_framework``);
+    an empty grid on those frameworks must continue to return
+    ``error_class='empty_grid'`` so the orchestration LLM is forced
+    to emit variants. Regression guard against accidentally seeding
+    sglang from the atom branch.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base_sglang.yaml"
+    _write_baseline_yaml(base)
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "base_tput":   800.0,
+            "grid":        [],
+        },
+        idempotency_key="ex-sglang-empty-still-fails",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    res = await sub.run_task(task)
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == "empty_grid"
+
+
 def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
     monkeypatch,
 ):
