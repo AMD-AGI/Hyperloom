@@ -156,12 +156,32 @@ SEVERITY_REGRESS:          Final[str] = "regress"
 SEVERITY_NOOP:             Final[str] = "noop"
 
 # ---------------------------------------------------------------------------
-# Defaults
+# Defaults — bypass-mode semantics
 # ---------------------------------------------------------------------------
-DEFAULT_HTTP_TIMEOUT_SEC:  Final[float] = 10.0
+# Two timeout / retry profiles depending on the caller's tolerance for
+# being blocked on a slow / unreachable KB:
+#
+# * **foreground** — Coordinator on the main event loop. Every fact-
+#   write (one per KEEP / REVERT, ~10 / EXPLORE round) is a sync HTTP
+#   call. With the legacy 10s × 3 retries × backoff, a single KB
+#   stall could block the optimizer for ~32s per write, snowballing
+#   to >5min per EXPLORE round when KB is sick. Operator requirement:
+#   "KB is a side-channel — if it's unavailable / slow, do NOT slow
+#   the main logic". So the foreground profile fails fast (2s + 1
+#   retry ≈ ~2.5s worst case) and the write falls through to NDJSON
+#   on the very first transport hiccup. Cost: more rows queued; the
+#   kb_flusher daemon picks them up in the background.
+#
+# * **background** — kb_flusher daemon + CLOSE-time drain. These run
+#   outside the main loop so they can afford the legacy retry budget
+#   (10s × 3) to maximize the chance a transient KB blip still
+#   commits without dead-lettering the row.
+DEFAULT_HTTP_TIMEOUT_SEC:  Final[float] = 10.0  # background / flusher
 DEFAULT_MAX_CONCURRENCY:   Final[int] = 8       # aligned with asyncpg pool
 DEFAULT_RETRY_ATTEMPTS:    Final[int] = 3
 DEFAULT_RETRY_BASE_MS:     Final[int] = 200     # 200ms × {1, 1.4, 4}
+FOREGROUND_HTTP_TIMEOUT_SEC: Final[float] = 2.0   # Coordinator main loop
+FOREGROUND_RETRY_ATTEMPTS:   Final[int] = 1       # fail fast → NDJSON
 # Maximum number of times a single NDJSON row may be re-attempted by
 # the drain loop before it is treated as permanent and moved to the
 # dead-letter counter. Protects against infinite retry loops when a
@@ -263,6 +283,8 @@ __all__ = [
     "DEFAULT_MAX_CONCURRENCY",
     "DEFAULT_RETRY_ATTEMPTS",
     "DEFAULT_RETRY_BASE_MS",
+    "FOREGROUND_HTTP_TIMEOUT_SEC",
+    "FOREGROUND_RETRY_ATTEMPTS",
     "MAX_FLUSH_ATTEMPTS",
     "DEFAULT_GENERATOR",
     "SMOKE_GENERATOR",
