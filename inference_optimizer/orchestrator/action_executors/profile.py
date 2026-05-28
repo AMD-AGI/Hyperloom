@@ -496,6 +496,24 @@ class ProfileExecutor(BaselineExecutor):
         # Override action label so per-task output lands under runs/profile/
         # rather than runs/baseline/ when the runner derives the path.
         params = ctx.task.params or {}
+        # PR-B: Watermark refresh inheritance of current_best.extra_sglang_args.
+        # Coordinator._enqueue_internal_analysis_task stamps
+        # ``current_best.extra_sglang_args`` into params["base_extra_args"]
+        # so the profile run captures a trace that reflects the optimized
+        # workload rather than the bare baseline. We merge it into
+        # ``params["extra_sglang_args"]`` here so the downstream
+        # ``materialize_config_with_envs`` call (in BaselineExecutor)
+        # picks it up via the standard ``extra_sglang_args`` channel.
+        # Without this merge, the watermark snapshot's trace_analyze
+        # KPI is byte-identical to the PRELUDE snapshot's, hiding the
+        # actual optimization gain on the dashboard.
+        base_args = str(params.get("base_extra_args") or "").strip()
+        if base_args:
+            from ._grid_runner import merge_server_args
+            params["extra_sglang_args"] = merge_server_args(
+                base_args,
+                str(params.get("extra_sglang_args") or "").strip(),
+            )
         extra = getattr(ctx, "extra", None) or {}
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
