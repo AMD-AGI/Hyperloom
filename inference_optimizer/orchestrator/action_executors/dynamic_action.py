@@ -50,33 +50,21 @@ def _resolve_artifact_dir(ctx: RunnerContext) -> Path | None:
 
 
 async def dynamic_action_executor(ctx: RunnerContext) -> dict[str, Any]:
-    """Append one dispatch_history.jsonl row + write empty proposal_set."""
-    dyn_id = ctx.task.params.get("dyn_id") or ctx.task.task_id
+    """Append one dispatch_history.jsonl row + write empty proposal_set.
+
+    The history row uses the unified ``SUB_AGENT_DONE`` closed schema
+    (G2) so consumers of dispatch_history can treat the stub uniformly
+    with the real runner.
+    """
+    dyn_id = str(ctx.task.params.get("dyn_id") or ctx.task.task_id)
     artifact_dir = _resolve_artifact_dir(ctx)
-    record = {
-        "ts": _now_iso(),
-        "dyn_id": str(dyn_id),
-        "outcome": "stub_empty",
-        "task_id": ctx.task.task_id,
-    }
     if artifact_dir is not None:
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            with (artifact_dir / "dispatch_history.jsonl").open(
-                "a", encoding="utf-8",
-            ) as f:
-                f.write(json.dumps(record, sort_keys=True) + "\n")
-        except OSError as exc:
-            log.warning(
-                "dynamic_action stub: dispatch_history append failed for "
-                "dyn_id=%s: %r",
-                dyn_id, exc,
-            )
         try:
             (artifact_dir / "proposal_set.json").write_text(
                 json.dumps(
                     {
-                        "dyn_id": str(dyn_id),
+                        "dyn_id": dyn_id,
                         "proposal_set": [],
                         "empty": True,
                     },
@@ -90,8 +78,35 @@ async def dynamic_action_executor(ctx: RunnerContext) -> dict[str, Any]:
                 "dyn_id=%s: %r",
                 dyn_id, exc,
             )
+        # Closed-schema history append; only when we can derive the
+        # session_dir from the artefact dir layout
+        # (``<session_dir>/agents/orchestration/dynamic_actions/<dyn_id>``).
+        session_dir = _session_dir_from_artifact(artifact_dir, dyn_id)
+        if session_dir is not None:
+            from ..dynamic_action_history import (
+                DispatchHistoryEvent,
+                append_dispatch_history_row,
+            )
+            try:
+                append_dispatch_history_row(
+                    session_dir=session_dir,
+                    dyn_id=dyn_id,
+                    event=DispatchHistoryEvent.SUB_AGENT_DONE,
+                    payload={
+                        "terminal_state": "COMPLETED_EMPTY",
+                        "reason": "stub_empty",
+                        "turns_used": 0,
+                        "journal_path": "",
+                        "proposal_count": 0,
+                    },
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action stub: history append failed for "
+                    "dyn_id=%s", dyn_id,
+                )
     return {
-        "dyn_id": str(dyn_id),
+        "dyn_id": dyn_id,
         "proposal_set": [],
         "empty": True,
         "outcome": "stub_empty",
@@ -100,6 +115,25 @@ async def dynamic_action_executor(ctx: RunnerContext) -> dict[str, Any]:
             "performed (real ReAct runner lands at P3)."
         ),
     }
+
+
+def _session_dir_from_artifact(
+    artifact_dir: Path, dyn_id: str,
+) -> Path | None:
+    """Walk the canonical layout back to the session root so the stub
+    can call the unified history writer without an extra plumb-through.
+
+    ``artifact_dir`` is
+    ``<session_dir>/agents/orchestration/dynamic_actions/<dyn_id>``;
+    we strip the four trailing path segments to recover the session
+    root. Returns ``None`` if the layout does not match.
+    """
+    if artifact_dir.name != dyn_id:
+        return None
+    candidate = artifact_dir.parent.parent.parent.parent
+    if (candidate / "agents").is_dir() or candidate.is_dir():
+        return candidate
+    return None
 
 
 __all__ = ["dynamic_action_executor"]
