@@ -722,16 +722,63 @@ def test_read_recipe_exact_returns_empty_dict_on_miss(session_dir):
     assert point == {}
 
 
-def test_read_recipe_exact_returns_empty_dict_on_http_failure(session_dir):
-    """Network / 5xx failure → ``{}`` so the caller can proceed with
-    a clean write (last-writer-wins is preferable to crashing CLOSE)."""
+def test_read_recipe_exact_propagates_on_http_failure(session_dir):
+    """R4-10 — network / 5xx failure MUST raise CortexKBError so the
+    caller can degrade gracefully (write WITHOUT sessions=) to avoid
+    KB shallow-merge overwriting the accumulated sessions[] history
+    with the singleton current entry.
+
+    The pre-R4-10 behaviour of returning ``{}`` silently caused data
+    loss: caller saw "no prior sessions" and wrote only its own
+    entry, which KB shallow-merged into the row and replaced the
+    accumulated history. The contract is now explicit: ``{}`` ONLY
+    on confirmed miss / disabled client; everything else propagates.
+    """
+    from inference_optimizer.cortex_kb_client import CortexKBError
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
     with respx.mock(base_url=KB_URL) as router:
         router.post("/v1/points/query").mock(
             return_value=httpx.Response(500, json={"detail": "boom"}),
         )
+        with pytest.raises(CortexKBError):
+            client.read_recipe_exact(model="M", hardware="h")
+
+
+def test_read_recipe_exact_returns_empty_on_confirmed_miss(session_dir):
+    """Confirmed miss (200 OK + empty points[]) still returns ``{}`` —
+    same contract as before, just disambiguated from transport error."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(200, json={"points": []}),
+        )
         point = client.read_recipe_exact(model="M", hardware="h")
     assert point == {}
+
+
+def test_read_lesson_exact_propagates_on_http_failure(session_dir):
+    """Symmetric R4-10 contract for lessons — propagate transport error
+    so caller skips source_session_ids merge."""
+    from inference_optimizer.cortex_kb_client import CortexKBError
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(500, json={"detail": "boom"}),
+        )
+        with pytest.raises(CortexKBError):
+            client.read_lesson_exact(statement="X")
+
+
+def test_read_pitfall_exact_propagates_on_http_failure(session_dir):
+    """Symmetric R4-10 contract for pitfalls."""
+    from inference_optimizer.cortex_kb_client import CortexKBError
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(
+            return_value=httpx.Response(500, json={"detail": "boom"}),
+        )
+        with pytest.raises(CortexKBError):
+            client.read_pitfall_exact(description="Y")
 
 
 def test_update_recipe_with_extra_workload_attrs_lands_them_flat(session_dir):
@@ -1384,6 +1431,101 @@ def test_record_fact_per_task_keep_caps_source_session_ids_at_10(
     # Oldest entry (``s0``) was dropped to make room for ``s-new``.
     assert "s0" not in extra["source_session_ids"]
     assert extra["source_session_ids"][-1] == "s-new"
+
+
+def test_record_fact_per_task_skips_session_ids_merge_when_kb_read_fails(
+    _coord_for_fact_writes,
+):
+    """R4-10 — when ``read_lesson_exact`` raises (KB transport error),
+    the writer MUST skip ``source_session_ids`` / ``validated_count``
+    fields. Otherwise KB shallow-merge would replace a multi-session
+    accumulated list with this session's singleton, losing history.
+
+    The lesson is still written (so KEEP isn't lost entirely) — just
+    without the read-modify-write fields, so the KB row's prior
+    accumulated values stay intact."""
+    from inference_optimizer.cortex_kb_client import CortexKBError
+
+    class _ReadFailingKB:
+        enabled = True
+
+        def __init__(self):
+            self.lesson_calls: list[dict] = []
+            self.pitfall_calls: list[dict] = []
+
+        def propose_lesson(self, **kwargs):
+            self.lesson_calls.append(kwargs)
+            return {"status": "auto_accepted"}
+
+        def propose_pitfall(self, **kwargs):
+            self.pitfall_calls.append(kwargs)
+            return {"status": "auto_accepted"}
+
+        def read_lesson_exact(self, **kwargs):
+            raise CortexKBError("simulated transport error", category="transport")
+
+        def read_pitfall_exact(self, **kwargs):
+            raise CortexKBError("simulated transport error", category="transport")
+
+    coord = _coord_for_fact_writes
+    coord.cortex_kb = _ReadFailingKB()
+    coord._record_fact_per_task(
+        task=_Task("t-r10", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": 7.0, "output_throughput": 750.0},
+        kept=True,
+    )
+    assert len(coord.cortex_kb.lesson_calls) == 1
+    extra = coord.cortex_kb.lesson_calls[0]["extra_attrs"]
+    # source_session_ids / validated_count / last_validated_at MUST be
+    # absent. workload tags (from _collect_workload_tags) ARE still
+    # written — they're independent of the read-modify-write merge.
+    assert "source_session_ids" not in extra
+    assert "validated_count" not in extra
+    assert "last_validated_at" not in extra
+    # Workload tags still land (they're not from the failed read).
+    assert "framework" in extra
+
+
+def test_record_fact_per_task_skips_pitfall_merge_when_kb_read_fails(
+    _coord_for_fact_writes,
+):
+    """R4-10 — same skip-merge protection for the pitfall path."""
+    from inference_optimizer.cortex_kb_client import CortexKBError
+
+    class _ReadFailingKB:
+        enabled = True
+
+        def __init__(self):
+            self.pitfall_calls: list[dict] = []
+            self.lesson_calls: list[dict] = []
+
+        def propose_lesson(self, **kwargs):
+            self.lesson_calls.append(kwargs)
+            return {"status": "auto_accepted"}
+
+        def propose_pitfall(self, **kwargs):
+            self.pitfall_calls.append(kwargs)
+            return {"status": "auto_accepted"}
+
+        def read_lesson_exact(self, **kwargs):
+            return {}
+
+        def read_pitfall_exact(self, **kwargs):
+            raise CortexKBError("simulated transport error", category="transport")
+
+    coord = _coord_for_fact_writes
+    coord.cortex_kb = _ReadFailingKB()
+    coord._record_fact_per_task(
+        task=_Task("t-r10b", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": None, "error_class": "crash"},
+        kept=False,
+    )
+    assert len(coord.cortex_kb.pitfall_calls) == 1
+    extra = coord.cortex_kb.pitfall_calls[0]["extra_attrs"]
+    assert "source_session_ids" not in extra
+    assert "validated_count" not in extra
 
 
 def test_record_fact_per_task_revert_writes_validated_count_on_pitfall(
