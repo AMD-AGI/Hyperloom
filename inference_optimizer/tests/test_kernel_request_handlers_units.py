@@ -220,3 +220,69 @@ class TestEnrichCandidate:
     def test_enrich_candidates_artifact_noop_when_missing_path(self):
         # Should not raise even though path does not exist.
         krh._enrich_candidates_artifact("", {"env_vars": {}}, trace_report_path="")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: atom-aware reusable kernel detection
+# ---------------------------------------------------------------------------
+
+class TestReusableSourceRootsAtom:
+    """Phase 2.5 — atom layout prefixes participate in cross-task
+    kernel reuse alongside aiter/sglang/vllm."""
+
+    def test_includes_atom_editable_path(self):
+        # The matcher (``_is_runtime_generated_kernel``) lowercases its
+        # source-file input before substring matching, so the stored
+        # prefix is lowercase ``/app/atom/atom/`` even though the real
+        # filesystem path is ``/app/ATOM/atom/``. PolicyGate uses a
+        # case-sensitive ``startswith`` and keeps the canonical case in
+        # ``framework_paths._DEFAULT_SOURCE_ROOTS`` separately.
+        assert any(
+            "/app/atom/atom/" in r.lower() for r in krh._REUSABLE_SOURCE_ROOTS
+        )
+
+    def test_includes_atom_site_packages_python_3_10(self):
+        assert any(
+            "/opt/venv/lib/python3.10/site-packages/atom/" in r
+            for r in krh._REUSABLE_SOURCE_ROOTS
+        )
+
+    def test_includes_atom_site_packages_python_3_12(self):
+        assert any(
+            "/opt/venv/lib/python3.12/site-packages/atom/" in r
+            for r in krh._REUSABLE_SOURCE_ROOTS
+        )
+
+    def test_atom_path_classified_as_reusable(self):
+        """A representative atom-owned kernel source (model_runner.py) at
+        /app/ATOM/atom/ must NOT be flagged as runtime-generated even
+        when its kernel name matches an inductor / triton compile
+        marker. This is the exact condition the reusable-roots check
+        guards against in ``_is_runtime_generated_kernel``."""
+        markers = krh._COMPILE_GENERATED_NAME_MARKERS
+        if not markers:
+            pytest.skip("compile markers empty in build")
+        marker = next(iter(markers))
+        result = krh._is_runtime_generated_kernel(
+            marker, "/app/ATOM/atom/model_engine/model_runner.py",
+        )
+        # Same logic as the existing sglang/vllm test (line 84): the
+        # name marker would normally classify as runtime-generated, but
+        # the source path lives under a reusable root so the kernel is
+        # treated as patchable framework code.
+        assert result is False
+
+    def test_non_framework_path_under_app_is_not_reusable(self):
+        """A non-atom path under /app/ (e.g. /app/session_dir/runs/...)
+        must NOT match the atom reusable-source-root prefix — only
+        /app/ATOM/atom/ specifically."""
+        markers = krh._COMPILE_GENERATED_NAME_MARKERS
+        if not markers:
+            pytest.skip("compile markers empty in build")
+        marker = next(iter(markers))
+        # Path under /app/ but NOT /app/ATOM/atom/ — must classify as
+        # runtime-generated (i.e. not reusable).
+        result = krh._is_runtime_generated_kernel(
+            marker, "/app/session_dir/runs/baseline/foo.py",
+        )
+        assert result is True

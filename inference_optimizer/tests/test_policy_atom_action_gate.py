@@ -155,3 +155,55 @@ def test_propose_action_denied_for_framework_pr_on_atom():
         "framework_atom_action_unsupported",
         "framework_pr_action_not_llm_proposable",
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.4: kernel_opt / integrate_patch must NOT be denied by this rule
+# ---------------------------------------------------------------------------
+def test_kernel_opt_no_longer_denied_on_atom(monkeypatch):
+    """Phase 2.4: kernel-agent now works on atom, so kernel_opt MUST
+    NOT trigger ``framework_atom_action_unsupported`` anymore.
+
+    Other rules (e.g. ``kernel_owned_by_kernel_agent`` from the
+    orchestration role) may still deny kernel_opt for unrelated
+    reasons — what we're asserting is purely "the atom-specific rule
+    did not fire"."""
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    gate = _gate(_BareSharedState(framework="atom"))
+    try:
+        gate.validate_intent("orchestration", _delegate("kernel_opt"))
+    except PolicyDenied as exc:
+        assert exc.rule != "framework_atom_action_unsupported", (
+            f"kernel_opt must no longer trigger the atom rule after "
+            f"Phase 2.4; got rule={exc.rule!r}"
+        )
+
+
+def test_integrate_patch_no_longer_denied_on_atom(monkeypatch):
+    """Phase 2.4: integrate_patch (the kernel-agent's apply step) also
+    has a real execution path on atom now. The atom rule must NOT
+    fire for it."""
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    gate = _gate(_BareSharedState(framework="atom"))
+    try:
+        gate.validate_intent("orchestration", _delegate("integrate_patch"))
+    except PolicyDenied as exc:
+        assert exc.rule != "framework_atom_action_unsupported", (
+            f"integrate_patch must no longer trigger the atom rule "
+            f"after Phase 2.4; got rule={exc.rule!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# G1 cross-cutting static guard (atom_plan/phase2_open_kernel_agent/2.6)
+# ---------------------------------------------------------------------------
+def test_atom_unsupported_actions_set_contains_only_framework_pr():
+    """Phase 2.6 G1: pin the set to ``frozenset({"framework_pr"})``.
+
+    Phase 3 will lift this further (drop framework_pr / delete the rule);
+    either change must be intentional, hence the static guard."""
+    from inference_optimizer.orchestrator.policy import PolicyGate as _PG
+    assert _PG._ATOM_UNSUPPORTED_ACTIONS == frozenset({"framework_pr"}), (
+        f"_ATOM_UNSUPPORTED_ACTIONS drifted from Phase 2.4 contract: "
+        f"{_PG._ATOM_UNSUPPORTED_ACTIONS!r}"
+    )
