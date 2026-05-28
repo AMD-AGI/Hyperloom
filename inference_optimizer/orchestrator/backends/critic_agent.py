@@ -262,17 +262,21 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
 def _proposal_provenance_literal(proposal: dict[str, Any]) -> str:
     """Pull the ``provenance`` literal off a judge_bundle proposal,
     tolerating both top-level + nested ``params`` placement.
+
+    §1.2 / P3 §5.1 — provenance is case-sensitive; ``DYNAMIC`` /
+    ``Dynamic`` are NOT the same as ``dynamic``. The cross-domain
+    enrichment must agree with the runner validator at every layer.
     """
     if not isinstance(proposal, dict):
         return ""
     top = proposal.get("provenance")
     if isinstance(top, str) and top.strip():
-        return top.strip().lower()
+        return top.strip()
     params = proposal.get("params") or {}
     if isinstance(params, dict):
         nested = params.get("provenance")
         if isinstance(nested, str):
-            return nested.strip().lower()
+            return nested.strip()
     return ""
 
 

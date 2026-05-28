@@ -214,9 +214,13 @@ def classify_proposal_for_critic(
       ``"dynamic"``; otherwise the dict is empty (specialist patches
       are unaffected).
     """
+    # §1.2 / P3 §5.1 — provenance is a strict literal (case-sensitive).
+    # Matching a case-folded form would silently let ``DYNAMIC`` /
+    # ``Dynamic`` slip past the multi-layer defence the runner already
+    # enforces.
     provenance = str(
         (proposal_payload or {}).get("provenance") or "",
-    ).strip().lower()
+    ).strip()
     bundle_action_class = "patch_landing"
     if provenance != EXPECTED_PROVENANCE:
         return bundle_action_class, {}
