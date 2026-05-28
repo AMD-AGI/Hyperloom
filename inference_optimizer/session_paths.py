@@ -101,10 +101,8 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     # domain. Pipeline_phase ``explore`` includes it in the
     # registry-derived set; fallback covers the rare bootstrap miss.
     "assess_remaining_gaps",
-    # dynamic_action.MD P1 — cross-domain ReAct sub-agent that owns
-    # ``runs/dynamic_action/<dyn_id>/`` (spec / seed_kit / journal /
-    # proposal_set / dispatch_history). pipeline_phase=explore puts
-    # it in the registry-derived set; fallback covers loader failures.
+    # Cross-domain ReAct sub-agent; owns
+    # ``agents/orchestration/dynamic_actions/<dyn_id>/``.
     "dynamic_action",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
@@ -294,25 +292,19 @@ def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# dynamic_action.MD P2 §3 — orchestration-owned dispatch artefacts.
+# dynamic_action artefact paths.
+# Layout: ``<session_dir>/agents/orchestration/dynamic_actions/<dyn_id>/``
+# holds ``spec.json``, ``seed_kit.json``, ``sub_agent_journal.md``,
+# ``proposal_set.json``, ``critic_verdict.json``,
+# ``dispatch_history.jsonl``, and ``telemetry.json``.
 # ---------------------------------------------------------------------------
 def dynamic_actions_root(session_dir: Path) -> Path:
-    """``<sd>/agents/orchestration/dynamic_actions/`` — parent of every
-    per-dyn_id artefact dir. Pre-created by ``make_session_dir``; this
-    helper only computes the path."""
+    """Parent dir of every per-``dyn_id`` artefact dir."""
     return agent_dir(session_dir, "orchestration") / "dynamic_actions"
 
 
 def dynamic_action_artifact_dir(session_dir: Path, dyn_id: str) -> Path:
-    """``<sd>/agents/orchestration/dynamic_actions/<dyn_id>/`` —
-    dispatch-time artefact root for one dynamic_action.
-
-    Houses ``spec.json`` + ``seed_kit.json`` (P2 §3.1) plus future
-    ``sub_agent_journal.md`` / ``proposal_set.json`` / ``critic_verdict.json``
-    / ``dispatch_history.jsonl`` / ``telemetry.json`` written by P3 / P4
-    / P5 / P6. Caller is expected to ``mkdir(parents=True, exist_ok=True)``
-    before writing; Coordinator's dispatch hook does this once per dyn_id.
-    """
+    """Per-``dyn_id`` artefact root. Caller mkdir's before writing."""
     did = str(dyn_id or "").strip() or "unknown"
     return dynamic_actions_root(session_dir) / did
 
@@ -340,21 +332,14 @@ def dynamic_action_proposal_set_path(
 def dynamic_action_critic_verdict_path(
     session_dir: Path, dyn_id: str,
 ) -> Path:
-    """P4 §5.3 — verdict envelope written by the Critic for one
-    dynamic_action proposal."""
+    """Verdict envelope written by the Critic."""
     return dynamic_action_artifact_dir(session_dir, dyn_id) / "critic_verdict.json"
 
 
 def dynamic_action_telemetry_path(
     session_dir: Path, dyn_id: str,
 ) -> Path:
-    """dynamic_action.MD §1.5 + gap G3 — per-dyn_id terminal-state
-    rollup (kept / reverted / integrate_failed / gain_pct). Written
-    once per dispatch on transition to a terminal lifecycle status.
-
-    One file per dyn_id (closed schema); post-hoc analytics rake the
-    directory to compute KEEP rate / revert rate over many sessions
-    without reading the larger dispatch_history.jsonl stream."""
+    """Per-``dyn_id`` terminal-state rollup written on lifecycle exit."""
     return dynamic_action_artifact_dir(session_dir, dyn_id) / "telemetry.json"
 
 

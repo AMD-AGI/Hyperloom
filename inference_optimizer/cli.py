@@ -974,12 +974,12 @@ def _build_specialist_executor(
 def _build_dynamic_action_executor(
     args: argparse.Namespace,
 ) -> "Callable[[Any], Awaitable[dict]]":
-    """dynamic_action.MD P3 — wrap :class:`DynamicActionRunner` as a
-    SubAgentRunner-compatible executor.
+    """Build a SubAgentRunner-compatible executor backed by
+    :class:`DynamicActionRunner`.
 
-    A real Claude backend drives the loop in production; tests inject
-    a :class:`MockBackend` via the same registration path. Falls back
-    to the P1/P2 stub executor when no ``claude`` binary is on PATH.
+    Production uses a real Claude backend; tests register a
+    :class:`MockBackend` through the same path. Falls back to the
+    stub executor when no ``claude`` binary is on PATH.
     """
     import shutil
 
@@ -997,7 +997,7 @@ def _build_dynamic_action_executor(
     if not claude_bin:
         log.warning(
             "dynamic_action: `claude` binary not on PATH; falling "
-            "back to P1/P2 stub executor (empty proposal_set).",
+            "back to the stub executor (empty proposal_set).",
         )
         return _stub_executor
 
@@ -1080,10 +1080,8 @@ def _register_executors(
     if specialist_executor is not None:
         coordinator.sub.register_executor("specialist", specialist_executor)
 
-    # dynamic_action.MD P3 — register the runner-driven executor when
-    # available; cli falls back to the P1/P2 stub
-    # (``action_executors.dynamic_action.dynamic_action_executor``)
-    # in environments without a ``claude`` binary.
+    # Register the runner-driven dynamic_action executor when
+    # available; otherwise fall back to the stub.
     if dynamic_action_executor is not None:
         coordinator.sub.register_executor(
             "dynamic_action", dynamic_action_executor,
@@ -4535,7 +4533,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "INFERENCE_OPTIMIZER_DYNAMIC_ACTION_MODEL", "",
         ) or None,
         help="Claude model used for dynamic_action sub-agents (defaults "
-             "to --claude-model). dynamic_action.MD §1 + gap G5.",
+             "to --claude-model).",
     )
     opt.add_argument(
         "--dynamic-action-turn-cap",

@@ -1,10 +1,4 @@
-"""dynamic_action.MD P1 — dispatch skeleton regression matrix.
-
-action_dynamic_plan/P1_dispatch_skeleton.md §9 lists the 9 acceptance
-scenarios that must hold for the P1 milestone to be considered done.
-Each test below maps 1:1 to one row of that table; the file name maps
-to the §9 row id in the docstring so failures point straight at the
-broken contract.
+"""Tests for ``dynamic_action`` dispatch validation and round-cap accounting.
 
 PolicyGate is exercised against the real ``default_role_registry``;
 SharedState is replaced with a thin double that exposes only the
@@ -239,7 +233,7 @@ def test_p1_scenario_09b_update_state_on_round_count_denied():
 
 
 # ===========================================================================
-# Auxiliary — payload completeness (P1 §4.1 group B individual checks)
+# Payload schema completeness
 # ===========================================================================
 def test_empty_motivation_gap_text_denied():
     payload = _payload(params={
@@ -279,7 +273,7 @@ def test_bad_budget_hint_denied():
 
 
 # ===========================================================================
-# Auxiliary — P1 §4.2 "rejected dispatches do not consume round cap"
+# Rejected dispatches do not consume the round cap
 # ===========================================================================
 def test_rejected_dispatch_does_not_bump_round_counter():
     """SharedState round counter is only bumped by Coordinator after a
@@ -300,7 +294,7 @@ def test_rejected_dispatch_does_not_bump_round_counter():
 
 
 # ===========================================================================
-# Auxiliary — IR-4 P1 §4.4 white-list extension
+# IR-4 provenance white-list extension
 # ===========================================================================
 def test_ir4_provenance_whitelist_contains_dynamic_literal():
     """``dynamic`` is the single literal added by P1; no composite form
@@ -341,7 +335,7 @@ def test_explore_grid_size_caps_independent_of_dynamic():
 
 
 # ===========================================================================
-# Coordinator stub-executor integration — P1 §9 #1 second half
+# Stub-executor integration
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_stub_executor_writes_dispatch_history_and_empty_proposal_set(
@@ -398,7 +392,7 @@ async def test_stub_executor_writes_dispatch_history_and_empty_proposal_set(
 # ===========================================================================
 def test_record_dynamic_action_dispatch_idempotent_on_dyn_id():
     """A re-record with the same dyn_id overwrites the summary but
-    does NOT bump the round counter (P1 §4.2)."""
+    does NOT bump the round counter."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState(session_id="t")
@@ -419,7 +413,7 @@ def test_record_dynamic_action_dispatch_idempotent_on_dyn_id():
 
 def test_reset_dynamic_action_round_count_clears_only_counter():
     """``reset_dynamic_action_round_count`` zeros the counter but keeps
-    the cumulative ``dynamic_actions`` ledger intact (P1 §3 / P6 §3)."""
+    the cumulative ``dynamic_actions`` ledger intact."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     state = SharedState(session_id="t")
