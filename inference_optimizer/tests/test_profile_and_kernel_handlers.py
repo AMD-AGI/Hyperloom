@@ -870,6 +870,75 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path):
+    """B2: FRAMEWORK=atom must short-circuit ProfileExecutor to a
+    structured skipped result BEFORE any Magpie subprocess is launched.
+    atom (Magpie v1) has no torch_profiler wiring — running the full
+    profile path would either silently no-op or, worse, crash because
+    sglang/vllm-specific --profiler-config flags get injected into
+    EXTRA_ATOM_ARGS. Verified by checking the result dict shape AND
+    that no subprocess machinery (BaselineExecutor.__call__ /
+    run_with_session_kill) ran."""
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    pe = ProfileExecutor()
+    # If the short-circuit fails, the executor would try to materialize a
+    # YAML and shell out to Magpie. Sentinel-patch the parent __call__ so
+    # we can prove it was never reached.
+    called = {"parent": False}
+
+    async def _explode(self, ctx):  # pragma: no cover — must not run
+        called["parent"] = True
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(BaselineExecutor, "__call__", _explode)
+
+    task = SimpleNamespace(params={}, task_id="t-atom-profile")
+    ctx = SimpleNamespace(task=task, extra=None)
+
+    result = await pe(ctx)
+
+    assert result["status"] == "skipped"
+    assert result["error_class"] == "atom_no_profiler"
+    assert "torch_profiler" in result["error"]
+    assert called["parent"] is False, (
+        "ProfileExecutor must short-circuit BEFORE BaselineExecutor.__call__"
+    )
+
+
+@pytest.mark.asyncio
+async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
+    """B2: FRAMEWORK=atom must short-circuit RooflineExecutor at its
+    entrypoint, returning status=skipped without invoking profile or
+    trace_analyze sub-steps. Critical because the composite would
+    otherwise treat a skipped profile_result as a failure (the existing
+    _failed("profile", ...) branch) and pollute roofline_failure_streak."""
+    from inference_optimizer.orchestrator.action_executors.roofline import (
+        RooflineExecutor,
+    )
+
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    # RooflineExecutor requires shared_state, but the atom guard returns
+    # before touching it — a sentinel object is enough.
+    rexec = RooflineExecutor(shared_state=SimpleNamespace())
+
+    # Sentinel: prove the lazy import / sub-step orchestration never runs.
+    import inference_optimizer.orchestrator.action_executors.profile as profile_mod
+
+    async def _explode(_ctx):  # pragma: no cover — must not run
+        raise AssertionError("profile_executor must not be invoked under atom")
+
+    monkeypatch.setattr(profile_mod, "profile_executor", _explode)
+
+    task = SimpleNamespace(params={}, task_id="t-atom-roofline")
+    ctx = SimpleNamespace(task=task, extra=None)
+
+    result = await rexec(ctx)
+    assert result["status"] == "skipped"
+    assert result["error_class"] == "atom_no_profiler"
+    assert result["framework"] == "atom"
+
+
+@pytest.mark.asyncio
 async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tmp_path):
     """A cleanup/profile wrapper failure must not discard completed requests."""
     db = SqliteConnection(tmp_path / "baseline.db")
