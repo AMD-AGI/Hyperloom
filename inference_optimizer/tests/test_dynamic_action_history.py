@@ -18,14 +18,21 @@ from inference_optimizer.orchestrator.dynamic_action_history import (
     INTEGRATE_RESULT_FIELDS,
     SUB_AGENT_DONE_FIELDS,
     SUB_AGENT_TERMINATED_FIELDS,
+    TELEMETRY_FIELDS,
+    TelemetryRowError,
     append_dispatch_history_row,
     event_field_set,
+    write_dynamic_action_telemetry,
+)
+from inference_optimizer.orchestrator.dynamic_action_proposal import (
+    DynamicActionStatus,
 )
 from inference_optimizer.orchestrator.dynamic_action_resume import (
     ABANDONED_HISTORY_FIELDS as RESUME_ABANDONED_FIELDS,
 )
 from inference_optimizer.session_paths import (
     dynamic_action_dispatch_history_path,
+    dynamic_action_telemetry_path,
 )
 
 
@@ -269,3 +276,124 @@ class TestInvariantLifecycle:
             )
         events = [r["event"] for r in _read_rows(tmp_path)]
         assert events == [e.value for e, _ in sequence]
+
+
+# ===========================================================================
+# G3 — telemetry.json per-dyn_id rollup
+# ===========================================================================
+class TestTelemetry:
+
+    def test_telemetry_field_set_pinned(self):
+        assert TELEMETRY_FIELDS == frozenset({
+            "dyn_id", "rolled_up_at", "lifecycle",
+            "kept", "reverted", "integrate_failed", "critic_rejected",
+            "timed_out", "failed", "completed_empty", "abandoned",
+            "gain_pct", "round_index",
+        })
+
+    def test_telemetry_kept_writes_one_counter_set(self, tmp_path):
+        write_dynamic_action_telemetry(
+            session_dir=tmp_path, dyn_id=DYN_ID,
+            lifecycle=DynamicActionStatus.KEPT,
+            gain_pct=3.7, round_index=2,
+        )
+        path = dynamic_action_telemetry_path(tmp_path, DYN_ID)
+        body = json.loads(path.read_text(encoding="utf-8"))
+        assert set(body.keys()) == TELEMETRY_FIELDS
+        assert body["lifecycle"] == "KEPT"
+        assert body["kept"] == 1
+        assert body["reverted"] == 0
+        assert body["gain_pct"] == 3.7
+        assert body["round_index"] == 2
+
+    @pytest.mark.parametrize("lifecycle,counter", [
+        (DynamicActionStatus.KEPT, "kept"),
+        (DynamicActionStatus.REVERTED, "reverted"),
+        (DynamicActionStatus.INTEGRATE_FAILED, "integrate_failed"),
+        (DynamicActionStatus.CRITIC_REJECTED, "critic_rejected"),
+        (DynamicActionStatus.TIMED_OUT, "timed_out"),
+        (DynamicActionStatus.FAILED, "failed"),
+        (DynamicActionStatus.COMPLETED_EMPTY, "completed_empty"),
+        (DynamicActionStatus.ABANDONED, "abandoned"),
+    ])
+    def test_telemetry_every_terminal_state_sets_one_counter(
+        self, tmp_path, lifecycle, counter,
+    ):
+        write_dynamic_action_telemetry(
+            session_dir=tmp_path, dyn_id=DYN_ID, lifecycle=lifecycle,
+        )
+        body = json.loads(
+            dynamic_action_telemetry_path(tmp_path, DYN_ID)
+            .read_text(encoding="utf-8"),
+        )
+        assert body[counter] == 1
+        # Exactly one of the eight counters must be set.
+        all_counters = {
+            "kept", "reverted", "integrate_failed", "critic_rejected",
+            "timed_out", "failed", "completed_empty", "abandoned",
+        }
+        assert sum(body[c] for c in all_counters) == 1
+
+    def test_telemetry_non_terminal_rejected(self, tmp_path):
+        with pytest.raises(TelemetryRowError):
+            write_dynamic_action_telemetry(
+                session_dir=tmp_path, dyn_id=DYN_ID,
+                lifecycle=DynamicActionStatus.SUB_AGENT_RUNNING,
+            )
+
+    def test_telemetry_overwrite_idempotent(self, tmp_path):
+        """Second write replaces the first — needed when the resume
+        sweep re-rolls up a dyn_id that already had a terminal write."""
+        write_dynamic_action_telemetry(
+            session_dir=tmp_path, dyn_id=DYN_ID,
+            lifecycle=DynamicActionStatus.KEPT, gain_pct=5.0,
+        )
+        write_dynamic_action_telemetry(
+            session_dir=tmp_path, dyn_id=DYN_ID,
+            lifecycle=DynamicActionStatus.ABANDONED,
+        )
+        body = json.loads(
+            dynamic_action_telemetry_path(tmp_path, DYN_ID)
+            .read_text(encoding="utf-8"),
+        )
+        assert body["lifecycle"] == "ABANDONED"
+        assert body["abandoned"] == 1
+        assert body["kept"] == 0
+
+    def test_telemetry_string_lifecycle_accepted(self, tmp_path):
+        write_dynamic_action_telemetry(
+            session_dir=tmp_path, dyn_id=DYN_ID, lifecycle="REVERTED",
+        )
+        body = json.loads(
+            dynamic_action_telemetry_path(tmp_path, DYN_ID)
+            .read_text(encoding="utf-8"),
+        )
+        assert body["lifecycle"] == "REVERTED"
+
+
+# ===========================================================================
+# G3 invariant — telemetry exists for every terminal dyn_id
+# ===========================================================================
+class TestInvariantTelemetry:
+
+    def test_inv_telemetry_present_on_terminal_state(self, tmp_path):
+        """Every terminal lifecycle write must produce a telemetry
+        file on disk. Future Coordinator hook breakage would surface
+        as a missing file here."""
+        for status in (
+            DynamicActionStatus.KEPT,
+            DynamicActionStatus.REVERTED,
+            DynamicActionStatus.INTEGRATE_FAILED,
+            DynamicActionStatus.CRITIC_REJECTED,
+            DynamicActionStatus.TIMED_OUT,
+            DynamicActionStatus.FAILED,
+            DynamicActionStatus.COMPLETED_EMPTY,
+            DynamicActionStatus.ABANDONED,
+        ):
+            dyn = f"dyn-{status.value.lower()}"
+            write_dynamic_action_telemetry(
+                session_dir=tmp_path, dyn_id=dyn, lifecycle=status,
+            )
+            assert dynamic_action_telemetry_path(
+                tmp_path, dyn,
+            ).is_file()
