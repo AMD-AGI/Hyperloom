@@ -415,6 +415,152 @@ class TestComputePeakFromState:
 
 
 # ---------------------------------------------------------------------------
+# MoE active weight bytes (PR: MoE-aware decode ceiling).
+# ---------------------------------------------------------------------------
+def _write_qwen3_moe_model(model_dir: Path, *, total_size: int) -> None:
+    """Lay down a Qwen3-30B-A3B-shaped MoE HF dir for ceiling tests."""
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "config.json").write_text(json.dumps({
+        "architectures": ["Qwen3MoeForCausalLM"],
+        "model_type": "qwen3_moe",
+        "num_hidden_layers": 48,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 4,
+        "hidden_size": 2048,
+        "head_dim": 128,
+        "intermediate_size": 6144,
+        "moe_intermediate_size": 768,
+        "num_experts": 128,
+        "num_experts_per_tok": 8,
+        "torch_dtype": "bfloat16",
+    }))
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": total_size}, "weight_map": {}})
+    )
+
+
+class TestMoEActiveWeightBytes:
+    """MoE models route a small subset of experts per token; the
+    decode-roofline divisor must use the active subset or the ceiling
+    drops below measured throughput (within_roofline_pct > 100%)."""
+
+    def test_qwen3_30b_a3b_active_is_small_fraction_of_total(self, tmp_path):
+        """Qwen3-30B-A3B: 128 experts, 8 active. Active weight bytes
+        should land in the ~8-15% range of total (experts dominate the
+        weight budget; non-expert + 8/128 × experts is the active set)."""
+        _write_qwen3_moe_model(tmp_path / "m", total_size=61_064_245_248)
+        meta = load_model_meta(tmp_path / "m")
+        assert meta is not None
+        assert meta.weight_bytes == 61_064_245_248
+        assert 0 < meta.active_weight_bytes < meta.weight_bytes
+        ratio = meta.active_weight_bytes / meta.weight_bytes
+        assert 0.05 < ratio < 0.20, (
+            f"Qwen3-30B-A3B active ratio {ratio:.3f} outside expected window"
+        )
+
+    def test_dense_model_active_equals_total(self, tmp_path):
+        """Dense (no num_experts / num_experts_per_tok) → active = total,
+        preserves legacy behaviour for Qwen3-8B / Llama-70B style configs."""
+        _write_synthetic_model(
+            tmp_path / "m",
+            total_size=16_381_470_720,
+            num_layers=36,
+            num_kv_heads=8,
+            num_attention_heads=32,
+            hidden_size=4096,
+        )
+        meta = load_model_meta(tmp_path / "m")
+        assert meta is not None
+        assert meta.active_weight_bytes == meta.weight_bytes
+
+    def test_moe_ceiling_higher_than_dense_equivalent(self, tmp_path):
+        """Same total bytes, but MoE active routing → ceiling several
+        × higher than naive dense ceiling. Pins the property the PR
+        actually delivers (fixes 'within_roofline_pct > 100%' on MoE)."""
+        _write_qwen3_moe_model(tmp_path / "m", total_size=61_064_245_248)
+        meta = load_model_meta(tmp_path / "m")
+        assert meta is not None
+        kwargs = dict(
+            gpu_type="mi355x",
+            num_gpus=1,
+            num_layers=meta.num_layers,
+            num_kv_heads=meta.num_kv_heads,
+            head_dim=meta.head_dim,
+            kv_dtype_bytes=meta.weight_dtype_bytes,
+            isl=1024,
+            osl=1024,
+            concurrency=8,
+        )
+        dense_peak = compute_theoretical_peak_output_tok_per_sec(
+            weight_bytes=meta.weight_bytes, **kwargs,
+        )
+        moe_peak = compute_theoretical_peak_output_tok_per_sec(
+            weight_bytes=meta.weight_bytes,
+            active_weight_bytes=meta.active_weight_bytes,
+            **kwargs,
+        )
+        assert moe_peak > dense_peak * 2.0, (
+            f"MoE ceiling {moe_peak:.0f} should be much higher than "
+            f"dense-treated ceiling {dense_peak:.0f}"
+        )
+
+    def test_active_weight_bytes_zero_falls_back_to_weight_bytes(self):
+        """Backward-compat: callers that don't know about MoE leave
+        active_weight_bytes=0; the function must behave as before."""
+        without = compute_theoretical_peak_output_tok_per_sec(
+            gpu_type="mi300x",
+            num_gpus=1,
+            weight_bytes=140_000_000_000,
+            num_layers=80,
+            num_kv_heads=8,
+            head_dim=128,
+            kv_dtype_bytes=2.0,
+            isl=2048,
+            osl=512,
+            concurrency=1,
+        )
+        with_zero = compute_theoretical_peak_output_tok_per_sec(
+            gpu_type="mi300x",
+            num_gpus=1,
+            weight_bytes=140_000_000_000,
+            active_weight_bytes=0,
+            num_layers=80,
+            num_kv_heads=8,
+            head_dim=128,
+            kv_dtype_bytes=2.0,
+            isl=2048,
+            osl=512,
+            concurrency=1,
+        )
+        assert without == with_zero
+
+    def test_moe_geometry_overshoots_safe_degrade(self, tmp_path):
+        """If computed expert bytes >= safetensors total_size (config /
+        quantization mismatch), helper must clamp to weight_bytes
+        instead of producing negative non_expert_bytes."""
+        model_dir = tmp_path / "m"
+        model_dir.mkdir()
+        # huge num_experts but tiny total_size → expert_bytes > total
+        (model_dir / "config.json").write_text(json.dumps({
+            "num_hidden_layers": 4,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 4,
+            "hidden_size": 4096,
+            "moe_intermediate_size": 4096,
+            "num_experts": 256,
+            "num_experts_per_tok": 2,
+            "torch_dtype": "bfloat16",
+        }))
+        (model_dir / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": 100_000_000}})
+        )
+        meta = load_model_meta(model_dir)
+        assert meta is not None
+        # Safe degrade: active equals total (no inflation, no negatives).
+        assert meta.active_weight_bytes == meta.weight_bytes
+
+
+# ---------------------------------------------------------------------------
 # HW_SPECS table sanity.
 # ---------------------------------------------------------------------------
 class TestHWSpecsTable:

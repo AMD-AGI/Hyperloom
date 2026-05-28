@@ -411,7 +411,73 @@ class TestBuildSnapshotCeilingFields:
 
 class TestComparisonDeltaIncludesWithinRoofline:
     """``build_roofline_comparison_from_history.delta`` carries
-    within_roofline_pct so dashboards can show ppt improvement."""
+    within_roofline_pct AND gap_to_roofline_pct so dashboards can show
+    the "Before X% within roofline → After Y% within roofline"
+    improvement either way."""
+
+    def test_before_after_delta_gap_to_roofline_pct(self):
+        from inference_optimizer.orchestrator.roofline_snapshot import (
+            build_roofline_comparison_from_history,
+        )
+        snap_base = _snapshot_with_ceiling(
+            snapshot_id=1,
+            analysis_md_path="/tmp/base.md",
+            ts="2026-05-28T10:00:00+00:00",
+            theoretical_peak_tok_per_sec=1000.0,
+            achieved_tok_per_sec=527.5,
+            within_roofline_pct=52.75,
+            gap_to_roofline_pct=47.25,
+        )
+        snap_latest = _snapshot_with_ceiling(
+            snapshot_id=2,
+            analysis_md_path="/tmp/latest.md",
+            ts="2026-05-28T11:00:00+00:00",
+            theoretical_peak_tok_per_sec=1000.0,
+            achieved_tok_per_sec=690.89,
+            within_roofline_pct=69.09,
+            gap_to_roofline_pct=30.91,
+        )
+        cmp = build_roofline_comparison_from_history([snap_base, snap_latest])
+        delta = (cmp or {}).get("delta") or {}
+        # Optimization closed the gap from 47.25% to 30.91% (-16.34 ppt).
+        assert pytest.approx(delta.get("gap_to_roofline_pct"), abs=0.01) == -16.34
+
+    def test_format_table_renders_gap_delta(self):
+        from inference_optimizer.orchestrator.roofline_snapshot import (
+            format_roofline_metrics_table,
+        )
+        base = _snapshot_with_ceiling(
+            snapshot_id=1,
+            analysis_md_path="/tmp/base.md",
+            ts="2026-05-28T10:00:00+00:00",
+            theoretical_peak_tok_per_sec=1000.0,
+            achieved_tok_per_sec=527.5,
+            within_roofline_pct=52.75,
+            gap_to_roofline_pct=47.25,
+        )
+        latest = _snapshot_with_ceiling(
+            snapshot_id=2,
+            analysis_md_path="/tmp/latest.md",
+            ts="2026-05-28T11:00:00+00:00",
+            theoretical_peak_tok_per_sec=1000.0,
+            achieved_tok_per_sec=690.89,
+            within_roofline_pct=69.09,
+            gap_to_roofline_pct=30.91,
+        )
+        cmp = {
+            "mode": "before_after",
+            "baseline": base,
+            "latest": latest,
+            "delta": {
+                "within_roofline_pct": 16.34,
+                "gap_to_roofline_pct": -16.34,
+            },
+        }
+        text = "\n".join(format_roofline_metrics_table(cmp))
+        # Gap row now carries a Δ column (was — placeholder); regex-light
+        # check via the unique negative delta value.
+        assert "Gap to roofline %" in text
+        assert "-16.3" in text
 
     def test_before_after_delta_within_roofline_pct(self):
         from inference_optimizer.orchestrator.roofline_snapshot import (

@@ -332,6 +332,12 @@ def build_roofline_comparison_from_history(
                 latest.get("within_roofline_pct"),
                 baseline.get("within_roofline_pct"),
             ),
+            # Dashboard surfaces gap-to-roofline shrinkage as the main
+            # "X% within roofline" delta (negative = closer to ceiling).
+            "gap_to_roofline_pct": _num_delta(
+                latest.get("gap_to_roofline_pct"),
+                baseline.get("gap_to_roofline_pct"),
+            ),
         }
     return out
 
@@ -384,6 +390,12 @@ def build_roofline_comparison(
             "within_roofline_pct": _num_delta(
                 latest.get("within_roofline_pct"),
                 baseline.get("within_roofline_pct"),
+            ),
+            # Dashboard surfaces gap-to-roofline shrinkage as the main
+            # "X% within roofline" delta (negative = closer to ceiling).
+            "gap_to_roofline_pct": _num_delta(
+                latest.get("gap_to_roofline_pct"),
+                baseline.get("gap_to_roofline_pct"),
             ),
         }
     return out
@@ -513,7 +525,8 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     lines.append(
         f"| Gap to roofline % | "
         f"{_fmt_pct_cell(baseline.get('gap_to_roofline_pct'))} | "
-        f"{_fmt_pct_cell(latest.get('gap_to_roofline_pct'))} | — |"
+        f"{_fmt_pct_cell(latest.get('gap_to_roofline_pct'))} | "
+        f"{_fmt_delta(delta.get('gap_to_roofline_pct'))} |"
     )
     lines.append("")
     return lines

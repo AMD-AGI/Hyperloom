@@ -101,13 +101,25 @@ def _resolve_dtype_bytes(tag: str | None) -> float:
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ModelMeta:
-    """HF subset needed for the decode roofline ceiling."""
+    """HF subset needed for the decode roofline ceiling.
+
+    ``active_weight_bytes`` (MoE-aware, optional): bytes of model weights
+    actually fetched from HBM per generated token. For dense models this
+    equals ``weight_bytes``; for Mixture-of-Experts models (e.g.
+    Qwen3-30B-A3B, DeepSeek-V3, Mixtral) only a routed subset of expert
+    weights fires per token so the divisor of the roofline must shrink.
+    Defaults to ``0`` for backward-compat with callers that construct
+    ``ModelMeta`` directly without MoE knowledge; the compute helpers
+    treat ``0`` as "fall back to weight_bytes" so dense behaviour is
+    preserved. ``load_model_meta`` always sets a concrete value.
+    """
 
     weight_bytes: int
     num_layers: int
     num_kv_heads: int
     head_dim: int
     weight_dtype_bytes: float
+    active_weight_bytes: int = 0
 
 
 def _read_total_size(model_path: Path) -> int | None:
@@ -159,6 +171,74 @@ def _derive_head_dim(cfg: dict[str, Any]) -> int:
     return 0
 
 
+def _compute_active_weight_bytes(
+    cfg: dict[str, Any],
+    *,
+    weight_bytes: int,
+    dtype_bytes: float,
+) -> int:
+    """MoE-aware estimate of bytes of weight actually fetched per token.
+
+    Background: a vanilla Mixture-of-Experts decoder routes each token
+    to ``num_experts_per_tok`` of ``num_experts`` routed experts; all
+    other weights (attention / norms / embeddings / router / optional
+    shared experts) run on every token. Using the full safetensors
+    ``total_size`` as the divisor of the memory roofline therefore
+    over-counts the per-token weight IO by ~10× on Qwen3-30B-A3B,
+    DeepSeek-V3, Mixtral, etc., and drives the ceiling below the
+    measured throughput (``within_roofline_pct > 100%``).
+
+    Geometry-based estimate, derived from HF config:
+
+      expert_bytes_per_layer = num_experts
+                              × 3 × hidden_size × moe_intermediate_size
+                              × dtype_bytes
+      total_expert_bytes     = num_hidden_layers × expert_bytes_per_layer
+      non_expert_bytes       = weight_bytes − total_expert_bytes
+      active_expert_bytes    = (num_experts_per_tok / num_experts)
+                              × total_expert_bytes
+      active_weight_bytes    = non_expert_bytes + active_expert_bytes
+
+    The ``3 ×`` factor matches the gated-MLP convention used by Qwen3
+    / Llama-style experts (gate + up + down projections). DeepSeek's
+    optional shared experts are conservatively treated as part of
+    ``non_expert_bytes`` via the subtraction: any weight not accounted
+    for by the routed experts (including shared experts) stays in the
+    always-active pool, which is the safe direction (slightly larger
+    divisor → slightly lower ceiling, never inflates).
+
+    Safe degrade — returns ``int(weight_bytes)`` unchanged when:
+      * any MoE field is missing or non-positive  → treat as dense
+      * computed ``total_expert_bytes >= weight_bytes`` → config /
+        safetensors mismatch (quantized experts, accounting drift);
+        stay safe and keep the dense-equivalent divisor
+    """
+    num_experts = int(cfg.get("num_experts") or 0)
+    experts_per_tok = int(cfg.get("num_experts_per_tok") or 0)
+    if num_experts <= 0 or experts_per_tok <= 0:
+        return int(weight_bytes)
+    hidden_size = int(cfg.get("hidden_size") or 0)
+    num_layers = int(cfg.get("num_hidden_layers") or 0)
+    moe_inter = int(
+        cfg.get("moe_intermediate_size")
+        or cfg.get("intermediate_size")
+        or 0
+    )
+    if hidden_size <= 0 or num_layers <= 0 or moe_inter <= 0 or dtype_bytes <= 0:
+        return int(weight_bytes)
+    expert_bytes_per_layer = (
+        num_experts * 3 * hidden_size * moe_inter * dtype_bytes
+    )
+    total_expert_bytes = int(num_layers * expert_bytes_per_layer)
+    if total_expert_bytes <= 0 or total_expert_bytes >= int(weight_bytes):
+        return int(weight_bytes)
+    non_expert_bytes = int(weight_bytes) - total_expert_bytes
+    active_expert_bytes = int(
+        (experts_per_tok / num_experts) * total_expert_bytes
+    )
+    return non_expert_bytes + active_expert_bytes
+
+
 def load_model_meta(
     model_path: str | Path,
     *,
@@ -188,12 +268,16 @@ def load_model_meta(
     dtype_bytes = _resolve_dtype_bytes(
         cfg.get("torch_dtype") or precision_hint
     )
+    active_weight_bytes = _compute_active_weight_bytes(
+        cfg, weight_bytes=weight_bytes, dtype_bytes=dtype_bytes,
+    )
     return ModelMeta(
         weight_bytes=weight_bytes,
         num_layers=int(cfg.get("num_hidden_layers") or 0),
         num_kv_heads=_derive_kv_heads(cfg),
         head_dim=_derive_head_dim(cfg),
         weight_dtype_bytes=dtype_bytes,
+        active_weight_bytes=active_weight_bytes,
     )
 
 
@@ -227,6 +311,7 @@ def compute_theoretical_peak_output_tok_per_sec(
     isl: int,
     osl: int,
     concurrency: int,
+    active_weight_bytes: int = 0,
 ) -> float:
     """Decode-only memory-bound ceiling for ``output_throughput``.
 
@@ -235,11 +320,19 @@ def compute_theoretical_peak_output_tok_per_sec(
     placeholder. Never raises.
 
     Inputs map to ``SharedState`` fields:
-      ``gpu_type``     -> ``state.gpu_type``
-      ``num_gpus``     -> ``state.tp`` (tensor-parallel per replica)
-      ``weight_bytes`` -> ``ModelMeta.weight_bytes``
-      ``concurrency``  -> ``state.conc`` (continuous-batching width)
-      ``isl`` / ``osl`` -> ``state.isl`` / ``state.osl``
+      ``gpu_type``           -> ``state.gpu_type``
+      ``num_gpus``           -> ``state.tp`` (tensor-parallel per replica)
+      ``weight_bytes``       -> ``ModelMeta.weight_bytes``
+      ``active_weight_bytes``-> ``ModelMeta.active_weight_bytes`` (MoE)
+      ``concurrency``        -> ``state.conc`` (continuous-batching width)
+      ``isl`` / ``osl``      -> ``state.isl`` / ``state.osl``
+
+    ``active_weight_bytes`` (optional, defaults to 0) shrinks the
+    per-token weight IO term for MoE models: the divisor uses
+    ``active_weight_bytes`` instead of ``weight_bytes`` when the former
+    is positive. Dense models (or callers without MoE knowledge) leave
+    it at 0 and get the original ``weight_bytes`` divisor — preserves
+    backward compatibility.
     """
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
@@ -255,8 +348,13 @@ def compute_theoretical_peak_output_tok_per_sec(
     # Average KV-cache length during decode: read isl + already-decoded
     # tokens, averaged over the osl decode steps.
     kv_seq_len = max(int(isl) + int(osl) // 2, 1)
+    effective_weight = (
+        int(active_weight_bytes)
+        if active_weight_bytes and active_weight_bytes > 0
+        else int(weight_bytes)
+    )
     bytes_per_token_total = (
-        weight_bytes / batch + kv_bytes * kv_seq_len
+        effective_weight / batch + kv_bytes * kv_seq_len
     )
     if bytes_per_token_total <= 0:
         return 0.0
@@ -280,6 +378,7 @@ def compute_peak_from_state(state: Any) -> float:
         gpu_type=str(getattr(state, "gpu_type", "") or ""),
         num_gpus=int(getattr(state, "tp", 0) or 0),
         weight_bytes=meta.weight_bytes,
+        active_weight_bytes=meta.active_weight_bytes,
         num_layers=meta.num_layers,
         num_kv_heads=meta.num_kv_heads,
         head_dim=meta.head_dim,
