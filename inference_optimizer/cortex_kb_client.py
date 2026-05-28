@@ -320,14 +320,16 @@ class _HttpTransport:
 
     Concurrency cap is enforced via a semaphore aligned with the
     backend's ``asyncpg pool=8`` (§3); 5xx/timeout/connect errors
-    retry up to :data:`cortex_kb_constants.DEFAULT_RETRY_ATTEMPTS`
-    with exponential backoff.
+    retry up to ``retry_attempts`` (passed by the client; foreground
+    callers use 1 to fail fast, background uses 3) with exponential
+    backoff.
     """
 
     base_url: str
     timeout_sec: float
     token: str | None = None
     max_connections: int = C.DEFAULT_MAX_CONCURRENCY
+    retry_attempts: int = C.DEFAULT_RETRY_ATTEMPTS
 
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
     _semaphore: threading.Semaphore = field(init=False, repr=False)
@@ -374,7 +376,8 @@ class _HttpTransport:
         """
         client = self._ensure_client()
         last_exc: Exception | None = None
-        for attempt in range(C.DEFAULT_RETRY_ATTEMPTS):
+        attempts = max(1, int(self.retry_attempts))
+        for attempt in range(attempts):
             with self._semaphore:
                 try:
                     response = client.post(path, json=dict(body or {}))
@@ -408,7 +411,7 @@ class _HttpTransport:
                 return parsed if isinstance(parsed, dict) else {"_value": parsed}
         # Retry budget exhausted.
         raise CortexKBError(
-            f"transport_exhausted after {C.DEFAULT_RETRY_ATTEMPTS} attempts: "
+            f"transport_exhausted after {attempts} attempts: "
             f"{path}: {last_exc}",
             category="transport",
         )
@@ -437,7 +440,13 @@ class CortexKBClient:
         kb_url: ``CORTEX_KB_URL`` override; ``None`` reads env or
             :data:`cortex_kb_constants.DEFAULT_KB_URL`.
         timeout_sec: per-HTTP-call timeout (env
-            ``CORTEX_KB_HTTP_TIMEOUT_SEC``).
+            ``CORTEX_KB_HTTP_TIMEOUT_SEC``). Defaults adjust based on
+            ``foreground``: 2s for main-loop callers, 10s for the
+            flusher daemon.
+        retry_attempts: how many times to retry transient errors
+            (5xx / connect / timeout). Defaults: 1 (foreground —
+            fail fast to NDJSON), 3 (background flusher — give
+            transient blips a chance).
         enabled: when ``False``, every entrypoint becomes a no-op
             (used by ``--degraded-kb``). Audit log still records the
             skip so breakdown collection can flag the bypass.
@@ -448,16 +457,25 @@ class CortexKBClient:
         smoke: tag ``attrs.kbsg_smoke=True`` + smoke generator
             provenance on every propose call (env ``CORTEX_KB_SMOKE``).
         initiator: ``provenance.generator`` + ``initiator`` value.
+        foreground: True when the client is used on the Coordinator
+            main loop (every KEEP / REVERT triggers one sync call —
+            slow KB MUST NOT block the optimizer). False for the
+            kb_flusher daemon / CLI T0 anchor (runs once at startup
+            or in a separate process). Side-channel semantic: a slow
+            / unreachable KB falls through to NDJSON within ~2s
+            instead of blocking up to ~32s.
     """
 
     session_dir: Path
     kb_url: str | None = None
-    timeout_sec: float = C.DEFAULT_HTTP_TIMEOUT_SEC
+    timeout_sec: float | None = None
     enabled: bool = True
     max_connections: int = C.DEFAULT_MAX_CONCURRENCY
     token: str | None = None
     smoke: bool = False
     initiator: str = C.DEFAULT_GENERATOR
+    foreground: bool = False
+    retry_attempts: int | None = None
 
     _transport: _HttpTransport | None = field(default=None, init=False, repr=False)
 
@@ -466,10 +484,35 @@ class CortexKBClient:
         cortex_dir(self.session_dir).mkdir(parents=True, exist_ok=True)
         if not self.kb_url:
             self.kb_url = os.environ.get("CORTEX_KB_URL") or C.DEFAULT_KB_URL
+        # Resolve timeout: caller-supplied > env override > profile default
+        # (foreground=2s, background=10s). Side-channel rationale: a slow
+        # KB call on the main loop scales linearly with EXPLORE round size
+        # (one fact write per variant), so the foreground budget MUST be
+        # bounded tight enough that "KB unhealthy" doesn't stretch a
+        # 10-variant round from ~30s to ~5min.
+        if self.timeout_sec is None:
+            profile_default = (
+                C.FOREGROUND_HTTP_TIMEOUT_SEC if self.foreground
+                else C.DEFAULT_HTTP_TIMEOUT_SEC
+            )
+            self.timeout_sec = profile_default
         env_timeout = os.environ.get("CORTEX_KB_HTTP_TIMEOUT_SEC")
         if env_timeout:
             try:
                 self.timeout_sec = float(env_timeout)
+            except ValueError:
+                pass
+        # Same resolution for retry budget.
+        if self.retry_attempts is None:
+            profile_default_retry = (
+                C.FOREGROUND_RETRY_ATTEMPTS if self.foreground
+                else C.DEFAULT_RETRY_ATTEMPTS
+            )
+            self.retry_attempts = profile_default_retry
+        env_retry = os.environ.get("CORTEX_KB_RETRY_ATTEMPTS")
+        if env_retry:
+            try:
+                self.retry_attempts = int(env_retry)
             except ValueError:
                 pass
         env_conc = os.environ.get("CORTEX_KB_MAX_CONCURRENCY")
@@ -507,6 +550,7 @@ class CortexKBClient:
                 timeout_sec=self.timeout_sec,
                 token=self.token,
                 max_connections=self.max_connections,
+                retry_attempts=int(self.retry_attempts or C.DEFAULT_RETRY_ATTEMPTS),
             )
         return self._transport
 
