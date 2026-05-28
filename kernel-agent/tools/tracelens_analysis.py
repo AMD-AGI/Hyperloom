@@ -1985,9 +1985,33 @@ def write_reports(
     }
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
+    # Per AMD-AGI/Hyperloom#314: ``kernel_candidates.json::hot_kernels``
+    # is the dispatch payload consumed by the kernel-opt path
+    # (``kernel_optimization.load_candidates``, ``parallel_e2e_runner``,
+    # ``kernel_request_handlers``). Filter it down to candidates that
+    # ``classify_patchability`` actually marked routable so downstream
+    # batch dispatchers no longer have to re-apply the same filter and
+    # so ``num_hot_kernels`` accounting reflects what we will really
+    # send to a backend. The full unfiltered list stays available in
+    # ``tracelens/tracelens_report.json`` for audit, and the routable
+    # vs. skipped split is also surfaced in ``tracelens/summary.json``
+    # (``tasks[]`` / ``skipped[]``). ``skipped_kernels[]`` carries the
+    # FULL candidate dicts (not just an audit projection) so direct
+    # lookup paths (``kernel_optimization.load_candidates``, the CLI's
+    # ``find_candidate``) can still resolve a non-routable kernel by
+    # id; the dispatcher's ``_validate_reusable_native_kernel`` guard
+    # is what blocks them from reaching a backend.
+    routable_candidates = [
+        c for c in candidates
+        if isinstance(c, dict) and c.get("reusable_native_kernel") is True
+    ]
+    skipped_kernels = [
+        c for c in candidates
+        if isinstance(c, dict) and c.get("reusable_native_kernel") is not True
+    ]
     atomic_write_json(
         run_dir / "kernel_candidates.json",
-        {"hot_kernels": candidates, "task_groups": task_groups, **report},
+        {**report, "hot_kernels": routable_candidates, "skipped_kernels": skipped_kernels},
     )
 
     # PR-A §3: per-run audit sidecar listing which TraceLens hot kernels
