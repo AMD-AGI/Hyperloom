@@ -493,6 +493,24 @@ class ProfileExecutor(BaselineExecutor):
         return None
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        # B2: atom (Magpie v1) has no torch_profiler wiring. atom_mi*x.sh
+        # accepts PROFILE=1 but silently no-ops; injecting sglang/vllm
+        # TraceLens flags into EXTRA_ATOM_ARGS would crash atom's argparse.
+        # Short-circuit here so the EXPLORE specialist's occasional profile
+        # proposal degrades to a skipped delegated_result instead of a
+        # spurious failed run. Coordinator already treats skipped as
+        # non-fatal (no RCA escalation, no current_best mutation).
+        if os.environ.get("FRAMEWORK", "").strip().lower() == "atom":
+            return {
+                "status": "skipped",
+                "framework": "atom",
+                "error_class": "atom_no_profiler",
+                "error": (
+                    "atom framework has no torch_profiler integration in "
+                    "Magpie v1; profile/roofline are no-ops for this run. "
+                    "See atom_boost_tutorials.md §6."
+                ),
+            }
         # Override action label so per-task output lands under runs/profile/
         # rather than runs/baseline/ when the runner derives the path.
         params = ctx.task.params or {}

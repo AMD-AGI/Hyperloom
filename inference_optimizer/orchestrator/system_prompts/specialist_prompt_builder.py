@@ -361,16 +361,11 @@ class SpecialistPromptInputs:
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
-    # F2-3 framework_pr_scout sub_kind: Coordinator pre-fetched PR
-    # candidates from ``fa candidates`` (metadata only — diff bodies
-    # the specialist fetches itself via the curl template in the
-    # rendered FRAMEWORK PR CANDIDATES section). Empty list → section
-    # renders empty / placeholder. ``sub_kind`` mirrors the dispatch
-    # ``params.sub_kind`` so the section can short-circuit when the
-    # specialist is NOT a framework_pr_scout (avoid leaking PR feed
-    # noise into other domains).
+    # Generic sub_kind passthrough from the dispatch params. Still
+    # routed into the prompt so per-domain ``_focus_*`` helpers can
+    # specialise on it where useful; the legacy ``framework_pr_scout``
+    # branch was retired with the FRAMEWORK_PR phase migration.
     sub_kind: str = ""
-    pr_candidates: list[dict[str, Any]] = field(default_factory=list)
 
     # Local source navigation hint (§3.5 §6 part 7)
     framework_source_roots: tuple[str, ...] = ()
@@ -915,89 +910,6 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Section 6b — Framework PR candidates (F2-3 framework_pr_scout sub_kind)
-# ---------------------------------------------------------------------------
-def _section_framework_pr_candidates(
-    inp: SpecialistPromptInputs,
-) -> list[str]:
-    """Render the FRAMEWORK PR CANDIDATES section for serving_specialist
-    runs with ``sub_kind='framework_pr_scout'``.
-
-    Coordinator pre-fetches the PR list via the ``fa candidates`` CLI
-    (see :mod:`framework_agent_client`); the section instructs the
-    specialist how to pull each PR's diff body via ``curl`` inside the
-    subprocess sandbox (the diff itself is too large to inline here).
-
-    Returns an empty list (section omitted) when the specialist is not
-    a framework_pr_scout OR when no candidates landed (graceful
-    degrade for offline / fa-binary-missing scenarios).
-    """
-    if (inp.sub_kind or "").strip() != "framework_pr_scout":
-        return []
-    candidates = inp.pr_candidates or []
-    if not isinstance(candidates, list) or not candidates:
-        return []
-    rows = ["## 6b. FRAMEWORK PR CANDIDATES", ""]
-    rows.append(
-        f"Coordinator pre-fetched these **{len(candidates)}** PR "
-        "candidates from `fa candidates`. Diff bodies are NOT included; "
-        "fetch them yourself before authoring patches."
-    )
-    rows.append("")
-    rows.append("| # | repo | pr_number | ref | title | summary | score | diff_url |")
-    rows.append("|---|---|---:|---|---|---|---:|---|")
-    for i, c in enumerate(candidates[:20], start=1):
-        if not isinstance(c, dict):
-            continue
-        repo = str(c.get("repo") or "")
-        pr_number = c.get("pr_number") or c.get("number") or ""
-        ref = str(c.get("ref") or "")
-        title = str(c.get("title") or "").replace("|", "/")
-        summary = str(c.get("summary") or "").replace("|", "/")
-        if len(summary) > 140:
-            summary = summary[:137] + "..."
-        score = c.get("score")
-        score_str = (
-            f"{float(score):.2f}" if isinstance(score, (int, float))
-            else "—"
-        )
-        diff_url = str(c.get("diff_url") or c.get("source_url") or "")
-        rows.append(
-            f"| {i} | {repo} | {pr_number} | {ref} | {title} | "
-            f"{summary} | {score_str} | {diff_url} |"
-        )
-    rows.append("")
-    rows.append("### How to fetch a PR diff")
-    rows.append("")
-    rows.append(
-        "```bash"
-    )
-    rows.append(
-        "mkdir -p $WORKTREE/incoming"
-    )
-    rows.append(
-        "curl -fsSL -o $WORKTREE/incoming/<pr_number>.diff '<diff_url>'"
-    )
-    rows.append(
-        "git -C $FRAMEWORK_ROOT apply --check "
-        "$WORKTREE/incoming/<pr_number>.diff"
-    )
-    rows.append(
-        "# Then re-author into worktree/patches/NNN_<slug>.patch via Edit"
-    )
-    rows.append("```")
-    rows.append("")
-    rows.append(
-        "**Iron rule:** do NOT commit a raw GitHub diff into "
-        "`worktree/patches/` — always Edit your own `.patch` so "
-        "`integrate_patch` can attribute provenance correctly. The "
-        "incoming GitHub diff is reference material; the patches/ "
-        "entry is your own work product."
-    )
-    return rows
-
-
-# ---------------------------------------------------------------------------
 # Section 7 — Local source navigation hint
 # ---------------------------------------------------------------------------
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
@@ -1199,20 +1111,6 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     snapshot_section = _section_session_snapshot(inp)
     if snapshot_section:
         user_sections.insert(7, snapshot_section)
-    # F2-3: framework_pr_scout candidates ride right after PR feed so
-    # the specialist sees PR Monitor warm cache + the fa-fetched
-    # candidates in adjacent sections. Returns an empty list for any
-    # other sub_kind / empty candidate list, so non-framework_pr_scout
-    # specialists never see this section.
-    fa_candidates_section = _section_framework_pr_candidates(inp)
-    if fa_candidates_section:
-        # Insert after the PR feed section. Index is dynamic: +1 if
-        # § 5d was injected above. ``index`` uses the still-fresh
-        # ``§ 6. PR FEED`` header to anchor.
-        for i, section in enumerate(user_sections):
-            if section and section[0].startswith("## 6. PR FEED"):
-                user_sections.insert(i + 1, fa_candidates_section)
-                break
     if inp.notes:
         user_sections.append([
             "## 10. NOTES FROM ORCHESTRATION",
