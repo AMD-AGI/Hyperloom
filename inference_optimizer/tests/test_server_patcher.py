@@ -20,7 +20,6 @@ real ``$TRACELENS_ROOT`` or any real ``site-packages``.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 import textwrap
 import threading

@@ -27,7 +27,6 @@ from inference_optimizer.orchestrator.action_executors.profile import (
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
-    MockTurn,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
@@ -36,7 +35,7 @@ from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager, SqliteLeaseBackend,
 )
 from inference_optimizer.orchestrator.sub_agent_runner import (
-    RunnerContext, SubAgentRunner,
+    SubAgentRunner,
 )
 from inference_optimizer.manifest import build_manifest
 from inference_optimizer.paths import make_session_dir
@@ -701,7 +700,6 @@ def test_materialize_profile_kill_switch_default_is_on(
     be invoked so users on TraceLens-patched images get the enhanced
     flags without any opt-in step. Symmetric to the kill-switch test
     above."""
-    import yaml
     _clear_workload_env(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
     counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
