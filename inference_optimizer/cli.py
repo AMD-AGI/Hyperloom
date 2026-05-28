@@ -54,6 +54,7 @@ from .cortex_kb_client import (
 from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     baseline_executor,
+    dynamic_action_executor,
     explore_executor,
     recover_executor,
     report_executor,
@@ -790,6 +791,10 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     # ``orchestrator/action_executors/recover.py``. ``validate_stack``
     # has been retired and is intentionally absent.
     "recover":           recover_executor,
+    # dynamic_action.MD P1 §7 — stub executor that writes
+    # ``dispatch_history.jsonl`` + empty ``proposal_set.json``. The
+    # real multi-turn ReAct runner replaces this at P3.
+    "dynamic_action":    dynamic_action_executor,
 }
 
 # Kernel-only real executors. The composite ``roofline`` action is
