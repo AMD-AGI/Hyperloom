@@ -186,13 +186,18 @@ EXPLORE_ACTION_NAME: str = "explore"
 # a single source of truth.  See _validate_sweep_singleton.
 SWEEP_ACTION_NAME: str = "sweep"
 
-# PR-A9: provenance values that survive the explore-provenance gate.
-# Every other value (``llm_direct``, missing, unknown) is denied.
+# PR-A9 + dynamic_action.MD P1 §4.4: provenance values that survive
+# the explore-provenance gate. Every other value (``llm_direct``,
+# missing, unknown) is denied. ``dynamic`` is a single literal stamp;
+# no sub-tag form (no ``dynamic:kv_cache+scheduler``) is accepted —
+# that keeps IR-4 audit collapsed to one row per dynamic-sourced
+# variant.
 EXPLORE_PERMISSIVE_PROVENANCE_PREFIXES: tuple[str, ...] = (
     "specialist:",
 )
 EXPLORE_PERMISSIVE_PROVENANCE_LITERALS: frozenset[str] = frozenset({
     "default_grid",
+    "dynamic",
 })
 
 # Specialist / Explore parallelism caps — single source of truth
@@ -227,6 +232,60 @@ SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration
 # Prefix the SubAgentRunner stamps on every emit-intent originating
 # from a specialist task. ``from_agent='specialist:<task_id>'``.
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
+
+
+# ---------------------------------------------------------------------------
+# dynamic_action — supplementary cross-domain ReAct sub-agent channel
+# (dynamic_action.MD §1 + action_dynamic_plan/P1).
+#
+# Same physical research_lane as specialists (cap 6 unchanged); an
+# independent round-cap so the two pools never starve each other.
+# All P1 §4 red-line checks live in ``_validate_dynamic_action_dispatch``.
+# ---------------------------------------------------------------------------
+DYNAMIC_ACTION_NAME: str = "dynamic_action"
+
+# Source roles allowed to dispatch a dynamic_action via
+# ``delegate{action='dynamic_action'}``. P1 §4.1 group A — only the
+# Orchestration role; sub-agents (specialists, kernel, robustness)
+# cannot recursively spawn dynamic_actions.
+DYNAMIC_ACTION_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({
+    "orchestration",
+})
+
+# P0_decisions.md Q3 + P1 §4.3: a single dynamic_action per EXPLORE
+# round; the matching ``MAX_DYNAMIC_SOURCED_VARIANTS=1`` falls out
+# naturally because proposal_set is capped at 1 per run.
+MAX_DYNAMIC_PER_ROUND: int = 1
+MAX_DYNAMIC_SOURCED_VARIANTS: int = 1
+
+# P1 §3 hard floor on ``scope_domains`` length — "cross-domain" is
+# meaningless below 2.
+DYNAMIC_ACTION_MIN_SCOPE_DOMAINS: int = 2
+
+# P1 §10 #5: enum for the optional ``budget_hint`` field.
+DYNAMIC_ACTION_BUDGET_HINTS: frozenset[str] = frozenset({
+    "low", "medium", "high",
+})
+
+# P1 §4.1 group C: side-effect categories the §1.2 red lines forbid
+# dynamic_action from declaring. Three sources:
+#   * KERNEL_OWNED_ACTIONS — same kernel-owned禁区 as specialist;
+#   * metric / accuracy_gate / server — §1.2 explicitly bars
+#     dynamic_action from declaring its own success metric, running
+#     accuracy gates, or starting independent server processes.
+#   * non-integrate_patch patch landings — the orchestrator-side
+#     ``integrate_patch`` is the sole patch-landing channel.
+DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES: frozenset[str] = frozenset({
+    "metric",
+    "accuracy_gate",
+    "server",
+    "magpie",
+})
+
+# P1 §4.1 group C 子项 — every scope_domain == "kernel" means the
+# dynamic_action degenerates into a kernel-only patch; rejected by
+# ``dynamic_kernel_only_disallowed``.
+DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL: str = "kernel"
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +688,13 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # LLM update_state must not rewrite the index or duplicate KB
     # ``exp:{sid}:{iter:04d}`` anchors would collide.
     "session_iter_index",
+    # dynamic_action.MD D-C / P0 §2 — Coordinator-only writes on the
+    # dynamic_action aggregate view. LLM cannot UPDATE_STATE its own
+    # dispatch outcomes (would let orchestration self-narrate
+    # "everything I dispatched worked"). Coordinator writes at the
+    # four nodes documented in P0 §2 D-C / P6 §3.
+    "dynamic_actions",
+    "dynamic_action_round_count",
 })
 
 
@@ -847,6 +913,15 @@ class PolicyGate:
         if action_name == SPECIALIST_ACTION_NAME:
             self._validate_specialist_dispatch(role, payload)
             self._validate_phase_action(role, action_name, intent_kind="delegate")
+            return
+        # dynamic_action.MD P1 §4 — supplementary cross-domain ReAct
+        # channel. Phase + source + payload + red-line checks live
+        # in ``_validate_dynamic_action_dispatch``; the phase check
+        # runs first so a wrong-phase emit gets the canonical
+        # ``dynamic_phase_violation`` reason instead of the generic
+        # R1 ``phase_incompatible`` message.
+        if action_name == DYNAMIC_ACTION_NAME:
+            self._validate_dynamic_action_dispatch(role, payload)
             return
         # PR-A7 (Arbor-into-Hyperloom) — ``integrate_patch`` requires a
         # non-reject Critic verdict on the specialist's patches before
@@ -2017,6 +2092,233 @@ class PolicyGate:
                         f"the prompt default is 8."
                     ),
                 )
+
+    # ------------------------------------------------------------------
+    # dynamic_action dispatch — action_dynamic_plan/P1 §4
+    # ------------------------------------------------------------------
+    def _validate_dynamic_action_dispatch(
+        self, role: "AgentRole", payload: dict[str, Any],
+    ) -> None:
+        """Translate every §1.2 red line into a dispatch-time deny.
+
+        Four groups (P1 §4.1):
+
+        - **A** phase + source admission
+        - **B** payload schema completeness
+        - **C** physical red-line boundaries on ``side_effects_declared``
+        - **D** capacity / round-cap accounting
+
+        Each failure raises :class:`PolicyDenied` with a distinct
+        ``rule=dynamic_*`` code so the orchestration LLM gets a
+        precise reason instead of a generic deny.
+
+        Group D's ``dynamic_round_cap_exhausted`` and the IR-4
+        ``MAX_DYNAMIC_SOURCED_VARIANTS`` cap depend on SharedState; the
+        method falls open (no deny) when ``shared_state`` is not wired
+        — keeps the legacy unit-test path stable.
+        """
+        # Group A — phase + source. Phase first so a misuse from the
+        # wrong phase always returns ``dynamic_phase_violation`` rather
+        # than collapsing to the generic R1 message.
+        state = self.shared_state
+        phase = ""
+        if state is not None:
+            phase = str(getattr(state, "phase", "") or "").strip().upper()
+        if phase and phase != PHASE_EXPLORE:
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}} only valid in "
+                f"phase=EXPLORE; current phase={phase!r}",
+                rule="dynamic_phase_violation",
+                hint=(
+                    "dynamic_action is an EXPLORE-only supplementary "
+                    "channel (dynamic_action.MD §1.6). Wait for the "
+                    "EXPLORE phase to begin before dispatching."
+                ),
+            )
+        if role.name not in DYNAMIC_ACTION_DISPATCH_SOURCE_ALLOWLIST:
+            raise PolicyDenied(
+                f"role={role.name!r} cannot dispatch dynamic_action "
+                f"(allowed: "
+                f"{sorted(DYNAMIC_ACTION_DISPATCH_SOURCE_ALLOWLIST)!r})",
+                rule="dynamic_source_violation",
+                hint=(
+                    "Only the Orchestration role may dispatch "
+                    "dynamic_action; sub-agents must not recursively "
+                    "spawn one."
+                ),
+            )
+
+        # Group B — payload schema completeness.
+        params = payload.get("params") or {}
+        if not isinstance(params, dict):
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: params must "
+                f"be a dict",
+                rule="dynamic_payload_schema",
+                hint=(
+                    "params must carry motivation_gap_text, "
+                    "scope_domains, side_effects_declared (and optional "
+                    "budget_hint). See "
+                    "action_dynamic_plan/P1_dispatch_skeleton.md §3."
+                ),
+            )
+        motivation = str(params.get("motivation_gap_text") or "").strip()
+        if not motivation:
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
+                f"params.motivation_gap_text is required and non-empty",
+                rule="dynamic_payload_schema",
+                hint=(
+                    "Provide a free-form motivation_gap_text explaining "
+                    "why a single specialist cannot cover this patch "
+                    "combination (audit only; PolicyGate does not parse "
+                    "the semantics)."
+                ),
+            )
+        scope_domains_raw = params.get("scope_domains")
+        if not isinstance(scope_domains_raw, (list, tuple)):
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
+                f"params.scope_domains must be a list of specialist "
+                f"domain keys",
+                rule="dynamic_payload_schema",
+            )
+        scope_domains = [str(d or "").strip() for d in scope_domains_raw]
+        scope_domains = [d for d in scope_domains if d]
+        if len(scope_domains) < DYNAMIC_ACTION_MIN_SCOPE_DOMAINS:
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
+                f"scope_domains has {len(scope_domains)} entries; "
+                f"minimum is {DYNAMIC_ACTION_MIN_SCOPE_DOMAINS}",
+                rule="dynamic_scope_too_narrow",
+                hint=(
+                    "dynamic_action is for cross-domain patches; "
+                    "declare at least 2 distinct specialist domains. "
+                    "For single-domain patches, dispatch a specialist."
+                ),
+            )
+        unknown_domains = [
+            d for d in scope_domains
+            if d not in SPECIALIST_DOMAIN_KEYS
+            and d != DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL
+        ]
+        if unknown_domains:
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
+                f"scope_domains contains unregistered keys: "
+                f"{unknown_domains!r}",
+                rule="dynamic_scope_unknown_domain",
+                hint=(
+                    f"Every scope_domains entry must be one of "
+                    f"{sorted(SPECIALIST_DOMAIN_KEYS)!r} (or the "
+                    f"reserved literal "
+                    f"{DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL!r})."
+                ),
+            )
+        side_effects_raw = params.get("side_effects_declared")
+        if not isinstance(side_effects_raw, (list, tuple)):
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
+                f"params.side_effects_declared must be a list",
+                rule="dynamic_payload_schema",
+                hint=(
+                    "Declare every action category the sub-agent "
+                    "expects to touch (e.g. ['framework_source']); "
+                    "PolicyGate verifies it against the §1.2 red line "
+                    "set."
+                ),
+            )
+        side_effects = [str(s or "").strip() for s in side_effects_raw]
+        side_effects = [s for s in side_effects if s]
+        if not side_effects:
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
+                f"params.side_effects_declared cannot be empty",
+                rule="dynamic_payload_schema",
+                hint=(
+                    "Even a noop-shaped dynamic_action must declare "
+                    "its target side-effect category (e.g. "
+                    "['framework_source'])."
+                ),
+            )
+        budget_hint_raw = params.get("budget_hint")
+        if budget_hint_raw is not None:
+            budget_hint = str(budget_hint_raw or "").strip().lower()
+            if budget_hint and budget_hint not in DYNAMIC_ACTION_BUDGET_HINTS:
+                raise PolicyDenied(
+                    f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
+                    f"budget_hint={budget_hint!r} not in "
+                    f"{sorted(DYNAMIC_ACTION_BUDGET_HINTS)!r}",
+                    rule="dynamic_payload_schema",
+                )
+
+        # Group C — physical red-line boundaries.
+        offending_side_effects: list[str] = []
+        for se in side_effects:
+            if (
+                se in KERNEL_OWNED_ACTIONS
+                or se in DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES
+            ):
+                offending_side_effects.append(se)
+        if offending_side_effects:
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
+                f"side_effects_declared crosses §1.2 red lines: "
+                f"{offending_side_effects!r}",
+                rule="dynamic_side_effects_red_line",
+                hint=(
+                    "dynamic_action cannot declare kernel-owned "
+                    "actions, metric / accuracy_gate ownership, or "
+                    "independent server lifecycle. Patches still flow "
+                    "through integrate_patch; success metrics still "
+                    "come from the existing grid runner."
+                ),
+            )
+        if all(
+            d == DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL for d in scope_domains
+        ):
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: every "
+                f"scope_domains entry is "
+                f"{DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL!r}; that is a "
+                f"kernel-only patch in disguise",
+                rule="dynamic_kernel_only_disallowed",
+                hint=(
+                    "Kernel-only patches must go through the kernel "
+                    "agent (REQUEST{target_agent='kernel', ...}); "
+                    "dynamic_action is for genuine cross-domain "
+                    "synthesis."
+                ),
+            )
+
+        # Group D — capacity / round-cap. Phase R1 was already covered
+        # by the group-A phase check; we only do the soft round-cap
+        # accounting here. The cap is read from
+        # ``shared_state.dynamic_action_round_count`` when wired;
+        # without state we let the dispatch proceed (legacy test path).
+        if state is not None:
+            cur = int(
+                getattr(state, "dynamic_action_round_count", 0) or 0
+            )
+            if cur >= MAX_DYNAMIC_PER_ROUND:
+                raise PolicyDenied(
+                    f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
+                    f"round cap exhausted "
+                    f"({cur}/{MAX_DYNAMIC_PER_ROUND} dispatched in the "
+                    f"current EXPLORE round)",
+                    rule="dynamic_round_cap_exhausted",
+                    hint=(
+                        f"At most {MAX_DYNAMIC_PER_ROUND} dynamic_action "
+                        f"may be dispatched per EXPLORE round (P1 §4.3). "
+                        f"Wait for the next round before re-dispatching."
+                    ),
+                )
+        # Finally let R1 phase_incompatible run as defense-in-depth so
+        # the registry-backed phase allowlist stays the single source
+        # of truth for which actions are dispatchable in EXPLORE.
+        self._validate_phase_action(
+            role, DYNAMIC_ACTION_NAME, intent_kind="delegate",
+        )
 
     # ------------------------------------------------------------------
     # R3 ``specialist_done_source``
