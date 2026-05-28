@@ -345,6 +345,19 @@ def dynamic_action_critic_verdict_path(
     return dynamic_action_artifact_dir(session_dir, dyn_id) / "critic_verdict.json"
 
 
+def dynamic_action_telemetry_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    """dynamic_action.MD §1.5 + gap G3 — per-dyn_id terminal-state
+    rollup (kept / reverted / integrate_failed / gain_pct). Written
+    once per dispatch on transition to a terminal lifecycle status.
+
+    One file per dyn_id (closed schema); post-hoc analytics rake the
+    directory to compute KEEP rate / revert rate over many sessions
+    without reading the larger dispatch_history.jsonl stream."""
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "telemetry.json"
+
+
 # ---------------------------------------------------------------------------
 # External baseline comparison artefacts (DESIGN: target_analysis is report-only)
 # ---------------------------------------------------------------------------
