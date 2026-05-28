@@ -37,6 +37,7 @@ entry can wire the stub instead.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -272,6 +273,24 @@ class RooflineExecutor:
         self.shared_state = shared_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        # B2: roofline = profile + trace_analyze, and profile is a hard
+        # dependency. atom has no torch_profiler integration in Magpie v1
+        # (profile_executor short-circuits to status="skipped"), so the
+        # composite cannot produce a trace and would otherwise return
+        # _failed("profile", ...). Short-circuit at the entrypoint so the
+        # Coordinator sees a clean "skipped" instead of a spurious failed
+        # roofline that would trigger RCA / current_best regression checks.
+        if os.environ.get("FRAMEWORK", "").strip().lower() == "atom":
+            return {
+                "status": "skipped",
+                "framework": "atom",
+                "error_class": "atom_no_profiler",
+                "error": (
+                    "roofline requires torch_profiler which atom (Magpie v1) "
+                    "does not provide; both sub-steps (profile, trace_analyze) "
+                    "are no-ops for this run. See atom_boost_tutorials.md §6."
+                ),
+            }
         # Lazy imports avoid pulling shell-out / yaml machinery at
         # module load time (consistent with how the BaselineExecutor
         # subclass is constructed lazily by cli).

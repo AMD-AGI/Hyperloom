@@ -303,6 +303,15 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset({
     "replay_warm_recipe",
 })
 
+# FRAMEWORK_PR phase: ``framework_pr`` is Coordinator-internal too
+# (the new phase pumps candidates serially; the LLM never proposes the
+# action). Kept as a separate set so the denial rule fires a distinct
+# ``framework_pr_action_not_llm_proposable`` name with a hint pointing
+# at ``--no-framework`` rather than the roofline/profile hint.
+FRAMEWORK_PR_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset({
+    "framework_pr",
+})
+
 
 # ---------------------------------------------------------------------------
 # v0.8 §3.11 R4 / R5 — external tool whitelist registry
@@ -1124,7 +1133,7 @@ class PolicyGate:
         # F3-5 is a within-KERNEL correctness rule. Skipping here keeps
         # the legacy ``phase_incompatible`` message fired by
         # _validate_phase_action when an LLM proposes kernel_opt in
-        # PRELUDE / EXPLORE.
+        # PRELUDE / FRAMEWORK_PR / EXPLORE.
         if str(getattr(ss, "phase", "") or "") != "KERNEL":
             return
         history = list(getattr(ss, "gain_per_stack_entry", []) or [])
@@ -1359,6 +1368,18 @@ class PolicyGate:
         """
         if not action_name:
             return
+        if action_name in FRAMEWORK_PR_INTERNAL_ACTION_NAMES:
+            raise PolicyDenied(
+                f"action {action_name!r} is Coordinator-internal; the LLM "
+                f"must not propose it ({intent_kind})",
+                rule="framework_pr_action_not_llm_proposable",
+                hint=(
+                    "``framework_pr`` is driven by the FRAMEWORK_PR phase "
+                    "pump (one candidate per tick, plateau-based exit). "
+                    "Propose ``specialist`` or ``explore`` instead, or "
+                    "pass ``--no-framework`` to skip the phase entirely."
+                ),
+            )
         if action_name not in INTERNAL_ONLY_ACTION_NAMES:
             return
         raise PolicyDenied(
@@ -1963,21 +1984,15 @@ class PolicyGate:
                 ),
             )
 
-        # F2-2 (Roofline-v2 / framework-agent): per-domain sub_kind
-        # validation. Default sub_kind (None / "") is always allowed —
-        # the specialist runs the canonical per-domain prompt. Non-
-        # empty sub_kind must appear in the domain's ``sub_kinds``
-        # tuple; framework-agent-gated sub_kinds additionally require
-        # ``SharedState.framework_agent_enabled=True`` (defense in
-        # depth — the SpecialistRunner subprocess sandbox in F2-3
-        # also enforces this, but failing fast at the dispatch
-        # boundary keeps the no_executor / network-deny paths cleaner).
+        # Per-domain sub_kind validation. Default sub_kind (None / "")
+        # is always allowed — the specialist runs the canonical per-
+        # domain prompt. Non-empty sub_kind must appear in the
+        # domain's ``sub_kinds`` tuple. (``FRAMEWORK_AGENT_GATED_SUB_KINDS``
+        # / ``framework_pr_scout`` were removed when framework-agent
+        # was promoted to the FRAMEWORK_PR phase.)
         sub_kind = str(params.get("sub_kind") or "").strip()
         if sub_kind:
-            from .specialist_domains import (
-                FRAMEWORK_AGENT_GATED_SUB_KINDS,
-                get_domain,
-            )
+            from .specialist_domains import get_domain
             domain_obj = get_domain(domain)
             allowed = tuple(domain_obj.sub_kinds) if domain_obj else ()
             if sub_kind not in allowed:
@@ -1991,26 +2006,6 @@ class PolicyGate:
                         f"{sorted(allowed)!r} for domain={domain!r}."
                     ),
                 )
-            if sub_kind in FRAMEWORK_AGENT_GATED_SUB_KINDS:
-                ss = getattr(self, "shared_state", None)
-                fa_enabled = bool(
-                    getattr(ss, "framework_agent_enabled", False)
-                ) if ss is not None else False
-                if not fa_enabled:
-                    raise PolicyDenied(
-                        f"delegate{{action='specialist'}}: "
-                        f"sub_kind={sub_kind!r} requires "
-                        f"--framework-agent-enabled (currently off)",
-                        rule="specialist_dispatch_source",
-                        hint=(
-                            "Pass --framework-agent-enabled (or set env "
-                            "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=1) "
-                            "to authorise the framework-agent subprocess "
-                            "tooling, or omit params.sub_kind to fall "
-                            "back to the default serving_specialist "
-                            "prompt."
-                        ),
-                    )
 
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         if not gap:
