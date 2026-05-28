@@ -110,11 +110,10 @@ def test_main_explore_plan_happy_path(monkeypatch, tmp_path: Path, capsys) -> No
 
 
 def test_main_candidates_accepts_atom_framework(monkeypatch, tmp_path: Path, capsys) -> None:
-    """atom_plan/phase3_open_framework_agent 3.3 G5: ``fa candidates``
-    must accept ``framework=atom`` (free-form string, no enum
-    validation) and forward the request through enumerate_candidates
-    unchanged. Smoke-tests that atom is a first-class framework name
-    in the fa CLI surface."""
+    """``fa candidates`` must accept ``framework=atom`` (free-form
+    string, no enum validation) and forward the request through
+    enumerate_candidates unchanged. Smoke-tests that atom is a
+    first-class framework name in the fa CLI surface."""
     req_payload = {
         "framework": "atom",
         "repo_url": "https://github.com/ROCm/ATOM.git",

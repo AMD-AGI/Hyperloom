@@ -1377,16 +1377,13 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # NOTE: the historical ``framework_atom_action_unsupported`` rule
-    # (and its companion ``_ATOM_UNSUPPORTED_ACTIONS`` set + helper)
-    # was removed in atom_plan/phase3_open_framework_agent. After
-    # Phase 2 (kernel-agent enablement) and Phase 3 (framework-agent
-    # enablement), atom no longer has any action that needs framework-
-    # specific denial at the PolicyGate layer — multi-node is guarded
-    # at the CLI level, and ``framework_pr`` is still caught for all
-    # frameworks by the earlier ``framework_pr_action_not_llm_proposable``
-    # rule (LLMs cannot propose ``framework_pr`` regardless of
-    # framework; the Coordinator drives it directly).
+    # NOTE: no ``framework_atom_action_unsupported`` rule exists. atom
+    # has no action that needs framework-specific denial at the
+    # PolicyGate layer — multi-node is guarded at the CLI level, and
+    # ``framework_pr`` is still caught for all frameworks by the
+    # earlier ``framework_pr_action_not_llm_proposable`` rule (LLMs
+    # cannot propose ``framework_pr`` regardless of framework; the
+    # Coordinator drives it directly).
     #
     # Anti-regression guards live in
     # ``inference_optimizer/tests/test_policy_atom_invariants.py``

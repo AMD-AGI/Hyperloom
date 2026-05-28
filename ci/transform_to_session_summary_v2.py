@@ -74,8 +74,8 @@ def _patch_baseline(data: Dict) -> List[str]:
     `baseline` does not. Mirror them up from baseline.invocation when missing.
 
     Read-tolerant for the legacy ``extra_sglang_args`` key on input
-    (Phase 4 of ``atom_plan/`` renamed to ``extra_server_args``); the
-    output always writes the canonical name only.
+    (renamed to ``extra_server_args``); the output always writes the
+    canonical name only.
     """
     notes = []
     baseline = data.get("baseline")
@@ -83,7 +83,7 @@ def _patch_baseline(data: Dict) -> List[str]:
         return notes
 
     if "extra_server_args" not in baseline:
-        # Phase 4 back-compat: prefer the legacy key's value if the
+        # Back-compat: prefer the legacy key's value if the
         # input session_breakdown.json predates the rename.
         if "extra_sglang_args" in baseline:
             baseline["extra_server_args"] = baseline.pop("extra_sglang_args")
@@ -184,7 +184,7 @@ def _patch_phase_timeline(data: Dict) -> List[str]:
             and "extra_server_args" not in extras
             and "sglang_args" not in extras
         ):
-            # Phase 4 back-compat: accept both ``candidate_extra_server_args``
+            # Back-compat: accept both ``candidate_extra_server_args``
             # (post-rename) and ``candidate_extra_sglang_args`` (legacy
             # pre-rename JSONs). Canonical key wins when both are present.
             cand = extras.get("candidate_extra_server_args")
@@ -276,7 +276,7 @@ def is_already_v2(data: Dict) -> bool:
     """
     Cheap heuristic: presence of all 4 fields means upstream already fixed it.
     """
-    # Phase 4 back-compat: a legacy session_breakdown.json carries
+    # Back-compat: a legacy session_breakdown.json carries
     # ``extra_sglang_args`` instead of ``extra_server_args``; treat
     # either as evidence the field is present.
     baseline_ok = isinstance(data.get("baseline"), dict) and (
@@ -294,7 +294,7 @@ def is_already_v2(data: Dict) -> bool:
     pt_ok = True
     for entry in pt:
         extras = (entry or {}).get("extras") or {}
-        # Phase 4 back-compat: accept either canonical or legacy key.
+        # Back-compat: accept either canonical or legacy key.
         has_candidate = (
             "candidate_extra_server_args" in extras
             or "candidate_extra_sglang_args" in extras
