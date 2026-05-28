@@ -46,7 +46,7 @@ def _build_args(**overrides) -> Namespace:
         "geak_cost_limit": 5.0,
         "oob_max_turns": 8,
         "dry_run": False,
-        "extra_sglang_args": "",
+        "extra_server_args": "",
     }
     base.update(overrides)
     return Namespace(**base)

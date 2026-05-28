@@ -173,7 +173,7 @@ def _extract_proposed_flags(state: dict[str, Any]) -> list[str]:
         for entry in attempts:
             if not isinstance(entry, dict):
                 continue
-            args = str(entry.get("extra_sglang_args") or "")
+            args = str(entry.get("extra_server_args") or "")
             if args:
                 found.extend(_FLAG_PATTERN.findall(args))
     # Also walk params_search.tested / backends_search.tested for
@@ -186,7 +186,7 @@ def _extract_proposed_flags(state: dict[str, Any]) -> list[str]:
             continue
         for snap in tested.values():
             if isinstance(snap, dict):
-                args = str(snap.get("extra_sglang_args") or "")
+                args = str(snap.get("extra_server_args") or "")
                 if args:
                     found.extend(_FLAG_PATTERN.findall(args))
     return found
