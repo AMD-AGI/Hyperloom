@@ -813,6 +813,27 @@ class TestInvariant_PhaseSourceRestriction:
 # Critic verdict mapping invariants — verdict outcomes are the only
 # way to flip the lifecycle status
 # ===========================================================================
+class TestInvariant_G8_ProposalSetCap:
+    """G8 — runner enforces MAX_PROPOSAL_SET_LEN=1 by breaking on the
+    first emit_proposal; the Coordinator also defends against schema
+    drift by truncating to the cap on read. The constant pin here is
+    the source of truth."""
+
+    def test_inv_max_proposal_set_len_is_one(self):
+        from inference_optimizer.orchestrator.dynamic_action_proposal import (
+            MAX_PROPOSAL_SET_LEN,
+        )
+        assert MAX_PROPOSAL_SET_LEN == 1
+
+    def test_inv_coordinator_truncates_proposal_set_above_cap(self):
+        """The truncate path lives in the runner-result hook; a
+        text scan ensures the cap reference + log call is present."""
+        from inference_optimizer.orchestrator import coordinator as coord_mod
+        body = Path(coord_mod.__file__).read_text(encoding="utf-8")
+        assert "MAX_PROPOSAL_SET_LEN" in body
+        assert "truncating to first" in body
+
+
 class TestInvariant_VerdictMapping:
 
     def test_inv_three_cross_domain_rules_locked(self):

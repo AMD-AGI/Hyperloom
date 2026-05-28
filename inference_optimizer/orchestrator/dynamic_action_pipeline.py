@@ -250,6 +250,13 @@ def compose_critic_verdict_envelope(
     Strictest-wins composition: if mechanical pre says
     reject/revise, the LLM verdict is ignored — mechanical layer is a
     *floor* per P4 §7.
+
+    ``REVISE`` vs ``REJECT`` in v1 (gap G11): the lifecycle treats
+    both identically (both flip to CRITIC_REJECTED) because v1 has
+    no sub-agent re-dispatch loop. The verdict label itself is
+    preserved on ``critic_verdict.json`` so a future v2 with a
+    re-prompt loop can re-open ``revise`` dispatches without
+    rewriting the envelope schema.
     """
     pre: CrossDomainPreverdict = run_mechanical_cross_domain_checks(
         proposal, spec_scope_domains=list(spec_scope_domains or ()),
