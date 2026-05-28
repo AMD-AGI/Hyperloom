@@ -34,7 +34,7 @@ DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "allreduce", "nccl", "rccl", "quickreduce", "communication", "collective",
     ],
     "compiler": ["compiler", "inductor", "codegen"],
-    "framework": ["vllm", "sglang", "framework", "scheduler", "cuda_graph", "cudagraph"],
+    "framework": ["vllm", "sglang", "atom", "framework", "scheduler", "cuda_graph", "cudagraph"],
     "fusion": ["fusion", "fused", "overlap"],
     "systems": ["system", "hip", "rocm", "driver", "launch", "dispatch"],
     "pr_intelligence": ["pr", "github", "upstream", "patch"],
