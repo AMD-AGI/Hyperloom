@@ -3377,15 +3377,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["MODEL_PATH"] = str(args.model)
 
         # Resolve framework: --framework > $FRAMEWORK env > "sglang".
-        # Session-wide; mixing sglang/vllm in one session is not supported.
+        # Session-wide; mixing frameworks in one session is not supported.
         framework = (
             (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
             or "sglang"
         )
-        if framework not in ("sglang", "vllm"):
+        if framework not in ("sglang", "vllm", "atom"):
             print(
-                f"ERROR: --framework must be sglang or vllm (got {framework!r}); "
-                "set $FRAMEWORK accordingly or pass --framework",
+                f"ERROR: --framework must be sglang, vllm, or atom "
+                f"(got {framework!r}); set $FRAMEWORK accordingly or pass "
+                "--framework",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -3840,11 +3841,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "sglang_mi325x.sh / vllm_mi325x.sh.",
     )
     opt.add_argument(
-        "--framework", choices=["sglang", "vllm"], default=None,
+        "--framework", choices=["sglang", "vllm", "atom"], default=None,
         help="Inference framework to benchmark / optimize. Resolution order: "
              "--framework > $FRAMEWORK env > sglang (default). Selection is "
-             "session-wide; mixing sglang and vllm in a single session is "
-             "not supported.",
+             "session-wide; mixing frameworks in a single session is not "
+             "supported. NOTE: --framework atom is single-node-only and has "
+             "no profiler / framework-source-patcher integration; B3 "
+             "auto-tightens incompatible phases off when atom is selected.",
     )
     opt.add_argument(
         "--nodes", type=int,
