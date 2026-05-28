@@ -2759,6 +2759,15 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         except ValueError:
             gpn = 8
 
+    # Forward agent-supplied prompt env (verbatim, no defaults). When the
+    # state file already has a non-terminal rayjob_id, cmd_create_rayjob
+    # reuses it and skips POST CreateWorkload -- so passing extra_env on
+    # a reuse call is a no-op (the original create-time env stays in
+    # effect). To inject env into an existing RayJob the caller must
+    # `stop-rayjob --clear-state` first or invoke create-rayjob with
+    # --recreate. See multi_node/SKILL.md.
+    rayjob_extra_env = list(getattr(args, "rayjob_extra_env", None) or [])
+
     ns_create = argparse.Namespace(
         workspace=None,
         image=image,
@@ -2770,7 +2779,7 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         display_name=None,
         description=None,
         owner_id=None,
-        extra_env=[],
+        extra_env=rayjob_extra_env,
         extra_label=[],
         no_wait=False,
         recreate=False,
@@ -3844,6 +3853,31 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="GPUs per RayJob pod (default: INFERENCE_OPTIMIZER_GPUS_PER_NODE "
              "or 8). Passed to multi_node create-rayjob.",
+    )
+    # --rayjob-extra-env is a PROMPT-DRIVEN pass-through: this CLI never
+    # invents or hardcodes env keys/values. The agent maps each line of
+    # the user prompt's `env:` block into one `--rayjob-extra-env K=V`
+    # (same contract as `multi_node create-rayjob --extra-env`). Forwarded
+    # verbatim to `_provision_multi_node_rayjob_stack` -> cmd_create_rayjob
+    # -> workload_spec.env. Reserved keys (RAY_JOB_ENTRYPOINT) are stripped
+    # by the multi_node layer. Credential keys (*_API_KEY / *_BASE_URL)
+    # are still auto-injected by _credential_fanout() — do NOT also pass
+    # them here; the prompt block deliberately excludes them per the
+    # multi_node SKILL contract.
+    opt.add_argument(
+        "--rayjob-extra-env",
+        action="append",
+        default=[],
+        metavar="K=V",
+        help="Extra env entries to inject into the multi-node RayJob "
+             "(repeatable). Agent maps each line of the user prompt's "
+             "`env:` block into one --rayjob-extra-env K=V; the CLI "
+             "does not own any default. Skip *_API_KEY / *_BASE_URL "
+             "(auto-injected by _credential_fanout) and RAY_JOB_ENTRYPOINT "
+             "(reserved by workload_spec). Only takes effect when "
+             "--nodes>=2 and this run actually creates the RayJob; "
+             "idempotent reuse of an existing rayjob_id keeps the env "
+             "set at original create time.",
     )
     opt.add_argument(
         "--tp", type=int,
