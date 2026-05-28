@@ -1740,7 +1740,8 @@ async def _probe_gateway_health(
 # Default mount paths probed by J2. Each is read from the env at probe
 # time so an operator can move them without rebuilding the agent.
 _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
-    ("TRACELENS_ROOT", "/workspace/TraceLens-internal"),
+    ("TRACELENS_ROOT", "/workspace/TraceLens"),
+    ("TRACELENS_INTERNAL_ROOT", "/workspace/TraceLens-internal"),
     ("INFERENCEX_PATH", ""),
     ("OOB_SRC", ""),
 )

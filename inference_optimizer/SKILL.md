@@ -122,14 +122,14 @@ Path helpers (don't string-concat):
 | `manifest.write_manifest(sd, args)` / `load_manifest(sd)` | manifest.json read/write |
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
-or warm-start caches): **TraceLens** — one dependency, two editable
-installs from different source repos: `$TRACELENS_PKG_ROOT` (default
+or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
 `/workspace/TraceLens`; public [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens))
-then `$TRACELENS_ROOT` (default `/workspace/TraceLens-internal`;
+with an internal extension at `$TRACELENS_INTERNAL_ROOT` (default
+`/workspace/TraceLens-internal`;
 [AMD-AGI/TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal)
-— skills, patches, CLI). See README Local Mode step 1. The per-version
+— rehydration module). See README Local Mode step 1. The per-version
 `sglang_roofline_patches/sglang_<minor>_<patch>/` layout under
-TraceLens-internal is required by `_server_patcher`),
+TraceLens is required by `_server_patcher`),
 `$OOB_SRC` / `$HYPERLOOM_BUNDLE`,
 `/sgl-workspace/{aiter,sglang,vllm}/`, `~/.claude/config.json` +
 `~/.codex/auth.json`, `~/.cache/amd-ai-devtool/semantic-index/`
@@ -371,7 +371,8 @@ of `inference_optimizer/install.sh`):
 | Component | Provided by |
 |---|---|
 | `ray==2.44.1` + `click<8.3.0` | pip |
-| TraceLens (two-source editable install) | `ensure_tracelens` (`pip install -e` public at `$TRACELENS_PKG_ROOT`, then internal at `$TRACELENS_ROOT`; mirrors read-only internal checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`) |
+| TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
+| TraceLens-internal (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT`; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module) |
 | GEAK CLI + `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` | `ensure_geak` |
 | Node.js/npm + OOB CLI + claude/codex npm CLIs + `@cursor/sdk` global install + `~/.claude/config.json` + `~/.codex/auth.json` | `ensure_node` + `ensure_oob` (mirrors `${HYPERLOOM_BUNDLE}/OOB` → `${HYPERLOOM_ROOT}/OOB/oob_cli`) |
 | `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL` exported to `kernel-agent.env.sh` if set in env (cursor backend uses Cursor's own gateway). When `CURSOR_API_KEY` is unset, `cursor` is auto-skipped from default backend selection (`choose_backends` / `recommend_backends` / batch fallback ladder / `parallel_e2e_runner --backends` default); explicit user-supplied backends are still honored. | `write_env_file` |
@@ -382,7 +383,7 @@ GEAK config path, and InferenceX path. Source it (don't try to derive these by
 hand). Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
 
-**Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
+**Multi-node escape hatch**: if `$TRACELENS_INTERNAL_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
 `rsync -a` them into `$SESSION_DIR/vendor/<name>/` and override the matching
 env vars BEFORE running `install.sh`. Single-node WekaFS-mount setups (the
@@ -423,8 +424,8 @@ CLI:
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-export TRACELENS_PKG_ROOT="${TRACELENS_PKG_ROOT:-/workspace/TraceLens}"
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens-internal}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
+export TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/workspace/TraceLens-internal}"
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"

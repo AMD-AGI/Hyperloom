@@ -455,7 +455,8 @@ RUNTIME_API_NAMES = {
     "cudadevicesynchronize",
     "cudastreamsynchronize",
 }
-DEFAULT_TRACELENS_ROOT = "/workspace/TraceLens-internal"
+DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens"
+DEFAULT_TRACELENS_INTERNAL_ROOT = "/wekafs/hyperloom/TraceLens-internal"
 
 
 def utc_now() -> str:
@@ -2127,10 +2128,10 @@ def main() -> int:
         ),
     )
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
-    parser.add_argument("--tracelens-pkg-root",
-                        default=os.environ.get("TRACELENS_PKG_ROOT", ""),
-                        help="Public TraceLens checkout (TRACELENS_PKG_ROOT). "
-                             "Passed to the orchestrator prompt as TraceLens root.")
+    parser.add_argument("--tracelens-internal-root",
+                        default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
+                        help="TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
+                             "Rehydration module; plumbed to run_tracelens_skill.")
     parser.add_argument("--roofline-json", default="")
     parser.add_argument(
         "--capture-folder",
@@ -2309,6 +2310,7 @@ def main() -> int:
                           log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                           started_at=started_at)
             tl_root = Path(args.tracelens_root)
+            tl_internal_root = Path(args.tracelens_internal_root)
             if not tl_root.exists():
                 raise FileNotFoundError(
                     f"TraceLens root not found: {tl_root} "
@@ -2317,8 +2319,8 @@ def main() -> int:
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],
                         cwd=tl_root, log_path=log_path,
                         timeout_s=max(60, int(args.budget_minutes * 60)))
-            # TraceLens-internal v0.3 (#148): the standalone analysis skill
-            # lives under TraceLens/Agent/Analysis/ with the shorter file name
+            # TraceLens v0.3 (#148): the standalone analysis skill lives
+            # under TraceLens/Agent/Analysis/ with the shorter file name
             # `analysis-orchestrator.md` (renamed from
             # `standalone-analysis-orchestrator.md` and moved out of the old
             # `AgenticMode/Standalone/` tree). Override by setting
@@ -2610,13 +2612,12 @@ def main() -> int:
                         if args.capture_folder else
                         discover_capture_folder(trace_input_path, trace_files)
                     )
-                    tl_public_root = Path(args.tracelens_pkg_root) if args.tracelens_pkg_root else None
                     skill_result = asyncio.run(run_tracelens_skill(
                         skill_path=skill,
                         trace_path=cli_trace_path,
                         output_dir=tracelens_dir,
-                        tracelens_root=tl_public_root,
-                        tracelens_internal_root=tl_root,
+                        tracelens_root=tl_root,
+                        tracelens_internal_root=tl_internal_root,
                         platform=args.target_platform,
                         framework=args.framework,
                         analysis_mode=args.analysis_mode,

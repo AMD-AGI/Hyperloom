@@ -102,8 +102,6 @@ cd TraceLens && pip install -e .
 
 git clone https://github.com/AMD-AGI/TraceLens-internal.git
 cd TraceLens-internal && pip install -e .
-
-TraceLens_generate_perf_report_pytorch_inference --help
 ```
 
 Recommended container paths (match the defaults below):
@@ -165,8 +163,8 @@ Edit `.env`:
 ```env
 SAFE_API_KEY=ak-your-safe-apikey
 OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
-TRACELENS_PKG_ROOT=/workspace/TraceLens
-TRACELENS_ROOT=/workspace/TraceLens-internal
+TRACELENS_ROOT=/workspace/TraceLens
+TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 # Optional, only set if you want the Cursor kernel-opt backend:
 # CURSOR_API_KEY=crsr_xxxxxxxxxxxx
@@ -177,8 +175,8 @@ TRACELENS_ROOT=/workspace/TraceLens-internal
 |----------|-------------|---------|
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
 | `OPENAI_BASE_URL` | LLM gateway endpoint | `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1` |
-| `TRACELENS_PKG_ROOT` | TraceLens public repo checkout (first `pip install -e .`) | `/workspace/TraceLens` |
-| `TRACELENS_ROOT` | TraceLens-internal repo checkout (second `pip install -e .`; skills, patches, CLI) | `/workspace/TraceLens-internal` |
+| `TRACELENS_ROOT` | TraceLens public repo checkout (`pip install -e .`; skills, patches, CLI, analysis orchestrator) | `/workspace/TraceLens` |
+| `TRACELENS_INTERNAL_ROOT` | TraceLens-internal repo checkout (`pip install -e .`; rehydration module) | `/workspace/TraceLens-internal` |
 | `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to skip cursor and only use claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 
