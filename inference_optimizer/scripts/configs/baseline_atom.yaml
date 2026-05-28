@@ -23,12 +23,16 @@
 #   - profile / roofline / TraceLens DO work on atom. The Magpie atom
 #     wrapper (atom_mi*x.sh) bridges PROFILE=1 to atom's --torch-profiler-dir
 #     CLI flag and the InferenceX bench client auto-POSTs /start_profile +
-#     /stop_profile. Set PROFILE=1 (env) or flip torch_profiler.enabled
-#     below to true; atom writes *.pt.trace.json.gz under
+#     /stop_profile. Set PROFILE=1 (env) or use profile_atom.yaml (which
+#     pre-flips the profiler block below to true) for the profile /
+#     roofline executors. atom writes *.pt.trace.json.gz under
 #     <torch_profiler_dir>/rank_<N>/ which TraceLens consumes unchanged.
 #   - Multi-node is unsupported; cli.py rejects --framework atom + --nodes>=2.
-#   - Kernel-agent / framework-agent are auto-disabled (no atom source
-#     patcher); cli.py auto-sets --no-kernel and --no-framework.
+#   - Kernel-agent + framework-agent + profile / roofline / TraceLens
+#     all run on atom after atom_plan/ phases 1-3. The only remaining
+#     auto-tighten in cli.py is the --nodes>=2 fail-fast guard
+#     (_apply_atom_auto_tighten / _assert_atom_single_node); --no-kernel
+#     and --no-framework are NO LONGER auto-flipped.
 
 benchmark:
   framework: atom
@@ -65,8 +69,14 @@ benchmark:
                                # JIT + weights load) can hit ~6 min on first run
 
   profiler:
+    # baseline doesn't profile — profile_atom.yaml flips these to
+    # true. After atom_plan/ phase 1 the atom wrapper (atom_mi*x.sh)
+    # bridges PROFILE=1 to --torch-profiler-dir, so atom's profile
+    # executor produces the same chrome traces TraceLens consumes
+    # for sglang / vllm. Set PROFILE=1 here or use profile_atom.yaml
+    # to enable.
     torch_profiler:
-      enabled: false           # atom has no profiler wiring in Magpie v1
+      enabled: false
     system_profiler:
       enabled: false
     tracelens:

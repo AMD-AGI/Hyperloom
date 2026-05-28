@@ -136,9 +136,11 @@ path you emit MUST be one of:
   (a) verbatim from SharedState, OR
   (b) prefixed by `SESSION_DIR`, OR
   (c) under one of the framework source roots listed in SESSION CONTEXT
-      (`framework_source_roots`, default `/sgl-workspace/{aiter,sglang,vllm}/`
-      plus any `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` env supplement)
-      for `source_file` references.
+      (`framework_source_roots`, default
+      `/sgl-workspace/{aiter,sglang,vllm}/` + `/app/ATOM/atom/` (atom's
+      editable-install layout, opened to kernel-agent by `atom_plan/`
+      phase 2.1) plus any `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`
+      env supplement) for `source_file` references.
 
 PolicyGate REJECTS intents whose path fields fall outside this set; the
 rejection lands in your inbox as `policy_denied` so you can self-correct

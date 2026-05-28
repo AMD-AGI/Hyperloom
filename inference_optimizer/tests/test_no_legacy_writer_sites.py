@@ -129,6 +129,24 @@ ALLOWED_FILES: dict[str, str] = {
     "robustness-agent/tests/test_signals_repeated_payload.py":
         "regression test that legacy + canonical envelopes hash to "
         "the same fingerprint (gap G3)",
+
+    # atom_gap2.md H1 (B1 fix): regression tests parametrise the
+    # ``_load_materialized_workload_metadata`` reader over (sglang,
+    # vllm, atom) including stray-EXTRA_SGLANG_ARGS cases for atom
+    # YAMLs, so the test source mentions the legacy name by design
+    # (the lowercase ``extra_sglang_args`` lives only inside a test
+    # function name ``test_atom_server_args_not_read_from_extra_sglang_args``).
+    "inference_optimizer/tests/test_kernel_request_handlers_units.py":
+        "test_server_args_read_from_per_framework_env_key + "
+        "test_atom_server_args_not_read_from_extra_sglang_args "
+        "parametrise the materialised metadata reader",
+
+    # atom_gap2.md H3 (B4-B6 docs refresh): the IR-8 entry in
+    # SKILL.md now documents the Phase 4 compat-helper read path
+    # and names the legacy key in the bullet describing the alias.
+    "inference_optimizer/SKILL.md":
+        "IR-8 entry names the legacy extra_sglang_args alias as "
+        "Phase 4 compat surface context",
 }
 
 
