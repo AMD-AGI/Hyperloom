@@ -563,6 +563,140 @@ class TestMoEActiveWeightBytes:
 # ---------------------------------------------------------------------------
 # HW_SPECS table sanity.
 # ---------------------------------------------------------------------------
+class TestResolveEffectiveConcurrency:
+    """Concurrency fallback chain (PR-A): state.conc -> baseline yaml
+    envs.CONC -> 1. The yaml path covers the SharedState-default-8 vs
+    ci-config-CONC=64 mismatch the e2e exposed on Qwen3-30B-A3B."""
+
+    def test_state_conc_wins_when_positive(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            _resolve_effective_concurrency,
+        )
+        state = SimpleNamespace(conc=32, last_baseline={})
+        assert _resolve_effective_concurrency(state) == 32
+
+    def test_falls_back_to_baseline_yaml_envs_conc(self, tmp_path):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            _resolve_effective_concurrency,
+        )
+        yaml_path = tmp_path / "baseline_config.with_envs.yaml"
+        yaml_path.write_text(
+            "benchmark:\n"
+            "  envs:\n"
+            "    CONC: 64\n"
+            "    ISL: 256\n",
+            encoding="utf-8",
+        )
+        state = SimpleNamespace(
+            conc=0,  # SharedState default — drives the fallback
+            last_baseline={
+                "extras": {"materialized_config": str(yaml_path)},
+            },
+        )
+        assert _resolve_effective_concurrency(state) == 64
+
+    def test_state_conc_8_default_still_takes_precedence_over_yaml(
+        self, tmp_path,
+    ):
+        """If operator explicitly sets state.conc (>0), trust them
+        regardless of the baseline yaml. Only conc=0 triggers the
+        yaml fallback."""
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            _resolve_effective_concurrency,
+        )
+        yaml_path = tmp_path / "baseline_config.with_envs.yaml"
+        yaml_path.write_text(
+            "benchmark:\n  envs:\n    CONC: 64\n",
+            encoding="utf-8",
+        )
+        state = SimpleNamespace(
+            conc=8,  # explicit operator value
+            last_baseline={
+                "extras": {"materialized_config": str(yaml_path)},
+            },
+        )
+        assert _resolve_effective_concurrency(state) == 8
+
+    def test_missing_yaml_falls_back_to_one(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            _resolve_effective_concurrency,
+        )
+        state = SimpleNamespace(
+            conc=0,
+            last_baseline={
+                "extras": {"materialized_config": "/no/such/file.yaml"},
+            },
+        )
+        assert _resolve_effective_concurrency(state) == 1
+
+    def test_malformed_yaml_falls_back_to_one(self, tmp_path):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            _resolve_effective_concurrency,
+        )
+        bad = tmp_path / "broken.yaml"
+        bad.write_text("not: [valid yaml at all", encoding="utf-8")
+        state = SimpleNamespace(
+            conc=0,
+            last_baseline={"extras": {"materialized_config": str(bad)}},
+        )
+        assert _resolve_effective_concurrency(state) == 1
+
+    def test_yaml_without_conc_falls_back_to_one(self, tmp_path):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            _resolve_effective_concurrency,
+        )
+        yaml_path = tmp_path / "no_conc.yaml"
+        yaml_path.write_text(
+            "benchmark:\n  envs:\n    ISL: 256\n",
+            encoding="utf-8",
+        )
+        state = SimpleNamespace(
+            conc=0,
+            last_baseline={"extras": {"materialized_config": str(yaml_path)}},
+        )
+        assert _resolve_effective_concurrency(state) == 1
+
+    def test_no_last_baseline_falls_back_to_one(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            _resolve_effective_concurrency,
+        )
+        state = SimpleNamespace(conc=0, last_baseline=None)
+        assert _resolve_effective_concurrency(state) == 1
+
+    def test_compute_peak_from_state_uses_yaml_fallback(self, tmp_path):
+        """End-to-end: state.conc=0 + yaml envs.CONC=64 →
+        peak computed with batch=64 (not 1, not 8)."""
+        _write_synthetic_model(
+            tmp_path / "m",
+            total_size=140_000_000_000,
+            num_layers=80, num_kv_heads=8,
+            hidden_size=8192, num_attention_heads=64,
+            torch_dtype="bfloat16",
+        )
+        yaml_path = tmp_path / "bl.yaml"
+        yaml_path.write_text(
+            "benchmark:\n  envs:\n    CONC: 64\n",
+            encoding="utf-8",
+        )
+        state = SimpleNamespace(
+            model_path=str(tmp_path / "m"),
+            gpu_type="mi300x",
+            tp=1,
+            precision="bf16",
+            conc=0,  # default — forces yaml fallback
+            isl=2048,
+            osl=512,
+            last_baseline={"extras": {"materialized_config": str(yaml_path)}},
+        )
+        peak_with_yaml = compute_peak_from_state(state)
+        # Same call but conc=1 (state.conc set explicitly to 1, no fallback)
+        state.conc = 1
+        peak_with_conc_1 = compute_peak_from_state(state)
+        # batch=64 amortizes weight reads 64×, so the yaml-resolved peak
+        # must be substantially higher than the conc=1 peak.
+        assert peak_with_yaml > 10 * peak_with_conc_1
+
+
 class TestHWSpecsTable:
     def test_mi_series_present(self):
         for key in ("mi300x", "mi325x", "mi355x"):

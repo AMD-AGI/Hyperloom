@@ -361,12 +361,64 @@ def compute_theoretical_peak_output_tok_per_sec(
     return bw_total_bytes_per_sec / bytes_per_token_total
 
 
+def _resolve_effective_concurrency(state: Any) -> int:
+    """Best-effort resolution of the concurrency the actual benchmark used.
+
+    Fallback chain (any positive value wins):
+
+      1. ``state.conc`` (SharedState field, populated by ``cli._init_fresh_
+         session`` from ``$CONC`` / yaml). Subject to a default-vs-stale
+         pitfall: when an operator launches without ``--conc`` / ``$CONC``,
+         this stays at the SharedState dataclass default (typically 8)
+         while the materialized baseline yaml carries the ci-config
+         ``CONC: 64``. Reading state.conc alone produces an 8x
+         under-counted ceiling.
+      2. ``state.last_baseline.extras.materialized_config`` →
+         ``envs.CONC`` in the on-disk baseline yaml. This is the
+         ground-truth value the Magpie subprocess actually ran with;
+         we treat it as authoritative whenever the file is readable.
+      3. ``1`` as the ultimate fallback so the formula divisor never
+         degenerates (and matches the single-stream interpretation).
+
+    Returns ``int`` >= 1.
+    """
+    conc = int(getattr(state, "conc", 0) or 0)
+    if conc > 0:
+        return conc
+    last_bl = getattr(state, "last_baseline", None) or {}
+    if isinstance(last_bl, dict):
+        extras = last_bl.get("extras") or {}
+        cfg_path = (
+            extras.get("materialized_config")
+            if isinstance(extras, dict) else ""
+        )
+        if cfg_path:
+            try:
+                import yaml as _yaml
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = _yaml.safe_load(f) or {}
+                envs = (cfg.get("benchmark") or {}).get("envs") or {}
+                raw = envs.get("CONC")
+                if raw is not None:
+                    parsed = int(raw)
+                    if parsed > 0:
+                        return parsed
+            except Exception:  # noqa: BLE001 — yaml IO / parse is best-effort
+                pass
+    return 1
+
+
 def compute_peak_from_state(state: Any) -> float:
     """Convenience wrapper reading directly from a ``SharedState``-like object.
 
     Returns ``0.0`` when ``model_path`` / ``gpu_type`` / any required
     field is unset or unreadable. Never raises so the caller can stamp
     the value into history entries unconditionally.
+
+    Concurrency is resolved via :func:`_resolve_effective_concurrency`
+    (state.conc → baseline yaml envs.CONC → 1), not ``state.conc``
+    directly, so a SharedState default-8 does not under-count the
+    divisor for a session whose actual benchmark CONC was 64.
     """
     meta = load_model_meta(
         getattr(state, "model_path", ""),
@@ -385,5 +437,5 @@ def compute_peak_from_state(state: Any) -> float:
         kv_dtype_bytes=meta.weight_dtype_bytes,
         isl=int(getattr(state, "isl", 0) or 0),
         osl=int(getattr(state, "osl", 0) or 0),
-        concurrency=int(getattr(state, "conc", 0) or 0),
+        concurrency=_resolve_effective_concurrency(state),
     )
