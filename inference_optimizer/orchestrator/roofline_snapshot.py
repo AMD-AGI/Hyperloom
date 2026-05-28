@@ -191,6 +191,10 @@ def build_roofline_snapshot(
     snap: dict[str, Any] = {
         "snapshot_id": snapshot_id,
         "ts": ts or "",
+        # 9fe4609 sidecar pointer — caller (SharedState.record_trace_analyze)
+        # overwrites with the real path; stays empty for offline /
+        # synthetic callers that only have an analysis.md.
+        "kernel_roofline_path": "",
         "compute_pct": None,
         "idle_pct": None,
         "comm_pct": None,

@@ -47,6 +47,7 @@ def _snapshot(
     top_kernel_gpu_pct: float | None = 17.64,
     top_kernel_bound_type: str | None = "compute",
     trace_input: str = "/tmp/trace",
+    kernel_roofline_path: str = "",
 ) -> dict[str, Any]:
     """Build a roofline_snapshots entry matching the new schema."""
     return {
@@ -54,6 +55,8 @@ def _snapshot(
         "analysis_md_path": analysis_md_path,
         "trace_input": trace_input,
         "ts": ts,
+        # 9fe4609 sidecar pointer to reports/kernel_roofline.json.
+        "kernel_roofline_path": kernel_roofline_path,
         "compute_pct": compute_pct,
         "idle_pct": idle_pct,
         "comm_pct": comm_pct,
@@ -265,3 +268,62 @@ def test_format_section_before_after_renders_both_blocks(tmp_path):
     assert "Baseline snapshot #1" in md
     assert "Post-optimization snapshot #2" in md
     assert "N31" not in md
+
+
+# ---------------------------------------------------------------------------
+# kernel_roofline_path sidecar (9fe4609 contract)
+# ---------------------------------------------------------------------------
+def test_build_summary_propagates_kernel_roofline_path(analysis_md):
+    """The per-kernel roofline sidecar path written by
+    ``tracelens_analysis.py`` (``reports/kernel_roofline.json``) must
+    survive into ``final.json`` so dashboards have a stable pointer to
+    the per-kernel arithmetic-intensity / efficiency table.
+
+    9fe4609 (``feat: add kernel roofline sidecar evidence``) put the
+    field on ``roofline_comparison.latest``; PR-321's history-driven
+    rewrite must keep that surface non-empty whenever the underlying
+    ``state.roofline_snapshots`` entry carries the path.
+    """
+    path = analysis_md("analysis_1.md")
+    snap = _snapshot(
+        snapshot_id=1,
+        analysis_md_path=path,
+        ts="2026-05-24T13:00:02+00:00",
+        kernel_roofline_path="/tmp/session/reports/kernel_roofline.json",
+    )
+    state = _mock_state(roofline_snapshots=[snap])
+    summary = _build_summary_dict(state, ev_counts={}, highlights=[])
+    cmp = summary.get("roofline_comparison")
+    assert cmp is not None
+    # single_snapshot mode → both sides carry the same sidecar pointer.
+    assert (
+        cmp["baseline"].get("kernel_roofline_path")
+        == "/tmp/session/reports/kernel_roofline.json"
+    )
+    assert (
+        cmp["latest"].get("kernel_roofline_path")
+        == "/tmp/session/reports/kernel_roofline.json"
+    )
+
+
+def test_build_roofline_snapshot_default_carries_empty_kernel_roofline_path(
+    tmp_path,
+):
+    """``roofline_snapshot.build_roofline_snapshot`` is the canonical
+    factory; even when callers only have an analysis.md (no
+    ``kernel_roofline_path`` to inject) the returned dict MUST still
+    expose the key so downstream readers don't ``KeyError``."""
+    from inference_optimizer.orchestrator.roofline_snapshot import (
+        build_roofline_snapshot,
+    )
+    p = tmp_path / "analysis.md"
+    p.write_text(
+        "# TraceLens\n\n## Executive Summary\n\nbody\n", encoding="utf-8",
+    )
+    snap = build_roofline_snapshot(
+        snapshot_id=1,
+        ts="2026-05-24T13:00:00+00:00",
+        analysis_md_path=str(p),
+    )
+    assert "kernel_roofline_path" in snap
+    assert snap["kernel_roofline_path"] == ""

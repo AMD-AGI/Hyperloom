@@ -2703,6 +2703,10 @@ class SharedState:
             )
             history_entry["trace_input"] = str(trace_input)
             history_entry["analysis_md_path"] = str(analysis_md_path)
+            # 9fe4609 sidecar artifact pointer: dashboards read this
+            # path to surface per-kernel roofline data from the
+            # tracelens-written ``reports/kernel_roofline.json``.
+            history_entry["kernel_roofline_path"] = str(kernel_roofline_path)
             if not isinstance(self.roofline_snapshots, list):
                 self.roofline_snapshots = []
             self.roofline_snapshots.append(history_entry)
