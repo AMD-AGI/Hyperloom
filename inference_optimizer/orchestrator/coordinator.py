@@ -3572,6 +3572,13 @@ class Coordinator:
             denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
             if denial_summary:
                 sections.append(denial_summary)
+            # dynamic_action.MD P6 §7 — surface the most recent N
+            # dynamic_action summaries so orchestration sees its own
+            # dispatch outcomes on the next tick without paying the
+            # token cost of the full ledger.
+            dyn_section = self.shared_state.to_dynamic_actions_prompt_section()
+            if dyn_section:
+                sections.append(dyn_section)
             required_step = self._required_next_step()
             if required_step:
                 sections.append("=== Execution checklist (Coordinator-enforced) ===")
@@ -5835,15 +5842,35 @@ class Coordinator:
                 dynamic_action_seed_kit_path(self.session_dir, dyn_id),
             )
 
+        # P6 §3 — populate the closed prompt-projection fields at
+        # dispatch time. Anything beyond SUMMARY_PROMPT_FIELDS is
+        # private audit metadata (degraded_dispatch / seed_kit_tokens
+        # / side_effects_declared) that lives on disk but never leaks
+        # into the prompt section.
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            LAST_OUTCOME_BY_STATUS,
+            MOTIVATION_GAP_SHORT_MAX_CHARS,
+        )
+        motivation_short = payload_snapshot["motivation_gap_text"].strip()
+        if len(motivation_short) > MOTIVATION_GAP_SHORT_MAX_CHARS:
+            motivation_short = (
+                motivation_short[: MOTIVATION_GAP_SHORT_MAX_CHARS - 3].rstrip()
+                + "..."
+            )
         summary = {
             "dyn_id": dyn_id,
-            "round_id": round_id,
-            "status": "DISPATCHED",
+            "round_index": round_id,
+            "status": DynamicActionStatus.DISPATCHED.value,
+            "last_outcome": LAST_OUTCOME_BY_STATUS[DynamicActionStatus.DISPATCHED],
             "dispatched_at": dispatched_at,
             "scope_domains": payload_snapshot["scope_domains"],
+            "motivation_gap_short": motivation_short,
+            "verdict": None,
+            "cumulative_gain": None,
+            "artifact_path": str(artifact_dir) if artifact_dir else "",
             "side_effects_declared": payload_snapshot["side_effects_declared"],
             "budget_hint": payload_snapshot["budget_hint"],
-            "artifact_path": str(artifact_dir) if artifact_dir else "",
             "degraded_dispatch": spec["degraded_dispatch"],
             "seed_kit_tokens": spec["seed_kit_tokens"],
         }
@@ -5893,6 +5920,122 @@ class Coordinator:
     # ------------------------------------------------------------------
     # dynamic_action.MD P5 — runner / critic / integrate lifecycle hooks
     # ------------------------------------------------------------------
+    def _ensure_dynamic_action_dispatched_row(
+        self,
+        *,
+        dyn_id: str,
+        params: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Make sure ``dynamic_actions[dyn_id]`` has a DISPATCHED row
+        before the lifecycle hooks walk to a downstream state.
+
+        Coordinator-side wiring normally creates the row at dispatch
+        (P2). This helper is the defensive fallback for the rare path
+        where the row is missing — runner crash before dispatch
+        finalise, resume-with-no-summary, test setups, etc. — and
+        also enriches a freshly-seeded row with the P6 §3
+        prompt-projection fields (motivation_gap_short / scope_domains
+        / artifact_path) when ``params`` / ``extra`` carry them.
+        """
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            MOTIVATION_GAP_SHORT_MAX_CHARS,
+        )
+        if dyn_id in (self.shared_state.dynamic_actions or {}):
+            return
+        params = params or {}
+        extra = extra or {}
+        scope_from_spec: list[str] = []
+        motivation = ""
+        artifact_path = str(params.get("artifact_path") or "")
+        spec_path = params.get("spec_path")
+        if spec_path:
+            try:
+                spec_dict = json.loads(
+                    Path(str(spec_path)).read_text(encoding="utf-8"),
+                )
+                payload_dict = spec_dict.get("payload") or {}
+                scope_from_spec = list(payload_dict.get("scope_domains") or ())
+                motivation = str(payload_dict.get("motivation_gap_text") or "")
+            except (OSError, json.JSONDecodeError):
+                pass
+        if len(motivation) > MOTIVATION_GAP_SHORT_MAX_CHARS:
+            motivation = (
+                motivation[: MOTIVATION_GAP_SHORT_MAX_CHARS - 3].rstrip()
+                + "..."
+            )
+        seed_extra: dict[str, Any] = {
+            "dyn_id": dyn_id,
+            "scope_domains": scope_from_spec,
+            "motivation_gap_short": motivation,
+            "artifact_path": artifact_path,
+            "verdict": None,
+            "cumulative_gain": None,
+            "synthesised_row": True,
+        }
+        seed_extra.update(extra)
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id,
+            status=DynamicActionStatus.DISPATCHED.value,
+            extra=seed_extra,
+        )
+
+    def _walk_dynamic_action_to_state(
+        self,
+        dyn_id: str,
+        *,
+        target_status: "DynamicActionStatus",
+    ) -> None:
+        """Step the dyn_id summary along the canonical happy path
+        until ``status == target_status``.
+
+        Each step uses the strict writer so illegal transitions still
+        log warnings; the helper is a *recovery* primitive that
+        catches hook skips without bypassing the state machine.
+        Terminal source states stop the walk (a terminal can't be
+        advanced).
+        """
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            TERMINAL_LIFECYCLE_STATUSES,
+        )
+
+        canonical_path = (
+            DynamicActionStatus.DISPATCHED,
+            DynamicActionStatus.SUB_AGENT_RUNNING,
+            DynamicActionStatus.SUB_AGENT_DONE,
+            DynamicActionStatus.AWAITING_CRITIC,
+            DynamicActionStatus.INTEGRATING,
+        )
+        if target_status not in canonical_path:
+            return
+        self._ensure_dynamic_action_dispatched_row(dyn_id=dyn_id)
+        target_index = canonical_path.index(target_status)
+        for _ in range(len(canonical_path)):
+            current_row = (
+                self.shared_state.dynamic_actions.get(dyn_id) or {}
+            )
+            current_raw = str(current_row.get("status") or "")
+            try:
+                current = DynamicActionStatus(current_raw)
+            except ValueError:
+                return
+            if current == target_status:
+                return
+            if current in TERMINAL_LIFECYCLE_STATUSES:
+                return
+            try:
+                current_index = canonical_path.index(current)
+            except ValueError:
+                return
+            if current_index >= target_index:
+                return
+            next_status = canonical_path[current_index + 1]
+            self.shared_state.record_dynamic_action_outcome(
+                dyn_id, status=next_status.value,
+            )
+
     async def _handle_dynamic_action_runner_result(
         self,
         *,
@@ -5956,12 +6099,26 @@ class Coordinator:
             "turns_used": turns_used,
             "journal_path": str(result_dict.get("journal_path") or ""),
         }
+        # P6 §4 — walk the state machine deliberately so the audit
+        # trail captures DISPATCHED → SUB_AGENT_RUNNING transitions
+        # even when the runner finished in one tick. Defensive: if the
+        # row is missing (dispatch hook never landed), create it as
+        # DISPATCHED first so the writer's transition validator is
+        # happy.
+        self._ensure_dynamic_action_dispatched_row(
+            dyn_id=dyn_id,
+            params=params,
+            extra=extra,
+        )
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id, status=DynamicActionStatus.SUB_AGENT_RUNNING.value,
+        )
         # Non-COMPLETED → terminal status; skip critic + integrate.
         if terminal_state != DynamicRunnerTerminalState.COMPLETED:
             self.shared_state.record_dynamic_action_outcome(
                 dyn_id,
                 status=lifecycle.value,
-                last_outcome=reason or terminal_state.value.lower(),
+                last_outcome=reason or None,
                 extra=extra,
             )
             try:
@@ -5984,7 +6141,8 @@ class Coordinator:
             # COMPLETED but empty proposal_set (runner contract
             # mismatch); collapse to COMPLETED_EMPTY for the
             # lifecycle so downstream consumers see the canonical
-            # empty signal.
+            # empty signal. Walk through SUB_AGENT_RUNNING already
+            # done above; the terminal write is legal.
             self.shared_state.record_dynamic_action_outcome(
                 dyn_id,
                 status=DynamicActionStatus.COMPLETED_EMPTY.value,
@@ -6000,6 +6158,12 @@ class Coordinator:
                 )
             return
         proposal = proposal_set[0]
+        # P6 §4 — walk SUB_AGENT_RUNNING → SUB_AGENT_DONE before
+        # AWAITING_CRITIC so the state-machine audit trail captures
+        # the runner-done event distinctly from the critic dispatch.
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id, status=DynamicActionStatus.SUB_AGENT_DONE.value,
+        )
 
         # Load spec.json for scope_domains (mechanical-check truth set).
         spec_path = dynamic_action_spec_path(self.session_dir, dyn_id)
@@ -6091,8 +6255,7 @@ class Coordinator:
         self.state.pending_proposals[msg.msg_id] = pending
         self.shared_state.record_dynamic_action_outcome(
             dyn_id,
-            status=DynamicActionStatus.DISPATCHED.value,
-            last_outcome="awaiting_critic",
+            status=DynamicActionStatus.AWAITING_CRITIC.value,
             extra={
                 **extra,
                 "specialist_task_id": specialist_task_id,
@@ -6185,7 +6348,14 @@ class Coordinator:
             "critic_verdict": envelope["verdict"],
             "critic_reason_codes": list(envelope["reason_codes"]),
             "critic_proposal_msg_id": pending.proposal_msg_id,
+            "verdict": envelope["verdict"],
         }
+        # P6 §4 — ensure we land on AWAITING_CRITIC before the verdict
+        # transition (covers replays where the runner-done hook did
+        # not advance the state for any reason).
+        self._walk_dynamic_action_to_state(
+            dyn_id, target_status=DynamicActionStatus.AWAITING_CRITIC,
+        )
         self.shared_state.record_dynamic_action_outcome(
             dyn_id, status=new_status,
             last_outcome=last_outcome, extra=extra,
@@ -6238,10 +6408,20 @@ class Coordinator:
         gain_value: float | None = None
         if isinstance(delta_pct, (int, float)):
             gain_value = float(delta_pct)
+        # P6 §4 — the integrate completion is the
+        # INTEGRATING → {KEPT, REVERTED, INTEGRATE_FAILED} step.
+        # Walk the canonical state-machine path so the audit trail
+        # captures every intermediate transition even if upstream
+        # hooks happened to skip a state (test setups that seed
+        # DISPATCHED directly, resume-after-crash flows, etc.).
+        self._walk_dynamic_action_to_state(
+            dyn_id,
+            target_status=DynamicActionStatus.INTEGRATING,
+        )
         self.shared_state.record_dynamic_action_outcome(
             dyn_id,
             status=lifecycle.value,
-            last_outcome=integrate_status or lifecycle.value.lower(),
+            last_outcome=integrate_status or None,
             cumulative_gain=gain_value,
             extra=extra,
         )
