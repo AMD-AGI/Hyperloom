@@ -1175,9 +1175,28 @@ class Coordinator:
             "boot_origin": "coordinator_fallback",
         }
         try:
+            # SDK callers don't have a CLI ``args`` namespace to feed
+            # into ``_build_recipe_kb_dispatcher``, so we wire a
+            # minimal local-only dispatcher here. ``--cortex-kb-url``
+            # / ``--local-kb-root`` from the operator's CLI are NOT
+            # honoured on this fallback path — SDK callers wanting a
+            # remote read should construct their own dispatcher.
+            import os as _os
+            from pathlib import Path as _Path
+            from ..recipe_kb import LocalRecipeStore, RecipeKB
             from .cortex_t0 import run_t0_anchor
+
+            _root = (
+                _os.environ.get("HYPERLOOM_LOCAL_KB_ROOT")
+                or (
+                    f"{_os.environ['USER_DATA_PATH']}/recipe_kb"
+                    if _os.environ.get("USER_DATA_PATH")
+                    else "/workspace/hyperloom/recipe_kb"
+                )
+            )
+            kb = RecipeKB(local=LocalRecipeStore(root=_Path(_root)), remote=None)
             run_t0_anchor(
-                client,
+                kb,
                 state,
                 workload=workload,
                 hw=hw,
