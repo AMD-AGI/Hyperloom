@@ -1,18 +1,12 @@
-"""dynamic_action.MD P9 §5 — red-line invariants.
+"""Red-line invariant tests for the ``dynamic_action`` channel.
 
-These tests are the **machine evidence** that the §1.2 red lines stay
-enforced regardless of which layer a violation comes from. They live
-in a dedicated file (per P9 §11 #2) so CI can run them as a
-block-merge gate — any failure here means a §1.2 red line has been
-breached and the change must trigger the §3.11 design-change process,
-not a local patch.
-
-Naming convention (per P9 §11 #1): every test starts with ``inv_``;
-the eight red-line categories are I-1 through I-8 per P9 §5.1.
-
-Each test deliberately constructs a *hostile* input or behaviour and
-asserts the system blocks it — these tests must not be deleted to
-make the suite green; they ARE the red line.
+Each test constructs a hostile input and asserts the system blocks
+it. Eight categories (I-1 through I-8) cover micro-bench output,
+SharedState write protection, provenance literal, kernel-owned
+denial, server / Magpie denial, self-metric denial, integrate_patch
+mandate, and cross-``dyn_id`` isolation. Failures here indicate a
+red line has been breached; do not delete tests to make the suite
+green.
 """
 
 from __future__ import annotations
@@ -171,8 +165,7 @@ class _StubBus:
 
 
 # ===========================================================================
-# I-1 — micro-bench output never enters the promote chain
-# (dynamic_action.MD §1.2 red line: "micro-bench 仅作内部假设验证")
+# I-1 — micro-bench output never enters the promote chain.
 # ===========================================================================
 class TestInvariant_1_MicroBench:
     """I-1: micro-bench output stays inside the worktree and the
@@ -244,7 +237,7 @@ class TestInvariant_1_MicroBench:
         self, tmp_path: Path,
     ):
         """Runner finalise tears down the worktree — bench scratch
-        outputs die with it (P3 §6 recovery whitelist mechanics)."""
+        outputs die with it (only the recovery-whitelist files survive)."""
         dyn_id = "dyn-0-1"
         # Spec + seed_kit on disk so the runner can load them.
         art = dynamic_action_artifact_dir(tmp_path, dyn_id)
@@ -304,8 +297,7 @@ class TestInvariant_1_MicroBench:
 
 
 # ===========================================================================
-# I-2 — SharedState protected fields cannot be mutated by the LLM
-# (dynamic_action.MD §1.2 red line + D-C decision)
+# I-2 — SharedState protected fields cannot be mutated by the LLM.
 # ===========================================================================
 class TestInvariant_2_SharedStateProtection:
     """I-2: dynamic_actions and adjacent core fields are
@@ -359,8 +351,7 @@ class TestInvariant_2_SharedStateProtection:
 
 
 # ===========================================================================
-# I-3 — Provenance literal MUST be "dynamic" (no compound forms)
-# (dynamic_action.MD §1.2 + P1 IR-4 + P3 runner schema + P4 critic)
+# I-3 — Provenance literal MUST be "dynamic" (no compound forms).
 # ===========================================================================
 class TestInvariant_3_ProvenanceLiteral:
     """I-3: dynamic-sourced patches carry the single literal stamp
@@ -455,8 +446,7 @@ class TestInvariant_3_ProvenanceLiteral:
 
 
 # ===========================================================================
-# I-4 — Dynamic action cannot touch kernel-owned actions
-# (dynamic_action.MD §1.2 + CLAUDE.md IR-6)
+# I-4 — Dynamic action cannot touch kernel-owned actions.
 # ===========================================================================
 class TestInvariant_4_KernelOwnedDenial:
 
@@ -503,8 +493,7 @@ class TestInvariant_4_KernelOwnedDenial:
 
 
 # ===========================================================================
-# I-5 — Dynamic action cannot start independent server / run Magpie
-# (dynamic_action.MD §1.2)
+# I-5 — Dynamic action cannot start independent server / run Magpie.
 # ===========================================================================
 class TestInvariant_5_NoServerNoMagpie:
 
@@ -542,8 +531,7 @@ class TestInvariant_5_NoServerNoMagpie:
 
 
 # ===========================================================================
-# I-6 — Dynamic action cannot declare its own metric
-# (dynamic_action.MD §1.2)
+# I-6 — Dynamic action cannot declare its own metric.
 # ===========================================================================
 class TestInvariant_6_NoSelfMetric:
 
@@ -592,8 +580,8 @@ class TestInvariant_6_NoSelfMetric:
 
 
 # ===========================================================================
-# I-7 — Dynamic patches must traverse integrate_patch; no source
-# tree shortcut (dynamic_action.MD §1.2)
+# I-7 — Dynamic patches must traverse integrate_patch; no source-tree
+# shortcut.
 # ===========================================================================
 class TestInvariant_7_IntegratePatchOnly:
 
@@ -644,8 +632,7 @@ class TestInvariant_7_IntegratePatchOnly:
 
 
 # ===========================================================================
-# I-8 — Dynamic actions never learn from each other
-# (dynamic_action.MD §1.8 + §1.2 implicit)
+# I-8 — Dynamic actions never learn from each other.
 # ===========================================================================
 class TestInvariant_8_CrossDynIsolation:
 
@@ -700,8 +687,7 @@ class TestInvariant_8_CrossDynIsolation:
 
 # ===========================================================================
 # Round-cap invariants — every reject + every restart respects
-# MAX_DYNAMIC_PER_ROUND / MAX_DYNAMIC_SOURCED_VARIANTS
-# (dynamic_action.MD §1.4 + Q3)
+# MAX_DYNAMIC_PER_ROUND / MAX_DYNAMIC_SOURCED_VARIANTS.
 # ===========================================================================
 class TestInvariant_RoundCap:
 
@@ -710,8 +696,8 @@ class TestInvariant_RoundCap:
         assert MAX_DYNAMIC_SOURCED_VARIANTS == 1
 
     def test_inv_dynamic_sourced_cap_enforced_at_explore_dispatch(self):
-        """G4 — the IR-4 sourced-variant cap is mechanically enforced
-        on every explore-grid delegate, independent of MAX_DYNAMIC_PER_ROUND."""
+        """The sourced-variant cap is enforced on every explore-grid
+        delegate, independent of ``MAX_DYNAMIC_PER_ROUND``."""
         gate = _gate()
         bad = Intent(
             type=IntentType.DELEGATE,
@@ -777,8 +763,7 @@ class TestInvariant_RoundCap:
 
 
 # ===========================================================================
-# Phase / source restriction invariants
-# (dynamic_action.MD §1.6 + §1.4 dispatch channel)
+# Phase / source restriction invariants.
 # ===========================================================================
 class TestInvariant_PhaseSourceRestriction:
 
@@ -813,11 +798,9 @@ class TestInvariant_PhaseSourceRestriction:
 # Critic verdict mapping invariants — verdict outcomes are the only
 # way to flip the lifecycle status
 # ===========================================================================
-class TestInvariant_G8_ProposalSetCap:
-    """G8 — runner enforces MAX_PROPOSAL_SET_LEN=1 by breaking on the
-    first emit_proposal; the Coordinator also defends against schema
-    drift by truncating to the cap on read. The constant pin here is
-    the source of truth."""
+class TestInvariant_ProposalSetCap:
+    """Runner enforces ``MAX_PROPOSAL_SET_LEN=1`` by breaking on the
+    first emit_proposal; the Coordinator also truncates on read."""
 
     def test_inv_max_proposal_set_len_is_one(self):
         from inference_optimizer.orchestrator.dynamic_action_proposal import (
@@ -844,10 +827,9 @@ class TestInvariant_VerdictMapping:
             "motivation_gap_valid",
         ]
 
-    def test_inv_revise_handled_as_reject_in_v1(self):
-        """Per P4 §5.2 + P5 §6, REVISE collapses to CRITIC_REJECTED
-        for the lifecycle status; the verdict label is preserved
-        on the envelope for audit."""
+    def test_inv_revise_collapses_to_critic_rejected(self):
+        """REVISE collapses to ``CRITIC_REJECTED`` for the lifecycle
+        status; the verdict label is preserved on the envelope."""
         from inference_optimizer.orchestrator.dynamic_action_pipeline import (
             compose_critic_verdict_envelope,
         )
@@ -915,23 +897,22 @@ class TestInvariant_CoreFieldsAudit:
 
 
 # ===========================================================================
-# G12 — RESEARCH_LANE_NAME used everywhere (no hard-coded literals)
+# Coordinator imports ``RESEARCH_LANE_NAME`` instead of hard-coding it.
 # ===========================================================================
-class TestInvariant_G12_ResearchLaneConstant:
+class TestInvariant_ResearchLaneConstant:
 
     def test_inv_research_lane_constant_exposed(self):
-        """G12 — the canonical lane name lives in policy.py so
+        """The canonical lane name lives in :mod:`policy` so
         Coordinator-side spec builders import it instead of
-        hard-coding the string."""
+        hard-coding the literal."""
         from inference_optimizer.orchestrator.policy import (
             RESEARCH_LANE_NAME,
         )
         assert RESEARCH_LANE_NAME == "research_lane"
 
     def test_inv_coordinator_does_not_hardcode_research_lane_literal(self):
-        """The dispatch hook now references the constant; no other
-        ``"research_lane"`` string literal should slip in alongside
-        the new symbol — future audits stay machine-checkable."""
+        """The dispatch hook references the constant; no
+        ``"research_lane"`` string literal should slip in alongside it."""
         from inference_optimizer.orchestrator import coordinator as coord_mod
         body = Path(coord_mod.__file__).read_text(encoding="utf-8")
         # The only allowed occurrences are the import line + the

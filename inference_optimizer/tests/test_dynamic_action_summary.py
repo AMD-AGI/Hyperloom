@@ -1,6 +1,5 @@
-"""dynamic_action.MD P6 §10 — SharedState aggregate view + state machine.
-
-Each ``test_p6_scenario_*`` test maps 1:1 to one row of P6 §10.
+"""Tests for the ``dynamic_actions`` SharedState aggregate view +
+state machine.
 Auxiliary tests pin the transition table invariants, the prompt
 projection field set, last_outcome derivation, motivation truncation,
 and the closed prompt-section format.
@@ -46,7 +45,7 @@ SCOPE = ["serving_specialist", "kernel_switch_specialist"]
 # Surface invariants
 # ===========================================================================
 def test_status_enum_count_is_eleven_plus_abandoned():
-    """P6 §4.2 — 5 non-terminal + 7 terminal + 1 ABANDONED."""
+    """5 non-terminal + 7 terminal + 1 ABANDONED."""
     non_terminal = set(DynamicActionStatus) - TERMINAL_LIFECYCLE_STATUSES
     assert len(non_terminal) == 5
     assert len(TERMINAL_LIFECYCLE_STATUSES) == 8  # 7 + ABANDONED
@@ -55,7 +54,7 @@ def test_status_enum_count_is_eleven_plus_abandoned():
 
 
 def test_summary_prompt_fields_locked():
-    """P6 §3 — closed field set; any new field is a design change."""
+    """Closed field set; any new field surfaces in the diff."""
     assert SUMMARY_PROMPT_FIELDS == frozenset({
         "dyn_id", "status", "dispatched_at", "round_index",
         "scope_domains", "motivation_gap_short", "verdict",
@@ -65,13 +64,13 @@ def test_summary_prompt_fields_locked():
 
 
 def test_last_outcome_map_covers_every_status():
-    """P6 §8 — every status has a flattened label."""
+    """Every status has a flattened prompt-friendly label."""
     for status in DynamicActionStatus:
         assert status in LAST_OUTCOME_BY_STATUS
 
 
 def test_terminal_statuses_have_empty_allowed_transitions():
-    """P6 §4.3 — terminal states never transition out."""
+    """Terminal states never transition out."""
     for terminal in TERMINAL_LIFECYCLE_STATUSES:
         assert ALLOWED_TRANSITIONS[terminal] == frozenset()
 
@@ -243,7 +242,7 @@ def test_prompt_section_renders_compact_rows():
 
 
 def test_prompt_section_caps_at_max_entries_with_elision_marker():
-    """P6 §10 #5 — 6 entries → 5 rows + elision marker for the 6th."""
+    """6 entries render as 5 rows + an elision marker for the 6th."""
     s = SharedState(session_id="t")
     # Seed 6 dyn_ids with increasing updated_at timestamps.
     for i in range(6):
@@ -572,9 +571,8 @@ def test_p6_scenario_05_prompt_caps_at_five_entries(tmp_path: Path):
 # prompt-section render path never sees a missing-key skip).
 # ===========================================================================
 def test_p6_scenario_07_dispatch_populates_prompt_fields(tmp_path: Path):
-    """The P2/P5 dispatch hook stamps every P6 §3 prompt-projection
-    field at creation time so the prompt-section render never has to
-    cope with a missing key."""
+    """The dispatch hook stamps every prompt-projection field at
+    creation time so the renderer never sees a missing key."""
     s = SharedState(session_id="t")
     s.record_dynamic_action_outcome("dyn-0-1", status="DISPATCHED", extra={
         "scope_domains": SCOPE,
@@ -621,8 +619,8 @@ def test_dynamic_actions_in_core_state_fields():
 # Coordinator prompt injection
 # ===========================================================================
 def test_prompt_section_compact_under_token_budget(tmp_path: Path):
-    """P6 §7.3 — total section ≤ ~250 tokens. We use the section's
-    char count / 4 estimator for a coarse upper bound."""
+    """Rendered section stays within the ~250-token budget (using a
+    chars/4 estimator for a coarse upper bound)."""
     s = SharedState(session_id="t")
     for i in range(5):
         _seed_summary(s, f"dyn-0-{i}", "KEPT", gain=float(i))
@@ -630,5 +628,5 @@ def test_prompt_section_compact_under_token_budget(tmp_path: Path):
     estimated_tokens = len(rendered) // 4
     assert estimated_tokens <= 500, (
         f"prompt section estimated tokens={estimated_tokens} exceeds "
-        f"P6 §7.3 budget (≤250 ideal, 500 hard ceiling)"
+        f"the 500-token hard ceiling (250 ideal)"
     )

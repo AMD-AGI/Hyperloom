@@ -1,6 +1,4 @@
-"""dynamic_action.MD P5 §10 — end-to-end acceptance matrix.
-
-Each ``test_p5_scenario_*`` test maps 1:1 to one row of P5 §10.
+"""End-to-end ``dynamic_action`` lifecycle acceptance tests.
 Auxiliary tests pin the pipeline helpers + Coordinator hooks the
 acceptance flow leans on.
 
@@ -212,7 +210,7 @@ def test_terminal_lifecycle_set_matches_p5_table():
         DynamicActionStatus.KEPT,
         DynamicActionStatus.ABANDONED,
     })
-    # DISPATCHED is the only non-terminal status (P5 §6)
+    # DISPATCHED is the only non-terminal status.
     assert DynamicActionStatus.DISPATCHED not in TERMINAL_LIFECYCLE_STATUSES
 
 
@@ -220,7 +218,7 @@ def test_terminal_lifecycle_set_matches_p5_table():
 # Pipeline pure helpers
 # ===========================================================================
 def test_runner_status_to_lifecycle_full_map():
-    # P6 §5 node B — COMPLETED transitions to AWAITING_CRITIC
+    # COMPLETED transitions to AWAITING_CRITIC.
     # in a single atomic step (the critic dispatch runs synchronously
     # in the same hook, so DISPATCHED → ... → AWAITING_CRITIC is
     # collapsed into one writer event).
@@ -320,7 +318,7 @@ def test_compose_critic_verdict_llm_reject_passes_through():
 
 
 def test_compose_critic_verdict_happy_advances_to_integrating():
-    # P6 §4 node C — approve transitions to INTEGRATING (the
+    # Approve transitions to INTEGRATING (the
     # integrate_patch dispatch fires immediately after).
     envelope, lifecycle = compose_critic_verdict_envelope(
         dyn_id="dyn-0-1", proposal=_proposal(), spec_scope_domains=SCOPE,
@@ -373,7 +371,7 @@ async def test_p5_scenario_01_happy_path_to_kept(tmp_path: Path):
     )
     summary = coord.shared_state.dynamic_actions[dyn_id]
     # Runner-done hook collapses DISPATCHED → SUB_AGENT_RUNNING →
-    # SUB_AGENT_DONE → AWAITING_CRITIC in one event (P6 §5 node B).
+    # SUB_AGENT_DONE → AWAITING_CRITIC happens in one event.
     assert summary["status"] == DynamicActionStatus.AWAITING_CRITIC.value
     assert "specialist_task_id" in summary
     # Coordinator pushed a proposal onto the bus.
@@ -383,7 +381,7 @@ async def test_p5_scenario_01_happy_path_to_kept(tmp_path: Path):
     assert pending.action_name == "integrate_patch"
 
     # Critic approves → mirror writes critic_verdict.json + flips
-    # status to INTEGRATING (P6 §4 node C). integrate_patch hook
+    # status to INTEGRATING. integrate_patch hook
     # advances it to KEPT next.
     coord._mirror_critic_verdict_to_dynamic_action(
         pending=pending, verdict="approve", reasoning="lgtm",
