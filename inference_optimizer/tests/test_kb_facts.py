@@ -74,6 +74,144 @@ def test_lesson_canonical_id_empty_citations_is_stable():
     assert a == b
 
 
+def test_recipe_canonical_id_includes_framework_when_supplied():
+    """New shape: sglang and vLLM on the same (model, hw) get
+    different canonical_ids so their best_config blobs do not collide
+    under KB shallow-merge."""
+    sglang = recipe_canonical_id("DeepSeek-R1", "MI300X", framework="sglang")
+    vllm = recipe_canonical_id("DeepSeek-R1", "MI300X", framework="vllm")
+    assert sglang == "recipe:deepseek-r1:sglang:mi300x"
+    assert vllm == "recipe:deepseek-r1:vllm:mi300x"
+    assert sglang != vllm
+
+
+def test_recipe_canonical_id_falls_back_to_legacy_when_framework_absent():
+    """Empty framework → legacy shape ``recipe:{model}:{hw}`` (back-compat
+    for callers / KB rows that pre-date the framework-PR)."""
+    cid = recipe_canonical_id("DeepSeek-R1", "MI300X", framework="")
+    assert cid == "recipe:deepseek-r1:mi300x"
+    cid_no_arg = recipe_canonical_id("DeepSeek-R1", "MI300X")
+    assert cid_no_arg == "recipe:deepseek-r1:mi300x"
+    from inference_optimizer.cortex_kb_client import recipe_canonical_id_legacy
+    assert recipe_canonical_id_legacy("DeepSeek-R1", "MI300X") == cid_no_arg
+
+
+def test_find_recipe_with_fallback_t1_legacy_fallback_on_new_shape_miss(
+    session_dir,
+):
+    """When the new-shape ``recipe:{model}:{framework}:{hw}`` lookup
+    misses but a legacy ``recipe:{model}:{hw}`` row exists with a
+    matching ``attrs.framework``, the fallback ladder returns it as
+    ``T1_exact_legacy`` (confidence 0.80) — slightly below T1_exact
+    (0.85) to indicate it's a back-compat hit."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    legacy_point = {
+        "id": 1,
+        "canonical_id": "recipe:deepseek-r1:mi300x",
+        "kind": "recipe",
+        "attrs": {
+            "model": "DeepSeek-R1",
+            "hardware": "MI300X",
+            "framework": "sglang",
+            "best_config": {"extra_sglang_args": "--x"},
+        },
+        "confidence": 0.5,
+    }
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(side_effect=[
+            httpx.Response(200, json={"points": []}),       # T1 new shape miss
+            httpx.Response(200, json={"points": [legacy_point]}),  # T1 legacy hit
+        ])
+        point, tier, conf = client.find_recipe_with_fallback(
+            workload="DeepSeek-R1", hw="MI300X", framework="sglang",
+        )
+    assert tier == "T1_exact_legacy"
+    assert conf == 0.80
+    assert point["canonical_id"] == "recipe:deepseek-r1:mi300x"
+
+
+def test_find_recipe_with_fallback_legacy_hit_rejects_wrong_framework(
+    session_dir,
+):
+    """A legacy row tagged ``attrs.framework=vllm`` MUST NOT be
+    returned to a sglang session — its ``best_config.extra_sglang_args``
+    is missing / incompatible and would crash the server."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    wrong_fw_legacy = {
+        "id": 2,
+        "canonical_id": "recipe:deepseek-r1:mi300x",
+        "kind": "recipe",
+        "attrs": {
+            "model": "DeepSeek-R1",
+            "hardware": "MI300X",
+            "framework": "vllm",
+            "best_config": {"extra_vllm_args": "--y"},
+        },
+        "confidence": 0.5,
+    }
+    with respx.mock(base_url=KB_URL) as router:
+        router.post("/v1/points/query").mock(side_effect=[
+            httpx.Response(200, json={"points": []}),            # T1 new miss
+            httpx.Response(200, json={"points": [wrong_fw_legacy]}),  # T1 legacy wrong-fw
+            httpx.Response(200, json={"points": []}),            # T2
+            httpx.Response(200, json={"points": []}),            # T3
+            # T4 skipped (no model_class)
+            httpx.Response(200, json={"points": []}),            # T5
+            httpx.Response(200, json={"points": []}),            # T6
+        ])
+        point, tier, conf = client.find_recipe_with_fallback(
+            workload="DeepSeek-R1", hw="MI300X", framework="sglang",
+        )
+    # Legacy hit was rejected → ladder continues; nothing else matches.
+    assert tier == "miss"
+    assert conf == 0.0
+    assert point == {}
+
+
+def test_update_recipe_with_framework_writes_new_shape_canonical_id(
+    session_dir,
+):
+    """update_recipe(framework=...) lands under the new framework-
+    scoped canonical_id and stamps ``attrs.framework`` so attr-filter
+    queries (T2..T5) can match on it."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
+            }),
+        )
+        client.update_recipe(
+            model="DeepSeek-R1", hardware="MI300X", framework="sglang",
+            best_config={"extra_sglang_args": "--foo"},
+        )
+    body = json.loads(route.calls.last.request.content)
+    assert body["canonical_id"] == "recipe:deepseek-r1:sglang:mi300x"
+    assert body["attrs"]["framework"] == "sglang"
+
+
+def test_update_recipe_without_framework_keeps_legacy_canonical_id(
+    session_dir,
+):
+    """Back-compat: callers that don't pass framework continue to
+    write under the legacy ``recipe:{model}:{hw}`` canonical_id (no
+    attrs.framework stamp either)."""
+    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
+    with respx.mock(base_url=KB_URL) as router:
+        route = router.post("/v1/points/propose").mock(
+            return_value=httpx.Response(200, json={
+                "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
+            }),
+        )
+        client.update_recipe(
+            model="DeepSeek-R1", hardware="MI300X",
+            best_config={"extra_sglang_args": "--foo"},
+        )
+    body = json.loads(route.calls.last.request.content)
+    assert body["canonical_id"] == "recipe:deepseek-r1:mi300x"
+    assert "framework" not in body["attrs"]
+
+
 # ===========================================================================
 # propose_lesson / propose_pitfall — wrap propose_point with the right kind
 # ===========================================================================
@@ -409,9 +547,11 @@ def test_find_recipe_t2_includes_framework_in_filter(session_dir):
     specific and would crash the server)."""
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
     with respx.mock(base_url=KB_URL) as router:
-        # T1 miss → T2 fires
+        # T1 (framework-scoped) miss → T1 legacy (framework supplied)
+        # miss → T2 fires.
         route = router.post("/v1/points/query").mock(side_effect=[
-            httpx.Response(200, json={"points": []}),  # T1
+            httpx.Response(200, json={"points": []}),  # T1 new shape
+            httpx.Response(200, json={"points": []}),  # T1 legacy shape
             httpx.Response(200, json={"points": []}),  # T2 (asserted below)
             httpx.Response(200, json={"points": []}),  # T3
             httpx.Response(200, json={"points": []}),  # T4
@@ -425,8 +565,8 @@ def test_find_recipe_t2_includes_framework_in_filter(session_dir):
             precision="fp8",
             tp=8,
         )
-    # T2 query (2nd call) must carry framework=sglang in attrs_filter.
-    t2_body = json.loads(route.calls[1].request.content)
+    # T2 query is the 3rd call (1=T1 new, 2=T1 legacy, 3=T2).
+    t2_body = json.loads(route.calls[2].request.content)
     assert t2_body["attrs_filter"]["framework"] == "sglang"
     assert t2_body["attrs_filter"]["precision"] == "fp8"
     assert t2_body["attrs_filter"]["tp"] == 8
@@ -437,7 +577,8 @@ def test_find_recipe_t3_includes_framework_in_filter(session_dir):
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
     with respx.mock(base_url=KB_URL) as router:
         route = router.post("/v1/points/query").mock(side_effect=[
-            httpx.Response(200, json={"points": []}),  # T1
+            httpx.Response(200, json={"points": []}),  # T1 new shape
+            httpx.Response(200, json={"points": []}),  # T1 legacy shape
             # No precision/tp ⇒ T2 skipped
             httpx.Response(200, json={"points": []}),  # T3
             httpx.Response(200, json={"points": []}),  # T4
@@ -450,12 +591,12 @@ def test_find_recipe_t3_includes_framework_in_filter(session_dir):
             framework="sglang",
             model_class="moe_mla",
         )
-    # 2nd call is T3 (T2 skipped due to no precision/tp).
-    t3_body = json.loads(route.calls[1].request.content)
+    # T3 query is the 3rd call (1=T1 new, 2=T1 legacy, 3=T3).
+    t3_body = json.loads(route.calls[2].request.content)
     assert t3_body["attrs_filter"]["framework"] == "sglang"
     assert t3_body["attrs_filter"]["hardware"] == "mi300x"
-    # 3rd call is T4 (model_class) — must also have framework filter.
-    t4_body = json.loads(route.calls[2].request.content)
+    # T4 query is the 4th call.
+    t4_body = json.loads(route.calls[3].request.content)
     assert t4_body["attrs_filter"]["framework"] == "sglang"
     assert t4_body["attrs_filter"]["model_class"] == "moe_mla"
 
@@ -469,7 +610,8 @@ def test_find_recipe_t2_includes_ep_in_filter(session_dir):
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
     with respx.mock(base_url=KB_URL) as router:
         route = router.post("/v1/points/query").mock(side_effect=[
-            httpx.Response(200, json={"points": []}),  # T1
+            httpx.Response(200, json={"points": []}),  # T1 new shape
+            httpx.Response(200, json={"points": []}),  # T1 legacy shape
             httpx.Response(200, json={"points": []}),  # T2
             httpx.Response(200, json={"points": []}),  # T3
             httpx.Response(200, json={"points": []}),  # T4
@@ -481,7 +623,8 @@ def test_find_recipe_t2_includes_ep_in_filter(session_dir):
             framework="sglang",
             precision="fp8", tp=8, ep=8,
         )
-    t2_body = json.loads(route.calls[1].request.content)
+    # T2 query is the 3rd call (1=T1 new, 2=T1 legacy, 3=T2).
+    t2_body = json.loads(route.calls[2].request.content)
     assert t2_body["attrs_filter"]["ep"] == 8
 
 
@@ -491,7 +634,8 @@ def test_find_recipe_t2_fires_with_only_ep_when_precision_tp_missing(session_dir
     client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
     with respx.mock(base_url=KB_URL) as router:
         route = router.post("/v1/points/query").mock(side_effect=[
-            httpx.Response(200, json={"points": []}),  # T1
+            httpx.Response(200, json={"points": []}),  # T1 new shape
+            httpx.Response(200, json={"points": []}),  # T1 legacy shape
             httpx.Response(200, json={"points": []}),  # T2 (must fire)
             httpx.Response(200, json={"points": []}),  # T3
             httpx.Response(200, json={"points": []}),  # T5 (T4 skipped — no model_class)
@@ -502,10 +646,10 @@ def test_find_recipe_t2_fires_with_only_ep_when_precision_tp_missing(session_dir
             framework="sglang",
             ep=4,  # only ep — model_class omitted so T4 is skipped
         )
-    # The 2nd call must be T2 (not T3). With the old "precision OR tp"
-    # guard ep alone would have skipped T2 and the 2nd call would be
-    # T3 (which has no precision / tp / ep keys).
-    t2_body = json.loads(route.calls[1].request.content)
+    # T2 query is the 3rd call (1=T1 new, 2=T1 legacy, 3=T2).
+    # With the old "precision OR tp" guard ep alone would have
+    # skipped T2 and the 3rd call would be T3 instead.
+    t2_body = json.loads(route.calls[2].request.content)
     assert t2_body["attrs_filter"]["ep"] == 4
     assert "precision" not in t2_body["attrs_filter"]
     assert "tp" not in t2_body["attrs_filter"]
@@ -676,16 +820,18 @@ def _coord_with_kb_stub(session_dir):
             self.update_recipe_calls = []
             self.read_recipe_calls = []
 
-        def read_recipe_exact(self, *, model, hardware):
+        def read_recipe_exact(self, *, model, hardware, framework=""):
             self.read_calls += 1
-            self.read_recipe_calls.append((model, hardware))
+            self.read_recipe_calls.append((model, hardware, framework))
+            fw_seg = f"{framework.lower()}:" if framework else ""
             return {
                 "id": 42,
-                "canonical_id": f"recipe:{model.lower()}:{hardware.lower()}",
+                "canonical_id": f"recipe:{model.lower()}:{fw_seg}{hardware.lower()}",
                 "kind": "recipe",
                 "attrs": {
                     "model": model,
                     "hardware": hardware,
+                    "framework": framework,
                     "sessions": list(self._prior_sessions),
                 },
             }
@@ -858,6 +1004,12 @@ def _coord_for_fact_writes(session_dir):
         def __init__(self):
             self.lesson_calls: list[dict] = []
             self.pitfall_calls: list[dict] = []
+            self.read_lesson_calls: list[dict] = []
+            self.read_pitfall_calls: list[dict] = []
+            # ``read_lesson_exact_returns`` / ``read_pitfall_exact_returns``
+            # can be overridden per test to seed prior validators.
+            self.read_lesson_exact_returns: dict | None = None
+            self.read_pitfall_exact_returns: dict | None = None
 
         def propose_lesson(self, **kwargs):
             self.lesson_calls.append(kwargs)
@@ -866,6 +1018,14 @@ def _coord_for_fact_writes(session_dir):
         def propose_pitfall(self, **kwargs):
             self.pitfall_calls.append(kwargs)
             return {"status": "auto_accepted"}
+
+        def read_lesson_exact(self, **kwargs):
+            self.read_lesson_calls.append(kwargs)
+            return self.read_lesson_exact_returns or {}
+
+        def read_pitfall_exact(self, **kwargs):
+            self.read_pitfall_calls.append(kwargs)
+            return self.read_pitfall_exact_returns or {}
 
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = session_dir
@@ -1124,6 +1284,377 @@ def test_collect_workload_tags_uses_env_fallback_for_ep_and_pp(
     tags = coord._collect_workload_tags()
     assert tags["ep"] == 16
     assert tags["pp"] == 2
+
+
+def test_record_fact_per_task_keep_writes_validated_count_and_recent_ids(
+    _coord_for_fact_writes,
+):
+    """GAP 4 — first KEEP on a lesson writes ``validated_count=1`` +
+    ``source_session_ids=[my_id]`` so future sessions can accumulate
+    rather than overwriting under KB shallow-merge."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.optimization_stack = []
+    coord._record_fact_per_task(
+        task=_Task("t-vc1", "kernel_opt"),
+        source_session_id="session-NEW",
+        result_dict={"gain_pct": 7.0, "output_throughput": 750.0},
+        kept=True,
+    )
+    extra = coord.cortex_kb.lesson_calls[0]["extra_attrs"]
+    assert extra["validated_count"] == 1
+    assert extra["source_session_ids"] == ["session-NEW"]
+    assert extra["last_validated_at"]  # non-empty iso ts
+
+
+def test_record_fact_per_task_keep_appends_to_prior_validators(
+    _coord_for_fact_writes,
+):
+    """GAP 4 — when the KB already has source_session_ids[] for this
+    statement, we append our session_id (capped at 10) and bump count."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.optimization_stack = []
+    coord.cortex_kb.read_lesson_exact_returns = {
+        "attrs": {
+            "source_session_ids": ["session-A", "session-B", "session-C"],
+            "validated_count": 3,
+        }
+    }
+    coord._record_fact_per_task(
+        task=_Task("t-vc2", "kernel_opt"),
+        source_session_id="session-D",
+        result_dict={"gain_pct": 8.0, "output_throughput": 760.0},
+        kept=True,
+    )
+    extra = coord.cortex_kb.lesson_calls[0]["extra_attrs"]
+    assert extra["validated_count"] == 4
+    assert extra["source_session_ids"] == [
+        "session-A", "session-B", "session-C", "session-D",
+    ]
+
+
+def test_record_fact_per_task_keep_dedupes_own_session_id(
+    _coord_for_fact_writes,
+):
+    """GAP 4 — resume / retry of the same session must NOT double-count.
+    Prior occurrence of my_session_id is removed before append, so the
+    list size stays the same after the second write."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.optimization_stack = []
+    coord.cortex_kb.read_lesson_exact_returns = {
+        "attrs": {
+            "source_session_ids": ["session-A", "session-B", "session-X"],
+            "validated_count": 3,
+        }
+    }
+    coord._record_fact_per_task(
+        task=_Task("t-vc3", "kernel_opt"),
+        source_session_id="session-X",  # same as one already in the list
+        result_dict={"gain_pct": 8.0, "output_throughput": 760.0},
+        kept=True,
+    )
+    extra = coord.cortex_kb.lesson_calls[0]["extra_attrs"]
+    # session-X moved to the tail, count stays at 3.
+    assert extra["validated_count"] == 3
+    assert extra["source_session_ids"] == [
+        "session-A", "session-B", "session-X",
+    ]
+
+
+def test_record_fact_per_task_keep_caps_source_session_ids_at_10(
+    _coord_for_fact_writes,
+):
+    """GAP 4 — the list is bounded so KB rows don't bloat indefinitely.
+    Validated_count remains 10 (the cap), exposing saturation."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.optimization_stack = []
+    coord.cortex_kb.read_lesson_exact_returns = {
+        "attrs": {
+            "source_session_ids": [f"s{i}" for i in range(10)],
+            "validated_count": 10,
+        }
+    }
+    coord._record_fact_per_task(
+        task=_Task("t-vc4", "kernel_opt"),
+        source_session_id="s-new",
+        result_dict={"gain_pct": 7.0, "output_throughput": 750.0},
+        kept=True,
+    )
+    extra = coord.cortex_kb.lesson_calls[0]["extra_attrs"]
+    assert extra["validated_count"] == 10
+    # Oldest entry (``s0``) was dropped to make room for ``s-new``.
+    assert "s0" not in extra["source_session_ids"]
+    assert extra["source_session_ids"][-1] == "s-new"
+
+
+def test_record_fact_per_task_revert_writes_validated_count_on_pitfall(
+    _coord_for_fact_writes,
+):
+    """GAP 4 — pitfalls track validators the same way lessons do."""
+    coord = _coord_for_fact_writes
+    coord.cortex_kb.read_pitfall_exact_returns = {
+        "attrs": {
+            "source_session_ids": ["session-A"],
+            "validated_count": 1,
+        }
+    }
+    coord._record_fact_per_task(
+        task=_Task("t-vc5", "kernel_opt"),
+        source_session_id="session-B",
+        result_dict={"gain_pct": None, "error_class": "crash"},
+        kept=False,
+    )
+    extra = coord.cortex_kb.pitfall_calls[0]["extra_attrs"]
+    assert extra["validated_count"] == 2
+    assert extra["source_session_ids"] == ["session-A", "session-B"]
+
+
+def test_record_fact_per_task_keep_statement_includes_framework_prefix(
+    _coord_for_fact_writes,
+):
+    """FIX-4 — lesson statement carries a ``[<framework>]`` prefix so
+    same args on sglang vs vLLM hash to different canonical_ids and
+    cannot collide via KB shallow new-wins merge."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.framework = "sglang"
+    coord._record_fact_per_task(
+        task=_Task("t-fw1", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": 7.0, "output_throughput": 750.0},
+        kept=True,
+    )
+    statement = coord.cortex_kb.lesson_calls[0]["statement"]
+    assert statement.startswith("[sglang] "), statement
+    assert "DeepSeek-R1" in statement
+    assert "MI300X" in statement
+
+
+def test_record_fact_per_task_statement_differs_across_frameworks(
+    _coord_for_fact_writes,
+):
+    """Same ``change`` text but a different framework produces a
+    DIFFERENT statement (and therefore a different canonical_id),
+    preventing KB shallow-merge from clobbering one framework's
+    measured_impact with the other's."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.framework = "sglang"
+    coord._record_fact_per_task(
+        task=_Task("t-fw-sg", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": 7.0, "output_throughput": 750.0},
+        kept=True,
+    )
+    statement_sglang = coord.cortex_kb.lesson_calls[0]["statement"]
+    coord.cortex_kb.lesson_calls.clear()
+
+    coord.shared_state.framework = "vllm"
+    coord._record_fact_per_task(
+        task=_Task("t-fw-vl", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": 7.0, "output_throughput": 750.0},
+        kept=True,
+    )
+    statement_vllm = coord.cortex_kb.lesson_calls[0]["statement"]
+    assert statement_sglang != statement_vllm
+    assert statement_sglang.startswith("[sglang] ")
+    assert statement_vllm.startswith("[vllm] ")
+
+
+def test_record_fact_per_task_pitfall_description_includes_framework_prefix(
+    _coord_for_fact_writes,
+):
+    """Pitfall canonical_id derives from ``description`` — same FIX-4
+    fix applies symmetrically with lessons."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.framework = "vllm"
+    coord._record_fact_per_task(
+        task=_Task("t-fw-p", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": None, "error_class": "crash"},
+        kept=False,
+    )
+    description = coord.cortex_kb.pitfall_calls[0]["description"]
+    assert description.startswith("[vllm] "), description
+
+
+def test_record_fact_per_task_statement_uses_question_mark_when_framework_missing(
+    _coord_for_fact_writes,
+):
+    """Defensive: ``SharedState.framework`` empty (legacy SDK caller
+    without _seed_shared_state) → statement still carries ``[?]``
+    so canonical_id stays stable / different from any real-framework
+    statement (no accidental collision with a non-prefixed legacy row)."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.framework = ""
+    coord._record_fact_per_task(
+        task=_Task("t-fw-?", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": 7.0, "output_throughput": 750.0},
+        kept=True,
+    )
+    statement = coord.cortex_kb.lesson_calls[0]["statement"]
+    assert statement.startswith("[?] ")
+
+
+def test_record_fact_per_task_measured_impact_is_structured_dict(
+    _coord_for_fact_writes,
+):
+    """GAP 3 — measured_impact is now a dict (not a string) so
+    downstream consumers can parse fields without regex."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.optimization_stack = [{"name": "depth1"}, {"name": "depth2"}]
+    coord._record_fact_per_task(
+        task=_Task("t-mi1", "kernel_opt"),
+        source_session_id="session-X",
+        result_dict={"gain_pct": 12.3, "output_throughput": 678.0},
+        kept=True,
+    )
+    impact = coord.cortex_kb.lesson_calls[0]["measured_impact"]
+    assert isinstance(impact, dict)
+    assert impact["gain_pct"] == 12.3
+    assert impact["throughput_after"] == 678.0
+    assert impact["stack_depth_at_apply"] == 2
+    assert impact["measured_at"]  # non-empty iso ts
+
+
+def test_parse_baseline_workload_extra_extracts_sglang_extra_args(tmp_path):
+    """GAP 5 — Magpie YAML carries ``EXTRA_SGLANG_ARGS`` as one string.
+    We light-parse the common knobs: ``--max-running-requests`` /
+    ``--max-num-seqs`` / ``--enable-chunked-prefill`` /
+    ``--enable-torch-compile``."""
+    from inference_optimizer.orchestrator.coordinator import (
+        _parse_baseline_workload_extra,
+    )
+    yaml_path = tmp_path / "baseline.yaml"
+    yaml_path.write_text(
+        "benchmark:\n"
+        "  envs:\n"
+        "    EXTRA_SGLANG_ARGS: \"--max-running-requests 128 "
+        "--max-num-seqs 256 --enable-chunked-prefill "
+        "--enable-torch-compile\"\n"
+    )
+    parsed = _parse_baseline_workload_extra(str(yaml_path))
+    assert parsed["max_running_requests"] == 128
+    assert parsed["max_num_seqs"] == 256
+    assert parsed["chunked_prefill_enabled"] is True
+    assert parsed["enable_torch_compile"] is True
+
+
+def test_parse_baseline_workload_extra_disable_chunked_prefill(tmp_path):
+    """``--disable-chunked-prefill`` lands as ``chunked_prefill_enabled=False``."""
+    from inference_optimizer.orchestrator.coordinator import (
+        _parse_baseline_workload_extra,
+    )
+    yaml_path = tmp_path / "baseline.yaml"
+    yaml_path.write_text(
+        "benchmark:\n"
+        "  envs:\n"
+        "    EXTRA_SGLANG_ARGS: \"--disable-chunked-prefill\"\n"
+    )
+    parsed = _parse_baseline_workload_extra(str(yaml_path))
+    assert parsed["chunked_prefill_enabled"] is False
+
+
+def test_parse_baseline_workload_extra_falls_back_to_vllm_args(tmp_path):
+    """vLLM session writes EXTRA_VLLM_ARGS instead — parser must pick
+    the framework-appropriate blob."""
+    from inference_optimizer.orchestrator.coordinator import (
+        _parse_baseline_workload_extra,
+    )
+    yaml_path = tmp_path / "baseline.yaml"
+    yaml_path.write_text(
+        "benchmark:\n"
+        "  envs:\n"
+        "    EXTRA_VLLM_ARGS: \"--max-num-seqs 512\"\n"
+    )
+    parsed = _parse_baseline_workload_extra(str(yaml_path))
+    assert parsed["max_num_seqs"] == 512
+
+
+def test_parse_baseline_workload_extra_returns_empty_on_missing_file(tmp_path):
+    """Best-effort: a missing YAML returns ``{}`` rather than crashing
+    the baseline promote path."""
+    from inference_optimizer.orchestrator.coordinator import (
+        _parse_baseline_workload_extra,
+    )
+    assert _parse_baseline_workload_extra(str(tmp_path / "nonexistent.yaml")) == {}
+
+
+def test_collect_workload_tags_includes_model_family(_coord_for_fact_writes):
+    """GAP 5 — model_family is derived from model_name and stamped on
+    every lesson / pitfall so warm-start ladder (T3 / T6) can match
+    on family without re-running slug logic at read time."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.model_name = "DeepSeek-R1-0528"
+    tags = coord._collect_workload_tags()
+    assert tags["model_family"] == "deepseek"
+
+
+def test_collect_workload_tags_pulls_framework_version_from_stack_meta(
+    _coord_for_fact_writes,
+):
+    """GAP 5 — when ``stack_fingerprint_meta`` carries the active
+    framework's version (sglang or vllm), it lands as
+    ``framework_version`` so KB rows can later be ranked by version
+    proximity."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.framework = "sglang"
+    coord.shared_state.stack_fingerprint_meta = {
+        "sglang": "0.5.11",
+        "vllm":   "0.19.0",
+        "rocm":   "6.2.0",
+        "aiter":  "abc123",
+        "image_digest": "sha256:deadbeef",
+    }
+    tags = coord._collect_workload_tags()
+    assert tags["framework_version"] == "0.5.11"
+    assert tags["rocm_version"] == "6.2.0"
+    assert tags["aiter_version"] == "abc123"
+    assert tags["image_digest"] == "sha256:deadbeef"
+
+
+def test_collect_workload_tags_skips_unknown_stack_meta_values(
+    _coord_for_fact_writes,
+):
+    """GAP 5 — ``"unknown"`` sentinel and empty strings are stripped
+    so KB attrs stays compact (no useless ``rocm_version=unknown``)."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.framework = "sglang"
+    coord.shared_state.stack_fingerprint_meta = {
+        "sglang": "unknown",
+        "rocm":   "",
+        "aiter":  None,
+    }
+    tags = coord._collect_workload_tags()
+    assert "framework_version" not in tags
+    assert "rocm_version" not in tags
+    assert "aiter_version" not in tags
+
+
+def test_collect_workload_tags_includes_baseline_workload_extra(
+    _coord_for_fact_writes,
+):
+    """GAP 5 — workload extras parsed from materialized YAML (max-
+    running-requests / chunked-prefill / quant_scheme / ...) land
+    flat in the tag dict so attr-filter queries can match them."""
+    coord = _coord_for_fact_writes
+    coord.shared_state.baseline_workload_extra = {
+        "max_running_requests": 128,
+        "max_num_seqs": 256,
+        "chunked_prefill_enabled": True,
+        "enable_torch_compile": False,
+        "quant_scheme": "per-tensor",
+        "workload_mode": "streaming",
+    }
+    tags = coord._collect_workload_tags()
+    assert tags["max_running_requests"] == 128
+    assert tags["max_num_seqs"] == 256
+    assert tags["chunked_prefill_enabled"] is True
+    # ``enable_torch_compile=False`` is a meaningful signal (operator
+    # explicitly disabled), but our skip-rule drops the falsy 0/empty/
+    # None — False is a bool, NOT in skip list, so it should land.
+    assert tags["enable_torch_compile"] is False
+    assert tags["quant_scheme"] == "per-tensor"
+    assert tags["workload_mode"] == "streaming"
 
 
 def test_collect_workload_tags_skips_unset_dimensions(_coord_for_fact_writes):
