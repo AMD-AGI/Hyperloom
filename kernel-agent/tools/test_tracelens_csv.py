@@ -596,6 +596,7 @@ def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
     assert str(out) in prompt
     assert "Analysis mode: inference" in prompt
     assert "Inference execution mode: graph_capture" in prompt
+    assert "Comparison scope: standalone" in prompt
     assert "Do not ask the user" in prompt
 
 

@@ -143,6 +143,7 @@ def build_orchestrator_prompt(
     else:
         exec_mode = "default"
 
+    comparison_scope = "standalone"
     capture_text = str(capture_folder) if capture_folder else "N/A"
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
@@ -161,6 +162,7 @@ Execution context:
 - Output directory: {output_dir}
 - Platform: {platform}
 - Framework: {framework or "unknown"}
+- Comparison scope: {comparison_scope}
 - Analysis mode: {analysis_mode}
 - Inference execution mode: {exec_mode}
 - Capture folder path: {capture_text}
