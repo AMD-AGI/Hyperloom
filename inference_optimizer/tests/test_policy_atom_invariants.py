@@ -1,0 +1,171 @@
+"""atom-PolicyGate anti-regression guards (atom_plan/phase3_open_framework_agent 3.2).
+
+The framework-agent enablement phase deleted the
+``framework_atom_action_unsupported`` rule scaffold from
+``inference_optimizer.orchestrator.policy``:
+
+* ``_ATOM_UNSUPPORTED_ACTIONS`` constant — gone.
+* ``_validate_framework_atom_action_unsupported`` helper — gone.
+* The two dispatch sites in ``_validate_delegate`` /
+  ``_validate_propose_action`` — gone.
+
+After Phase 2 (kernel-agent enablement) and Phase 3 (framework-agent
+enablement), atom no longer has any action that needs framework-
+specific denial at this layer:
+
+* ``kernel_opt`` / ``integrate_patch`` — atom source roots are in
+  PolicyGate's allowlist, ``_REUSABLE_SOURCE_ROOTS``, and the
+  server-flag pre-flight probe (Phase 2).
+* ``framework_pr`` — Coordinator-driven, not LLM-proposable
+  regardless of framework. The cross-framework
+  ``framework_pr_action_not_llm_proposable`` rule still fires for
+  any LLM that tries to propose / delegate it directly.
+* ``--nodes >= 2`` — guarded at the CLI level
+  (``_apply_atom_auto_tighten``).
+
+This test file is the renamed successor of
+``test_policy_atom_action_gate.py`` (deleted in Phase 3). Its only
+job is to make a future reintroduction of the rule intentional.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from inference_optimizer.orchestrator import policy as policy_module
+from inference_optimizer.orchestrator.agent_role import default_role_registry
+from inference_optimizer.orchestrator.intent_parser import (
+    Intent, IntentType,
+)
+from inference_optimizer.orchestrator.policy import (
+    PolicyDenied,
+    PolicyGate,
+)
+
+
+# ---------------------------------------------------------------------------
+# G2 — source-level guards: the scaffold is fully removed
+# ---------------------------------------------------------------------------
+_POLICY_PATH = Path(policy_module.__file__)
+
+
+def test_no_atom_unsupported_actions_constant_in_source():
+    """``_ATOM_UNSUPPORTED_ACTIONS`` must not appear as a constant
+    definition in policy.py. A bare mention in a comment / docstring
+    (e.g. release-notes context) is fine and explicitly tolerated."""
+    src = _POLICY_PATH.read_text(encoding="utf-8")
+    assert "_ATOM_UNSUPPORTED_ACTIONS:" not in src, (
+        "_ATOM_UNSUPPORTED_ACTIONS constant was removed in "
+        "atom_plan/phase3_open_framework_agent; re-introducing it "
+        "must be intentional (and should re-add a dispatch site too)."
+    )
+
+
+def test_no_validate_framework_atom_action_unsupported_helper_in_source():
+    """The validator helper must not be defined in policy.py."""
+    src = _POLICY_PATH.read_text(encoding="utf-8")
+    assert "def _validate_framework_atom_action_unsupported" not in src, (
+        "_validate_framework_atom_action_unsupported helper was removed "
+        "in atom_plan/phase3_open_framework_agent."
+    )
+
+
+def test_no_framework_atom_action_unsupported_rule_name_in_source():
+    """The rule name must not appear as a ``rule=`` parameter in
+    policy.py — no validator emits it any more."""
+    src = _POLICY_PATH.read_text(encoding="utf-8")
+    assert 'rule="framework_atom_action_unsupported"' not in src, (
+        "framework_atom_action_unsupported rule is no longer emitted; "
+        "if you need an atom-specific denial, pick a different rule name "
+        "to avoid confusing operators who searched logs for the old one."
+    )
+
+
+def test_atom_unsupported_actions_attribute_removed_from_policy_gate():
+    """Runtime-level guard: PolicyGate must not expose the constant."""
+    assert not hasattr(PolicyGate, "_ATOM_UNSUPPORTED_ACTIONS"), (
+        "PolicyGate._ATOM_UNSUPPORTED_ACTIONS was removed in Phase 3; "
+        "reintroducing requires updating this guard intentionally."
+    )
+
+
+def test_validate_helper_removed_from_policy_gate():
+    """Runtime-level guard: PolicyGate must not expose the validator."""
+    assert not hasattr(PolicyGate, "_validate_framework_atom_action_unsupported"), (
+        "PolicyGate._validate_framework_atom_action_unsupported was "
+        "removed in Phase 3."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Behavioural guards: the cross-framework LLM-proposability rule still
+# covers framework_pr under atom, so the hole the atom-specific rule
+# guarded against (LLM → framework_pr) stays closed.
+# ---------------------------------------------------------------------------
+class _BareSharedState:
+    """Minimal SharedState surface for PolicyGate."""
+
+    def __init__(self, framework: str = "atom", phase: str = "EXPLORE"):
+        self.framework = framework
+        self.phase = phase
+        self.tick = 0
+
+    def record_policy_denial(self, **_kwargs):
+        return 1
+
+
+def _gate(state) -> PolicyGate:
+    return PolicyGate(
+        role_registry=default_role_registry(),
+        shared_state=state,
+    )
+
+
+def _delegate(action_name: str, **extra) -> Intent:
+    payload = {"action_name": action_name}
+    payload.update(extra)
+    return Intent(type=IntentType.DELEGATE, payload=payload)
+
+
+def _propose(action_name: str, **extra) -> Intent:
+    payload = {"action_name": action_name}
+    payload.update(extra)
+    return Intent(type=IntentType.PROPOSE_ACTION, payload=payload)
+
+
+@pytest.mark.parametrize("channel", ["delegate", "propose_action"])
+def test_framework_pr_still_denied_via_action_not_llm_proposable_under_atom(
+    channel: str,
+):
+    """LLM-proposed ``framework_pr`` under FRAMEWORK=atom must still
+    be denied — by the cross-framework
+    ``framework_pr_action_not_llm_proposable`` rule (not by the now-
+    removed atom-specific rule). Confirms removing the atom-specific
+    gate didn't open up the LLM-proposability hole."""
+    gate = _gate(_BareSharedState(framework="atom"))
+    intent = _delegate("framework_pr") if channel == "delegate" else _propose("framework_pr")
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", intent)
+    assert exc.value.rule == "framework_pr_action_not_llm_proposable", (
+        f"expected the cross-framework LLM-proposability rule to deny "
+        f"framework_pr under atom; got rule={exc.value.rule!r}"
+    )
+
+
+@pytest.mark.parametrize("action_name", ["kernel_opt", "integrate_patch"])
+def test_kernel_actions_not_denied_by_removed_atom_rule(action_name, monkeypatch):
+    """Phase 2 contract preserved: ``kernel_opt`` and ``integrate_patch``
+    have real execution paths on atom. They may still be denied for
+    unrelated reasons (e.g. ``kernel_owned_by_kernel_agent``), but the
+    removed atom rule must not be the source of denial."""
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    gate = _gate(_BareSharedState(framework="atom"))
+    try:
+        gate.validate_intent("orchestration", _delegate(action_name))
+    except PolicyDenied as exc:
+        assert exc.rule != "framework_atom_action_unsupported", (
+            f"{action_name} must never trigger the removed atom rule; "
+            f"got rule={exc.rule!r}"
+        )
