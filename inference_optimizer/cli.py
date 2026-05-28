@@ -1635,11 +1635,29 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
+_MULTI_NODE_WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (
+    "ROBUSTNESS_WORKLOAD_UID",
+    "CLAW_WORKLOAD_UID",
+    "WORKLOAD_UID",
+    "KUBE_WORKLOAD_UID",
+    "RAY_JOB_ID",
+)
+
+
 def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     """Collect non-default ``request.options`` overrides from CLI flags.
 
     Only emits keys the operator actually passed so the runtime CLI
     falls back to its own defaults / env-discovery for the rest.
+
+    Multi-node policy: when ``--nodes >= 2`` the agent must source its
+    signals from the cluster (robustness-server) rather than the local
+    sandbox, otherwise the per-pod LocalProbe trips false ``ray_head_dead``
+    / ``local_server_unreachable`` symptoms on every worker that does not
+    host the inference server. We therefore default ``disable_local_probe``
+    and ``enable_cluster_pod_metrics`` to True in that mode (unless the
+    operator explicitly opted out) and forward a workload_uid hint so the
+    server can resolve every pod that belongs to the same RayJob.
     """
     options: dict[str, Any] = {}
     server_url = getattr(args, "robustness_server_url", None)
@@ -1648,6 +1666,44 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     llm_rca = getattr(args, "robustness_llm_rca", None)
     if llm_rca is not None:
         options["llm_rca_enabled"] = bool(llm_rca)
+
+    nodes = int(getattr(args, "nodes", 1) or 1)
+    multi_node = nodes >= 2
+    if nodes > 1:
+        options["nodes"] = nodes
+
+    workload_uid = (getattr(args, "robustness_workload_uid", None) or "").strip()
+    if not workload_uid:
+        for key in _MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
+            candidate = (os.environ.get(key) or "").strip()
+            if candidate:
+                workload_uid = candidate
+                break
+    if workload_uid:
+        options["workload_uid"] = workload_uid
+
+    disable_local = getattr(args, "robustness_disable_local_probe", None)
+    if disable_local is None and multi_node:
+        disable_local = True
+    if disable_local is not None:
+        options["disable_local_probe"] = bool(disable_local)
+
+    enable_pod_metrics = getattr(args, "robustness_enable_cluster_pod_metrics", None)
+    if enable_pod_metrics is None and multi_node:
+        enable_pod_metrics = True
+    if enable_pod_metrics is not None:
+        options["enable_cluster_pod_metrics"] = bool(enable_pod_metrics)
+
+    categories_raw = getattr(args, "robustness_pod_metrics_categories", None)
+    if categories_raw:
+        if isinstance(categories_raw, (list, tuple)):
+            cat_iter = categories_raw
+        else:
+            cat_iter = str(categories_raw).split(",")
+        cat_list = [c.strip() for c in cat_iter if str(c).strip()]
+        if cat_list:
+            options["pod_metrics_categories"] = cat_list
+
     return options
 
 
@@ -2224,6 +2280,69 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="robustness_llm_rca",
         action="store_false",
         help="Forward llm_rca_enabled=false into request.options.",
+    )
+    opt.add_argument(
+        "--nodes",
+        dest="nodes",
+        type=int,
+        default=int(os.environ.get("NODES", "1") or "1"),
+        help="Number of nodes the optimization run is spanning (RayJob worker "
+             "count + head). Honoured by the robustness-agent multi-node "
+             "policy: --nodes>=2 disables the local sandbox probe and "
+             "enables the cluster pod-metrics fan-out so symptoms come "
+             "from robustness-server instead of per-pod rocm-smi/HTTP "
+             "probes. Single-node (default) keeps the legacy local-probe "
+             "fallback unchanged.",
+    )
+    opt.add_argument(
+        "--robustness-workload-uid",
+        dest="robustness_workload_uid",
+        type=str,
+        default=None,
+        help="Forward workload_uid into request.options. The robustness-server "
+             "resolves it to every pod (head + workers) backing the RayJob via "
+             "the cluster/workloads/{uid}/hierarchy endpoint. Falls back to "
+             "$CLAW_WORKLOAD_UID / $WORKLOAD_UID / $RAY_JOB_ID when unset.",
+    )
+    opt.add_argument(
+        "--robustness-disable-local-probe",
+        dest="robustness_disable_local_probe",
+        action="store_true",
+        default=None,
+        help="Force disable_local_probe=true. The robustness-agent silences "
+             "its LocalProbe fallback so per-pod sandbox checks (ps, rocm-smi, "
+             "local HTTP) cannot emit false-positive symptoms.",
+    )
+    opt.add_argument(
+        "--no-robustness-disable-local-probe",
+        dest="robustness_disable_local_probe",
+        action="store_false",
+        help="Force disable_local_probe=false (keep the LocalProbe fallback "
+             "even in multi-node mode).",
+    )
+    opt.add_argument(
+        "--robustness-enable-cluster-pod-metrics",
+        dest="robustness_enable_cluster_pod_metrics",
+        action="store_true",
+        default=None,
+        help="Force enable_cluster_pod_metrics=true so the robustness-agent "
+             "fans out per-pod metrics through robustness-server and feeds "
+             "the local_health rules with cluster-decoded GPU snapshots.",
+    )
+    opt.add_argument(
+        "--no-robustness-enable-cluster-pod-metrics",
+        dest="robustness_enable_cluster_pod_metrics",
+        action="store_false",
+        help="Force enable_cluster_pod_metrics=false.",
+    )
+    opt.add_argument(
+        "--robustness-pod-metrics-categories",
+        dest="robustness_pod_metrics_categories",
+        type=str,
+        default=None,
+        help="Comma-separated metric categories forwarded into "
+             "pod_metrics_categories (e.g. 'gpu,memory'). Default 'gpu' is "
+             "applied by the runtime when this flag is omitted.",
     )
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")

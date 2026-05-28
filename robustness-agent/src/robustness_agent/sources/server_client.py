@@ -340,6 +340,7 @@ class RobustnessServerSource:
         enable_cluster_pod_metrics: bool = False,
         pod_metrics_categories: tuple[str, ...] = ("gpu",),
         max_pods_per_tick: int = 16,
+        workload_uid: str = "",
     ) -> None:
         self._client = client
         self._metrics_window_s = max(60, int(metrics_window_s))
@@ -355,6 +356,12 @@ class RobustnessServerSource:
         self._enable_cluster_pod_metrics = bool(enable_cluster_pod_metrics)
         self._pod_metrics_categories = tuple(pod_metrics_categories)
         self._max_pods_per_tick = max(1, int(max_pods_per_tick))
+        # ``workload_uid`` opts into hierarchy-based pod discovery so
+        # multi-node RayJobs reconcile the full pod set (head + workers)
+        # even before the session has registered every pod. Empty
+        # string disables it and keeps the legacy ``list_session_pods``
+        # path.
+        self._workload_uid = (workload_uid or "").strip()
 
     async def fetch(self, ctx: Any) -> SourceData:
         session_id = _extract_session_id(ctx)
@@ -367,7 +374,7 @@ class RobustnessServerSource:
             end_unix=now_unix or 0,
         )
 
-        pods = await self._client.list_session_pods(
+        session_pods = await self._client.list_session_pods(
             session_id,
             start_unix=window.start_unix or None,
             end_unix=window.end_unix or None,
@@ -381,6 +388,23 @@ class RobustnessServerSource:
         summary: dict[str, Any] = {}
         if window.start_unix and window.end_unix:
             summary = await self._client.get_session_summary(session_id, window)
+
+        # Resolve the full pod set the agent should observe. When a
+        # workload_uid is configured we call the cluster hierarchy
+        # endpoint and merge its pods with whatever the session view
+        # already exposes — that way the fan-out covers Ray workers
+        # the session has not yet seen, and the resulting ``session_pods``
+        # gives downstream signals a consistent multi-node view.
+        hierarchy_pods: list[dict[str, Any]] = []
+        if self._workload_uid:
+            try:
+                hierarchy = await self._client.get_cluster_workload_hierarchy(
+                    self._workload_uid,
+                )
+            except SourceUnavailable:
+                raise
+            hierarchy_pods = _extract_hierarchy_pods(hierarchy)
+        merged_pods = _merge_pods(session_pods, hierarchy_pods)
 
         cluster_faults: list[dict[str, Any]] = []
         if self._enable_cluster_faults:
@@ -404,14 +428,14 @@ class RobustnessServerSource:
         local_gpu: dict[str, Any] = {}
         if (
             self._enable_cluster_pod_metrics
-            and pods
+            and merged_pods
             and window.start_unix
             and window.end_unix
         ):
-            local_gpu = await self._fetch_cluster_pod_metrics(pods, window)
+            local_gpu = await self._fetch_cluster_pod_metrics(merged_pods, window)
 
         return SourceData(
-            session_pods=pods,
+            session_pods=merged_pods,
             session_events=events,
             session_summary=summary,
             cluster_faults=cluster_faults,
@@ -491,6 +515,71 @@ def _unique_pod_refs(pods: list[dict[str, Any]]) -> list[tuple[str, str]]:
             continue
         seen.add(key)
         out.append(key)
+    return out
+
+
+def _extract_hierarchy_pods(
+    hierarchy: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Pluck pod rows from a workload hierarchy response.
+
+    The server returns
+    ``{"workload_id": ..., "pods": [{"namespace": ..., "name": ...}, ...]}``
+    in the documented case, but mirrors of the same data sometimes
+    nest under ``children`` / ``items`` while a single-pod degraded
+    response uses ``pod`` directly. We accept all three so a schema
+    nudge upstream does not silently disable multi-node fan-out.
+    """
+
+    if not isinstance(hierarchy, dict):
+        return []
+    for key in ("pods", "children", "items"):
+        rows = hierarchy.get(key)
+        if isinstance(rows, list):
+            return [r for r in rows if isinstance(r, dict)]
+    pod = hierarchy.get("pod")
+    if isinstance(pod, dict):
+        return [pod]
+    return []
+
+
+def _merge_pods(
+    session_pods: list[dict[str, Any]],
+    extra_pods: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Combine session_pods with hierarchy-derived pods, deduping by ref.
+
+    Hierarchy rows carry only ``namespace`` / ``name`` so we wrap them
+    in the session-pod envelope (``{"pod": {...}}``) when appending so
+    downstream consumers (signals, cluster_decoder) see a uniform
+    shape. Session entries always win on conflicts because they carry
+    the richer phase / role metadata.
+    """
+
+    out: list[dict[str, Any]] = list(session_pods or [])
+    seen: set[tuple[str, str]] = set()
+    for entry in out:
+        if not isinstance(entry, dict):
+            continue
+        pod = entry.get("pod") if isinstance(entry.get("pod"), dict) else entry
+        ns = str(pod.get("namespace") or "")
+        name = str(pod.get("name") or "")
+        if ns and name:
+            seen.add((ns, name))
+
+    for raw in extra_pods or []:
+        pod = raw.get("pod") if isinstance(raw.get("pod"), dict) else raw
+        if not isinstance(pod, dict):
+            continue
+        ns = str(pod.get("namespace") or "")
+        name = str(pod.get("name") or "")
+        if not ns or not name:
+            continue
+        key = (ns, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"pod": {"namespace": ns, "name": name}, "source": "hierarchy"})
     return out
 
 
