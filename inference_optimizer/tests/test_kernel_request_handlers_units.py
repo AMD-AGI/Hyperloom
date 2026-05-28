@@ -194,6 +194,75 @@ class TestLoadMaterializedWorkloadMetadata:
         # Env vars passed through the allowlist guard.
         assert "TP" in out["env_vars"]
 
+    @pytest.mark.parametrize(
+        "framework,env_name,expected_args",
+        [
+            ("sglang", "EXTRA_SGLANG_ARGS", "--mem-fraction-static=0.8"),
+            ("vllm",   "EXTRA_VLLM_ARGS",   "--gpu-memory-utilization 0.9"),
+            ("atom",   "EXTRA_ATOM_ARGS",
+             "--trust-remote-code --level 2 --enable-expert-parallel"),
+        ],
+    )
+    def test_server_args_read_from_per_framework_env_key(
+        self, tmp_path, framework, env_name, expected_args,
+    ):
+        """atom_gap2.md B1 regression: the handler must read the
+        per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot, not silently
+        default to ``EXTRA_SGLANG_ARGS`` on non-sglang sessions.
+        Pre-fix, atom sessions resolved to ``EXTRA_SGLANG_ARGS``
+        (empty) and dropped every atom-side flag from the kernel-opt
+        metadata.
+        """
+        cfg = tmp_path / f"magpie_{framework}.yaml"
+        cfg.write_text(
+            "benchmark:\n"
+            f"  framework: {framework}\n"
+            "  model: /weights/m\n"
+            "  precision: bf16\n"
+            "  envs:\n"
+            "    TP: 4\n"
+            "    CONC: 32\n"
+            "    ISL: 1024\n"
+            "    OSL: 1024\n"
+            f"    {env_name}: '{expected_args}'\n"
+        )
+        out = krh._load_materialized_workload_metadata(str(cfg))
+        runtime = out["runtime_args"]
+        assert runtime["framework"] == framework
+        # The per-framework slot wins regardless of which framework
+        # the session is on.
+        assert runtime["server_args"] == expected_args, (
+            f"framework={framework!r} expected server_args="
+            f"{expected_args!r}; got {runtime['server_args']!r}. "
+            "Likely regression of atom_gap2.md B1."
+        )
+
+    def test_atom_server_args_not_read_from_extra_sglang_args(self, tmp_path):
+        """atom_gap2.md B1 sharper regression: when an atom YAML
+        carries BOTH ``EXTRA_ATOM_ARGS`` (real) AND a stray
+        ``EXTRA_SGLANG_ARGS`` (left over from a copy-paste), the
+        handler MUST pick the atom slot, not the sglang one.
+        """
+        cfg = tmp_path / "magpie_atom_mixed.yaml"
+        cfg.write_text(
+            "benchmark:\n"
+            "  framework: atom\n"
+            "  model: /weights/m\n"
+            "  precision: fp8\n"
+            "  envs:\n"
+            "    TP: 4\n"
+            "    CONC: 32\n"
+            "    ISL: 1024\n"
+            "    OSL: 1024\n"
+            "    EXTRA_SGLANG_ARGS: '--should-be-ignored'\n"
+            "    EXTRA_ATOM_ARGS: '--trust-remote-code --level 2'\n"
+        )
+        out = krh._load_materialized_workload_metadata(str(cfg))
+        runtime = out["runtime_args"]
+        assert runtime["framework"] == "atom"
+        assert runtime["server_args"] == "--trust-remote-code --level 2"
+        assert "--should-be-ignored" not in runtime["server_args"]
+
 
 # ---------------------------------------------------------------------------
 # enrichment helpers
