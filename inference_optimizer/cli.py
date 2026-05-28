@@ -914,6 +914,49 @@ def _seed_shared_state(
         except (TypeError, ValueError):
             return 0
 
+    def _resolve_framework_version(args_in: Any) -> str:
+        """Resolve ``framework_version`` for the recipe-snapshot canonical id.
+
+        Three-tier ladder so the operator never has to think about it
+        unless they specifically want to pin a version:
+
+        1. Explicit CLI override — ``--framework-version=<slug>`` /
+           ``$FRAMEWORK_VERSION`` (operator-pinned, highest priority).
+        2. Auto-detect — import the framework's top-level package and
+           read ``__version__`` (sglang / vllm / atom supported).
+        3. Fall through to empty string — SharedState then carries
+           ``""`` and the canonical_id helper substitutes the
+           ``unknown_version`` slug. Recipe row is still created;
+           just less specific.
+
+        Auto-detect runs only when both CLI and env are empty so a
+        process that has *intentionally* set ``$FRAMEWORK_VERSION=""``
+        (e.g. a CI smoke test that doesn't want sglang imported) still
+        gets the empty-string outcome instead of an unexpected import.
+        """
+        explicit = (
+            (getattr(args_in, "framework_version", None) or "").strip()
+            or (os.environ.get("FRAMEWORK_VERSION", "") or "").strip()
+        )
+        if explicit:
+            return explicit
+        framework = (
+            (getattr(args_in, "framework", None) or "").strip()
+            or (os.environ.get("FRAMEWORK", "") or "").strip()
+        )
+        if not framework:
+            return ""
+        from .recipe_snapshot_constants import (
+            DEFAULT_FRAMEWORK_VERSION_SLUG,
+            detect_framework_version,
+        )
+
+        detected = detect_framework_version(framework)
+        # Treat the failure-slug as "no info" rather than persisting it
+        # on SharedState — the canonical_id helper will redo the same
+        # fallback on its own at use time.
+        return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
+
     # Fix E (--explore-overtime-kill-ratio): mirror the CLI value into
     # the fresh SharedState so the ExploreExecutor can read it via the
     # Coordinator-injected task.params on the very first explore round.
@@ -952,6 +995,7 @@ def _seed_shared_state(
         precision=(
             str(getattr(args, "precision", None) or os.environ.get("PRECISION", "") or "").strip()
         ),
+        framework_version=_resolve_framework_version(args),
         conc=_int_env_or_arg("conc", "CONC"),
         isl=_int_env_or_arg("isl", "ISL"),
         osl=_int_env_or_arg("osl", "OSL"),
@@ -3678,6 +3722,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if state.precision:
             os.environ["PRECISION"] = state.precision
             print(f"  re-exported PRECISION     : {state.precision}")
+        if getattr(state, "framework_version", ""):
+            os.environ["FRAMEWORK_VERSION"] = state.framework_version
+            print(
+                f"  re-exported FRAMEWORK_VERSION: "
+                f"{state.framework_version}"
+            )
         # Honour persisted kernel_enabled flag on resume; CLI --no-kernel
         # can still override on a previously-enabled session.
         if not state.kernel_enabled:
@@ -3905,8 +3955,32 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["ISL"] = str(args.isl)
         os.environ["OSL"] = str(args.osl)
         os.environ["PRECISION"] = args.precision
+        # Mirror the resolved framework_version into the env so kernel /
+        # framework executors and any subprocess (sglang / vllm CLI
+        # wrappers) see the same value SharedState carries. Resolution
+        # mirrors :func:`_resolve_framework_version`: explicit override
+        # wins, otherwise auto-detect, otherwise leave the env unset.
+        _fw_version_for_env = (
+            (getattr(args, "framework_version", None) or "").strip()
+            or (os.environ.get("FRAMEWORK_VERSION", "") or "").strip()
+        )
+        if not _fw_version_for_env:
+            from .recipe_snapshot_constants import (
+                DEFAULT_FRAMEWORK_VERSION_SLUG,
+                detect_framework_version,
+            )
+
+            _detected = detect_framework_version(
+                (getattr(args, "framework", None) or "").strip()
+                or os.environ.get("FRAMEWORK", "")
+            )
+            if _detected and _detected != DEFAULT_FRAMEWORK_VERSION_SLUG:
+                _fw_version_for_env = _detected
+        if _fw_version_for_env:
+            os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
         print(f"Workload        : ISL={args.isl} OSL={args.osl} "
-              f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision}")
+              f"MAX_MODEL_LEN={max_model_len} PRECISION={args.precision} "
+              f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}")
 
         # N17: session_dir is now <workspace_root>/<model>/<UTC ts>/
         # by default (per-model + per-launch). Workspace_root is
@@ -4551,6 +4625,22 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--precision", type=str,
                       default=os.environ.get("PRECISION", "bf16"),
                       help="Model precision (default $PRECISION or bf16)")
+    opt.add_argument(
+        "--framework-version",
+        dest="framework_version",
+        type=str,
+        default=None,
+        help=(
+            "Framework version slug for the recipe-snapshot canonical id "
+            "(scopes recipes to a specific framework release — sglang 0.4.5 "
+            "and sglang 0.5.x have different scheduler defaults so they "
+            "deserve separate KB rows). When omitted, auto-detected via "
+            "importing the framework's top-level package and reading "
+            "``__version__`` (sglang/vllm/atom supported); auto-detect "
+            "failure degrades to 'unknown_version'. Override with "
+            "--framework-version=0.4.5 to pin a specific tag for the run."
+        ),
+    )
     grp = opt.add_mutually_exclusive_group()
     grp.add_argument("--target-gain", type=float, default=None,
                       help="Stop when cumulative_gain >= N%% over baseline")
