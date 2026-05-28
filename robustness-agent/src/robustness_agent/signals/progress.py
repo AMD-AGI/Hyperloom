@@ -21,7 +21,6 @@ Both detectors short-circuit when the session is in ``closing_phase``
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from ..role.prompt_inputs import ReactorContext, SharedStateSnapshot
 from ..sources.base import SourceData

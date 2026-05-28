@@ -9,8 +9,6 @@ miss. We target those here so the helper contracts stay locked.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any
 
 import pytest
 

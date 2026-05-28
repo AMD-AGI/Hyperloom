@@ -47,8 +47,6 @@ from __future__ import annotations
 
 import csv
 import importlib.util
-import os
-import sys
 from pathlib import Path
 
 import pytest
