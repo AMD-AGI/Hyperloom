@@ -27,7 +27,7 @@ fields:
     max_minutes         int   — wall-clock budget (0 = unlimited)
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
-                                `select_kernels` REQUEST `trace_input` param
+                                `trace_analyze` REQUEST `trace_input` param
 """
 
 from __future__ import annotations
@@ -417,22 +417,26 @@ class SharedState:
     # Orchestration uses this to decide whether re-profiling would change the
     # hot-kernel distribution; identical args means the same trace.
     last_profile_args: str = ""
-    # Cached result of the most recent `select_kernels` request keyed by
-    # `trace_input`. Coordinator short-circuits subsequent identical requests
-    # so Orchestration does not waste budget re-analysing the same trace.
-    last_select_kernels: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
-    # roofline-v2 placeholder fields (PR #288 integration).
+    # Roofline-v2 trace-analyze cache (canonical, post-M4 rename).
     #
-    # ``last_trace_analyze`` mirrors the canonical 11-field dict main's
-    # ``record_trace_analyze`` writes (see ``TraceAnalyzeSnapshot.from_dict``
-    # for the reader-side schema). F1 ports the writer; until then these
-    # stay default-empty and no consumer reads them.
+    # ``last_trace_analyze`` is the canonical 11-field dict written by
+    # :meth:`record_trace_analyze` after a successful ``trace_analyze``
+    # sub-step (typically driven by ``RooflineExecutor``). Coordinator
+    # short-circuits subsequent identical ``trace_analyze`` requests off
+    # this cache so Orchestration does not waste budget re-analysing the
+    # same trace.
     #
     # ``roofline_snapshot_id`` mirrors ``last_trace_analyze['roofline_snapshot_id']``
     # at the top level for fast PolicyGate / Coordinator access (avoids the
     # nested-dict lookup on hot paths).
+    #
+    # Pre-M4 ``last_select_kernels`` field was removed in this branch
+    # (commit "drop select_kernels alias…") — all readers must use
+    # ``last_trace_analyze``. Resume of a stale state.json that still
+    # carries ``last_select_kernels`` will silently drop the extra key
+    # via :meth:`_apply_loaded_state`.
     # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
@@ -985,6 +989,11 @@ class SharedState:
             "score_mult",
             "effective_score",
             "last_action_score_snapshot",
+            # Removed in this branch: M4 renamed select_kernels →
+            # trace_analyze; the legacy mirror field was dropped so all
+            # readers use ``last_trace_analyze``. Resume of an older
+            # state.json silently discards this slot.
+            "last_select_kernels",
         )
         legacy_seen: list[tuple[str, int]] = []
         for legacy in _legacy_drop_fields:
@@ -2627,10 +2636,11 @@ class SharedState:
         """write the canonical 11-field ``last_trace_analyze`` dict.
 
         Called by :class:`RooflineExecutor` (F1-2) after a successful
-        ``trace_analyze`` sub-step. Distinct from the legacy
-        :meth:`record_select_kernels` writer below, which writes a thinner
-        ``last_select_kernels`` schema for the ``select_kernels_handler``
-        path and stays in place for backward compatibility.
+        ``trace_analyze`` sub-step, and by the inline programmatic
+        handler path in :meth:`Coordinator._handle_request` when an LLM
+        emits a ``trace_analyze`` request directly. Single canonical
+        writer for this cache — the M4 legacy ``record_select_kernels``
+        twin was removed in this branch.
 
         On every successful call, ``roofline_snapshot_id`` is read from the
         previous ``last_trace_analyze`` and incremented by one — giving a
@@ -2643,10 +2653,6 @@ class SharedState:
         ``result['trace_report_path']``; OSErrors degrade silently to
         empty text (the ``analysis_md_path`` field still lets a future
         ``read_artifact`` intent re-fetch it on demand).
-
-        Cherry-picked from /wekafs/zgong/Hyperloom main @ c6f0a71
-        ``shared_state.py:1508`` ; verbatim except for the docstring tying
-        it to F1-1 / F1-2 of this branch's integration plan.
         """
         if not isinstance(result, dict):
             return
@@ -2732,121 +2738,6 @@ class SharedState:
         # Mirror the snapshot id at the top level so PolicyGate /
         # Coordinator can read it without the nested-dict lookup.
         self.roofline_snapshot_id = snapshot_id
-
-    def record_select_kernels(self, payload: dict[str, Any],
-                              result: dict[str, Any]) -> None:
-        """Cache the latest select_kernels output keyed by trace_input.
-
-        We persist a wider window than the prompt-visible top5 so that when
-        the very top GPU consumers are vendor-binary kernels (Tensile / CK)
-        Orchestration still sees lower-ranked but **reusable native** entries
-        (e.g. AITER RMSNorm) and can dispatch ``run_optimization`` against
-        them instead of looping on rejected ones.
-
-        We also persist ``trace_health_warnings`` so Orchestration's prompt
-        surfaces the structured routing signals produced by the TraceLens
-        analyzer (Hyperloom v0.4 finishing-touches T3 / T4):
-
-        * ``high_gpu_idle_pct`` — Executive Summary's ``Idle %`` exceeded
-          the gate threshold; per Report_Interfacing.docx §2 (idle-gate
-          sanity check) the LLM should pivot to parameter optimization
-          rather than kernel rewriting in this regime.
-        * ``tracelens_analysis_failed`` — the TraceLens subprocess crashed
-          permanently (perf-CLI missing, ``analysis.md`` not produced,
-          timeout, …); Coordinator already demoted this to ``status=ok``
-          + empty ``hot_kernels`` at the handler boundary, but the LLM
-          still needs to *see* the failure so it picks parameter
-          optimization explicitly instead of inferring "TraceLens is
-          still running" from the empty list.
-
-        Without this pass-through the warnings produced upstream are
-        dropped at the SharedState boundary and Orchestration cannot
-        ground its routing decisions on them.
-        """
-        if not isinstance(result, dict):
-            return
-        trace_input = (
-            (payload or {}).get("trace_input")
-            or (payload or {}).get("trace_dir")
-            or ""
-        )
-        candidates_path = result.get("candidates_path") or ""
-        if not candidates_path:
-            artifacts = result.get("artifact_paths") or {}
-            if isinstance(artifacts, dict):
-                candidates_path = artifacts.get("kernel_candidates", "") or ""
-        hot = result.get("hot_kernels") or []
-        summary: list[dict[str, Any]] = []
-        reusable_ids: list[str] = []
-        for entry in hot[:15] if isinstance(hot, list) else []:
-            if not isinstance(entry, dict):
-                continue
-            kid = entry.get("kernel_id")
-            reusable = bool(entry.get("reusable_native_kernel"))
-            summary.append({
-                "kernel_id": kid,
-                "name": entry.get("name"),
-                "gpu_pct": entry.get("gpu_pct"),
-                "bottleneck": entry.get("bottleneck"),
-                "arithmetic_intensity": entry.get("arithmetic_intensity"),
-                "source_file": entry.get("source_file"),
-                "reusable_native_kernel": reusable,
-                "recommended_backends": entry.get("recommended_backends") or [],
-                "recommended_actions": entry.get("recommended_actions") or [],
-            })
-            if reusable and kid:
-                reusable_ids.append(str(kid))
-
-        # T3 / T4: keep the structured warning list verbatim — handler
-        # already shaped each entry into the documented form (code,
-        # severity, message, plus code-specific extras like idle_pct or
-        # returncode). We filter to ``dict`` to be defensive against a
-        # buggy tool emitting non-dict junk, but otherwise pass through
-        # untouched so the LLM sees the full diagnostic.
-        raw_warnings = result.get("trace_health_warnings") or []
-        warnings_cleaned: list[dict[str, Any]] = []
-        if isinstance(raw_warnings, list):
-            for entry in raw_warnings:
-                if isinstance(entry, dict) and entry.get("code"):
-                    warnings_cleaned.append(dict(entry))
-
-        # 893bc6f: propagate ``task_groups`` from the handler result so
-        # the multi-KEEP integrate queue's source-of-truth lookups stay
-        # in sync with what ``_batch_kernel_candidates`` dispatched.
-        # Without this, ``untried_hot_reusable_kernels()`` and
-        # ``next_pending_keep_kernel_id()`` see ``task_groups=[]`` and
-        # fall through to per-kernel logic — e.g. for
-        # ``primary=k004 kids=[k003, k004]`` they treat k003 as an
-        # untried independent kernel even though dispatching k004
-        # already covered the same AST function.
-        task_groups = result.get("task_groups") or []
-        if not isinstance(task_groups, list):
-            task_groups = []
-        # F1-1: ``record_trace_analyze`` is the canonical writer for
-        # the 11-field ``last_trace_analyze`` (snapshot_id /
-        # analysis_md_text / baseline_gain_at_snapshot / …). This
-        # legacy ``record_select_kernels`` writer stays in place for
-        # backwards-compatible callers and only mirrors the slim
-        # ``last_select_kernels`` schema; task_groups is added so the
-        # downstream lookups behave identically regardless of which
-        # path populated SharedState.
-        cached = {
-            "trace_input": str(trace_input),
-            "candidates_path": str(candidates_path),
-            "hot_kernels_top15": summary,
-            "task_groups": task_groups,
-            "reusable_native_kernel_ids": reusable_ids,
-            "trace_health_warnings": warnings_cleaned,
-            "ts": _now_iso(),
-        }
-        self.last_select_kernels = cached
-        # Main M4 main merge: ``last_trace_analyze`` is the canonical
-        # post-rename name (RooflineExecutor / `record_trace_analyze`
-        # writes a richer schema there, but the legacy
-        # ``record_select_kernels`` writer must also mirror its slim
-        # schema into ``last_trace_analyze`` so the policy gate's cache
-        # lookup (which prefers the canonical field) finds the entry.
-        self.last_trace_analyze = dict(cached)
 
     def record_sweep(self, result: dict[str, Any]) -> None:
         if not isinstance(result, dict):
@@ -3837,12 +3728,8 @@ class SharedState:
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
-            f"last_select_kernels={self._format_last_select_kernels()}",
-            # Main M4 main merge: ``last_trace_analyze`` mirrors the
-            # canonical post-rename name; both keys carry the same
-            # slim cache schema, so we render both lines for backward
-            # compatibility with prompt-format-stable tests on either
-            # side (legacy regression_locks expects `last_trace_analyze=`).
+            # Canonical post-M4 cache key; legacy ``last_select_kernels``
+            # was removed in this branch (callers must use this field).
             f"last_trace_analyze={self._format_last_trace_analyze()}",
             # Full TraceLens ``analysis.md`` (snapshot id + gain in the
             # bookend header) so the orchestration LLM grounds
@@ -4230,21 +4117,13 @@ class SharedState:
             f"=== End TraceLens Analysis ===\n"
         )
 
-    def _format_last_select_kernels(self) -> str:
-        return self._format_select_kernels_blob(self.last_select_kernels)
-
     def _format_last_trace_analyze(self) -> str:
-        # Main M4 renamed ``select_kernels`` → ``trace_analyze`` and the
-        # back-compat path ships the same dict shape under both keys; on
-        # this branch ``last_trace_analyze`` is populated alongside
-        # ``last_select_kernels`` for resume + v0.6 prompt-format parity.
-        # Prefer ``last_trace_analyze`` (canonical post-M4), fall back to
-        # ``last_select_kernels`` (legacy writer) so tests that seed only
-        # one of the two keys still render meaningfully.
-        blob = self.last_trace_analyze or self.last_select_kernels
-        return self._format_select_kernels_blob(blob)
+        # Canonical post-M4 cache key. Legacy ``last_select_kernels``
+        # field was removed in this branch — see SharedState dataclass
+        # docstring.
+        return self._format_trace_analyze_blob(self.last_trace_analyze)
 
-    def _format_select_kernels_blob(self, blob: dict[str, Any] | None) -> str:
+    def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
         if not blob:
             return "(none)"
         ids = [
