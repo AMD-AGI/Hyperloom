@@ -104,17 +104,53 @@ def _slug(value: str, default: str) -> str:
     return cleaned or default
 
 
-def recipe_canonical_id(model_name: str, hardware: str) -> str:
-    """``recipe:{slug(model)}:{slug(hardware)}`` — KB-registered ``recipe`` kind.
+def recipe_canonical_id(
+    model_name: str,
+    hardware: str,
+    framework: str = "",
+) -> str:
+    """KB-registered ``recipe`` kind canonical id.
 
-    Replaces the legacy ``workload.<slug>.<gpu>`` name; aligns with
-    ``shared/kinds/recipe.py`` so kb-explorer + warm-start can index it.
+    Two shapes:
 
-    Both slug components are lowercased (PR-A10) so the canonical_id
+    * New (framework-scoped) — ``recipe:{model}:{framework}:{hardware}``.
+      Used whenever ``framework`` is supplied (non-empty after slug).
+      sglang and vLLM on the same (model, hw) live in **separate**
+      recipe rows because their ``best_config.extra_*_args`` are
+      framework-specific and would crash the server if mixed.
+
+    * Legacy — ``recipe:{model}:{hardware}`` — preserved when
+      ``framework`` is empty so back-compat callers (offline ingest,
+      pre-framework-PR seed records) still produce the original
+      canonical id. ``find_recipe_with_fallback`` also queries this
+      shape as a last-resort lookup so existing KB rows remain
+      reachable until they are rewritten under the new shape.
+
+    All slug components are lowercased (PR-A10) so the canonical_id
     matches the KB corpus convention regardless of how the operator
-    typed the CLI ``--model`` arg.
+    typed the CLI ``--model`` / ``--framework`` arg.
     """
-    return f"recipe:{_slug(model_name, 'unknown_model')}:{_slug(hardware, 'unknown_hw')}"
+    fw_slug = _slug(framework, "") if framework else ""
+    if fw_slug:
+        return (
+            f"recipe:{_slug(model_name, 'unknown_model')}:"
+            f"{fw_slug}:{_slug(hardware, 'unknown_hw')}"
+        )
+    return (
+        f"recipe:{_slug(model_name, 'unknown_model')}:"
+        f"{_slug(hardware, 'unknown_hw')}"
+    )
+
+
+def recipe_canonical_id_legacy(model_name: str, hardware: str) -> str:
+    """Legacy (pre-framework-PR) recipe canonical id.
+
+    Identical to ``recipe_canonical_id(model, hw, framework="")``.
+    Exposed as a separate helper so ``find_recipe_with_fallback`` can
+    issue a documented "look up under the old name" query without
+    relying on the implicit empty-framework branch.
+    """
+    return recipe_canonical_id(model_name, hardware, "")
 
 
 # ---------------------------------------------------------------------------
@@ -582,9 +618,13 @@ class CortexKBClient:
     # Public API — read side (T0)
     # ==================================================================
     def read_recipe_exact(
-        self, *, model: str, hardware: str,
+        self,
+        *,
+        model: str,
+        hardware: str,
+        framework: str = "",
     ) -> dict[str, Any]:
-        """Read the current ``recipe:{model}:{hardware}`` point as a dict.
+        """Read the current ``recipe:{model}:{framework}:{hardware}`` point.
 
         Returns the parsed KB point (``{id, canonical_id, kind,
         attrs, authority, confidence, ...}``) or ``{}`` when the
@@ -598,13 +638,22 @@ class CortexKBClient:
         the CURRENT anchor state to merge ``sessions[]`` without
         losing historical entries.
 
+        Back-compat: when the new-shape lookup misses, we re-query the
+        legacy ``recipe:{model}:{hardware}`` canonical id (no
+        framework segment). KB rows written before the framework-PR
+        live under the legacy shape; surfacing them once is enough
+        because the very next ``update_recipe`` written by this
+        session lands under the new shape and supersedes the legacy
+        row for future reads.
+
         Failures are non-fatal: the caller treats ``{}`` as "no
         prior state" and proceeds with a fresh write.
         """
         if not self.enabled:
             return {}
+        cid_new = recipe_canonical_id(model, hardware, framework)
         body = {
-            C.F_CANONICAL_ID:     recipe_canonical_id(model, hardware),
+            C.F_CANONICAL_ID:     cid_new,
             C.F_KIND:             C.KIND_RECIPE,
             C.F_NEIGHBOR_PREVIEW: False,
             C.F_LIMIT:            1,
@@ -617,11 +666,117 @@ class CortexKBClient:
         points = resp.get(C.F_POINTS) or resp.get("points") or []
         if isinstance(points, list) and points and isinstance(points[0], dict):
             return points[0]
+        # Legacy fallback (only when caller supplied framework so the
+        # new-shape lookup actually differed from the legacy shape).
+        if framework:
+            cid_legacy = recipe_canonical_id_legacy(model, hardware)
+            if cid_legacy != cid_new:
+                try:
+                    resp = self._post(C.PATH_QUERY_POINT, {
+                        C.F_CANONICAL_ID:     cid_legacy,
+                        C.F_KIND:             C.KIND_RECIPE,
+                        C.F_NEIGHBOR_PREVIEW: False,
+                        C.F_LIMIT:            1,
+                    })
+                except CortexKBError as exc:
+                    log.info(
+                        "read_recipe_exact legacy fallback failed (%s)", exc,
+                    )
+                    return {}
+                points = resp.get(C.F_POINTS) or resp.get("points") or []
+                if (
+                    isinstance(points, list)
+                    and points
+                    and isinstance(points[0], dict)
+                    # Belt-and-braces: only return a legacy hit if its
+                    # ``attrs.framework`` matches the caller. Without
+                    # this check a sglang read could pull a stale
+                    # vLLM-tagged legacy row written by a pre-PR
+                    # session.
+                    and (
+                        not (points[0].get("attrs") or {}).get("framework")
+                        or str((points[0].get("attrs") or {}).get("framework"))
+                           .strip().lower() == framework.strip().lower()
+                    )
+                ):
+                    return points[0]
         return {}
 
-    def find_recipe(self, *, workload: str, hw: str) -> str:
+    def read_lesson_exact(
+        self,
+        *,
+        statement: str,
+        cited_citation_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Read the current ``lesson:{hash16}`` point as a dict.
+
+        Mirror of :meth:`read_recipe_exact` for the lesson kind.
+        Used by ``_record_fact_per_*`` to do read-modify-write on
+        ``attrs.source_session_ids`` / ``attrs.validated_count`` so
+        the KB shallow-merge doesn't erase prior validators on every
+        write.
+
+        Returns ``{}`` on miss / disabled / HTTP failure (non-fatal —
+        caller treats empty as "no prior validators" and proceeds
+        with a singleton list).
+        """
+        if not self.enabled:
+            return {}
+        cid = lesson_canonical_id(statement, cited_citation_ids)
+        body = {
+            C.F_CANONICAL_ID:     cid,
+            C.F_KIND:             C.KIND_LESSON,
+            C.F_NEIGHBOR_PREVIEW: False,
+            C.F_LIMIT:            1,
+        }
+        try:
+            resp = self._post(C.PATH_QUERY_POINT, body)
+        except CortexKBError as exc:
+            log.info("read_lesson_exact failed (%s); treating as no prior", exc)
+            return {}
+        points = resp.get(C.F_POINTS) or resp.get("points") or []
+        if isinstance(points, list) and points and isinstance(points[0], dict):
+            return points[0]
+        return {}
+
+    def read_pitfall_exact(
+        self,
+        *,
+        description: str,
+        cited_citation_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Read the current ``pitfall:{hash16}`` point as a dict.
+
+        Symmetric with :meth:`read_lesson_exact`.
+        """
+        if not self.enabled:
+            return {}
+        cid = pitfall_canonical_id(description, cited_citation_ids)
+        body = {
+            C.F_CANONICAL_ID:     cid,
+            C.F_KIND:             C.KIND_PITFALL,
+            C.F_NEIGHBOR_PREVIEW: False,
+            C.F_LIMIT:            1,
+        }
+        try:
+            resp = self._post(C.PATH_QUERY_POINT, body)
+        except CortexKBError as exc:
+            log.info("read_pitfall_exact failed (%s); treating as no prior", exc)
+            return {}
+        points = resp.get(C.F_POINTS) or resp.get("points") or []
+        if isinstance(points, list) and points and isinstance(points[0], dict):
+            return points[0]
+        return {}
+
+    def find_recipe(
+        self,
+        *,
+        workload: str,
+        hw: str,
+        framework: str = "",
+    ) -> str:
         """T0 — ``POST /v1/points/query`` filtering ``kind=recipe`` for
-        the (workload, hw) anchor.
+        the (workload, framework, hw) anchor.
 
         Failures are non-fatal in M1 (warm_start is consumed by M5);
         callers should swallow :class:`CortexKBError`. Kept as the
@@ -632,7 +787,7 @@ class CortexKBClient:
         if not self.enabled:
             return ""
         body = {
-            C.F_CANONICAL_ID:     recipe_canonical_id(workload, hw),
+            C.F_CANONICAL_ID:     recipe_canonical_id(workload, hw, framework),
             C.F_KIND:             C.KIND_RECIPE,
             C.F_NEIGHBOR_PREVIEW: True,
             C.F_LIMIT:            1,
@@ -765,9 +920,16 @@ class CortexKBClient:
             points = resp.get(C.F_POINTS) or resp.get("points") or []
             return list(points) if isinstance(points, list) else []
 
-        # ── T1: exact canonical_id ───────────────────────────────────
+        # ── T1: exact canonical_id (framework-scoped, new shape) ────
+        # Two-step exact lookup: first under the new
+        # ``recipe:{model}:{framework}:{hw}`` canonical id, then —
+        # only when caller supplied a framework AND the new-shape
+        # lookup missed — re-query the legacy ``recipe:{model}:{hw}``
+        # shape so KB rows written before the framework-PR are still
+        # reachable. The framework filter on the legacy hit guards
+        # against picking up a stale vLLM row in a sglang session.
         t1 = _query({
-            C.F_CANONICAL_ID:     recipe_canonical_id(workload, hw),
+            C.F_CANONICAL_ID:     recipe_canonical_id(workload, hw, framework or ""),
             C.F_KIND:             C.KIND_RECIPE,
             C.F_NEIGHBOR_PREVIEW: True,
             C.F_LIMIT:            1,
@@ -777,6 +939,40 @@ class CortexKBClient:
                 return p, "T1_exact", 0.85
         # T1 hit but empty attrs (smoke / seed record) → keep walking
         t1_seed = t1[0] if t1 else None
+        if framework:
+            cid_legacy = recipe_canonical_id_legacy(workload, hw)
+            cid_new = recipe_canonical_id(workload, hw, framework)
+            if cid_legacy != cid_new:
+                t1_legacy = _query({
+                    C.F_CANONICAL_ID:     cid_legacy,
+                    C.F_KIND:             C.KIND_RECIPE,
+                    C.F_NEIGHBOR_PREVIEW: True,
+                    C.F_LIMIT:            1,
+                })
+                # Only accept legacy hits whose ``attrs.framework``
+                # matches the caller (or is unset). Without this gate
+                # a sglang session could silently pick up a vLLM-
+                # tagged legacy row written before the PR.
+                fw_matched_legacy = []
+                for p in t1_legacy:
+                    p_fw = str(
+                        ((p or {}).get("attrs") or {}).get("framework")
+                        or "",
+                    ).strip().lower()
+                    if p_fw and p_fw != framework.strip().lower():
+                        continue
+                    fw_matched_legacy.append(p)
+                for p in fw_matched_legacy:
+                    if _has_real_config(p):
+                        return p, "T1_exact_legacy", 0.80
+                # Framework-matched legacy seed (no real config) is
+                # preferable to nothing — surface it as bottom-of-
+                # ladder seed-only. Wrong-framework legacy rows are
+                # deliberately NOT promoted: their best_config blob
+                # is for the other framework and the prompt section
+                # would mislead the specialist.
+                if t1_seed is None and fw_matched_legacy:
+                    t1_seed = fw_matched_legacy[0]
 
         # ── T2: same family + same hw + same workload-shape ──────────
         # Inserted between T1 (exact) and T3 (same-family) because a
@@ -893,6 +1089,54 @@ class CortexKBClient:
             return t1_seed, "T1_seed_only", 0.0
         return empty
 
+    # GAP 7+8 — when ranking parameters are supplied, the client over-
+    # fetches by this factor and re-ranks locally to pick the top
+    # ``limit`` rows. Without over-fetch, KB's confidence-only sort
+    # may have already truncated the lessons / pitfalls our composite
+    # score would have preferred (e.g. an old high-confidence row
+    # outranking a newer same-framework_version row that should win
+    # after version-proximity weighting).
+    #
+    # Capped at 200 to keep the KB query bounded — the typical
+    # (model, hw, framework) anchor doesn't have more than 50-100
+    # lessons / pitfalls, so 4x of the default limit=20 (=80) plus
+    # this hard cap is a safe trade-off between coverage and latency.
+    _RANKING_OVER_FETCH_FACTOR: int = 4
+    _RANKING_OVER_FETCH_CAP: int = 200
+
+    def _ranking_active(
+        self,
+        current_workload_shape: Mapping[str, Any] | None,
+        current_framework_version: str,
+    ) -> bool:
+        """True iff at least one ranking signal is supplied (callers
+        without context get the legacy confidence-only path)."""
+        if current_workload_shape:
+            return True
+        if (current_framework_version or "").strip():
+            return True
+        return False
+
+    def _kb_fetch_limit(
+        self,
+        limit: int,
+        *,
+        ranking_active: bool,
+    ) -> int:
+        """Decide how many rows to ask KB for.
+
+        ``ranking_active`` over-fetches so the client-side ranker has
+        a meaningful set to re-sort. When no ranking signal is
+        supplied, the legacy confidence-only sort suffices and we ask
+        KB for exactly ``limit`` rows to keep wire cost minimal.
+        """
+        if not ranking_active:
+            return int(limit)
+        return min(
+            self._RANKING_OVER_FETCH_CAP,
+            int(limit) * self._RANKING_OVER_FETCH_FACTOR,
+        )
+
     def pitfalls(
         self,
         *,
@@ -900,6 +1144,8 @@ class CortexKBClient:
         hardware: str,
         framework: str | None = None,
         limit: int = 20,
+        current_workload_shape: Mapping[str, Any] | None = None,
+        current_framework_version: str = "",
     ) -> list[dict[str, Any]]:
         """T0 — query ``kind=pitfall`` points relevant to ``(model, hardware)``.
 
@@ -935,10 +1181,19 @@ class CortexKBClient:
             attrs_filter["applicable_hardware"] = hardware
         if framework:
             attrs_filter["framework"] = framework
+        # GAP 7+8 (FIX-3) — over-fetch when ranking is active so the
+        # composite scorer has the full candidate set. KB-side limit
+        # truncates by confidence; without over-fetch, the row a
+        # version-proximity / shape-similarity boost would have lifted
+        # to the top may already be cut off.
+        ranking_active = self._ranking_active(
+            current_workload_shape, current_framework_version,
+        )
+        fetch_limit = self._kb_fetch_limit(limit, ranking_active=ranking_active)
         body = {
             C.F_KIND:         C.KIND_PITFALL,
             C.F_ATTRS_FILTER: attrs_filter,
-            C.F_LIMIT:        int(limit),
+            C.F_LIMIT:        fetch_limit,
         }
         try:
             resp = self._post(C.PATH_QUERY_POINT, body)
@@ -948,14 +1203,17 @@ class CortexKBClient:
         points = resp.get(C.F_POINTS) or resp.get("points") or []
         if not isinstance(points, list):
             return []
-        # Sort by KB-side confidence desc so the most authoritative
-        # pitfalls land first in the specialist prompt section.
-        sorted_points = sorted(
+        # Composite ranking (confidence × validated_count × shape
+        # similarity × version proximity × time decay). Falls back to
+        # confidence-only when no ranking signal is supplied.
+        sorted_points = _rank_fact_points(
             (p for p in points if isinstance(p, dict)),
-            key=lambda p: float(p.get("confidence") or 0.0),
-            reverse=True,
+            current_workload_shape=current_workload_shape,
+            current_framework_version=current_framework_version,
         )
-        return sorted_points
+        # Trim back down to the caller's requested cap (we asked KB
+        # for more rows than they ultimately want to render).
+        return sorted_points[: int(limit)]
 
     def lessons(
         self,
@@ -964,6 +1222,8 @@ class CortexKBClient:
         hardware: str,
         framework: str | None = None,
         limit: int = 20,
+        current_workload_shape: Mapping[str, Any] | None = None,
+        current_framework_version: str = "",
     ) -> list[dict[str, Any]]:
         """T0 — query ``kind=lesson`` points relevant to ``(model, hardware)``.
 
@@ -1001,10 +1261,14 @@ class CortexKBClient:
             attrs_filter["applicable_hardware"] = hardware
         if framework:
             attrs_filter["framework"] = framework
+        ranking_active = self._ranking_active(
+            current_workload_shape, current_framework_version,
+        )
+        fetch_limit = self._kb_fetch_limit(limit, ranking_active=ranking_active)
         body = {
             C.F_KIND:         C.KIND_LESSON,
             C.F_ATTRS_FILTER: attrs_filter,
-            C.F_LIMIT:        int(limit),
+            C.F_LIMIT:        fetch_limit,
         }
         try:
             resp = self._post(C.PATH_QUERY_POINT, body)
@@ -1014,14 +1278,12 @@ class CortexKBClient:
         points = resp.get(C.F_POINTS) or resp.get("points") or []
         if not isinstance(points, list):
             return []
-        # Sort by KB-side confidence desc so the most authoritative
-        # lessons land first in the specialist prompt's section.
-        sorted_points = sorted(
+        sorted_points = _rank_fact_points(
             (p for p in points if isinstance(p, dict)),
-            key=lambda p: float(p.get("confidence") or 0.0),
-            reverse=True,
+            current_workload_shape=current_workload_shape,
+            current_framework_version=current_framework_version,
         )
-        return sorted_points
+        return sorted_points[: int(limit)]
 
     # ==================================================================
     # Public API — write side (T2 / T3 / T4)
@@ -1256,6 +1518,7 @@ class CortexKBClient:
         *,
         model: str,
         hardware: str,
+        framework: str = "",
         best_config: Mapping[str, Any] | None = None,
         best_throughput: float | None = None,
         what_worked: list[Mapping[str, Any]] | None = None,
@@ -1271,12 +1534,14 @@ class CortexKBClient:
         idempotency_key: str | None = None,
         prefer_sync: bool = True,
     ) -> dict[str, Any]:
-        """Merge fact fields into the (model, hardware) ``recipe`` anchor.
+        """Merge fact fields into the (model, framework, hardware) ``recipe`` anchor.
 
         Wraps :meth:`propose_point` with ``kind="recipe"`` and the
-        canonical id ``recipe:{slug(model)}:{slug(hardware)}`` — the
-        same anchor T0 mints, so KB-merge semantics make this an
-        in-place update of the existing point.
+        canonical id ``recipe:{slug(model)}:{slug(framework)}:{slug(hardware)}``
+        when ``framework`` is supplied, or the legacy
+        ``recipe:{slug(model)}:{slug(hardware)}`` shape when it is
+        not (back-compat for callers / tests that pre-date the
+        framework PR).
 
         Only non-``None`` arguments are written; unspecified keys are
         left untouched on the server side (attrs is shallow-merged
@@ -1284,11 +1549,16 @@ class CortexKBClient:
         ``Recipe`` dataclass — see kg-usage-guide §7.4 for the full
         field shape.
         """
-        cid = recipe_canonical_id(model, hardware)
+        cid = recipe_canonical_id(model, hardware, framework)
         attrs: dict[str, Any] = {
             "model":    model,
             "hardware": hardware,
         }
+        if framework:
+            # Persist framework into attrs as well so attr-filter
+            # queries (find_recipe_with_fallback T2..T5) match by
+            # framework without re-parsing the canonical_id.
+            attrs["framework"] = framework
         if best_config is not None:
             attrs["best_config"] = dict(best_config)
         if best_throughput is not None:
@@ -1499,6 +1769,161 @@ class CortexKBClient:
         return "ok"
 
 
+# ---------------------------------------------------------------------------
+# GAP 7+8 — client-side ranking for lessons() / pitfalls()
+# ---------------------------------------------------------------------------
+def _rank_fact_points(
+    points: "Any",  # Iterable[dict]
+    *,
+    current_workload_shape: Mapping[str, Any] | None = None,
+    current_framework_version: str = "",
+) -> list[dict[str, Any]]:
+    """Sort ``kind=lesson`` / ``kind=pitfall`` KB points by composite
+    relevance score, highest first.
+
+    Score factors (multiplicative — each defaults to 1.0 when its
+    inputs are missing so partial KB rows degrade gracefully):
+
+    1. **KB confidence** — base score = ``confidence`` (or 0.5 when
+       unset). Captures KB-side authority + new-row prior.
+    2. **validated_count** — +10% per additional session that
+       confirmed the lesson, capped at +50% (saturate at 6 sessions).
+       Multi-session validation is the strongest cross-session signal.
+    3. **workload-shape similarity** — exact match on (tp / ep /
+       precision) is heavily weighted (+30% per dimension); numeric
+       fields (conc / isl / osl / max_model_len) decay by ratio.
+    4. **framework_version proximity** — same version 1.0; same
+       major.minor 0.8; same major 0.5; different 0.2. A lesson from
+       sglang@0.4 is downweighted vs one from sglang@0.5 when the
+       current session is 0.5.
+    5. **time decay** — half-life 90 days (aiter/sglang iterate
+       fast). Older lessons are downweighted but never dropped — the
+       LLM gets to decide if a 6-month-old lesson still applies.
+
+    Returns a fresh list (does not mutate the input).
+
+    Back-compat: when ``current_workload_shape`` is None / empty AND
+    ``current_framework_version`` is empty, factors 3–4 collapse to
+    1.0 so the result reduces to "confidence × validated_count × time
+    decay" — which still beats the legacy confidence-only sort.
+    """
+    shape = dict(current_workload_shape or {})
+    fw_version = (current_framework_version or "").strip()
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        scored.append((_lesson_rank_score(p, shape, fw_version), p))
+    scored.sort(key=lambda kv: kv[0], reverse=True)
+    return [p for _, p in scored]
+
+
+def _lesson_rank_score(
+    point: dict[str, Any],
+    current_shape: dict[str, Any],
+    current_fw_version: str,
+) -> float:
+    """Per-point score (see :func:`_rank_fact_points` for the formula).
+
+    Public-ish so tests can drive it directly without round-tripping
+    through ``lessons()`` / ``pitfalls()``.
+    """
+    attrs = (point or {}).get("attrs") or {}
+    # Factor 1 — KB confidence.
+    try:
+        score = float(point.get("confidence") or 0.5)
+    except (TypeError, ValueError):
+        score = 0.5
+    # Factor 2 — validated_count.
+    try:
+        vc = int(attrs.get("validated_count") or 1)
+    except (TypeError, ValueError):
+        vc = 1
+    if vc > 1:
+        score *= 1.0 + 0.1 * min(vc - 1, 5)
+    # Factor 3 — workload-shape similarity.
+    if current_shape:
+        for key, weight in (
+            ("tp", 0.30), ("ep", 0.30), ("precision", 0.30),
+            ("conc", 0.10), ("isl", 0.10), ("osl", 0.10),
+            ("max_model_len", 0.05),
+        ):
+            cur = current_shape.get(key)
+            lesson_val = attrs.get(key)
+            if cur is None or lesson_val is None:
+                continue
+            if cur == lesson_val:
+                score *= 1.0 + weight
+            elif (
+                isinstance(cur, (int, float))
+                and isinstance(lesson_val, (int, float))
+                and max(float(cur), float(lesson_val)) > 0
+            ):
+                ratio = min(float(cur), float(lesson_val)) / max(
+                    float(cur), float(lesson_val),
+                )
+                # Smooth decay: 0.5 at zero similarity → 1.0 at exact.
+                score *= 0.5 + 0.5 * ratio
+            else:
+                # Different non-numeric values (precision="fp8" vs
+                # "bf16") — meaningful downweight.
+                score *= 0.5
+    # Factor 4 — framework_version proximity.
+    lesson_fv = str(attrs.get("framework_version") or "").strip()
+    if current_fw_version and lesson_fv:
+        score *= _version_proximity(current_fw_version, lesson_fv)
+    # Factor 5 — time decay (90 day half-life).
+    last_at = str(
+        attrs.get("last_validated_at")
+        or attrs.get("source_generated_at")
+        or "",
+    ).strip()
+    if last_at:
+        age_days = _age_in_days(last_at)
+        if age_days is not None and age_days >= 0:
+            score *= 0.5 ** (age_days / 90.0)
+    return float(score)
+
+
+def _version_proximity(v1: str, v2: str) -> float:
+    """Semantic-versioning-ish proximity in [0.0, 1.0].
+
+    * Identical → 1.0
+    * Same major.minor (patch differs) → 0.8
+    * Same major (minor differs) → 0.5
+    * Different majors → 0.2
+    * Unparseable → 0.5 (neither side gets a benefit)
+    """
+    parts1 = (v1 or "").lstrip("v").split(".")
+    parts2 = (v2 or "").lstrip("v").split(".")
+    if parts1 == parts2:
+        return 1.0
+    if len(parts1) >= 2 and len(parts2) >= 2 and parts1[:2] == parts2[:2]:
+        return 0.8
+    if len(parts1) >= 1 and len(parts2) >= 1 and parts1[:1] == parts2[:1]:
+        return 0.5
+    return 0.2
+
+
+def _age_in_days(iso_ts: str) -> float | None:
+    """Parse ``iso_ts`` and return age-in-days (now - ts).
+
+    ``None`` on parse failure so the caller can short-circuit the time-
+    decay factor.
+    """
+    try:
+        # Accept "Z" suffix as well as offset form. fromisoformat in
+        # py3.10 doesn't handle "Z" so normalise.
+        s = iso_ts.replace("Z", "+00:00")
+        ts = datetime.fromisoformat(s)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - ts
+        return delta.total_seconds() / 86400.0
+    except (TypeError, ValueError):
+        return None
+
+
 __all__ = [
     "CortexKBClient",
     "CortexKBError",
@@ -1506,4 +1931,5 @@ __all__ = [
     "parse_kb_error",
     "pitfall_canonical_id",
     "recipe_canonical_id",
+    "recipe_canonical_id_legacy",
 ]

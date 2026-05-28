@@ -293,6 +293,14 @@ DEPRECATED_ACTION_REPLACEMENTS: dict[str, str] = {
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset({
     "roofline",
     "profile",
+    # GAP 1 — ``replay_warm_recipe`` is enqueued exclusively by the
+    # Coordinator at PRELUDE (after baseline lands) when the T0
+    # warm-start ladder returned a high-confidence prior. Letting the
+    # LLM propose it would (a) race the one-shot guard, (b) let a
+    # specialist hand-craft a "warm replay" with adversarial args
+    # that ought to go through ``explore`` instead. Same gate as
+    # roofline / profile.
+    "replay_warm_recipe",
 })
 
 
@@ -570,6 +578,17 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "warm_start_pitfalls",
     "warm_start_lessons",
     "warm_start_ts",
+    # GAP 5 KB tag completeness — populated by Coordinator from
+    # manifest + baseline materialized config. LLM agents can read
+    # them via prompt sections, but only Coordinator writes.
+    "stack_fingerprint_meta",
+    "baseline_workload_extra",
+    # GAP 1 warm-recipe replay — one-shot guard + outcome record.
+    # Coordinator-only writes; LLM cannot edit them via update_state
+    # (would let a misbehaving LLM bypass the replay budget).
+    "warm_replay_attempted",
+    "warm_replay_outcome",
+    "warm_history_injected",
     # phase state machine fields (KB_design §3.2, §3.10,
     # §3.13 M2). All managed by ``Coordinator._advance_phase_if_needed``;
     # LLM update_state never reaches these.
@@ -1347,13 +1366,13 @@ class PolicyGate:
             f"must not propose it ({intent_kind})",
             rule="analysis_action_not_llm_proposable",
             hint=(
-                "roofline / profile are auto-enqueued at PRELUDE and on "
-                "every +10% gain crossing. Selection is controlled by "
-                "``--enable-roofline`` / ``--no-enable-roofline`` (default "
-                "on → roofline; off → profile). Propose ``specialist`` "
-                "or ``explore`` instead — the analysis snapshot will be "
-                "refreshed automatically the next time the watermark "
-                "trips."
+                "roofline / profile / replay_warm_recipe are auto-enqueued "
+                "by the Coordinator (PRELUDE bootstrap + +10% watermark "
+                "crossings + warm-recipe replay). Selection is controlled "
+                "by ``--enable-roofline`` / ``--no-enable-roofline`` / "
+                "``--no-warm-replay``. Propose ``specialist`` or "
+                "``explore`` instead — these analysis snapshots will "
+                "refresh automatically when their gate fires."
             ),
         )
 
