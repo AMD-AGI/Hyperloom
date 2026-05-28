@@ -1005,14 +1005,12 @@ def _build_dynamic_action_executor(
         getattr(args, "dynamic_action_model", None)
         or getattr(args, "claude_model", "")
     ).strip()
-    turn_cap = int(
-        getattr(args, "dynamic_action_turn_cap", DEFAULT_TURN_CAP) or DEFAULT_TURN_CAP,
-    )
-    wall_clock = float(
-        getattr(
-            args, "dynamic_action_wall_clock_sec",
-            DEFAULT_WALL_CLOCK_BUDGET_SEC,
-        ) or DEFAULT_WALL_CLOCK_BUDGET_SEC,
+    turn_cap_raw = getattr(args, "dynamic_action_turn_cap", None)
+    turn_cap = int(turn_cap_raw) if turn_cap_raw else DEFAULT_TURN_CAP
+    wall_clock_raw = getattr(args, "dynamic_action_wall_clock_sec", None)
+    wall_clock = (
+        float(wall_clock_raw) if wall_clock_raw
+        else DEFAULT_WALL_CLOCK_BUDGET_SEC
     )
     backend = ClaudeBackend(model=model, max_turns_default=1)
     runner = DynamicActionRunner(
@@ -4528,6 +4526,41 @@ def _build_parser() -> argparse.ArgumentParser:
         or None,
         help="Claude model used for specialist sub-agents (defaults to "
              "the orchestration --claude-model). KB_design §3.5 §6.",
+    )
+    opt.add_argument(
+        "--dynamic-action-model",
+        dest="dynamic_action_model",
+        type=str,
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_DYNAMIC_ACTION_MODEL", "",
+        ) or None,
+        help="Claude model used for dynamic_action sub-agents (defaults "
+             "to --claude-model). dynamic_action.MD §1 + gap G5.",
+    )
+    opt.add_argument(
+        "--dynamic-action-turn-cap",
+        dest="dynamic_action_turn_cap",
+        type=int,
+        default=int(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DYNAMIC_ACTION_TURN_CAP", "0",
+            ) or "0",
+        ) or None,
+        help="Hard cap on ReAct turns per dynamic_action dispatch "
+             "(default 12). Per dynamic_action_runner.DEFAULT_TURN_CAP.",
+    )
+    opt.add_argument(
+        "--dynamic-action-wall-clock-sec",
+        dest="dynamic_action_wall_clock_sec",
+        type=float,
+        default=float(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DYNAMIC_ACTION_WALL_CLOCK_SEC", "0",
+            ) or "0",
+        ) or None,
+        help="Wall-clock budget per dynamic_action dispatch (default "
+             "900s = 15 min). Per "
+             "dynamic_action_runner.DEFAULT_WALL_CLOCK_BUDGET_SEC.",
     )
     opt.add_argument(
         "--specialist-max-turns",
