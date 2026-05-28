@@ -73,6 +73,22 @@ class TestListAndMatch:
         """When no keyword matches, the result is an empty list."""
         assert kb._match_domains("totally unrelated free-form text") == []
 
+    def test_match_domains_atom_keyword_hit(self) -> None:
+        """atom_plan/phase3_open_framework_agent 3.3: ``atom`` lives
+        under the framework domain alongside sglang / vllm so a gap
+        description mentioning atom can pull framework-domain KB
+        priors. Pinned here so a future trim of DOMAIN_KEYWORDS doesn't
+        silently drop it."""
+        domains = kb._match_domains("improve atom moe throughput on mi300x")
+        assert "framework" in domains, (
+            f"atom must hit the framework domain; got {domains!r}"
+        )
+
+    def test_atom_in_framework_domain_keywords_constant(self) -> None:
+        """Constant-level guard: ``atom`` must appear in the
+        ``framework`` domain's keyword list."""
+        assert "atom" in kb.DOMAIN_KEYWORDS["framework"]
+
 
 class TestSelectKb:
     """select_kb priority and fallback behaviour."""
