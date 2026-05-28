@@ -89,6 +89,20 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _clear_kernel_request_handler_caches():
+    """Clear ``lru_cache`` state on env-bound helpers between tests.
+
+    ``_default_geak_budget_minutes`` and ``_default_kernel_batch_parallel``
+    cache their ``$GEAK_RUN_MODE`` / ``$KERNEL_AGENT_NUM_GPUS`` /
+    ``torch.cuda.device_count()`` reads (these don't change in-session
+    in production). Tests that monkeypatch any of those need a fresh
+    cache so the helper actually re-reads the patched value.
+    """
+    from inference_optimizer.orchestrator import kernel_request_handlers as krh
+    krh._default_geak_budget_minutes.cache_clear()
+    krh._default_kernel_batch_parallel.cache_clear()
+
 
 def _bootstrap_kernel_agent_env() -> None:
     """Point HYPERLOOM_KERNEL_AGENT_ROOT at the in-repo kernel-agent checkout."""
