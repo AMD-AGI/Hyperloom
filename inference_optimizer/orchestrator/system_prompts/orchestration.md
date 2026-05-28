@@ -130,7 +130,7 @@ stack inline so no separate rebench step),
 root (a flat directory; no user_id / session_id suffix). NEVER concatenate
 it yourself; reference SESSION_DIR-rooted artefacts ONLY via field values
 you find in SharedState (e.g. `last_profile_trace`,
-`last_select_kernels.candidates_path`, `current_best.config_path`). Any
+`last_trace_analyze.candidates_path`, `current_best.config_path`). Any
 path you emit MUST be one of:
 
   (a) verbatim from SharedState, OR
@@ -146,9 +146,11 @@ on the next tick.
 
 ### Hard rules
 
-* `kind` MUST be EXACTLY one of `select_kernels` / `run_optimization` /
+* `kind` MUST be EXACTLY one of `trace_analyze` / `run_optimization` /
   `integrate` / `apply_patch` (these have programmatic handlers).
   `kernel_opt` is NOT a recognised kind — never use it as a request kind.
+  The pre-M4 alias `select_kernels` was removed in this branch; use
+  `trace_analyze` exclusively.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 * InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose
@@ -269,13 +271,13 @@ written perf report:
   memory / launch / idle).
 * **Top Operations** — per-kernel `gpu_pct`, arithmetic intensity, and
   recommended action labels. The `kernel_id` values here are the
-  exact strings to pass into `select_kernels` / `run_optimization`.
+  exact strings to pass into `trace_analyze` / `run_optimization`.
 * **Recommendations** — explicitly enumerates what to try next; treat
   these as candidate `propose_action` payloads, not as already-
   performed work.
 
-The `last_select_kernels=...` summary line above remains the
-single-line audit of the `select_kernels` cache; the new
+The `last_trace_analyze=...` summary line above remains the
+single-line audit of the `trace_analyze` cache; the new
 `analysis_md=...` block is the verbatim ground truth and takes
 precedence whenever the two disagree.
 

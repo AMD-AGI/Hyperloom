@@ -1200,7 +1200,7 @@ class PolicyGate:
             raise PolicyDenied("request missing kind", rule="payload")
         # v0.8 M3 / ``action_deprecated`` covers the
         # REQUEST channel too (defense in depth). None of the legacy
-        # request kinds (select_kernels / kernel_opt / integrate /
+        # request kinds (trace_analyze / kernel_opt / integrate /
         # ...) collide with the deprecated set today, but an operator
         # extension that re-uses one of the legacy names via
         # ``request.kind`` would still be caught here.
