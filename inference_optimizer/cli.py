@@ -2801,42 +2801,37 @@ def _bootstrap_cortex_kb(
     manifest: dict[str, Any],
     resume: bool,
 ) -> CortexKBClient:
-    """Construct the :class:`CortexKBClient` and run the T0 anchor.
+    """Boot the KB integration: T0 recipe-snapshot anchor + legacy
+    CortexKBClient construction.
 
-    T0 (PRELUDE entry) sequence per 
-    1. ``session begin`` (sync, must succeed unless ``--degraded-kb``).
-    2. ``propose-point workload_node`` (canonical: ``workload.<model>.<hw>``)
-       — idempotent across sessions for the same pair.
-    3. ``find-recipe`` snapshot to ``.kb_warm.json`` (M5 will consume).
-    4. ``traps`` snapshot to ``.kb_pitfalls.json`` (M5).
-    5. Persist sid to SharedState + ``.kb_sid``.
+    Transitional state (between commits 4c and 4d): the T0 anchor
+    runs against the new :class:`recipe_kb.RecipeKB` dispatcher, but
+    the Coordinator's KEEP/REVERT path still calls into the legacy
+    :class:`CortexKBClient`. So this helper builds *both*:
 
-    Resume rules (M1 §7): if ``.kb_sid`` exists, reuse the sid without
-    re-begin. The other T0 steps still run so the warm-start snapshots
-    stay fresh for M5 consumers.
+    * a :class:`RecipeKB` dispatcher for ``run_t0_anchor`` (local
+      writes + remote read fall-through);
+    * a :class:`CortexKBClient` with the same URL / degraded flag,
+      threaded into the Coordinator constructor.
+
+    Commit 4d retires the second half (Coordinator switches to
+    RecipeKB) and this function will then return a ``RecipeKB``
+    directly.
 
     Failure handling:
 
-    - ``--degraded-kb`` → returns a disabled client; never raises.
-    - sync ``session begin`` failure → ``sys.exit(2)``; resume can pick
-      up the partial session_dir once Cortex comes back.
-    - propose_point / find_recipe / traps failures fall through to NDJSON
-      / warning; PRELUDE proceeds.
-
-    Returns the constructed (possibly disabled) :class:`CortexKBClient`
-    so the caller can thread it into the Coordinator.
+    * Local store is always wired — even ``--degraded-kb`` runs go
+      through the dispatcher (just with ``remote=None``).
+    * Remote read failures are absorbed by the dispatcher and
+      degrade silently to local-only.
+    * The legacy CortexKBClient mirrors the prior fail-fast +
+      sys.exit policy on hard remote outages so we don't change
+      operator-visible behaviour for the legacy KB write path.
     """
+    kb = _build_recipe_kb_dispatcher(args)
+
     enabled = bool(getattr(args, "cortex_enabled", True))
     kb_url = (getattr(args, "cortex_kb_url", None) or "").strip() or None
-    # ``foreground=True`` → 2s timeout + 1 retry. This client is
-    # handed to the Coordinator and gets called synchronously on the
-    # main loop (every KEEP / REVERT triggers one fact write). The
-    # tight budget enforces the side-channel contract — a slow / sick
-    # KB falls through to NDJSON in ~2s instead of blocking the
-    # optimizer for up to ~32s per call (= ~5min per EXPLORE round).
-    # CLI T0 anchor is called once at startup, so it tolerates the
-    # short budget; the kb_flusher daemon constructs its own client
-    # without foreground=True so it keeps the legacy retry budget.
     client = CortexKBClient(
         session_dir=session_dir,
         kb_url=kb_url,
@@ -2847,12 +2842,6 @@ def _bootstrap_cortex_kb(
         print("Cortex KB        : DISABLED (--degraded-kb)")
         return client
 
-    # the cli is the *canonical* T0 entry point
-    # (fail-fast banner + sys.exit on Cortex outage), but the actual
-    # T0 ritual lives in :mod:`orchestrator.cortex_t0` so an SDK /
-    # integration-test caller that constructs the Coordinator
-    # directly can run the same sequence as a defensive fallback
-    # (see :meth:`Coordinator._ensure_cortex_t0_anchored`).
     state = SharedState.load_or_init(session_dir)
     workload = (
         state.model_name
@@ -2863,11 +2852,11 @@ def _bootstrap_cortex_kb(
     hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
     stack_fp = manifest.get("stack_fingerprint") or {}
     image_digest = manifest.get("image") or ""
-    # GAP 5 — mirror version + image fingerprint onto SharedState so
-    # lesson / pitfall writes (coordinator._collect_workload_tags) can
-    # stamp them onto KB attrs WITHOUT re-reading manifest at every
-    # fact-write. Resume reads ``stack_fingerprint_meta`` back from
-    # state.json verbatim.
+    # Mirror version + image fingerprint onto SharedState so the
+    # CLOSE-time recipe write (coordinator._collect_workload_tags)
+    # can stamp them onto the recipe.extras WITHOUT re-reading
+    # manifest at every write. Resume reads ``stack_fingerprint_meta``
+    # back from state.json verbatim.
     if isinstance(stack_fp, dict) and stack_fp:
         merged_meta = dict(getattr(state, "stack_fingerprint_meta", {}) or {})
         for key, value in stack_fp.items():
@@ -2881,15 +2870,15 @@ def _bootstrap_cortex_kb(
         "marathon_dispatch_id": manifest.get("session_id", ""),
         "framework":            state.framework or manifest.get("framework", ""),
         "model_class":          state.model_class or "",
-        # Operator traceability — KB writes the most-recent triple onto
-        # the recipe anchor so a future debugger can answer "which Claw
-        # job / sandbox produced this best_config".
+        # Operator traceability — the recipe.extras carry the most-
+        # recent tracing tuple so a future debugger can answer
+        # "which Claw job / sandbox produced this best_config".
         "claw_session_id":      manifest.get("claw_session_id") or "",
         "sandbox_user_id":      manifest.get("sandbox_user_id") or "",
     }
     try:
         run_t0_anchor(
-            client,
+            kb,
             state,
             workload=workload,
             hw=hw,
@@ -2904,25 +2893,25 @@ def _bootstrap_cortex_kb(
             # here so an IR-3-pass + T0-fail race (KB UP at probe
             # time but DOWN moments later) also degrades cleanly
             # instead of aborting the optimizer. The Coordinator
-            # observes ``client.enabled=False`` after this fall-back
-            # and skips every KB write / read path.
+            # The dispatcher's remote half (if any) absorbs read
+            # failures internally; the local store is always
+            # writable, so a hard failure here is a programming bug
+            # (Path / OSError-class), not a remote outage.
             fail_fast=False,
             on_status=print,
             session_dir=session_dir,
             save_state=True,
         )
-    except CortexKBError as exc:
-        # T0 hit a hard failure mid-anchor (e.g. recipe backfill 5xx
-        # after IR-3 reported KB reachable). Downgrade to KB-degraded
-        # mode and record the audit reason so the breakdown collector
-        # can surface the drift between IR-3 and T0.
+    except Exception as exc:  # noqa: BLE001 — defensive
         print(
-            f"WARNING: T0 Cortex anchor failed mid-flight: {exc}\n"
-            f"Soft-degrading to KB-disabled mode for this session "
-            f"(equivalent to --degraded-kb). KB writes will queue to "
-            f"NDJSON only and KB reads will return empty.",
+            f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\n"
+            f"Continuing without warm-start (recipes for this 5-tuple "
+            f"will be created on first KEEP/REVERT).",
             file=sys.stderr,
         )
+        # Soft-degrade the legacy CortexKBClient so the Coordinator's
+        # T1-T4 path skips writes too — keeps the on-disk audit
+        # consistent with what the operator sees in the warning.
         client.enabled = False
         args.cortex_enabled = False
         args.kb_degraded_reason = (
