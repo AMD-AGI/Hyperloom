@@ -90,6 +90,7 @@ class _FullStewardState:
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
+    warm_replay_outcome: dict[str, Any] = field(default_factory=dict)
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
 
     def find_gap(self, _cid: str):
@@ -124,8 +125,41 @@ def test_build_session_snapshot_returns_all_documented_fields(tmp_path: Path):
         "gaps_count", "gaps_top5_canonical_ids",
         "policy_denial_history_tail",
         "steward_continuation_used",
+        # GAP 1 — warm-replay context so steward can distinguish
+        # cumulative_gain that came from KB recipe inheritance vs
+        # this session's own EXPLORE work.
+        "warm_replay_status",
+        "warm_replay_actual_gain_pct",
     ):
         assert key in snap, f"missing key: {key}"
+
+
+def test_build_session_snapshot_exposes_warm_replay_outcome(tmp_path: Path):
+    """GAP 1 — when warm-replay reproduced the KB best_config, the
+    snapshot must surface the status + actual_gain_pct so the steward
+    can attribute the cumulative_gain to inheritance vs. session work."""
+    state = _FullStewardState()
+    state.warm_replay_outcome = {
+        "status": "reproduced",
+        "actual_gain_pct": 23.5,
+        "expected_gain_pct": 25.0,
+        "warm_recipe_tier": "T1_exact",
+    }
+    coord = _make_coord(tmp_path, state=state)
+    snap = coord._build_session_snapshot()
+    assert snap["warm_replay_status"] == "reproduced"
+    assert snap["warm_replay_actual_gain_pct"] == 23.5
+
+
+def test_build_session_snapshot_warm_replay_empty_when_not_attempted(
+    tmp_path: Path,
+):
+    """No warm-replay → snapshot still has the keys (stable contract)
+    but with empty / zero values so the prompt template doesn't branch."""
+    coord = _make_coord(tmp_path, state=_FullStewardState())
+    snap = coord._build_session_snapshot()
+    assert snap["warm_replay_status"] == ""
+    assert snap["warm_replay_actual_gain_pct"] == 0.0
 
 
 def test_build_session_snapshot_aggregates_rejected_reasons(tmp_path: Path):
