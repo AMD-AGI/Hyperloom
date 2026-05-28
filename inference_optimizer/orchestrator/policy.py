@@ -214,6 +214,13 @@ EXPLORE_PERMISSIVE_PROVENANCE_LITERALS: frozenset[str] = frozenset({
 #     one ``explore`` grid. ``default_grid`` variants are unaffected
 #     (cold-start path).
 MAX_RESEARCH_LANE_CAPACITY: int = 6
+
+# Canonical name of the LLM-sub-agent resource lane shared by
+# specialists + dynamic_action. The single literal is here so
+# Coordinator-side spec-builders (e.g. dynamic_action spec.json's
+# ``resource_lane`` field) stay in lockstep with
+# :mod:`resource_lock`'s :data:`LANE_PRIORITY`.
+RESEARCH_LANE_NAME: str = "research_lane"
 DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 3
 MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS: int = 1
 
