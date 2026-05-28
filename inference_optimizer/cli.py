@@ -2800,23 +2800,13 @@ def _bootstrap_cortex_kb(
     session_dir: Path,
     manifest: dict[str, Any],
     resume: bool,
-) -> CortexKBClient:
-    """Boot the KB integration: T0 recipe-snapshot anchor + legacy
-    CortexKBClient construction.
+):
+    """Boot the recipe-snapshot KB integration and run the T0 anchor.
 
-    Transitional state (between commits 4c and 4d): the T0 anchor
-    runs against the new :class:`recipe_kb.RecipeKB` dispatcher, but
-    the Coordinator's KEEP/REVERT path still calls into the legacy
-    :class:`CortexKBClient`. So this helper builds *both*:
-
-    * a :class:`RecipeKB` dispatcher for ``run_t0_anchor`` (local
-      writes + remote read fall-through);
-    * a :class:`CortexKBClient` with the same URL / degraded flag,
-      threaded into the Coordinator constructor.
-
-    Commit 4d retires the second half (Coordinator switches to
-    RecipeKB) and this function will then return a ``RecipeKB``
-    directly.
+    Builds a :class:`recipe_kb.RecipeKB` dispatcher (local writes +
+    optional remote-read fall-through) and runs ``run_t0_anchor``
+    against it. Returns the dispatcher so the caller can thread it
+    into the Coordinator.
 
     Failure handling:
 
@@ -2824,23 +2814,11 @@ def _bootstrap_cortex_kb(
       through the dispatcher (just with ``remote=None``).
     * Remote read failures are absorbed by the dispatcher and
       degrade silently to local-only.
-    * The legacy CortexKBClient mirrors the prior fail-fast +
-      sys.exit policy on hard remote outages so we don't change
-      operator-visible behaviour for the legacy KB write path.
+    * T0 hard failures (e.g. filesystem permission denied) log a
+      warning and continue with an empty warm-start; the recipe
+      will be created on the first KEEP/REVERT.
     """
     kb = _build_recipe_kb_dispatcher(args)
-
-    enabled = bool(getattr(args, "cortex_enabled", True))
-    kb_url = (getattr(args, "cortex_kb_url", None) or "").strip() or None
-    client = CortexKBClient(
-        session_dir=session_dir,
-        kb_url=kb_url,
-        enabled=enabled,
-        foreground=True,
-    )
-    if not enabled:
-        print("Cortex KB        : DISABLED (--degraded-kb)")
-        return client
 
     state = SharedState.load_or_init(session_dir)
     workload = (
@@ -2909,15 +2887,10 @@ def _bootstrap_cortex_kb(
             f"will be created on first KEEP/REVERT).",
             file=sys.stderr,
         )
-        # Soft-degrade the legacy CortexKBClient so the Coordinator's
-        # T1-T4 path skips writes too — keeps the on-disk audit
-        # consistent with what the operator sees in the warning.
-        client.enabled = False
-        args.cortex_enabled = False
         args.kb_degraded_reason = (
             getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"
         )
-    return client
+    return kb
 
 
 # ---------------------------------------------------------------------------
@@ -4298,26 +4271,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # ``None`` when --degraded-kb; otherwise wraps Cortex KB +
         # PR Monitor for specialist prompt assembly.
         knowledge_plane=knowledge_plane,
-        # Fact-write surface (propose_lesson / propose_pitfall /
-        # update_recipe). Default ON; ``--no-fact-writes`` flips it
-        # OFF for soak runs that should not pollute the shared KB.
-        # The local optimization_journal is independent of this gate.
-        #
-        # Resume-safety: when ``--no-fact-writes`` was NOT supplied on
-        # the resume command line, fall back to the value recorded in
-        # manifest.json so robustness_monitor.sh resume preserves the
-        # operator's original intent (manifest is the persistent
-        # authority across restarts).
-        fact_writes_enabled=_resume_safe_flag(
-            args, "no_fact_writes", manifest, "fact_writes_enabled",
-            default=True, invert=True,
-        ),
         # GAP 1 — Warm-recipe replay controls. Default ON, fires when
         # warm_start_recipe.confidence >= min_confidence and the
         # measured gain reproduces at least min_reproduce_pct of the
-        # recipe's historical claim. Same resume-safety semantics as
-        # ``--no-fact-writes`` — manifest is the authority across
-        # restarts.
+        # recipe's historical claim. Manifest is the persistent
+        # authority across restarts (resume-safe).
         warm_replay_enabled=_resume_safe_flag(
             args, "no_warm_replay", manifest, "warm_replay_enabled",
             default=True, invert=True,
@@ -4985,21 +4943,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "stack_fingerprint does not match the current pod (recorded "
              "in manifest.json). Default: lenient (M1 records the flag "
              "in manifest only; consumed by M5 specialist assembly).",
-    )
-    # Fact-write surface gate (kg-usage-guide §3.2 / §3.4 / §3.5). When
-    # set, Coordinator still writes the local optimization_journal but
-    # skips every direct propose_lesson / propose_pitfall /
-    # update_recipe call. Useful for soak runs against the shared
-    # Cortex KB that should not pollute the lesson / pitfall tables.
-    opt.add_argument(
-        "--no-fact-writes",
-        dest="no_fact_writes",
-        action="store_true",
-        default=False,
-        help="Skip Cortex KB fact writes (propose_lesson / "
-             "propose_pitfall / update_recipe) at KEEP / REVERT / "
-             "CLOSE. Hypothesis writes (T2/T3) and the local "
-             "reports/optimization_journal.json are unaffected.",
     )
     # GAP 1 — Warm-recipe replay (PRELUDE auto-applies the KB best_config
     # before EXPLORE starts). Three flags control the behavior:
