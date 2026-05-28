@@ -88,8 +88,8 @@ _DEFAULT_ATTEMPTS_HISTORY = 20
 # prompt; older failures stay in the event log but drop from the prompt.
 _DEFAULT_LAST_FAILURES = 10
 
-# phase_history cap. There are only 5 phases in the line
-# (PRELUDE/EXPLORE/KERNEL/SWEEP/CLOSE) so 100 rows is wildly generous;
+# phase_history cap. There are only 6 phases in the line
+# (PRELUDE/FRAMEWORK_PR/EXPLORE/KERNEL/SWEEP/CLOSE) so 100 rows is wildly generous;
 # the only realistic path to hitting it is repeated escalate/recover
 # loops, which we'd want surfaced as a warning anyway. Cap is enforced
 # in :meth:`SharedState.record_phase_transition`.
@@ -449,10 +449,55 @@ class SharedState:
     # ------------------------------------------------------------------
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
     # ------------------------------------------------------------------
-    # framework-agent is on by default; the ``serving_specialist``
-    # ``framework_pr_scout`` sub_kind requires this. Operators opt out
-    # via ``--no-framework-agent-enabled``.
-    framework_agent_enabled: bool = True
+    # FRAMEWORK_PR phase toggle. When True (the default) the Coordinator
+    # routes PRELUDE → FRAMEWORK_PR → EXPLORE; the FRAMEWORK_PR phase
+    # batches ``fa phase-discover`` candidates, runs each through the
+    # standard Critic-gated ``integrate_patch``-style benchmark, and
+    # KEEPs winners to ``optimization_stack``. Operators opt out via
+    # ``--no-framework`` (PRELUDE → EXPLORE directly, ``prelude_done``
+    # reason preserved). Replaces the v0.8 ``framework_agent_enabled``
+    # serving-sub-kind toggle; PolicyGate's
+    # ``framework_pr_action_not_llm_proposable`` rule keeps the LLM
+    # from proposing the action itself.
+    framework_phase_enabled: bool = True
+    # FRAMEWORK_PR phase progress tracker. One entry per candidate
+    # benchmark, written by the FrameworkPrExecutor: ``{candidate_id,
+    # pr_url, batch_id, status, pre_tput, post_tput, gain_pct, kept,
+    # ts}``. Used by the breakdown collector + the phase exit logic's
+    # plateau judgment (lookback over the per-batch max gain).
+    framework_pr_phase_progress: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
+    # One row per ``fa phase-discover`` batch: ``{batch_id, ts,
+    # candidate_count, max_gain_pct_observed_in_batch}``. Read by
+    # ``exit_normal_framework_pr`` for the plateau gate (default: 3
+    # consecutive batches with max gain < 1% → exit).
+    framework_pr_batches: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
+    # Coordinator sets this to True when the FRAMEWORK_PR loop has no
+    # more candidates to run (``fa phase-discover`` returned 0 or every
+    # candidate in the latest batch has been tried). ``compute_next_phase``
+    # consults this for the ``framework_pr_phase_done`` exit reason.
+    framework_pr_phase_done: bool = False
+    # Consecutive ``fa phase-discover`` failures (timeout / non-zero
+    # exit / parse error). The Coordinator's discover loop bumps this
+    # on each failure and resets to 0 on a successful batch. Phase is
+    # only marked done after ``DISCOVER_FAILURE_RETRY_LIMIT`` (default
+    # 3) consecutive failures, so a transient network blip or a slow
+    # PR scan no longer collapses the whole FRAMEWORK_PR phase
+    # silently.
+    framework_pr_discover_failures: int = 0
+    # FRAMEWORK_PR Critic-gate decisions, one row per reviewed candidate:
+    # ``{candidate_id, batch_id, verdict, rationale, ts}``. The
+    # Coordinator's pump calls the Critic backend before each
+    # ``_enqueue_framework_pr_task``; ``approve`` proceeds, ``reject``
+    # records a ``critic_denied`` progress row instead. The cache lets a
+    # resume avoid double-calling the Critic on candidates the prior run
+    # already reviewed.
+    framework_pr_critic_decisions: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
     # When True (the default) the Coordinator's auto-managed analysis
     # action — at PRELUDE bootstrap and on every +10% watermark
     # crossing — is ``roofline`` (composite: profile + trace_analyze +
@@ -770,8 +815,8 @@ class SharedState:
     # ------------------------------------------------------------------
     # Phase state machine fields
     # ------------------------------------------------------------------
-    # ``phase`` is the run-level pipeline phase (PRELUDE / EXPLORE /
-    # KERNEL / SWEEP / CLOSE).  Coordinator is the only writer
+    # ``phase`` is the run-level pipeline phase (PRELUDE / FRAMEWORK_PR /
+    # EXPLORE / KERNEL / SWEEP / CLOSE). Coordinator is the only writer
     # (PolicyGate adds it to CORE_STATE_FIELDS); LLM agents can read
     # via prompt injection but cannot update_state. Empty string
     # signals "phase machine not yet initialised" — Coordinator
@@ -789,7 +834,7 @@ class SharedState:
     # :func:`phase_state.make_history_row` and conforms to KB_design
     # §3.2 §6 (reason must be in ``PHASE_EXIT_REASONS``).  Capped at
     # ``_PHASE_HISTORY_CAP`` so a runaway transition never bloats
-    # state.json (unlikely — there are only 5 phases — but defensive).
+    # state.json (unlikely — at most ~6 phases in the chain — but defensive).
     phase_history: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase.
     # Coordinator populates from CLI flags / defaults at construction
@@ -3609,6 +3654,7 @@ class SharedState:
         """
         from .phase_state import (
             DEFAULT_PHASE_BUDGET_PCT,
+            PHASE_NAMES,
             normalize_budget_pct,
             phase_elapsed_seconds,
         )
@@ -3638,8 +3684,9 @@ class SharedState:
         mm = float(self.max_minutes or 0.0)
         total_budget_sec = mm * 60.0
         lines: list[str] = []
-        # Stable order — by PHASE_INDEX so the operator sees the chain.
-        for phase in ("PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+        # Stable order — iterate ``PHASE_NAMES`` so any phase added to
+        # the chain (e.g. FRAMEWORK_PR) renders automatically.
+        for phase in PHASE_NAMES:
             if phase not in elapsed_per_phase:
                 continue
             elapsed = elapsed_per_phase[phase]
@@ -4160,9 +4207,14 @@ class SharedState:
         md_text = cached.get("analysis_md_text") or ""
         if not md_text:
             return (
-                "(no TraceLens snapshot yet — propose `roofline` to "
-                "produce one; roofline is a composite action that "
-                "runs profile + trace_analyze atomically)"
+                "(no TraceLens snapshot yet — analysis is auto-enqueued "
+                "by the Coordinator at the end of PRELUDE and on every "
+                "+10% validated-gain crossing; wait for the pending "
+                "task to land, or continue with specialist / explore "
+                "work that does not need analysis.md. PolicyGate denies "
+                "any LLM-emitted propose_action/delegate against "
+                "`roofline` or `profile` with rule "
+                "`analysis_action_not_llm_proposable`.)"
             )
         md_text = self._strip_base64_data_urls(md_text)
         snap = cached.get("roofline_snapshot_id", "?")
