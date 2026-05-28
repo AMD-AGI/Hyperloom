@@ -1735,14 +1735,32 @@ class Coordinator:
         outcome["actual_gain_pct"] = round(measured_gain, 3)
         outcome["throughput_after"] = tput
         if reproduced:
+            # R4-4 defense: pushing an empty stack entry (with no
+            # extra_sglang_args / extra_envs) corrupts session_breakdown
+            # attribution and confuses warm-start consumers in the
+            # next session. ``task=None`` shouldn't normally happen
+            # (``_promote_to_shared_state`` always supplies task), but
+            # if it does we degrade gracefully: record the outcome
+            # without polluting the stack.
+            params = (task.params if task is not None else {}) or {}
+            warm_args = str(params.get("extra_sglang_args") or "").strip()
+            warm_envs = dict(params.get("extra_envs") or {})
+            if not warm_args and not warm_envs:
+                outcome["status"] = "reproduced_but_no_params"
+                outcome["reason"] = "task.params missing extra_sglang_args/extra_envs"
+                log.warning(
+                    "warm-replay measured +%.2f%% but cannot push stack "
+                    "(task=%r has no warm args/envs)",
+                    measured_gain, task,
+                )
+                state.warm_replay_outcome = outcome
+                state.save(self.session_dir)
+                return
             outcome["status"] = "reproduced"
             # Push warm best_config onto the stack so the rest of the
             # session inherits it. We synthesize a stack entry matching
             # the shape ``_lift_to_current_best`` writes for normal
             # EXPLORE KEEPs.
-            params = (task.params if task is not None else {}) or {}
-            warm_args = str(params.get("extra_sglang_args") or "").strip()
-            warm_envs = dict(params.get("extra_envs") or {})
             # Stack entry schema mirrors what kernel-integrate /
             # explore-KEEP append (see lines 6520+ / 8030+). Fields are
             # what session_breakdown's attribution + capability_summary
@@ -7319,16 +7337,30 @@ class Coordinator:
             # GAP 4 read-modify-write: merge source_session_ids[] so
             # subsequent sessions accumulate validators rather than
             # overwriting via KB shallow new-wins.
-            prior_lesson = self.cortex_kb.read_lesson_exact(statement=statement)
-            recent_ids, validated_count = self._merge_recent_session_ids(
-                prior_lesson.get("attrs"), source_session_id,
-            )
+            # R4-10 — when the read fails (transport / business
+            # error), DO NOT write the read-modify-write fields. KB
+            # shallow-merge would replace the existing list with our
+            # singleton, losing all accumulated validators. Write
+            # without those fields so the KB keeps its prior list
+            # untouched; the next session with a healthy read will
+            # rejoin the accumulation correctly.
             lesson_extra = dict(extra or {})
-            lesson_extra.update({
-                "source_session_ids": recent_ids,
-                "validated_count": validated_count,
-                "last_validated_at": now_iso,
-            })
+            try:
+                prior_lesson = self.cortex_kb.read_lesson_exact(statement=statement)
+                recent_ids, validated_count = self._merge_recent_session_ids(
+                    prior_lesson.get("attrs"), source_session_id,
+                )
+                lesson_extra.update({
+                    "source_session_ids": recent_ids,
+                    "validated_count": validated_count,
+                    "last_validated_at": now_iso,
+                })
+            except CortexKBError as exc:
+                log.info(
+                    "lesson read failed (%s); skipping source_session_ids "
+                    "merge to avoid clobbering KB's accumulated list",
+                    exc,
+                )
             self.cortex_kb.propose_lesson(
                 statement=statement,
                 measured_impact=impact,
@@ -7346,16 +7378,23 @@ class Coordinator:
             description = self._build_statement(
                 change=change, severity=severity, kind="pitfall",
             )
-            prior_pitfall = self.cortex_kb.read_pitfall_exact(description=description)
-            recent_ids, validated_count = self._merge_recent_session_ids(
-                prior_pitfall.get("attrs"), source_session_id,
-            )
             pitfall_extra = dict(extra or {})
-            pitfall_extra.update({
-                "source_session_ids": recent_ids,
-                "validated_count": validated_count,
-                "last_validated_at": now_iso,
-            })
+            try:
+                prior_pitfall = self.cortex_kb.read_pitfall_exact(description=description)
+                recent_ids, validated_count = self._merge_recent_session_ids(
+                    prior_pitfall.get("attrs"), source_session_id,
+                )
+                pitfall_extra.update({
+                    "source_session_ids": recent_ids,
+                    "validated_count": validated_count,
+                    "last_validated_at": now_iso,
+                })
+            except CortexKBError as exc:
+                log.info(
+                    "pitfall read failed (%s); skipping source_session_ids "
+                    "merge to avoid clobbering KB's accumulated list",
+                    exc,
+                )
             self.cortex_kb.propose_pitfall(
                 description=description,
                 severity=severity,
@@ -7536,16 +7575,24 @@ class Coordinator:
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
                 measured_at=now_iso,
             )
-            prior_lesson = self.cortex_kb.read_lesson_exact(statement=statement)
-            recent_ids, validated_count = self._merge_recent_session_ids(
-                prior_lesson.get("attrs"), source_session_id,
-            )
+            # R4-10 — same read-failure guard as ``_record_fact_per_task``.
             lesson_extra = dict(extra or {})
-            lesson_extra.update({
-                "source_session_ids": recent_ids,
-                "validated_count": validated_count,
-                "last_validated_at": now_iso,
-            })
+            try:
+                prior_lesson = self.cortex_kb.read_lesson_exact(statement=statement)
+                recent_ids, validated_count = self._merge_recent_session_ids(
+                    prior_lesson.get("attrs"), source_session_id,
+                )
+                lesson_extra.update({
+                    "source_session_ids": recent_ids,
+                    "validated_count": validated_count,
+                    "last_validated_at": now_iso,
+                })
+            except CortexKBError as exc:
+                log.info(
+                    "per-variant lesson read failed (%s); skipping "
+                    "source_session_ids merge to avoid clobbering KB",
+                    exc,
+                )
             self.cortex_kb.propose_lesson(
                 statement=statement,
                 measured_impact=impact,
@@ -7568,16 +7615,23 @@ class Coordinator:
             description = self._build_statement(
                 change=change, severity=severity, kind="pitfall",
             )
-            prior_pitfall = self.cortex_kb.read_pitfall_exact(description=description)
-            recent_ids, validated_count = self._merge_recent_session_ids(
-                prior_pitfall.get("attrs"), source_session_id,
-            )
             pitfall_extra = dict(extra or {})
-            pitfall_extra.update({
-                "source_session_ids": recent_ids,
-                "validated_count": validated_count,
-                "last_validated_at": now_iso,
-            })
+            try:
+                prior_pitfall = self.cortex_kb.read_pitfall_exact(description=description)
+                recent_ids, validated_count = self._merge_recent_session_ids(
+                    prior_pitfall.get("attrs"), source_session_id,
+                )
+                pitfall_extra.update({
+                    "source_session_ids": recent_ids,
+                    "validated_count": validated_count,
+                    "last_validated_at": now_iso,
+                })
+            except CortexKBError as exc:
+                log.info(
+                    "per-variant pitfall read failed (%s); skipping "
+                    "source_session_ids merge to avoid clobbering KB",
+                    exc,
+                )
             self.cortex_kb.propose_pitfall(
                 description=description,
                 severity=severity,
@@ -7673,8 +7727,17 @@ class Coordinator:
         # cumulative_gain at tick=0 looks identical to +25% earned
         # over 30 EXPLORE rounds — the steward might wrongly conclude
         # we already have a long stack worth keeping.
-        warm_replay = dict(getattr(ss, "warm_replay_outcome", {}) or {})
+        # R4-9 defense: SharedState fields can be tampered by
+        # resume / migration / tests. Guard against non-dict values
+        # before dereferencing ``.get`` so the snapshot never throws
+        # AttributeError mid-render.
+        wro_raw = getattr(ss, "warm_replay_outcome", None)
+        warm_replay = dict(wro_raw) if isinstance(wro_raw, dict) else {}
         warm_replay_status = str(warm_replay.get("status") or "")
+        try:
+            warm_replay_actual_gain = float(warm_replay.get("actual_gain_pct") or 0.0)
+        except (TypeError, ValueError):
+            warm_replay_actual_gain = 0.0
         return {
             "phase":                            str(getattr(ss, "phase", "") or ""),
             "tick":                             int(getattr(ss, "tick", 0) or 0),
@@ -7699,9 +7762,7 @@ class Coordinator:
                 getattr(ss, "steward_continuation_used", False)
             ),
             "warm_replay_status":               warm_replay_status,
-            "warm_replay_actual_gain_pct":      float(
-                warm_replay.get("actual_gain_pct") or 0.0,
-            ),
+            "warm_replay_actual_gain_pct":      warm_replay_actual_gain,
         }
 
     def _collect_workload_tags(self) -> dict[str, Any]:
@@ -7989,40 +8050,61 @@ class Coordinator:
                 str((s or {}).get("session_id") or "")
                 for s in my_sessions if isinstance(s, dict)
             }
-            existing_point = self.cortex_kb.read_recipe_exact(
-                model=model_name,
-                hardware=gpu_type,
-                framework=str(getattr(ss, "framework", "") or ""),
-            )
-            existing_sessions: list[dict[str, Any]] = []
-            prior_attrs = existing_point.get("attrs") or {}
-            for row in (prior_attrs.get("sessions") or []):
-                if not isinstance(row, dict):
-                    continue
-                if str(row.get("session_id") or "") in my_session_ids:
-                    # Resume / retry of the same session — our new entry
-                    # supersedes the prior one (carries the latest
-                    # gain_pct / stack_len). Skip the historical copy.
-                    continue
-                existing_sessions.append(dict(row))
-            merged_sessions = existing_sessions + my_sessions
+            # R4-10 — when read fails (transport / business error),
+            # DO NOT pass ``sessions=`` to update_recipe. The KB
+            # shallow-merge would replace its accumulated sessions[]
+            # with our singleton (current session only), wiping every
+            # prior session's history. Write without ``sessions=`` so
+            # the KB keeps its prior list intact; the next session
+            # with a healthy read will rejoin correctly. The trade-off:
+            # this session's entry is NOT added to the recipe history
+            # this round (the NDJSON-flusher retry will fix it on the
+            # subsequent successful read).
+            merged_sessions: list[dict[str, Any]] | None = None
+            try:
+                existing_point = self.cortex_kb.read_recipe_exact(
+                    model=model_name,
+                    hardware=gpu_type,
+                    framework=str(getattr(ss, "framework", "") or ""),
+                )
+                existing_sessions: list[dict[str, Any]] = []
+                prior_attrs = existing_point.get("attrs") or {}
+                for row in (prior_attrs.get("sessions") or []):
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get("session_id") or "") in my_session_ids:
+                        # Resume / retry of the same session — our new
+                        # entry supersedes the prior one (carries the
+                        # latest gain_pct / stack_len). Skip historical.
+                        continue
+                    existing_sessions.append(dict(row))
+                merged_sessions = existing_sessions + my_sessions
+            except CortexKBError as exc:
+                log.info(
+                    "recipe read failed (%s); finalize will write WITHOUT "
+                    "sessions[] to avoid clobbering the KB's accumulated "
+                    "history. Next session's update_recipe will rejoin.",
+                    exc,
+                )
 
-            self.cortex_kb.update_recipe(
-                model=model_name,
-                hardware=gpu_type,
-                framework=str(getattr(ss, "framework", "") or ""),
-                best_config=attrs["best_config"],
-                best_throughput=attrs["best_throughput"],
-                what_worked=attrs["what_worked"],
-                what_failed=attrs["what_failed"],
-                stack_fingerprint=attrs["stack_fingerprint"],
-                last_profiled=attrs["last_profiled"],
-                sessions=merged_sessions,
-                extra_attrs=workload_tags if workload_tags else None,
-                evidence=[
+            kwargs: dict[str, Any] = {
+                "model":             model_name,
+                "hardware":          gpu_type,
+                "framework":         str(getattr(ss, "framework", "") or ""),
+                "best_config":       attrs["best_config"],
+                "best_throughput":   attrs["best_throughput"],
+                "what_worked":       attrs["what_worked"],
+                "what_failed":       attrs["what_failed"],
+                "stack_fingerprint": attrs["stack_fingerprint"],
+                "last_profiled":     attrs["last_profiled"],
+                "extra_attrs":       workload_tags if workload_tags else None,
+                "evidence":          [
                     f"log:session-{getattr(ss, 'cortex_session_id', '') or self.session_dir.name}",
                 ],
-            )
+            }
+            if merged_sessions is not None:
+                kwargs["sessions"] = merged_sessions
+            self.cortex_kb.update_recipe(**kwargs)
         # update_recipe → propose_point internally swallows CortexKBError
         # and enqueues NDJSON, so this catch-all only matters for true
         # programmer bugs (OSError writing pending file, attr lookups

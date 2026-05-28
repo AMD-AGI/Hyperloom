@@ -4592,7 +4592,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=_env_default_on("INFERENCE_OPTIMIZER_ENABLE_ROOFLINE"),
         help="Select which analysis action the Coordinator enqueues at "
-             "PRELUDE bootstrap and on every +10% watermark crossing. "
+             "PRELUDE bootstrap and on every +10%% watermark crossing. "
              "Default on: ``roofline`` (composite profile + "
              "trace_analyze + analysis.md). Pass ``--no-enable-roofline`` "
              "to use plain ``profile`` instead (lighter — captures the "

@@ -627,27 +627,32 @@ class CortexKBClient:
         """Read the current ``recipe:{model}:{framework}:{hardware}`` point.
 
         Returns the parsed KB point (``{id, canonical_id, kind,
-        attrs, authority, confidence, ...}``) or ``{}`` when the
-        anchor doesn't exist yet / the KB is disabled / the query
-        fails.
+        attrs, authority, confidence, ...}``) on a confirmed hit, or
+        ``{}`` when:
+
+        * the client is disabled (``--degraded-kb``), OR
+        * KB confirmed (200 OK) that the row doesn't exist.
+
+        Raises :class:`CortexKBError` on transport / business error.
+        R4-10 — the legacy silent ``return {}`` on error caused
+        ``cortex_finalize_recipe_and_journal`` to think there were no
+        prior sessions[] entries, and the resulting ``update_recipe``
+        (with only the current session's entry) would have KB
+        shallow-merge OVERWRITE every prior session's history. Caller
+        MUST now catch the exception and degrade gracefully (write
+        without ``sessions=`` so the KB keeps its prior list).
+
+        Back-compat: when the new-shape lookup misses (true 200 OK
+        miss, not error), we re-query the legacy
+        ``recipe:{model}:{hardware}`` canonical id (no framework
+        segment). KB rows written before the framework-PR live under
+        the legacy shape; surfacing them once is enough because the
+        very next ``update_recipe`` written by this session lands
+        under the new shape and supersedes the legacy row for future
+        reads.
 
         Unlike :meth:`find_recipe_with_fallback` this NEVER falls
-        back to same-family / same-class records — it's the dedicated
-        read primitive for ``update_recipe`` read-modify-write
-        callers (e.g. CLOSE-time recipe finalize) that need to see
-        the CURRENT anchor state to merge ``sessions[]`` without
-        losing historical entries.
-
-        Back-compat: when the new-shape lookup misses, we re-query the
-        legacy ``recipe:{model}:{hardware}`` canonical id (no
-        framework segment). KB rows written before the framework-PR
-        live under the legacy shape; surfacing them once is enough
-        because the very next ``update_recipe`` written by this
-        session lands under the new shape and supersedes the legacy
-        row for future reads.
-
-        Failures are non-fatal: the caller treats ``{}`` as "no
-        prior state" and proceeds with a fresh write.
+        back to same-family / same-class records.
         """
         if not self.enabled:
             return {}
@@ -658,11 +663,9 @@ class CortexKBClient:
             C.F_NEIGHBOR_PREVIEW: False,
             C.F_LIMIT:            1,
         }
-        try:
-            resp = self._post(C.PATH_QUERY_POINT, body)
-        except CortexKBError as exc:
-            log.info("read_recipe_exact failed (%s); treating as no prior", exc)
-            return {}
+        # R4-10 — transport errors propagate. Legacy fallback on miss
+        # still works (200 OK with empty points).
+        resp = self._post(C.PATH_QUERY_POINT, body)
         points = resp.get(C.F_POINTS) or resp.get("points") or []
         if isinstance(points, list) and points and isinstance(points[0], dict):
             return points[0]
@@ -671,18 +674,12 @@ class CortexKBClient:
         if framework:
             cid_legacy = recipe_canonical_id_legacy(model, hardware)
             if cid_legacy != cid_new:
-                try:
-                    resp = self._post(C.PATH_QUERY_POINT, {
-                        C.F_CANONICAL_ID:     cid_legacy,
-                        C.F_KIND:             C.KIND_RECIPE,
-                        C.F_NEIGHBOR_PREVIEW: False,
-                        C.F_LIMIT:            1,
-                    })
-                except CortexKBError as exc:
-                    log.info(
-                        "read_recipe_exact legacy fallback failed (%s)", exc,
-                    )
-                    return {}
+                resp = self._post(C.PATH_QUERY_POINT, {
+                    C.F_CANONICAL_ID:     cid_legacy,
+                    C.F_KIND:             C.KIND_RECIPE,
+                    C.F_NEIGHBOR_PREVIEW: False,
+                    C.F_LIMIT:            1,
+                })
                 points = resp.get(C.F_POINTS) or resp.get("points") or []
                 if (
                     isinstance(points, list)
@@ -716,9 +713,24 @@ class CortexKBClient:
         the KB shallow-merge doesn't erase prior validators on every
         write.
 
-        Returns ``{}`` on miss / disabled / HTTP failure (non-fatal —
-        caller treats empty as "no prior validators" and proceeds
-        with a singleton list).
+        Returns:
+
+        * ``{}`` on:
+            - client disabled (``--degraded-kb``),
+            - KB confirmed the row doesn't exist (200 OK with
+              ``points=[]``).
+          Both signal "safe to write a singleton list" — there is
+          either no prior row to clobber or we never had a chance to
+          read one.
+
+        * raises :class:`CortexKBError` on transport / business error.
+          Critical contract: caller MUST NOT proceed with a
+          source_session_ids=[my_id] write in this case, because the
+          KB might have a prior list of N session_ids that the
+          shallow-merge would silently overwrite (R4-10 data-loss
+          bug). The caller should fall back to writing the lesson
+          WITHOUT the read-modify-write fields, so the KB keeps its
+          existing source_session_ids untouched.
         """
         if not self.enabled:
             return {}
@@ -729,11 +741,12 @@ class CortexKBClient:
             C.F_NEIGHBOR_PREVIEW: False,
             C.F_LIMIT:            1,
         }
-        try:
-            resp = self._post(C.PATH_QUERY_POINT, body)
-        except CortexKBError as exc:
-            log.info("read_lesson_exact failed (%s); treating as no prior", exc)
-            return {}
+        # R4-10 — transport / business errors propagate. The legacy
+        # silent ``return {}`` swallowed every failure and let the
+        # caller write a singleton list that clobbered the KB's
+        # accumulated validators. Caller now MUST catch CortexKBError
+        # and degrade gracefully.
+        resp = self._post(C.PATH_QUERY_POINT, body)
         points = resp.get(C.F_POINTS) or resp.get("points") or []
         if isinstance(points, list) and points and isinstance(points[0], dict):
             return points[0]
@@ -747,7 +760,10 @@ class CortexKBClient:
     ) -> dict[str, Any]:
         """Read the current ``pitfall:{hash16}`` point as a dict.
 
-        Symmetric with :meth:`read_lesson_exact`.
+        Symmetric with :meth:`read_lesson_exact` — see R4-10 note.
+        ``{}`` only on confirmed miss / disabled; transport errors
+        propagate as ``CortexKBError`` so the caller can avoid
+        clobbering the KB's accumulated source_session_ids.
         """
         if not self.enabled:
             return {}
@@ -758,11 +774,7 @@ class CortexKBClient:
             C.F_NEIGHBOR_PREVIEW: False,
             C.F_LIMIT:            1,
         }
-        try:
-            resp = self._post(C.PATH_QUERY_POINT, body)
-        except CortexKBError as exc:
-            log.info("read_pitfall_exact failed (%s); treating as no prior", exc)
-            return {}
+        resp = self._post(C.PATH_QUERY_POINT, body)
         points = resp.get(C.F_POINTS) or resp.get("points") or []
         if isinstance(points, list) and points and isinstance(points[0], dict):
             return points[0]
