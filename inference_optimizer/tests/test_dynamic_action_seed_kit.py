@@ -452,7 +452,12 @@ async def test_stub_executor_writes_into_artifact_dir(tmp_path: Path):
     artefact = dynamic_action_artifact_dir(tmp_path, dyn_id)
     history = (artefact / "dispatch_history.jsonl").read_text(encoding="utf-8")
     parsed = [json.loads(l) for l in history.splitlines() if l.strip()]
-    assert parsed[0]["dyn_id"] == dyn_id
+    # G2 — dispatch_history now uses closed schemas:
+    # prepare hook writes DISPATCHED row, stub executor writes
+    # SUB_AGENT_DONE row.
+    events = [r["event"] for r in parsed]
+    assert events == ["dispatched", "sub_agent_done"]
+    assert parsed[1]["terminal_state"] == "COMPLETED_EMPTY"
     proposal = json.loads(
         (artefact / "proposal_set.json").read_text(encoding="utf-8"),
     )
