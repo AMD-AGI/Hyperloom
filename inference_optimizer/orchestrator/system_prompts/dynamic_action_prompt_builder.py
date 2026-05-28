@@ -183,9 +183,22 @@ def _maybe_truncate(journal: list[JournalTurn], rendered_so_far_tokens: int) -> 
 
 def build_system_prompt(turn_cap: int) -> str:
     """Identity + iron rules + tool catalogue. Stable across turns."""
-    bench_list = ", ".join(sorted(BENCH_REGISTRY)) or "(none)"
     forbidden = ", ".join(sorted(FORBIDDEN_PROPOSAL_FIELDS))
     tools = ", ".join(sorted(ALL_DYNAMIC_TOOLS))
+    bench_line = (
+        f"- run_bench: bench_id ∈ {{{', '.join(sorted(BENCH_REGISTRY))}}}; "
+        f"each call is hard-killed at {MAX_BENCH_WALL_CLOCK_SEC:.0f}s "
+        f"wall-clock.\n"
+        if BENCH_REGISTRY else
+        "- run_bench is DISABLED in v1; rely on read_source +\n"
+        "  read_session_artifact for hypothesis exploration.\n"
+    )
+    micro_bench_line = (
+        "- micro-bench results are for your internal reasoning only;\n"
+        "  the system does NOT promote them and does NOT accept any\n"
+        "  numeric speedup claim derived from them.\n"
+        if BENCH_REGISTRY else ""
+    )
     return (
         "You are a dynamic_action sub-agent: a multi-turn ReAct LLM\n"
         "exploring **one** cross-domain patch combination that no\n"
@@ -194,8 +207,7 @@ def build_system_prompt(turn_cap: int) -> str:
         f"- You have at most {turn_cap} turns. Each turn you must\n"
         "  either call exactly one tool OR emit_proposal.\n"
         f"- Available tools: {tools}.\n"
-        f"- run_bench: bench_id ∈ {{{bench_list}}}; each call is\n"
-        f"  hard-killed at {MAX_BENCH_WALL_CLOCK_SEC:.0f}s wall-clock.\n"
+        f"{bench_line}"
         f"- read_source / read_session_artifact return ≤ "
         f"{MAX_READ_SOURCE_CHARS} chars; use a more specific path if\n"
         "  truncated.\n"
@@ -208,9 +220,7 @@ def build_system_prompt(turn_cap: int) -> str:
         "- patch_text must be a valid unified diff; scope_domains\n"
         "  must be a subset of the dispatch spec's scope_domains and\n"
         "  every domain must be mentioned in cross_domain_rationale.\n"
-        "- micro-bench results are for your internal reasoning only;\n"
-        "  the system does NOT promote them and does NOT accept any\n"
-        "  numeric speedup claim derived from them.\n"
+        f"{micro_bench_line}"
         "- emit_proposal with patch_text='' signals 'no feasible\n"
         "  cross-domain combo'; this is a legitimate terminal state.\n"
     )
