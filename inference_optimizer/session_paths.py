@@ -101,6 +101,11 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     # domain. Pipeline_phase ``explore`` includes it in the
     # registry-derived set; fallback covers the rare bootstrap miss.
     "assess_remaining_gaps",
+    # dynamic_action.MD P1 — cross-domain ReAct sub-agent that owns
+    # ``runs/dynamic_action/<dyn_id>/`` (spec / seed_kit / journal /
+    # proposal_set / dispatch_history). pipeline_phase=explore puts
+    # it in the registry-derived set; fallback covers loader failures.
+    "dynamic_action",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
     "recover",

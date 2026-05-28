@@ -137,6 +137,9 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "validate_stack":          "exploration",
     "dream":                   "exploration",
     "re_explore":              "exploration",
+    # dynamic_action — multi-turn ReAct sub-agent that explores a
+    # cross-domain patch combination (dynamic_action.MD P1).
+    "dynamic_action":          "exploration",
 }
 _DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
 
