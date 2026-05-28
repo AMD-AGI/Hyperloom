@@ -32,7 +32,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ..session_paths import dynamic_action_dispatch_history_path
+from ..session_paths import (
+    dynamic_action_dispatch_history_path,
+    dynamic_action_telemetry_path,
+)
+from .dynamic_action_proposal import (
+    DynamicActionStatus,
+    TERMINAL_LIFECYCLE_STATUSES,
+)
 
 
 log = logging.getLogger(__name__)
@@ -180,6 +187,102 @@ def append_dispatch_history_row(
         )
 
 
+# ---------------------------------------------------------------------------
+# telemetry.json (gap G3) — per-dyn_id terminal-state rollup
+# ---------------------------------------------------------------------------
+TELEMETRY_FIELDS: frozenset[str] = frozenset({
+    "dyn_id",
+    "rolled_up_at",
+    "lifecycle",
+    "kept",
+    "reverted",
+    "integrate_failed",
+    "critic_rejected",
+    "timed_out",
+    "failed",
+    "completed_empty",
+    "abandoned",
+    "gain_pct",
+    "round_index",
+})
+
+# Map of lifecycle terminal → one-of-eight counter field set to 1.
+_TELEMETRY_COUNTER_FOR: dict[DynamicActionStatus, str] = {
+    DynamicActionStatus.KEPT: "kept",
+    DynamicActionStatus.REVERTED: "reverted",
+    DynamicActionStatus.INTEGRATE_FAILED: "integrate_failed",
+    DynamicActionStatus.CRITIC_REJECTED: "critic_rejected",
+    DynamicActionStatus.TIMED_OUT: "timed_out",
+    DynamicActionStatus.FAILED: "failed",
+    DynamicActionStatus.COMPLETED_EMPTY: "completed_empty",
+    DynamicActionStatus.ABANDONED: "abandoned",
+}
+
+
+class TelemetryRowError(ValueError):
+    """Raised when a telemetry payload violates the closed schema."""
+
+
+def write_dynamic_action_telemetry(
+    *,
+    session_dir: Path,
+    dyn_id: str,
+    lifecycle: DynamicActionStatus | str,
+    gain_pct: float | None = None,
+    round_index: int | None = None,
+) -> None:
+    """Write (overwrite) ``telemetry.json`` for one dyn_id.
+
+    Called on transition to any terminal lifecycle status by the
+    Coordinator lifecycle hooks. Idempotent: a later write replaces
+    an earlier one with the same lifecycle (matters on a re-process
+    after resume; the abandoned sweep is the canonical second-pass
+    writer).
+    """
+    lifecycle_enum = (
+        lifecycle if isinstance(lifecycle, DynamicActionStatus)
+        else DynamicActionStatus(str(lifecycle))
+    )
+    if lifecycle_enum not in TERMINAL_LIFECYCLE_STATUSES:
+        raise TelemetryRowError(
+            f"telemetry write requires a terminal lifecycle; got "
+            f"{lifecycle_enum.value!r}"
+        )
+    counters: dict[str, int] = {
+        v: 0 for v in _TELEMETRY_COUNTER_FOR.values()
+    }
+    counters[_TELEMETRY_COUNTER_FOR[lifecycle_enum]] = 1
+    payload: dict[str, Any] = {
+        "dyn_id": str(dyn_id),
+        "rolled_up_at": _now_iso(),
+        "lifecycle": lifecycle_enum.value,
+        "gain_pct": float(gain_pct) if gain_pct is not None else None,
+        "round_index": (
+            int(round_index) if round_index is not None else None
+        ),
+        **counters,
+    }
+    extra = sorted(set(payload.keys()) - TELEMETRY_FIELDS)
+    missing = sorted(TELEMETRY_FIELDS - set(payload.keys()))
+    if extra or missing:
+        raise TelemetryRowError(
+            f"telemetry payload violates closed schema for dyn_id="
+            f"{dyn_id!r}: extra={extra!r} missing={missing!r}"
+        )
+    target = dynamic_action_telemetry_path(session_dir, dyn_id)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(payload, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning(
+            "dynamic_action telemetry: write failed for dyn_id=%s: %r",
+            dyn_id, exc,
+        )
+
+
 __all__ = [
     "ABANDONED_FIELDS",
     "CRITIC_VERDICT_FIELDS",
@@ -189,6 +292,9 @@ __all__ = [
     "INTEGRATE_RESULT_FIELDS",
     "SUB_AGENT_DONE_FIELDS",
     "SUB_AGENT_TERMINATED_FIELDS",
+    "TELEMETRY_FIELDS",
+    "TelemetryRowError",
     "append_dispatch_history_row",
     "event_field_set",
+    "write_dynamic_action_telemetry",
 ]
