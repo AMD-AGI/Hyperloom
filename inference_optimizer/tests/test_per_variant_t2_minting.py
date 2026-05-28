@@ -280,7 +280,7 @@ async def test_t2_hook_explore_without_grid_uses_single_path(coord):
 @pytest.mark.asyncio
 async def test_t2_hook_per_variant_mints_one_per_variant(coord):
     grid = [
-        {"name": "v1", "extra_sglang_args": "--mla 1"},
+        {"name": "v1", "extra_server_args": "--mla 1"},
         {"name": "v2", "extra_envs": {"FOO": "bar"}},
         {"name": "v3", "provenance": "specialist:framework"},
         {"name": "v4"},
@@ -319,7 +319,7 @@ async def test_t2_hook_per_variant_carries_variant_attrs(coord):
     grid = [
         {
             "name": "vA",
-            "extra_sglang_args": "--mla 1",
+            "extra_server_args": "--mla 1",
             "extra_envs": {"FOO": "bar"},
             "provenance": "specialist:serving_specialist",
         },
@@ -330,7 +330,7 @@ async def test_t2_hook_per_variant_carries_variant_attrs(coord):
     pp_call = coord.cortex_kb.propose_point_calls[1]
     attrs = pp_call["attrs"]
     assert attrs["variant_name"] == "vA"
-    assert attrs["extra_sglang_args"] == "--mla 1"
+    assert attrs["extra_server_args"] == "--mla 1"
     assert attrs["extra_envs"] == {"FOO": "bar"}
     assert attrs["provenance"] == "specialist:serving_specialist"
     assert attrs["proposal_msg_id"] == "msg-1"
@@ -351,7 +351,7 @@ async def test_t2_hook_per_variant_skips_nameless_variants(coord):
     even waste a propose_point on a phantom edge."""
     grid = [
         {"name": "v1"},
-        {"extra_sglang_args": "--no-name"},  # nameless
+        {"extra_server_args": "--no-name"},  # nameless
         {"name": ""},                        # empty name
         {"name": "v4"},
     ]
@@ -513,7 +513,7 @@ async def test_materialize_stamps_per_variant_kb_edge_id(coord, monkeypatch):
     coord._record_observation = _noop_observation  # type: ignore[method-assign]
 
     pending = _pending(grid=[
-        {"name": "v1", "extra_sglang_args": "--mla 1"},
+        {"name": "v1", "extra_server_args": "--mla 1"},
         {"name": "v2", "extra_envs": {"FOO": "bar"}},
     ])
     # Pretend T2 already populated the maps:
@@ -527,8 +527,8 @@ async def test_materialize_stamps_per_variant_kb_edge_id(coord, monkeypatch):
     stamped_grid = coord.tasks.last_params["grid"]
     assert stamped_grid[0]["kb_edge_id"] == "edge-v1"
     assert stamped_grid[1]["kb_edge_id"] == "edge-v2"
-    # Originals (extra_sglang_args / extra_envs) preserved.
-    assert stamped_grid[0]["extra_sglang_args"] == "--mla 1"
+    # Originals (extra_server_args / extra_envs) preserved.
+    assert stamped_grid[0]["extra_server_args"] == "--mla 1"
     assert stamped_grid[1]["extra_envs"] == {"FOO": "bar"}
 
 
@@ -567,7 +567,7 @@ async def test_materialize_no_stamp_when_kb_edge_ids_empty(coord):
         return None
     coord._record_observation = _noop_observation  # type: ignore[method-assign]
 
-    pending = _pending(grid=[{"name": "v1", "extra_sglang_args": "--mla 1"}])
+    pending = _pending(grid=[{"name": "v1", "extra_server_args": "--mla 1"}])
     # kb_edge_ids intentionally empty (e.g. --degraded-kb).
     await coord._materialize_approved_proposal(pending)
     stamped_grid = coord.tasks.last_params["grid"]
