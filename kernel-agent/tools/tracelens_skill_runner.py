@@ -164,7 +164,7 @@ Execution context:
 - Analysis mode: {analysis_mode}
 - Inference execution mode: {exec_mode}
 - Capture folder path: {capture_text}
-- TL_EXTENSION: {tracelens_internal_root}
+- TL_EXTENSION: TraceLens_internal
 
 
 Important requirements:

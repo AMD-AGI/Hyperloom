@@ -938,6 +938,7 @@ write_env_file() {
     # mirrors instead of falling back to the read-only /wekafs defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
     [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
+    [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && echo "export TL_EXTENSION='TraceLens_internal'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
