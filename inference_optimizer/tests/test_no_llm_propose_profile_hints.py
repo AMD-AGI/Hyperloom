@@ -16,7 +16,7 @@ This test pins all three sites:
   * ``_sequence_denial_for_action()`` — execution_order denial for
     sequence-gated actions when last_profile_trace is empty.
   * ``_sequence_denial_for_request()`` — execution_order denial for
-    select_kernels / run_optimization requests.
+    trace_analyze / run_optimization requests.
 
 The accepted phrasing must reference (a) waiting for the Coordinator-
 internal analysis task and (b) ``recover`` as the escape hatch.
@@ -49,7 +49,6 @@ _FORBIDDEN_SUBSTRINGS = (
 class _BareState:
     baseline_tput: float = 100.0
     last_profile_trace: str = ""
-    last_select_kernels: dict[str, Any] = field(default_factory=dict)
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     cumulative_gain_validated: float = 0.0
     last_roofline_tput: float = 0.0
@@ -139,7 +138,7 @@ def test_sequence_denial_request_hint_does_not_tell_llm_to_propose_profile(
 ):
     """Same contract for the REQUEST-layer denial that fires on
     run_optimization when ``last_profile_trace`` is empty. (Note:
-    ``select_kernels`` is the prereq itself and early-returns ``None``
+    ``trace_analyze`` is the prereq itself and early-returns ``None``
     from ``_sequence_denial_for_request``; only ``run_optimization``
     reaches the profile-prereq branch.)"""
     coord.shared_state.last_profile_trace = ""

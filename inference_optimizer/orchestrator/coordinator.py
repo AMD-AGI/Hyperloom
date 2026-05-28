@@ -1941,7 +1941,7 @@ class Coordinator:
         :meth:`_maybe_enqueue_watermark_roofline`. The KERNEL phase
         no longer needs an entry-time profile anchor: the watermark
         refresh keeps ``analysis.md`` aligned with stack progress,
-        and ``select_kernels`` / ``kernel_opt`` read
+        and ``trace_analyze`` / ``kernel_opt`` read
         ``last_profile_trace`` written by the same roofline executor.
         """
         if not self._kernel_enabled():
@@ -3838,7 +3838,7 @@ class Coordinator:
         }
 
     def _all_reusable_kernels_rejected(self) -> bool:
-        select = self.shared_state.last_select_kernels or {}
+        select = self.shared_state.last_trace_analyze or {}
         reusable = {
             str(k) for k in (select.get("reusable_native_kernel_ids") or [])
             if k
@@ -4301,7 +4301,7 @@ class Coordinator:
         so the TraceLens ``analysis.md`` contract is honored before
         kernel_opt fires. The TODO is purely guidance —
         `_sequence_denial_for_action` still does NOT block explore actions
-        (params/backends/sweep) on a stale `last_select_kernels` cache;
+        (params/backends/sweep) on a stale `last_trace_analyze` cache;
         that demoted gate stays demoted. Only
         `_sequence_denial_for_request` enforces it for `run_optimization`
         REQUESTs, as before):
@@ -4349,7 +4349,7 @@ class Coordinator:
         # Profile / analyze / integrate guards only apply when the kernel
         # agent is alive — no-kernel runs have no way to service the
         # request and the mandate would be meaningless.
-        # ``select_kernels`` is a prerequisite ONLY for
+        # ``trace_analyze`` is a prerequisite ONLY for
         # ``run_optimization`` REQUESTs (enforced in
         # ``_sequence_denial_for_request``); the action-layer hard-gate
         # stays demoted (explore actions are not blocked).
@@ -4368,13 +4368,23 @@ class Coordinator:
                     "`recover` as your escape hatch — the analysis lane is "
                     "Coordinator-owned and not LLM-proposable."
                 )
-            # analysis.md contract: require `select_kernels` to have
+            # analysis.md contract: require `trace_analyze` to have
             # run against the current trace so analysis.md exists on disk
             # before any kernel_opt / integrate cycle can fire.  Guidance
             # only -- explore actions (params/backends/sweep/report) are
             # not blocked; only run_optimization is hard-gated on the
             # same cache by `_sequence_denial_for_request`.
-            cached = self.shared_state.last_select_kernels or {}
+            #
+            # NOTE: read ``last_trace_analyze`` (canonical post-M4 cache
+            # key written by RooflineExecutor and by the inline
+            # ``trace_analyze`` request handler). Reading the removed
+            # ``last_select_kernels`` here was the root cause of the
+            # KERNEL-phase ``select_kernels`` request loop: Roofline
+            # would write only ``last_trace_analyze`` and the guard
+            # would see an empty legacy field and instruct the LLM to
+            # emit a redundant ``trace_analyze`` request every tick
+            # forever.
+            cached = self.shared_state.last_trace_analyze or {}
             current_trace = self.shared_state.last_profile_trace
             cache_matches_trace = (
                 isinstance(cached, dict)
@@ -4383,10 +4393,10 @@ class Coordinator:
             if not cache_matches_trace:
                 return (
                     "TODO 3/5: analyze is required now. last_profile_trace "
-                    f"={current_trace!r} but last_select_kernels is "
+                    f"={current_trace!r} but last_trace_analyze is "
                     "empty/stale; TraceLens has not yet produced "
                     "analysis.md for this trace. Emit "
-                    "request{target_agent='kernel', kind='select_kernels', "
+                    "request{target_agent='kernel', kind='trace_analyze', "
                     "params={trace_input: <last_profile_trace>, top_k: 10}}. "
                     "Do NOT propose kernel_opt / run_optimization / "
                     "integrate until this cache populates."
@@ -4730,10 +4740,10 @@ class Coordinator:
                 return self_loop
         # Profile / integrate guards only apply when kernel agent is in
         # the role registry — no-kernel mode skips them.
-        # ``select_kernels`` is enforced at the REQUEST layer
+        # ``trace_analyze`` is enforced at the REQUEST layer
         # (``_sequence_denial_for_request``) for ``run_optimization``
         # only. ``params`` / ``backends`` / ``sweep`` / ``report`` are
-        # never gated on a fresh ``last_select_kernels`` cache — those
+        # never gated on a fresh ``last_trace_analyze`` cache — those
         # actions don't need kernel candidates to make progress.
         if "kernel" in self.role_registry:
             if (
@@ -4846,18 +4856,15 @@ class Coordinator:
         req_kind = str(kind or "").strip()
         if target != "kernel" or self.shared_state.stop_reason:
             return None
-        # select_kernels / trace_analyze IS the prerequisite request: it
-        # produces ``last_select_kernels`` / ``last_trace_analyze`` cache
-        # the rest of the chain consults. It is also used directly by
-        # tests / tools passing an explicit ``trace_input``, so allow it
-        # through; later backends/params/sweep are guarded until the
-        # result is cached in SharedState. (Main M4 renamed
-        # ``select_kernels`` → ``trace_analyze``; on this branch both
-        # request kinds dispatch to the same handler via the
-        # back-compat alias in ``kernel_request_handlers.py``, so the
-        # allowlist must accept both names to keep this carve-out
-        # working under both pre- and post-rename test surfaces.)
-        if req_kind in ("select_kernels", "trace_analyze"):
+        # ``trace_analyze`` IS the prerequisite request: it produces the
+        # ``last_trace_analyze`` cache the rest of the chain consults.
+        # It is also used directly by tests / tools passing an explicit
+        # ``trace_input``, so allow it through; later
+        # backends/params/sweep are guarded until the result is cached
+        # in SharedState. (Main M4 renamed ``select_kernels`` →
+        # ``trace_analyze``; this branch dropped the legacy alias, so
+        # only the canonical kind passes the carve-out.)
+        if req_kind == "trace_analyze":
             return None
         if get_handler(req_kind) is None:
             return None
@@ -4874,7 +4881,7 @@ class Coordinator:
                 hint=(
                     "wait for the Coordinator-internal analysis task to "
                     "populate ``last_profile_trace`` before requesting "
-                    "select_kernels / run_optimization; analysis is "
+                    "trace_analyze / run_optimization; analysis is "
                     "auto-enqueued at PRELUDE and on every +10% watermark "
                     "crossing. The analysis lane is Coordinator-owned and not "
                     "LLM-proposable (PolicyGate denies with "
@@ -4883,18 +4890,11 @@ class Coordinator:
                     "`recover` as the escape hatch."
                 ),
             )
-        # Main M4 renamed the cache field from ``last_select_kernels`` to
-        # ``last_trace_analyze``; this branch populates BOTH (legacy +
-        # canonical) on each handler success, but tests and external
-        # callers may seed only the canonical one. Accept either as the
-        # prerequisite cache.
-        select = (
-            self.shared_state.last_trace_analyze
-            or self.shared_state.last_select_kernels
-            or {}
-        )
+        # Canonical post-M4 cache key; legacy ``last_select_kernels``
+        # was removed in this branch.
+        select = self.shared_state.last_trace_analyze or {}
         needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
-        if needs_select and req_kind not in ("select_kernels", "trace_analyze"):
+        if needs_select and req_kind != "trace_analyze":
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: trace_analyze must run first",
                 rule="execution_order",
@@ -6292,7 +6292,7 @@ class Coordinator:
         specialist catalogue.
         """
         a = str(action or "").strip().lower()
-        if a in {"kernel_opt", "integrate", "select_kernels", "run_optimization"}:
+        if a in {"kernel_opt", "integrate", "trace_analyze", "run_optimization"}:
             return ("kernel", "kernel_switch_specialist")
         if a in {"profile", "roofline"}:
             return ("kernel", "kernel_switch_specialist")
@@ -6909,20 +6909,18 @@ class Coordinator:
                     },
                     in_reply_to=request_msg.msg_id, priority=1,
                 ))
-                # Cache select_kernels / trace_analyze output so subsequent
-                # identical requests are short-circuited next tick. Only
-                # cache real successful runs, not failures, to avoid
-                # sticky errors. Main M4 renamed ``select_kernels`` →
-                # ``trace_analyze`` so accept both request kinds at the
-                # cache write site too — the back-compat alias on
-                # ``KERNEL_REQUEST_HANDLERS`` lets either name reach
-                # here.
+                # Cache trace_analyze output so subsequent identical
+                # requests are short-circuited next tick. Only cache
+                # real successful runs, not failures, to avoid sticky
+                # errors. Pre-M4 ``select_kernels`` alias was removed
+                # in this branch — only the canonical kind triggers a
+                # cache write.
                 if (
-                    kind in ("select_kernels", "trace_analyze")
+                    kind == "trace_analyze"
                     and cache_hit_source is None
                     and result.get("status") in ("ok", "succeeded")
                 ):
-                    self.shared_state.record_select_kernels(merged_payload, result)
+                    self.shared_state.record_trace_analyze(merged_payload, result)
                     self.shared_state.save(self.session_dir)
                 # Mirror kernel-opt outcomes into SharedState so Orch
                 # sees decision/speedup in its prompt next tick and
@@ -6968,21 +6966,13 @@ class Coordinator:
     def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Return a cached programmatic_handler result if applicable.
 
-        Main M4 renamed ``select_kernels`` → ``trace_analyze``; both
-        request kinds dispatch to the same handler via the back-compat
-        alias and the cache lives under either of ``last_trace_analyze``
-        (canonical post-M4) or ``last_select_kernels`` (legacy resume
-        parity). Prefer the canonical field; fall back to the legacy
-        one so cached requests work regardless of which field the
-        handler write path populated last.
+        Canonical post-M4 cache key is ``last_trace_analyze``; the
+        legacy ``last_select_kernels`` mirror was removed in this
+        branch.
         """
-        if kind not in ("select_kernels", "trace_analyze"):
+        if kind != "trace_analyze":
             return None
-        cached = (
-            self.shared_state.last_trace_analyze
-            or self.shared_state.last_select_kernels
-            or {}
-        )
+        cached = self.shared_state.last_trace_analyze or {}
         if not isinstance(cached, dict) or not cached:
             return None
         trace_input = payload.get("trace_input") or payload.get("trace_dir")
@@ -9114,7 +9104,7 @@ class Coordinator:
                 }
             # Bug C fix: surface the trace path produced by ProfileExecutor
             # to SharedState so Orch can pass a real path to the kernel
-            # `select_kernels` REQUEST instead of fabricating one.
+            # `trace_analyze` REQUEST instead of fabricating one.
             trace_path = (
                 result.get("main_trace_path")
                 or (result.get("trace_files") or [None])[0]
@@ -9136,11 +9126,8 @@ class Coordinator:
                         (task.params or {}).get("base_extra_args") or ""
                     )
                 self.shared_state.last_profile_args = profile_args
-                # Stale select_kernels / trace_analyze cache no longer matches
-                # this trace. Clear both (M4 main merge: ``last_trace_analyze``
-                # is the canonical post-rename field; ``last_select_kernels``
-                # is kept on this branch for legacy resume parity).
-                self.shared_state.last_select_kernels = {}
+                # Stale trace_analyze cache no longer matches this
+                # trace. Clear the canonical cache key.
                 self.shared_state.last_trace_analyze = {}
                 changed = True
                 audit_extras["trace_path"] = str(trace_path)
