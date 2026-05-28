@@ -435,11 +435,20 @@ class DynamicActionRunner:
             return None, None
         try:
             spec = json.loads(spec_text)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            log.warning(
+                "dynamic_action runner: spec.json parse failed at %s: %r",
+                spec_path, exc,
+            )
             return None, None
         try:
             seed = json.loads(seed_text)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            log.warning(
+                "dynamic_action runner: seed_kit.json parse failed at "
+                "%s: %r",
+                seed_kit_path, exc,
+            )
             return None, None
         return spec.get("payload") or {}, seed
 

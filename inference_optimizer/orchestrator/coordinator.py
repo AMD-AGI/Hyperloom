@@ -6267,6 +6267,20 @@ class Coordinator:
             raw = runner_payload.get("proposal_set") or []
             if isinstance(raw, list):
                 proposal_set = [p for p in raw if isinstance(p, dict)]
+        # G8 — runner already enforces MAX_PROPOSAL_SET_LEN = 1 by
+        # breaking out of the ReAct loop on the first emit_proposal.
+        # Defense-in-depth here: if a schema drift produces extras,
+        # truncate to the cap and log; downstream materialise only
+        # reads [0].
+        from .dynamic_action_proposal import MAX_PROPOSAL_SET_LEN
+        if len(proposal_set) > MAX_PROPOSAL_SET_LEN:
+            log.warning(
+                "dynamic_action: proposal_set len=%d > cap=%d for "
+                "dyn_id=%s; truncating to first %d entries",
+                len(proposal_set), MAX_PROPOSAL_SET_LEN, dyn_id,
+                MAX_PROPOSAL_SET_LEN,
+            )
+            proposal_set = proposal_set[:MAX_PROPOSAL_SET_LEN]
         # dispatch_history.jsonl — SUB_AGENT_DONE row carrying the
         # post-load proposal_count (0 collapses to COMPLETED_EMPTY
         # downstream; 1 proceeds to critic).
