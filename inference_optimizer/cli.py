@@ -391,6 +391,54 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         sys.exit(2)
 
 
+def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
+    """B3: tighten incompatible CLI knobs when --framework atom is selected.
+
+    atom in Magpie v1 has neither a torch_profiler integration (so
+    roofline cannot produce a trace) nor a source-patcher for the
+    framework-agent's PR loop (the kernel-agent / framework-agent assume
+    sglang/vllm source layouts). Auto-disabling kernel-agent +
+    framework-agent + roofline phases keeps the rest of the run sensible
+    without forcing the operator to remember three extra flags. Explicit
+    user opt-in for any of these is preserved (we only flip a value when
+    it is still at its enabled default).
+
+    atom multi-node is also unsupported (Magpie wrapper / atom server
+    have no multi-node TP wiring) — fail-fast on ``--nodes >= 2`` so
+    operators don't burn a ~6-min cold start on a doomed run.
+
+    Returns the list of flag names auto-disabled (for callers that want
+    to log / assert). Calls ``sys.exit(2)`` on the multi-node guard
+    failure.
+    """
+    auto_disabled: list[str] = []
+    if not getattr(args, "no_kernel", False):
+        args.no_kernel = True
+        auto_disabled.append("--no-kernel")
+    if not getattr(args, "no_framework", False):
+        args.no_framework = True
+        auto_disabled.append("--no-framework")
+    if getattr(args, "enable_roofline", True):
+        args.enable_roofline = False
+        auto_disabled.append("--no-enable-roofline")
+    if auto_disabled:
+        print(
+            f"  framework=atom: auto-disabling "
+            f"{', '.join(auto_disabled)} (atom has no profiler / "
+            "sglang/vllm-specific source patcher; see "
+            "atom_boost_tutorials.md §6)"
+        )
+    if int(getattr(args, "nodes", 1) or 1) >= 2:
+        print(
+            "ERROR: --framework atom does not support multi-node "
+            "(--nodes >= 2). atom multi-node TP wiring is deferred; "
+            "drop to --nodes 1 or pick --framework sglang/vllm.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return auto_disabled
+
+
 def _autodetect_gpu_type() -> str | None:
     """Return mi300x|mi325x|mi355x or None if undetectable.
 
@@ -3392,6 +3440,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
         os.environ["FRAMEWORK"] = framework
         print(f"Framework       : {framework}")
+
+        # B3: --framework atom auto-tightens incompatible phases. See
+        # _apply_atom_auto_tighten for rationale.
+        if framework == "atom":
+            _apply_atom_auto_tighten(args)
 
         # Resolve real target GPU: --gpu-type > $GPU_TYPE > rocm-smi probe.
         # Keep the real type in args/SharedState so TraceLens and GEAK prompts
