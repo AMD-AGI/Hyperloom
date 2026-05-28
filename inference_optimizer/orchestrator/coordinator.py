@@ -5852,6 +5852,34 @@ class Coordinator:
                 dynamic_action_seed_kit_path(self.session_dir, dyn_id),
             )
 
+        # dispatch_history.jsonl — DISPATCHED row (G2 closed schema).
+        from .dynamic_action_history import (
+            DispatchHistoryEvent,
+            append_dispatch_history_row,
+        )
+        if self.session_dir is not None:
+            try:
+                append_dispatch_history_row(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    event=DispatchHistoryEvent.DISPATCHED,
+                    payload={
+                        "round_index": round_id,
+                        "scope_domains": list(payload_snapshot["scope_domains"]),
+                        "side_effects_declared": list(
+                            payload_snapshot["side_effects_declared"],
+                        ),
+                        "budget_hint": payload_snapshot["budget_hint"],
+                        "degraded_dispatch": bool(spec["degraded_dispatch"]),
+                        "seed_kit_tokens": int(spec["seed_kit_tokens"]),
+                    },
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: dispatch_history DISPATCHED write "
+                    "failed for dyn_id=%s", dyn_id,
+                )
+
         # P6 §3 — populate the closed prompt-projection fields at
         # dispatch time. Anything beyond SUMMARY_PROMPT_FIELDS is
         # private audit metadata (degraded_dispatch / seed_kit_tokens
@@ -6120,6 +6148,10 @@ class Coordinator:
             runner_status_to_lifecycle,
         )
         from .dynamic_action_critic import write_critic_verdict
+        from .dynamic_action_history import (
+            DispatchHistoryEvent,
+            append_dispatch_history_row,
+        )
         from .dynamic_action_proposal import (
             DynamicActionStatus,
             DynamicRunnerTerminalState,
@@ -6166,8 +6198,30 @@ class Coordinator:
         self.shared_state.record_dynamic_action_outcome(
             dyn_id, status=DynamicActionStatus.SUB_AGENT_RUNNING.value,
         )
-        # Non-COMPLETED → terminal status; skip critic + integrate.
+        # dispatch_history.jsonl — SUB_AGENT_TERMINATED for the
+        # non-COMPLETED terminal states; SUB_AGENT_DONE lands later
+        # after we count the materialised proposal_set.
         if terminal_state != DynamicRunnerTerminalState.COMPLETED:
+            try:
+                append_dispatch_history_row(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    event=DispatchHistoryEvent.SUB_AGENT_TERMINATED,
+                    payload={
+                        "terminal_state": terminal_state.value,
+                        "reason": reason,
+                        "turns_used": turns_used,
+                        "journal_path": str(
+                            result_dict.get("journal_path") or "",
+                        ),
+                        "proposal_count": 0,
+                    },
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: history SUB_AGENT_TERMINATED write "
+                    "failed for dyn_id=%s", dyn_id,
+                )
             self.shared_state.record_dynamic_action_outcome(
                 dyn_id,
                 status=lifecycle.value,
@@ -6190,6 +6244,29 @@ class Coordinator:
             raw = runner_payload.get("proposal_set") or []
             if isinstance(raw, list):
                 proposal_set = [p for p in raw if isinstance(p, dict)]
+        # dispatch_history.jsonl — SUB_AGENT_DONE row carrying the
+        # post-load proposal_count (0 collapses to COMPLETED_EMPTY
+        # downstream; 1 proceeds to critic).
+        try:
+            append_dispatch_history_row(
+                session_dir=self.session_dir,
+                dyn_id=dyn_id,
+                event=DispatchHistoryEvent.SUB_AGENT_DONE,
+                payload={
+                    "terminal_state": terminal_state.value,
+                    "reason": reason,
+                    "turns_used": turns_used,
+                    "journal_path": str(
+                        result_dict.get("journal_path") or "",
+                    ),
+                    "proposal_count": len(proposal_set),
+                },
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: history SUB_AGENT_DONE write failed "
+                "for dyn_id=%s", dyn_id,
+            )
         if not proposal_set:
             # COMPLETED but empty proposal_set (runner contract
             # mismatch); collapse to COMPLETED_EMPTY for the
@@ -6245,6 +6322,26 @@ class Coordinator:
         )
         if envelope["verdict"] != "approve":
             write_critic_verdict(self.session_dir, dyn_id, envelope)
+            try:
+                append_dispatch_history_row(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    event=DispatchHistoryEvent.CRITIC_VERDICT,
+                    payload={
+                        "verdict": envelope["verdict"],
+                        "reason_codes": list(envelope["reason_codes"]),
+                        "applied_rules": list(envelope["applied_rules"]),
+                        "cross_domain_flag": bool(
+                            envelope["cross_domain_flag"],
+                        ),
+                        "mechanical_floor_blocked": True,
+                    },
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: history CRITIC_VERDICT (mechanical) "
+                    "write failed for dyn_id=%s", dyn_id,
+                )
             self.shared_state.record_dynamic_action_outcome(
                 dyn_id,
                 status=DynamicActionStatus.CRITIC_REJECTED.value,
@@ -6352,6 +6449,10 @@ class Coordinator:
             is_dynamic_specialist_task_id,
         )
         from .dynamic_action_critic import write_critic_verdict
+        from .dynamic_action_history import (
+            DispatchHistoryEvent,
+            append_dispatch_history_row,
+        )
         from .dynamic_action_proposal import DynamicActionStatus
         from ..session_paths import dynamic_action_spec_path
 
@@ -6391,6 +6492,24 @@ class Coordinator:
             llm_reason=reasoning,
         )
         write_critic_verdict(self.session_dir, dyn_id, envelope)
+        try:
+            append_dispatch_history_row(
+                session_dir=self.session_dir,
+                dyn_id=dyn_id,
+                event=DispatchHistoryEvent.CRITIC_VERDICT,
+                payload={
+                    "verdict": envelope["verdict"],
+                    "reason_codes": list(envelope["reason_codes"]),
+                    "applied_rules": list(envelope["applied_rules"]),
+                    "cross_domain_flag": bool(envelope["cross_domain_flag"]),
+                    "mechanical_floor_blocked": False,
+                },
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: history CRITIC_VERDICT (llm) write "
+                "failed for dyn_id=%s", dyn_id,
+            )
         new_status = lifecycle.value
         last_outcome = (
             envelope["reason_codes"][0]
@@ -6439,6 +6558,10 @@ class Coordinator:
             integrate_status_to_lifecycle,
             is_dynamic_specialist_task_id,
         )
+        from .dynamic_action_history import (
+            DispatchHistoryEvent,
+            append_dispatch_history_row,
+        )
         from .dynamic_action_proposal import DynamicActionStatus
 
         params = task.params or {}
@@ -6478,6 +6601,29 @@ class Coordinator:
             cumulative_gain=gain_value,
             extra=extra,
         )
+        try:
+            append_dispatch_history_row(
+                session_dir=self.session_dir,
+                dyn_id=dyn_id,
+                event=DispatchHistoryEvent.INTEGRATE_RESULT,
+                payload={
+                    "integrate_status": integrate_status,
+                    "lifecycle": lifecycle.value,
+                    "delta_pct": gain_value,
+                    "task_id": str(task.task_id or ""),
+                    "patches_applied": list(
+                        result_dict.get("patches_applied") or (),
+                    ),
+                    "patches_reverted": list(
+                        result_dict.get("patches_reverted") or (),
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: history INTEGRATE_RESULT write failed "
+                "for dyn_id=%s", dyn_id,
+            )
         # Tag the intervention ledger with a dynamic-specific action
         # name so post-hoc analytics can split KEEP rate by source
         # without scraping logs (P5 §11 #4 + #5).

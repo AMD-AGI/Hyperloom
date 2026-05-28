@@ -364,25 +364,29 @@ async def test_stub_executor_writes_dispatch_history_and_empty_proposal_set(
             default_factory=lambda: {"dyn_id": "dyn-0-1"},
         )
 
-    workspace = tmp_path / "runs" / DYNAMIC_ACTION_NAME / "dyn-0-1"
-    workspace.mkdir(parents=True, exist_ok=True)
-    ctx = RunnerContext(
-        task=_StubTask(),
-        lease=None,
-        extra={"workspace": str(workspace)},
+    from inference_optimizer.session_paths import (
+        dynamic_action_artifact_dir,
     )
+    artefact = dynamic_action_artifact_dir(tmp_path, "dyn-0-1")
+    artefact.mkdir(parents=True, exist_ok=True)
+    task = _StubTask()
+    task.params["artifact_path"] = str(artefact)
+    ctx = RunnerContext(task=task, lease=None, extra={})
     result = await dynamic_action_executor(ctx)
     assert result["empty"] is True
     assert result["proposal_set"] == []
     assert result["outcome"] == "stub_empty"
     assert result["dyn_id"] == "dyn-0-1"
-    history = (workspace / "dispatch_history.jsonl").read_text(encoding="utf-8")
+    history = (artefact / "dispatch_history.jsonl").read_text(encoding="utf-8")
     parsed = [json.loads(line) for line in history.splitlines() if line.strip()]
     assert len(parsed) == 1
-    assert parsed[0]["dyn_id"] == "dyn-0-1"
-    assert parsed[0]["outcome"] == "stub_empty"
+    row = parsed[0]
+    assert row["event"] == "sub_agent_done"
+    assert row["terminal_state"] == "COMPLETED_EMPTY"
+    assert row["reason"] == "stub_empty"
+    assert row["proposal_count"] == 0
     proposal = json.loads(
-        (workspace / "proposal_set.json").read_text(encoding="utf-8"),
+        (artefact / "proposal_set.json").read_text(encoding="utf-8"),
     )
     assert proposal["proposal_set"] == []
     assert proposal["empty"] is True
