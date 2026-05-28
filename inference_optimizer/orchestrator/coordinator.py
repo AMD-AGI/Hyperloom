@@ -7421,38 +7421,56 @@ class Coordinator:
         *,
         change: str,
         kind: str,
-        gain_pct: float | None = None,
+        gain_pct: float | None = None,  # kept for backward call-signature compat
         severity: str | None = None,
     ) -> str:
-        """GAP 4 (FIX-4) — build the lesson statement / pitfall
-        description used to derive the KB canonical_id.
+        """Build the lesson statement / pitfall description used to
+        derive the KB canonical_id.
 
-        Framework is intentionally included in the visible text so the
-        canonical_id (a hash of the statement) differs across
-        framework even when the variant args happen to collide. Without
-        this guard, a sglang ``--enable-chunked-prefill`` lesson and a
-        vLLM ``--enable-chunked-prefill`` lesson would hash to the
-        same row → KB shallow-merge would have the later writer
-        overwrite the earlier one's measured_impact / source_session
-        triple, AND ``attrs.framework`` would flip-flop on every write.
+        Critical contract: this string is hashed into the canonical_id,
+        so anything that varies session-to-session for the **same
+        experience** must be excluded. Otherwise N sessions writing
+        the "same" lesson produce N KB rows instead of merging.
+
+        Identity dimensions (included → become part of canonical_id):
+
+          * ``framework`` — sglang vs vLLM lessons stay separate
+            (extra_*_args blobs are incompatible).
+          * ``change`` — the actual variant string (args + envs).
+          * ``model`` / ``hw`` — different hardware → different
+            lessons (best practices vary).
+
+        Volatile signals (excluded → updated via measured_impact /
+        validated_count instead):
+
+          * ``gain_pct`` — measure floats drift session-to-session
+            (+12.30% / +11.50% / +12.70%). Including it would explode
+            "1 lesson, 5 sessions confirming" into "5 lessons,
+            each validated_count=1". The actual gain lives in
+            ``attrs.measured_impact`` (shallow new-wins → reflects
+            most recent measurement) and the list of source sessions
+            in ``attrs.source_session_ids``.
+
+        Pitfall description uses ``severity`` (3-value enum:
+        ``crash`` / ``regress`` / ``noop``) instead of gain_pct so the
+        same drift-stability concern doesn't apply.
 
         Output shape:
 
-        * ``[<framework>] <change> → +<gain>% on <model>/<hw>`` for lessons.
-        * ``[<framework>] <change> → <severity> on <model>/<hw>`` for pitfalls.
+        * ``[<framework>] <change> on <model>/<hw>``               for lessons
+        * ``[<framework>] <change> → <severity> on <model>/<hw>``  for pitfalls
 
-        Framework is rendered as ``[?]`` (sentinel) when SharedState
-        doesn't know it, so legacy / mock callers still produce a
-        stable canonical_id without the brackets disappearing entirely
-        (otherwise pre-PR rows and post-PR rows would still collide).
+        Framework is rendered as ``[?]`` when SharedState doesn't know
+        it (legacy / mock callers) so the canonical_id stays stable
+        and distinguishable from a real-framework row.
         """
         framework = str(getattr(self.shared_state, "framework", "") or "").strip()
         fw_tag = f"[{framework or '?'}] "
         model = self.shared_state.model_name or "?"
         hw = self.shared_state.gpu_type or "?"
         if kind == "lesson":
-            assert gain_pct is not None  # caller contract
-            return f"{fw_tag}{change} → +{gain_pct:.2f}% on {model}/{hw}"
+            # gain_pct intentionally NOT included — see docstring.
+            return f"{fw_tag}{change} on {model}/{hw}"
         # kind == "pitfall"
         return f"{fw_tag}{change} → {severity or '?'} on {model}/{hw}"
 
