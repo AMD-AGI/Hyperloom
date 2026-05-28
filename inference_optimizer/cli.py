@@ -137,12 +137,11 @@ class _RetiredFlag(argparse.Action):
 def _orchestration_rules_fragment_path() -> Path:
     """Path to the rules-only fragment consumed by ``prompt_builder``.
 
-    Phase 1 collapsed ``orchestration.md`` to a small "rules + output protocol"
-    fragment; the full system prompt is composed at runtime from
+    ``orchestration.md`` is a small "rules + output protocol" fragment;
+    the full system prompt is composed at runtime from
     :class:`ActionMetadata` and run-level parameters by
-    :func:`build_orchestration_prompt`. The legacy
-    ``orchestration.no_kernel.md`` was deleted — kernel-vs-no-kernel is now
-    a builder parameter, not a separate file.
+    :func:`build_orchestration_prompt`. Kernel-vs-no-kernel is a builder
+    parameter, not a separate file.
     """
     return asset_system_prompts_dir() / "orchestration.md"
 
@@ -394,25 +393,19 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
     """IR-8: validate atom-specific CLI knob compatibility.
 
-    After Phase 3 of atom_plan/ (framework-agent enablement) the
-    function's only remaining responsibility is the multi-node
-    fail-fast guard. Kept under the original name for git-blame
-    continuity with the historical ``--no-kernel`` / ``--no-framework``
-    auto-flip; the body is now narrower than the name suggests.
-
-    Phase 7 gap G9 added the forward-looking alias
-    :data:`_assert_atom_single_node` (defined below) that resolves to
-    this same callable — new call sites are encouraged to prefer the
-    clearer name; the historical name stays for back-compat.
+    The function's only responsibility is the multi-node fail-fast
+    guard. The forward-looking alias :data:`_assert_atom_single_node`
+    (defined below) resolves to this same callable — new call sites
+    are encouraged to prefer the clearer name.
 
     What works on atom today (NO auto-tightening applied):
 
-    * kernel-agent — atom_plan/phase2_open_kernel_agent wired atom
-      source roots into PolicyGate's allowlist,
-      ``_REUSABLE_SOURCE_ROOTS``, and the server-flag pre-flight
-      probe; ``--no-kernel`` is preserved at its False default.
-    * framework-agent — atom_plan/phase3_open_framework_agent added
-      atom's repo URL (https://github.com/ROCm/ATOM.git) to
+    * kernel-agent — atom source roots are wired into PolicyGate's
+      allowlist, ``_REUSABLE_SOURCE_ROOTS``, and the server-flag
+      pre-flight probe; ``--no-kernel`` is preserved at its False
+      default.
+    * framework-agent — atom's repo URL
+      (https://github.com/ROCm/ATOM.git) is in
       ``framework_agent.repo_map``; ``--no-framework`` is preserved
       at its False default, so the FRAMEWORK_PR phase runs.
     * profile / roofline / TraceLens — atom's OpenAI-compatible
@@ -429,10 +422,9 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
       ``sys.exit(2)`` so operators don't burn a ~6-min cold start on
       a doomed run.
 
-    Returns the list of flag names auto-disabled — always empty after
-    Phase 3 since no defaults are flipped any more. The return type
-    is preserved so callers that historically appended to / logged
-    the list keep working unchanged.
+    Returns the list of flag names auto-disabled — always empty since
+    no defaults are flipped. The return type is preserved so callers
+    that append to / log the list keep working unchanged.
     """
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
@@ -451,12 +443,11 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
     return auto_disabled
 
 
-# Forward-looking alias for the post-Phase-3 reality. The historical
-# name ``_apply_atom_auto_tighten`` is kept for git-blame continuity
-# and because dozens of tests / SKILL references still cite it (gap
-# G9). New call sites that want the clearer name can use this alias;
-# the body is the same function — both names point at the same
-# callable object so monkeypatching either still works.
+# Forward-looking alias. The name ``_apply_atom_auto_tighten`` is kept
+# because tests / SKILL references still cite it. New call sites that
+# want the clearer name can use this alias; the body is the same
+# function — both names point at the same callable object so
+# monkeypatching either still works.
 _assert_atom_single_node = _apply_atom_auto_tighten
 
 
@@ -3930,9 +3921,8 @@ def _build_parser() -> argparse.ArgumentParser:
              "session-wide; mixing frameworks in a single session is not "
              "supported. NOTE: --framework atom is single-node-only "
              "(``--nodes>=2`` fails fast); profile / roofline, "
-             "kernel-agent, and framework-agent are all enabled on atom "
-             "after atom_plan/ phases 1-3. The auto-tighten guard now "
-             "only enforces ``--nodes 1``.",
+             "kernel-agent, and framework-agent are all enabled on atom. "
+             "The auto-tighten guard only enforces ``--nodes 1``.",
     )
     opt.add_argument(
         "--nodes", type=int,

@@ -143,12 +143,12 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 LATEST_STATE_SCHEMA_VERSION: int = 2
 
 
-# Phase 4 of atom_plan/: the payload-surface field was renamed from
-# ``extra_sglang_args`` (sglang-era name) to ``extra_server_args``
-# (framework-neutral). The on-disk state.json may carry the legacy
-# key in any of several deeply-nested ledgers, so a one-shot
-# walk-and-rewrite on load is the cleanest migration — the next save
-# then emits canonical only and a re-load is a no-op.
+# The payload-surface field was renamed from ``extra_sglang_args``
+# (sglang-era name) to ``extra_server_args`` (framework-neutral).
+# The on-disk state.json may carry the legacy key in any of several
+# deeply-nested ledgers, so a one-shot walk-and-rewrite on load is
+# the cleanest migration — the next save then emits canonical only
+# and a re-load is a no-op.
 _PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
     "extra_sglang_args":           "extra_server_args",
     "candidate_extra_sglang_args": "candidate_extra_server_args",
@@ -156,7 +156,7 @@ _PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
 
 
 def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
-    """Recursively rewrite legacy Phase 4 field names in-place.
+    """Recursively rewrite legacy ``extra_sglang_args`` field names in-place.
 
     Walks every dict and list reachable from ``obj`` and renames keys
     listed in :data:`_PHASE4_LEGACY_KEY_RENAMES` to their canonical
@@ -933,18 +933,17 @@ class SharedState:
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
         migration_events: list[str] = []
 
-        # Phase 4 of atom_plan/: rename ``extra_sglang_args`` ->
-        # ``extra_server_args`` (same for ``candidate_extra_sglang_args``).
-        # The on-disk shape stays a plain dict, so the legacy key may
-        # appear in any of the many nested ledgers (winners,
-        # baseline_artifacts, action_attempts, explore_search, etc.).
-        # Walk the entire payload once at load time and rewrite the
-        # legacy keys in place — the next save will then emit canonical
-        # only and a future load of the same file is a no-op.
+        # Migrate the ``extra_sglang_args`` -> ``extra_server_args`` rename
+        # (same for ``candidate_extra_sglang_args``). The on-disk shape
+        # stays a plain dict, so the legacy key may appear in any of the
+        # many nested ledgers (winners, baseline_artifacts, action_attempts,
+        # explore_search, etc.). Walk the entire payload once at load time
+        # and rewrite the legacy keys in place — the next save will then
+        # emit canonical only and a future load of the same file is a no-op.
         legacy_migrations = _migrate_legacy_extra_sglang_args_keys(raw)
         if legacy_migrations:
             migration_events.append(
-                f"Phase 4 rename: migrated {legacy_migrations} legacy "
+                f"extra_server_args rename: migrated {legacy_migrations} legacy "
                 f"extra_sglang_args / candidate_extra_sglang_args key(s) "
                 f"to extra_server_args / candidate_extra_server_args"
             )
@@ -1005,9 +1004,9 @@ class SharedState:
                     "v0.8 §3.9: dropped legacy scoreboard fields from "
                     "state.json (%s).", summary,
                 )
-        # Phase 7 of the dedup-by-fingerprint plan: migrate any v1
-        # ``params_search`` ledger (where ``tested`` was keyed by display
-        # name) to schema v2 (keyed by content fingerprint). Backends has
+        # Migrate any v1 ``params_search`` ledger (where ``tested`` was
+        # keyed by display name) to schema v2 (keyed by content
+        # fingerprint). Backends has
         # no pre-fingerprint persisted data so it only needs default-key
         # normalization. We do this here — at the load boundary — so the
         # executor and Coordinator paths can assume the v2 schema and
@@ -1871,8 +1870,8 @@ class SharedState:
             or ""
         )
         # ``payload`` is an external envelope (LLM intent or sub-agent
-        # kernel_opt result); route through the Phase 4 compat helper so
-        # a legacy ``extra_sglang_args`` key still resolves with a single
+        # kernel_opt result); route through the compat helper so a legacy
+        # ``extra_sglang_args`` key still resolves with a single
         # DeprecationWarning logged via stacklevel=3.
         from ..compat.payload_aliases import read_extra_server_args
         extra_args = read_extra_server_args(payload).strip()
@@ -2832,12 +2831,12 @@ class SharedState:
             "ts": _now_iso(),
         }
         self.last_select_kernels = cached
-        # Main M4 main merge: ``last_trace_analyze`` is the canonical
-        # post-rename name (RooflineExecutor / `record_trace_analyze`
-        # writes a richer schema there, but the legacy
-        # ``record_select_kernels`` writer must also mirror its slim
-        # schema into ``last_trace_analyze`` so the policy gate's cache
-        # lookup (which prefers the canonical field) finds the entry.
+        # ``last_trace_analyze`` is the canonical field name
+        # (RooflineExecutor / `record_trace_analyze` writes a richer
+        # schema there), but the legacy ``record_select_kernels`` writer
+        # must also mirror its slim schema into ``last_trace_analyze`` so
+        # the policy gate's cache lookup (which prefers the canonical
+        # field) finds the entry.
         self.last_trace_analyze = dict(cached)
 
     def record_sweep(self, result: dict[str, Any]) -> None:
@@ -3449,7 +3448,7 @@ class SharedState:
             )
 
     # ------------------------------------------------------------------
-    # Time-budget helpers (Phase 2 — consumed by Coordinator._compose_prompt)
+    # Time-budget helpers (consumed by Coordinator._compose_prompt)
     # ------------------------------------------------------------------
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
         """Wall-clock minutes since ``start_ts``.
@@ -3835,11 +3834,11 @@ class SharedState:
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_select_kernels={self._format_last_select_kernels()}",
-            # Main M4 main merge: ``last_trace_analyze`` mirrors the
-            # canonical post-rename name; both keys carry the same
-            # slim cache schema, so we render both lines for backward
-            # compatibility with prompt-format-stable tests on either
-            # side (legacy regression_locks expects `last_trace_analyze=`).
+            # ``last_trace_analyze`` mirrors the canonical field name;
+            # both keys carry the same slim cache schema, so we render
+            # both lines for backward compatibility with
+            # prompt-format-stable tests on either side (legacy
+            # regression_locks expects `last_trace_analyze=`).
             f"last_trace_analyze={self._format_last_trace_analyze()}",
             # Full TraceLens ``analysis.md`` (snapshot id + gain in the
             # bookend header) so the orchestration LLM grounds

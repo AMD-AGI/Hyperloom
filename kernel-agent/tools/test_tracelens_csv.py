@@ -2606,14 +2606,12 @@ def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
 
 
 # ---------------------------------------------------------------------------
-# atom_gap2.md B3 — atom maps to ``inference`` analysis mode
+# atom maps to ``inference`` analysis mode
 # ---------------------------------------------------------------------------
 def test_infer_analysis_mode_atom_returns_inference():
-    """B3 regression: atom traces are produced by the same torch
-    profiler API and the same chrome-trace JSON shape as sglang /
-    vllm. Pre-fix, atom fell through to ``default`` and got generic
-    torch grouping; now atom shares the inference-mode kernel
-    grouping with sglang/vllm.
+    """atom traces share the inference-mode kernel grouping with
+    sglang/vllm; without this they would fall through to ``default``
+    and get generic torch grouping.
     """
     assert tlr.infer_analysis_mode("atom", "") == "inference"
     assert tlr.infer_analysis_mode("ATOM", "default") == "inference"
@@ -2621,8 +2619,7 @@ def test_infer_analysis_mode_atom_returns_inference():
 
 
 def test_infer_analysis_mode_sglang_vllm_unchanged():
-    """Regression guard: B3 must not accidentally change sglang /
-    vllm behaviour (was ``inference`` pre-fix, still ``inference``).
+    """Regression guard: sglang / vllm remain ``inference``.
     """
     assert tlr.infer_analysis_mode("sglang", "") == "inference"
     assert tlr.infer_analysis_mode("vllm", "default") == "inference"
@@ -2645,20 +2642,17 @@ def test_infer_analysis_mode_unknown_framework_stays_default():
 
 
 # ---------------------------------------------------------------------------
-# atom_gap2.md B2 — atom entries present in _FRAMEWORK_PKG_FALLBACK_ROOTS
+# atom entries present in _FRAMEWORK_PKG_FALLBACK_ROOTS
 # ---------------------------------------------------------------------------
 def test_framework_pkg_fallback_roots_has_atom_entry():
-    """B2 regression: pre-fix, the offline source resolver silently
-    rejected atom kernel sources because the fallback table only
-    knew about aiter / sglang / vllm. The atom entry must include at
-    least the editable-install parent ``/app/ATOM`` so a relative
-    ``atom/model_engine/...`` path in a TraceLens CSV can be joined
-    against it.
+    """The offline source resolver must accept atom kernel sources; the
+    atom entry must include at least the editable-install parent
+    ``/app/ATOM`` so a relative ``atom/model_engine/...`` path in a
+    TraceLens CSV can be joined against it.
     """
     table = tlr._FRAMEWORK_PKG_FALLBACK_ROOTS
     assert "atom" in table, (
-        "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS — "
-        "atom_gap2.md B2 regression"
+        "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS"
     )
     roots = table["atom"]
     assert "/app/ATOM" in roots
