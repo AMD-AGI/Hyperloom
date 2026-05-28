@@ -45,12 +45,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .. import cortex_kb_constants as C
-from ..cortex_kb_client import (
-    CortexKBClient,
-    CortexKBError,
-    recipe_canonical_id,
-)
+from ..recipe_kb import RecipeKB, recipe_canonical_id
+from ..recipe_snapshot_constants import detect_framework_version
 
 
 log = logging.getLogger(__name__)
@@ -88,7 +84,7 @@ def _default_status_emitter(line: str) -> None:
 
 
 def run_t0_anchor(
-    client: CortexKBClient,
+    kb: RecipeKB,
     shared_state: Any,
     *,
     workload: str,
@@ -102,40 +98,42 @@ def run_t0_anchor(
     session_dir: Path | None = None,
     save_state: bool = True,
 ) -> T0Result:
-    """Run the T0 Cortex anchor.
+    """Run the T0 recipe-snapshot anchor.
 
     Mutates ``shared_state`` in place (sets ``cortex_session_id``,
     ``warm_start_ts``, ``warm_start_recipe``, ``warm_start_pitfalls``)
     and, when ``save_state=True``, persists via
     ``shared_state.save(session_dir)``.
 
+    Reads / writes go through the :class:`RecipeKB` dispatcher.
+    Identity uses the v2 5-tuple canonical_id
+    (model + hardware + framework + framework_version + precision);
+    no fallback ladder — a cold-start session for a model whose
+    exact 5-tuple has no prior recipe simply gets ``warm_present =
+    False`` and the optimizer cold-starts.
+
     Failure handling:
 
-    * ``client.enabled is False`` → no-op, returns
-      ``T0Result(status='skipped_disabled')``.
     * Already-anchored short-circuit (``cortex_session_id`` AND
       ``warm_start_ts`` both set, ``resume=False``) → no-op,
-      returns ``T0Result(status='skipped_already')``. Both
-      ``cli._bootstrap_cortex_kb`` and
-      ``Coordinator._ensure_cortex_t0_anchored`` call us in
-      sequence on a fresh launch; the second invocation hits this
-      short-circuit instead of re-issuing the 7+ KB HTTP requests.
+      returns ``T0Result(status='skipped_already')``.
     * ``resume=True`` callers intentionally bypass the short-circuit
-      so a refreshed warm-start surface is fetched (the live KB may
-      have grown new recipes since the original run).
-    * The KB session begin protocol was retired; this helper no
-      longer fail-fasts on session creation. ``fail_fast`` is kept
-      as a no-op for back-compat with cli callers.
-    * ``find_recipe`` / ``traps`` failures are *always* non-fatal —
-      warm_start is a hint, stale data is preferable to a crashed
-      PRELUDE.
+      so a refreshed warm-start surface is fetched (the local store
+      may have grown new recipes since the original run, and the
+      central kb-service may have caught up too).
+    * ``fail_fast`` is kept as a no-op for back-compat with cli
+      callers.
+    * Read failures (remote unhealthy / disabled) are absorbed by
+      the dispatcher and degrade silently to local-only — warm_start
+      is a hint, stale data is preferable to a crashed PRELUDE.
 
     Args
     ----
-    client:
-        The :class:`CortexKBClient` instance. Caller constructed it
-        with the right ``session_dir`` / ``kb_url`` / ``enabled``
-        flags; we don't reconstruct.
+    kb:
+        The :class:`RecipeKB` dispatcher instance. Caller
+        constructed it with the right ``--local-kb-root`` /
+        ``--cortex-kb-url`` / ``--degraded-kb`` settings via
+        ``cli._build_recipe_kb_dispatcher``.
     shared_state:
         The live :class:`SharedState` whose ``cortex_session_id`` /
         ``warm_start_*`` fields we write.
@@ -157,7 +155,8 @@ def run_t0_anchor(
         ``print``.
     session_dir:
         Used by ``save_state`` and the ``.kb_sid`` discovery fall-
-        back. Defaults to ``client.session_dir``.
+        back. Caller MUST pass an explicit value — the dispatcher
+        doesn't carry a session_dir of its own.
     save_state:
         When ``True`` (default), call ``shared_state.save(session_dir)``
         at the end so the writes survive a process crash.
@@ -167,11 +166,9 @@ def run_t0_anchor(
     :class:`T0Result` capturing the outcome.
     """
     emit = on_status or _default_status_emitter
-    sd = session_dir or client.session_dir
-
-    if not client.enabled:
-        emit("Cortex KB        : DISABLED (--degraded-kb)")
-        return T0Result(status="skipped_disabled", workload=workload, hw=hw)
+    if session_dir is None:
+        raise ValueError("run_t0_anchor requires an explicit session_dir")
+    sd = Path(session_dir)
 
     # Hyperloom-local session id (carried into fact-write attrs for
     # traceability). The Cortex KB session protocol was retired, so
@@ -224,73 +221,51 @@ def run_t0_anchor(
             timespec="seconds",
         )
 
-    # Backfill metadata attrs onto the recipe anchor so PR-A10
-    # fallback queries can match it earlier. Best-effort: the first
-    # KEEP / CLOSE update_recipe will create the point on demand
-    # anyway, so this backfill just pre-stamps the searchable tags.
-    #
-    # Tags written here:
-    #   * model / hardware / model_family            — always
-    #   * model_class / framework                    — from extra_attrs (cli)
-    #   * framework_version / rocm_version /         — from stack_fingerprint
-    #     aiter_version
-    #   * image_digest                               — from cli (manifest.image)
-    #   * marathon_dispatch_id / claw_session_id /   — from extra_attrs
-    #     sandbox_user_id (operator traceability)
-    #   * precision / tp / conc / isl / osl /        — from SharedState (cli)
-    #     max_model_len / ep / pp
-    #
-    # The operator-traceability fields (marathon / claw / sandbox)
-    # are KB-merge-overwritten by the NEXT session that runs the same
-    # (model, hardware) — i.e. the recipe always carries the *most
-    # recent* tracing tuple. Historical tracing per session lives in
-    # ``recipe.sessions[]`` (CLOSE-time, read-modify-write merged).
-    from ..cortex_kb_client import model_family as _model_family
-    _extra: Mapping[str, Any] = extra_attrs if isinstance(extra_attrs, Mapping) else {}
+    # Backfill metadata onto the recipe anchor so subsequent reads
+    # (warm-start) and the CLOSE-time update_recipe see the operator-
+    # tracing fields (model_class, image_digest, marathon_dispatch_id,
+    # ...). T0 only stamps metadata — best_config / best_throughput /
+    # what_worked etc. stay whatever they were (preserved across the
+    # read-modify-write below). The CLOSE-time hook in coordinator
+    # rewrites them with measured values.
+    _extra: Mapping[str, Any] = (
+        extra_attrs if isinstance(extra_attrs, Mapping) else {}
+    )
     _model_class = str(_extra.get("model_class") or "").strip()
-    _framework = str(_extra.get("framework") or "").strip()
-    _attrs: dict[str, Any] = {
-        "model":        workload,
-        "hardware":     hw,
-        "model_family": _model_family(workload),
-    }
+    _framework   = str(_extra.get("framework")   or "").strip()
+    _precision   = str(getattr(shared_state, "precision", "") or "").strip()
+    fp: Mapping[str, Any] = (
+        stack_fingerprint if isinstance(stack_fingerprint, Mapping) else {}
+    )
+    # framework_version: prefer SharedState (CLI explicit), else lift
+    # from stack_fingerprint, else auto-detect via importlib.
+    _fw_version = str(getattr(shared_state, "framework_version", "") or "").strip()
+    if not _fw_version and _framework in ("sglang", "vllm"):
+        _fw_version = str(fp.get(_framework) or "").strip()
+        if _fw_version == "unknown":
+            _fw_version = ""
+    if not _fw_version and _framework:
+        _fw_version = detect_framework_version(_framework)
+
+    # Operator-traceability + workload-shape tags — written into
+    # ``extras`` so they round-trip through the arbor schema's
+    # free-form key support. Skipping empty / zero values.
+    _extras: dict[str, Any] = {}
     if _model_class:
-        _attrs["model_class"] = _model_class
-    if _framework:
-        _attrs["framework"] = _framework
-    # framework_version — lift from stack_fingerprint
-    # (``{rocm, sglang, vllm, aiter}`` versions, populated by manifest).
-    fp: Mapping[str, Any] = stack_fingerprint if isinstance(stack_fingerprint, Mapping) else {}
-    if _framework in ("sglang", "vllm"):
-        version = str(fp.get(_framework) or "").strip()
-        if version and version != "unknown":
-            _attrs["framework_version"] = version
+        _extras["model_class"] = _model_class
     rocm_v = str(fp.get("rocm") or "").strip()
     if rocm_v and rocm_v != "unknown":
-        _attrs["rocm_version"] = rocm_v
+        _extras["rocm_version"] = rocm_v
     aiter_v = str(fp.get("aiter") or "").strip()
     if aiter_v and aiter_v != "unknown":
-        _attrs["aiter_version"] = aiter_v
-    # Image digest (the docker image hyperloom is running in) — used
-    # to be written into the legacy ``session_begin`` attrs; preserve
-    # the operator-visible field on the recipe anchor for debugging
-    # "which image produced this best_config".
+        _extras["aiter_version"] = aiter_v
     if image_digest and image_digest != "unknown":
-        _attrs["image_digest"] = str(image_digest).strip()
-    # Operator-tracing fields from extra_attrs whitelist — anything
-    # else in extra_attrs is intentionally ignored so an ad-hoc dict
-    # value doesn't accidentally pollute the recipe schema.
+        _extras["image_digest"] = str(image_digest).strip()
     for src_key in ("marathon_dispatch_id", "claw_session_id", "sandbox_user_id"):
         v = str(_extra.get(src_key) or "").strip()
         if v:
-            _attrs[src_key] = v
-    # Workload-shape tags — read from SharedState (cli already wrote
-    # them via _seed_shared_state). Skipping empty / zero values so
-    # KB query filter doesn't match "tp=0" placeholders. EP is read
-    # from SharedState first (resume-safe), env as fallback (legacy
-    # paths that bypass _seed_shared_state).
+            _extras[src_key] = v
     for src_attr, dst_key in (
-        ("precision",     "precision"),
         ("tp",            "tp"),
         ("ep",            "ep"),
         ("conc",          "conc"),
@@ -300,79 +275,123 @@ def run_t0_anchor(
     ):
         v = getattr(shared_state, src_attr, None)
         if v not in (None, "", 0):
-            _attrs[dst_key] = v
-    # PP — no SharedState field (no CLI surface); read env only.
-    # EP env fallback when SharedState.ep is unset (legacy SDK callers
-    # that constructed SharedState without _seed_shared_state).
-    if "ep" not in _attrs:
+            _extras[dst_key] = v
+    if "ep" not in _extras:
         raw_ep = (os.environ.get("EP") or "").strip()
         try:
             n = int(raw_ep) if raw_ep else 0
         except ValueError:
             n = 0
         if n > 0:
-            _attrs["ep"] = n
+            _extras["ep"] = n
     raw_pp = (os.environ.get("PP") or "").strip()
     try:
         pp_n = int(raw_pp) if raw_pp else 0
     except ValueError:
         pp_n = 0
     if pp_n > 0:
-        _attrs["pp"] = pp_n
-    # update_recipe → propose_point internally swallows CortexKBError
-    # and enqueues NDJSON, so an explicit ``except CortexKBError`` here
-    # would be dead code. The catch-all only matters for true programmer
-    # bugs (OSError writing pending file, attr lookups blowing up, …).
-    #
-    # Framework is plumbed into the canonical_id so sglang / vLLM rows
-    # on the same (model, hw) stay separate — their best_config blobs
-    # are framework-incompatible and would crash the server if mixed.
+        _extras["pp"] = pp_n
+
+    # Build the canonical_id from the 5-tuple we just resolved. sglang
+    # 0.4.5 / sglang 0.5.x / vllm 0.6.0 each get their own recipe row
+    # (precision is the strongest "secondary" identity dim — fp8 vs
+    # bf16 changes optimal tp / ep wholesale).
+    cid = recipe_canonical_id(
+        model=workload, hardware=hw,
+        framework=_framework or "",
+        framework_version=_fw_version or "",
+        precision=_precision or "",
+    )
+
+    # Read-modify-write: load existing payload (if any) so this
+    # T0 metadata stamp doesn't clobber best_config / sessions /
+    # what_worked / etc. that the prior CLOSE wrote.
     try:
-        client.update_recipe(
-            model=workload,
-            hardware=hw,
-            framework=_framework or "",
-            extra_attrs=_attrs,
+        live = kb.get_recipe(canonical_id=cid) or {}
+    except Exception as exc:  # noqa: BLE001 — defensive
+        log.info("T0 anchor get_recipe non-fatal failure: %s", exc)
+        live = {}
+
+    # Merge prior extras with the new ones we want to stamp; new
+    # values win (T0 always carries the freshest operator-tracing
+    # tuple, by design — see the ``most recent tracing tuple``
+    # comment in the prior implementation).
+    merged_extras: dict[str, Any] = {}
+    prior_extras = {
+        k: v for k, v in (live or {}).items()
+        if k not in {
+            "canonical_id", "version", "created_at", "updated_at",
+            "model", "hardware", "framework", "framework_version",
+            "precision",
+            "best_config", "best_throughput",
+            "what_worked", "what_failed", "remaining_gaps",
+            "prs_tested", "pitfalls", "lessons",
+            "last_profiled", "stack_fingerprint", "sessions",
+            "authority", "confidence", "evidence_refs", "provenance",
+        }
+    }
+    merged_extras.update(prior_extras)
+    merged_extras.update(_extras)
+
+    # Stack fingerprint — preserve prior values where a key is
+    # present locally but not stamped this round.
+    sfp_payload: dict[str, str] = dict(live.get("stack_fingerprint") or {})
+    if isinstance(fp, Mapping):
+        for fp_key in ("vllm_version", "aiter_commit", "rocm_version"):
+            new = str(fp.get(fp_key.replace("_version", "").replace("_commit", "")) or "").strip()
+            if new and new != "unknown":
+                sfp_payload[fp_key] = new
+
+    try:
+        kb.put_recipe(
+            canonical_id=cid,
+            model=workload, hardware=hw,
+            framework=_framework or "", framework_version=_fw_version or "",
+            precision=_precision or "",
+            best_config=dict(live.get("best_config") or {}),
+            best_throughput=float(live.get("best_throughput") or 0.0),
+            what_worked=list(live.get("what_worked") or []),
+            what_failed=list(live.get("what_failed") or []),
+            remaining_gaps=list(live.get("remaining_gaps") or []),
+            prs_tested=list(live.get("prs_tested") or []),
+            pitfalls=list(live.get("pitfalls") or []),
+            lessons=list(live.get("lessons") or []),
+            last_profiled=str(live.get("last_profiled") or ""),
+            stack_fingerprint=sfp_payload,
+            sessions=list(live.get("sessions") or []),
+            extras=merged_extras,
+            provenance={
+                "source":       "hyperloom-inference-optimizer",
+                "generator":    "t0_anchor",
+                "generated_at": datetime.now(timezone.utc).isoformat(
+                    timespec="microseconds",
+                ),
+                "details":      {"sid": sid},
+            },
         )
     except Exception:  # noqa: BLE001 — defensive
-        log.exception("update_recipe T0 backfill raised unexpectedly")
+        log.exception("T0 anchor put_recipe raised unexpectedly")
 
-    # warm_start_recipe — non-fatal. PR-A10: graceful fallback ladder
-    # so a cold-start session for a model with no exact KB recipe can
-    # still pick up a same-family / same-class / same-hw prior.
-    model_class = (extra_attrs or {}).get("model_class") if isinstance(extra_attrs, Mapping) else None
-    framework = (extra_attrs or {}).get("framework") if isinstance(extra_attrs, Mapping) else None
-    # Workload-shape filters (T2 fallback tier — same precision + tp
-    # + ep beats same-family alone). All three read from SharedState
-    # first (resume-safe); EP falls back to env for legacy SDK callers.
-    _precision = str(getattr(shared_state, "precision", "") or "").strip()
-    _tp = int(getattr(shared_state, "tp", 0) or 0)
-    _ep = int(getattr(shared_state, "ep", 0) or 0)
-    if _ep == 0:
-        _ep_raw = (os.environ.get("EP") or "").strip()
-        try:
-            _ep = int(_ep_raw) if _ep_raw else 0
-        except ValueError:
-            _ep = 0
+    # warm_start_recipe — exact 5-tuple lookup, no fallback ladder
+    # under the v2 design. A cold-start session for a model whose
+    # exact 5-tuple has no prior recipe row simply cold-starts;
+    # the optimizer's specialist prompt knows how to handle empty
+    # warm-start.
     warm_point: dict[str, Any] = {}
     warm_tier: str = "miss"
     warm_conf: float = 0.0
     try:
-        warm_point, warm_tier, warm_conf = client.find_recipe_with_fallback(
-            workload=workload,
-            hw=hw,
-            model_class=str(model_class) if model_class else None,
-            framework=str(framework) if framework else None,
-            precision=_precision or None,
-            tp=_tp if _tp > 0 else None,
-            ep=_ep if _ep > 0 else None,
-        )
-    except CortexKBError as exc:
-        log.info("find_recipe_with_fallback non-fatal failure: %s", exc)
-    # Keep a legacy raw text envelope on disk so existing readers
-    # (kb_explorer, breakdown collectors) keep working; new readers
-    # should prefer shared_state.warm_start_recipe["tier"] /
-    # ["confidence"] / ["recipe"].
+        row = kb.get_recipe(canonical_id=cid)
+    except Exception as exc:  # noqa: BLE001 — dispatcher absorbs RemoteRecipeClientError
+        log.info("warm-start get_recipe non-fatal failure: %s", exc)
+        row = None
+    if isinstance(row, dict) and row:
+        warm_point = row
+        warm_tier = "exact"
+        warm_conf = 1.0
+    # Keep the on-disk warm.json envelope shape stable so existing
+    # readers (kb_explorer, breakdown collectors) keep working;
+    # new readers should prefer shared_state.warm_start_recipe.
     warm_text = json.dumps(
         {"points": [warm_point] if warm_point else []}, sort_keys=True,
     )
@@ -398,51 +417,14 @@ def run_t0_anchor(
     except OSError as exc:
         log.warning("warm_start snapshot write failed: %s", exc)
 
-    # warm_start_pitfalls — non-fatal. Mirror of warm_start_lessons:
-    # query kind=pitfall by (model, hardware, framework) so the
-    # specialist prompt's "do NOT repeat" section actually surfaces
-    # the right pitfalls. The legacy ``traps(symptom=...)`` API was
-    # broken (filtered on an ``attrs.symptom`` field that
-    # ``propose_pitfall`` never wrote) — see the pitfall reader-
-    # symmetry fix.
-    # GAP 7+8 — workload-shape + framework-version are forwarded to
-    # the client so the returned lessons / pitfalls are ranked by
-    # similarity-to-current-session (not just KB confidence). The
-    # shape dict mirrors what ``_collect_workload_tags`` writes on
-    # lesson / pitfall attrs (post-PR), so writer + reader agree.
-    _current_shape: dict[str, Any] = {}
-    for src_attr, dst_key in (
-        ("precision",     "precision"),
-        ("tp",            "tp"),
-        ("ep",            "ep"),
-        ("conc",          "conc"),
-        ("isl",           "isl"),
-        ("osl",           "osl"),
-        ("max_model_len", "max_model_len"),
-    ):
-        v = getattr(shared_state, src_attr, None)
-        if v not in (None, "", 0):
-            _current_shape[dst_key] = v
-    # framework_version from the same stack_fingerprint backfill we
-    # already do for the recipe row.
-    _current_fw_version = ""
-    if _framework in ("sglang", "vllm"):
-        _current_fw_version = str(fp.get(_framework) or "").strip()
-        if _current_fw_version == "unknown":
-            _current_fw_version = ""
-
-    pitfalls_list: list[dict[str, Any]] = []
-    try:
-        pitfalls_list = client.pitfalls(
-            model=workload,
-            hardware=hw,
-            framework=_framework or None,
-            limit=20,
-            current_workload_shape=_current_shape or None,
-            current_framework_version=_current_fw_version,
-        )
-    except CortexKBError as exc:
-        log.info("pitfalls non-fatal failure: %s", exc)
+    # warm_start_pitfalls / warm_start_lessons — under the v2 design
+    # these are embedded fields of the recipe row (one row per
+    # 5-tuple), so we just read them out of the warm_point we
+    # already loaded. No separate query, no cross-recipe ranking
+    # ladder — the user explicitly asked for exact-5-tuple-only
+    # semantics.
+    pitfalls_list: list[dict[str, Any]] = list(warm_point.get("pitfalls") or [])
+    lessons_list:  list[dict[str, Any]] = list(warm_point.get("lessons") or [])
     try:
         pit_path = sd / "runtime" / "cortex" / ".kb_pitfalls.json"
         pit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -462,24 +444,6 @@ def run_t0_anchor(
             shared_state.warm_start_pitfalls = pitfalls_list
     except OSError as exc:
         log.warning("warm_start_pitfalls snapshot write failed: %s", exc)
-
-    # warm_start_lessons — non-fatal. Pulls prior KEEP-derived lessons
-    # for (model, hardware), optionally filtered by framework so a
-    # sglang session doesn't surface vLLM-only lessons (KB attrs hold
-    # the source framework on each lesson; the filter is None-tolerant
-    # so historical lessons that predate the field still surface).
-    lessons_list: list[dict[str, Any]] = []
-    try:
-        lessons_list = client.lessons(
-            model=workload,
-            hardware=hw,
-            framework=_framework or None,
-            limit=20,
-            current_workload_shape=_current_shape or None,
-            current_framework_version=_current_fw_version,
-        )
-    except CortexKBError as exc:
-        log.info("lessons non-fatal failure: %s", exc)
     try:
         les_path = sd / "runtime" / "cortex" / ".kb_lessons.json"
         les_path.parent.mkdir(parents=True, exist_ok=True)
@@ -526,8 +490,8 @@ def run_t0_anchor(
             "empty"
         )
         emit(
-            f"Cortex KB        : session_id={sid} "
-            f"workload={recipe_canonical_id(workload, hw, _framework or '')} "
+            f"Recipe KB        : session_id={sid} "
+            f"workload={cid} "
             f"(warm={warm_label}, "
             f"pitfalls={len(pitfalls_list)}, "
             f"lessons={len(lessons_list)})"
