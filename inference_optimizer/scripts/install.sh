@@ -585,23 +585,32 @@ PY
 _probe_framework_source_roots
 
 # ---------------------------------------------------------------------------
-# F2-1 — framework-agent (PR #280 sibling skill).
+# framework-agent (sibling skill — drives the standalone FRAMEWORK_PR
+# phase via ``fa phase-discover`` for batch enumeration. The
+# Coordinator's executor handles the apply/bench loop directly, so
+# ``phase-fetch`` / ``phase-emit-proposal`` ship for ad-hoc use but
+# are not on the inference_optimizer hot path). Owns its own python
+# deps and venv layout; we only need to invoke its installer.
 #
-# The framework-agent ships as a sibling tool that ``serving_specialist``
-# subprocesses can shell out to (``fa candidates`` + ``git fetch refs/pull/...``)
-# under the ``framework_pr_scout`` sub_kind. It owns its own python deps
-# and venv layout; we only need to invoke its installer.
+# Install is ON by default to match the runtime default
+# (``SharedState.framework_phase_enabled = True``). Opt out by
+# exporting ``INFERENCE_OPTIMIZER_NO_FRAMEWORK=1`` before install
+# (mirrors the runtime ``--no-framework`` CLI flag).
 #
-# Install is ON by default to match the orchestrator-side defaults
-# (``SharedState.framework_agent_enabled = True`` and the ``--framework-
-# agent-enabled`` CLI flag's ``_env_default_on`` semantics). Opt out by
-# exporting ``INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0`` before
-# install (the runtime CLI flag obeys the same env knob with the same
-# semantics, so flipping it to ``0`` keeps install + runtime aligned).
+# Back-compat: the legacy ``INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0``
+# knob is still honoured for one release with a deprecation warning so
+# operator scripts don't break. Remove on the next cleanup pass.
 # ---------------------------------------------------------------------------
 ensure_framework_agent() {
-  if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-1}" = "0" ]; then
-    log "framework-agent: skipped (INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0)"
+  if [ -n "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-}" ]; then
+    warn "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED is deprecated; use INFERENCE_OPTIMIZER_NO_FRAMEWORK=1 to opt out"
+    if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED}" = "0" ]; then
+      log "framework-agent: skipped (legacy INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0)"
+      return 0
+    fi
+  fi
+  if [ "${INFERENCE_OPTIMIZER_NO_FRAMEWORK:-0}" = "1" ]; then
+    log "framework-agent: skipped (INFERENCE_OPTIMIZER_NO_FRAMEWORK=1)"
     return 0
   fi
   local fa_dir="${INFERENCE_OPTIMIZER_REPO:-$(pwd)}/framework-agent"
