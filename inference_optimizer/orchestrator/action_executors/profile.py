@@ -493,24 +493,20 @@ class ProfileExecutor(BaselineExecutor):
         return None
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        # B2: atom (Magpie v1) has no torch_profiler wiring. atom_mi*x.sh
-        # accepts PROFILE=1 but silently no-ops; injecting sglang/vllm
-        # TraceLens flags into EXTRA_ATOM_ARGS would crash atom's argparse.
-        # Short-circuit here so the EXPLORE specialist's occasional profile
-        # proposal degrades to a skipped delegated_result instead of a
-        # spurious failed run. Coordinator already treats skipped as
-        # non-fatal (no RCA escalation, no current_best mutation).
-        if os.environ.get("FRAMEWORK", "").strip().lower() == "atom":
-            return {
-                "status": "skipped",
-                "framework": "atom",
-                "error_class": "atom_no_profiler",
-                "error": (
-                    "atom framework has no torch_profiler integration in "
-                    "Magpie v1; profile/roofline are no-ops for this run. "
-                    "See atom_boost_tutorials.md §6."
-                ),
-            }
+        # IR-8 (atom): the historical short-circuit returned status="skipped"
+        # here because atom_mi*x.sh accepted PROFILE=1 but silently no-op'd.
+        # The Magpie atom wrapper now bridges PROFILE=1 to atom's
+        # --torch-profiler-dir CLI flag (see atom_mi*x.sh PROFILER_ARGS),
+        # the atom OpenAI server exposes /start_profile and /stop_profile,
+        # and the InferenceX benchmark client auto-POSTs both around the
+        # bench window. Atom writes standard *.pt.trace.json.gz chrome
+        # traces under <workspace>/torch_trace/rank_<N>/ which our
+        # _candidate_trace_dirs probe + rglob("*.trace.json.gz") matches
+        # unchanged, and TraceLens consumes those traces unchanged
+        # (framework-agnostic). So the executor falls through to the same
+        # path as sglang/vllm. The TraceLens-flag injection guard for
+        # atom still lives in _workload_envs.py (atom's argparse rejects
+        # vLLM-style --profiler-config.* flags).
         # Override action label so per-task output lands under runs/profile/
         # rather than runs/baseline/ when the runner derives the path.
         params = ctx.task.params or {}

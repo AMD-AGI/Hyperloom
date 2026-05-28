@@ -392,20 +392,29 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """B3: tighten incompatible CLI knobs when --framework atom is selected.
+    """IR-8: tighten incompatible CLI knobs when --framework atom is selected.
 
-    atom in Magpie v1 has neither a torch_profiler integration (so
-    roofline cannot produce a trace) nor a source-patcher for the
-    framework-agent's PR loop (the kernel-agent / framework-agent assume
-    sglang/vllm source layouts). Auto-disabling kernel-agent +
-    framework-agent + roofline phases keeps the rest of the run sensible
-    without forcing the operator to remember three extra flags. Explicit
-    user opt-in for any of these is preserved (we only flip a value when
-    it is still at its enabled default).
+    atom has no source-patcher for the kernel-agent / framework-agent
+    PR loops (both assume sglang/vllm source layouts; atom ships its
+    own closed layout under ``/app/ATOM/atom``). Auto-disabling those
+    two phases keeps the rest of the run sensible without forcing the
+    operator to remember the flags. Explicit user opt-in for either is
+    preserved (we only flip a value when it's still at its enabled
+    default).
 
     atom multi-node is also unsupported (Magpie wrapper / atom server
     have no multi-node TP wiring) — fail-fast on ``--nodes >= 2`` so
     operators don't burn a ~6-min cold start on a doomed run.
+
+    NOTE — profile / roofline / TraceLens are NO LONGER auto-tightened
+    off for atom. atom's OpenAI-compatible server (atom/entrypoints/
+    openai_server.py) exposes /start_profile and /stop_profile HTTP
+    endpoints, the atom engine takes a ``--torch-profiler-dir`` CLI
+    flag, and Magpie's ``atom_mi*x.sh`` now bridges ``PROFILE=1`` to
+    that flag. atom writes standard *.pt.trace.json.gz chrome traces
+    which TraceLens consumes unchanged (framework-agnostic). The
+    historical ``--no-enable-roofline`` auto-tighten was removed once
+    that wiring landed.
 
     Returns the list of flag names auto-disabled (for callers that want
     to log / assert). Calls ``sys.exit(2)`` on the multi-node guard
@@ -418,15 +427,12 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
     if not getattr(args, "no_framework", False):
         args.no_framework = True
         auto_disabled.append("--no-framework")
-    if getattr(args, "enable_roofline", True):
-        args.enable_roofline = False
-        auto_disabled.append("--no-enable-roofline")
     if auto_disabled:
         print(
             f"  framework=atom: auto-disabling "
-            f"{', '.join(auto_disabled)} (atom has no profiler / "
-            "sglang/vllm-specific source patcher; see "
-            "atom_boost_tutorials.md §6)"
+            f"{', '.join(auto_disabled)} (atom has no sglang/vllm-"
+            "equivalent source patcher; profile / roofline / TraceLens "
+            "stay enabled — see SKILL.md IR-8)"
         )
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
