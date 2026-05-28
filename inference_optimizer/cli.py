@@ -400,6 +400,11 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
     continuity with the historical ``--no-kernel`` / ``--no-framework``
     auto-flip; the body is now narrower than the name suggests.
 
+    Phase 7 gap G9 added the forward-looking alias
+    :data:`_assert_atom_single_node` (defined below) that resolves to
+    this same callable — new call sites are encouraged to prefer the
+    clearer name; the historical name stays for back-compat.
+
     What works on atom today (NO auto-tightening applied):
 
     * kernel-agent — atom_plan/phase2_open_kernel_agent wired atom
@@ -444,6 +449,15 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         "for atom); --nodes>=2 guard active — see SKILL.md IR-8"
     )
     return auto_disabled
+
+
+# Forward-looking alias for the post-Phase-3 reality. The historical
+# name ``_apply_atom_auto_tighten`` is kept for git-blame continuity
+# and because dozens of tests / SKILL references still cite it (gap
+# G9). New call sites that want the clearer name can use this alias;
+# the body is the same function — both names point at the same
+# callable object so monkeypatching either still works.
+_assert_atom_single_node = _apply_atom_auto_tighten
 
 
 def _autodetect_gpu_type() -> str | None:

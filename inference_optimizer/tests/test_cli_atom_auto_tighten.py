@@ -176,3 +176,33 @@ def test_atom_auto_tighten_log_line_is_single_line(capsys):
         f"expected exactly one atom-context line, got "
         f"{len(atom_lines)}: {atom_lines!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Gap G9 — forward-looking alias for the post-Phase-3 behaviour name.
+# ---------------------------------------------------------------------------
+def test_assert_atom_single_node_alias_resolves_to_same_callable():
+    """`_assert_atom_single_node` is a forward-looking alias for
+    `_apply_atom_auto_tighten` (atom_gap1.md G9). After Phase 3 the
+    function no longer auto-tightens anything; the new name reflects
+    the actual contract. Old name kept for git-blame continuity +
+    test back-compat.
+
+    Both names must resolve to the SAME callable object so a
+    monkeypatch / mock against either name affects every call site.
+    """
+    assert hasattr(optimizer_cli, "_assert_atom_single_node")
+    assert (
+        optimizer_cli._assert_atom_single_node
+        is optimizer_cli._apply_atom_auto_tighten
+    )
+
+
+def test_assert_atom_single_node_alias_exits_on_multi_node(capsys):
+    """The alias must inherit the multi-node fail-fast behaviour."""
+    args = _fresh_args(nodes=2)
+    with pytest.raises(SystemExit) as excinfo:
+        optimizer_cli._assert_atom_single_node(args)
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "--framework atom does not support multi-node" in err

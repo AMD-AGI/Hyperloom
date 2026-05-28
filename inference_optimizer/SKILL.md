@@ -838,13 +838,23 @@ inference_optimizer optimize --framework atom --model "$MODEL_PATH" --max-hours 
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
-- Which Magpie YAML the executors default to
-  (`baseline_sglang.yaml` / `baseline_vllm.yaml` /
-  `baseline_atom.yaml`, `profile_sglang.yaml` / `profile_vllm.yaml`;
-  no separate `profile_atom.yaml` — the baseline YAML carries
-  `profiler.torch_profiler.enabled` overridable via `PROFILE=1` env)
+- Which Magpie YAML the executors default to —
+  `baseline_{sglang,vllm,atom}.yaml` and
+  `profile_{sglang,vllm,atom}.yaml`. After atom_plan/phase1
+  (`fix(atom): add profile_atom.yaml + _default_profile_config atom
+  branch`) atom has a dedicated `profile_atom.yaml`; the
+  per-framework resolver `_default_profile_config()` in
+  `action_executors/profile.py` picks the right file from
+  `$FRAMEWORK`.
 - Which framework-specific seed grid the `explore` action falls
-  back to when no `params.grid` is supplied
+  back to when no `params.grid` is supplied. atom is the only
+  framework with a programmatic seed today
+  (`_default_grid_for_framework("atom", ...)` in
+  `action_executors/explore.py`, populated by
+  `_atom_default_grid()`); sglang and vllm continue to rely on
+  the orchestration LLM emitting `provenance='default_grid'`
+  variants and will fail with `error_class="empty_grid"` on a
+  cold-start with no LLM input.
 - Which extra-args env name `_grid_runner` writes
   (`EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS`)
 - Which Marathon KB partition orchestration reads for hints

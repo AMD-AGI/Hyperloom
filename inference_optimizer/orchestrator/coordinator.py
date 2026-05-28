@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from ..compat.payload_aliases import read_extra_server_args
 from ..cortex_kb_client import (
     CortexKBClient,
     CortexKBError,
@@ -4683,9 +4684,9 @@ class Coordinator:
                         "predicted_gain_pct":  pending.predicted_gain_pct,
                         "proposal_msg_id":     pending.proposal_msg_id,
                         "variant_name":        variant_name,
-                        "extra_server_args":   str(
-                            variant.get("extra_server_args")
-                            or variant.get("extra_args") or ""
+                        "extra_server_args":   (
+                            read_extra_server_args(variant)
+                            or str(variant.get("extra_args") or "")
                         ),
                         "extra_envs":          dict(
                             variant.get("extra_envs") or {}
@@ -7051,10 +7052,19 @@ class Coordinator:
             self.shared_state.seed_stack_from_current_best()
 
         cb = self.shared_state.current_best or {}
-        extra_args = str(
-            result.get("extra_server_args")
-            or (cb.get("extra_server_args") if isinstance(cb, dict) else "")
-            or ""
+        # ``result`` is a sub-agent envelope (kernel_opt → integrate_patch
+        # executor result); route the read through the compat helper so a
+        # legacy ``extra_sglang_args`` envelope still resolves while
+        # logging a single deprecation warning. ``cb`` is Coordinator-
+        # internal state and migrated at load time by
+        # SharedState._PHASE4_LEGACY_KEY_RENAMES, so a direct .get is
+        # safe.
+        extra_args = (
+            read_extra_server_args(result)
+            or (
+                str(cb.get("extra_server_args") or "")
+                if isinstance(cb, dict) else ""
+            )
         ).strip()
         apply_result = result.get("apply_result") or {}
         entry = {

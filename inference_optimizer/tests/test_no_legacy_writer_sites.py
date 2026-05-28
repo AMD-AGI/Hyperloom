@@ -108,6 +108,27 @@ ALLOWED_FILES: dict[str, str] = {
     # decision. None of these are imported at runtime.
     "atom_full_support.md":
         "status document recording the Phase 4 rename plan",
+    "atom_gap1.md":
+        "design-vs-code gap report; references the legacy key as "
+        "audit context for Phase 4 readers",
+
+    # atom_gap1 follow-ups F2/F3 (Phase-4 reader-site sweep): readers
+    # that funnel external-envelope payloads through
+    # ``read_extra_server_args`` MUST mention the legacy key inline in
+    # the surrounding code comment so future archaeologists know why
+    # the call goes through the helper.
+    "inference_optimizer/orchestrator/coordinator.py":
+        "comments explain the read_extra_server_args call at the LLM "
+        "intent / sub-agent envelope read boundaries (gap G2)",
+    "inference_optimizer/orchestrator/kernel_request_handlers.py":
+        "comments explain the read_extra_server_args call at the "
+        "integrate_patch sub-agent envelope read boundary (gap G2)",
+    "robustness-agent/src/robustness_agent/signals/repeated_payload.py":
+        "_normalise_extra_server_args_key uses the shim to fold "
+        "legacy-keyed envelopes into the same fingerprint (gap G3)",
+    "robustness-agent/tests/test_signals_repeated_payload.py":
+        "regression test that legacy + canonical envelopes hash to "
+        "the same fingerprint (gap G3)",
 }
 
 

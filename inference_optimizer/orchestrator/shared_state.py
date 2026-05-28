@@ -1870,7 +1870,12 @@ class SharedState:
             or payload.get("source_file")
             or ""
         )
-        extra_args = str(payload.get("extra_server_args") or "").strip()
+        # ``payload`` is an external envelope (LLM intent or sub-agent
+        # kernel_opt result); route through the Phase 4 compat helper so
+        # a legacy ``extra_sglang_args`` key still resolves with a single
+        # DeprecationWarning logged via stacklevel=3.
+        from ..compat.payload_aliases import read_extra_server_args
+        extra_args = read_extra_server_args(payload).strip()
         return kernel_id, patch_path, target_file, extra_args
 
     def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:

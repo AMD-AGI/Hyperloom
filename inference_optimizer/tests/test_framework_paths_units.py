@@ -463,3 +463,56 @@ class TestAtomPathPresentInAllThreeLocations:
             "is out of sync with inference_optimizer/orchestrator/"
             "kernel_request_handlers._REUSABLE_SOURCE_ROOTS (atom missing)"
         )
+
+    def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
+        """Gap G8 / atom_plan/phase2_open_kernel_agent 2.6 G2 strict
+        subset-equality: every atom entry in
+        ``kernel_request_handlers._REUSABLE_SOURCE_ROOTS`` must also
+        appear verbatim in the kernel-agent's tracelens_analysis
+        ``_REUSABLE_SOURCE_ROOTS`` (and vice versa).
+
+        Stricter than the presence-only guard above: ensures the two
+        lists' atom subsets stay byte-for-byte identical, so a future
+        path-tree change in one place can't silently leave the other
+        side stale.
+        """
+        ka_path = (
+            Path(__file__).resolve().parents[2]
+            / "kernel-agent" / "tools" / "tracelens_analysis.py"
+        )
+        if not ka_path.is_file():
+            pytest.skip(
+                f"kernel-agent tracelens_analysis not on disk at {ka_path}"
+            )
+        from inference_optimizer.orchestrator.kernel_request_handlers import (
+            _REUSABLE_SOURCE_ROOTS as ORCH_ROOTS,
+        )
+        orch_atom = frozenset(
+            r for r in ORCH_ROOTS
+            if "atom" in r.lower() and r != "/sgl-workspace/atom/"
+        )
+        # Extract the literal-string list from the kernel-agent file so
+        # we don't need to import the sister module (kernel-agent may
+        # not be on PYTHONPATH).
+        import re as _re
+        text = ka_path.read_text(encoding="utf-8")
+        ka_atom_literals = frozenset(
+            _re.findall(r'"(/[^"]*atom/[^"]*)"', text)
+        )
+        # Drop irrelevant atom hits (e.g. doc-comment paths).
+        ka_atom_literals = frozenset(
+            p for p in ka_atom_literals
+            if p.endswith("/") and "/atom/" in p
+        )
+        missing_in_kernel_agent = orch_atom - ka_atom_literals
+        missing_in_orchestrator = ka_atom_literals - orch_atom
+        assert not missing_in_kernel_agent, (
+            f"atom paths present in orchestrator but missing in "
+            f"kernel-agent/tools/tracelens_analysis.py: "
+            f"{sorted(missing_in_kernel_agent)!r}"
+        )
+        assert not missing_in_orchestrator, (
+            f"atom paths present in kernel-agent/tools/tracelens_analysis.py "
+            f"but missing in orchestrator/kernel_request_handlers: "
+            f"{sorted(missing_in_orchestrator)!r}"
+        )

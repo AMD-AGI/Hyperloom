@@ -24,6 +24,20 @@ def _minimal_request(**overrides) -> ExploreRequest:
     return ExploreRequest.from_dict(base)
 
 
+# Per-framework repo URLs used to parametrise the dispatch tests over
+# every framework the framework-agent CLI accepts. Gap G5 / Phase 3.3
+# regression: the original test file defaulted ``framework: "sglang"``
+# everywhere; this map plus the parametrize decorator below ensure
+# every dispatch path is exercised for sglang AND vllm AND atom so a
+# future regression that silently routes only one framework correctly
+# fails the suite.
+_FRAMEWORK_TO_REPO_URL: dict[str, str] = {
+    "sglang": "https://github.com/sgl-project/sglang.git",
+    "vllm":   "https://github.com/ROCm/vllm.git",
+    "atom":   "https://github.com/ROCm/ATOM.git",
+}
+
+
 def test_dispatch_explicit_refs_only() -> None:
     """Without search_perf_prs, only explicit candidate_refs are returned."""
     req = _minimal_request(candidate_refs=["main", "PR:1"], search_perf_prs=False)
@@ -32,6 +46,59 @@ def test_dispatch_explicit_refs_only() -> None:
     sources = {c.source for c in out}
     assert refs == ["main", "PR:1"]
     assert sources == {"explicit"}
+
+
+# Gap G5 / Phase 3.3 — parametrise the dispatch path over every
+# framework the CLI accepts so a future regression that silently
+# routes only one framework correctly fails the suite. The original
+# file defaulted ``framework="sglang"`` for every test; the
+# parametrised guard below covers sglang / vllm / atom.
+@pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
+def test_dispatch_explicit_refs_only_across_frameworks(framework: str) -> None:
+    """Explicit candidate_refs must come out untouched for every
+    framework — there's no framework-specific filtering at the
+    dispatch layer.
+    """
+    req = _minimal_request(
+        framework=framework,
+        repo_url=_FRAMEWORK_TO_REPO_URL[framework],
+        candidate_refs=["main", "PR:1"],
+        search_perf_prs=False,
+    )
+    out = src.enumerate_candidates(req)
+    assert [c.ref for c in out] == ["main", "PR:1"]
+    assert {c.source for c in out} == {"explicit"}
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
+def test_dispatch_primus_search_per_framework(framework: str, monkeypatch) -> None:
+    """PR-search backends are framework-agnostic — the framework only
+    determines which repo gets queried. atom must be dispatched the
+    same way sglang/vllm are.
+    """
+    req = _minimal_request(
+        framework=framework,
+        repo_url=_FRAMEWORK_TO_REPO_URL[framework],
+        search_perf_prs=True,
+        search_modes=["primus_cortex"],
+        max_search_candidates=2,
+        primus_cortex={"base_url": "http://x"},
+    )
+
+    seen_repo_urls: list[str] = []
+
+    def fake_primus(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+        seen_repo_urls.append(repo_url)
+        return [
+            GitHubPr(number=11, title=f"{framework}-pr-1", html_url="u1"),
+        ]
+
+    monkeypatch.setattr(src, "list_perf_prs", fake_primus)
+
+    out = src.enumerate_candidates(req)
+    # The primus backend was called against the framework's own repo URL.
+    assert seen_repo_urls == [_FRAMEWORK_TO_REPO_URL[framework]]
+    assert any(c.source == "primus_cortex" for c in out)
 
 
 def test_dispatch_primus_missing_config_raises() -> None:
