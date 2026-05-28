@@ -1,21 +1,19 @@
 """dynamic_action.MD P3 §4 — tool whitelist for the dynamic sub-agent.
 
-Four resource tools + one terminal signal. Names map to *resources*,
-not LLM tool-call symbols (P3 §4 design principle: name-level surface,
-runner-owned). Each tool is implemented as a free function so the
-runner + tests can call them directly without a class instance.
-
-Hard limits enforced inline:
+Three live resource tools + one terminal signal + ``run_bench`` gated
+off in v1 (see :data:`BENCH_TOOL_ENABLED_V1`).
 
 * ``read_source``                  — path inside framework_source_roots
                                       + ``MAX_READ_SOURCE_CHARS``
 * ``read_session_artifact``        — whitelist roots + blacklist guards
-* ``run_bench``                    — bench_id ∈ ``BENCH_REGISTRY``
-                                      + per-bench wall-clock timeout
 * ``apply_patch_in_worktree``      — ``git apply`` inside the worktree
                                       only; out-of-tree paths denied
 * ``emit_proposal``                — terminal signal; validation lives
                                       in :mod:`dynamic_action_proposal`.
+* ``run_bench`` (DISABLED IN v1)   — until real probes land
+  (``dynamic_action_gaps.md`` G1), the tool is excluded from
+  :data:`ALL_DYNAMIC_TOOLS`, :data:`BENCH_REGISTRY` is empty, and
+  any call returns ``bench_tool_disabled_v1``.
 
 Each tool returns a JSON-serialisable dict so the runner can both
 journal the result and feed it back to the LLM verbatim.
@@ -49,13 +47,22 @@ TOOL_RUN_BENCH: str = "run_bench"
 TOOL_APPLY_PATCH_IN_WORKTREE: str = "apply_patch_in_worktree"
 TOOL_EMIT_PROPOSAL: str = "emit_proposal"
 
-ALL_DYNAMIC_TOOLS: frozenset[str] = frozenset({
-    TOOL_READ_SOURCE,
-    TOOL_READ_SESSION_ARTIFACT,
-    TOOL_RUN_BENCH,
-    TOOL_APPLY_PATCH_IN_WORKTREE,
-    TOOL_EMIT_PROPOSAL,
-})
+# v1 disable flag for the bench tool (dynamic_action_gaps.md G1). When
+# False, ``run_bench`` is removed from the sub-agent's tool surface,
+# :data:`BENCH_REGISTRY` is empty, and the runner treats any
+# ``run_bench`` call as an unknown tool. Flip to True together with
+# real probe implementations.
+BENCH_TOOL_ENABLED_V1: bool = False
+
+ALL_DYNAMIC_TOOLS: frozenset[str] = frozenset(
+    {
+        TOOL_READ_SOURCE,
+        TOOL_READ_SESSION_ARTIFACT,
+        TOOL_APPLY_PATCH_IN_WORKTREE,
+        TOOL_EMIT_PROPOSAL,
+    } | ({TOOL_RUN_BENCH} if BENCH_TOOL_ENABLED_V1 else set()),
+)
+DYNAMIC_RESOURCE_TOOLS: frozenset[str] = ALL_DYNAMIC_TOOLS - {TOOL_EMIT_PROPOSAL}
 
 # P3 §4.1.a — single read_source response is hard-capped (≈4K tokens at
 # 4 chars per token).
@@ -100,35 +107,14 @@ class BenchSpec:
     script_path: str
 
 
-BENCH_REGISTRY: dict[str, BenchSpec] = {
-    spec.bench_id: spec
-    for spec in (
-        BenchSpec(
-            bench_id="kernel_attention_timing",
-            description="Single attention layer forward timing",
-            wall_clock_sec=30.0,
-            script_path="benches/kernel_attention_timing.sh",
-        ),
-        BenchSpec(
-            bench_id="kernel_gemm_timing",
-            description="GEMM op timing + occupancy",
-            wall_clock_sec=20.0,
-            script_path="benches/kernel_gemm_timing.sh",
-        ),
-        BenchSpec(
-            bench_id="kernel_kvcache_layout",
-            description="KV cache layout read/write throughput",
-            wall_clock_sec=30.0,
-            script_path="benches/kernel_kvcache_layout.sh",
-        ),
-        BenchSpec(
-            bench_id="inference_short_prompt",
-            description="Short prompt + short max_tokens end-to-end latency",
-            wall_clock_sec=60.0,
-            script_path="benches/inference_short_prompt.sh",
-        ),
-    )
-}
+# v1 registry — empty until real probes land (see G1 + BENCH_TOOL_ENABLED_V1).
+# v2 candidates (kept here as docstring + commented descriptor so the
+# next implementation pass has the schema target):
+#   * kernel_attention_timing      — Single attention layer forward timing
+#   * kernel_gemm_timing           — GEMM op timing + occupancy
+#   * kernel_kvcache_layout        — KV cache layout read/write throughput
+#   * inference_short_prompt       — Short prompt end-to-end latency
+BENCH_REGISTRY: dict[str, BenchSpec] = {}
 
 # Absolute hard ceiling regardless of per-bench config (Q2 decision).
 MAX_BENCH_WALL_CLOCK_SEC: float = 60.0
@@ -271,10 +257,20 @@ async def run_bench(
     """Execute a registered micro-bench inside the worktree.
 
     ``bench_dir_root`` lets tests stub the script discovery root; in
-    production it defaults to ``<package>/benches``. Output lands under
+    production it defaults to ``<package>/benches``.     Output lands under
     ``worktree/scratch/bench/<bench_id>/<call_id>/`` and is *not*
     recovered (P3 §6 recovery whitelist).
     """
+    if not BENCH_TOOL_ENABLED_V1:
+        return _error(
+            "bench_tool_disabled_v1",
+            bench_id=bench_id,
+            note=(
+                "run_bench is gated off in v1 until real probes land "
+                "(dynamic_action_gaps.md G1). Proceed using read_source "
+                "+ read_session_artifact only."
+            ),
+        )
     bench = BENCH_REGISTRY.get(bench_id)
     if bench is None:
         return _error(
@@ -418,7 +414,9 @@ def reset_worktree(worktree: Path) -> None:
 __all__ = [
     "ALL_DYNAMIC_TOOLS",
     "BENCH_REGISTRY",
+    "BENCH_TOOL_ENABLED_V1",
     "BenchSpec",
+    "DYNAMIC_RESOURCE_TOOLS",
     "MAX_BENCH_WALL_CLOCK_SEC",
     "MAX_READ_SOURCE_CHARS",
     "SESSION_ARTIFACT_ALLOWED_PREFIXES",
