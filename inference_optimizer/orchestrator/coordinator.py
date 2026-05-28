@@ -54,6 +54,7 @@ from .kernel_request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
 from .policy import (
+    DYNAMIC_ACTION_NAME,
     KILL_TASK_SOURCE_ALLOWLIST,
     PolicyDenied,
     PolicyGate,
@@ -5543,6 +5544,18 @@ class Coordinator:
         # supply values; we only fill the gaps.
         if action_name == "specialist":
             await self._warm_specialist_params(params)
+        # dynamic_action.MD P1 §6 — generate dyn_id + artefact dir
+        # skeleton before the task is enqueued so the stub executor
+        # has a workspace at first dispatch. PolicyGate has already
+        # validated the payload + cap; this branch only assigns the
+        # identifier and seeds spec.json. ``record_dynamic_action_dispatch``
+        # is called *after* the task is queued so a failed
+        # ``create_or_return_existing`` does not bump the round cap.
+        dynamic_action_dispatch_meta: dict[str, Any] | None = None
+        if action_name == DYNAMIC_ACTION_NAME:
+            dynamic_action_dispatch_meta = self._prepare_dynamic_action_dispatch(
+                params,
+            )
         # Idempotency-key resolution chain (most-explicit first):
         #   1. ``intent.payload.idempotency_key`` — schema-correct top-level
         #      placement.
@@ -5631,10 +5644,117 @@ class Coordinator:
             )
             return
         self.shared_state.reset_policy_denial_streak(action_name)
+        if (
+            action_name == DYNAMIC_ACTION_NAME
+            and dynamic_action_dispatch_meta is not None
+        ):
+            try:
+                self._finalize_dynamic_action_dispatch(
+                    task_id=task.task_id,
+                    meta=dynamic_action_dispatch_meta,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: finalize hook failed for task=%s",
+                    task.task_id,
+                )
         await self.bus.append_and_seq(Message.new(
             "coordinator", "*", "event",
             {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
         ))
+
+    # ------------------------------------------------------------------
+    # dynamic_action — action_dynamic_plan/P1 dispatch hook
+    # ------------------------------------------------------------------
+    def _prepare_dynamic_action_dispatch(
+        self, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Generate ``dyn_id``, seed ``spec.json``, build the summary
+        row that will land in ``SharedState.dynamic_actions`` after
+        the task is enqueued.
+
+        Mutates ``params`` in place to inject ``dyn_id`` so the stub
+        executor sees the same identifier. Returns a meta dict the
+        caller hands to :meth:`_finalize_dynamic_action_dispatch`
+        once the task row has been created.
+        """
+        state = self.shared_state
+        round_id = self._dynamic_action_round_id()
+        seq = int(
+            getattr(state, "dynamic_action_round_count", 0) or 0
+        ) + 1
+        dyn_id = f"dyn-{round_id}-{seq}"
+        params["dyn_id"] = dyn_id
+        dispatched_at = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds",
+        )
+        spec = {
+            "dyn_id": dyn_id,
+            "round_id": round_id,
+            "seq": seq,
+            "motivation_gap_text": str(
+                params.get("motivation_gap_text") or "",
+            ),
+            "scope_domains": list(params.get("scope_domains") or ()),
+            "side_effects_declared": list(
+                params.get("side_effects_declared") or (),
+            ),
+            "budget_hint": str(params.get("budget_hint") or "medium"),
+            "dispatched_at": dispatched_at,
+        }
+        artifact_dir: Path | None = None
+        if self.session_dir is not None:
+            from ..session_paths import runs_dir as _runs_dir
+            artifact_dir = _runs_dir(
+                self.session_dir, DYNAMIC_ACTION_NAME, dyn_id,
+            )
+            try:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                (artifact_dir / "spec.json").write_text(
+                    json.dumps(spec, sort_keys=True, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError:
+                log.exception(
+                    "dynamic_action: failed to seed artefact dir for "
+                    "dyn_id=%s",
+                    dyn_id,
+                )
+        summary = {
+            "dyn_id": dyn_id,
+            "round_id": round_id,
+            "status": "DISPATCHED",
+            "dispatched_at": spec["dispatched_at"],
+            "scope_domains": spec["scope_domains"],
+            "side_effects_declared": spec["side_effects_declared"],
+            "budget_hint": spec["budget_hint"],
+            "artifact_path": str(artifact_dir) if artifact_dir else "",
+        }
+        return {"dyn_id": dyn_id, "summary": summary}
+
+    def _finalize_dynamic_action_dispatch(
+        self, *, task_id: str, meta: dict[str, Any],
+    ) -> None:
+        """Atomically register the dispatch on SharedState (round cap
+        +1) + log the task_id into the summary.
+        """
+        summary = dict(meta.get("summary") or {})
+        summary["task_id"] = task_id
+        dyn_id = str(meta.get("dyn_id") or "")
+        self.shared_state.record_dynamic_action_dispatch(dyn_id, summary)
+
+    def _dynamic_action_round_id(self) -> int:
+        """Stable round id used in the ``dyn-<round>-<seq>`` template.
+
+        Mirrors the round derivation used by the IR-7 assess_remaining_gaps
+        wrapper: ``explore_search.cursor`` is the canonical EXPLORE-round
+        cursor, falling back to 0 when the ledger is empty.
+        """
+        cursor = (self.shared_state.explore_search or {}).get("cursor")
+        try:
+            return int(cursor or 0)
+        except (TypeError, ValueError):
+            return 0
 
     # ------------------------------------------------------------------
     # v0.8 §3.5 + specialist pre-dispatch warmup
