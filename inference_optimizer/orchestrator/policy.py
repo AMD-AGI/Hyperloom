@@ -1396,20 +1396,21 @@ class PolicyGate:
     # framework_atom_action_unsupported —
     # deny actions that have no atom-compatible execution path
     # ------------------------------------------------------------------
-    # ``kernel_opt`` / ``integrate_patch`` / ``framework_pr`` all rely on
-    # a source-patcher that targets sglang or vllm source roots. atom
-    # ships its own (closed) source layout under ``/app/ATOM/atom`` that
-    # the patchers do not understand, so these actions would either crash
-    # or silently corrupt the framework tree. ``_apply_atom_auto_tighten``
-    # in cli.py auto-sets ``--no-kernel`` + ``--no-framework`` for fresh
-    # atom launches, but a manual ``--kernel-opt --framework atom`` (or a
-    # resume from a session whose env drifted) would bypass that. The
-    # guard here gives a structured ``policy_denied`` row with an
-    # actionable hint instead of a 30-minute-into-the-run subprocess
-    # crash.
+    # Only ``framework_pr`` is still atom-incompatible at this layer.
+    # Phase 2 of atom_plan/ (kernel-agent enablement) wired atom source
+    # roots into PolicyGate's allowlist, ``_REUSABLE_SOURCE_ROOTS``, and
+    # the server-flag pre-flight probe, so ``kernel_opt`` and
+    # ``integrate_patch`` now have a real execution path on atom and
+    # were removed from this set. Phase 3 will remove ``framework_pr``
+    # in turn (or drop the rule entirely) once ``fa`` learns about
+    # atom's repo URL and patch shape.
+    #
+    # The scaffold (rule + dispatch sites in ``_validate_delegate`` /
+    # ``_validate_propose_action``) stays so Phase 3's lift is a one-
+    # liner — the alternative (deleting the rule now and re-adding it
+    # in Phase 3) would risk an inconsistent transient state where
+    # ``framework_pr`` leaks through and crashes the executor.
     _ATOM_UNSUPPORTED_ACTIONS: frozenset[str] = frozenset({
-        "kernel_opt",
-        "integrate_patch",
         "framework_pr",
     })
 
@@ -1443,15 +1444,15 @@ class PolicyGate:
             f"FRAMEWORK=atom ({intent_kind})",
             rule="framework_atom_action_unsupported",
             hint=(
-                "atom has no sglang/vllm-equivalent source layout, so "
-                "kernel-agent / integrate_patch / framework_pr have "
-                "nothing to patch. ``--framework atom`` auto-sets "
-                "``--no-kernel`` + ``--no-framework`` on fresh launches; "
-                "if you need these actions, switch to "
-                "``--framework sglang`` or ``--framework vllm``. Atom "
-                "sessions should rely on baseline + EXPLORE + sweep + "
-                "the analysis lane (profile / roofline / TraceLens) "
-                "which all work on atom."
+                "atom's framework-agent PR loop is not yet wired (Phase "
+                "3 of atom_plan/). kernel_opt and integrate_patch now "
+                "work on atom — operators can drop --no-kernel to "
+                "exercise them. ``--framework atom`` still auto-sets "
+                "``--no-framework`` on fresh launches; pass "
+                "``--framework sglang`` / ``--framework vllm`` if you "
+                "need the framework-agent loop. baseline / EXPLORE / "
+                "sweep / analysis lane (profile / roofline / TraceLens) "
+                "all work on atom unchanged."
             ),
         )
 

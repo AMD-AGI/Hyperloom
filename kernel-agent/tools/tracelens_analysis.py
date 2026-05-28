@@ -690,6 +690,9 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/opt/venv/lib/python3.12/site-packages/aiter/",
+    "/opt/venv/lib/python3.12/site-packages/sglang/",
+    "/opt/venv/lib/python3.12/site-packages/vllm/",
     # Production vLLM wheel install layout (system dist-packages).
     # Required since vLLM in the current image ships under
     # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
@@ -702,6 +705,15 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
+    # atom layout (atom_plan/phase2_open_kernel_agent/2.5). Keep in
+    # sync with ``inference_optimizer/orchestrator/kernel_request_handlers.py``
+    # ``_REUSABLE_SOURCE_ROOTS`` — both lists feed the same
+    # reusable-kernel classifier.
+    "/app/ATOM/atom/",
+    "/opt/venv/lib/python3.10/site-packages/atom/",
+    "/opt/venv/lib/python3.12/site-packages/atom/",
+    "/usr/local/lib/python3.12/dist-packages/atom/",
+    "/usr/local/lib/python3.10/dist-packages/atom/",
 )
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,

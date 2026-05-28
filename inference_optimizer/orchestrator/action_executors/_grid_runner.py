@@ -396,40 +396,92 @@ _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
 )
 
 
-# Cache for ``_probe_sglang_help_text`` — populated on first call so we
-# avoid spawning a subprocess per-variant. Cleared by ``importlib.reload``
-# during tests. Sentinel ``None`` = not yet probed.
-_SGLANG_HELP_CACHE: str | None = None
+# Per-framework cache for ``_probe_server_help_text`` — populated on
+# first call per framework so we avoid spawning a subprocess per-variant.
+# Cleared by ``importlib.reload`` during tests. Empty results are NOT
+# cached so a transient failure (e.g. mocked subprocess raises once)
+# re-probes on the next call. The single-key ``_SGLANG_HELP_CACHE``
+# this replaces is preserved as a back-compat alias below; callers that
+# pre-date the rename keep working through ``_probe_sglang_help_text``.
+_HELP_TEXT_CACHE: dict[str, str] = {}
+
+# Per-framework subprocess command for ``--help`` text extraction. Each
+# command must be a single-shot ``python3 -c <inline>`` invocation so
+# the probe's 10-second timeout covers the import cost. Failure paths
+# (importerror / argparse exit / etc.) are captured by the broad
+# ``except Exception`` in ``_probe_server_help_text``.
+_HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
+    "sglang": (
+        "python3", "-c",
+        "from sglang.launch_server import parser; parser.print_help()",
+    ),
+    "vllm": (
+        "python3", "-c",
+        "from vllm.entrypoints.openai.api_server import make_arg_parser; "
+        "make_arg_parser(None).print_help()",
+    ),
+    # atom branch: the audited atom version exposes EngineArgs.add_cli_args
+    # on ``atom.model_engine.arg_utils`` (mirrors vLLM's EngineArgs). Build
+    # a throwaway ArgumentParser, let atom populate it, and print the help
+    # surface for substring matching against grid-variant flag literals.
+    "atom": (
+        "python3", "-c",
+        "import argparse; from atom.model_engine.arg_utils import EngineArgs; "
+        "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p); "
+        "p.print_help()",
+    ),
+}
 
 
-def _probe_sglang_help_text() -> str:
-    """Best-effort fetch of ``sglang launch_server --help`` text.
+def _probe_server_help_text(framework: str) -> str:
+    """Best-effort fetch of ``<framework> --help`` text for grid-variant
+    flag validation.
 
-    Returns ``""`` on ANY failure (subprocess timeout, sglang not
-    importable in the current Python, sandbox without sglang installed,
-    test-time subprocess mocks that mis-handle this probe's argv shape,
-    ValueError from a too-strict mock side_effect, etc.). Callers MUST
-    treat empty as "I don't know what sglang supports" and fall through
-    to NOT filtering (defer to graceful runtime failure).
+    Supported frameworks: ``sglang``, ``vllm``, ``atom``. Unknown values
+    return ``""`` (defer to graceful runtime failure). The cache is
+    keyed by framework so a multi-framework test box doesn't leak the
+    first-probed framework's output into the second's slot.
+
+    Returns ``""`` on ANY failure (subprocess timeout, framework not
+    importable in the current Python, sandbox without the framework
+    installed, test-time subprocess mocks that mis-handle this probe's
+    argv shape, ValueError from a too-strict mock side_effect, etc.).
+    Callers MUST treat empty as "I don't know what this framework
+    supports" and fall through to NOT filtering. Empty results are NOT
+    cached so a transient mock-side failure does not poison the cache.
 
     The broad ``except Exception`` is deliberate: this probe is purely
-    a perf optimisation (saves a wasted 10-min sglang restart per
+    a perf optimisation (saves a wasted 10-min server restart per
     incompatible variant). It must NEVER crash the optimizer or fail
     a unit test that mocks ``subprocess.run`` for unrelated reasons.
     """
-    global _SGLANG_HELP_CACHE
-    if _SGLANG_HELP_CACHE is not None:
-        return _SGLANG_HELP_CACHE
+    fw = (framework or "").strip().lower()
+    if fw in _HELP_TEXT_CACHE:
+        return _HELP_TEXT_CACHE[fw]
+    cmd = _HELP_PROBE_COMMANDS.get(fw)
+    if cmd is None:
+        return ""
     try:
         proc = subprocess.run(
-            ["python3", "-c",
-             "from sglang.launch_server import parser; parser.print_help()"],
+            list(cmd),
             capture_output=True, text=True, timeout=10,
         )
-        _SGLANG_HELP_CACHE = (proc.stdout or "") + (proc.stderr or "")
+        out = (proc.stdout or "") + (proc.stderr or "")
     except Exception:  # noqa: BLE001 — best-effort, see docstring
-        _SGLANG_HELP_CACHE = ""
-    return _SGLANG_HELP_CACHE
+        out = ""
+    if out:
+        _HELP_TEXT_CACHE[fw] = out
+    return out
+
+
+def _probe_sglang_help_text() -> str:
+    """Back-compat shim — defer to the framework-keyed probe.
+
+    Pre-dates the multi-framework rename; kept so in-process tests that
+    monkey-patch this exact name still work. New call sites should use
+    ``_probe_server_help_text("sglang")`` directly.
+    """
+    return _probe_server_help_text("sglang")
 
 
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
@@ -485,8 +537,14 @@ def apply_compatibility_filter(
         # No MODEL_PATH set -> can't detect -> assume compatible.
         is_mla, is_moe = True, True
 
-    sglang_help = _probe_sglang_help_text()
-    sglang_help_available = bool(sglang_help)
+    # Pick the live framework's --help text. Default to sglang so
+    # existing test fixtures that don't pass ``framework=`` (and pre-
+    # atom call sites) keep their old behaviour. atom / vllm flow in
+    # through callers that thread the rendered ``benchmark.framework``
+    # value down here.
+    fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+    help_text = _probe_server_help_text(fw)
+    help_available = bool(help_text)
 
     kept: list[GridVariant] = []
     dropped: list[dict] = []
@@ -508,11 +566,13 @@ def apply_compatibility_filter(
                     f"{required_class.upper()}-class"
                 )
                 break
-            # sglang flag-support predicate (only when help is readable)
-            if sglang_help_available and flag not in sglang_help:
+            # Framework flag-support predicate (only when help is
+            # readable). Reason mentions the active framework so log
+            # readers can tell which `--help` rejected the variant.
+            if help_available and flag not in help_text:
                 skip_reason = (
-                    f"{flag} not present in `sglang --help` output; "
-                    "current sglang version likely too old"
+                    f"{flag} not present in `{fw} --help` output; "
+                    f"current {fw} version likely too old"
                 )
                 break
         if skip_reason:

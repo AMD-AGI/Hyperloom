@@ -102,6 +102,9 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/opt/venv/lib/python3.12/site-packages/aiter/",
+    "/opt/venv/lib/python3.12/site-packages/sglang/",
+    "/opt/venv/lib/python3.12/site-packages/vllm/",
     # Production vLLM wheel install layout (system dist-packages). Keep
     # this in sync with ``kernel-agent/tools/tracelens_analysis.py`` so
     # both the kernel-agent classifier and the orchestrator-side gate
@@ -113,6 +116,20 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
+    # atom layout (atom_plan/phase2_open_kernel_agent/2.5). The
+    # editable install lives under ``/app/ATOM/atom/``; wheel installs
+    # land under the venv / system site-packages. Keep this block in
+    # sync with ``framework_paths._DEFAULT_SOURCE_ROOTS`` (PolicyGate
+    # allowlist) and ``kernel-agent/tools/tracelens_analysis.py``
+    # ``_REUSABLE_SOURCE_ROOTS``. The PolicyGate allowlist controls
+    # which atom files specialists are allowed to read; this list
+    # controls whether atom-touching kernel-opt patches are flagged as
+    # "reusable framework source" for cross-task caching.
+    "/app/ATOM/atom/",
+    "/opt/venv/lib/python3.10/site-packages/atom/",
+    "/opt/venv/lib/python3.12/site-packages/atom/",
+    "/usr/local/lib/python3.12/dist-packages/atom/",
+    "/usr/local/lib/python3.10/dist-packages/atom/",
 )
 _APPLY_TOOL_MODULE: Any | None = None
 _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")

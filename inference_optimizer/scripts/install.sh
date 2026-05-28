@@ -566,6 +566,19 @@ PY
     return 0
   fi
   log "discovered framework roots: $roots"
+  # Phase-2 / atom_plan/phase2_open_kernel_agent/2.2: emit a
+  # framework-bucketed one-liner so operators (and the Phase 7
+  # preflight grep) can tell at a glance whether atom was picked up.
+  local roots_summary
+  roots_summary="$(ROOTS_INPUT="$roots" "$PYTHON" - <<'PY'
+import os
+from inference_optimizer.orchestrator.framework_paths import summarise_framework_root_discovery
+print(summarise_framework_root_discovery(os.environ.get("ROOTS_INPUT", "")))
+PY
+)"
+  if [ -n "$roots_summary" ]; then
+    log "discovered framework roots: $roots_summary"
+  fi
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
     log "would append INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=$roots to ${KERNEL_AGENT_ENV}"
     return 0

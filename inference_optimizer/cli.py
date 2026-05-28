@@ -394,45 +394,45 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
     """IR-8: tighten incompatible CLI knobs when --framework atom is selected.
 
-    atom has no source-patcher for the kernel-agent / framework-agent
-    PR loops (both assume sglang/vllm source layouts; atom ships its
-    own closed layout under ``/app/ATOM/atom``). Auto-disabling those
-    two phases keeps the rest of the run sensible without forcing the
-    operator to remember the flags. Explicit user opt-in for either is
-    preserved (we only flip a value when it's still at its enabled
-    default).
+    atom's framework-agent PR loop ships separately (Phase 3 of the
+    atom_plan/ lift). Until that lands, ``--no-framework`` is
+    auto-flipped on fresh atom launches so the FRAMEWORK_PR phase
+    is skipped cleanly. Explicit user opt-in is preserved — we only
+    flip a value when it's still at its enabled default.
 
-    atom multi-node is also unsupported (Magpie wrapper / atom server
-    have no multi-node TP wiring) — fail-fast on ``--nodes >= 2`` so
+    Kernel-agent works on atom now (atom_plan/phase2_open_kernel_agent):
+    PolicyGate's allowlist, ``_REUSABLE_SOURCE_ROOTS``, and the
+    server-flag pre-flight probe all recognise atom source paths and
+    atom's ``EngineArgs`` parser. The historical ``--no-kernel``
+    auto-flip was removed at the same time; operators can still pass
+    ``--no-kernel`` explicitly to opt out per-session.
+
+    atom multi-node is unsupported (Magpie wrapper / atom server have
+    no multi-node TP wiring) — fail-fast on ``--nodes >= 2`` so
     operators don't burn a ~6-min cold start on a doomed run.
 
-    NOTE — profile / roofline / TraceLens are NO LONGER auto-tightened
-    off for atom. atom's OpenAI-compatible server (atom/entrypoints/
-    openai_server.py) exposes /start_profile and /stop_profile HTTP
-    endpoints, the atom engine takes a ``--torch-profiler-dir`` CLI
-    flag, and Magpie's ``atom_mi*x.sh`` now bridges ``PROFILE=1`` to
-    that flag. atom writes standard *.pt.trace.json.gz chrome traces
-    which TraceLens consumes unchanged (framework-agnostic). The
-    historical ``--no-enable-roofline`` auto-tighten was removed once
-    that wiring landed.
+    NOTE — profile / roofline / TraceLens are NOT auto-tightened off
+    for atom either. atom's OpenAI-compatible server exposes
+    /start_profile and /stop_profile HTTP endpoints, the atom engine
+    takes a ``--torch-profiler-dir`` CLI flag, and Magpie's
+    ``atom_mi*x.sh`` bridges ``PROFILE=1`` to that flag. atom writes
+    standard ``*.pt.trace.json.gz`` chrome traces which TraceLens
+    consumes unchanged.
 
     Returns the list of flag names auto-disabled (for callers that want
     to log / assert). Calls ``sys.exit(2)`` on the multi-node guard
     failure.
     """
     auto_disabled: list[str] = []
-    if not getattr(args, "no_kernel", False):
-        args.no_kernel = True
-        auto_disabled.append("--no-kernel")
     if not getattr(args, "no_framework", False):
         args.no_framework = True
         auto_disabled.append("--no-framework")
     if auto_disabled:
         print(
             f"  framework=atom: auto-disabling "
-            f"{', '.join(auto_disabled)} (atom has no sglang/vllm-"
-            "equivalent source patcher; profile / roofline / TraceLens "
-            "stay enabled — see SKILL.md IR-8)"
+            f"{', '.join(auto_disabled)} (atom framework-agent PR loop "
+            "pending Phase 3; kernel-agent + profile / roofline / "
+            "TraceLens stay enabled — see SKILL.md IR-8)"
         )
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(

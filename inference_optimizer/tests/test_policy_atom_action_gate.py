@@ -1,22 +1,25 @@
 """IR-8 / atom PolicyGate test: framework_atom_action_unsupported.
 
 Covers the defensive PolicyGate rule that denies LLM-proposed
-``kernel_opt`` / ``integrate_patch`` / ``framework_pr`` actions when
-``FRAMEWORK=atom`` is in effect.
+``framework_pr`` action when ``FRAMEWORK=atom`` is in effect.
 
-The CLI's ``_apply_atom_auto_tighten`` flips ``--no-kernel`` +
-``--no-framework`` on fresh atom launches, so in normal flow these
-actions are gated off by the phase / kernel-owned rules anyway. The
-rule here is *defense in depth* — it catches the cases that would
-otherwise reach the executor and crash:
+After Phase 2 of atom_plan/ (kernel-agent enablement) the set
+shrank to ``{"framework_pr"}`` only — ``kernel_opt`` and
+``integrate_patch`` now have real execution paths on atom (the atom
+source roots are in the PolicyGate allowlist, reusable-kernel ledger,
+and the server-flag pre-flight probe). Phase 3 will further lift the
+``framework_pr`` denial once ``fa`` learns about atom's repo URL.
 
-  * Operator passes ``--kernel-opt --framework atom`` explicitly
+The CLI's ``_apply_atom_auto_tighten`` flips ``--no-framework`` on
+fresh atom launches, so in normal flow ``framework_pr`` is gated off
+by the phase rules anyway. The rule here is *defense in depth* — it
+catches the cases that would otherwise reach the executor and crash:
+
+  * Operator passes ``--framework-pr --framework atom`` explicitly
     (auto-tighten only flips when the flag is still at its enabled
     default).
   * Resume from a session whose ``$FRAMEWORK`` env drifted between
     invocations.
-  * A future LLM-side regression that smuggles ``kernel_opt`` through
-    the propose channel even though it's officially kernel-owned.
 
 The rule fires on both ``delegate`` and ``propose_action`` channels and
 sources the framework either from ``SharedState.framework`` (when
@@ -74,33 +77,26 @@ def _propose(action_name: str, **extra) -> Intent:
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "action_name",
-    ["kernel_opt", "integrate_patch", "framework_pr"],
+    ["framework_pr"],
 )
 def test_delegate_denied_when_framework_atom_from_shared_state(action_name):
-    """The rule must fire when SharedState.framework=='atom' regardless
-    of which of the three unsupported action names was attempted. The
-    denial must carry rule='framework_atom_action_unsupported' and a
-    hint pointing at the no-source-patcher root cause + the supported
-    actions (baseline / EXPLORE / sweep / analysis lane)."""
+    """The rule must fire when SharedState.framework=='atom' for the
+    remaining unsupported action (framework_pr). Phase 2 dropped
+    kernel_opt + integrate_patch from this set — they now have real
+    execution paths on atom and are NOT denied by this rule. Phase 3
+    will lift the framework_pr denial in turn.
+
+    Defense-in-depth: framework_pr is also caught by the earlier
+    ``framework_pr_action_not_llm_proposable`` rule (it fires before
+    this one in the validation order). Either rule firing is the
+    correct outcome since both block the action."""
     gate = _gate(_BareSharedState(framework="atom"))
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", _delegate(action_name))
-    # Defense-in-depth: framework_pr is also caught by the earlier
-    # ``framework_pr_action_not_llm_proposable`` rule (it fires before
-    # this one in the validation order). Either rule firing is the
-    # correct outcome for that name; the other two must hit our new
-    # rule.
-    if action_name == "framework_pr":
-        assert exc.value.rule in {
-            "framework_atom_action_unsupported",
-            "framework_pr_action_not_llm_proposable",
-        }
-    else:
-        assert exc.value.rule == "framework_atom_action_unsupported"
-        # Hint must mention atom + the operator escape hatch.
-        hint = (exc.value.hint or "").lower()
-        assert "atom" in hint
-        assert "sglang" in hint or "vllm" in hint or "--framework" in hint
+    assert exc.value.rule in {
+        "framework_atom_action_unsupported",
+        "framework_pr_action_not_llm_proposable",
+    }
 
 
 def test_delegate_denied_when_framework_atom_from_env_fallback(
@@ -108,19 +104,16 @@ def test_delegate_denied_when_framework_atom_from_env_fallback(
 ):
     """When SharedState doesn't carry a ``framework`` attribute, the
     rule must fall back to the process ``$FRAMEWORK`` env. This matches
-    how PolicyGate elsewhere reads SharedState defensively."""
+    how PolicyGate elsewhere reads SharedState defensively. Uses
+    framework_pr (the remaining atom-unsupported action) as the probe."""
     monkeypatch.setenv("FRAMEWORK", "atom")
     state = _BareSharedState(framework="")  # SharedState says nothing
     gate = _gate(state)
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", _delegate("kernel_opt"))
-    # kernel_opt may hit either framework_atom_action_unsupported OR
-    # kernel_owned_by_kernel_agent (the kernel-owned rule fires later
-    # in the validation order); accept either since both are correct
-    # — what we're asserting is "atom + kernel_opt is denied".
+        gate.validate_intent("orchestration", _delegate("framework_pr"))
     assert exc.value.rule in {
         "framework_atom_action_unsupported",
-        "kernel_owned_by_kernel_agent",
+        "framework_pr_action_not_llm_proposable",
     }
 
 
@@ -149,17 +142,16 @@ def test_delegate_not_denied_when_framework_not_atom(framework, monkeypatch):
 # ---------------------------------------------------------------------------
 # propose_action channel
 # ---------------------------------------------------------------------------
-def test_propose_action_denied_for_kernel_opt_on_atom():
-    """Mirror coverage for the propose_action channel — same hint /
-    rule contract. (kernel_opt is the obvious probe; integrate_patch
-    and framework_pr propose-channel paths trip earlier validators.)"""
+def test_propose_action_denied_for_framework_pr_on_atom():
+    """Mirror coverage for the propose_action channel using framework_pr
+    (the remaining atom-unsupported action after Phase 2). Either
+    ``framework_atom_action_unsupported`` or the earlier
+    ``framework_pr_action_not_llm_proposable`` is acceptable since both
+    correctly block the action."""
     gate = _gate(_BareSharedState(framework="atom"))
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", _propose("kernel_opt"))
-    # As with the delegate-channel kernel_opt path, either rule firing
-    # is acceptable since both correctly block the action.
+        gate.validate_intent("orchestration", _propose("framework_pr"))
     assert exc.value.rule in {
         "framework_atom_action_unsupported",
-        "analysis_action_not_llm_proposable",
-        "kernel_owned_by_kernel_agent",
+        "framework_pr_action_not_llm_proposable",
     }

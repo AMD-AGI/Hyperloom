@@ -25,6 +25,7 @@ def _clean_framework_env(monkeypatch):
         "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
         "INFERENCE_OPTIMIZER_SGLANG_SERVER_ARGS",
         "INFERENCE_OPTIMIZER_VLLM_ARG_UTILS",
+        "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS",
         "VIRTUAL_ENV",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -53,7 +54,10 @@ class TestResolveSourceFileAllowlist:
         )
         out = fp.resolve_source_file_allowlist()
         # Defaults preserved, extras appended, duplicates of defaults dropped.
-        assert out[:3] == fp._DEFAULT_SOURCE_ROOTS
+        # Slice length tracks the full default set so adding a 5th framework
+        # in a future phase keeps this assertion honest.
+        n = len(fp._DEFAULT_SOURCE_ROOTS)
+        assert out[:n] == fp._DEFAULT_SOURCE_ROOTS
         assert "/opt/custom/sglang/" in out
         assert "/opt/other/vllm/" in out
         # No duplicate of the existing default.

@@ -33,23 +33,54 @@ def _fresh_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def test_atom_auto_tighten_flips_kernel_and_framework_when_at_defaults(capsys):
+def test_atom_auto_tighten_flips_framework_only_when_at_defaults(capsys):
     """Vanilla ``--framework atom`` (no other phase flags) must auto-flip
-    no_kernel and no_framework, but MUST NOT disable enable_roofline
-    (profile / roofline / TraceLens work on atom now). The single log
-    line should name both auto-disabled flags."""
+    no_framework only — kernel-agent is wired for atom in Phase 2 of the
+    atom_plan/ lift, so ``--no-kernel`` is preserved at its False
+    default. ``enable_roofline`` also stays at True (profile / roofline
+    / TraceLens work on atom)."""
     args = _fresh_args()
     disabled = optimizer_cli._apply_atom_auto_tighten(args)
-    assert args.no_kernel is True
+    # Kernel-agent now works on atom (atom_plan/phase2_open_kernel_agent).
+    assert args.no_kernel is False
     assert args.no_framework is True
-    # Roofline must stay at its enabled default — atom supports it now.
     assert args.enable_roofline is True
-    assert "--no-kernel" in disabled
+    assert "--no-kernel" not in disabled
     assert "--no-framework" in disabled
     assert "--no-enable-roofline" not in disabled
     out = capsys.readouterr().out
     assert "framework=atom" in out
-    assert "--no-kernel" in out
+    assert "--no-framework" in out
+    # Regression guard: the log line must not mention --no-kernel either
+    # as an auto-disable target or as a "still disabled" leftover.
+    assert "--no-kernel" not in out
+
+
+def test_atom_auto_tighten_log_line_mentions_framework_only(capsys):
+    """The single auto-disabling log line names only ``--no-framework``
+    after Phase 2. Operator readability gate."""
+    args = _fresh_args()
+    optimizer_cli._apply_atom_auto_tighten(args)
+    out = capsys.readouterr().out
+    auto_lines = [l for l in out.splitlines() if "auto-disabling" in l]
+    # Exactly one auto-disable line for the framework knob.
+    assert len(auto_lines) == 1, (
+        f"expected exactly one auto-disabling line; got {auto_lines!r}"
+    )
+    assert "--no-framework" in auto_lines[0]
+    assert "--no-kernel" not in auto_lines[0]
+
+
+def test_atom_auto_tighten_preserves_explicit_no_kernel():
+    """Explicit ``--no-kernel`` from the operator must not be reverted.
+    Auto-tighten only flips defaults; it never overrides an
+    operator-supplied value, regardless of direction."""
+    args = _fresh_args(no_kernel=True)
+    disabled = optimizer_cli._apply_atom_auto_tighten(args)
+    assert args.no_kernel is True
+    # --no-kernel was already set; it should NOT appear in the
+    # auto-disabled list (which is "what we flipped").
+    assert "--no-kernel" not in disabled
 
 
 def test_atom_auto_tighten_does_not_touch_enable_roofline(capsys):
