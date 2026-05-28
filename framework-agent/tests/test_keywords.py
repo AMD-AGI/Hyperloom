@@ -65,7 +65,7 @@ def test_extract_nvidia_codenames() -> None:
 
 
 # ---------------------------------------------------------------------------
-# atom framework keyword coverage (atom_plan/phase3_open_framework_agent 3.3)
+# atom framework keyword coverage
 # ---------------------------------------------------------------------------
 
 

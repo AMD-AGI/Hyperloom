@@ -4062,8 +4062,8 @@ class Coordinator:
     ) -> PolicyDenied | None:
         """Reject orchestration action/delegate attempts that skip required steps.
 
-        Phase 2 addition: once optimization_stack has unvalidated KEEPs,
-        the next ``explore`` round must carry the inlined stack rebench
+        Once optimization_stack has unvalidated KEEPs, the next
+        ``explore`` round must carry the inlined stack rebench
         (PolicyGate rule ``stack_rebench_required``). The legacy
         ``validate_stack`` standalone action was retired in the legacy release; this
         function now only enforces the cross-action ordering (target_analysis
@@ -4258,12 +4258,11 @@ class Coordinator:
         # the rest of the chain consults. It is also used directly by
         # tests / tools passing an explicit ``trace_input``, so allow it
         # through; later backends/params/sweep are guarded until the
-        # result is cached in SharedState. (Main M4 renamed
-        # ``select_kernels`` → ``trace_analyze``; on this branch both
-        # request kinds dispatch to the same handler via the
-        # back-compat alias in ``kernel_request_handlers.py``, so the
-        # allowlist must accept both names to keep this carve-out
-        # working under both pre- and post-rename test surfaces.)
+        # result is cached in SharedState. (``select_kernels`` is the
+        # legacy alias for ``trace_analyze``; both request kinds
+        # dispatch to the same handler via the back-compat alias in
+        # ``kernel_request_handlers.py``, so the allowlist must accept
+        # both names.)
         if req_kind in ("select_kernels", "trace_analyze"):
             return None
         if get_handler(req_kind) is None:
@@ -5750,10 +5749,10 @@ class Coordinator:
         # so serving / system / kernel-switch specialists reason against the
         # real benchmark workload rather than the dataclass defaults.
         params.setdefault("gpu_type", state.gpu_type or "")
-        # Active server framework name — Phase 6.1 uses this to switch
-        # the per-domain "what to read first" hint blocks to atom paths
-        # when SharedState.framework == "atom". sglang / vllm sessions
-        # fall through to the canonical hint blocks.
+        # Active server framework name — used to switch the per-domain
+        # "what to read first" hint blocks to atom paths when
+        # SharedState.framework == "atom". sglang / vllm sessions fall
+        # through to the canonical hint blocks.
         if getattr(state, "framework", "") or "":
             params.setdefault("framework", str(state.framework))
         if int(getattr(state, "tp", 0) or 0) > 0:
@@ -7056,9 +7055,9 @@ class Coordinator:
         # executor result); route the read through the compat helper so a
         # legacy ``extra_sglang_args`` envelope still resolves while
         # logging a single deprecation warning. ``cb`` is Coordinator-
-        # internal state and migrated at load time by
-        # SharedState._PHASE4_LEGACY_KEY_RENAMES, so a direct .get is
-        # safe.
+        # internal state and is migrated at load time by
+        # ``_migrate_legacy_extra_sglang_args_keys``, so a direct .get
+        # is safe.
         extra_args = (
             read_extra_server_args(result)
             or (
@@ -8125,9 +8124,9 @@ class Coordinator:
                     )
                 self.shared_state.last_profile_args = profile_args
                 # Stale select_kernels / trace_analyze cache no longer matches
-                # this trace. Clear both (M4 main merge: ``last_trace_analyze``
-                # is the canonical post-rename field; ``last_select_kernels``
-                # is kept on this branch for legacy resume parity).
+                # this trace. Clear both (``last_trace_analyze`` is the
+                # canonical field; ``last_select_kernels`` is kept for legacy
+                # resume parity).
                 self.shared_state.last_select_kernels = {}
                 self.shared_state.last_trace_analyze = {}
                 changed = True

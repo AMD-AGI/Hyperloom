@@ -1,9 +1,9 @@
 """Tests for ``inference_optimizer.compat.payload_aliases``.
 
 Covers the read-only deprecation alias from ``extra_sglang_args`` ->
-``extra_server_args`` introduced in Phase 4 of ``atom_plan/``. Every
-reader site funnels through these helpers, so the contract here is
-the source of truth for the rest of the migration test surface.
+``extra_server_args``. Every reader site funnels through these
+helpers, so the contract here is the source of truth for the rest of
+the migration test surface.
 
 All tests are pure-Python and hermetic — no fixtures touch the disk
 or the network.
@@ -237,9 +237,9 @@ def test_public_api_exports_match_all():
 
 
 def test_compat_package_importable():
-    """End-to-end import smoke matching the Phase 4.1 acceptance
-    criterion: ``from inference_optimizer.compat.payload_aliases
-    import read_extra_server_args`` resolves and is callable."""
+    """End-to-end import smoke: ``from
+    inference_optimizer.compat.payload_aliases import
+    read_extra_server_args`` resolves and is callable."""
     from inference_optimizer.compat import payload_aliases as imported
     assert callable(imported.read_extra_server_args)
     assert callable(imported.read_extra_server_args_from_envs)

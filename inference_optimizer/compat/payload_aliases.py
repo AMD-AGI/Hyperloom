@@ -1,11 +1,11 @@
 """Read-only deprecation aliases for renamed payload fields.
 
-Phase 4 of ``atom_plan/`` renamed the payload-surface field
-``extra_sglang_args`` (sglang-era name) to the framework-neutral
+The payload-surface field ``extra_sglang_args`` (sglang-era name) is
+a read-only legacy alias for the framework-neutral
 ``extra_server_args``. The field carries arbitrary server-launch
 flags that get routed into ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS``
 / ``EXTRA_ATOM_ARGS`` by the per-framework Magpie wrapper, so the
-sglang-specific name became a lie once vllm + atom support landed.
+sglang-specific name is a lie now that vllm + atom support exists.
 
 This module provides the single, well-tested reader helper that every
 in-process payload reader in the Hyperloom orchestrator funnels
@@ -24,12 +24,8 @@ through. The contract is intentionally narrow:
   ``.strip()`` / shape normalisation, matching the per-site
   conventions already in the codebase.
 
-Removal schedule: this module + its tests + every back-compat alias
-that imports from it (SharedState loader transform, GridVariant
-``extra_sglang_args=`` kwarg alias) is slated for deletion in the
-release *after* Hyperloom ships full atom support. The static guard
-``test_no_legacy_writer_sites.py`` tracks the allowlist so the
-cleanup PR has a complete inventory.
+The static guard ``test_no_legacy_writer_sites.py`` tracks the
+allowlist of remaining legacy references.
 """
 
 from __future__ import annotations
@@ -39,7 +35,7 @@ from typing import Any
 
 
 # Canonical and legacy key names. Kept as module-level constants so
-# the rename + cleanup pass can grep them deterministically.
+# downstream code can grep them deterministically.
 CANONICAL_KEY: str = "extra_server_args"
 LEGACY_KEY: str = "extra_sglang_args"
 
@@ -58,8 +54,8 @@ def _coerce_str(value: Any) -> str:
     site previously did inline (``str(payload.get(...) or "")``).
 
     ``None`` collapses to the empty string so callers that immediately
-    ``.strip()`` get the same result they did pre-rename. Non-string,
-    non-None values fall through ``str()``.
+    ``.strip()`` get the same result. Non-string, non-None values fall
+    through ``str()``.
     """
     if value is None:
         return ""
@@ -87,7 +83,7 @@ def read_extra_server_args(payload: dict, *, default: str = "") -> str:
 
     The check is ``in``, not truthiness, so a deliberately empty
     string value is distinguished from a missing key. This matches
-    the existing reader convention which used
+    the legacy reader convention which used
     ``str(payload.get("extra_sglang_args") or "")`` and treated both
     missing-key and empty-value the same — the helper preserves the
     cumulative behaviour while pinning the canonical-vs-legacy split.
