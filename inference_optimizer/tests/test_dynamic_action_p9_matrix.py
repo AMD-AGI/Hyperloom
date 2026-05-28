@@ -79,6 +79,8 @@ _FILE_BUCKET: dict[str, str] = {
     # P9 meta tests count as unit-layer audit tests of the matrix
     # itself (count gates, fixture surface, regression markers).
     "test_dynamic_action_p9_matrix.py":            "unit",
+    # G2 / G13 — dispatch_history closed-schema writer.
+    "test_dynamic_action_history.py":              "unit",
 }
 
 
