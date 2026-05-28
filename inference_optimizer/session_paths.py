@@ -337,6 +337,14 @@ def dynamic_action_proposal_set_path(
     return dynamic_action_artifact_dir(session_dir, dyn_id) / "proposal_set.json"
 
 
+def dynamic_action_critic_verdict_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    """P4 §5.3 — verdict envelope written by the Critic for one
+    dynamic_action proposal."""
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "critic_verdict.json"
+
+
 # ---------------------------------------------------------------------------
 # External baseline comparison artefacts (DESIGN: target_analysis is report-only)
 # ---------------------------------------------------------------------------
@@ -499,6 +507,7 @@ __all__ = [
     "cortex_sid_file",
     "cortex_warm_json",
     "dynamic_action_artifact_dir",
+    "dynamic_action_critic_verdict_path",
     "dynamic_action_dispatch_history_path",
     "dynamic_action_proposal_set_path",
     "dynamic_action_seed_kit_path",
