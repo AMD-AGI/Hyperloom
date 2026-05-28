@@ -257,6 +257,62 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
 
 
 # ---------------------------------------------------------------------------
+# dynamic_action.MD P4 §3 — cross-domain enrichment helper
+# ---------------------------------------------------------------------------
+def _proposal_provenance_literal(proposal: dict[str, Any]) -> str:
+    """Pull the ``provenance`` literal off a judge_bundle proposal,
+    tolerating both top-level + nested ``params`` placement.
+    """
+    if not isinstance(proposal, dict):
+        return ""
+    top = proposal.get("provenance")
+    if isinstance(top, str) and top.strip():
+        return top.strip().lower()
+    params = proposal.get("params") or {}
+    if isinstance(params, dict):
+        nested = params.get("provenance")
+        if isinstance(nested, str):
+            return nested.strip().lower()
+    return ""
+
+
+def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
+    """Set ``review_constraints.cross_domain = True`` + rule descriptors
+    when any proposal carries ``provenance == "dynamic"``.
+
+    Idempotent: a re-injection on the same bundle leaves the dict
+    unchanged. Specialist-only bundles are no-ops.
+    """
+    proposals = judge_bundle.get("proposals") or []
+    if not isinstance(proposals, list):
+        return
+    from ..dynamic_action_critic import (
+        CROSS_DOMAIN_RULES,
+        EXPECTED_PROVENANCE,
+    )
+    has_dynamic = any(
+        _proposal_provenance_literal(p) == EXPECTED_PROVENANCE
+        for p in proposals
+    )
+    if not has_dynamic:
+        return
+    rc = judge_bundle.setdefault("review_constraints", {})
+    if not isinstance(rc, dict):
+        rc = {}
+        judge_bundle["review_constraints"] = rc
+    rc["cross_domain"] = True
+    rc["cross_domain_rules"] = [
+        {
+            "rule_id": r.rule_id,
+            "description": r.description,
+            "failure_verdict": r.failure_verdict,
+            "failure_reason_code": r.failure_reason_code,
+        }
+        for r in CROSS_DOMAIN_RULES
+    ]
+
+
+# ---------------------------------------------------------------------------
 @dataclass
 class CriticAgentBackend:
     """Real Critic backend that drives the critic-agent runtime.
@@ -607,6 +663,12 @@ class CriticAgentBackend:
                 rc = {}
                 judge_bundle["review_constraints"] = rc
             rc["action_verdict_policy"] = dict(self.action_verdict_policy)
+
+        # dynamic_action.MD P4 §3 — when any proposal carries the
+        # ``provenance == "dynamic"`` literal, flip the cross_domain
+        # flag and inject the rule descriptors so the LLM-critic
+        # applies the three extra rules on top of patch_landing.
+        _maybe_inject_cross_domain_constraints(judge_bundle)
 
         # Phase 2 — Codex reasoning. Note we still call the LLM even when
         # `judge_bundle.proposals` is empty (the runtime returns an empty
