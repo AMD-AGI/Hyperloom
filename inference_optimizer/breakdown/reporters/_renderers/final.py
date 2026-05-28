@@ -26,7 +26,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     val_stack_len = f.get("validated_at_stack_len")
     val_ts = f.get("validated_ts")
     stack_changed = bool(f.get("stack_changed_after_validation"))
-    extra_args = f.get("extra_sglang_args") or ""
+    extra_args = f.get("extra_server_args") or ""
     action_path = f.get("action_path") or []
 
     facts: list[str] = []
@@ -56,7 +56,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "Final stack: " + " → ".join(f"`{p}`" for p in action_path)
         )
     if extra_args:
-        facts.append(f"Final extra_sglang_args: `{extra_args}`.")
+        facts.append(f"Final extra_server_args: `{extra_args}`.")
     if stack_changed:
         warnings.append(
             "stack_changed_after_validation = true — optimization_stack grew "
@@ -78,7 +78,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         ("validated_at_stack_len",         val_stack_len),
         ("validated_ts",                   val_ts),
         ("stack_changed_after_validation", stack_changed),
-        ("extra_sglang_args",              extra_args or None),
+        ("extra_server_args",              extra_args or None),
         ("action_path",                    action_path or None),
         ("ttft_mean_ms",                   f.get("ttft_mean_ms")),
         ("e2el_mean_ms",                   f.get("e2el_mean_ms")),
