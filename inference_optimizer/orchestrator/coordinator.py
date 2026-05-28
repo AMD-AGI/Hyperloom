@@ -937,12 +937,22 @@ class Coordinator:
         # 1. Drain async queue. NDJSON drains *can* take meaningful time
         #    when Cortex was unreachable mid-run; 60s is the documented
         #    upper bound.
+        #
+        # Resilience contract (operator requirement May 2026 — "if KB is
+        # not available, do not affect the main logic"): a drain that
+        # raises (programmer bug — drain_pending itself catches every
+        # KB error) or that leaves rows queued (the COMMON CASE when KB
+        # is unreachable for the whole session) must NOT set a
+        # ``stop_reason``. ``stop_reason`` is the LLM-visible "why we
+        # stopped" surface; tagging "cortex_drain_failed" on a routine
+        # KB outage would (a) mislead specialists into thinking the
+        # session ended in failure and (b) violate the soft-degrade
+        # contract. The kb_flusher daemon will pick up leftover rows
+        # next time KB is reachable.
         try:
             drain_report = self.cortex_kb.drain_pending(timeout_sec=60.0)
         except Exception as exc:  # noqa: BLE001 — defensive
-            log.exception("cortex T4 drain_pending failed")
-            if not self.shared_state.stop_reason:
-                self.shared_state.set_stop_reason("cortex_drain_failed")
+            log.exception("cortex T4 drain_pending failed (KB outage, ignored)")
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001
@@ -951,11 +961,11 @@ class Coordinator:
         if drain_report.get("remaining", 0) > 0:
             log.warning(
                 "cortex T4 drain incomplete: %s remaining; flusher daemon "
-                "should drain on next pickup.",
+                "should drain on next pickup. Not setting stop_reason — "
+                "KB outage is a soft-degrade signal, not a session "
+                "failure.",
                 drain_report,
             )
-            if not self.shared_state.stop_reason:
-                self.shared_state.set_stop_reason("cortex_drain_failed")
         # KB session_commit was retired alongside the hypothesize/verify
         # protocol — fact writes are session-less, so there is no remote
         # session to close. The drain above is the only T4 KB action.
