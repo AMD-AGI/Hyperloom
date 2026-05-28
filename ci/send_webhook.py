@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 import requests
-import urllib3
 
 
 def _fmt_num(v: Any) -> str:
@@ -253,13 +252,19 @@ def main() -> int:
         print("summary has no rows; skipping webhook")
         return 0
 
-    urllib3.disable_warnings()
     chunks = [rows[i:i + args.rows_per_card] for i in range(0, len(rows), args.rows_per_card)]
     for idx, chunk in enumerate(chunks, 1):
         body = _build_payload(chunk, rows, idx, len(chunks), args.dashboard_url)
         body_bytes = len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
         print(f"Webhook part {idx}/{len(chunks)}: {len(chunk)} rows, {body_bytes} bytes")
-        response = requests.post(args.url, json=body, timeout=args.timeout, verify=False)
+        response = requests.post(
+            args.url,
+            json=body,
+            timeout=args.timeout,
+            verify=os.environ.get(
+                "SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True)
+            ),
+        )
         print(f"Webhook part {idx}: HTTP {response.status_code}")
         if response.status_code >= 300:
             print(response.text[:500])
