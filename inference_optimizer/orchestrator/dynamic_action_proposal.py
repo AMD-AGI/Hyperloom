@@ -277,6 +277,31 @@ _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
     r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.M,
 )
 
+# G6 cumulative-diff check — git emits these on every ``diff``; the
+# sub-agent's hand-crafted patches typically do not. Stripping them
+# before comparison keeps the check on hunk semantics, not metadata.
+_DIFF_NORMALISE_DROP_LINES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+(?: \d+)?$", re.M),
+    re.compile(r"^diff --git a/.* b/.*$", re.M),
+    re.compile(r"^new file mode \d+$", re.M),
+    re.compile(r"^deleted file mode \d+$", re.M),
+    re.compile(r"^similarity index \d+%$", re.M),
+)
+
+
+def _normalise_diff_for_compare(text: str) -> str:
+    """Strip git-only metadata + trailing whitespace so a hand-crafted
+    proposal patch can be compared with ``git diff HEAD`` output.
+
+    Returns the canonical form ready for byte comparison.
+    """
+    body = text or ""
+    for pat in _DIFF_NORMALISE_DROP_LINES:
+        body = pat.sub("", body)
+    return "\n".join(
+        line.rstrip() for line in body.splitlines() if line.strip()
+    )
+
 
 # ---------------------------------------------------------------------------
 # Result envelopes
@@ -323,12 +348,20 @@ def validate_proposal(
     proposal: dict[str, Any],
     *,
     spec_scope_domains: list[str],
+    worktree_cumulative_diff: str | None = None,
 ) -> ProposalValidationResult:
     """Apply the P3 §5.3 checks to one proposal payload.
 
     ``spec_scope_domains`` is the scope_domains list captured in the
     dispatch ``spec.json`` (the canonical truth set; the proposal's
     own list must be a subset).
+
+    ``worktree_cumulative_diff`` (gap G6) is ``git diff HEAD`` from
+    the sub-agent's worktree captured at ``emit_proposal`` time. When
+    non-empty, the proposal's ``patch_text`` MUST match it (after
+    normalising for git metadata + whitespace). ``None`` disables the
+    check (no worktree present / git failure / runner ran in a test
+    fixture).
 
     Empty payload + empty patch is **not** treated here — the runner
     interprets ``emit_proposal`` with ``patch_text == ""`` as the
@@ -392,6 +425,20 @@ def validate_proposal(
         return ProposalValidationResult(
             ok=False, reason="patch_text_not_unified_diff",
         )
+    if worktree_cumulative_diff:
+        if _normalise_diff_for_compare(patch) != _normalise_diff_for_compare(
+            worktree_cumulative_diff,
+        ):
+            return ProposalValidationResult(
+                ok=False,
+                reason="patch_text_not_cumulative_diff",
+                detail=(
+                    "proposal.patch_text does not match the worktree's "
+                    "git diff HEAD; emit_proposal MUST carry the "
+                    "cumulative diff when the sub-agent has applied "
+                    "patches during iteration."
+                ),
+            )
 
     rationale = str(proposal.get("cross_domain_rationale") or "")
     if not rationale.strip():
