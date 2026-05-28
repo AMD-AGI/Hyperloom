@@ -447,6 +447,7 @@ class SpecialistRunner:
                 pr_monitor_available=bool(
                     params.get("pr_monitor_available", True)
                 ),
+                framework=str(params.get("framework") or ""),
                 framework_source_roots=tuple(
                     params.get("framework_source_roots") or ()
                 ),
