@@ -673,6 +673,19 @@ class SharedState:
     # storm detector fires when this crosses the configured cap
     # without a single non-empty proposal_set in the same window.
     explore_specialist_dispatched_count: int = 0
+    # dynamic_action.MD P0 D-C / P6 — aggregate view of dynamic_action
+    # dispatches. P1 ships the minimal write surface (Coordinator
+    # writes one entry per successful dispatch); the full
+    # ``DynamicActionSummary`` schema (cumulative_gain, last_outcome,
+    # status state machine, …) lands in P6. Map: dyn_id → summary
+    # dict. CORE_STATE_FIELDS protects it from LLM UPDATE_STATE.
+    dynamic_actions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per-EXPLORE-round counter of *successful* dynamic_action
+    # dispatches (PolicyGate-rejected emits do not increment, per P1
+    # §4.2). Reset on every fresh EXPLORE entry. Read by PolicyGate
+    # ``_validate_dynamic_action_dispatch`` group D for the
+    # ``MAX_DYNAMIC_PER_ROUND`` cap; Coordinator is the sole writer.
+    dynamic_action_round_count: int = 0
     # research_lane capacity locked at session start
     #. M5 default is 1 (single-specialist series);
     # M6 raises to 6 (concurrent). PolicyGate denies mid-session
@@ -3038,6 +3051,41 @@ class SharedState:
         EXPLORE entry.
         """
         self.explore_specialist_dispatched_count = 0
+
+    def record_dynamic_action_dispatch(
+        self, dyn_id: str, summary: dict[str, Any],
+    ) -> int:
+        """dynamic_action.MD P1 / D-C — register a freshly-dispatched
+        dynamic_action in the aggregate view AND bump the per-round
+        cap counter atomically.
+
+        Coordinator-only writer (CORE_STATE_FIELDS protects it from
+        LLM UPDATE_STATE). Idempotent on ``dyn_id``: a re-record with
+        the same id overwrites the summary but does NOT double-bump
+        the round counter. Returns the post-increment round counter
+        value.
+        """
+        key = str(dyn_id or "").strip()
+        if not key:
+            return self.dynamic_action_round_count
+        was_new = key not in self.dynamic_actions
+        self.dynamic_actions[key] = dict(summary or {})
+        if was_new:
+            self.dynamic_action_round_count = int(
+                self.dynamic_action_round_count or 0
+            ) + 1
+        return self.dynamic_action_round_count
+
+    def reset_dynamic_action_round_count(self) -> None:
+        """dynamic_action.MD P1 §4.3 — clear the per-EXPLORE round cap
+        counter.
+
+        Called by Coordinator on phase transition into a fresh
+        EXPLORE entry, mirroring ``reset_specialist_dispatched``. The
+        ``dynamic_actions`` aggregate view itself is preserved across
+        rounds (cumulative ledger).
+        """
+        self.dynamic_action_round_count = 0
 
     def record_specialist_patch_verdict(
         self, specialist_task_id: str, verdict: str,
