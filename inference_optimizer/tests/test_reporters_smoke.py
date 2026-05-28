@@ -66,7 +66,7 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "validated_at_stack_len": 1,
             "validated_ts": "2026-05-12T11:54:00Z",
             "stack_changed_after_validation": False,
-            "extra_sglang_args": "",
+            "extra_server_args": "",
             "action_path": ["backends:vllm_kv_fp8"],
         },
         "phase_timeline": [],

@@ -92,7 +92,7 @@ async def test_prelude_initial_roofline_task_contract(coord: Coordinator):
     forward the baseline's benchmark-script + current_best extra args
     so the profile sub-step bench against the same workload."""
     coord.shared_state.current_best = {
-        "extra_sglang_args": "--tp 8 --enable-mla",
+        "extra_server_args": "--tp 8 --enable-mla",
     }
     coord.shared_state.last_baseline = {
         "benchmark_script": "magpie_serving_bench.sh",

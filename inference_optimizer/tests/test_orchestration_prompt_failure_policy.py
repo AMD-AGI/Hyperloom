@@ -76,7 +76,7 @@ def test_prompt_failure_recovery_lists_fingerprint_keys(registry, rules_path):
     knows which fields actually change what PolicyGate sees."""
     text = _prompt(registry, rules_path)
     expected_keys = (
-        "benchmark_script", "result_dir", "extra_sglang_args",
+        "benchmark_script", "result_dir", "extra_server_args",
         "extra_envs", "model_path", "gpu_type", "config_path",
         "disable_run_eval",
     )

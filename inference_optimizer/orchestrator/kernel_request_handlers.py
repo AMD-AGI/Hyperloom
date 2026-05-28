@@ -1397,7 +1397,7 @@ async def _run_optimization_single(
         geak_budget_min: default 90 (GEAK only; also ``HYPERLOOM_GEAK_BUDGET_MIN``)
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
-        extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
+        extra_server_args: SGLang runtime flags for GEAK metadata (optional)
         enable_rag:      default True; false disables GEAK RAG tools
         enable_xs_memory: default True; false disables GEAK cross-session memory
         dry_run:         default False (testing)
@@ -1445,8 +1445,8 @@ async def _run_optimization_single(
         cmd += ["--source-file", str(payload["source_file"])]
     if target_platform:
         cmd += ["--target-platform", str(target_platform)]
-    if payload.get("extra_sglang_args"):
-        cmd += ["--extra-sglang-args", str(payload["extra_sglang_args"])]
+    if payload.get("extra_server_args"):
+        cmd += ["--extra-sglang-args", str(payload["extra_server_args"])]
     if payload.get("candidates_path"):
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
@@ -1582,7 +1582,7 @@ async def integrate_handler(
         target_file:       inductor cache file to patch (informational)
         kernel_id:         label used in result + bus events
         config_path:       Magpie YAML for the re-baseline run
-        extra_sglang_args: extra flags layered onto the Magpie envs
+        extra_server_args: extra flags layered onto the Magpie envs
         keep_threshold_pct: KEEP if gain > X% (default 1.0)
         budget_minutes:    re-baseline timeout (default 20)
 
@@ -1646,10 +1646,10 @@ async def integrate_handler(
         }
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
-    extra_args = str(payload.get("extra_sglang_args", "") or "").strip()
+    extra_args = str(payload.get("extra_server_args", "") or "").strip()
 
     # Build a Task wrapper around BaselineExecutor (which expects an
-    # RunnerContext with a Task in it). The "extra_sglang_args" hand-
+    # RunnerContext with a Task in it). The "extra_server_args" hand-
     # off goes via the task params even though baseline_executor doesn't
     # use them yet — kept for forward compat (P3 will inject EXTRA_SGLANG_ARGS).
     from ..session_paths import runs_dir
@@ -1664,7 +1664,7 @@ async def integrate_handler(
             "config_path": payload.get("config_path"),
             "output_dir":  str(workspace),
             "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )
@@ -1687,7 +1687,7 @@ async def integrate_handler(
         )
         try:
             await restart_server_for_round(
-                extra_sglang_args=extra_args,
+                extra_server_args=extra_args,
                 framework=os.environ.get("FRAMEWORK") or None,
                 model_path=(
                     str(payload.get("model_path") or "").strip()
@@ -1762,7 +1762,7 @@ async def integrate_handler(
         "gain_pct":    gain_pct,
         "report_path": bench_result.get("report_path"),
         "workspace":   bench_result.get("workspace"),
-        "extra_sglang_args": extra_args,
+        "extra_server_args": extra_args,
         "apply_result": apply_result,
         "revert_result": revert_result,
     }

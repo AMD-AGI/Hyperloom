@@ -302,7 +302,7 @@ def _resolve_round_args(
 
 async def restart_server_for_round(
     *,
-    extra_sglang_args: str = "",
+    extra_server_args: str = "",
     torch_profiler_dir: str = "",
     framework: str | None = None,
     model_path: str | None = None,
@@ -377,7 +377,7 @@ async def restart_server_for_round(
     # own defaults baked into the server and Magpie doesn't append the
     # same flags there.
     if fw == "sglang":
-        extra_sglang_args = _merge_sglang_defaults(extra_sglang_args)
+        extra_server_args = _merge_sglang_defaults(extra_server_args)
 
     saved_trace_env = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR")
     if torch_profiler_dir:
@@ -486,7 +486,7 @@ async def restart_server_for_round(
             model=mdl,
             tp=tp_int,
             ep=ep_int,
-            extra_args=extra_sglang_args or "",
+            extra_args=extra_server_args or "",
             pid_file=None,
             log_file=None,
             no_wait_health=False,
@@ -520,7 +520,7 @@ async def restart_server_for_round(
             pd.get("pd_prefill_nodes", 0), pd.get("pd_prefill_tp", 0),
             pd.get("pd_decode_nodes", 0), pd.get("pd_decode_tp", 0),
             pd.get("pd_transfer_backend", ""), pd.get("pd_ib_device", ""),
-            extra_sglang_args, torch_profiler_dir,
+            extra_server_args, torch_profiler_dir,
         )
 
         # When kernel-agent just patched sglang source on every pod, the
@@ -548,7 +548,7 @@ async def restart_server_for_round(
         if rc != 0:
             raise ServerRestartFailed(
                 f"cmd_restart_server returned non-zero rc={rc} "
-                f"(framework={fw} tp={tp_int} extra_args={extra_sglang_args!r})"
+                f"(framework={fw} tp={tp_int} extra_args={extra_server_args!r})"
             )
 
         # ADDENDUM: cmd_restart_server returns when the launcher driver
