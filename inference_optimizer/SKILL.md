@@ -341,6 +341,43 @@ Resume: same shape as EXPLORE — completed candidates skip via the
 task registry idempotency key (`framework_pr:<batch_id>:<cand_id>`),
 in-flight ones are dropped + redone.
 
+### IR-8 — `--framework atom` is single-node, source-patcher-free
+
+`--framework atom` runs the Magpie atom wrapper
+(`atom_mi*x.sh`) against `atom.entrypoints.openai_server`. The
+contract differs from sglang/vllm in three load-bearing ways and
+the CLI enforces them at launch time
+(`_apply_atom_auto_tighten` in `cli.py`):
+
+1. **Multi-node is rejected.** `--nodes >= 2` + `--framework atom`
+   fails fast with `SystemExit(2)`. atom + Magpie wrapper have no
+   multi-node TP wiring; a 6-min cold start to discover this at
+   runtime is wasted budget.
+2. **Kernel-agent and framework-agent are auto-disabled.**
+   `--no-kernel` and `--no-framework` are auto-set (unless the
+   operator already passed them). Both sister agents assume
+   sglang/vllm-style source layouts that atom does not have, so
+   the kernel patcher / framework PR loop have nothing to bite
+   on.
+3. **Profile / roofline / TraceLens ARE supported as of the
+   `atom_mi*x.sh` PROFILE wiring patch** (see Magpie commit that
+   adds `--torch-profiler-dir` to atom server launch). atom writes
+   standard `*.pt.trace.json.gz` chrome traces under
+   `<workspace>/torch_trace/rank_<N>/`; TraceLens consumes them
+   unchanged (framework-agnostic). `--enable-roofline` stays at
+   its default (on) for atom. The previous "no profiler in Magpie
+   v1" carve-out was rescinded once the wrapper script was
+   patched; ProfileExecutor / RooflineExecutor no longer
+   short-circuit on `FRAMEWORK=atom`.
+
+What still works for atom: baseline, EXPLORE (specialist +
+default_grid), sweep, profile, roofline, TraceLens analyze, the
+roofline composite + watermark loop, the report exporter.
+
+Operator opt-out: each auto-tightened flag can be re-enabled
+explicitly (`--kernel-opt` / `--framework`); the auto-tighten
+only fires when the flag is still at its enabled default.
+
 ## Retired modules and rules (do not re-introduce)
 
 These orchestrator modules were intentionally removed; the
@@ -443,7 +480,7 @@ already handle the read-only-source case.
 ```bash
 inference_optimizer optimize \
   --model "$MODEL_PATH" \
-  --framework vllm \           # or sglang (default)
+  --framework vllm \           # sglang (default) / vllm / atom (atom triggers IR-8 auto-tighten)
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; biases per-action curated priors
   --max-hours 2 \
@@ -457,7 +494,7 @@ supply session metadata directly via CLI flags / env vars:
 | Surface | CLI flag | Env var | Notes |
 |---|---|---|---|
 | Model path | `--model` | — | required |
-| Framework | `--framework` | `FRAMEWORK` | `vllm` / `sglang` |
+| Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` — atom triggers IR-8 auto-tighten |
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | `MODEL_CLASS` | drives `orchestrator/scoring.MODEL_CLASS_ACTION_PRIORS`; defaults to `moe_mla` when unset |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
@@ -775,29 +812,39 @@ on every tick to avoid unbounded growth.
 
 ## Framework Selection
 
-A session is single-framework. Pick `sglang` (default) or `vllm` via
-`--framework` or `$FRAMEWORK`:
+A session is single-framework. Pick `sglang` (default), `vllm`, or
+`atom` via `--framework` or `$FRAMEWORK`:
 
 ```bash
 inference_optimizer optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
 FRAMEWORK=vllm inference_optimizer optimize --model "$MODEL_PATH" --max-hours 2
+inference_optimizer optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 auto-tightens
 ```
 
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
 - Which Magpie YAML the executors default to
-  (`baseline_sglang.yaml` / `baseline_vllm.yaml`,
-  `profile_sglang.yaml` / `profile_vllm.yaml`)
+  (`baseline_sglang.yaml` / `baseline_vllm.yaml` /
+  `baseline_atom.yaml`, `profile_sglang.yaml` / `profile_vllm.yaml`;
+  no separate `profile_atom.yaml` — the baseline YAML carries
+  `profiler.torch_profiler.enabled` overridable via `PROFILE=1` env)
 - Which framework-specific seed grid the `explore` action falls
   back to when no `params.grid` is supplied
 - Which extra-args env name `_grid_runner` writes
-  (`EXTRA_VLLM_ARGS` vs `EXTRA_SGLANG_ARGS`)
+  (`EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS`)
 - Which Marathon KB partition orchestration reads for hints
 
-Mixing sglang and vllm in a single session is not supported; the CLI
+Mixing frameworks in a single session is not supported; the CLI
 locks `$FRAMEWORK` for the run. Resume re-reads `$FRAMEWORK` from the
-shell — set it when you resume a vLLM session.
+shell — set it when you resume a non-default session.
+
+**`--framework atom` specifics (IR-8):** single-node only, kernel-agent
+and framework-agent are auto-disabled, but profile / roofline /
+TraceLens work normally (atom ships `--torch-profiler-dir` + HTTP
+`/start_profile` `/stop_profile`, the Magpie atom wrapper bridges
+`PROFILE=1` to them, and TraceLens consumes the resulting
+`*.pt.trace.json.gz` unchanged). See the IR-8 entry above.
 
 ## GPU Runner Type
 

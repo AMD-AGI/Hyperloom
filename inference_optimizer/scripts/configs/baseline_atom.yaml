@@ -14,15 +14,21 @@
 # in at run time, Magpie's resolver picks `atom_{runner_type}.sh`
 # (e.g. atom_mi355x.sh).
 #
-# IMPORTANT — atom-specific constraints (see atom_boost_tutorials.md):
+# IMPORTANT — atom-specific constraints (see atom_boost_tutorials.md
+# and SKILL.md IR-8):
 #   - precision is fp8 by default (DeepSeek-R1 / GLM5 are shipped FP8).
 #   - EXTRA_ATOM_ARGS includes --trust-remote-code because most production
 #     atom-served models ship their modeling code in the model dir
 #     (e.g. modeling_deepseek.py + configuration_deepseek.py).
-#   - profile / roofline are NOT applicable to atom in Magpie v1
-#     (no torch_profiler integration); the ProfileExecutor /
-#     RooflineExecutor short-circuit to status="skipped" when FRAMEWORK=atom.
+#   - profile / roofline / TraceLens DO work on atom. The Magpie atom
+#     wrapper (atom_mi*x.sh) bridges PROFILE=1 to atom's --torch-profiler-dir
+#     CLI flag and the InferenceX bench client auto-POSTs /start_profile +
+#     /stop_profile. Set PROFILE=1 (env) or flip torch_profiler.enabled
+#     below to true; atom writes *.pt.trace.json.gz under
+#     <torch_profiler_dir>/rank_<N>/ which TraceLens consumes unchanged.
 #   - Multi-node is unsupported; cli.py rejects --framework atom + --nodes>=2.
+#   - Kernel-agent / framework-agent are auto-disabled (no atom source
+#     patcher); cli.py auto-sets --no-kernel and --no-framework.
 
 benchmark:
   framework: atom
