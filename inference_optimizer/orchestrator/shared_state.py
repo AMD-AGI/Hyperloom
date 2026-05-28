@@ -234,6 +234,19 @@ class SharedState:
     # env var; this field is the resume-safe authority.
     ep: int = 0
     precision: str = ""
+    # Recipe-snapshot v2 canonical id is a five-tuple
+    # ``model + hardware + framework + framework_version + precision``;
+    # ``framework_version`` is the only one not derivable from existing
+    # SharedState fields, so it lives here. Populated by ``cli`` from
+    # ``--framework-version`` (operator override) or, when omitted,
+    # auto-detected via :func:`recipe_snapshot_constants.detect_framework_version`
+    # (best-effort: imports the framework's top-level package and reads
+    # ``__version__``). Mirrored to env ``FRAMEWORK_VERSION`` on resume so
+    # downstream executors see the same value the original run used.
+    # Empty string means "unknown" — the recipe canonical_id falls back
+    # to ``unknown_version`` and KB lookups for this dimension lose
+    # specificity (rows still write under that slug).
+    framework_version: str = ""
     conc: int = 0
     isl: int = 0
     osl: int = 0

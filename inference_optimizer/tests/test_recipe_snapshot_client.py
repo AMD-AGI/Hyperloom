@@ -2,8 +2,6 @@
 
 Covers Phase 1 of the cortex-KB → recipe-snapshot cutover:
 
-* canonical_id derivation matches the documented
-  ``inference:{model}:{framework}:{hardware}`` shape.
 * ``put_recipe`` 200 happy path: wire body matches the v2 spec,
   ``provenance`` is auto-stamped, evidence refs normalised, response
   carries ``{status, canonical_id, version, created}``.
@@ -65,6 +63,31 @@ from inference_optimizer.session_paths import (
 KB_URL = "http://kb-test.local"
 
 
+def _cid(
+    *,
+    model: str = "m",
+    hardware: str = "mi300x",
+    framework: str = "sglang",
+    framework_version: str = "0.4.5",
+    precision: str = "fp8",
+) -> str:
+    """Test-only convenience wrapper around :func:`recipe_canonical_id`.
+
+    Centralises the 5-tuple call so the bulk of the suite can override
+    just the dimension(s) it cares about (most often ``model`` to
+    distinguish two recipes in the same test). Detailed canonical_id
+    semantics — slug normalisation, default fall-through, mhfvp
+    ordering — are tested in ``test_canonical_id_5tuple.py``.
+    """
+    return recipe_canonical_id(
+        model=model,
+        hardware=hardware,
+        framework=framework,
+        framework_version=framework_version,
+        precision=precision,
+    )
+
+
 # ===========================================================================
 # fixtures
 # ===========================================================================
@@ -95,32 +118,13 @@ def client(session_dir: Path) -> RecipeSnapshotClient:
 
 
 # ===========================================================================
-# canonical_id + path helpers
+# path helpers
 # ===========================================================================
-def test_recipe_canonical_id_shape_includes_framework():
-    """``inference:{slug(model)}:{slug(framework)}:{slug(hardware)}``."""
-    cid = recipe_canonical_id("Qwen3-30B-A3B", "sglang", "mi355x")
-    assert cid == "inference:qwen3-30b-a3b:sglang:mi355x"
-
-
-def test_recipe_canonical_id_basenames_path_style_model_arg():
-    """A CLI ``--model /hyperloom/models/Qwen3-30B-A3B`` must converge
-    on the same canonical_id as the bare model name."""
-    cid_path = recipe_canonical_id(
-        "/hyperloom/models/Qwen3-30B-A3B", "sglang", "mi355x",
-    )
-    cid_bare = recipe_canonical_id("Qwen3-30B-A3B", "sglang", "mi355x")
-    assert cid_path == cid_bare
-
-
-def test_recipe_canonical_id_fills_unknowns_when_missing():
-    cid = recipe_canonical_id("", "", "")
-    # Documented sentinel values — guarantees the canonical_id never
-    # collapses to ``inference:::`` which the path converter would
-    # reject as empty.
-    assert cid == "inference:unknown_model:unknown_framework:unknown_hw"
-
-
+# Detailed canonical_id semantics (slug rules, default fall-through,
+# mhfvp ordering, auto-detect helper) live in
+# ``test_canonical_id_5tuple.py``. This module covers behavioural
+# tests of the HTTP client only; the cid is just an opaque identifier
+# from this file's point of view.
 def test_format_recipe_path_preserves_colons():
     cid = "inference:qwen3-30b-a3b:sglang:mi355x"
     path = format_recipe_path(PATH_RECIPE_TPL, cid)
@@ -187,7 +191,7 @@ def test_parse_error_envelope_unknown_shape():
 # ===========================================================================
 @respx.mock
 def test_put_recipe_happy_path_writes_v2_body_shape(client: RecipeSnapshotClient):
-    cid = recipe_canonical_id("test-model", "sglang", "mi300x")
+    cid = _cid(model="test-model")
     route = respx.put(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(
             200, json={"canonical_id": cid, "version": 1, "created": True},
@@ -236,7 +240,7 @@ def test_put_recipe_happy_path_writes_v2_body_shape(client: RecipeSnapshotClient
 def test_put_recipe_omits_optional_collections_when_empty(client: RecipeSnapshotClient):
     """Sending ``[]`` is harmless on v2 but cluttery in the audit
     log; the client omits empty list / dict fields entirely."""
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     respx.put(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(
             200, json={"canonical_id": cid, "version": 2, "created": False},
@@ -254,7 +258,7 @@ def test_put_recipe_omits_optional_collections_when_empty(client: RecipeSnapshot
 
 @respx.mock
 def test_put_recipe_smoke_mode_stamps_smoke_generator(session_dir: Path):
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     respx.put(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(
             200, json={"canonical_id": cid, "version": 1, "created": True},
@@ -276,7 +280,7 @@ def test_put_recipe_smoke_mode_stamps_smoke_generator(session_dir: Path):
 def test_put_recipe_transient_failure_enqueues_to_ndjson(
     client: RecipeSnapshotClient, session_dir: Path,
 ):
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     respx.put(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(503, text="pool not ready"),
     )
@@ -312,7 +316,7 @@ def test_put_recipe_validation_failure_raises_and_does_not_enqueue(
     can re-emit. This mirrors the legacy cortex client's behaviour;
     flusher dead-letters business / validation errors on the first
     retry attempt so the queue won't spin forever."""
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     respx.put(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(
             422,
@@ -342,7 +346,7 @@ def test_put_recipe_propagates_when_enqueue_disabled(
     ``_enqueue_on_failure=False`` — a persistent failure MUST raise
     so the drain loop can dead-letter the row instead of duplicating
     it on the queue forever."""
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     respx.put(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(503, text="x"),
     )
@@ -358,7 +362,7 @@ def test_put_recipe_propagates_when_enqueue_disabled(
 # ===========================================================================
 @respx.mock
 def test_get_recipe_200(client: RecipeSnapshotClient):
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     recipe = {
         "canonical_id": cid, "version": 7,
         "labels": {"model": "m"}, "body": {"best_config": {}},
@@ -384,7 +388,7 @@ def test_get_recipe_200(client: RecipeSnapshotClient):
 
 @respx.mock
 def test_get_recipe_404_returns_none(client: RecipeSnapshotClient):
-    cid = recipe_canonical_id("absent", "sglang", "mi300x")
+    cid = _cid(model="absent")
     respx.get(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(
             404,
@@ -406,7 +410,7 @@ def test_get_recipe_404_returns_none(client: RecipeSnapshotClient):
 def test_get_recipe_with_explicit_version_forwards_query_param(
     client: RecipeSnapshotClient,
 ):
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     route = respx.get(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(
             200, json={"canonical_id": cid, "version": 3},
@@ -419,7 +423,7 @@ def test_get_recipe_with_explicit_version_forwards_query_param(
 
 @respx.mock
 def test_get_recipe_500_raises(client: RecipeSnapshotClient):
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     respx.get(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(503, text="pool"),
     )
@@ -430,7 +434,7 @@ def test_get_recipe_500_raises(client: RecipeSnapshotClient):
 
 @respx.mock
 def test_get_history_returns_archives(client: RecipeSnapshotClient):
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     respx.get(
         f"{KB_URL}{format_recipe_path(PATH_RECIPE_HISTORY_TPL, cid)}",
     ).mock(
@@ -457,7 +461,7 @@ def test_get_history_empty_for_unknown_id(client: RecipeSnapshotClient):
     """Spec: history endpoint returns ``{canonical_id, history: []}``
     for unknown id (NOT 404). The client must surface that as an
     empty list, not raise."""
-    cid = recipe_canonical_id("absent", "sglang", "mi300x")
+    cid = _cid(model="absent")
     respx.get(
         f"{KB_URL}{format_recipe_path(PATH_RECIPE_HISTORY_TPL, cid)}",
     ).mock(
@@ -510,8 +514,8 @@ def test_drain_pending_flushes_recoverable_rows(
     client: RecipeSnapshotClient, session_dir: Path,
 ):
     # Seed two queued rows.
-    cid_a = recipe_canonical_id("a", "sglang", "mi300x")
-    cid_b = recipe_canonical_id("b", "sglang", "mi300x")
+    cid_a = _cid(model="a")
+    cid_b = _cid(model="b")
     respx.put(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid_a)}").mock(
         return_value=httpx.Response(503, text="seed"),
     )
@@ -565,7 +569,7 @@ def test_drain_pending_dead_letters_on_business_error(
 ):
     """422 / business errors short-circuit to dead-letter on the
     first drain attempt — retrying with the same body cannot help."""
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     respx.put(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(503, text="seed"),
     )
@@ -607,7 +611,7 @@ def test_disabled_client_short_circuits_all_writes(
     c = RecipeSnapshotClient(
         session_dir=session_dir, kb_url=KB_URL, enabled=False,
     )
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     assert c.put_recipe(canonical_id=cid, labels={"x": 1}) == {
         "status": "skip_disabled", "canonical_id": cid,
     }
@@ -685,7 +689,7 @@ def test_kb_url_default_when_no_env(
 def test_put_recipe_writes_audit_row(
     client: RecipeSnapshotClient, session_dir: Path,
 ):
-    cid = recipe_canonical_id("m", "sglang", "mi300x")
+    cid = _cid()
     respx.put(f"{KB_URL}{format_recipe_path(PATH_RECIPE_TPL, cid)}").mock(
         return_value=httpx.Response(
             200, json={"canonical_id": cid, "version": 1, "created": True},

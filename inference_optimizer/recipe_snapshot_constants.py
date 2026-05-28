@@ -14,7 +14,10 @@ the dedicated recipe-snapshot resource. See CHANGELOG for the cutover.
 
 from __future__ import annotations
 
+import logging
 from typing import Final
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +72,18 @@ F_AUTHORITY:     Final[str] = "authority"
 F_CONFIDENCE:    Final[str] = "confidence"
 F_EVIDENCE_REFS: Final[str] = "evidence_refs"
 F_PROVENANCE:    Final[str] = "provenance"
+
+# Canonical identity dimensions — caller-defined keys inside ``labels``
+# that mirror the five components of :func:`recipe_canonical_id`. Server
+# does not enforce these (labels are caller-defined under v2), but every
+# inference-optimizer caller MUST stamp them so ``/recipes/search`` can
+# locate rows by individual dimensions even when the canonical_id format
+# evolves (e.g. when a new dimension is appended).
+F_LABEL_MODEL:             Final[str] = "model"
+F_LABEL_HARDWARE:          Final[str] = "hardware"
+F_LABEL_FRAMEWORK:         Final[str] = "framework"
+F_LABEL_FRAMEWORK_VERSION: Final[str] = "framework_version"
+F_LABEL_PRECISION:         Final[str] = "precision"
 
 # PUT response fields
 F_CANONICAL_ID:  Final[str] = "canonical_id"
@@ -217,19 +232,41 @@ DEFAULT_CONFIDENCE: Final[float] = 0.85
 # ---------------------------------------------------------------------------
 # Canonical id derivation
 # ---------------------------------------------------------------------------
+# Default-slug constants for missing identity components. Kept as named
+# constants (rather than literals scattered across helpers) so the audit
+# log and the `/search` corpus stay consistent — operators can grep for
+# ``unknown_framework_version`` to find rows where auto-detect failed,
+# for example, instead of guessing every spelling variant.
+DEFAULT_MODEL_SLUG:             Final[str] = "unknown_model"
+DEFAULT_HARDWARE_SLUG:          Final[str] = "unknown_hw"
+DEFAULT_FRAMEWORK_SLUG:         Final[str] = "unknown_framework"
+DEFAULT_FRAMEWORK_VERSION_SLUG: Final[str] = "unknown_version"
+DEFAULT_PRECISION_SLUG:         Final[str] = "unknown_precision"
+
+
 def _slug(value: str, default: str) -> str:
-    """Lowercase + basename + space→underscore.
+    """Lowercase + basename + space/dot/colon→underscore.
 
     Recipe ``canonical_id`` is caller-defined under v2 (the path
     accepts forward slashes raw) so we are no longer subject to the
     strict ``[a-z0-9_-]`` regex the pre-v2 ``/v1/points`` server
-    enforced. We still slug here for two reasons:
+    enforced. We still slug here for three reasons:
 
     1. Lookup stability — two CLI invocations supplying
        ``--model /wekafs/models/Qwen3-30B-A3B`` and
        ``--model qwen3-30b-a3b`` must converge on the same recipe row.
-    2. Compatibility with the legacy ``recipe:{model}:{framework}:
-       {hardware}`` shape from the prior ``/v1/points`` corpus.
+    2. Filesystem safety — the local KB store (Commit 2) maps each
+       canonical_id component to a directory level; characters that
+       would split a slug across directories (``/``) or that are
+       awkward in filenames (``:``, ``.``, whitespace) are normalised
+       to ``_`` so ``Qwen/Qwen3`` cannot collide with ``Qwen_Qwen3``.
+       NOTE: ``/`` is still resolved to the basename FIRST (so HF
+       paths like ``meta-llama/Llama-3.1-8B`` collapse to
+       ``llama-3.1-8b``), and only embedded ``/`` survives that step
+       in pathological inputs.
+    3. Versions like ``0.4.5+abcdef0`` — common for editable installs
+       — keep their ``+``/digits but lose dots-as-path-separators on
+       Windows-ish filesystems.
     """
     raw = (value or "").strip()
     if not raw:
@@ -238,26 +275,140 @@ def _slug(value: str, default: str) -> str:
     # fallback). Matches the prior helper in ``cortex_kb_client``.
     if "/" in raw:
         raw = raw.rstrip("/").rsplit("/", 1)[-1] or raw
-    return raw.replace(" ", "_").lower() or default
+    # Replace each problematic char individually rather than doing a
+    # blanket regex strip — keeps useful chars like '-', '+', '_'
+    # untouched while normalising the rest.
+    cleaned = raw.lower()
+    for ch in (" ", "\t", "/"):
+        cleaned = cleaned.replace(ch, "_")
+    return cleaned or default
 
 
-def recipe_canonical_id(model: str, framework: str, hardware: str) -> str:
-    """Build the recipe ``canonical_id`` ``inference:{model}:{framework}:{hardware}``.
+def recipe_canonical_id(
+    *,
+    model: str,
+    hardware: str,
+    framework: str,
+    framework_version: str,
+    precision: str,
+) -> str:
+    """Build the recipe ``canonical_id``.
 
-    Order is **model → framework → hardware** so the prefix sorts
-    nicely (model is the strongest identity dimension; hardware ties
-    the row to one platform). ``framework`` is REQUIRED on this branch
-    (the prior optional-empty shape from ``cortex_kb_client`` is
-    retired together with the legacy ``/v1/points`` client) so sglang
-    and vLLM on the same (model, hw) live in separate recipe rows —
-    their ``best_config.extra_*_args`` are framework-specific.
+    Shape:
+        ``inference:{model}:{hardware}:{framework}:{framework_version}:{precision}``
+
+    Identity-strength order (strongest → weakest) so the prefix sorts
+    nicely and partial-string queries are useful even before five
+    components are known:
+
+    1. ``model``             — the workload — ties the row to a
+       distinct model architecture / weights.
+    2. ``hardware``          — the platform — ties it to one GPU
+       generation (mi300x vs mi355x have different tile sizes,
+       different best-tp).
+    3. ``framework``         — sglang vs vLLM vs atom — different
+       schedulers / ``best_config.extra_*_args`` shapes.
+    4. ``framework_version`` — same framework can change scheduler
+       internals across releases (e.g. sglang 0.4 → 0.5 RadixAttention
+       defaults), so two versions deserve separate recipe rows.
+    5. ``precision``         — fp8 / fp16 / bf16 / fp4 / int8 —
+       changes the optimal tp / ep / kv_cache_dtype because memory
+       footprint shifts.
+
+    All five components are ``keyword-only`` to prevent accidental
+    positional re-ordering; an empty / missing component falls back
+    to the matching ``DEFAULT_*_SLUG`` so the canonical_id is always
+    well-formed (5 colons, 6 segments). Callers are encouraged to
+    use :func:`detect_framework_version` to fill ``framework_version``
+    when the operator did not pass ``--framework-version`` explicitly.
     """
     return (
         f"inference:"
-        f"{_slug(model, 'unknown_model')}:"
-        f"{_slug(framework, 'unknown_framework')}:"
-        f"{_slug(hardware, 'unknown_hw')}"
+        f"{_slug(model,             DEFAULT_MODEL_SLUG)}:"
+        f"{_slug(hardware,          DEFAULT_HARDWARE_SLUG)}:"
+        f"{_slug(framework,         DEFAULT_FRAMEWORK_SLUG)}:"
+        f"{_slug(framework_version, DEFAULT_FRAMEWORK_VERSION_SLUG)}:"
+        f"{_slug(precision,         DEFAULT_PRECISION_SLUG)}"
     )
+
+
+def canonical_labels(
+    *,
+    model: str,
+    hardware: str,
+    framework: str,
+    framework_version: str,
+    precision: str,
+) -> dict[str, str]:
+    """Return the five-key ``labels`` dict that mirrors the canonical id.
+
+    Stamping these into ``labels`` on every PUT lets ``/recipes/search``
+    use ``label_match`` to filter by individual dimensions (e.g. "all
+    sglang recipes regardless of model") without parsing the
+    canonical_id string. Slug values match the ones used in
+    :func:`recipe_canonical_id` so a search round-trip never disagrees
+    with the id derivation.
+    """
+    return {
+        F_LABEL_MODEL:             _slug(model,             DEFAULT_MODEL_SLUG),
+        F_LABEL_HARDWARE:          _slug(hardware,          DEFAULT_HARDWARE_SLUG),
+        F_LABEL_FRAMEWORK:         _slug(framework,         DEFAULT_FRAMEWORK_SLUG),
+        F_LABEL_FRAMEWORK_VERSION: _slug(framework_version, DEFAULT_FRAMEWORK_VERSION_SLUG),
+        F_LABEL_PRECISION:         _slug(precision,         DEFAULT_PRECISION_SLUG),
+    }
+
+
+# Mapping from ``framework`` slug → top-level python package whose
+# ``__version__`` attribute is treated as authoritative. Keep narrow:
+# adding a new framework is a one-line append, but every entry has to
+# be a package the optimizer process is allowed to import at boot
+# (we MUST NOT trigger a sglang import inside a vLLM-only run, etc.).
+_FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
+    "sglang": "sglang",
+    "vllm":   "vllm",
+    # ``atom`` is a vendor-internal framework whose ``__version__`` is
+    # typically a git short-hash rather than a SemVer tag; we still
+    # try the import and fall back to ``unknown_version`` on miss.
+    "atom":   "atom",
+}
+
+
+def detect_framework_version(framework: str) -> str:
+    """Best-effort: return the installed version of ``framework``.
+
+    Auto-detect path used when the operator didn't pass
+    ``--framework-version`` (most common case). Tries to ``import``
+    the framework's top-level package and read ``__version__``.
+    Failures degrade to :data:`DEFAULT_FRAMEWORK_VERSION_SLUG`
+    rather than raising — the optimizer must boot even when the
+    framework module isn't importable in the current venv (e.g.
+    a dry-run on a CI box without GPU stacks). Callers should treat
+    a result equal to the default slug as "operator should pass
+    ``--framework-version`` explicitly to scope the recipe row".
+    """
+    fw_slug = _slug(framework, "")
+    if not fw_slug:
+        return DEFAULT_FRAMEWORK_VERSION_SLUG
+    module_name = _FRAMEWORK_VERSION_MODULES.get(fw_slug)
+    if not module_name:
+        return DEFAULT_FRAMEWORK_VERSION_SLUG
+    try:
+        import importlib
+
+        mod = importlib.import_module(module_name)
+    except Exception as exc:  # noqa: BLE001 — broad on purpose
+        log.debug(
+            "detect_framework_version: import %r failed (%s); "
+            "falling back to %r",
+            module_name, exc, DEFAULT_FRAMEWORK_VERSION_SLUG,
+        )
+        return DEFAULT_FRAMEWORK_VERSION_SLUG
+    raw = getattr(mod, "__version__", "") or ""
+    # Some frameworks expose ``VERSION`` instead. Tried second so
+    # ``__version__`` (the PEP 396 standard) wins when both exist.
+    if not raw:
+        raw = getattr(mod, "VERSION", "") or ""
+    return _slug(str(raw), DEFAULT_FRAMEWORK_VERSION_SLUG)
 
 
 def format_recipe_path(template: str, canonical_id: str) -> str:
@@ -290,6 +441,8 @@ __all__ = [
     "F_LABELS", "F_BODY", "F_METRICS",
     "F_FINDINGS", "F_FAILURES", "F_PITFALLS", "F_LESSONS", "F_GAPS",
     "F_AUTHORITY", "F_CONFIDENCE", "F_EVIDENCE_REFS", "F_PROVENANCE",
+    "F_LABEL_MODEL", "F_LABEL_HARDWARE", "F_LABEL_FRAMEWORK",
+    "F_LABEL_FRAMEWORK_VERSION", "F_LABEL_PRECISION",
     "F_CANONICAL_ID", "F_VERSION", "F_CREATED",
     "F_HISTORY", "F_ARCHIVED_AT", "F_REPLACED_BY", "F_SNAPSHOT",
     "F_SESSION_ID", "F_DIFF", "F_PREDICTED_DELTA", "F_MEASURED_METRICS",
@@ -313,5 +466,9 @@ __all__ = [
     "MAX_FLUSH_ATTEMPTS",
     "DEFAULT_SOURCE", "DEFAULT_GENERATOR", "SMOKE_GENERATOR",
     "DEFAULT_CONFIDENCE",
-    "recipe_canonical_id", "format_recipe_path",
+    "DEFAULT_MODEL_SLUG", "DEFAULT_HARDWARE_SLUG",
+    "DEFAULT_FRAMEWORK_SLUG", "DEFAULT_FRAMEWORK_VERSION_SLUG",
+    "DEFAULT_PRECISION_SLUG",
+    "recipe_canonical_id", "canonical_labels",
+    "detect_framework_version", "format_recipe_path",
 ]
