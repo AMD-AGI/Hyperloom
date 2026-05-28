@@ -395,7 +395,7 @@ async def test_integrate_handler_rejects_incompatible_standalone_cpp(
 
 
 @pytest.mark.asyncio
-async def test_integrate_handler_injects_extra_sglang_args(
+async def test_integrate_handler_injects_extra_server_args(
     session_dir, tmp_path,
 ):
     base_yaml = tmp_path / "base.yaml"
@@ -418,7 +418,7 @@ async def test_integrate_handler_injects_extra_sglang_args(
         "base_tput": 800.0,
         "config_path": str(base_yaml),
         "kernel_id": "k_good",
-        "extra_sglang_args": "--cuda-graph-max-bs 8",
+        "extra_server_args": "--cuda-graph-max-bs 8",
         "patch_path": str(patch_file),
         "target_file": str(target),
         "allow_unknown_target": True,

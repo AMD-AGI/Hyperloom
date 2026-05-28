@@ -771,12 +771,12 @@ async def test_promote_explore_records_success_attempt(session_dir):
             "status": "succeeded",
             "winners": [{
                 "name": "v1",
-                "extra_sglang_args": "--foo",
+                "extra_server_args": "--foo",
                 "extra_envs": {"K": "1"},
             }],
             "best_variant": {
                 "name": "v1",
-                "extra_sglang_args": "--foo",
+                "extra_server_args": "--foo",
                 "extra_envs": {"K": "1"},
             },
             "output_throughput": 900.0,
@@ -826,12 +826,12 @@ async def test_promote_explore_updates_validated_gain(session_dir):
             "status": "succeeded",
             "winners": [{
                 "name": "kv_fp8",
-                "extra_sglang_args": "--kv-cache-fp8",
+                "extra_server_args": "--kv-cache-fp8",
                 "extra_envs": {},
             }],
             "best_variant": {
                 "name": "kv_fp8",
-                "extra_sglang_args": "--kv-cache-fp8",
+                "extra_server_args": "--kv-cache-fp8",
                 "extra_envs": {},
             },
             "output_throughput": 1100.0,
@@ -957,7 +957,7 @@ def _mk_baseline_task(params: dict, *, task_id: str = "t-fp-1") -> Task:
 
 def test_fingerprint_keys_covers_recovery_surface():
     expected = {
-        "benchmark_script", "result_dir", "extra_sglang_args",
+        "benchmark_script", "result_dir", "extra_server_args",
         "extra_envs", "model_path", "gpu_type", "config_path",
         "disable_run_eval",
     }
@@ -975,7 +975,7 @@ def test_fingerprint_missing_keys_become_none_or_empty():
     fp = _baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
     assert fp["benchmark_script"] == "sglang_mi300x.sh"
     assert fp["result_dir"] is None
-    assert fp["extra_sglang_args"] is None
+    assert fp["extra_server_args"] is None
     assert fp["extra_envs"] == []
     assert fp["model_path"] is None
     fp_with_empty = _baseline_params_fingerprint({
@@ -998,7 +998,7 @@ def test_fingerprint_different_overrides_produce_different_fingerprints():
     a = _baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
     b = _baseline_params_fingerprint({"benchmark_script": "dsr1_fp8_mi300x.sh"})
     c = _baseline_params_fingerprint({"result_dir": "/workspace"})
-    d = _baseline_params_fingerprint({"extra_sglang_args": "--mem-fraction-static 0.9"})
+    d = _baseline_params_fingerprint({"extra_server_args": "--mem-fraction-static 0.9"})
     encoded = {json.dumps(x, sort_keys=True) for x in (a, b, c, d)}
     assert len(encoded) == 4
 
@@ -1103,7 +1103,7 @@ def test_summarize_failed_variants_projects_expected_keys():
                 "(url=http://10.245.131.67:8888/health, "
                 "last_err=ConnectError: All connection attempts failed)"
             ),
-            "extra_sglang_args": "--max-num-seqs 128",
+            "extra_server_args": "--max-num-seqs 128",
         },
         {
             "name": "max_num_seqs_512",
@@ -1121,7 +1121,7 @@ def test_summarize_failed_variants_projects_expected_keys():
             "(url=http://10.245.131.67:8888/health, "
             "last_err=ConnectError: All connection attempts failed)"
         ),
-        "extra_sglang_args": "--max-num-seqs 128",
+        "extra_server_args": "--max-num-seqs 128",
     }
 
 
@@ -1133,7 +1133,7 @@ def test_summarize_failed_variants_truncates_error_excerpt_at_400_chars():
             "status": "failed",
             "error_class": "ec",
             "error": huge_err,
-            "extra_sglang_args": "",
+            "extra_server_args": "",
         },
     ]
     out = coordinator._summarize_failed_variants(rows)
@@ -1148,7 +1148,7 @@ def test_summarize_failed_variants_caps_max_entries():
             "status": "failed",
             "error_class": "ec",
             "error": "boom",
-            "extra_sglang_args": f"--arg {i}",
+            "extra_server_args": f"--arg {i}",
         }
         for i in range(50)
     ]
@@ -1176,7 +1176,7 @@ def test_summarize_failed_variants_handles_missing_optional_fields():
         "name": "v",
         "error_class": None,
         "error_excerpt": None,
-        "extra_sglang_args": "",
+        "extra_server_args": "",
     }]
 
 
