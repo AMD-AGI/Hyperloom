@@ -41,6 +41,7 @@ from .dynamic_action_history import (
     ABANDONED_FIELDS as _ABANDONED_FIELDS_CANONICAL,
     DispatchHistoryEvent,
     append_dispatch_history_row,
+    write_dynamic_action_telemetry,
 )
 from .dynamic_action_proposal import (
     DynamicActionStatus,
@@ -439,6 +440,20 @@ def _process_one(
         except (OSError, ValueError):
             log.exception(
                 "dynamic_action resume: dispatch_history append failed "
+                "for dyn_id=%s",
+                dyn_id,
+            )
+        # G3 — telemetry rollup; abandoned counts toward the
+        # per-dyn_id terminal-state tally just like KEPT / REVERTED.
+        try:
+            write_dynamic_action_telemetry(
+                session_dir=session_dir,
+                dyn_id=dyn_id,
+                lifecycle=DynamicActionStatus.ABANDONED,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action resume: telemetry write failed "
                 "for dyn_id=%s",
                 dyn_id,
             )
