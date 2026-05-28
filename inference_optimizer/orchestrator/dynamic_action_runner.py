@@ -44,6 +44,7 @@ from .dynamic_action_tools import (
     TOOL_READ_SOURCE,
     TOOL_RUN_BENCH,
     apply_patch_in_worktree,
+    capture_worktree_cumulative_diff,
     read_session_artifact,
     read_source,
     reset_worktree,
@@ -292,11 +293,20 @@ class DynamicActionRunner:
                             "emit_empty", None,
                         )
                         break
+                    # G6 — when the worktree has uncommitted changes
+                    # (sub-agent applied patches during iteration),
+                    # the proposal patch_text must equal git diff HEAD.
+                    # A clean worktree skips the check.
+                    cumulative_diff = (
+                        capture_worktree_cumulative_diff(worktree)
+                        if worktree is not None else None
+                    )
                     verdict: ProposalValidationResult = validate_proposal(
                         action.args,
                         spec_scope_domains=list(
                             spec_payload.get("scope_domains") or (),
                         ),
+                        worktree_cumulative_diff=cumulative_diff,
                     )
                     if not verdict.ok:
                         consecutive_rejects += 1
