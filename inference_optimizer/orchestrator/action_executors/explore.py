@@ -177,6 +177,150 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Phase 6.2 — Atom default grid seed
+#
+# ``_atom_default_grid`` returns a curated list of ``GridVariant`` objects
+# seeded from atom's CLI flag space (audited Phase 2.3 via
+# ``EngineArgs.add_cli_args``). Sglang and vllm don't have analogous
+# helpers today — the LLM is hinted via system-prompt prose to emit
+# variants from their flag spaces — so ``_default_grid_for_framework``
+# only dispatches a non-empty grid for atom. Sglang / vllm callers
+# receive ``[]`` and continue to rely on the LLM-emitted ``default_grid``
+# provenance variants.
+#
+# Each variant is gated *up-front* on ``model_class`` so MoE / MLA / MTP
+# variants are NOT emitted for dense models. ``apply_compatibility_filter``
+# (see ``_grid_runner.py``) is a second-line gate that drops any variant
+# whose flag literal is missing from ``atom --help`` — for the atom box
+# this works because Phase 2.3 wired the atom help-text probe.
+# ---------------------------------------------------------------------------
+
+# Curated MTP-capable model class set. MTP requires the model architecture
+# to expose multi-token-prediction heads (DeepSeek family today). Adding
+# new entries should be cross-referenced with atom's MTP runtime support
+# in ``atom/model_engine/`` rather than guessed from the model name alone.
+_ATOM_MTP_CAPABLE_MODEL_CLASSES: frozenset[str] = frozenset({
+    "moe_mla",
+    "moe_mla_nsa",
+})
+
+
+def _atom_default_grid(
+    *,
+    model_class: str,
+    conc: int,
+    isl: int = 0,
+    osl: int = 0,
+) -> list[GridVariant]:
+    """Atom EXPLORE default grid, seeded from atom's known perf knobs.
+
+    Phase 6.2 (Atom UX polish). The variants below cover the atom CLI
+    surface audited during Phase 2.3:
+
+    * compile / cudagraph bracket (``--level``,
+      ``--cudagraph-capture-sizes``)
+    * prefix cache toggle (``--enable_prefix_caching``)
+    * KV-cache fp8 (``--kv_cache_dtype fp8``) — gated on FP8 models
+    * MoE expert parallel (``--enable-expert-parallel``) — gated on
+      MoE models
+    * MLA DP-attention (``--enable-dp-attention``) — gated on MLA
+      models
+    * MTP speculative decoding (``--method mtp
+      --num-speculative-tokens {1,3}``) — gated on the curated
+      MTP-capable model class set above.
+
+    The atom box's ``apply_compatibility_filter`` (with the atom
+    help-text probe live) is the second-line gate: anything whose flag
+    literal isn't in ``atom --help`` is dropped pre-dispatch.
+
+    Variant naming convention: every variant name is prefixed with
+    ``atom_`` so cross-session reports can disambiguate from
+    sglang/vllm-named variants at a glance.
+    """
+    mc_l = (model_class or "").strip().lower()
+    is_moe = "moe" in mc_l
+    is_mla = "mla" in mc_l
+    is_fp8 = "fp8" in mc_l or mc_l.endswith("_fp8")
+    is_mtp_capable = mc_l in _ATOM_MTP_CAPABLE_MODEL_CLASSES
+
+    variants: list[GridVariant] = []
+
+    def _add(name: str, args: str) -> None:
+        gv = GridVariant(
+            name=name,
+            extra_server_args=args,
+            extra_envs={},
+            note="default_grid",
+        )
+        gv.provenance = "default_grid"  # type: ignore[attr-defined]
+        variants.append(gv)
+
+    _add("atom_level_2", "--level 2")
+    _add("atom_level_3", "--level 3")
+    _add("atom_prefix_cache", "--enable_prefix_caching")
+
+    if is_fp8:
+        _add("atom_kv_fp8", "--kv_cache_dtype fp8")
+
+    if is_moe:
+        _add("atom_ep", "--enable-expert-parallel")
+
+    if is_mla:
+        _add("atom_dp_attn", "--enable-dp-attention")
+
+    if is_mtp_capable:
+        _add(
+            "atom_mtp_3",
+            "--method mtp --num-speculative-tokens 3",
+        )
+        _add(
+            "atom_mtp_1",
+            "--method mtp --num-speculative-tokens 1",
+        )
+
+    if conc and conc > 0:
+        # Bracket the live concurrency in the cudagraph capture list so
+        # the cudagraph hits the actual decode batch sizes the workload
+        # spends most of its time at.
+        cg_sizes = sorted({1, 2, 4, 8, 16, int(conc)})
+        cg_str = "[" + ",".join(str(s) for s in cg_sizes) + "]"
+        _add(
+            "atom_cudagraph_bracket",
+            f"--cudagraph-capture-sizes {cg_str}",
+        )
+
+    return variants
+
+
+def _default_grid_for_framework(
+    framework: str,
+    *,
+    model_class: str,
+    conc: int = 0,
+    isl: int = 0,
+    osl: int = 0,
+) -> list[GridVariant]:
+    """Phase 6.2 framework-keyed default grid dispatch.
+
+    Atom returns a curated seed grid (see :func:`_atom_default_grid`).
+    Sglang / vllm continue to rely on LLM-emitted variants stamped with
+    ``provenance='default_grid'`` — no programmatic seed exists for
+    those frameworks today and adding one is out of scope for the
+    atom UX polish phase. Unknown frameworks also return ``[]``.
+
+    Callers MUST treat an empty list as "no programmatic seed for this
+    framework"; the EXPLORE flow continues to accept LLM-emitted
+    ``default_grid`` variants exactly as before.
+    """
+    fw = (framework or "").strip().lower()
+    if fw == "atom":
+        return _atom_default_grid(
+            model_class=model_class, conc=conc, isl=isl, osl=osl,
+        )
+    return []
+
+
 def _gain_pct(tput: float | None, base_tput: float) -> float | None:
     if (
         not isinstance(tput, (int, float))

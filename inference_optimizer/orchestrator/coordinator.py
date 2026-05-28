@@ -5749,6 +5749,12 @@ class Coordinator:
         # so serving / system / kernel-switch specialists reason against the
         # real benchmark workload rather than the dataclass defaults.
         params.setdefault("gpu_type", state.gpu_type or "")
+        # Active server framework name — Phase 6.1 uses this to switch
+        # the per-domain "what to read first" hint blocks to atom paths
+        # when SharedState.framework == "atom". sglang / vllm sessions
+        # fall through to the canonical hint blocks.
+        if getattr(state, "framework", "") or "":
+            params.setdefault("framework", str(state.framework))
         if int(getattr(state, "tp", 0) or 0) > 0:
             params.setdefault("tp", int(state.tp))
         if getattr(state, "precision", "") or "":

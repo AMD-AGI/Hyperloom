@@ -28,7 +28,12 @@ from inference_optimizer.orchestrator.action_executors._canonical_fingerprint im
     canonical_fingerprint,
 )
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
+    apply_compatibility_filter,
     variant_fingerprint,
+)
+from inference_optimizer.orchestrator.action_executors.explore import (
+    _atom_default_grid,
+    _default_grid_for_framework,
 )
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.resource_lock import (
@@ -768,3 +773,156 @@ def test_capability_summary_has_explore_row_with_legacy_aliases():
     assert "backends" in cap
     assert "params" in cap
     assert "validate_stack" in cap
+
+
+# ===========================================================================
+# Phase 6.2 — _atom_default_grid + framework dispatch
+# ===========================================================================
+def _names(variants):
+    return [v.name for v in variants]
+
+
+def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
+    """MoE + MLA + MTP-capable model class (e.g. ``moe_mla``) unlocks
+    the full atom seed grid. Acceptance gate (Phase 6.2 README):
+    >= 5 variants; each gated branch present.
+    """
+    grid = _atom_default_grid(
+        model_class="moe_mla", conc=64, isl=1024, osl=1024,
+    )
+    names = _names(grid)
+    assert len(grid) >= 5, f"too few variants: {names}"
+    # Base coverage.
+    assert "atom_level_2" in names
+    assert "atom_level_3" in names
+    assert "atom_prefix_cache" in names
+    # Model-class-gated branches.
+    assert "atom_ep" in names, "MoE branch missing for moe_mla"
+    assert "atom_dp_attn" in names, "MLA branch missing for moe_mla"
+    assert "atom_mtp_3" in names, "MTP branch missing for moe_mla"
+    assert "atom_mtp_1" in names
+    # CONC bracket variant emitted because conc > 0.
+    assert "atom_cudagraph_bracket" in names
+
+
+def test_atom_default_grid_dense_model_omits_moe_mla_mtp():
+    """Dense model class must NOT emit MoE / MLA / MTP variants —
+    those flags would either fail flag-compat or crash atom on
+    startup.
+    """
+    grid = _atom_default_grid(
+        model_class="dense", conc=8, isl=512, osl=512,
+    )
+    names = _names(grid)
+    assert "atom_ep" not in names
+    assert "atom_dp_attn" not in names
+    assert "atom_mtp_3" not in names
+    assert "atom_mtp_1" not in names
+    # Basic variants still present.
+    assert "atom_level_2" in names
+    assert "atom_level_3" in names
+    assert "atom_prefix_cache" in names
+
+
+def test_atom_default_grid_fp8_model_emits_kv_fp8():
+    grid = _atom_default_grid(
+        model_class="moe_fp8", conc=16, isl=512, osl=512,
+    )
+    names = _names(grid)
+    assert "atom_kv_fp8" in names
+    # FP8 + MoE gate the EP variant on too.
+    assert "atom_ep" in names
+
+
+def test_atom_default_grid_non_fp8_omits_kv_fp8():
+    grid = _atom_default_grid(model_class="dense", conc=8)
+    names = _names(grid)
+    assert "atom_kv_fp8" not in names
+
+
+def test_atom_default_grid_variants_have_unique_names():
+    """Round-trip every supported model class through the grid and
+    assert names are unique within each grid (the EXPLORE ledger keys
+    by name within a single round).
+    """
+    for mc in ("dense", "moe", "moe_mla", "moe_mla_nsa", "moe_fp8", ""):
+        grid = _atom_default_grid(model_class=mc, conc=32)
+        names = _names(grid)
+        assert len(names) == len(set(names)), (
+            f"duplicate names in atom grid for model_class={mc!r}: {names}"
+        )
+
+
+def test_atom_default_grid_names_use_atom_prefix():
+    grid = _atom_default_grid(model_class="moe_mla", conc=64)
+    for v in grid:
+        assert v.name.startswith("atom_"), (
+            f"variant name does not start with 'atom_': {v.name!r}"
+        )
+
+
+def test_atom_default_grid_variants_carry_default_grid_provenance():
+    grid = _atom_default_grid(model_class="moe_mla", conc=64)
+    for v in grid:
+        # ``provenance`` is stashed onto the dataclass instance.
+        assert getattr(v, "provenance", None) == "default_grid", (
+            f"variant {v.name!r} provenance not set to default_grid"
+        )
+
+
+def test_atom_default_grid_conc_zero_omits_cudagraph_bracket():
+    """When the Coordinator can't supply CONC, the bracket variant is
+    skipped (would otherwise emit an empty / nonsensical list).
+    """
+    grid = _atom_default_grid(model_class="dense", conc=0)
+    assert "atom_cudagraph_bracket" not in _names(grid)
+
+
+def test_default_grid_for_framework_atom_returns_seeded_grid():
+    grid = _default_grid_for_framework(
+        "atom", model_class="moe_mla", conc=64, isl=1024, osl=1024,
+    )
+    assert grid, "atom framework should produce a non-empty default grid"
+    assert any(v.name == "atom_level_2" for v in grid)
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm", "", "unknown"])
+def test_default_grid_for_framework_non_atom_returns_empty(framework):
+    """Sglang / vllm rely on LLM-emitted variants (no programmatic
+    seed exists today). Unknown frameworks must also return ``[]``
+    rather than crash.
+    """
+    grid = _default_grid_for_framework(
+        framework, model_class="moe_mla", conc=64,
+    )
+    assert grid == []
+
+
+def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
+    monkeypatch,
+):
+    """When the atom help-text probe is unavailable (e.g. test sandbox
+    with no atom installed), ``apply_compatibility_filter`` MUST NOT
+    drop any atom seed variant — it treats absent help text as
+    "defer to graceful runtime failure".
+
+    Guarantees the seed grid is never silently emptied by the
+    compatibility filter on test boxes.
+    """
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    # Force the help-text probe to return empty (simulates atom not
+    # importable). The filter must not drop any of the seed variants.
+    from inference_optimizer.orchestrator.action_executors import (
+        _grid_runner,
+    )
+    monkeypatch.setattr(
+        _grid_runner, "_probe_server_help_text", lambda fw: "",
+    )
+
+    grid = _atom_default_grid(model_class="moe_mla", conc=64)
+    kept, dropped = apply_compatibility_filter(grid)
+    assert kept == grid, (
+        f"compatibility filter dropped seed variants when help-text "
+        f"probe is empty; dropped={dropped}"
+    )
