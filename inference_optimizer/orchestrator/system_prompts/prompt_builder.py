@@ -62,6 +62,11 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # apply+restart+gate that consumes specialist worktree patches.
     # Both live under pipeline_phase=explore in the registry.
     "specialist",
+    # dynamic_action.MD P7 — supplementary cross-domain ReAct
+    # sub-agent channel. EXPLORE-only, round-cap 1; declared in
+    # the catalogue right next to specialist so the LLM reads them
+    # as sibling channels (specialist = default, dynamic =補充).
+    "dynamic_action",
     "integrate_patch",
     "sweep",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
@@ -89,6 +94,7 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # PR-A1 (Arbor-into-Hyperloom): specialist + integrate_patch are
     # always-on; they are EXPLORE-phase actions and unrelated to kernel mode.
     "specialist",
+    "dynamic_action",
     "integrate_patch",
     "sweep",
     # finalize
@@ -383,6 +389,28 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "config_changes?={ENV_VAR: value}, "
             "keep_threshold_pct?=0.2, "
             "accuracy_baseline?={task: {metric: score}}}}"
+        )
+    # dynamic_action.MD P7 §5 — emit hint mirrors specialist's shape:
+    # payload field table + key constraints + reason-code surface so
+    # the LLM can self-correct on PolicyGate denials.
+    if meta.name == "dynamic_action":
+        return (
+            "delegate{action_name='dynamic_action', params={"
+            "motivation_gap_text=<why no single specialist can cover>, "
+            "scope_domains=[<>=2 specialist domain keys>], "
+            "side_effects_declared=[<framework_source|...>], "
+            "budget_hint?=<low|medium|high>}}. "
+            "Constraints: scope_domains length >= 2; "
+            "side_effects_declared must not include any kernel-owned "
+            "action / metric / accuracy_gate / server lifecycle; "
+            "at most 1 dispatch per EXPLORE round. "
+            "PolicyGate reason codes on denial: "
+            "dynamic_phase_violation / dynamic_source_violation / "
+            "dynamic_payload_schema / dynamic_scope_too_narrow / "
+            "dynamic_scope_unknown_domain / "
+            "dynamic_side_effects_red_line / "
+            "dynamic_kernel_only_disallowed / "
+            "dynamic_round_cap_exhausted."
         )
     return (
         f"propose_action{{action_name='{meta.name}', "
@@ -891,6 +919,34 @@ def _read_rules_fragment(path: Path | None) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# dynamic_action.MD P7 §3 — entry declaration. Strictly follows §1.7:
+# state that the channel exists + when it is appropriate + that it is
+# NOT the default; no triggering heuristics, no examples, no negative
+# guidance about cost / cooldown / specialist failure fallback.
+# ---------------------------------------------------------------------------
+def _section_dynamic_action(actions: list[ActionMetadata]) -> list[str] | None:
+    if not any(a.name == "dynamic_action" for a in actions):
+        return None
+    return [
+        "## 6b. DYNAMIC ACTION (supplementary EXPLORE channel)",
+        "",
+        "If you believe a single cross-domain patch combination exists",
+        "that no specialist could surface within its own-domain prompt",
+        "boundary, you MAY dispatch one `dynamic_action` in the EXPLORE",
+        "phase via `delegate{action_name='dynamic_action', params={...}}`.",
+        "",
+        "`dynamic_action` is a **supplementary** channel, not the default.",
+        "Specialists remain the primary EXPLORE entry. At most ONE",
+        "`dynamic_action` dispatch is allowed per EXPLORE round.",
+        "",
+        "Payload contract is closed; see the EMIT line on the action",
+        "catalogue entry above for the field table + PolicyGate denial",
+        "reason codes. The `=== Dynamic Action History ===` block (when",
+        "non-empty) lists the most recent outcomes of your own dispatches.",
+    ]
+
+
 def _section_rules(rules_md: str) -> list[str]:
     body = rules_md.strip() or (
         "(orchestration.md rules fragment not found — Coordinator will still"
@@ -968,6 +1024,13 @@ def build_orchestration_prompt(
     ]
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
+    # dynamic_action.MD P7 §6 — Dynamic Action declaration sits after
+    # the decision framework / kernel-opt pipeline so the LLM sees the
+    # supplementary-channel framing once it has internalised the
+    # default specialist-first decision flow.
+    dyn_section = _section_dynamic_action(actions)
+    if dyn_section is not None:
+        sections.append(dyn_section)
     sections.append(_section_rules(rules_md))
 
     # Join sections with a blank line between each; ensure single trailing
