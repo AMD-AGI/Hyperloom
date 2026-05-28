@@ -11,7 +11,7 @@ Records are JSON-Lines (one record per line) under
 is intentionally inside the framework-agent KB tree because the
 records describe upstream-PR outcomes, not orchestrator state; the
 ``fa`` CLI reads from the same tree on subsequent
-``fa candidates`` calls to filter out PRs we already integrated.
+``fa phase-discover`` calls to filter out PRs we already integrated.
 
 Module-level :data:`KB_ROOT` is monkeypatchable in tests so the writer
 can target a tmp_path without polluting the workspace KB.

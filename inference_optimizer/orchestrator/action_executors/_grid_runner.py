@@ -722,6 +722,11 @@ def sanitize_result_dir(value: Any) -> str | None:
 def server_args_env_name(framework: str | None) -> str:
     """Return the Magpie env var used to append backend server args."""
     name = str(framework or "").strip().lower()
+    # atom check first: "atom" is not a substring of vllm/sglang, but keep
+    # ordering explicit so future framework names with overlapping substrings
+    # cannot accidentally match the wrong branch.
+    if "atom" in name:
+        return "EXTRA_ATOM_ARGS"
     if "vllm" in name:
         return "EXTRA_VLLM_ARGS"
     return "EXTRA_SGLANG_ARGS"
