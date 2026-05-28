@@ -327,9 +327,27 @@ def _safe_mtime(p: Path) -> float:
 
 
 def _default_profile_config() -> Path:
-    """Resolve default profile YAML based on $FRAMEWORK env (sglang/vllm)."""
+    """Resolve default profile YAML based on $FRAMEWORK env.
+
+    Recognised values: ``atom``, ``vllm``, ``sglang``. Unknown / unset
+    values fall back to ``profile_sglang.yaml`` so existing sglang-default
+    tests keep passing.
+
+    The atom branch ships separately because the materializer reads the
+    top-level ``benchmark.framework`` field from the YAML (NOT
+    ``$FRAMEWORK``) to resolve Magpie's wrapper script — silently
+    falling through to ``profile_sglang.yaml`` on ``FRAMEWORK=atom``
+    would launch ``sglang_mi*x.sh`` under an atom-named session, which
+    crashes on atom-only boxes and would run sglang under an atom
+    session on multi-framework boxes.
+    """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    name = "profile_vllm.yaml" if fw == "vllm" else "profile_sglang.yaml"
+    if fw == "atom":
+        name = "profile_atom.yaml"
+    elif fw == "vllm":
+        name = "profile_vllm.yaml"
+    else:
+        name = "profile_sglang.yaml"
     return asset_root() / "scripts" / "configs" / name
 
 

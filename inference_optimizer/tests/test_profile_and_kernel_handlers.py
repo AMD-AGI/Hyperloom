@@ -930,6 +930,122 @@ def test_default_profile_config_tracks_framework(monkeypatch):
     assert _default_profile_config().name == "profile_sglang.yaml"
 
 
+def test_default_profile_config_resolves_atom_when_env_set(monkeypatch):
+    """Phase 1: $FRAMEWORK=atom must resolve to profile_atom.yaml.
+
+    Previously the resolver silently fell through to
+    profile_sglang.yaml whose top-level `framework: sglang` field made
+    Magpie launch `sglang_mi*x.sh` instead of `atom_mi*x.sh`. The
+    dedicated atom profile YAML closes that gap; this test pins the
+    resolver wiring."""
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    cfg = _default_profile_config()
+    assert cfg.name == "profile_atom.yaml"
+    assert cfg.exists(), (
+        "profile_atom.yaml must ship as a package asset (Phase 1)"
+    )
+
+
+def test_profile_atom_yaml_declares_atom_framework():
+    """The shipped profile_atom.yaml must declare `framework: atom` at
+    the top level — Magpie's materializer reads `bench.get("framework")`
+    (NOT `$FRAMEWORK`) to resolve the wrapper script. A mis-declared
+    field would re-create the original regression by routing atom
+    sessions through `sglang_mi*x.sh`."""
+    import yaml
+    cfg_path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts" / "configs" / "profile_atom.yaml"
+    )
+    assert cfg_path.exists()
+    with cfg_path.open() as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["benchmark"]["framework"] == "atom"
+    assert cfg["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
+    envs = cfg["benchmark"]["envs"]
+    assert envs.get("PROFILE") == "1", (
+        "profile_atom.yaml must set PROFILE=1 so Magpie's atom_mi*x.sh "
+        "bridges to atom's --torch-profiler-dir CLI flag"
+    )
+    extra = str(envs.get("EXTRA_ATOM_ARGS", ""))
+    assert "--trust-remote-code" in extra, (
+        "profile_atom.yaml must carry --trust-remote-code (same as "
+        "baseline_atom.yaml) so production atom-served models with "
+        "modeling code in the model dir still load."
+    )
+
+
+def test_materialize_config_renders_atom_framework_under_profile(
+    tmp_path, monkeypatch,
+):
+    """Phase 1 acceptance gate: with FRAMEWORK=atom + PROFILE=1, the
+    rendered YAML must keep `framework: atom`. This is the gate that
+    prevents the original regression (silently rendering `framework:
+    sglang` under an atom-named session) from coming back."""
+    import yaml
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    monkeypatch.setenv("PROFILE", "1")
+    src = _default_profile_config()
+    assert src.name == "profile_atom.yaml"
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    assert rendered["benchmark"]["framework"] == "atom", (
+        f"Rendered profile YAML must keep framework=atom so Magpie "
+        f"picks atom_mi*x.sh; got {rendered['benchmark'].get('framework')!r}"
+    )
+
+
+def test_materialize_atom_profile_does_not_inject_vllm_or_sglang_args(
+    tmp_path, monkeypatch,
+):
+    """Phase 1: the atom profile path must NOT inject any sglang/vllm
+    -specific profiler env or CLI flag into EXTRA_ATOM_ARGS / envs.
+    atom's argparse would reject --profiler-config.* and the SGLang
+    PROFILE_EXTRA_BODY HTTP protocol is meaningless on atom."""
+    import yaml
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    monkeypatch.setenv("PROFILE", "1")
+    src = _default_profile_config()
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    extra = str(envs.get("EXTRA_ATOM_ARGS", ""))
+    assert "--trust-remote-code" in extra, (
+        f"atom profile path lost base --trust-remote-code: {extra!r}"
+    )
+    assert "--profiler-config" not in extra, (
+        f"atom EXTRA_ATOM_ARGS leaked sglang/vllm profiler flag: {extra!r}"
+    )
+    assert "EXTRA_VLLM_ARGS" not in envs, (
+        f"atom profile render must not produce EXTRA_VLLM_ARGS: {envs!r}"
+    )
+    assert "EXTRA_SGLANG_ARGS" not in envs, (
+        f"atom profile render must not produce EXTRA_SGLANG_ARGS: {envs!r}"
+    )
+    assert "PROFILE_EXTRA_BODY" not in envs, (
+        f"atom profile render must not produce SGLang PROFILE_EXTRA_BODY: "
+        f"{envs!r}"
+    )
+    # The TraceLens steady-state NUM_PROMPTS formula still applies to
+    # atom (the HTTP /stop_profile boundary needs enough prompts to push
+    # past warmup), so it MUST be populated on the rendered envs.
+    num_prompts = envs.get("NUM_PROMPTS")
+    assert num_prompts is not None and int(num_prompts) > 0, (
+        f"atom profile render must still set NUM_PROMPTS from the "
+        f"TraceLens steady-state formula: {envs!r}"
+    )
+
+
+def test_profile_executor_picks_atom_yaml_at_call_time(monkeypatch):
+    """Mirror of test_profile_executor_picks_framework_yaml_at_call_time
+    for atom — the executor's call-time resolver must pick the new
+    profile_atom.yaml when FRAMEWORK=atom."""
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    pe = ProfileExecutor()
+    assert pe.default_config_path is None
+    assert pe._resolve_default_config().name == "profile_atom.yaml"
+
+
 def test_baseline_executor_picks_framework_yaml_at_call_time(tmp_path, monkeypatch):
     """No config_path override + FRAMEWORK=vllm => baseline_vllm.yaml is
     the resolved default, NOT baseline_sglang.yaml. This is the very
