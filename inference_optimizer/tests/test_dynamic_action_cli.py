@@ -1,10 +1,9 @@
-"""dynamic_action_gaps.md G5 — CLI knobs smoke tests.
+"""Smoke tests for the dynamic_action CLI knobs:
+``--dynamic-action-model`` / ``--dynamic-action-turn-cap`` /
+``--dynamic-action-wall-clock-sec``.
 
-The runner-construction helper in ``cli.py`` reads three operator
-flags via ``getattr`` defaults. Before G5 the argparser did not
-define them, so ``getattr`` always returned the default — operators
-had no control. These tests pin both the parse + the wiring into
-:class:`DynamicActionRunner`.
+Pins both argparse acceptance and the wiring into
+:class:`DynamicActionRunner` defaults.
 """
 
 from __future__ import annotations
@@ -44,9 +43,9 @@ def test_cli_dynamic_action_wall_clock_propagates():
 
 
 def test_cli_defaults_match_runner_constants():
-    """The CLI defaults absent overrides MUST match the runner
-    module's DEFAULT_* — otherwise an operator's "default" run uses
-    different budgets than the runner advertises."""
+    """Without overrides the CLI defaults resolve to the runner's
+    ``DEFAULT_*`` constants so an operator's "default" run matches
+    what the runner advertises."""
     ns = _parse()
     turn_cap = (
         int(ns.dynamic_action_turn_cap) if ns.dynamic_action_turn_cap

@@ -1,6 +1,4 @@
-"""dynamic_action.MD P8 §10 — resume-time abandoned sweep matrix.
-
-Each ``test_p8_scenario_*`` test maps 1:1 to one row of P8 §10.
+"""Tests for the resume-time abandoned-dispatch sweep.
 Auxiliary tests pin the closed dispatch_history schema, the
 worktree-cleanup outcome enum, and the multi-restart idempotency
 contract.
@@ -68,7 +66,7 @@ _HAPPY_PATH = (
     "AWAITING_CRITIC", "INTEGRATING",
 )
 
-# Canonical predecessor for each terminal status — pinned by P6 §4.1
+# Canonical predecessor lifecycle for each terminal status.
 # state machine. The walker drops out of the happy path at the
 # predecessor and emits one final transition to the terminal.
 _TERMINAL_PREDECESSOR: dict[str, str] = {
