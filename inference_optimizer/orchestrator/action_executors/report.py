@@ -304,6 +304,18 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
             "for the report._"
         )
         lines.append("")
+        lines.append(
+            "_The **Theoretical peak** below is the decode "
+            "memory-roofline ceiling derived from the GPU's HBM "
+            "bandwidth and the model's weight + KV-cache traffic per "
+            "token (see `roofline_ceiling.compute_peak_from_state`). "
+            "It is an upper bound: real `output_throughput` always "
+            "stays under it because of comm overhead, kernel "
+            "efficiency < 100%, and KV-cache fragmentation. **Within "
+            "roofline %** = measured / peak; **Gap to roofline %** = "
+            "100 − Within._"
+        )
+        lines.append("")
         lines.extend(format_roofline_metrics_table(cmp))
         lines.append(f"### Snapshot #{base_id} — Executive Summary")
         lines.append("")
@@ -322,6 +334,20 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "The baseline snapshot was captured at PRELUDE; the latest "
         "snapshot was captured after a +10% gain watermark refresh "
         "(see `Coordinator._maybe_enqueue_watermark_roofline`)."
+    )
+    lines.append("")
+    lines.append(
+        "_The **Theoretical peak** below is the decode "
+        "memory-roofline ceiling derived from the GPU's HBM "
+        "bandwidth and the model's weight + KV-cache traffic per "
+        "token (see `roofline_ceiling.compute_peak_from_state`). "
+        "It is an upper bound: real `output_throughput` always "
+        "stays under it because of comm overhead, kernel "
+        "efficiency < 100%, and KV-cache fragmentation. **Within "
+        "roofline %** = measured / peak; **Gap to roofline %** = "
+        "100 − Within. The ceiling is a session-level constant "
+        "(hardware + model + isl/osl don't change), so baseline and "
+        "latest are compared against the same anchor._"
     )
     lines.append("")
     lines.extend(format_roofline_metrics_table(cmp))

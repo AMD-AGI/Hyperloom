@@ -2696,10 +2696,31 @@ class SharedState:
         # errors degrade silently to None fields.
         try:
             from .roofline_snapshot import build_roofline_snapshot
+            # Stamp decode-roofline ceiling + measured throughput so
+            # the dashboard can surface "% within roofline" without
+            # re-reading model files. Ceiling is a session-level
+            # constant (hardware + model + isl/osl don't change),
+            # achieved tput is current_best.tput if optimization has
+            # produced a winner, else baseline_tput.
+            from .roofline_ceiling import compute_peak_from_state
+            peak_tput = 0.0
+            try:
+                peak_tput = float(compute_peak_from_state(self) or 0.0)
+            except Exception:  # noqa: BLE001 — ceiling is best-effort
+                peak_tput = 0.0
+            achieved_tput = 0.0
+            cb = self.current_best if isinstance(self.current_best, dict) else {}
+            cb_tput = cb.get("tput")
+            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                achieved_tput = float(cb_tput)
+            elif isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
+                achieved_tput = float(self.baseline_tput)
             history_entry = build_roofline_snapshot(
                 snapshot_id=snapshot_id,
                 ts=ts_iso,
                 analysis_md_path=str(analysis_md_path),
+                theoretical_peak_tok_per_sec=peak_tput,
+                achieved_tok_per_sec=achieved_tput,
             )
             history_entry["trace_input"] = str(trace_input)
             history_entry["analysis_md_path"] = str(analysis_md_path)

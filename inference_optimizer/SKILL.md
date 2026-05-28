@@ -950,7 +950,13 @@ The optimizer should:
   is in flight, `specialist` / `explore` / `kernel_opt` / `integrate`
   / `deep_kernel_analysis` / `operator_tuning` / `vendor_kernel_config`
   dispatches are blocked by PolicyGate
-  (`rule='wait_for_auto_roofline'`) until it lands.
+  (`rule='wait_for_auto_roofline'`) until it lands. Each successful
+  `record_trace_analyze` also stamps a **decode memory-roofline ceiling**
+  (`HBM_BW × num_gpus / (weight_bytes / batch + kv_bytes × seq_len)`;
+  see `orchestrator/roofline_ceiling.py`) onto the appended history
+  entry, so the final report's `## Roofline Comparison` section can
+  render `% within roofline` for baseline + latest against a stable
+  (but physically unreachable) theoretical anchor.
 3. Run `select_kernels` once per trace/config and cache the result in
   `last_select_kernels`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.

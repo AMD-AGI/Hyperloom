@@ -159,6 +159,32 @@ _ROOFLINE_GATED_ACTIONS: frozenset[str] = frozenset({
 })
 
 
+# Default watermark ratio (PR #321): roofline re-fires every +10% over
+# ``last_roofline_tput`` (compound 10% → 21% → 33% …).
+_ROOFLINE_WATERMARK_RATIO_DEFAULT: float = 1.10
+
+
+def _resolve_roofline_watermark_ratio() -> float:
+    """Read the watermark ratio fresh on every call.
+
+    Default :data:`_ROOFLINE_WATERMARK_RATIO_DEFAULT` (PR #321: 1.10);
+    operators can override via ``HYPERLOOM_ROOFLINE_WATERMARK_RATIO``
+    to tune watermark sensitivity for debug / non-default workload
+    mixes. Values <= 1.0 would re-fire constantly (and noise-driven
+    false refreshes start around 1.03 — benchmark-relative tput noise
+    is ±2-3%); we clamp such values back to the default so a typo
+    doesn't melt the analysis pipeline.
+    """
+    raw = os.environ.get("HYPERLOOM_ROOFLINE_WATERMARK_RATIO")
+    if raw is None:
+        return _ROOFLINE_WATERMARK_RATIO_DEFAULT
+    try:
+        ratio = float(raw)
+    except (TypeError, ValueError):
+        return _ROOFLINE_WATERMARK_RATIO_DEFAULT
+    return ratio if ratio > 1.0 else _ROOFLINE_WATERMARK_RATIO_DEFAULT
+
+
 def effective_closing_grace_sec(
     max_minutes: float | None,
     closing_grace_sec: float | None,
@@ -1181,10 +1207,16 @@ class Coordinator:
             )
 
     # ------------------------------------------------------------------
-    # Auto-roofline — single-path PRELUDE bootstrap + 10% watermark
-    # refresh anchored on ``last_roofline_tput``.
+    # Auto-roofline — single-path PRELUDE bootstrap + watermark
+    # refresh anchored on ``last_roofline_tput``. Ratio resolution
+    # via :func:`_resolve_roofline_watermark_ratio` (env-var override).
     # ------------------------------------------------------------------
-    _ROOFLINE_WATERMARK_RATIO: float = 1.10   # 10% step over last roofline
+    @property
+    def _ROOFLINE_WATERMARK_RATIO(self) -> float:
+        """Watermark gain ratio; env-overridable so debug / non-default
+        workloads can tune sensitivity without code edits.
+        See :func:`_resolve_roofline_watermark_ratio` for the contract."""
+        return _resolve_roofline_watermark_ratio()
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project the current measured tput from
