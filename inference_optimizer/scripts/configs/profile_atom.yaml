@@ -1,0 +1,81 @@
+# Magpie profile config for Atom.
+# Same shape as baseline_atom.yaml but with torch_profiler ON so the run
+# produces a torch_trace dir downstream consumers (Kernel agent /
+# TraceLens) can read. `benchmark.model` and `benchmark.runner_type` are
+# OVERRIDDEN at runtime — see baseline_atom.yaml header for the full
+# rationale.
+#
+# atom-specific profiler wiring (IR-8; see atom_boost_tutorials.md §8):
+#   - atom's torch profiler is activated by the `--torch-profiler-dir`
+#     CLI flag injected by Magpie's `atom_mi*x.sh` from the
+#     `$ATOM_TORCH_PROFILER_DIR` env (set when PROFILE=1).
+#   - The InferenceX bench client auto-POSTs `/start_profile` and
+#     `/stop_profile` to atom's OpenAI-compatible server when `--profile`
+#     is set (driven by `PROFILE=1`).
+#   - atom writes `*.pt.trace.json.gz` under
+#     `<torch_profiler_dir>/rank_<N>/` — TraceLens consumes the format
+#     unchanged.
+#   - There is NO equivalent of vLLM's `--profiler-config.delay_iterations`
+#     / `--profiler-config.max_iterations` or SGLang's
+#     `PROFILE_EXTRA_BODY` start/stop protocol. The start/stop boundary
+#     is purely HTTP-driven; the bench window is bounded by `NUM_PROMPTS`
+#     (computed by `_workload_envs` from the same TraceLens steady-state
+#     formula used by sglang/vllm).
+#   - atom does have an `ATOM_PROFILER_MORE=1` toggle for detailed shape
+#     / callstack annotations (`atom/model_engine/model_runner.py::
+#     start_profiler`). It is intentionally left OFF here to match the
+#     safe default of `profile_sglang.yaml` / `profile_vllm.yaml`; the
+#     `--mark-trace` follow-up may revisit this.
+#
+# IMPORTANT — fields kept identical to baseline_atom.yaml:
+#   - `EXTRA_ATOM_ARGS: --trust-remote-code` (most production atom-served
+#     models ship their modeling code in the model dir).
+#   - `PATH=/opt/venv/bin:...` so the atom subprocess does not pick
+#     `/usr/bin/python3` (no torch with ROCm).
+#   - `gpu_selection.auto: false` so the executor pins via
+#     `ROCR_VISIBLE_DEVICES` at runtime.
+#
+# This YAML must declare `framework: atom` at the top level — Magpie's
+# materializer reads `bench.get("framework")` (NOT `$FRAMEWORK`) to
+# resolve the wrapper script (`atom_mi*x.sh`). A misrouted top-level
+# framework field would make Magpie launch `sglang_mi*x.sh` under an
+# atom-named session.
+
+benchmark:
+  framework: atom
+  # benchmark_script: atom_mi355x.sh  # uncomment to force a specific Magpie script
+  model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
+  precision: fp8
+  run_mode: local
+
+  envs:
+    TP: 8
+    CONC: 32
+    ISL: 128
+    OSL: 128
+    RANDOM_RANGE_RATIO: 0.8
+    MAX_MODEL_LEN: 4096
+    EXTRA_ATOM_ARGS: "--trust-remote-code"
+    # ROCR_VISIBLE_DEVICES injected at runtime by baseline.py
+    # (`0..TP-1`); export `ROCR_VISIBLE_DEVICES=...` to override.
+    PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    # --- Profile mode: bridges to atom's --torch-profiler-dir via
+    #     Magpie's atom_mi*x.sh + auto-enables --profile on the
+    #     InferenceX bench client. ---
+    PROFILE: "1"
+
+  gpu_selection:
+    auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
+
+  timeout_seconds: 3600        # 60 min hard cap — atom cold start (aiter MoE
+                               # JIT + weights load) can hit ~6 min on first run
+                               # and the profile window adds another 60–90 s.
+
+  profiler:
+    torch_profiler:
+      enabled: true                  # ← key difference vs baseline_atom.yaml
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false                 # we run TraceLens analysis ourselves
+                                     # via Hyperloom/kernel-agent tools
