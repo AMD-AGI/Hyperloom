@@ -5544,18 +5544,26 @@ class Coordinator:
         # supply values; we only fill the gaps.
         if action_name == "specialist":
             await self._warm_specialist_params(params)
-        # dynamic_action.MD P1 §6 — generate dyn_id + artefact dir
-        # skeleton before the task is enqueued so the stub executor
-        # has a workspace at first dispatch. PolicyGate has already
-        # validated the payload + cap; this branch only assigns the
-        # identifier and seeds spec.json. ``record_dynamic_action_dispatch``
-        # is called *after* the task is queued so a failed
-        # ``create_or_return_existing`` does not bump the round cap.
+        # dynamic_action.MD P1 §6 + P2 §6 — generate dyn_id, mkdir the
+        # P2 §3.1 artefact dir, write spec.json + seed_kit.json before
+        # the task is enqueued. PolicyGate has already validated the
+        # payload + cap; this branch assigns the identifier, builds
+        # the seed kit, and on assembly failure rolls back the
+        # dispatch (no task created, no round-cap bump).
+        # ``record_dynamic_action_dispatch`` runs *after* the task is
+        # queued so a failed ``create_or_return_existing`` does not
+        # bump the round cap either.
         dynamic_action_dispatch_meta: dict[str, Any] | None = None
         if action_name == DYNAMIC_ACTION_NAME:
-            dynamic_action_dispatch_meta = self._prepare_dynamic_action_dispatch(
-                params,
-            )
+            try:
+                dynamic_action_dispatch_meta = (
+                    self._prepare_dynamic_action_dispatch(params)
+                )
+            except PolicyDenied as denied:
+                await self._record_policy_denied(
+                    source, intent, denied, action_name=action_name,
+                )
+                return
         # Idempotency-key resolution chain (most-explicit first):
         #   1. ``intent.payload.idempotency_key`` — schema-correct top-level
         #      placement.
@@ -5664,34 +5672,66 @@ class Coordinator:
         ))
 
     # ------------------------------------------------------------------
-    # dynamic_action — action_dynamic_plan/P1 dispatch hook
+    # dynamic_action — action_dynamic_plan/P1 + P2 dispatch hook
     # ------------------------------------------------------------------
     def _prepare_dynamic_action_dispatch(
         self, params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Generate ``dyn_id``, seed ``spec.json``, build the summary
-        row that will land in ``SharedState.dynamic_actions`` after
-        the task is enqueued.
+        """Build the dispatch-time artefact bundle for one dynamic_action.
 
-        Mutates ``params`` in place to inject ``dyn_id`` so the stub
-        executor sees the same identifier. Returns a meta dict the
-        caller hands to :meth:`_finalize_dynamic_action_dispatch`
-        once the task row has been created.
+        Steps (all dispatch-time, before any task row exists):
+
+        1. Generate ``dyn-<round>-<seq>`` and detect dyn_id collisions
+           against ``SharedState.dynamic_actions`` (P2 §3.4 fail-fast).
+        2. mkdir ``agents/orchestration/dynamic_actions/<dyn_id>/``.
+        3. Assemble the seed kit (P2 §5). A SeedKitAssemblyError
+           aborts the dispatch — caller catches and surfaces as a
+           PolicyDenied so the round cap is not consumed.
+        4. Write ``spec.json`` (P2 §4.1 closed schema, including the
+           PolicyGate decision snapshot + ``degraded_dispatch`` flag).
+        5. Write ``seed_kit.json``.
+        6. Inject ``dyn_id`` / ``artifact_path`` / ``spec_path`` /
+           ``seed_kit_path`` into ``params`` so the stub executor +
+           future runners can locate the artefacts without traversal.
+
+        Returns the meta dict consumed by
+        :meth:`_finalize_dynamic_action_dispatch` once the task row
+        lands. On any failure the partial artefact dir is removed
+        and the raised :class:`PolicyDenied` carries a structured
+        reason code for the orchestration prompt.
         """
+        from .dynamic_action_seed_kit import (
+            SeedKitAssemblyError,
+            assemble_seed_kit,
+        )
+        from ..session_paths import (
+            dynamic_action_artifact_dir,
+            dynamic_action_seed_kit_path,
+            dynamic_action_spec_path,
+        )
+
         state = self.shared_state
         round_id = self._dynamic_action_round_id()
         seq = int(
             getattr(state, "dynamic_action_round_count", 0) or 0
         ) + 1
         dyn_id = f"dyn-{round_id}-{seq}"
-        params["dyn_id"] = dyn_id
+        if dyn_id in (getattr(state, "dynamic_actions", None) or {}):
+            raise PolicyDenied(
+                f"dynamic_action: dyn_id={dyn_id!r} already exists in "
+                f"SharedState.dynamic_actions (fail-fast on collision; "
+                f"likely a stale round-cap reset or resume race).",
+                rule="dynamic_dyn_id_collision",
+                hint=(
+                    "Coordinator should advance ``explore_search.cursor`` "
+                    "before re-dispatching; if this fires post-resume, the "
+                    "ABANDONED sweep in P8 should run first."
+                ),
+            )
         dispatched_at = datetime.now(timezone.utc).isoformat(
             timespec="microseconds",
         )
-        spec = {
-            "dyn_id": dyn_id,
-            "round_id": round_id,
-            "seq": seq,
+        payload_snapshot = {
             "motivation_gap_text": str(
                 params.get("motivation_gap_text") or "",
             ),
@@ -5700,44 +5740,124 @@ class Coordinator:
                 params.get("side_effects_declared") or (),
             ),
             "budget_hint": str(params.get("budget_hint") or "medium"),
-            "dispatched_at": dispatched_at,
         }
-        artifact_dir: Path | None = None
-        if self.session_dir is not None:
-            from ..session_paths import runs_dir as _runs_dir
-            artifact_dir = _runs_dir(
-                self.session_dir, DYNAMIC_ACTION_NAME, dyn_id,
-            )
+        policy_gate_decision = {
+            "rules_evaluated": [
+                "dynamic_phase_violation",
+                "dynamic_source_violation",
+                "dynamic_payload_schema",
+                "dynamic_scope_too_narrow",
+                "dynamic_scope_unknown_domain",
+                "dynamic_side_effects_red_line",
+                "dynamic_kernel_only_disallowed",
+                "dynamic_round_cap_exhausted",
+            ],
+            "verdict": "approve",
+        }
+        artifact_dir = (
+            dynamic_action_artifact_dir(self.session_dir, dyn_id)
+            if self.session_dir is not None else None
+        )
+        seed_kit_result = None
+        try:
+            seed_kit_result = assemble_seed_kit(state, payload_snapshot)
+        except SeedKitAssemblyError as exc:
+            raise PolicyDenied(
+                f"dynamic_action: seed kit assembly failed for "
+                f"dyn_id={dyn_id!r}: {exc}",
+                rule="dynamic_seed_kit_assembly_failed",
+                hint=(
+                    "Seed kit invariants (closed schema + ≤8K token cap) "
+                    "were violated; the dispatch is rolled back. Reduce "
+                    "the scope or wait for state to drain before retrying."
+                ),
+            ) from exc
+
+        spec = {
+            "dyn_id": dyn_id,
+            "dispatched_at": dispatched_at,
+            "round_index": round_id,
+            "payload": payload_snapshot,
+            "policy_gate_decision": policy_gate_decision,
+            "resource_lane": "research_lane",
+            "degraded_dispatch": bool(seed_kit_result.degraded),
+            "seed_kit_tokens": int(seed_kit_result.total_tokens),
+        }
+        if artifact_dir is not None:
             try:
                 artifact_dir.mkdir(parents=True, exist_ok=True)
-                (artifact_dir / "spec.json").write_text(
+                dynamic_action_spec_path(self.session_dir, dyn_id).write_text(
                     json.dumps(spec, sort_keys=True, indent=2),
                     encoding="utf-8",
                 )
-            except OSError:
-                log.exception(
-                    "dynamic_action: failed to seed artefact dir for "
-                    "dyn_id=%s",
-                    dyn_id,
+                dynamic_action_seed_kit_path(
+                    self.session_dir, dyn_id,
+                ).write_text(
+                    json.dumps(
+                        seed_kit_result.payload, sort_keys=True, indent=2,
+                    ),
+                    encoding="utf-8",
                 )
+            except OSError as exc:
+                self._cleanup_dynamic_action_artifact_dir(dyn_id)
+                raise PolicyDenied(
+                    f"dynamic_action: failed to persist artefacts for "
+                    f"dyn_id={dyn_id!r}: {exc!r}",
+                    rule="dynamic_artifact_write_failed",
+                    hint=(
+                        "Coordinator could not write spec.json / "
+                        "seed_kit.json to the session dir; check disk "
+                        "/ permissions and retry."
+                    ),
+                ) from exc
+
+        params["dyn_id"] = dyn_id
+        if artifact_dir is not None:
+            params["artifact_path"] = str(artifact_dir)
+            params["spec_path"] = str(
+                dynamic_action_spec_path(self.session_dir, dyn_id),
+            )
+            params["seed_kit_path"] = str(
+                dynamic_action_seed_kit_path(self.session_dir, dyn_id),
+            )
+
         summary = {
             "dyn_id": dyn_id,
             "round_id": round_id,
             "status": "DISPATCHED",
-            "dispatched_at": spec["dispatched_at"],
-            "scope_domains": spec["scope_domains"],
-            "side_effects_declared": spec["side_effects_declared"],
-            "budget_hint": spec["budget_hint"],
+            "dispatched_at": dispatched_at,
+            "scope_domains": payload_snapshot["scope_domains"],
+            "side_effects_declared": payload_snapshot["side_effects_declared"],
+            "budget_hint": payload_snapshot["budget_hint"],
             "artifact_path": str(artifact_dir) if artifact_dir else "",
+            "degraded_dispatch": spec["degraded_dispatch"],
+            "seed_kit_tokens": spec["seed_kit_tokens"],
         }
         return {"dyn_id": dyn_id, "summary": summary}
+
+    def _cleanup_dynamic_action_artifact_dir(self, dyn_id: str) -> None:
+        """Remove the partial ``agents/orchestration/dynamic_actions/<dyn_id>/``
+        on a dispatch-time failure so the round cap stays clean and the
+        next attempt starts from a fresh filesystem state."""
+        if self.session_dir is None:
+            return
+        from ..session_paths import dynamic_action_artifact_dir
+        target = dynamic_action_artifact_dir(self.session_dir, dyn_id)
+        try:
+            if target.exists():
+                import shutil
+                shutil.rmtree(target, ignore_errors=True)
+        except OSError:
+            log.exception(
+                "dynamic_action: artefact dir cleanup failed for dyn_id=%s",
+                dyn_id,
+            )
 
     def _finalize_dynamic_action_dispatch(
         self, *, task_id: str, meta: dict[str, Any],
     ) -> None:
         """Atomically register the dispatch on SharedState (round cap
-        +1) + log the task_id into the summary.
-        """
+        +1) + log the task_id into the summary."""
         summary = dict(meta.get("summary") or {})
         summary["task_id"] = task_id
         dyn_id = str(meta.get("dyn_id") or "")
