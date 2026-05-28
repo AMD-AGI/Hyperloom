@@ -99,6 +99,43 @@ def test_validate_helper_removed_from_policy_gate():
     )
 
 
+def test_historical_rule_name_mention_is_documented_provenance_only():
+    """Gap G6: the rule name ``framework_atom_action_unsupported``
+    DOES still appear in ``policy.py`` — but only inside an explanatory
+    block-comment (``# NOTE: the historical ...``) that documents
+    *why* the rule was removed. This test pins that the bare mention
+    is documentation (no surrounding ``def`` / ``rule=`` / constant
+    assignment) so a future reader doesn't accidentally tighten the
+    guard above and trip on the provenance comment.
+
+    If you ever physically delete the explanatory comment, you can
+    also delete this test — the three guards above will continue to
+    hold the contract.
+    """
+    src = _POLICY_PATH.read_text(encoding="utf-8")
+    # The rule name appears.
+    assert "framework_atom_action_unsupported" in src, (
+        "Phase 3 NOTE comment was removed; if intentional, drop this "
+        "test together with it. The other three guards above will "
+        "continue to enforce that no rule of this name is emitted."
+    )
+    # ...but only inside a comment block that explicitly frames it as
+    # historical context (the words ``historical`` + ``removed``
+    # appear together in the surrounding 30 lines).
+    idx = src.find("framework_atom_action_unsupported")
+    window = src[max(0, idx - 600): idx + 600]
+    assert "historical" in window.lower(), (
+        "framework_atom_action_unsupported mention is no longer "
+        "documented as historical provenance; if you re-add the rule, "
+        "drop this guard AND update the other three guards above."
+    )
+    assert "removed" in window.lower(), (
+        "framework_atom_action_unsupported mention is not framed as a "
+        "removal note; see the comment block at the top of the rule "
+        "section in policy.py."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Behavioural guards: the cross-framework LLM-proposability rule still
 # covers framework_pr under atom, so the hole the atom-specific rule

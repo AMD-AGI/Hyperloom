@@ -28,6 +28,78 @@ from typing import Iterable
 from .models import Finding
 
 
+# atom_plan/phase3_open_framework_agent/3.3 — per-framework KB
+# partition root. Currently a flat ``<KB_ROOT>/framework_optimization/
+# <framework>/`` layout: a thin per-framework bucket layered on top of
+# the existing per-domain layout so framework-specific empirical
+# findings (sglang scheduler tweaks, vllm chunked-prefill recipes,
+# atom MTP / EP gotchas) can be kept out of the cross-framework
+# ``framework`` domain bag without contaminating it.
+#
+# The directory is NOT created up-front — it's auto-created by
+# :func:`contribute_to_kb_for_framework` on first finding. Callers that
+# only need the path (e.g. for assertion / preview) use
+# :func:`path_for_framework`.
+_FRAMEWORK_OPTIMIZATION_ROOT: str = "framework_optimization"
+
+
+def path_for_framework(framework: str) -> Path:
+    """Resolve the KB sub-partition path for a per-framework finding
+    bag.
+
+    Phase 3.3 helper: returns ``<KB_ROOT>/framework_optimization/
+    <framework_lower>/`` for the active KB root. The framework name is
+    lowercased and stripped so call sites that pass ``"  Atom  "`` or
+    ``"ATOM"`` resolve to the same partition as ``"atom"``. The
+    partition directory may not exist on disk — callers MUST tolerate
+    the path being absent until ``contribute_to_kb_for_framework``
+    creates it.
+
+    Empty / whitespace-only framework names resolve to the
+    ``framework_optimization`` root itself; callers can treat that as
+    "framework partition not selected" and fall back to the cross-
+    framework ``framework`` domain bag.
+    """
+    fw = (framework or "").strip().lower()
+    root = _resolve_kb_root()
+    if not fw:
+        return root / _FRAMEWORK_OPTIMIZATION_ROOT
+    return root / _FRAMEWORK_OPTIMIZATION_ROOT / fw
+
+
+def contribute_to_kb_for_framework(
+    framework: str,
+    finding: str,
+    source: str,
+    session_id: str,
+) -> Path:
+    """Append a finding to the per-framework KB partition (Phase 3.3).
+
+    Mirrors :func:`contribute_to_kb` but writes under
+    :func:`path_for_framework` instead of the per-domain bucket.
+    Useful for findings that are tied to a specific framework
+    (atom MTP recipe, sglang chunked-prefill knob settings) rather
+    than a cross-framework domain.
+
+    The partition directory is created lazily on first write so an
+    empty atom session leaves no stray directories behind.
+    """
+    fw_dir = path_for_framework(framework)
+    fw_dir.mkdir(parents=True, exist_ok=True)
+    target = fw_dir / "empirical_kb.md"
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+    entry = (
+        f"\n\n---\n"
+        f"**[{timestamp}]** source=`{source}` session=`{session_id}`\n\n"
+        f"{finding}\n"
+    )
+    with target.open("a") as f:
+        f.write(entry)
+    return target
+
+
 DOMAIN_KEYWORDS: dict[str, list[str]] = {
     "kernel": ["kernel", "gemm", "moe", "attention", "fmoe", "ck", "triton"],
     "communication": [
@@ -382,6 +454,8 @@ __all__ = [
     "select_kb",
     "load_kb_content",
     "contribute_to_kb",
+    "contribute_to_kb_for_framework",
+    "path_for_framework",
     "synthesize_findings",
     "search_kb",
 ]
