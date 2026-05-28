@@ -159,6 +159,81 @@ def test_section_lessons_renders_each_lesson_with_metadata():
     assert "gain_pct=12.30 throughput_after=875.0" in text
 
 
+def test_section_lessons_renders_dict_measured_impact_as_human_readable_line(
+):
+    """GAP 3 — new ``measured_impact`` is a dict, not a string. The
+    renderer formats it as ``+12.3%, tput=678.0, depth=2, 2026-05-26``
+    so the specialist sees a parseable summary instead of raw JSON."""
+    lessons = [
+        {
+            "canonical_id": "lesson:dict",
+            "confidence": 0.85,
+            "attrs": {
+                "statement": "--attention-backend AITER → +12.3%",
+                "measured_impact": {
+                    "gain_pct": 12.3,
+                    "throughput_after": 678.0,
+                    "stack_depth_at_apply": 2,
+                    "measured_at": "2026-05-26T08:48:00Z",
+                },
+            },
+        },
+    ]
+    rows = _section_lessons(_make_inp(lessons))
+    text = "\n".join(rows)
+    assert "+12.30%" in text
+    assert "tput=678.0" in text
+    assert "depth=2" in text
+    assert "2026-05-26" in text
+
+
+def test_section_lessons_renders_validated_count_when_above_1():
+    """GAP 4 — when multiple sessions have validated a lesson, surface
+    the count so the specialist can prioritize community-validated
+    lessons over single-session ones."""
+    lessons = [
+        {
+            "canonical_id": "lesson:multi",
+            "confidence": 0.85,
+            "attrs": {
+                "statement": "AITER+TileLang → +15%",
+                "measured_impact": "gain_pct=15",
+                "validated_count": 5,
+                "source_session_ids": ["s-a", "s-b", "s-c", "s-d", "s-e"],
+            },
+        },
+    ]
+    rows = _section_lessons(_make_inp(lessons))
+    text = "\n".join(rows)
+    assert "validated=5" in text
+    # Prefers the latest session id (tail of source_session_ids[]) over
+    # the legacy singular source_session_id field.
+    assert "recent=s-e" in text
+
+
+def test_section_lessons_singleton_validation_omits_validated_tag():
+    """When validated_count == 1, the renderer skips the ``validated=N``
+    bit (no need to label as "1 session validated this"; that's the
+    default assumption for any lesson)."""
+    lessons = [
+        {
+            "canonical_id": "lesson:single",
+            "confidence": 0.7,
+            "attrs": {
+                "statement": "x → +5%",
+                "validated_count": 1,
+                "source_session_ids": ["s-only"],
+            },
+        },
+    ]
+    rows = _section_lessons(_make_inp(lessons))
+    text = "\n".join(rows)
+    assert "validated=" not in text
+    # ``recent=`` still surfaces so the operator knows which session
+    # produced it.
+    assert "recent=s-only" in text
+
+
 def test_section_lessons_skips_lessons_with_empty_statement():
     """Defensive: a KB row with empty ``statement`` is skipped (avoids
     rendering a meaningless ``- **** (conf=…)`` bullet)."""
