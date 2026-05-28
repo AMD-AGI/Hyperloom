@@ -831,15 +831,6 @@ class PolicyGate:
         self._validate_action_not_llm_proposable(
             action_name, intent_kind="delegate",
         )
-        # IR-8 defense-in-depth. Must fire BEFORE the kernel-owned and
-        # integrate_patch-Critic-gate checks so an atom session gets the
-        # specific "no source patcher" hint rather than the generic
-        # "kernel-owned" / "needs Critic verdict" hint, which would point
-        # the LLM at a recovery path that cannot work for atom. See the
-        # method docstring for the full contract.
-        self._validate_framework_atom_action_unsupported(
-            action_name, intent_kind="delegate",
-        )
         # Plan A — kernel-owned actions are not directly delegatable.
         if action_name in KERNEL_OWNED_ACTIONS:
             raise PolicyDenied(
@@ -958,13 +949,6 @@ class PolicyGate:
         # analysis_action_not_llm_proposable
         # (propose channel) — same rule, same hint.
         self._validate_action_not_llm_proposable(
-            action_name, intent_kind="propose_action",
-        )
-        # framework_atom_action_unsupported (propose channel) — defense
-        # in depth so the LLM gets a structured denial instead of
-        # advisory proposal → delegate → crash. See the delegate-channel
-        # site for the full contract.
-        self._validate_framework_atom_action_unsupported(
             action_name, intent_kind="propose_action",
         )
         # Soft check — propose is advisory; only reject if registry is wired
@@ -1393,68 +1377,21 @@ class PolicyGate:
         )
 
     # ------------------------------------------------------------------
-    # framework_atom_action_unsupported —
-    # deny actions that have no atom-compatible execution path
-    # ------------------------------------------------------------------
-    # Only ``framework_pr`` is still atom-incompatible at this layer.
-    # Phase 2 of atom_plan/ (kernel-agent enablement) wired atom source
-    # roots into PolicyGate's allowlist, ``_REUSABLE_SOURCE_ROOTS``, and
-    # the server-flag pre-flight probe, so ``kernel_opt`` and
-    # ``integrate_patch`` now have a real execution path on atom and
-    # were removed from this set. Phase 3 will remove ``framework_pr``
-    # in turn (or drop the rule entirely) once ``fa`` learns about
-    # atom's repo URL and patch shape.
+    # NOTE: the historical ``framework_atom_action_unsupported`` rule
+    # (and its companion ``_ATOM_UNSUPPORTED_ACTIONS`` set + helper)
+    # was removed in atom_plan/phase3_open_framework_agent. After
+    # Phase 2 (kernel-agent enablement) and Phase 3 (framework-agent
+    # enablement), atom no longer has any action that needs framework-
+    # specific denial at the PolicyGate layer — multi-node is guarded
+    # at the CLI level, and ``framework_pr`` is still caught for all
+    # frameworks by the earlier ``framework_pr_action_not_llm_proposable``
+    # rule (LLMs cannot propose ``framework_pr`` regardless of
+    # framework; the Coordinator drives it directly).
     #
-    # The scaffold (rule + dispatch sites in ``_validate_delegate`` /
-    # ``_validate_propose_action``) stays so Phase 3's lift is a one-
-    # liner — the alternative (deleting the rule now and re-adding it
-    # in Phase 3) would risk an inconsistent transient state where
-    # ``framework_pr`` leaks through and crashes the executor.
-    _ATOM_UNSUPPORTED_ACTIONS: frozenset[str] = frozenset({
-        "framework_pr",
-    })
-
-    def _validate_framework_atom_action_unsupported(
-        self,
-        action_name: str,
-        *,
-        intent_kind: str,
-    ) -> None:
-        if not action_name:
-            return
-        if action_name not in self._ATOM_UNSUPPORTED_ACTIONS:
-            return
-        # Pull FRAMEWORK from SharedState first (set by the CLI at launch
-        # and re-asserted by resume) and fall back to the process env so
-        # tests that exercise PolicyGate without a SharedState still get
-        # the rule. PolicyGate elsewhere reads SharedState defensively
-        # the same way (see _validate_phase_action).
-        framework = ""
-        if self.shared_state is not None:
-            framework = str(
-                getattr(self.shared_state, "framework", "") or ""
-            ).strip().lower()
-        if not framework:
-            import os as _os
-            framework = _os.environ.get("FRAMEWORK", "").strip().lower()
-        if framework != "atom":
-            return
-        raise PolicyDenied(
-            f"action {action_name!r} is not supported when "
-            f"FRAMEWORK=atom ({intent_kind})",
-            rule="framework_atom_action_unsupported",
-            hint=(
-                "atom's framework-agent PR loop is not yet wired (Phase "
-                "3 of atom_plan/). kernel_opt and integrate_patch now "
-                "work on atom — operators can drop --no-kernel to "
-                "exercise them. ``--framework atom`` still auto-sets "
-                "``--no-framework`` on fresh launches; pass "
-                "``--framework sglang`` / ``--framework vllm`` if you "
-                "need the framework-agent loop. baseline / EXPLORE / "
-                "sweep / analysis lane (profile / roofline / TraceLens) "
-                "all work on atom unchanged."
-            ),
-        )
+    # Anti-regression guards live in
+    # ``inference_optimizer/tests/test_policy_atom_invariants.py``
+    # (asserts the constant + helper symbols stay absent) so a future
+    # reintroduction has to be intentional.
 
     # ------------------------------------------------------------------
     # R1 phase_incompatible
