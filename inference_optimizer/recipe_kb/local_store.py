@@ -378,37 +378,62 @@ class LocalRecipeStore:
         self,
         *,
         canonical_id: str,
-        labels: dict[str, Any] | None = None,
-        body: dict[str, Any] | None = None,
-        metrics: dict[str, Any] | None = None,
-        findings: list[Any] | None = None,
-        failures: list[Any] | None = None,
+        # 5-tuple identity (also encoded in canonical_id; stamped at
+        # the top level for arbor-compat — arbor's recipe.json has
+        # ``model`` / ``hardware`` as top-level fields).
+        model: str = "",
+        hardware: str = "",
+        framework: str = "",
+        framework_version: str = "",
+        precision: str = "",
+        # Arbor-aligned payload. Each list entry can be either an
+        # already-shaped dict (the wire representation) or a typed
+        # dataclass instance — :meth:`Recipe.from_dict` handles both
+        # via the ``payload`` round-trip below.
+        best_config: dict[str, str] | None = None,
+        best_throughput: float = 0.0,
+        what_worked: list[Any] | None = None,
+        what_failed: list[Any] | None = None,
+        remaining_gaps: list[Any] | None = None,
+        prs_tested: list[Any] | None = None,
         pitfalls: list[Any] | None = None,
         lessons: list[Any] | None = None,
-        gaps: list[Any] | None = None,
+        last_profiled: str = "",
+        stack_fingerprint: dict[str, str] | None = None,
+        sessions: list[Any] | None = None,
+        # v2 audit / wire-compat fields (kept so the dispatcher can
+        # later push to the central server if we ever re-enable
+        # write-through; provenance is REQUIRED by the central server
+        # so we always stamp something).
         authority: str = "EXPERIENTIAL",
         confidence: float = 0.85,
         evidence_refs: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
+        # Forward-compat: arbor's existing recipes carry session-level
+        # free-form keys (``session_20260515_findings`` etc.); callers
+        # can pass them via ``extras`` to avoid losing data on rewrite.
+        extras: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Atomically upsert a recipe.
+        """Atomically upsert a recipe row in the arbor schema.
 
-        The full sequence runs under :class:`_CidLock`:
+        Atomicity is the same as before:
 
         1. read live ``recipe.json`` (may be missing on first put);
         2. archive prior live to ``history/v{prior_version}.json``,
-           stamping ``replaced_by = provenance`` so the archive carries
-           the triggering write's audit footprint;
+           stamping ``replaced_by = provenance`` so the archive
+           carries the triggering write's audit footprint;
         3. write new live ``recipe.json`` at ``version = prior + 1``
            with refreshed ``updated_at`` (and ``created_at`` carried
-           over on update / set to the same timestamp on first write).
+           over on update / set to ``now`` on first write).
 
-        Returns ``{"canonical_id": str, "version": int,
-        "created": bool}`` matching the central server's PUT response.
+        Returns ``{"canonical_id", "version", "created"}`` —
+        identical to the central server's PUT response shape.
 
-        Raises :class:`InvalidCanonicalIdError` on a malformed cid
-        (forwarded from :func:`cid_to_path_components`) and
-        :class:`LocalRecipeStoreError` on any underlying I/O failure.
+        ``what_worked`` / ``what_failed`` / etc. accept either
+        already-shaped dicts (``{"description": ..., "measured_impact":
+        ...}``) or arbor dataclass instances; everything is
+        normalised through ``Recipe.from_dict`` so the on-disk JSON
+        is always the documented arbor shape.
         """
         if not canonical_id:
             raise ValueError("put_recipe requires a non-empty canonical_id")
@@ -419,15 +444,15 @@ class LocalRecipeStore:
             now = _utc_now_iso()
             live = _read_json(self._live_path(canonical_id))
             created = live is None
-            prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
+            prior_version = (
+                int(live.get("version", 0)) if isinstance(live, dict) else 0
+            )
             new_version = prior_version + 1 if not created else 1
 
             if not created:
-                # Archive the prior live row before we overwrite it.
-                # Stamp ``replaced_by`` with the incoming provenance so
-                # the archive carries the audit footprint of the write
-                # that supplanted it. Mirrors central server behaviour
-                # documented in boundary doc §4.2.
+                # Archive prior live before overwrite. ``replaced_by``
+                # carries the triggering write's provenance so an
+                # audit can trace who supplanted v{N-1}.
                 archive_path = self._history_version_path(
                     canonical_id, prior_version,
                 )
@@ -440,28 +465,51 @@ class LocalRecipeStore:
                 }
                 _atomic_write_json(archive_path, archive_payload)
 
-            recipe = Recipe(
-                canonical_id=canonical_id,
-                version=new_version,
-                labels=dict(labels or {}),
-                body=dict(body or {}),
-                metrics=dict(metrics or {}),
-                findings=list(findings or []),
-                failures=list(failures or []),
-                pitfalls=list(pitfalls or []),
-                lessons=list(lessons or []),
-                gaps=list(gaps or []),
-                authority=str(authority),
-                confidence=float(confidence),
-                evidence_refs=list(evidence_refs or []),
-                provenance=dict(provenance or {}),
-                created_at=(
-                    str(live.get("created_at") or now) if isinstance(live, dict)
-                    else now
+            # Build payload via ``Recipe.from_dict`` so dataclass
+            # instances and dicts both round-trip cleanly (typed
+            # callers can pass ``Finding(description=..., measured_impact=...)``
+            # or ``{"description": ..., "measured_impact": ...}`` —
+            # both end up in the same on-disk shape).
+            payload_dict: dict[str, Any] = {
+                "canonical_id":      canonical_id,
+                "version":           new_version,
+                "created_at":        (
+                    str(live.get("created_at") or now)
+                    if isinstance(live, dict) else now
                 ),
-                updated_at=now,
+                "updated_at":        now,
+                "model":             model,
+                "hardware":          hardware,
+                "framework":         framework,
+                "framework_version": framework_version,
+                "precision":         precision,
+                "best_config":       dict(best_config or {}),
+                "best_throughput":   float(best_throughput),
+                "what_worked":       _normalise_findings(what_worked),
+                "what_failed":       _normalise_failures(what_failed),
+                "remaining_gaps":    _normalise_gaps(remaining_gaps),
+                "prs_tested":        _normalise_prs(prs_tested),
+                "pitfalls":          _normalise_pitfalls(pitfalls),
+                "lessons":           _normalise_lessons(lessons),
+                "last_profiled":     last_profiled,
+                "stack_fingerprint": dict(stack_fingerprint or {}),
+                "sessions":          _normalise_sessions(sessions),
+                "authority":         authority,
+                "confidence":        float(confidence),
+                "evidence_refs":     list(evidence_refs or []),
+                "provenance":        dict(provenance or {}),
+            }
+            if extras:
+                # Splat extras at the top level so arbor consumers
+                # see them where they expect (no nested ``extras``
+                # key on disk).
+                for key, val in extras.items():
+                    payload_dict.setdefault(key, val)
+
+            recipe = Recipe.from_dict(payload_dict)
+            _atomic_write_json(
+                self._live_path(canonical_id), recipe.to_dict(),
             )
-            _atomic_write_json(self._live_path(canonical_id), recipe.to_dict())
 
         return {
             "canonical_id": canonical_id,
@@ -796,18 +844,28 @@ class LocalRecipeStore:
 # search filter helpers
 # ---------------------------------------------------------------------------
 def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> bool:
-    """JSONB-containment-style match: every (k, v) in ``label_match``
-    must appear identically in ``payload['labels']``.
+    """Key-value match against the top-level identity fields of an
+    arbor-shape recipe.
+
+    Recognised label keys map to top-level fields:
+
+    * ``model`` / ``hardware`` / ``framework`` /
+      ``framework_version`` / ``precision`` → the 5-tuple identity
+      slots stamped at the top level.
+
+    Any other key is matched against the recipe's free-form
+    ``extras`` (preserved arbor session-level keys) so a caller
+    that stamps custom labels into ``put_recipe(..., extras={"task":
+    "pretrain"})`` can still filter on ``label_match={"task":
+    "pretrain"}``.
 
     Empty filter trivially matches everything.
     """
     if not label_match:
         return True
-    labels = payload.get("labels")
-    if not isinstance(labels, dict):
-        return False
     for key, expected in label_match.items():
-        if labels.get(key) != expected:
+        actual = payload.get(key)
+        if actual != expected:
             return False
     return True
 
@@ -815,23 +873,34 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
 def _matches_metrics(
     payload: dict[str, Any], metric_filters: dict[str, Any],
 ) -> bool:
-    """Numeric range filter. Rows missing the metric key are excluded.
+    """Numeric range filter against arbor-shape metric fields.
 
-    Mirrors the central server: ``{"throughput": {"min": 10000}}``
-    matches rows where ``metrics.throughput >= 10000``; rows without
-    ``metrics.throughput`` are filtered out (cannot be proven to
-    satisfy the bound).
+    Recognised metric keys:
+
+    * ``best_throughput`` (or shorthand ``throughput``) — read from
+      the top-level ``best_throughput`` field;
+    * any other key — looked up at the top level (so a caller can
+      stamp custom numeric metrics via
+      ``put_recipe(..., extras={"mfu": 0.4})``).
+
+    Rows missing the key are excluded (cannot be proven to satisfy
+    the bound — same semantics as the central server).
     """
     if not metric_filters:
         return True
-    metrics = payload.get("metrics")
-    if not isinstance(metrics, dict):
-        return False
     for key, bounds in metric_filters.items():
-        if key not in metrics:
+        # Shorthand alias: ``throughput`` resolves to
+        # ``best_throughput`` for arbor-compat (the v2 wire spec
+        # uses ``throughput`` as the canonical metric key, so
+        # callers might still use that name).
+        lookup_key = (
+            "best_throughput" if key in ("throughput", "best_throughput")
+            else key
+        )
+        if lookup_key not in payload:
             return False
         try:
-            value = float(metrics[key])
+            value = float(payload[lookup_key])
         except (TypeError, ValueError):
             return False
         if isinstance(bounds, dict):
@@ -879,6 +948,138 @@ def _coerce_sort_value(value: Any, key: str) -> Any:
         except (TypeError, ValueError):
             return 0
     return str(value or "")
+
+
+# ---------------------------------------------------------------------------
+# put_recipe input normalisation — accept dataclass OR dict for every list
+# ---------------------------------------------------------------------------
+# Each helper coerces a heterogeneous list (None / dataclass / plain dict /
+# tuple / scalar) into a list of plain dicts matching the arbor wire shape
+# for that field. Errors are propagated only when the input is unambiguously
+# malformed (e.g. a string where a Finding was expected). Empty / None
+# inputs become empty lists — callers don't have to guard.
+def _coerce_dict(item: Any) -> dict[str, Any] | None:
+    """Return ``item`` as a dict, or ``None`` when it cannot be coerced.
+
+    Accepts a dataclass instance (``__dict__`` view) or a Mapping.
+    Anything else (str / int / None) returns None so the helper-
+    specific extractors can decide whether to skip or raise.
+    """
+    from dataclasses import is_dataclass, asdict
+    if item is None:
+        return None
+    if isinstance(item, dict):
+        return item
+    if is_dataclass(item):
+        return asdict(item)
+    if hasattr(item, "to_dict") and callable(item.to_dict):
+        out = item.to_dict()
+        return out if isinstance(out, dict) else None
+    return None
+
+
+def _normalise_findings(items: list[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for it in (items or []):
+        d = _coerce_dict(it)
+        if d is None:
+            continue
+        out.append({
+            "description":     str(d.get("description") or ""),
+            "measured_impact": str(d.get("measured_impact") or ""),
+        })
+    return out
+
+
+def _normalise_failures(items: list[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for it in (items or []):
+        d = _coerce_dict(it)
+        if d is None:
+            continue
+        out.append({
+            "description": str(d.get("description") or ""),
+            "reason":      str(d.get("reason") or ""),
+        })
+    return out
+
+
+def _normalise_gaps(items: list[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for it in (items or []):
+        d = _coerce_dict(it)
+        if d is None:
+            continue
+        out.append({
+            "description": str(d.get("description") or ""),
+            "metrics":     str(d.get("metrics") or ""),
+        })
+    return out
+
+
+def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for it in (items or []):
+        d = _coerce_dict(it)
+        if d is None:
+            continue
+        try:
+            number = int(d.get("number") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        out.append({
+            "repo":    str(d.get("repo") or ""),
+            "number":  number,
+            "outcome": str(d.get("outcome") or ""),
+            "notes":   str(d.get("notes") or ""),
+        })
+    return out
+
+
+def _normalise_pitfalls(items: list[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for it in (items or []):
+        d = _coerce_dict(it)
+        if d is None:
+            continue
+        out.append({"description": str(d.get("description") or "")})
+    return out
+
+
+def _normalise_lessons(items: list[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for it in (items or []):
+        d = _coerce_dict(it)
+        if d is None:
+            continue
+        out.append({
+            "statement":       str(d.get("statement") or ""),
+            "measured_impact": str(d.get("measured_impact") or ""),
+        })
+    return out
+
+
+def _normalise_sessions(items: list[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for it in (items or []):
+        d = _coerce_dict(it)
+        if d is None:
+            continue
+        try:
+            tput_before = float(d.get("throughput_before") or 0.0)
+        except (TypeError, ValueError):
+            tput_before = 0.0
+        try:
+            tput_after = float(d.get("throughput_after") or 0.0)
+        except (TypeError, ValueError):
+            tput_after = 0.0
+        out.append({
+            "date":              str(d.get("date") or ""),
+            "throughput_before": tput_before,
+            "throughput_after":  tput_after,
+            "actions_taken":     list(d.get("actions_taken") or []),
+        })
+    return out
 
 
 __all__ = [
