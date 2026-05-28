@@ -37,6 +37,11 @@ from ..session_paths import (
     dynamic_action_spec_path,
     dynamic_actions_root,
 )
+from .dynamic_action_history import (
+    ABANDONED_FIELDS as _ABANDONED_FIELDS_CANONICAL,
+    DispatchHistoryEvent,
+    append_dispatch_history_row,
+)
 from .dynamic_action_proposal import (
     DynamicActionStatus,
     LAST_OUTCOME_BY_STATUS,
@@ -48,18 +53,10 @@ from .dynamic_action_proposal import (
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Closed schema for dispatch_history.jsonl ``abandoned_on_resume`` rows
-# (P8 §6). Any field outside this set is a design change.
-# ---------------------------------------------------------------------------
-ABANDONED_HISTORY_FIELDS: frozenset[str] = frozenset({
-    "event",
-    "ts",
-    "previous_status",
-    "coordinator_session_id",
-    "worktree_cleanup_outcome",
-    "artifact_missing",
-})
+# Re-export the canonical abandoned-row schema from the unified
+# history module (G2 / G13). Kept here as a backward-compat alias for
+# external callers + the P8 test matrix.
+ABANDONED_HISTORY_FIELDS: frozenset[str] = _ABANDONED_FIELDS_CANONICAL
 
 # Cleanup outcome enum surfaced on the abandoned_on_resume row (§6).
 WORKTREE_CLEANUP_OUTCOMES: frozenset[str] = frozenset({
@@ -220,30 +217,24 @@ def _append_abandoned_history(
     worktree_cleanup_outcome: str,
     artifact_missing: bool,
 ) -> None:
-    """Append one ``abandoned_on_resume`` row (§6 closed schema)."""
+    """Append one ``abandoned_on_resume`` row via the unified writer
+    (G2 / G13 — closed schema centralised in :mod:`dynamic_action_history`)."""
     if worktree_cleanup_outcome not in WORKTREE_CLEANUP_OUTCOMES:
         raise ValueError(
             f"worktree_cleanup_outcome={worktree_cleanup_outcome!r} not "
             f"in {sorted(WORKTREE_CLEANUP_OUTCOMES)!r}"
         )
-    row = {
-        "event": "abandoned_on_resume",
-        "ts": _now_iso(),
-        "previous_status": str(previous_status or ""),
-        "coordinator_session_id": str(coordinator_session_id or ""),
-        "worktree_cleanup_outcome": worktree_cleanup_outcome,
-        "artifact_missing": bool(artifact_missing),
-    }
-    extra_keys = set(row.keys()) - ABANDONED_HISTORY_FIELDS
-    if extra_keys:
-        raise ValueError(
-            f"abandoned history row carries unknown fields: "
-            f"{sorted(extra_keys)!r}"
-        )
-    target = dynamic_action_dispatch_history_path(session_dir, dyn_id)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, sort_keys=True) + "\n")
+    append_dispatch_history_row(
+        session_dir=session_dir,
+        dyn_id=dyn_id,
+        event=DispatchHistoryEvent.ABANDONED_ON_RESUME,
+        payload={
+            "previous_status": str(previous_status or ""),
+            "coordinator_session_id": str(coordinator_session_id or ""),
+            "worktree_cleanup_outcome": worktree_cleanup_outcome,
+            "artifact_missing": bool(artifact_missing),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
