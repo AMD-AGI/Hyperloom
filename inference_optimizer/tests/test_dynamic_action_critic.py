@@ -1,6 +1,4 @@
-"""dynamic_action.MD P4 §9 — Critic cross-domain review matrix.
-
-Each test under ``test_p4_scenario_*`` maps 1:1 to a row of P4 §9.
+"""Tests for the Critic cross-domain review primitives.
 Auxiliary tests pin the closed envelope schema, classifier idempotency,
 and the CriticAgentBackend enrichment helper.
 """

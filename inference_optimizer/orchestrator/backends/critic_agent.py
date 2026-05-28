@@ -257,15 +257,15 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
 
 
 # ---------------------------------------------------------------------------
-# dynamic_action.MD P4 §3 — cross-domain enrichment helper
+# Cross-domain enrichment helper for dynamic_action proposals.
 # ---------------------------------------------------------------------------
 def _proposal_provenance_literal(proposal: dict[str, Any]) -> str:
-    """Pull the ``provenance`` literal off a judge_bundle proposal,
+    """Read the ``provenance`` literal off a judge_bundle proposal,
     tolerating both top-level + nested ``params`` placement.
 
-    §1.2 / P3 §5.1 — provenance is case-sensitive; ``DYNAMIC`` /
-    ``Dynamic`` are NOT the same as ``dynamic``. The cross-domain
-    enrichment must agree with the runner validator at every layer.
+    Comparison is case-sensitive — ``DYNAMIC`` / ``Dynamic`` are not
+    accepted as ``dynamic`` so this layer agrees with the runner
+    validator.
     """
     if not isinstance(proposal, dict):
         return ""
@@ -668,10 +668,10 @@ class CriticAgentBackend:
                 judge_bundle["review_constraints"] = rc
             rc["action_verdict_policy"] = dict(self.action_verdict_policy)
 
-        # dynamic_action.MD P4 §3 — when any proposal carries the
-        # ``provenance == "dynamic"`` literal, flip the cross_domain
-        # flag and inject the rule descriptors so the LLM-critic
-        # applies the three extra rules on top of patch_landing.
+        # When any proposal carries ``provenance == "dynamic"``, flip
+        # ``review_constraints.cross_domain`` and inject the rule
+        # descriptors so the LLM-critic applies the cross-domain
+        # rules on top of patch_landing.
         _maybe_inject_cross_domain_constraints(judge_bundle)
 
         # Phase 2 — Codex reasoning. Note we still call the LLM even when

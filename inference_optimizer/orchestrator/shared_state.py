@@ -673,17 +673,15 @@ class SharedState:
     # storm detector fires when this crosses the configured cap
     # without a single non-empty proposal_set in the same window.
     explore_specialist_dispatched_count: int = 0
-    # dynamic_action.MD P0 D-C / P6 — aggregate view of dynamic_action
-    # dispatches. P1 ships the minimal write surface (Coordinator
-    # writes one entry per successful dispatch); the full
-    # ``DynamicActionSummary`` schema (cumulative_gain, last_outcome,
-    # status state machine, …) lands in P6. Map: dyn_id → summary
-    # dict. CORE_STATE_FIELDS protects it from LLM UPDATE_STATE.
+    # Aggregate view of dynamic_action dispatches keyed by ``dyn_id``;
+    # Coordinator-only writer (``CORE_STATE_FIELDS`` blocks LLM
+    # ``UPDATE_STATE``). Each value is the lifecycle summary dict
+    # (status / last_outcome / cumulative_gain / …).
     dynamic_actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Per-EXPLORE-round counter of *successful* dynamic_action
-    # dispatches (PolicyGate-rejected emits do not increment, per P1
-    # §4.2). Reset on every fresh EXPLORE entry. Read by PolicyGate
-    # ``_validate_dynamic_action_dispatch`` group D for the
+    # dispatches (PolicyGate denials do not increment). Reset on
+    # every fresh EXPLORE entry; read by
+    # ``PolicyGate._validate_dynamic_action_dispatch`` for the
     # ``MAX_DYNAMIC_PER_ROUND`` cap; Coordinator is the sole writer.
     dynamic_action_round_count: int = 0
     # research_lane capacity locked at session start
@@ -3055,15 +3053,13 @@ class SharedState:
     def record_dynamic_action_dispatch(
         self, dyn_id: str, summary: dict[str, Any],
     ) -> int:
-        """dynamic_action.MD P1 / D-C — register a freshly-dispatched
-        dynamic_action in the aggregate view AND bump the per-round
-        cap counter atomically.
+        """Register a freshly-dispatched ``dynamic_action`` + bump the
+        per-round counter atomically.
 
         Coordinator-only writer (CORE_STATE_FIELDS protects it from
-        LLM UPDATE_STATE). Idempotent on ``dyn_id``: a re-record with
-        the same id overwrites the summary but does NOT double-bump
-        the round counter. Returns the post-increment round counter
-        value.
+        LLM ``UPDATE_STATE``). Idempotent on ``dyn_id``: a re-record
+        overwrites the summary but does not double-bump the counter.
+        Returns the post-increment round counter value.
         """
         key = str(dyn_id or "").strip()
         if not key:
@@ -3077,14 +3073,8 @@ class SharedState:
         return self.dynamic_action_round_count
 
     def reset_dynamic_action_round_count(self) -> None:
-        """dynamic_action.MD P1 §4.3 — clear the per-EXPLORE round cap
-        counter.
-
-        Called by Coordinator on phase transition into a fresh
-        EXPLORE entry, mirroring ``reset_specialist_dispatched``. The
-        ``dynamic_actions`` aggregate view itself is preserved across
-        rounds (cumulative ledger).
-        """
+        """Clear the per-EXPLORE round cap counter; the cumulative
+        ``dynamic_actions`` ledger is preserved across rounds."""
         self.dynamic_action_round_count = 0
 
     def record_dynamic_action_outcome(
@@ -3096,25 +3086,18 @@ class SharedState:
         cumulative_gain: float | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        """dynamic_action.MD P5 §6 + P6 §4 — transition-validated
-        update of the summary row keyed by ``dyn_id``.
+        """Transition-validated update of the summary row keyed by
+        ``dyn_id``.
 
-        Coordinator-only writer (CORE_STATE_FIELDS guards it from LLM
-        ``UPDATE_STATE``). The existing summary dict is preserved
-        field-by-field; only the keys passed in are touched.
-
-        ``last_outcome`` defaults to the P6 §8 prompt-friendly label
-        for ``status`` when the caller omits it. ``last_updated_at``
-        is always refreshed (used by the prompt-section renderer for
-        the recency cap).
-
-        Illegal transitions (e.g. trying to escape a terminal state)
-        are logged + skipped; the in-memory summary stays at the last
-        legal value so a buggy hook can never silently corrupt the
-        audit trail.
+        Coordinator-only writer (``CORE_STATE_FIELDS`` guards it from
+        LLM ``UPDATE_STATE``). Only keys passed in are touched;
+        ``last_outcome`` defaults to the prompt-friendly label for
+        ``status``; ``last_updated_at`` is always refreshed. Illegal
+        transitions are logged and skipped so a buggy hook cannot
+        corrupt the audit trail.
         """
-        # Local import — module-level import would create a cycle
-        # (dynamic_action_proposal already imports from this file).
+        # Local import avoids the cycle with
+        # :mod:`dynamic_action_proposal`.
         from .dynamic_action_proposal import (
             DynamicActionStatus,
             LAST_OUTCOME_BY_STATUS,
@@ -3175,15 +3158,14 @@ class SharedState:
         max_entries: int = 5,
         title: str = "Dynamic Action History",
     ) -> str:
-        """dynamic_action.MD P6 §7 — compact ``=== <title> ===`` block
-        for orchestration prompt injection.
+        """Compact ``=== <title> ===`` block for orchestration prompt
+        injection.
 
-        Renders the most recent ``max_entries`` summaries (by
-        ``last_updated_at`` descending, with a stable tiebreak on
-        ``dyn_id`` for determinism). Older rows are collapsed into an
-        elision marker pointing at the on-disk artefact dir. Returns
-        the empty string when no dynamic_actions exist so callers can
-        skip the section entirely.
+        Renders the most recent ``max_entries`` summaries sorted by
+        ``last_updated_at`` descending (stable tiebreak on
+        ``dyn_id``). Older rows are collapsed into an elision marker
+        pointing at the on-disk artefact dir. Returns the empty
+        string when no rows exist so callers can skip the section.
         """
         summaries = self.dynamic_actions or {}
         if not summaries:
@@ -3224,9 +3206,7 @@ class SharedState:
         _last_outcome_lookup: dict | None = None,
         _status_enum: Any | None = None,
     ) -> str:
-        """Render one P6 §7.2 compact summary row.
-
-        Format (≈ 50 tokens each)::
+        """Render one compact summary row (~50 tokens):
 
             - <dyn_id> [<STATUS>, gain=<delta>%] scope=[d1,d2]
               motivation: "<motivation_gap_short>"

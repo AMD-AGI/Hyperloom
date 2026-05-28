@@ -62,10 +62,8 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # apply+restart+gate that consumes specialist worktree patches.
     # Both live under pipeline_phase=explore in the registry.
     "specialist",
-    # dynamic_action.MD P7 — supplementary cross-domain ReAct
-    # sub-agent channel. EXPLORE-only, round-cap 1; declared in
-    # the catalogue right next to specialist so the LLM reads them
-    # as sibling channels (specialist = default, dynamic =補充).
+    # Supplementary cross-domain ReAct sub-agent channel; EXPLORE-only,
+    # round-cap 1, sits next to specialist in the catalogue.
     "dynamic_action",
     "integrate_patch",
     "sweep",
@@ -390,9 +388,8 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "keep_threshold_pct?=0.2, "
             "accuracy_baseline?={task: {metric: score}}}}"
         )
-    # dynamic_action.MD P7 §5 — emit hint mirrors specialist's shape:
-    # payload field table + key constraints + reason-code surface so
-    # the LLM can self-correct on PolicyGate denials.
+    # Mirrors the specialist emit hint shape: payload field table +
+    # key constraints + PolicyGate reason-code surface for self-correction.
     if meta.name == "dynamic_action":
         return (
             "delegate{action_name='dynamic_action', params={"
@@ -920,19 +917,10 @@ def _read_rules_fragment(path: Path | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# dynamic_action.MD P7 §3 — entry declaration. Strictly follows §1.7;
-# the canonical source-of-truth text is the §1.7 quote below.
-#
-# > "如果你认为存在一组跨多个 domain 的 patch 组合，且任何单个
-# > specialist 在其 domain prompt 边界内都不可能提出来，可派发一条
-# > dynamic action。一般情况下应当依赖 specialist 体系；dynamic action
-# > 是补充通道，不是默认通道。"
-#
-# The English rendering below conveys the same intent while staying
-# consistent with the rest of the orchestration prompt's voice. No
-# triggering heuristics, no examples, no negative guidance about cost
-# / cooldown / specialist failure fallback — those would shift dynamic
-# from "supplementary" to "default fallback".
+# Entry declaration for the supplementary cross-domain ReAct channel.
+# Renders only when ``dynamic_action`` is in the enabled action set.
+# No triggering heuristics, examples, or fallback guidance — those
+# would shift the channel from supplementary to default.
 # ---------------------------------------------------------------------------
 def _section_dynamic_action(actions: list[ActionMetadata]) -> list[str] | None:
     if not any(a.name == "dynamic_action" for a in actions):
@@ -1033,10 +1021,9 @@ def build_orchestration_prompt(
     ]
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
-    # dynamic_action.MD P7 §6 — Dynamic Action declaration sits after
-    # the decision framework / kernel-opt pipeline so the LLM sees the
-    # supplementary-channel framing once it has internalised the
-    # default specialist-first decision flow.
+    # Dynamic action declaration sits after the decision framework
+    # so the LLM sees the supplementary-channel framing once it has
+    # internalised the specialist-first decision flow.
     dyn_section = _section_dynamic_action(actions)
     if dyn_section is not None:
         sections.append(dyn_section)

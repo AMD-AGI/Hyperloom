@@ -1,26 +1,21 @@
-"""dynamic_action.MD §1.5 + dynamic_action_gaps.md G2 / G13 —
-dispatch_history.jsonl writer with closed per-event schemas.
+"""Closed-schema writer for
+``agents/orchestration/dynamic_actions/<dyn_id>/dispatch_history.jsonl``
+plus the per-``dyn_id`` ``telemetry.json`` rollup.
 
 One module owns the canonical event vocabulary and the field
-contract for every row written into
-``agents/orchestration/dynamic_actions/<dyn_id>/dispatch_history.jsonl``.
-
-The schema is **closed** (per P2 §5.2 b): a row carrying an unknown
-field — or missing a required field — fails fast at write time so a
-buggy Coordinator hook cannot silently corrupt the audit trail.
+contract for every audit row. Writes carrying an unknown field — or
+missing a required field — fail fast so a buggy hook cannot silently
+corrupt the audit trail.
 
 Lifecycle coverage (Coordinator hook → event):
 
-* ``_prepare_dynamic_action_dispatch``         → ``DISPATCHED``
-* ``_handle_dynamic_action_runner_result``     → ``SUB_AGENT_DONE``
-                                                  (COMPLETED) or
-                                                  ``SUB_AGENT_TERMINATED``
-                                                  (TIMED_OUT / FAILED /
-                                                  COMPLETED_EMPTY)
-* ``_mirror_critic_verdict_to_dynamic_action`` → ``CRITIC_VERDICT``
+* ``_prepare_dynamic_action_dispatch``           → ``DISPATCHED``
+* ``_handle_dynamic_action_runner_result``       → ``SUB_AGENT_DONE``
+                                                    / ``SUB_AGENT_TERMINATED``
+* ``_mirror_critic_verdict_to_dynamic_action``   → ``CRITIC_VERDICT``
 * ``_maybe_update_dynamic_action_after_integrate``
-                                               → ``INTEGRATE_RESULT``
-* ``resume_abandon_dynamic_actions``           → ``ABANDONED_ON_RESUME``
+                                                 → ``INTEGRATE_RESULT``
+* ``resume_abandon_dynamic_actions``             → ``ABANDONED_ON_RESUME``
 """
 
 from __future__ import annotations
@@ -101,8 +96,8 @@ INTEGRATE_RESULT_FIELDS: frozenset[str] = _COMMON_FIELDS | {
 }
 
 
-# Mirrors ``dynamic_action_resume.ABANDONED_HISTORY_FIELDS`` so the
-# resume sweep + general writer share one source of truth.
+# Aliased as ``dynamic_action_resume.ABANDONED_HISTORY_FIELDS`` for
+# backwards-compatible imports.
 ABANDONED_FIELDS: frozenset[str] = _COMMON_FIELDS | {
     "previous_status",
     "coordinator_session_id",
@@ -144,9 +139,10 @@ def append_dispatch_history_row(
 ) -> None:
     """Append one row to ``dispatch_history.jsonl`` after schema check.
 
-    ``payload`` MUST contain every non-header field for the event and
-    no extras. ``event`` + ``ts`` are filled in by the writer and must
-    not appear in ``payload``.
+    ``payload`` MUST carry every non-header field for the event and no
+    extras. ``event`` + ``ts`` are filled in by the writer; OSError on
+    disk is logged + swallowed so audit-write failures never break the
+    lifecycle.
     """
     event_enum = (
         event if isinstance(event, DispatchHistoryEvent)
@@ -178,8 +174,6 @@ def append_dispatch_history_row(
         with target.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, sort_keys=True) + "\n")
     except OSError as exc:
-        # Non-fatal: an audit-trail write failure must not stop the
-        # lifecycle. Coordinator hooks log and continue.
         log.warning(
             "dynamic_action history: append failed for dyn_id=%s "
             "event=%s: %r",
@@ -188,7 +182,7 @@ def append_dispatch_history_row(
 
 
 # ---------------------------------------------------------------------------
-# telemetry.json (gap G3) — per-dyn_id terminal-state rollup
+# telemetry.json — per-dyn_id terminal-state rollup
 # ---------------------------------------------------------------------------
 TELEMETRY_FIELDS: frozenset[str] = frozenset({
     "dyn_id",
@@ -231,13 +225,12 @@ def write_dynamic_action_telemetry(
     gain_pct: float | None = None,
     round_index: int | None = None,
 ) -> None:
-    """Write (overwrite) ``telemetry.json`` for one dyn_id.
+    """Overwrite ``telemetry.json`` for one dyn_id on terminal transition.
 
-    Called on transition to any terminal lifecycle status by the
-    Coordinator lifecycle hooks. Idempotent: a later write replaces
-    an earlier one with the same lifecycle (matters on a re-process
-    after resume; the abandoned sweep is the canonical second-pass
-    writer).
+    Idempotent: a later write replaces an earlier one (the resume
+    abandoned sweep is the canonical second-pass writer). Raises
+    :class:`TelemetryRowError` when ``lifecycle`` is non-terminal or
+    the payload violates :data:`TELEMETRY_FIELDS`.
     """
     lifecycle_enum = (
         lifecycle if isinstance(lifecycle, DynamicActionStatus)
