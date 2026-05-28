@@ -643,9 +643,9 @@ class GridVariant:
         *,
         extra_sglang_args: str | None = None,
     ) -> None:
-        # Phase 4 of atom_plan/: back-compat keyword alias for the
-        # historical ``extra_sglang_args`` kwarg name. Operators /
-        # tests / third-party callers may still construct
+        # Back-compat keyword alias for the historical
+        # ``extra_sglang_args`` kwarg name. Operators / tests /
+        # third-party callers may still construct
         # ``GridVariant(extra_sglang_args="x")``; route that into the
         # canonical attribute with a single DeprecationWarning so the
         # callsite shows up in audit logs.

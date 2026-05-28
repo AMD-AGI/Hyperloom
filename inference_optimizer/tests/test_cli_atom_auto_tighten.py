@@ -1,25 +1,11 @@
-"""IR-8 tests: --framework atom validates multi-node guard but no
-longer auto-flips any kernel / framework phase knobs.
+"""IR-8 tests: --framework atom validates multi-node guard and does
+not auto-flip any kernel / framework phase knobs.
 
 Targets ``_apply_atom_auto_tighten`` in inference_optimizer.cli.
 
-History:
-* pre-Magpie-atom-PROFILE-wiring, ``--no-enable-roofline`` was
-  auto-flipped here. Once Magpie's ``atom_mi*x.sh`` learned to bridge
-  ``PROFILE=1`` to atom's ``--torch-profiler-dir``, profile / roofline /
-  TraceLens started working on atom natively and the roofline auto-
-  disable was removed.
-* atom_plan/phase2_open_kernel_agent removed the ``--no-kernel`` auto-
-  flip (kernel-agent now wired for atom — source roots, reusable-
-  kernel ledger, server-flag pre-flight probe).
-* atom_plan/phase3_open_framework_agent removed the ``--no-framework``
-  auto-flip (framework-agent now wired for atom — repo URL points at
-  https://github.com/ROCm/ATOM.git; the policy gate for
-  ``framework_atom_action_unsupported`` was also fully removed).
-
-After Phase 3 the only remaining behaviour is the ``--nodes >= 2``
-fail-fast guard. Multi-node TP wiring on atom is deferred; the guard
-saves operators a ~6-min cold start on a doomed run.
+The only remaining behaviour is the ``--nodes >= 2`` fail-fast guard.
+Multi-node TP wiring on atom is deferred; the guard saves operators a
+~6-min cold start on a doomed run.
 """
 
 from __future__ import annotations
@@ -47,10 +33,10 @@ def _fresh_args(**overrides) -> argparse.Namespace:
 
 def test_atom_auto_tighten_only_guards_multi_node(capsys):
     """Vanilla ``--framework atom`` (no other phase flags) must NOT
-    auto-flip any phase knobs after Phase 3. kernel-agent + framework-
-    agent + profile / roofline / TraceLens are all wired for atom; the
-    function's only remaining purpose is the ``--nodes >= 2`` fail-
-    fast guard. The returned auto-disabled list is empty."""
+    auto-flip any phase knobs. kernel-agent + framework-agent +
+    profile / roofline / TraceLens are all wired for atom; the
+    function's only purpose is the ``--nodes >= 2`` fail-fast guard.
+    The returned auto-disabled list is empty."""
     args = _fresh_args()
     disabled = optimizer_cli._apply_atom_auto_tighten(args)
     # No flags auto-flipped any more.
@@ -139,7 +125,7 @@ def test_framework_choices_reject_unknown_value():
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.5 G3 cross-cutting static guard:
+# Cross-cutting static guard:
 # _apply_atom_auto_tighten purpose narrowed to multi-node guard only.
 # ---------------------------------------------------------------------------
 def test_atom_auto_tighten_only_purpose_is_multi_node_guard():
@@ -152,10 +138,10 @@ def test_atom_auto_tighten_only_purpose_is_multi_node_guard():
     # reference the historical flips for context.
     body_only = src.split('"""', 2)[-1] if '"""' in src else src
     assert "args.no_kernel = True" not in body_only, (
-        "auto-tighten body must not flip no_kernel after Phase 2"
+        "auto-tighten body must not flip no_kernel"
     )
     assert "args.no_framework = True" not in body_only, (
-        "auto-tighten body must not flip no_framework after Phase 3"
+        "auto-tighten body must not flip no_framework"
     )
     assert "args.enable_roofline" not in body_only, (
         "auto-tighten body must not touch enable_roofline"
@@ -179,14 +165,13 @@ def test_atom_auto_tighten_log_line_is_single_line(capsys):
 
 
 # ---------------------------------------------------------------------------
-# Gap G9 — forward-looking alias for the post-Phase-3 behaviour name.
+# Forward-looking alias for the multi-node-guard-only behaviour.
 # ---------------------------------------------------------------------------
 def test_assert_atom_single_node_alias_resolves_to_same_callable():
     """`_assert_atom_single_node` is a forward-looking alias for
-    `_apply_atom_auto_tighten` (atom_gap1.md G9). After Phase 3 the
-    function no longer auto-tightens anything; the new name reflects
-    the actual contract. Old name kept for git-blame continuity +
-    test back-compat.
+    `_apply_atom_auto_tighten`; the new name reflects the current
+    contract (multi-node guard only). Old name kept for git-blame
+    continuity + test back-compat.
 
     Both names must resolve to the SAME callable object so a
     monkeypatch / mock against either name affects every call site.

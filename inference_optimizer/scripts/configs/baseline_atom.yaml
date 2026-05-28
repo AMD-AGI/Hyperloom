@@ -29,10 +29,10 @@
 #     <torch_profiler_dir>/rank_<N>/ which TraceLens consumes unchanged.
 #   - Multi-node is unsupported; cli.py rejects --framework atom + --nodes>=2.
 #   - Kernel-agent + framework-agent + profile / roofline / TraceLens
-#     all run on atom after atom_plan/ phases 1-3. The only remaining
-#     auto-tighten in cli.py is the --nodes>=2 fail-fast guard
-#     (_apply_atom_auto_tighten / _assert_atom_single_node); --no-kernel
-#     and --no-framework are NO LONGER auto-flipped.
+#     all run on atom. The only remaining auto-tighten in cli.py is the
+#     --nodes>=2 fail-fast guard (_apply_atom_auto_tighten /
+#     _assert_atom_single_node); --no-kernel and --no-framework are not
+#     auto-flipped.
 
 benchmark:
   framework: atom
@@ -70,9 +70,8 @@ benchmark:
 
   profiler:
     # baseline doesn't profile — profile_atom.yaml flips these to
-    # true. After atom_plan/ phase 1 the atom wrapper (atom_mi*x.sh)
-    # bridges PROFILE=1 to --torch-profiler-dir, so atom's profile
-    # executor produces the same chrome traces TraceLens consumes
+    # true. The atom wrapper (atom_mi*x.sh) bridges PROFILE=1 to
+    # --torch-profiler-dir, producing chrome traces TraceLens consumes
     # for sglang / vllm. Set PROFILE=1 here or use profile_atom.yaml
     # to enable.
     torch_profiler:
