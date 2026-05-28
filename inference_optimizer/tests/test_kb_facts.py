@@ -1090,7 +1090,13 @@ class _Task:
 
 
 def test_record_fact_per_task_keep_writes_lesson(_coord_for_fact_writes):
-    """KEEP with gain > 0 → exactly one propose_lesson call, no pitfall."""
+    """KEEP with gain > 0 → exactly one propose_lesson call, no pitfall.
+
+    Statement intentionally does NOT include the gain_pct number —
+    that goes into measured_impact (which gets shallow-merged so the
+    most-recent measurement is visible) while the statement stays
+    stable across re-validations so all sessions confirming the same
+    change merge into a single KB row."""
     coord = _coord_for_fact_writes
     coord._record_fact_per_task(
         task=_Task("t-1", "kernel_opt"),
@@ -1101,13 +1107,55 @@ def test_record_fact_per_task_keep_writes_lesson(_coord_for_fact_writes):
     assert len(coord.cortex_kb.lesson_calls) == 1
     assert len(coord.cortex_kb.pitfall_calls) == 0
     lesson = coord.cortex_kb.lesson_calls[0]
-    assert "+12.30%" in lesson["statement"]
+    # Identity dimensions IN statement.
     assert "DeepSeek-R1" in lesson["statement"]
-    assert "mi300x" in lesson["statement"].lower()
+    assert "MI300X" in lesson["statement"]
+    assert "[sglang]" in lesson["statement"]
+    # Volatile signal NOT in statement (lives in measured_impact).
+    assert "%" not in lesson["statement"], (
+        "statement must not encode gain_pct — would create N rows "
+        "per change across N re-validations"
+    )
     assert lesson["source_session_id"] == "session-X"
     assert lesson["source_task_id"] == "t-1"
     assert lesson["applicable_models"] == ["DeepSeek-R1"]
     assert lesson["applicable_hardware"] == ["MI300X"]
+    # measured_impact carries the gain numbers.
+    impact = lesson["measured_impact"]
+    assert isinstance(impact, dict)
+    assert impact["gain_pct"] == 12.3
+    assert impact["throughput_after"] == 875.0
+
+
+def test_lesson_statement_stable_across_gain_drift(_coord_for_fact_writes):
+    """Regression guard for the N-rows-per-change bug: two sessions
+    that KEEP the same change with slightly different measured gains
+    (e.g. 12.3% on session A, 11.5% on session B) MUST produce the
+    SAME lesson statement so KB merges them into one row."""
+    coord = _coord_for_fact_writes
+    # Session A measures +12.3%.
+    coord._record_fact_per_task(
+        task=_Task("t-A", "kernel_opt"),
+        source_session_id="session-A",
+        result_dict={"gain_pct": 12.3, "output_throughput": 875.0},
+        kept=True,
+    )
+    statement_a = coord.cortex_kb.lesson_calls[0]["statement"]
+    coord.cortex_kb.lesson_calls.clear()
+    # Session B measures +11.5% on the same change kind.
+    coord._record_fact_per_task(
+        task=_Task("t-B", "kernel_opt"),
+        source_session_id="session-B",
+        result_dict={"gain_pct": 11.5, "output_throughput": 860.0},
+        kept=True,
+    )
+    statement_b = coord.cortex_kb.lesson_calls[0]["statement"]
+    # Same statement → same canonical_id → KB merges into one row.
+    assert statement_a == statement_b, (
+        f"Drift bug: '{statement_a}' != '{statement_b}'. "
+        f"Two sessions writing the same lesson with different gain "
+        f"numbers must hash to the same canonical_id."
+    )
 
 
 def test_record_fact_per_task_keep_zero_gain_skips_lesson(_coord_for_fact_writes):
