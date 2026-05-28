@@ -78,7 +78,7 @@ EXPLORE is configuration-only by design.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.
 
-### Cross-domain proposal review (dynamic_action.MD P4)
+### Cross-domain proposal review (dynamic_action)
 
 This block fires only when `judge_bundle.review_constraints.cross_domain
 == true` — the runtime sets the flag when the proposal carries

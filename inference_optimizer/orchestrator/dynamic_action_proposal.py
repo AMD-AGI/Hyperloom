@@ -1,14 +1,12 @@
-"""dynamic_action.MD P3 §5 + §8 — proposal validator + terminal states.
+"""Proposal validator + lifecycle / terminal-state enums.
 
 The runner calls :func:`validate_proposal` on every ``emit_proposal``
 tool call; only validated payloads land in ``proposal_set.json``.
 
-Terminal-state enum (P3 §8) tags every runner exit so the P6 state
-machine reads a single canonical label rather than parsing logs.
-
-Reject reasons are stable strings — the runner echoes them into the
-sub_agent_journal so the sub-agent can iterate within the
-``MAX_PROPOSAL_REJECTS`` cap.
+Terminal-state and lifecycle enums anchor the canonical labels read
+by the state machine. Reject reasons are stable strings — the runner
+echoes them into the journal so the sub-agent can iterate within
+:data:`MAX_PROPOSAL_REJECTS`.
 """
 
 from __future__ import annotations
@@ -20,7 +18,7 @@ from typing import Any, Iterable
 
 
 # ---------------------------------------------------------------------------
-# Terminal states (P3 §8)
+# Runner terminal states
 # ---------------------------------------------------------------------------
 class DynamicRunnerTerminalState(str, Enum):
     """Final outcome label written to the per-dispatch summary."""
@@ -32,8 +30,7 @@ class DynamicRunnerTerminalState(str, Enum):
     ABANDONED = "ABANDONED"
 
 
-# Reason vocabulary attached to each terminal state. Closed enums so the
-# P6 state machine cannot grow new reasons by accident.
+# Closed reason vocabulary per terminal state.
 TERMINAL_REASONS: dict[DynamicRunnerTerminalState, frozenset[str]] = {
     DynamicRunnerTerminalState.COMPLETED: frozenset({"emit_proposal"}),
     DynamicRunnerTerminalState.COMPLETED_EMPTY: frozenset({"emit_empty"}),
@@ -52,19 +49,17 @@ TERMINAL_REASONS: dict[DynamicRunnerTerminalState, frozenset[str]] = {
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle states (P5 §6 + P6 §4 — full 11+1 state machine)
+# Lifecycle states
 # ---------------------------------------------------------------------------
 class DynamicActionStatus(str, Enum):
-    """SharedState.dynamic_actions[dyn_id].status vocabulary.
-
-    Closed enum covering every node of the P6 §4 state machine:
+    """``SharedState.dynamic_actions[dyn_id].status`` vocabulary.
 
     * Non-terminal: ``DISPATCHED`` → ``SUB_AGENT_RUNNING`` →
       ``SUB_AGENT_DONE`` → ``AWAITING_CRITIC`` → ``INTEGRATING``;
     * Terminal: ``COMPLETED_EMPTY`` / ``TIMED_OUT`` / ``FAILED`` /
       ``CRITIC_REJECTED`` / ``INTEGRATE_FAILED`` / ``KEPT`` /
-      ``REVERTED`` (7);
-    * Special terminal: ``ABANDONED`` set by the P8 resume sweep.
+      ``REVERTED``;
+    * Special terminal: ``ABANDONED`` set by the resume sweep.
     """
 
     DISPATCHED = "DISPATCHED"
@@ -82,9 +77,9 @@ class DynamicActionStatus(str, Enum):
     ABANDONED = "ABANDONED"
 
 
-# Initial status mapping for the dispatcher hook (P5 §5 node B).
-# COMPLETED maps to AWAITING_CRITIC because the runner-done →
-# critic-bound step is synchronous (P6 §5 node B note).
+# Map runner terminal state → initial lifecycle status. COMPLETED
+# goes straight to ``AWAITING_CRITIC`` because the runner-done →
+# critic-bound step is synchronous.
 RUNNER_STATE_TO_STATUS: dict[DynamicRunnerTerminalState, DynamicActionStatus] = {
     DynamicRunnerTerminalState.COMPLETED: DynamicActionStatus.AWAITING_CRITIC,
     DynamicRunnerTerminalState.COMPLETED_EMPTY: DynamicActionStatus.COMPLETED_EMPTY,
@@ -107,14 +102,11 @@ TERMINAL_LIFECYCLE_STATUSES: frozenset[DynamicActionStatus] = frozenset({
 
 
 # ---------------------------------------------------------------------------
-# Transition table (P6 §4.3) — Coordinator-only writes; terminal states
-# never transition out.
+# Transition table — Coordinator-only writes; terminal states are sinks.
 # ---------------------------------------------------------------------------
 ALLOWED_TRANSITIONS: dict[DynamicActionStatus, frozenset[DynamicActionStatus]] = {
     DynamicActionStatus.DISPATCHED: frozenset({
         DynamicActionStatus.SUB_AGENT_RUNNING,
-        # Runner can fail before the runtime ever starts (lane setup
-        # crash) — fold into the same terminal flow.
         DynamicActionStatus.TIMED_OUT,
         DynamicActionStatus.FAILED,
         DynamicActionStatus.ABANDONED,
@@ -154,8 +146,9 @@ def can_transition(
 ) -> bool:
     """Return True iff ``from_state → to_state`` is permitted.
 
-    Missing source (no prior summary) is treated as DISPATCHED
-    creation; only DISPATCHED is a legal first state.
+    Missing source (no prior summary) is treated as creation; only
+    ``DISPATCHED`` is a legal first state. Same-status re-writes are
+    idempotent.
     """
     target = (
         to_state if isinstance(to_state, DynamicActionStatus)
@@ -168,15 +161,13 @@ def can_transition(
         else DynamicActionStatus(str(from_state))
     )
     if src == target:
-        # Idempotent re-write of the same status is always allowed
-        # (Coordinator hooks can fire twice on duplicate events).
         return True
     allowed = ALLOWED_TRANSITIONS.get(src, frozenset())
     return target in allowed
 
 
 # ---------------------------------------------------------------------------
-# last_outcome map (P6 §8) — prompt-friendly flattened label.
+# Prompt-friendly flattened ``last_outcome`` label per status.
 # ---------------------------------------------------------------------------
 LAST_OUTCOME_BY_STATUS: dict[DynamicActionStatus, str] = {
     DynamicActionStatus.DISPATCHED: "running",
@@ -196,18 +187,13 @@ LAST_OUTCOME_BY_STATUS: dict[DynamicActionStatus, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Prompt projection schema (P6 §3 + §7) — fields the orchestration
-# prompt section renders. Closed enum; additions require a P6 design
-# change. On-disk summary may carry extra audit fields (critic_verdict,
-# integrate_status, ...) for the artefact trail, but those never leak
-# into the prompt.
+# Closed field set the orchestration prompt's dynamic_action section
+# renders. On-disk summaries may carry extra audit fields; only the
+# names below leak into the prompt projection.
 #
-# ``cumulative_gain`` semantics (gap G9): v1 dispatches are one-shot
-# (no re-dispatch loop yet), so the field holds the **single integrate
-# delta_pct** for the dyn_id rather than a multi-run cumulative sum.
-# The "cumulative" name is kept for forward compatibility — when v2
-# introduces sub-agent re-dispatch, the same field becomes the actual
-# running total without a prompt-schema change.
+# ``cumulative_gain`` currently holds the single integrate
+# ``delta_pct`` (one-shot dispatch); the name reserves space for a
+# multi-run total if sub-agent re-dispatch lands later.
 # ---------------------------------------------------------------------------
 SUMMARY_PROMPT_FIELDS: frozenset[str] = frozenset({
     "dyn_id",
@@ -223,12 +209,12 @@ SUMMARY_PROMPT_FIELDS: frozenset[str] = frozenset({
     "updated_at",
 })
 
-# P6 §3 motivation_gap_short hard cap.
+# Hard cap on the prompt-facing motivation excerpt.
 MOTIVATION_GAP_SHORT_MAX_CHARS: int = 200
 
 
 # ---------------------------------------------------------------------------
-# Proposal schema (P3 §5)
+# Proposal schema
 # ---------------------------------------------------------------------------
 ALLOWED_PROPOSAL_FIELDS: frozenset[str] = frozenset({
     "name",
@@ -248,8 +234,7 @@ REQUIRED_PROPOSAL_FIELDS: tuple[str, ...] = (
     "expected_qualitative_argument",
 )
 
-# P3 §5.2 — explicit denial of quantitative / priority fields. The
-# validator rejects any of these even when present with falsy values.
+# Quantitative / priority fields rejected outright on any proposal.
 FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset({
     "expected_gain",
     "expected_gain_pct",
@@ -260,18 +245,17 @@ FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset({
     "force_provenance",
 })
 
-# P3 §5.1 — provenance is a literal, no composite form.
+# Provenance is a strict literal, no composite form.
 EXPECTED_PROVENANCE: str = "dynamic"
 
-# Q3 — proposal_set length is hard-capped at 1.
+# Cap on the number of entries the runner accepts per dispatch.
 MAX_PROPOSAL_SET_LEN: int = 1
 
-# P3 §5.3 — consecutive validation rejects before the runner FAILs.
+# Consecutive validation rejects before the runner gives up.
 MAX_PROPOSAL_REJECTS: int = 2
 
-# P3 §5.3 — numeric-claim regex catches obvious "X%", "X.Yx",
-# "X.Y tok/s" patterns the sub-agent might use to smuggle bench
-# numbers into the qualitative argument.
+# Catches obvious numeric speedup claims smuggled into the qualitative
+# argument (``X%`` / ``X.Yx`` / ``X.Y ms`` / ``speedup of X``).
 _NUMERIC_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b\d+(?:\.\d+)?\s*%"),
     re.compile(r"\b\d+(?:\.\d+)?\s*x\b", re.I),
@@ -284,9 +268,9 @@ _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
     r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.M,
 )
 
-# G6 cumulative-diff check — git emits these on every ``diff``; the
-# sub-agent's hand-crafted patches typically do not. Stripping them
-# before comparison keeps the check on hunk semantics, not metadata.
+# Git emits these metadata lines on every diff; hand-crafted patches
+# typically do not. Stripping them keeps the cumulative-diff check on
+# hunk semantics, not metadata.
 _DIFF_NORMALISE_DROP_LINES: tuple[re.Pattern[str], ...] = (
     re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+(?: \d+)?$", re.M),
     re.compile(r"^diff --git a/.* b/.*$", re.M),
@@ -297,11 +281,8 @@ _DIFF_NORMALISE_DROP_LINES: tuple[re.Pattern[str], ...] = (
 
 
 def _normalise_diff_for_compare(text: str) -> str:
-    """Strip git-only metadata + trailing whitespace so a hand-crafted
-    proposal patch can be compared with ``git diff HEAD`` output.
-
-    Returns the canonical form ready for byte comparison.
-    """
+    """Strip git-only metadata + trailing whitespace, return the
+    canonical form for byte comparison."""
     body = text or ""
     for pat in _DIFF_NORMALISE_DROP_LINES:
         body = pat.sub("", body)
@@ -357,22 +338,19 @@ def validate_proposal(
     spec_scope_domains: list[str],
     worktree_cumulative_diff: str | None = None,
 ) -> ProposalValidationResult:
-    """Apply the P3 §5.3 checks to one proposal payload.
+    """Apply the closed-schema checks to one proposal payload.
 
-    ``spec_scope_domains`` is the scope_domains list captured in the
-    dispatch ``spec.json`` (the canonical truth set; the proposal's
-    own list must be a subset).
+    ``spec_scope_domains`` is the truth set from the dispatch
+    ``spec.json``; the proposal's own list must be a subset.
 
-    ``worktree_cumulative_diff`` (gap G6) is ``git diff HEAD`` from
-    the sub-agent's worktree captured at ``emit_proposal`` time. When
-    non-empty, the proposal's ``patch_text`` MUST match it (after
-    normalising for git metadata + whitespace). ``None`` disables the
-    check (no worktree present / git failure / runner ran in a test
-    fixture).
+    ``worktree_cumulative_diff`` is ``git diff HEAD`` from the
+    sub-agent's worktree captured at ``emit_proposal`` time. When
+    non-empty the proposal's ``patch_text`` MUST match it (after
+    git-metadata + whitespace normalisation). ``None`` disables the
+    check (no worktree / git failure / test fixture).
 
-    Empty payload + empty patch is **not** treated here — the runner
-    interprets ``emit_proposal`` with ``patch_text == ""`` as the
-    COMPLETED_EMPTY signal before calling the validator.
+    Empty ``patch_text`` is handled upstream as the ``COMPLETED_EMPTY``
+    signal and is not reached here.
     """
     if not isinstance(proposal, dict):
         return ProposalValidationResult(
@@ -489,11 +467,10 @@ def build_proposal_set_payload(
     *, dyn_id: str, normalised_proposal: dict[str, Any] | None,
     journal_path: str,
 ) -> dict[str, Any]:
-    """Build the ``proposal_set.json`` body in the schema P5 expects.
+    """Build the ``proposal_set.json`` body.
 
-    ``normalised_proposal=None`` represents the COMPLETED_EMPTY signal
-    (sub-agent declared no feasible cross-domain combo). The
-    specialist-equivalent empty path consumes this verbatim."""
+    ``normalised_proposal=None`` represents the ``COMPLETED_EMPTY``
+    signal (sub-agent declared no feasible cross-domain combo)."""
     if normalised_proposal is None:
         return {
             "dyn_id": str(dyn_id),

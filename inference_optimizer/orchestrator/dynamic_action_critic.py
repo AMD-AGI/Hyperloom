@@ -1,25 +1,23 @@
-"""dynamic_action.MD P4 — Critic-side cross-domain review primitives.
+"""Critic-side cross-domain review primitives for ``dynamic_action``.
 
-The runner (P3) already validates proposal payload schema and the
-numeric-claim guard before the patch reaches the Critic. P4 layers the
-**second** defense on the Critic boundary so a regression in P3 (or a
-manual proposal_set surgery) cannot silently bypass the §1.2 red lines.
+The runner already validates the proposal payload before the patch
+reaches the Critic. This module is the second defence layer so a
+regression upstream cannot silently bypass the cross-domain red lines.
 
 Public surface:
 
-* :data:`CROSS_DOMAIN_RULES` — the three rule descriptors (P4 §4) the
-  Critic prompt cites verbatim;
+* :data:`CROSS_DOMAIN_RULES` — the three rule descriptors the Critic
+  prompt cites verbatim;
 * :data:`CRITIC_VERDICT_FIELDS` — closed envelope for
-  ``critic_verdict.json`` (P4 §5.3);
-* :class:`CrossDomainPreverdict` — mechanical-check result wrapping a
-  ``verdict`` + ``reason_codes`` + ``applied_rules`` triple;
-* :func:`classify_proposal_for_critic` — entry point: maps one proposal
-  payload to ``(bundle_action_class, review_constraints)`` (P4 §3.1);
+  ``critic_verdict.json``;
+* :class:`CrossDomainPreverdict` — mechanical-check result;
+* :func:`classify_proposal_for_critic` — maps a proposal to
+  ``(bundle_action_class, review_constraints)``;
 * :func:`run_mechanical_cross_domain_checks` — applies the three rules
-  plus the §9 #6 / #7 fail-fast guards;
+  plus the fail-fast provenance + forbidden-field guards;
 * :func:`build_critic_verdict_envelope` — assembles the on-disk shape;
-* :func:`write_critic_verdict` — persists the envelope alongside
-  spec.json / seed_kit.json / proposal_set.json.
+* :func:`write_critic_verdict` — persists the envelope under the
+  dispatch artefact dir.
 """
 
 from __future__ import annotations
@@ -42,7 +40,7 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Rule catalogue (P4 §4)
+# Rule catalogue
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class CrossDomainRule:
@@ -92,7 +90,7 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# Closed verdict envelope (P4 §5.3)
+# Closed verdict envelope
 # ---------------------------------------------------------------------------
 CRITIC_VERDICT_FIELDS: frozenset[str] = frozenset({
     "dyn_id",
@@ -109,19 +107,14 @@ ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "revise"})
 # ---------------------------------------------------------------------------
 # Mechanical-check primitives
 # ---------------------------------------------------------------------------
-# P4 §4 rule 2 — sub-agent must talk about *why these have to happen
-# together*. Substring containment over a small list of coupling
-# keywords is the lightest deterministic check that catches the obvious
-# "two unrelated patches glued together" failure mode.
+# Coupling keywords — "why must these changes happen together?".
 _COUPLING_KEYWORDS: tuple[str, ...] = (
     "coupl", "联动", "interaction", "depend", "依赖", "interface",
     "interplay", "joint", "together", "synerg", "interact",
     "trigger", "follow",
 )
 
-# Words that signal "this proposal acknowledges a potential downside"
-# (P4 §4 rule 2 second half). A single hit is enough; the rule cap
-# stays soft so legitimate proposals with diverse phrasing pass.
+# Side-effect keywords — "what could go wrong?".
 _SIDE_EFFECT_KEYWORDS: tuple[str, ...] = (
     "side effect", "side-effect", "regression", "副作用", "trade-off",
     "tradeoff", "risk", "downside", "may decrease", "may degrade",
@@ -129,9 +122,9 @@ _SIDE_EFFECT_KEYWORDS: tuple[str, ...] = (
     "may break", "could break",
 )
 
-# P4 §4 rule 3 — motivation must explicitly say "no specialist alone
-# can do this". A grid-combo justification ("just stack proposals
-# from spec A and spec B") is a hard reject.
+# Phrases that justify a cross-domain dispatch (no single specialist
+# could surface it) — informational; the negative set drives the hard
+# reject.
 _MOTIVATION_VALID_KEYWORDS: tuple[str, ...] = (
     "no single specialist", "no single domain",
     "single specialist cannot", "single domain cannot",
@@ -140,14 +133,15 @@ _MOTIVATION_VALID_KEYWORDS: tuple[str, ...] = (
     "无法由单个 specialist", "无法由单 domain",
     "specialist 边界", "跨域专属",
 )
+# Phrases that signal a grid-combo masquerading as dynamic_action.
 _MOTIVATION_INVALID_KEYWORDS: tuple[str, ...] = (
     "just stack", "simple combination of",
     "concatenate two specialist", "concatenat", "merge of specialist",
     "拼接", "拼合", "组合 specialist a 和 specialist b",
 )
 
-# Re-export the runner's numeric-claim patterns so the Critic boundary
-# applies the same regex even if the runner is bypassed.
+# Mirrors the runner's numeric-claim regex so the Critic boundary
+# still rejects smuggled numbers if the runner is bypassed.
 _NUMERIC_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b\d+(?:\.\d+)?\s*%"),
     re.compile(r"\b\d+(?:\.\d+)?\s*x\b", re.I),
@@ -179,12 +173,11 @@ def _numeric_hits(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 @dataclass
 class CrossDomainPreverdict:
-    """Pre-LLM verdict produced by mechanical checks.
+    """Pre-LLM verdict produced by the mechanical checks.
 
-    When ``verdict == "approve"`` the LLM-critic still runs (its
-    job is to apply the §6 patch_landing four-checklist + any
-    higher-level judgement). The mechanical layer is a *floor* — it
-    can only down-rank the LLM's verdict, never up-rank it.
+    When ``verdict == "approve"`` the LLM-critic still runs and may
+    down-rank to ``revise`` / ``reject``. The mechanical layer is a
+    *floor* — it can only tighten the LLM's verdict, never loosen it.
     """
 
     verdict: str
@@ -198,7 +191,7 @@ class CrossDomainPreverdict:
 
 
 # ---------------------------------------------------------------------------
-# Classifier (P4 §3.1)
+# Classifier
 # ---------------------------------------------------------------------------
 def classify_proposal_for_critic(
     proposal_payload: dict[str, Any],
@@ -207,17 +200,15 @@ def classify_proposal_for_critic(
 
     Returns ``(bundle_action_class, review_constraints)``:
 
-    * ``bundle_action_class`` is always ``"patch_landing"`` (D-B
-      decision — never branches by source).
+    * ``bundle_action_class`` is always ``"patch_landing"`` (never
+      branches by source).
     * ``review_constraints`` carries ``cross_domain=True`` plus the
-      rule descriptors when the proposal's ``provenance`` literal is
-      ``"dynamic"``; otherwise the dict is empty (specialist patches
-      are unaffected).
+      rule descriptors when ``provenance == "dynamic"``; otherwise
+      the dict is empty (specialist patches are unaffected).
+
+    The ``provenance`` match is strict + case-sensitive so a forged
+    ``DYNAMIC`` / ``Dynamic`` cannot slip past this layer.
     """
-    # §1.2 / P3 §5.1 — provenance is a strict literal (case-sensitive).
-    # Matching a case-folded form would silently let ``DYNAMIC`` /
-    # ``Dynamic`` slip past the multi-layer defence the runner already
-    # enforces.
     provenance = str(
         (proposal_payload or {}).get("provenance") or "",
     ).strip()
@@ -246,28 +237,23 @@ def is_cross_domain_proposal(proposal_payload: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Mechanical checks (P4 §9 #2 / #3 / #4 / #6 / #7)
+# Mechanical checks
 # ---------------------------------------------------------------------------
 def run_mechanical_cross_domain_checks(
     proposal_payload: dict[str, Any],
     *,
     spec_scope_domains: list[str],
 ) -> CrossDomainPreverdict:
-    """Apply the three §4 rules + the §9 #6/#7 fail-fast guards.
+    """Apply the three review rules + the fail-fast guards.
 
-    Notes
-    -----
-    * The mechanical layer is intentionally conservative — it only
-      *blocks* on clear-cut violations and falls through to APPROVE
-      otherwise so the LLM-critic's patch_landing checklist still
-      gets the final say.
-    * ``applied_rules`` records the full ID list (passed + failed)
-      so the audit can reconstruct which rules ran.
+    The mechanical layer is conservative — it blocks on clear-cut
+    violations and otherwise falls through to ``approve`` so the
+    LLM-critic still gets the final say. ``applied_rules`` records
+    the full id list (passed + failed) for audit.
     """
     pre = CrossDomainPreverdict(verdict="approve", cross_domain_flag=True)
 
-    # §9 #6 — fail-fast provenance literal check (last line of
-    # defence; P1 IR-4 + P3 runner schema were the first two).
+    # Provenance literal — the last of the three defence layers.
     provenance = str(
         (proposal_payload or {}).get("provenance") or "",
     ).strip()
@@ -281,8 +267,7 @@ def run_mechanical_cross_domain_checks(
         return pre
     pre.applied_rules.append("provenance_literal")
 
-    # §9 #7 — forbidden quantitative fields (mirrors the P3 runner
-    # validator; second defence at the critic boundary).
+    # Forbidden quantitative fields mirror the runner-side validator.
     forbidden_present = sorted(
         set((proposal_payload or {}).keys()) & FORBIDDEN_PROPOSAL_FIELDS,
     )
@@ -301,18 +286,14 @@ def run_mechanical_cross_domain_checks(
         for d in proposal_payload.get("scope_domains") or ()
         if str(d or "").strip()
     ]
-    # The spec is the truth set; we still record the proposal's own
-    # scope for the rule-1 / rule-2 / rule-3 mentions check so a
-    # tighter scope inside the proposal still gets fairly evaluated.
+    # Spec is the truth set; proposal's own scope is used only to keep
+    # a tighter declared scope fairly evaluated.
     truth_set = list(spec_scope_domains or scope_domains)
     rationale = str(proposal_payload.get("cross_domain_rationale") or "")
     qualitative = str(
         proposal_payload.get("expected_qualitative_argument") or "",
     )
 
-    # P3 runner validator already enforces numeric_claims at sub-agent
-    # boundary; defence in depth at critic boundary too (§9 #7 cousin
-    # for the qualitative argument).
     nh = _numeric_hits(qualitative)
     if nh:
         pre.verdict = "reject"
@@ -324,10 +305,8 @@ def run_mechanical_cross_domain_checks(
         return pre
     pre.applied_rules.append("qualitative_no_numeric_claims")
 
-    # P4 §4 rule 1 — every truth-set domain must show up in the
-    # rationale text. Missing → REVISE (sub-agent can patch the
-    # rationale without re-emitting the whole proposal in v2; in v1
-    # REVISE is handled identically to REJECT per §5.2).
+    # rationale_per_domain — every truth-set domain must appear in
+    # the rationale text.
     missing = _missing_domain_mentions(rationale, truth_set)
     pre.applied_rules.append("rationale_per_domain")
     if missing:
@@ -338,7 +317,8 @@ def run_mechanical_cross_domain_checks(
         )
         return pre
 
-    # P4 §4 rule 2 — coupling + side-effect keywords.
+    # coupling_and_side_effects — rationale must mention both why
+    # changes happen together and one potential side effect.
     pre.applied_rules.append("coupling_and_side_effects")
     has_coupling = _has_any_keyword(rationale, _COUPLING_KEYWORDS)
     has_side_effect = _has_any_keyword(rationale, _SIDE_EFFECT_KEYWORDS)
@@ -355,10 +335,8 @@ def run_mechanical_cross_domain_checks(
         )
         return pre
 
-    # P4 §4 rule 3 — motivation gap valid. Hard reject when the
-    # rationale explicitly says "stack/concatenate specialist
-    # output"; soft pass otherwise (LLM-critic has the final say on
-    # the harder cases).
+    # motivation_gap_valid — hard reject when the rationale describes
+    # a grid-combo masquerading as a dynamic_action.
     pre.applied_rules.append("motivation_gap_valid")
     if _has_any_keyword(rationale, _MOTIVATION_INVALID_KEYWORDS):
         pre.verdict = "reject"
@@ -374,7 +352,7 @@ def run_mechanical_cross_domain_checks(
 
 
 # ---------------------------------------------------------------------------
-# Verdict envelope writer (P4 §5.3)
+# Verdict envelope writer
 # ---------------------------------------------------------------------------
 def build_critic_verdict_envelope(
     *,

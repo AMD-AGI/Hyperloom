@@ -1,6 +1,5 @@
-"""dynamic_action_gaps.md G2 + G13 — dispatch_history.jsonl
-closed-schema writer + per-event schema audit.
-"""
+"""Tests for the dispatch_history.jsonl closed-schema writer +
+per-event schema audit + telemetry.json rollup."""
 
 from __future__ import annotations
 
@@ -107,7 +106,7 @@ def _abandoned_payload() -> dict:
 class TestSchemaClosure:
 
     def test_resume_abandoned_alias_is_canonical_set(self):
-        """G2 — resume module re-exports the canonical schema."""
+        """The resume module re-exports the canonical schema."""
         assert RESUME_ABANDONED_FIELDS is ABANDONED_FIELDS
 
     @pytest.mark.parametrize("event,field_set", [
@@ -222,8 +221,8 @@ class TestWriter:
         )
 
     def test_round_trip_every_event(self, tmp_path):
-        """G2 + G13 — write one row per event type; reload and verify
-        the closed schema is honoured everywhere."""
+        """Write one row per event type; reload and verify the closed
+        schema is honoured everywhere."""
         cases = [
             (DispatchHistoryEvent.DISPATCHED, _dispatched_payload(),
              DISPATCHED_FIELDS),
@@ -255,9 +254,8 @@ class TestWriter:
 # Invariant — full lifecycle reconstruction
 # ===========================================================================
 class TestInvariantLifecycle:
-    """G2 — a successful KEPT run produces all four lifecycle rows in
-    order (DISPATCHED → SUB_AGENT_DONE → CRITIC_VERDICT → INTEGRATE_RESULT)
-    on the same file."""
+    """A successful KEPT run produces the four lifecycle rows in order
+    (DISPATCHED → SUB_AGENT_DONE → CRITIC_VERDICT → INTEGRATE_RESULT)."""
 
     def test_inv_dispatch_history_complete_lifecycle(self, tmp_path):
         sequence = [
@@ -279,7 +277,7 @@ class TestInvariantLifecycle:
 
 
 # ===========================================================================
-# G3 — telemetry.json per-dyn_id rollup
+# telemetry.json per-dyn_id rollup
 # ===========================================================================
 class TestTelemetry:
 
@@ -372,14 +370,13 @@ class TestTelemetry:
 
 
 # ===========================================================================
-# G3 invariant — telemetry exists for every terminal dyn_id
+# Telemetry invariant — file present on every terminal dyn_id
 # ===========================================================================
 class TestInvariantTelemetry:
 
     def test_inv_telemetry_present_on_terminal_state(self, tmp_path):
         """Every terminal lifecycle write must produce a telemetry
-        file on disk. Future Coordinator hook breakage would surface
-        as a missing file here."""
+        file on disk."""
         for status in (
             DynamicActionStatus.KEPT,
             DynamicActionStatus.REVERTED,
