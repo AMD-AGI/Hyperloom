@@ -2883,6 +2883,12 @@ class Coordinator:
             # any that are still blocked.
             if self._proposals_awaiting_roofline:
                 await self._drain_proposals_awaiting_roofline()
+            # dynamic_action.MD P8 — independent of the proposal
+            # replay path: walk the dynamic_actions artefact dir +
+            # SharedState summary map, transition every non-terminal
+            # dyn_id to ABANDONED, and clean up the orphan worktree +
+            # git branch a runner-side normal exit would have done.
+            self._resume_abandon_dynamic_actions()
         for _ in range(n):
             self.shared_state.increment_tick()
             for name in self._tick_roles:
@@ -2969,6 +2975,10 @@ class Coordinator:
             # queued would never re-dispatch them.
             if self._proposals_awaiting_roofline:
                 await self._drain_proposals_awaiting_roofline()
+            # dynamic_action.MD P8 — see ``tick(...)`` for the
+            # rationale. Same hook fires for the long-run path so
+            # the sweep is symmetric across both entry points.
+            self._resume_abandon_dynamic_actions()
 
         tick_n = 0
         stop_reason = ""
@@ -5916,6 +5926,49 @@ class Coordinator:
             return int(cursor or 0)
         except (TypeError, ValueError):
             return 0
+
+    # ------------------------------------------------------------------
+    # dynamic_action.MD P8 — resume-time abandoned sweep
+    # ------------------------------------------------------------------
+    def _resume_abandon_dynamic_actions(self) -> None:
+        """Consolidate every non-terminal dyn_id into ABANDONED at
+        resume time. Side-effects (worktree cleanup, dispatch_history
+        append, summary writes) live in
+        :mod:`dynamic_action_resume`; this wrapper only threads the
+        coordinator-side context (session_dir, shared_state,
+        framework_source_roots) and forwards a single boot-log line."""
+        from .dynamic_action_resume import resume_abandon_dynamic_actions
+        from .framework_paths import resolve_source_file_allowlist
+
+        if self.session_dir is None:
+            return
+        try:
+            result = resume_abandon_dynamic_actions(
+                session_dir=self.session_dir,
+                shared_state=self.shared_state,
+                coordinator_session_id=str(
+                    getattr(self.shared_state, "session_id", "") or "",
+                ),
+                framework_source_roots=tuple(
+                    resolve_source_file_allowlist(),
+                ),
+            )
+        except Exception:  # noqa: BLE001 — defensive: never block boot
+            log.exception(
+                "dynamic_action resume sweep failed; resume continues",
+            )
+            return
+        if (
+            result.abandoned or result.artifact_missing
+            or result.summary_missing
+        ):
+            log.info(result.to_log_line())
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action resume sweep: save after sweep failed",
+                )
 
     # ------------------------------------------------------------------
     # dynamic_action.MD P5 — runner / critic / integrate lifecycle hooks
