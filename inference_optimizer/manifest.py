@@ -398,11 +398,6 @@ def build_manifest(
             float(getattr(args, "warm_replay_min_reproduce_pct", 0.8) or 0.8)
             if args is not None else 0.8
         ),
-        # GAP 4 — Same pattern for ``--no-fact-writes``.
-        "fact_writes_enabled": (
-            not bool(getattr(args, "no_fact_writes", False))
-            if args is not None else True
-        ),
     }
 
 
