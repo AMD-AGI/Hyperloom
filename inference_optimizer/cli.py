@@ -2455,19 +2455,37 @@ def _bootstrap_cortex_kb(
             stack_fingerprint=stack_fp,
             extra_attrs=extra_attrs,
             resume=resume,
-            fail_fast=True,
+            # KB unavailability MUST NOT abort the launch. Operator
+            # requirement (May 2026): "if KB is not available, do not
+            # affect the main logic." IR-3 already soft-degrades when
+            # KB is unreachable at preflight; we mirror that policy
+            # here so an IR-3-pass + T0-fail race (KB UP at probe
+            # time but DOWN moments later) also degrades cleanly
+            # instead of aborting the optimizer. The Coordinator
+            # observes ``client.enabled=False`` after this fall-back
+            # and skips every KB write / read path.
+            fail_fast=False,
             on_status=print,
             session_dir=session_dir,
             save_state=True,
         )
     except CortexKBError as exc:
+        # T0 hit a hard failure mid-anchor (e.g. recipe backfill 5xx
+        # after IR-3 reported KB reachable). Downgrade to KB-degraded
+        # mode and record the audit reason so the breakdown collector
+        # can surface the drift between IR-3 and T0.
         print(
-            f"ERROR: T0 Cortex `session begin` failed: {exc}\n"
-            f"This is fail-fast per KB_design §3.13 M1. Pass "
-            f"--degraded-kb to skip KB integration this run.",
+            f"WARNING: T0 Cortex anchor failed mid-flight: {exc}\n"
+            f"Soft-degrading to KB-disabled mode for this session "
+            f"(equivalent to --degraded-kb). KB writes will queue to "
+            f"NDJSON only and KB reads will return empty.",
             file=sys.stderr,
         )
-        sys.exit(2)
+        client.enabled = False
+        args.cortex_enabled = False
+        args.kb_degraded_reason = (
+            getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"
+        )
     return client
 
 
