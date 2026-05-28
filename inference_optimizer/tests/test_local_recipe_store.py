@@ -108,16 +108,22 @@ def test_put_recipe_first_call_creates_live_at_version_1(
     cid = _cid()
     result = store.put_recipe(
         canonical_id=cid,
-        labels={"task": "pretrain"},
-        metrics={"throughput": 24300.5},
+        model="deepseek-r1", hardware="mi300x", framework="sglang",
+        framework_version="0.4.5", precision="fp8",
+        best_config={"tp": "8"},
+        best_throughput=24300.5,
         provenance={"source": "test", "generator": "ut"},
     )
     assert result == {"canonical_id": cid, "version": 1, "created": True}
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     assert live["version"] == 1
-    assert live["labels"] == {"task": "pretrain"}
-    assert live["metrics"] == {"throughput": 24300.5}
+    # Top-level arbor identity fields stamped from put_recipe args.
+    assert live["model"]    == "deepseek-r1"
+    assert live["hardware"] == "mi300x"
+    # arbor-style payload fields at the top level.
+    assert live["best_config"]     == {"tp": "8"}
+    assert live["best_throughput"] == 24300.5
     assert live["created_at"] == live["updated_at"]
     # Live row sits at the documented 5-level depth.
     rel = (tmp_path / "deepseek-r1" / "mi300x" / "sglang" / "0.4.5" / "fp8"
@@ -132,12 +138,12 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
     cid = _cid()
     store.put_recipe(
         canonical_id=cid,
-        metrics={"throughput": 1000.0},
+        best_throughput=1000.0,
         provenance={"source": "first", "generator": "ut"},
     )
     second = store.put_recipe(
         canonical_id=cid,
-        metrics={"throughput": 2000.0},
+        best_throughput=2000.0,
         provenance={"source": "second", "generator": "ut"},
     )
     assert second == {"canonical_id": cid, "version": 2, "created": False}
@@ -145,18 +151,18 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
     assert len(history) == 1
     archive = history[0]
     assert archive["version"] == 1
-    assert archive["snapshot"]["metrics"] == {"throughput": 1000.0}
+    assert archive["snapshot"]["best_throughput"] == 1000.0
     # ``replaced_by`` MUST carry the triggering write's provenance —
     # this is how an audit can trace which marathon wrote the
     # supplanting row (boundary doc §4.2).
     assert archive["replaced_by"] == {
         "source": "second", "generator": "ut",
     }
-    # Live row carries the new metrics and the bumped version.
+    # Live row carries the new throughput and the bumped version.
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
-    assert live["version"] == 2
-    assert live["metrics"] == {"throughput": 2000.0}
+    assert live["version"]         == 2
+    assert live["best_throughput"] == 2000.0
 
 
 def test_put_recipe_preserves_created_at_across_updates(
@@ -166,14 +172,14 @@ def test_put_recipe_preserves_created_at_across_updates(
     ``updated_at`` advances on subsequent puts."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid, metrics={"throughput": 1000.0})
+    store.put_recipe(canonical_id=cid, best_throughput=1000.0)
     first_live = store.get_recipe(canonical_id=cid)
     assert first_live is not None
     created_first = first_live["created_at"]
     # Force at least one microsecond gap so the timestamps differ.
     import time
     time.sleep(0.001)
-    store.put_recipe(canonical_id=cid, metrics={"throughput": 2000.0})
+    store.put_recipe(canonical_id=cid, best_throughput=2000.0)
     second_live = store.get_recipe(canonical_id=cid)
     assert second_live is not None
     assert second_live["created_at"] == created_first
@@ -218,14 +224,14 @@ def test_get_recipe_with_version_returns_archive_for_prior_version(
 ) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid, metrics={"throughput": 1000.0})
-    store.put_recipe(canonical_id=cid, metrics={"throughput": 2000.0})
+    store.put_recipe(canonical_id=cid, best_throughput=1000.0)
+    store.put_recipe(canonical_id=cid, best_throughput=2000.0)
     v1 = store.get_recipe(canonical_id=cid, version=1)
     assert v1 is not None
-    assert v1["metrics"] == {"throughput": 1000.0}
+    assert v1["best_throughput"] == 1000.0
     v2 = store.get_recipe(canonical_id=cid, version=2)
     assert v2 is not None
-    assert v2["metrics"] == {"throughput": 2000.0}
+    assert v2["best_throughput"] == 2000.0
 
 
 def test_get_recipe_with_unknown_version_returns_none(tmp_path: Path) -> None:
@@ -271,14 +277,14 @@ def test_get_history_respects_limit(tmp_path: Path) -> None:
 def test_delete_recipe_removes_live_preserves_history(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    store.put_recipe(canonical_id=cid, metrics={"throughput": 1000.0})
-    store.put_recipe(canonical_id=cid, metrics={"throughput": 2000.0})
+    store.put_recipe(canonical_id=cid, best_throughput=1000.0)
+    store.put_recipe(canonical_id=cid, best_throughput=2000.0)
     assert store.delete_recipe(canonical_id=cid) is True
     assert store.get_recipe(canonical_id=cid) is None
     # History survives — caller can still recover v1.
     history = store.get_history(canonical_id=cid)
     assert len(history) == 1
-    assert history[0]["snapshot"]["metrics"] == {"throughput": 1000.0}
+    assert history[0]["snapshot"]["best_throughput"] == 1000.0
 
 
 def test_delete_recipe_returns_false_for_unknown_cid(tmp_path: Path) -> None:
@@ -290,8 +296,13 @@ def test_delete_recipe_returns_false_for_unknown_cid(tmp_path: Path) -> None:
 # list_recent / search
 # ===========================================================================
 def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
-    """Create three recipes spanning different labels / metrics and
-    return their cids keyed by short alias for assertions."""
+    """Create three recipes spanning different identity / metrics and
+    return their cids keyed by short alias for assertions.
+
+    ``task`` and ``mfu`` go through ``extras`` (they're not in the
+    well-known arbor schema but the search filters look at every
+    top-level field, so ``extras`` are first-class for filtering).
+    """
     cid_a = recipe_canonical_id(
         model="m-a", hardware="mi300x", framework="sglang",
         framework_version="0.4.5", precision="fp8",
@@ -307,20 +318,26 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
     import time
     store.put_recipe(
         canonical_id=cid_a,
-        labels={"task": "pretrain", "hardware": "mi300x"},
-        metrics={"throughput": 10000.0, "mfu": 0.4},
+        model="m-a", hardware="mi300x", framework="sglang",
+        framework_version="0.4.5", precision="fp8",
+        best_throughput=10000.0,
+        extras={"task": "pretrain", "mfu": 0.4},
     )
     time.sleep(0.001)
     store.put_recipe(
         canonical_id=cid_b,
-        labels={"task": "inference", "hardware": "mi300x"},
-        metrics={"throughput": 25000.0, "mfu": 0.55},
+        model="m-b", hardware="mi300x", framework="vllm",
+        framework_version="0.6.0", precision="bf16",
+        best_throughput=25000.0,
+        extras={"task": "inference", "mfu": 0.55},
     )
     time.sleep(0.001)
     store.put_recipe(
         canonical_id=cid_c,
-        labels={"task": "pretrain", "hardware": "mi355x"},
-        metrics={"throughput": 5000.0, "mfu": 0.30},
+        model="m-c", hardware="mi355x", framework="sglang",
+        framework_version="0.5.0", precision="fp8",
+        best_throughput=5000.0,
+        extras={"task": "pretrain", "mfu": 0.30},
     )
     return {"a": cid_a, "b": cid_b, "c": cid_c}
 
@@ -380,8 +397,10 @@ def test_search_excludes_rows_missing_the_metric_key(tmp_path: Path) -> None:
     cannot be proven to satisfy the filter and is excluded."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid(model="no-tput")
-    store.put_recipe(canonical_id=cid, metrics={"mfu": 0.5})
-    rows = store.search(metric_filters={"throughput": {"min": 0}})
+    # ``best_throughput`` defaults to 0.0; we use a high min to trip
+    # the "missing key" path since 0.0 obviously fails the bound.
+    store.put_recipe(canonical_id=cid, extras={"mfu": 0.5})
+    rows = store.search(metric_filters={"throughput": {"min": 100}})
     assert rows == []
 
 
@@ -532,7 +551,7 @@ def test_put_recipe_concurrent_writers_keep_versions_monotonic(
     def write_once(idx: int) -> dict[str, Any]:
         return store.put_recipe(
             canonical_id=cid,
-            metrics={"throughput": float(1000 + idx)},
+            best_throughput=float(1000 + idx),
             provenance={"source": "concurrent", "generator": f"w{idx}"},
         )
 
