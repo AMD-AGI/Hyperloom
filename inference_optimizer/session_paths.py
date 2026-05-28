@@ -398,6 +398,54 @@ def cortex_audit_jsonl(session_dir: Path) -> Path:
     return cortex_dir(session_dir) / ".kb_audit.jsonl"
 
 
+# ---------------------------------------------------------------------------
+# recipe-snapshot v2 — new client per-session bookkeeping.
+#
+# Lives under a separate ``runtime/recipe_snapshot/`` subtree (NOT
+# ``runtime/cortex/``) so the new client can be developed and exercised
+# in parallel with the legacy ``/v1/points`` ``CortexKBClient``. Phase 2
+# of the cutover deletes the legacy client and its ``runtime/cortex/``
+# producers; ``runtime/recipe_snapshot/`` then becomes the sole KB
+# bookkeeping root.
+# ---------------------------------------------------------------------------
+def recipe_snapshot_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/`` — recipe-snapshot client root."""
+    return Path(session_dir) / "runtime" / "recipe_snapshot"
+
+
+def recipe_snapshot_pending_ndjson(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/.pending.ndjson`` — append-only
+    queue for ``PUT /recipes/{cid}`` calls that failed synchronously on
+    the main loop. Drained by a background flusher (Phase 3 of the
+    cutover) and at session close.
+    """
+    return recipe_snapshot_dir(session_dir) / ".pending.ndjson"
+
+
+def recipe_snapshot_flushed_ndjson(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/.flushed.ndjson`` — successfully-
+    POSTed rows, kept around for offline audit / breakdown collection.
+    """
+    return recipe_snapshot_dir(session_dir) / ".flushed.ndjson"
+
+
+def recipe_snapshot_dead_letter_ndjson(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/.dead_letter.ndjson`` — rows that
+    failed permanently (HTTP 4xx business-logic rejects, after
+    ``MAX_FLUSH_ATTEMPTS`` retries).
+    """
+    return recipe_snapshot_dir(session_dir) / ".dead_letter.ndjson"
+
+
+def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only
+    synchronous audit of every recipe-snapshot HTTP call (success or
+    failure) the Coordinator made directly, independent of NDJSON
+    fan-out.
+    """
+    return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
+
+
 def pr_monitor_status_json(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.pr_monitor_status.json`` — one-shot marker
     written by ``cli._bootstrap_knowledge_plane`` with
