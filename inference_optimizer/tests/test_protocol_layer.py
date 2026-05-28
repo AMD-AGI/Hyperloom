@@ -15,14 +15,12 @@ Covers:
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import pytest
 
 from inference_optimizer.orchestrator.cursor_store import CursorStore
 from inference_optimizer.orchestrator.intent_parser import (
     EMIT_INTENT_TOOL_SCHEMA,
-    Intent,
     IntentType,
     IntentValidationError,
     validate_envelope,
@@ -38,13 +36,11 @@ from inference_optimizer.orchestrator.resource_lock import (
     LaneBusy,
     ResourceLockManager,
     SqliteLeaseBackend,
-    StaleLeaseError,
 )
 from inference_optimizer.orchestrator.task_registry import (
     IllegalTransition,
     TASK_STATES,
     TERMINAL_STATES,
-    Task,
     TaskRegistry,
 )
 from inference_optimizer.storage import SqliteConnection
