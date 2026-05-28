@@ -35,9 +35,10 @@ can infer from the prompt is what gets used.
 ### Example prompt
 
 ```text
-Quantize Qwen/Qwen3-8B to mxfp4, with self_attn modules and kv_cache
-in fp8, and export it to <workspace>/quantized.
-Use gsm8k as the benchmark and accept up to a 5% eval gap.
+Quantize Qwen/Qwen3-8B with mxfp4 as the global scheme; override
+self_attn modules to fp8, and use fp8 for the kv_cache. Export the result
+to <workspace>/quantized.
+Use gsm8k as the benchmark and accept up to a 5% relative eval gap.
 No human interaction at any point.
 ```
 
