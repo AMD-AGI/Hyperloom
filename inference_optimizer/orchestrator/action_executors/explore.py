@@ -470,20 +470,96 @@ class ExploreExecutor:
         else:
             overtime_deadline_sec = None
 
-        # Resolve framework from materialized YAML (informational only —
-        # both sglang and vllm route through the same EXTRA_*_ARGS env;
-        # _grid_runner picks the correct env name on render).
+        # Resolve framework from materialized YAML. Used both for the
+        # informational ledger and (Phase 6.2, gap G1) for the
+        # cold-start seed-grid fallback below — atom is the only
+        # framework with a programmatic seed today; sglang / vllm
+        # still rely on the LLM-emitted ``default_grid`` variants.
         try:
             with config_path.open(encoding="utf-8") as _f:
                 _cfg = yaml.safe_load(_f) or {}
             framework = str(
                 (_cfg.get("benchmark") or {}).get("framework") or ""
             ).lower()
+            # The materialised YAML carries the live workload envs
+            # (CONC / ISL / OSL); pull CONC so the seed grid's
+            # cudagraph-bracket variant brackets the actual decode
+            # concurrency.
+            _yaml_envs = (_cfg.get("benchmark") or {}).get("envs") or {}
         except Exception:  # noqa: BLE001
             framework = ""
+            _yaml_envs = {}
 
         # ----- Variant grid ------------------------------------------------
         grid_payload = params.get("grid") or []
+        if not isinstance(grid_payload, list) or not grid_payload:
+            # Phase 6.2 / gap G1: when no LLM-emitted variants arrived
+            # AND a programmatic seed grid exists for the active
+            # framework, fall through to the seed instead of failing
+            # the task. Stamps each variant with
+            # ``provenance='default_grid'`` so PolicyGate's
+            # ``explore_requires_specialist_provenance`` rule (which
+            # accepts ``specialist:*`` OR ``default_grid``) is
+            # satisfied. The seed honours
+            # ``provenance='default_grid'`` already (see
+            # ``_atom_default_grid``); no extra stamping needed.
+            seed_model_class = (
+                str(params.get("model_class") or "").strip()
+                or os.environ.get("MODEL_CLASS", "").strip()
+            )
+            seed_conc = 0
+            try:
+                _conc_raw = (
+                    params.get("conc")
+                    or _yaml_envs.get("CONC")
+                    or os.environ.get("CONC")
+                    or 0
+                )
+                seed_conc = int(_conc_raw)
+            except (TypeError, ValueError):
+                seed_conc = 0
+            seed_isl = 0
+            seed_osl = 0
+            try:
+                seed_isl = int(
+                    params.get("isl")
+                    or _yaml_envs.get("ISL")
+                    or os.environ.get("ISL")
+                    or 0
+                )
+                seed_osl = int(
+                    params.get("osl")
+                    or _yaml_envs.get("OSL")
+                    or os.environ.get("OSL")
+                    or 0
+                )
+            except (TypeError, ValueError):
+                pass
+            seed = _default_grid_for_framework(
+                framework,
+                model_class=seed_model_class,
+                conc=seed_conc,
+                isl=seed_isl,
+                osl=seed_osl,
+            )
+            if seed:
+                log.info(
+                    "explore: empty grid for framework=%s; falling through "
+                    "to %d default_grid seed variants "
+                    "(model_class=%r conc=%d)",
+                    framework or "?", len(seed),
+                    seed_model_class or "?", seed_conc,
+                )
+                grid_payload = [
+                    {
+                        "name": v.name,
+                        "extra_server_args": v.extra_server_args,
+                        "extra_envs": dict(v.extra_envs or {}),
+                        "note": v.note or "default_grid",
+                        "provenance": getattr(v, "provenance", "default_grid"),
+                    }
+                    for v in seed
+                ]
         if not isinstance(grid_payload, list) or not grid_payload:
             return {
                 "status": "failed",
