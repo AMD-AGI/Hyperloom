@@ -49,9 +49,14 @@ try:
     )
 except ImportError:  # pragma: no cover — exercised only in IO-only test envs
 
+    # MUST stay byte-for-byte identical to
+    # ``framework_agent.repo_map._FRAMEWORK_TO_REPO_URL``. A cross-
+    # module sync test in ``framework-agent/tests/test_repo_map.py``
+    # enforces equality whenever both packages are on the test path.
     _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
         "sglang": "https://github.com/sgl-project/sglang.git",
         "vllm":   "https://github.com/ROCm/vllm.git",
+        "atom":   "https://github.com/ROCm/ATOM.git",
     }
 
     def repo_url_for_framework(framework: str) -> str:
