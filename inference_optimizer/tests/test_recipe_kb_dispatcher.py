@@ -127,7 +127,7 @@ def test_put_recipe_never_touches_remote(
 ) -> None:
     kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
     cid = _cid()
-    out = kb.put_recipe(canonical_id=cid, metrics={"x": 1.0})
+    out = kb.put_recipe(canonical_id=cid, best_throughput=1.0)
     assert out["created"] is True
     assert local_store.get_recipe(canonical_id=cid) is not None
 
@@ -154,14 +154,33 @@ def test_delete_recipe_never_touches_remote(
 # Reads — remote-first, local fallback (real remote via respx)
 # ===========================================================================
 def test_get_recipe_returns_remote_when_remote_hits(kb: RecipeKB) -> None:
+    """Remote answers 200 with a v2-shape recipe — dispatcher must
+    return it after translating to arbor shape (top-level
+    ``model``/``hardware``/``best_throughput`` etc.)."""
     cid = _cid()
-    expected = {"canonical_id": cid, "version": 5, "labels": {"src": "remote"}}
+    # Simulate the central kb-service v2 wire shape: identity goes
+    # in ``labels``, throughput in ``metrics``, best_config in body.
+    v2_payload = {
+        "canonical_id": cid,
+        "version":      5,
+        "labels":       {"model": "remote-model", "hardware": "mi300x"},
+        "body":         {"best_config": {"tp": "16"}},
+        "metrics":      {"throughput": 30000.0},
+    }
     with respx.mock(base_url=KB_URL) as mock:
         mock.get(format_recipe_path(PATH_RECIPE_TPL, cid)).mock(
-            return_value=httpx.Response(200, json=expected),
+            return_value=httpx.Response(200, json=v2_payload),
         )
         out = kb.get_recipe(canonical_id=cid)
-    assert out == expected
+    assert out is not None
+    # Translated arbor shape — top-level identity + best_config /
+    # best_throughput pulled out of v2's nested body / metrics.
+    assert out["canonical_id"]     == cid
+    assert out["version"]          == 5
+    assert out["model"]            == "remote-model"
+    assert out["hardware"]         == "mi300x"
+    assert out["best_config"]      == {"tp": "16"}
+    assert out["best_throughput"]  == 30000.0
 
 
 def test_get_recipe_falls_through_to_local_on_remote_404(
@@ -171,7 +190,7 @@ def test_get_recipe_falls_through_to_local_on_remote_404(
     invariant is "local is authoritative for writes"."""
     cid = _cid()
     local_store.put_recipe(
-        canonical_id=cid, labels={"src": "local"},
+        canonical_id=cid, model="local-marker",
     )
     with respx.mock(base_url=KB_URL) as mock:
         mock.get(format_recipe_path(PATH_RECIPE_TPL, cid)).mock(
@@ -184,14 +203,14 @@ def test_get_recipe_falls_through_to_local_on_remote_404(
         )
         out = kb.get_recipe(canonical_id=cid)
     assert out is not None
-    assert out["labels"] == {"src": "local"}
+    assert out["model"] == "local-marker"
 
 
 def test_get_recipe_falls_through_to_local_on_transport_error(
     kb: RecipeKB, local_store: LocalRecipeStore,
 ) -> None:
     cid = _cid()
-    local_store.put_recipe(canonical_id=cid, labels={"src": "local"})
+    local_store.put_recipe(canonical_id=cid, model="local-marker")
     failures: list[tuple[str, Exception]] = []
     kb.on_remote_failure = lambda m, exc: failures.append((m, exc))
     with respx.mock(base_url=KB_URL) as mock:
@@ -200,7 +219,7 @@ def test_get_recipe_falls_through_to_local_on_transport_error(
         )
         out = kb.get_recipe(canonical_id=cid)
     assert out is not None
-    assert out["labels"] == {"src": "local"}
+    assert out["model"] == "local-marker"
     assert len(failures) == 1
     assert failures[0][0] == "get_recipe"
     assert isinstance(failures[0][1], RemoteRecipeClientError)
@@ -248,8 +267,8 @@ def test_search_falls_through_to_local_on_remote_failure(
     cid = _cid()
     local_store.put_recipe(
         canonical_id=cid,
-        labels={"task": "pretrain"},
-        metrics={"throughput": 10000.0},
+        extras={"task": "pretrain"},
+        best_throughput=10000.0,
     )
     with respx.mock(base_url=KB_URL) as mock:
         mock.post(PATH_RECIPES_SEARCH).mock(
@@ -325,10 +344,10 @@ def test_no_remote_means_local_only_for_reads(
     store and never makes a network call."""
     kb = RecipeKB(local=local_store, remote=None)
     cid = _cid()
-    local_store.put_recipe(canonical_id=cid, labels={"src": "local"})
+    local_store.put_recipe(canonical_id=cid, model="local-marker")
     out = kb.get_recipe(canonical_id=cid)
     assert out is not None
-    assert out["labels"] == {"src": "local"}
+    assert out["model"] == "local-marker"
 
 
 def test_disabled_remote_treated_as_no_remote(
@@ -339,10 +358,10 @@ def test_disabled_remote_treated_as_no_remote(
     disabled = RemoteRecipeClient(kb_url=KB_URL, enabled=False)
     kb = RecipeKB(local=local_store, remote=disabled)
     cid = _cid()
-    local_store.put_recipe(canonical_id=cid, labels={"src": "local"})
+    local_store.put_recipe(canonical_id=cid, model="local-marker")
     out = kb.get_recipe(canonical_id=cid)
     assert out is not None
-    assert out["labels"] == {"src": "local"}
+    assert out["model"] == "local-marker"
 
 
 # ===========================================================================

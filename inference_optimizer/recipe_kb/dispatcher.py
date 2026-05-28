@@ -64,6 +64,111 @@ from .remote_client import RemoteRecipeClient, RemoteRecipeClientError
 log = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Schema translation: v2 wire → arbor on-disk
+# ---------------------------------------------------------------------------
+# The central kb-service speaks the v2 spec (``findings`` / ``failures`` /
+# ``gaps`` / ``body`` / ``metrics``). The dispatcher returns rows in arbor
+# shape (``what_worked`` / ``what_failed`` / ``remaining_gaps`` /
+# top-level ``best_config`` / ``best_throughput`` / ``stack_fingerprint``)
+# so callers always see one consistent shape regardless of which store
+# satisfied the read.
+#
+# Translation rules:
+#
+# * v2 ``findings``    → arbor ``what_worked`` (sub-shape preserved if
+#                       it already matches; otherwise wrapped to
+#                       ``{description, measured_impact}`` best-effort).
+# * v2 ``failures``    → arbor ``what_failed``    (same).
+# * v2 ``gaps``        → arbor ``remaining_gaps`` (same).
+# * v2 ``body.best_config`` / ``body.stack_fingerprint`` /
+#   ``body.last_profiled`` / ``body.sessions`` / ``body.prs_tested`` →
+#   pulled out as top-level arbor fields.
+# * v2 ``metrics.throughput`` (or ``body.best_throughput``) → arbor
+#   ``best_throughput``.
+# * v2 ``labels.{model,hardware,framework,framework_version,precision}``
+#   → top-level arbor identity fields (so an arbor consumer can read
+#   them without parsing canonical_id).
+# * v2-only fields (``authority``, ``confidence``, ``evidence_refs``,
+#   ``provenance``, ``canonical_id``, ``version``, ``created_at``,
+#   ``updated_at``) pass through unchanged — they're additive on top
+#   of arbor's shape.
+def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
+    """Translate a v2-spec recipe dict into the arbor on-disk shape.
+
+    Tolerant of missing keys — the central server always returns the
+    full v2 envelope, but a partially-populated row (e.g. an old
+    archive that pre-dates the field) shouldn't crash the read.
+    """
+    if not isinstance(v2_payload, dict):
+        return {}
+    body    = v2_payload.get("body")    or {}
+    metrics = v2_payload.get("metrics") or {}
+    labels  = v2_payload.get("labels")  or {}
+    if not isinstance(body, dict):
+        body = {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+    if not isinstance(labels, dict):
+        labels = {}
+
+    arbor: dict[str, Any] = {
+        # store-managed metadata
+        "canonical_id":      v2_payload.get("canonical_id", ""),
+        "version":           v2_payload.get("version", 1),
+        "created_at":        v2_payload.get("created_at", ""),
+        "updated_at":        v2_payload.get("updated_at", ""),
+        # 5-tuple identity from labels (with empty fallback when the
+        # central row pre-dates the labels stamp)
+        "model":             str(labels.get("model") or ""),
+        "hardware":          str(labels.get("hardware") or ""),
+        "framework":         str(labels.get("framework") or ""),
+        "framework_version": str(labels.get("framework_version") or ""),
+        "precision":         str(labels.get("precision") or ""),
+        # arbor payload pulled out of body / metrics
+        "best_config":       dict(body.get("best_config") or {}),
+        "best_throughput":   float(
+            body.get("best_throughput")
+            or metrics.get("throughput")
+            or 0.0
+        ),
+        "what_worked":       list(v2_payload.get("findings") or []),
+        "what_failed":       list(v2_payload.get("failures") or []),
+        "remaining_gaps":    list(v2_payload.get("gaps") or []),
+        "prs_tested":        list(body.get("prs_tested") or []),
+        "pitfalls":          list(v2_payload.get("pitfalls") or []),
+        "lessons":           list(v2_payload.get("lessons") or []),
+        "last_profiled":     str(body.get("last_profiled") or ""),
+        "stack_fingerprint": dict(body.get("stack_fingerprint") or {}),
+        "sessions":          list(body.get("sessions") or []),
+        # v2-only audit fields pass through
+        "authority":     v2_payload.get("authority", "EXPERIENTIAL"),
+        "confidence":    v2_payload.get("confidence", 0.85),
+        "evidence_refs": list(v2_payload.get("evidence_refs") or []),
+        "provenance":    dict(v2_payload.get("provenance") or {}),
+    }
+    return arbor
+
+
+def _v2_history_entry_to_arbor(entry: dict[str, Any]) -> dict[str, Any]:
+    """Translate a single ``/history`` archive entry to arbor shape.
+
+    History entries wrap the recipe under a ``snapshot`` key plus
+    ``archived_at`` / ``replaced_by`` envelope fields. Only the
+    ``snapshot`` payload is translated; the envelope passes through.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    snapshot = entry.get("snapshot")
+    return {
+        "canonical_id": entry.get("canonical_id", ""),
+        "version":      entry.get("version", 0),
+        "archived_at":  entry.get("archived_at", ""),
+        "replaced_by":  dict(entry.get("replaced_by") or {}),
+        "snapshot":     _v2_to_arbor(snapshot) if isinstance(snapshot, dict) else {},
+    }
+
+
 @dataclass
 class RecipeKB:
     """Local-write / remote-read-with-fallback dispatcher.
@@ -124,39 +229,57 @@ class RecipeKB:
         self,
         *,
         canonical_id: str,
-        labels: dict[str, Any] | None = None,
-        body: dict[str, Any] | None = None,
-        metrics: dict[str, Any] | None = None,
-        findings: list[Any] | None = None,
-        failures: list[Any] | None = None,
+        model: str = "",
+        hardware: str = "",
+        framework: str = "",
+        framework_version: str = "",
+        precision: str = "",
+        best_config: dict[str, str] | None = None,
+        best_throughput: float = 0.0,
+        what_worked: list[Any] | None = None,
+        what_failed: list[Any] | None = None,
+        remaining_gaps: list[Any] | None = None,
+        prs_tested: list[Any] | None = None,
         pitfalls: list[Any] | None = None,
         lessons: list[Any] | None = None,
-        gaps: list[Any] | None = None,
+        last_profiled: str = "",
+        stack_fingerprint: dict[str, str] | None = None,
+        sessions: list[Any] | None = None,
         authority: str = "EXPERIENTIAL",
         confidence: float = 0.85,
         evidence_refs: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
+        extras: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Write a recipe row LOCALLY ONLY.
+        """Write a recipe row LOCALLY ONLY in the arbor schema.
 
-        Returns ``{"canonical_id", "version", "created"}`` matching
-        the central server's PUT response shape. Never touches the
-        central kb-service.
+        Returns ``{"canonical_id", "version", "created"}``. Never
+        touches the central kb-service. Field shape mirrors arbor's
+        ``Recipe`` (see :mod:`recipe_kb.schema`).
         """
         return self.local.put_recipe(
             canonical_id=canonical_id,
-            labels=labels,
-            body=body,
-            metrics=metrics,
-            findings=findings,
-            failures=failures,
+            model=model,
+            hardware=hardware,
+            framework=framework,
+            framework_version=framework_version,
+            precision=precision,
+            best_config=best_config,
+            best_throughput=best_throughput,
+            what_worked=what_worked,
+            what_failed=what_failed,
+            remaining_gaps=remaining_gaps,
+            prs_tested=prs_tested,
             pitfalls=pitfalls,
             lessons=lessons,
-            gaps=gaps,
+            last_profiled=last_profiled,
+            stack_fingerprint=stack_fingerprint,
+            sessions=sessions,
             authority=authority,
             confidence=confidence,
             evidence_refs=evidence_refs,
             provenance=provenance,
+            extras=extras,
         )
 
     def append_attempt(
@@ -222,8 +345,8 @@ class RecipeKB:
                     canonical_id=canonical_id, version=version,
                 )
                 if row is not None:
-                    return row
-                # remote miss — fall through to local (see docstring).
+                    return _v2_to_arbor(row)
+                # remote miss — fall through to local.
             except RemoteRecipeClientError as exc:
                 self._note_failure("get_recipe", exc)
         return self.local.get_recipe(
@@ -250,7 +373,7 @@ class RecipeKB:
                     canonical_id=canonical_id, limit=limit,
                 )
                 if rows:
-                    return rows
+                    return [_v2_history_entry_to_arbor(r) for r in rows]
                 # Remote returned []; check the local store too —
                 # the dispatcher's invariant is "writes are local",
                 # so the local archive can be richer than central.
@@ -267,7 +390,7 @@ class RecipeKB:
                     limit=limit,
                 )
                 if rows:
-                    return rows
+                    return [_v2_to_arbor(r) for r in rows]
             except RemoteRecipeClientError as exc:
                 self._note_failure("list_recent", exc)
         return self.local.list_recent(limit=limit)
@@ -311,7 +434,7 @@ class RecipeKB:
                 # network or a freshly-bootstrapped service that
                 # hasn't received our local writes yet.
                 if rows:
-                    return rows
+                    return [_v2_to_arbor(r) for r in rows]
             except RemoteRecipeClientError as exc:
                 self._note_failure("search", exc)
         return self.local.search(
