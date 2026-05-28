@@ -791,13 +791,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     state = _require_state("head_pod_ip")
     head_ip = state["head_pod_ip"]
 
-    # Source the env file written by bootstrap so PATH points at /opt/venv,
-    # then verify each binary is on PATH.
+    # Source env file (PATH → /opt/venv), then verify ``ray`` on PATH.
+    # ``oob`` / ``claude`` / ``codex`` excluded: head pod never invokes
+    # these CLIs (see bootstrap.sh "# --- 2. / 2c. (removed)" comments).
     script = (
         "set -e; "
         "if [ -f /etc/profile.d/hyperloom-env.sh ]; "
         "then source /etc/profile.d/hyperloom-env.sh; fi; "
-        "for bin in oob claude codex ray; do "
+        "for bin in ray; do "
         "  echo \"-- which $bin --\"; "
         "  which \"$bin\" || { echo \"MISSING: $bin\" >&2; exit 1; }; "
         "done; "

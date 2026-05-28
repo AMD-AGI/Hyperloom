@@ -153,10 +153,9 @@ class _PreparedRun:
     subprocess execution paths. Internal to :class:`SpecialistRunner`."""
 
     domain: SpecialistDomain | None = None
-    # F2-3: per-domain sub_kind selected at dispatch time (e.g.
-    # 'framework_pr_scout'). Empty string = default per-domain prompt /
-    # tool whitelist. Threaded through so :meth:`_resolve_tools` can
-    # apply differential MCP-tool gating.
+    # Per-domain sub_kind selected at dispatch time. Empty string =
+    # default per-domain prompt. Threaded through so domain-specific
+    # focus helpers can specialise when needed.
     sub_kind: str = ""
     gap: str = ""
     max_turns: int = 0
@@ -292,15 +291,7 @@ class SpecialistRunner:
         self.per_turn_max_seconds = float(per_turn_max_seconds)
         self.knowledge_plane = knowledge_plane
 
-    # F2-3: framework-agent MCP tool prefix (for the optional
-    # ``mcp__fa__candidates`` / ``mcp__fa__fetch_pr`` server PR #280
-    # ships alongside the ``fa`` CLI). The ``fa`` CLI itself is
-    # invoked via the existing ``Bash`` tool, so this prefix only
-    # matters when the operator wires the fa MCP server. Centralised
-    # here so the whitelist policy stays a single source of truth.
-    _FA_MCP_TOOL_PREFIX: str = "mcp__fa__"
-
-    def _resolve_tools(self, sub_kind: str = "") -> tuple[str, ...]:
+    def _resolve_tools(self) -> tuple[str, ...]:
         """Return the per-task tool whitelist.
 
         Gated on:
@@ -308,12 +299,6 @@ class SpecialistRunner:
         * KnowledgePlane PR Monitor / Cortex KB availability — strips
           ``mcp__pr_monitor__*`` / ``mcp__cortex_kb__*`` whenever the
           corresponding surface is disabled.
-        * F2-3 framework-agent sub_kind — strips ``mcp__fa__*`` when
-          ``sub_kind != 'framework_pr_scout'`` so the default serving
-          path can never accidentally call the fa MCP server even if
-          the operator pre-loaded it into ``default_tools``. The fa CLI
-          itself is invoked via the existing ``Bash`` whitelist entry
-          when the sub_kind authorises it.
         * Always enforces :data:`SPECIALIST_TOOL_DENYLIST` last
           (defense in depth — caller may have extended ``default_tools``
           carelessly).
@@ -337,15 +322,6 @@ class SpecialistRunner:
                     t for t in tools
                     if not t.startswith("mcp__cortex_kb__")
                 ]
-        # F2-3: differential framework-agent gating. The default
-        # tool set never carries ``mcp__fa__*`` today, but we strip
-        # defensively so an operator-extended default_tools tuple
-        # still respects the sub_kind boundary.
-        if sub_kind != "framework_pr_scout":
-            tools = [
-                t for t in tools
-                if not t.startswith(self._FA_MCP_TOOL_PREFIX)
-            ]
         tools = [t for t in tools if t not in SPECIALIST_TOOL_DENYLIST]
         return tuple(tools)
 
@@ -399,9 +375,8 @@ class SpecialistRunner:
         ).strip()
         max_turns = int(params.get("max_turns") or self.default_max_turns)
         domain = get_domain(domain_key)
-        # propagate sub_kind from the dispatch params so
-        # _resolve_tools can apply differential gating. Empty = default
-        # per-domain prompt + tool whitelist.
+        # propagate sub_kind from the dispatch params for per-domain
+        # focus helpers. Empty = default per-domain prompt.
         sub_kind = str(params.get("sub_kind") or "").strip()
 
         workspace = self._resolve_workspace(ctx)
@@ -464,7 +439,6 @@ class SpecialistRunner:
                 # a valid SpecialistPromptInputs.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
                 sub_kind=str(params.get("sub_kind") or ""),
-                pr_candidates=list(params.get("pr_candidates") or []),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(
                     params.get("warm_start_pitfalls") or []
@@ -535,7 +509,7 @@ class SpecialistRunner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             notes=notes,
-            resolved_tools=self._resolve_tools(sub_kind),
+            resolved_tools=self._resolve_tools(),
         )
 
     # ------------------------------------------------------------------

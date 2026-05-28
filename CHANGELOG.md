@@ -5,6 +5,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 - Add repository governance docs (LICENSE, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md).
+- Add documentation guides under `docs/`: `ENV_AND_AUTH.md`, `KB_GUIDE.md`, `CONFIGURATION_REFERENCE.md`, `INTEGRATION_SESSION_BREAKDOWN.md`, `OPERATIONS.md`, `OPERATOR_SCRIPTS.md`, `TROUBLESHOOTING.md`, `UPGRADING.md`.
+- Refresh `docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md` and add `inference_optimizer/README.md` as a package-level entry point.
+- README now links to the new guides via a "Learn More" doc index and lists `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`, and `SECURITY.md` in the repo-tree.
 
 ## [v0.3] - 2026-05-14
 ### Added

@@ -19,8 +19,8 @@ with the user's actual workload contract":
 
 * :func:`materialize_config_with_envs` — write a per-run YAML file
   honoring process env (and optional caller overrides).
-* :func:`default_baseline_config` — pick the shipped sglang/vllm YAML
-  based on ``$FRAMEWORK``.
+* :func:`default_baseline_config` — pick the shipped sglang / vllm /
+  atom YAML based on ``$FRAMEWORK``.
 
 Callers:
 
@@ -86,7 +86,12 @@ def default_baseline_config() -> Path:
     sglang-default tests keep passing.
     """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    name = "baseline_vllm.yaml" if fw == "vllm" else "baseline_sglang.yaml"
+    if fw == "atom":
+        name = "baseline_atom.yaml"
+    elif fw == "vllm":
+        name = "baseline_vllm.yaml"
+    else:
+        name = "baseline_sglang.yaml"
     return asset_root() / "scripts" / "configs" / name
 
 
@@ -229,6 +234,17 @@ def materialize_config_with_envs(
         str(envs.get("PROFILE", "")).strip() == "1"
         or (bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True)
     )
+    # Atom (Magpie v1) has no torch_profiler wiring — atom_mi*x.sh prints
+    # "[atom_*] PROFILE=1 received but atom profiler wiring is not yet
+    # implemented; ignoring." Injecting sglang/vllm-specific profiler CLI
+    # flags into EXTRA_ATOM_ARGS would cause atom argparse failures, so we
+    # treat atom-with-PROFILE as profile-disabled for env injection
+    # purposes. The ProfileExecutor / RooflineExecutor short-circuit
+    # before this is even rendered when FRAMEWORK=atom; this guard is
+    # defense-in-depth for direct callers (params/sweep/backends) that
+    # happen to render a YAML with profiler.torch_profiler.enabled=true.
+    if is_profile and str(bench.get("framework") or "").lower() == "atom":
+        is_profile = False
     profile_num_prompts: int | None = None
     if is_profile:
         try:

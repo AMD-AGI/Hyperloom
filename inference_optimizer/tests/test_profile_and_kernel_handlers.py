@@ -794,6 +794,55 @@ def test_default_baseline_config_falls_back_on_unknown_value(monkeypatch):
     assert _default_baseline_config().name == "baseline_sglang.yaml"
 
 
+def test_default_baseline_config_resolves_atom_when_env_set(monkeypatch):
+    """B1: FRAMEWORK=atom selects baseline_atom.yaml. Single-source-of-truth
+    selector — every executor (baseline/params/sweep/backends) routes through
+    this so an env flip propagates everywhere without per-executor changes."""
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    assert _default_baseline_config().name == "baseline_atom.yaml"
+
+
+def test_server_args_env_name_atom():
+    """B1: atom maps to EXTRA_ATOM_ARGS, matching the env contract consumed
+    by Magpie's atom_mi*x.sh wrapper. Ordering note: the atom branch sits
+    before vllm so a future framework name containing 'vllm' as a substring
+    cannot accidentally win — even though 'atom' itself is not a vllm
+    substring today."""
+    from inference_optimizer.orchestrator.action_executors._grid_runner import (
+        server_args_env_name,
+    )
+    assert server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
+    assert server_args_env_name("ATOM") == "EXTRA_ATOM_ARGS"
+    # Regression: sglang/vllm still resolve correctly after the new branch.
+    assert server_args_env_name("vllm") == "EXTRA_VLLM_ARGS"
+    assert server_args_env_name("sglang") == "EXTRA_SGLANG_ARGS"
+
+
+def test_materialize_config_atom_profile_skips_tracelens_flags(
+    tmp_path, monkeypatch,
+):
+    """B1: PROFILE=1 + framework=atom must NOT inject sglang/vllm-specific
+    profiler CLI flags (--profiler-config.*) into EXTRA_ATOM_ARGS — atom's
+    argparse would reject them. The executor short-circuits before this
+    code path on a real run, but we defend in depth so direct callers
+    (params/sweep) can't accidentally render a broken atom YAML."""
+    import yaml
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    monkeypatch.setenv("PROFILE", "1")
+    src = _default_baseline_config()  # baseline_atom.yaml
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    extra = str(envs.get("EXTRA_ATOM_ARGS", ""))
+    assert "--profiler-config" not in extra, (
+        f"atom EXTRA_ATOM_ARGS leaked sglang/vllm profiler flag: {extra!r}"
+    )
+    # --trust-remote-code from the baseline YAML must survive untouched.
+    assert "--trust-remote-code" in extra, (
+        f"atom EXTRA_ATOM_ARGS lost base --trust-remote-code: {extra!r}"
+    )
+
+
 def test_default_profile_config_tracks_framework(monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     assert _default_profile_config().name == "profile_vllm.yaml"
@@ -818,6 +867,75 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
     pe = ProfileExecutor()
     assert pe.default_config_path is None
     assert pe._resolve_default_config().name == "profile_vllm.yaml"
+
+
+@pytest.mark.asyncio
+async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path):
+    """B2: FRAMEWORK=atom must short-circuit ProfileExecutor to a
+    structured skipped result BEFORE any Magpie subprocess is launched.
+    atom (Magpie v1) has no torch_profiler wiring — running the full
+    profile path would either silently no-op or, worse, crash because
+    sglang/vllm-specific --profiler-config flags get injected into
+    EXTRA_ATOM_ARGS. Verified by checking the result dict shape AND
+    that no subprocess machinery (BaselineExecutor.__call__ /
+    run_with_session_kill) ran."""
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    pe = ProfileExecutor()
+    # If the short-circuit fails, the executor would try to materialize a
+    # YAML and shell out to Magpie. Sentinel-patch the parent __call__ so
+    # we can prove it was never reached.
+    called = {"parent": False}
+
+    async def _explode(self, ctx):  # pragma: no cover — must not run
+        called["parent"] = True
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(BaselineExecutor, "__call__", _explode)
+
+    task = SimpleNamespace(params={}, task_id="t-atom-profile")
+    ctx = SimpleNamespace(task=task, extra=None)
+
+    result = await pe(ctx)
+
+    assert result["status"] == "skipped"
+    assert result["error_class"] == "atom_no_profiler"
+    assert "torch_profiler" in result["error"]
+    assert called["parent"] is False, (
+        "ProfileExecutor must short-circuit BEFORE BaselineExecutor.__call__"
+    )
+
+
+@pytest.mark.asyncio
+async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
+    """B2: FRAMEWORK=atom must short-circuit RooflineExecutor at its
+    entrypoint, returning status=skipped without invoking profile or
+    trace_analyze sub-steps. Critical because the composite would
+    otherwise treat a skipped profile_result as a failure (the existing
+    _failed("profile", ...) branch) and pollute roofline_failure_streak."""
+    from inference_optimizer.orchestrator.action_executors.roofline import (
+        RooflineExecutor,
+    )
+
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    # RooflineExecutor requires shared_state, but the atom guard returns
+    # before touching it — a sentinel object is enough.
+    rexec = RooflineExecutor(shared_state=SimpleNamespace())
+
+    # Sentinel: prove the lazy import / sub-step orchestration never runs.
+    import inference_optimizer.orchestrator.action_executors.profile as profile_mod
+
+    async def _explode(_ctx):  # pragma: no cover — must not run
+        raise AssertionError("profile_executor must not be invoked under atom")
+
+    monkeypatch.setattr(profile_mod, "profile_executor", _explode)
+
+    task = SimpleNamespace(params={}, task_id="t-atom-roofline")
+    ctx = SimpleNamespace(task=task, extra=None)
+
+    result = await rexec(ctx)
+    assert result["status"] == "skipped"
+    assert result["error_class"] == "atom_no_profiler"
+    assert result["framework"] == "atom"
 
 
 @pytest.mark.asyncio

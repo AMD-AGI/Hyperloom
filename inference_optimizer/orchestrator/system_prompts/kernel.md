@@ -25,10 +25,11 @@ After processing a request, emit exactly one `response{in_reply_to=<request_msg_
 ## Phase awareness
 
 Every per-tick prompt now includes a `=== Phase ===` block with the
-current pipeline phase (PRELUDE / EXPLORE / KERNEL / SWEEP / CLOSE).
-Your activity window is essentially limited to **KERNEL** phase:
+current pipeline phase (PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL /
+SWEEP / CLOSE). Your activity window is essentially limited to
+**KERNEL** phase:
 
-- In **PRELUDE / EXPLORE / SWEEP / CLOSE**: no request should reach you.
+- In **PRELUDE / FRAMEWORK_PR / EXPLORE / SWEEP / CLOSE**: no request should reach you.
   If you see one anyway, reply
   `response{status='failed', kind='<kind>_done', result={'error': 'phase_incompatible', 'phase': '<current>'}}`
   so the inbox carries a traceable rejection. Otherwise, emit a

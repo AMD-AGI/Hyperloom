@@ -206,8 +206,9 @@ def _section_session_context(
         "in that phase, and budget cap. The `=== Phase-allowed actions ===`",
         "block lists the exact set of actions you may propose this tick;",
         "anything outside that set returns `policy_denied` with rule",
-        "`phase_incompatible`. The 5-phase chain is:",
-        "  PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE",
+        "`phase_incompatible`. The 6-phase chain is:",
+        "  PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE",
+        "(FRAMEWORK_PR is skipped under ``--no-framework``.)",
         "Transitions are Coordinator-owned (you cannot write phase).",
     ]
 
@@ -232,7 +233,8 @@ def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
     lines: list[str] = [
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "",
-        "The Coordinator runs the optimization in a 5-phase linear pipeline.",
+        "The Coordinator runs the optimization in a 6-phase linear pipeline",
+        "(FRAMEWORK_PR collapses out with `--no-framework`, leaving 5).",
         "Each tick it injects a `=== Phase ===` block with the current",
         "phase. Per-phase action allowlists (PolicyGate R1 enforces these):",
         "",
