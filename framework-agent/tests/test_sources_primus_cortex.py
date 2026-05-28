@@ -62,6 +62,14 @@ def test_repo_slug_rejects_malformed() -> None:
         _repo_slug("not-a-url")
 
 
+def test_repo_slug_rejects_github_substring_in_path() -> None:
+    """URLs that embed github.com in the path must not be accepted."""
+    with pytest.raises(ValueError):
+        _repo_slug("https://evil.com/github.com/owner/repo.git")
+    with pytest.raises(ValueError):
+        _repo_slug("https://github.com.evil.com/owner/repo.git")
+
+
 # list_perf_prs ----------------------------------------------------------
 
 
