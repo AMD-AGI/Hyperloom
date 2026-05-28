@@ -231,7 +231,7 @@ def test_plateau_kernel_empty_attempts_does_not_trigger():
     with an empty ``kernel_integrate_attempts`` ledger — coupled with
     EXPLORE that produced no KEEPs (e.g. force-exit on low budget),
     the session went EXPLORE → KERNEL → SWEEP without ever spawning a
-    single ``select_kernels`` / ``run_optimization`` request.
+    single ``trace_analyze`` / ``run_optimization`` request.
     """
     state = SimpleNamespace(kernel_integrate_attempts={})
     triggered, ev = compute_plateau_kernel(state)
