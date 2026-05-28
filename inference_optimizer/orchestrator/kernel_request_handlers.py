@@ -116,8 +116,7 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
-    # atom layout (atom_plan/phase2_open_kernel_agent/2.5). The
-    # editable install lives under ``/app/ATOM/atom/`` on disk but
+    # atom layout. The editable install lives under ``/app/ATOM/atom/`` on disk but
     # ``_is_runtime_generated_kernel`` and ``run_optimization_handler``
     # lower-case their inputs before the ``startswith`` / substring
     # check, so the prefix below is stored lower-case for the match
@@ -278,12 +277,11 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     framework = str(bench.get("framework") or "").strip().lower()
-    # atom_gap2.md B1 fix: route through the single source of truth for
-    # the per-framework env name so an atom session correctly reads
-    # ``EXTRA_ATOM_ARGS`` (the previous ``EXTRA_VLLM_ARGS`` / else
-    # ``EXTRA_SGLANG_ARGS`` ternary silently dropped every atom-side
-    # flag, which then surfaced to TraceLens / GEAK / Cursor as an
-    # empty ``server_args`` context).
+    # Route through the single source of truth for the per-framework
+    # env name so an atom session reads ``EXTRA_ATOM_ARGS`` (rather
+    # than defaulting to ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS``,
+    # which would drop atom-side flags and surface an empty
+    # ``server_args`` context to TraceLens / GEAK / Cursor).
     from .action_executors._grid_runner import server_args_env_name
     server_key = server_args_env_name(framework)
     server_args = str(envs.get(server_key) or "").strip()
@@ -1654,7 +1652,7 @@ async def integrate_handler(
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
     # ``payload`` arrives via the integrate_patch sub-agent envelope;
-    # route the read through the Phase 4 compat helper so a legacy
+    # route the read through the compat helper so a legacy
     # ``extra_sglang_args`` envelope still resolves (with a single
     # DeprecationWarning logged via stacklevel=3).
     from ..compat.payload_aliases import read_extra_server_args
