@@ -117,15 +117,18 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
     # atom layout (atom_plan/phase2_open_kernel_agent/2.5). The
-    # editable install lives under ``/app/ATOM/atom/``; wheel installs
-    # land under the venv / system site-packages. Keep this block in
-    # sync with ``framework_paths._DEFAULT_SOURCE_ROOTS`` (PolicyGate
-    # allowlist) and ``kernel-agent/tools/tracelens_analysis.py``
-    # ``_REUSABLE_SOURCE_ROOTS``. The PolicyGate allowlist controls
-    # which atom files specialists are allowed to read; this list
-    # controls whether atom-touching kernel-opt patches are flagged as
-    # "reusable framework source" for cross-task caching.
-    "/app/ATOM/atom/",
+    # editable install lives under ``/app/ATOM/atom/`` on disk but
+    # ``_is_runtime_generated_kernel`` and ``run_optimization_handler``
+    # lower-case their inputs before the ``startswith`` / substring
+    # check, so the prefix below is stored lower-case for the match
+    # to fire. ``framework_paths._DEFAULT_SOURCE_ROOTS`` carries the
+    # canonical-case ``/app/ATOM/atom/`` because PolicyGate's
+    # ``_path_in_allowlist`` is case-sensitive against the real
+    # filesystem path. Keep this block in sync with
+    # ``kernel-agent/tools/tracelens_analysis.py``
+    # ``_REUSABLE_SOURCE_ROOTS`` (cross-cutting guard
+    # ``test_atom_present_in_tracelens_reusable_roots``).
+    "/app/atom/atom/",
     "/opt/venv/lib/python3.10/site-packages/atom/",
     "/opt/venv/lib/python3.12/site-packages/atom/",
     "/usr/local/lib/python3.12/dist-packages/atom/",
