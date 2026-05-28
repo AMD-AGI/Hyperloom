@@ -19,8 +19,8 @@ with the user's actual workload contract":
 
 * :func:`materialize_config_with_envs` — write a per-run YAML file
   honoring process env (and optional caller overrides).
-* :func:`default_baseline_config` — pick the shipped sglang/vllm YAML
-  based on ``$FRAMEWORK``.
+* :func:`default_baseline_config` — pick the shipped sglang / vllm /
+  atom YAML based on ``$FRAMEWORK``.
 
 Callers:
 
