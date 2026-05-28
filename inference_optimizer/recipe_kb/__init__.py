@@ -44,6 +44,7 @@ from .canonical_id import (
     detect_framework_version,
     recipe_canonical_id,
 )
+from .dispatcher import RecipeKB
 from .local_store import (
     ATTEMPTS_FILENAME,
     HISTORY_DIRNAME,
@@ -52,6 +53,7 @@ from .local_store import (
     LocalRecipeStoreError,
     RECIPE_FILENAME,
 )
+from .remote_client import RemoteRecipeClient, RemoteRecipeClientError
 from .schema import Attempt, Recipe
 
 
@@ -72,6 +74,9 @@ __all__ = [
     "LocalRecipeStoreError",
     "RECIPE_FILENAME",
     "Recipe",
+    "RecipeKB",
+    "RemoteRecipeClient",
+    "RemoteRecipeClientError",
     "canonical_id_for_path",
     "canonical_id_from_components",
     "canonical_labels",
