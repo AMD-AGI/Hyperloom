@@ -59,6 +59,7 @@ from .policy import (
     PolicyDenied,
     PolicyGate,
     REQUEST_ROUTING,
+    RESEARCH_LANE_NAME,
     REVIEW_VERDICT_SOURCE_ALLOWLIST,
     ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
     SPECIALIST_FROM_AGENT_PREFIX,
@@ -5792,6 +5793,15 @@ class Coordinator:
         seed_kit_result = None
         try:
             seed_kit_result = assemble_seed_kit(state, payload_snapshot)
+            if seed_kit_result.degraded:
+                log.info(
+                    "dynamic_action: seed kit DEGRADED for dyn_id=%s "
+                    "(missing one or more of roofline / profile / "
+                    "kept_patches / kb_pitfalls — see "
+                    "dynamic_action_seed_kit.assemble_seed_kit for the "
+                    "fallback rules). Sub-agent will still run.",
+                    dyn_id,
+                )
         except SeedKitAssemblyError as exc:
             raise PolicyDenied(
                 f"dynamic_action: seed kit assembly failed for "
@@ -5810,7 +5820,7 @@ class Coordinator:
             "round_index": round_id,
             "payload": payload_snapshot,
             "policy_gate_decision": policy_gate_decision,
-            "resource_lane": "research_lane",
+            "resource_lane": RESEARCH_LANE_NAME,
             "degraded_dispatch": bool(seed_kit_result.degraded),
             "seed_kit_tokens": int(seed_kit_result.total_tokens),
         }
