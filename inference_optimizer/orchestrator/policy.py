@@ -1810,6 +1810,30 @@ class PolicyGate:
                     "path)."
                 ),
             )
+        # dynamic_action.MD §1.4 + P1 §4.4 + gap G4 — IR-4 sourced cap
+        # for the dynamic provenance literal. Until now the per-round
+        # cap was implicitly satisfied by ``MAX_DYNAMIC_PER_ROUND=1`` ×
+        # ``MAX_PROPOSAL_SET_LEN=1``; this gate locks the invariant in
+        # at the explore-grid surface so a future v2 cannot loosen one
+        # of those constants and silently break the red line.
+        dynamic_sourced = sum(
+            1 for v in grid
+            if isinstance(v, dict)
+            and str(v.get("provenance") or "").strip() == "dynamic"
+        )
+        if dynamic_sourced > MAX_DYNAMIC_SOURCED_VARIANTS:
+            raise PolicyDenied(
+                f"explore: grid contains {dynamic_sourced} "
+                f"dynamic-sourced variants; max "
+                f"{MAX_DYNAMIC_SOURCED_VARIANTS} per round.",
+                rule="dynamic_sourced_variant_cap_exceeded",
+                hint=(
+                    f"At most {MAX_DYNAMIC_SOURCED_VARIANTS} variant "
+                    f"with provenance='dynamic' may enter a single "
+                    f"explore round (IR-4 + dynamic_action.MD §1.4). "
+                    f"Defer runners-up to a subsequent EXPLORE round."
+                ),
+            )
 
     # ------------------------------------------------------------------
     # ``sweep_phase_singleton``
