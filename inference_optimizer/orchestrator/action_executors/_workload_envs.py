@@ -99,7 +99,6 @@ def materialize_config_with_envs(
     config_path: Path,
     output_dir: Path,
     *,
-    extra_sglang_args: str = "",
     extra_server_args: str = "",
     extra_envs: dict[str, Any] | None = None,
     model_path: str | None = None,
@@ -137,15 +136,18 @@ def materialize_config_with_envs(
     * ``NUM_PROMPTS`` and ``NUM_WARMUPS`` are computed adaptively from
       ``CONC`` and ``ISL+OSL`` (longer sequences → fewer prompts to keep
       each variant under ~3-5 min wall time).
-    * ``extra_sglang_args`` / ``extra_server_args`` (the latter wins) are
-      written to ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS`` based on the
-      configured framework.
+    * ``extra_server_args`` is the framework-neutral payload-surface
+      slot (renamed in Phase 4 of ``atom_plan/`` from the legacy
+      ``extra_sglang_args``). The materializer routes its value into
+      the framework-specific env name (``EXTRA_SGLANG_ARGS`` /
+      ``EXTRA_VLLM_ARGS`` / ``EXTRA_ATOM_ARGS``) based on the
+      framework declared in the YAML's ``benchmark.framework``.
     * ``extra_envs`` overrides any of the above.
 
     Returns the path to the materialized YAML written under ``output_dir``.
     Reuses the file name across calls so callers can locate it predictably.
     """
-    server_args = (extra_server_args or extra_sglang_args).strip()
+    server_args = (extra_server_args or "").strip()
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
