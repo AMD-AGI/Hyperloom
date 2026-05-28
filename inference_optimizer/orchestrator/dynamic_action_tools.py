@@ -390,6 +390,35 @@ def apply_patch_in_worktree(
     return _ok({"applied": True})
 
 
+def capture_worktree_cumulative_diff(worktree: Path) -> str | None:
+    """Return ``git diff HEAD`` output for ``worktree`` (gap G6).
+
+    Used by the runner at ``emit_proposal`` time to validate that the
+    proposal's ``patch_text`` matches the current worktree state when
+    the sub-agent has applied one or more patches during iteration.
+
+    Returns:
+    * ``""``     — clean worktree (no uncommitted changes).
+    * ``<diff>`` — uncommitted-change diff.
+    * ``None``   — git failure (worktree not a repo / timeout); the
+                   caller skips the cumulative-diff check rather than
+                   bricking the dispatch.
+    """
+    worktree = Path(worktree)
+    if not worktree.is_dir():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(worktree), "diff", "HEAD"],
+            capture_output=True, text=True, timeout=20.0, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout or ""
+
+
 def reset_worktree(worktree: Path) -> None:
     """Roll the worktree back to a clean state (used on runner exit so
     the next dispatch sees a fresh tree)."""
@@ -427,6 +456,7 @@ __all__ = [
     "TOOL_READ_SOURCE",
     "TOOL_RUN_BENCH",
     "apply_patch_in_worktree",
+    "capture_worktree_cumulative_diff",
     "read_session_artifact",
     "read_source",
     "reset_worktree",
