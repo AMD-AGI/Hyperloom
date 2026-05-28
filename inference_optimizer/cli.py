@@ -2707,6 +2707,91 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Recipe-snapshot KB dispatcher bootstrap
+# ---------------------------------------------------------------------------
+def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
+    """Resolve the local recipe-snapshot KB root.
+
+    Resolution ladder (highest priority first):
+
+    1. ``--local-kb-root <path>`` — explicit operator override.
+    2. ``$HYPERLOOM_LOCAL_KB_ROOT`` — env override (mirrors the
+       same precedence pattern we use for ``--cortex-kb-url``).
+    3. ``$USER_DATA_PATH/recipe_kb/`` — per-user default; matches
+       the rest of the optimizer's session-data layout so a single
+       USER_DATA_PATH override moves the whole KB tail.
+    4. ``/workspace/hyperloom/recipe_kb/`` — container fallback
+       when even ``$USER_DATA_PATH`` isn't set (degraded sandbox /
+       fresh-image boot).
+
+    The directory is NOT created here — :class:`LocalRecipeStore`
+    handles lazy creation on first write so a degraded run that
+    never touches the KB pays nothing on disk.
+    """
+    explicit = (
+        getattr(args, "local_kb_root", None)
+        or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
+    )
+    if explicit:
+        return Path(str(explicit).strip())
+    user_data = os.environ.get("USER_DATA_PATH", "").strip()
+    if user_data:
+        return Path(user_data) / "recipe_kb"
+    return Path("/workspace/hyperloom") / "recipe_kb"
+
+
+def _build_recipe_kb_dispatcher(
+    args: argparse.Namespace,
+) -> Any:
+    """Build the local-write / remote-read dispatcher for the
+    recipe-snapshot KB.
+
+    Returns a :class:`recipe_kb.RecipeKB` instance. The remote half
+    is wired according to the operator's flags:
+
+    * ``--degraded-kb`` (or ``$CORTEX_KB_URL`` empty AND
+      ``--cortex-kb-url`` not passed) → ``remote=None`` →
+      local-only mode.
+    * Otherwise → enabled :class:`RemoteRecipeClient` pointed at
+      the resolved URL with the foreground-friendly retry/timeout
+      profile (2 s + 1 retry) so a slow / unreachable kb-service
+      never blocks the optimizer's main loop for more than the
+      side-channel budget the operator already calibrated for the
+      legacy v2 client.
+
+    The local store is always wired, regardless of remote
+    presence — writes have to land somewhere.
+    """
+    from .recipe_kb import LocalRecipeStore, RecipeKB, RemoteRecipeClient
+
+    local_root = _resolve_local_kb_root(args)
+    local_store = LocalRecipeStore(root=local_root)
+
+    if bool(getattr(args, "degraded_kb", False)):
+        # Operator explicitly opted out — no network calls regardless
+        # of CORTEX_KB_URL value.
+        return RecipeKB(local=local_store, remote=None)
+
+    cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
+    if not cortex_url:
+        cortex_url = (os.environ.get("CORTEX_KB_URL", "") or "").strip()
+    if not cortex_url:
+        # No URL configured anywhere — local-only. We deliberately
+        # do NOT fall back to ``DEFAULT_KB_URL`` here: the default
+        # only applies when the operator HAS opted in to remote
+        # reads but didn't override the URL. With nothing
+        # configured we infer "operator wants local-only".
+        return RecipeKB(local=local_store, remote=None)
+
+    remote = RemoteRecipeClient(
+        kb_url=cortex_url,
+        foreground=True,
+        enabled=True,
+    )
+    return RecipeKB(local=local_store, remote=remote)
+
+
+# ---------------------------------------------------------------------------
 # Cortex KB T0 hook
 # ---------------------------------------------------------------------------
 def _bootstrap_cortex_kb(
@@ -4868,7 +4953,28 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Override CORTEX_KB_URL for this run (default: env value or "
-             "http://kb-service.primus-cortex.svc.cluster.local).",
+             "http://kb-service.primus-cortex.svc.cluster.local). Under "
+             "the recipe-snapshot v2 cutover the central kb-service is "
+             "queried for READS only (writes always go to --local-kb-root); "
+             "an unreachable URL degrades the dispatcher to local-only "
+             "transparently — no need to also pass --degraded-kb.",
+    )
+    opt.add_argument(
+        "--local-kb-root",
+        dest="local_kb_root",
+        type=str,
+        default=None,
+        help="Filesystem root for the local recipe-snapshot KB store. "
+             "All writes (put_recipe / append_attempt / delete_recipe) go "
+             "here regardless of --cortex-kb-url. Defaults to "
+             "$HYPERLOOM_LOCAL_KB_ROOT, then $USER_DATA_PATH/recipe_kb/, "
+             "then /workspace/hyperloom/recipe_kb/. Layout is a 5-level "
+             "directory tree keyed by canonical_id components "
+             "(model -> hardware -> framework -> framework_version -> "
+             "precision); each leaf holds recipe.json + history/ + "
+             "attempts.ndjson + .lock. See "
+             "inference_optimizer/recipe_kb/local_store.py for the "
+             "on-disk contract.",
     )
     opt.add_argument(
         "--degraded-kb",
