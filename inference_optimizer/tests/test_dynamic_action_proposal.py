@@ -15,6 +15,7 @@ from inference_optimizer.orchestrator.dynamic_action_proposal import (
     MAX_PROPOSAL_SET_LEN,
     REQUIRED_PROPOSAL_FIELDS,
     TERMINAL_REASONS,
+    _normalise_diff_for_compare,
     build_proposal_set_payload,
     validate_proposal,
 )
@@ -183,3 +184,75 @@ def test_build_proposal_set_payload_empty():
         "empty": True,
         "journal_path": "/p",
     }
+
+
+# ===========================================================================
+# G6 — cumulative-diff alignment check
+# ===========================================================================
+PATCH_A = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"
+
+
+def test_g6_no_diff_check_when_worktree_clean():
+    """Empty worktree diff (or None) skips the cumulative-diff check."""
+    r = validate_proposal(
+        _good_proposal(patch_text=PATCH_A),
+        spec_scope_domains=SCOPE,
+        worktree_cumulative_diff="",
+    )
+    assert r.ok is True
+
+
+def test_g6_no_diff_check_when_worktree_disabled():
+    r = validate_proposal(
+        _good_proposal(patch_text=PATCH_A),
+        spec_scope_domains=SCOPE,
+        worktree_cumulative_diff=None,
+    )
+    assert r.ok is True
+
+
+def test_g6_matching_cumulative_diff_passes():
+    """A proposal whose patch_text matches the worktree's git diff
+    HEAD (modulo git metadata) is accepted."""
+    git_diff = (
+        "diff --git a/x b/x\nindex 123..456 100644\n"
+        "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+    r = validate_proposal(
+        _good_proposal(patch_text=PATCH_A),
+        spec_scope_domains=SCOPE,
+        worktree_cumulative_diff=git_diff,
+    )
+    assert r.ok is True
+
+
+def test_g6_mismatched_cumulative_diff_rejected():
+    """If the sub-agent's patch_text disagrees with the worktree's
+    actual diff, the proposal is rejected so integrate_patch does not
+    silently apply an incomplete patch."""
+    worktree_diff = (
+        "diff --git a/y b/y\nindex 999..aaa 100644\n"
+        "--- a/y\n+++ b/y\n@@ -1 +1 @@\n-foo\n+bar\n"
+    )
+    r = validate_proposal(
+        _good_proposal(patch_text=PATCH_A),
+        spec_scope_domains=SCOPE,
+        worktree_cumulative_diff=worktree_diff,
+    )
+    assert r.ok is False
+    assert r.reason == "patch_text_not_cumulative_diff"
+
+
+def test_g6_normaliser_strips_git_metadata():
+    """Index lines + diff --git headers + mode lines drop out so a
+    hand-crafted patch can match git's machine output."""
+    with_meta = (
+        "diff --git a/x b/x\nindex abc..def 100644\n"
+        "new file mode 100644\n"
+        "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+    without_meta = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+    assert (
+        _normalise_diff_for_compare(with_meta)
+        == _normalise_diff_for_compare(without_meta)
+    )

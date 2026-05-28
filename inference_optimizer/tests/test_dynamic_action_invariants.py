@@ -891,3 +891,34 @@ class TestInvariant_CoreFieldsAudit:
             f"{required!r} dropped from CORE_STATE_FIELDS — that field "
             f"would become LLM-writable"
         )
+
+
+# ===========================================================================
+# G12 — RESEARCH_LANE_NAME used everywhere (no hard-coded literals)
+# ===========================================================================
+class TestInvariant_G12_ResearchLaneConstant:
+
+    def test_inv_research_lane_constant_exposed(self):
+        """G12 — the canonical lane name lives in policy.py so
+        Coordinator-side spec builders import it instead of
+        hard-coding the string."""
+        from inference_optimizer.orchestrator.policy import (
+            RESEARCH_LANE_NAME,
+        )
+        assert RESEARCH_LANE_NAME == "research_lane"
+
+    def test_inv_coordinator_does_not_hardcode_research_lane_literal(self):
+        """The dispatch hook now references the constant; no other
+        ``"research_lane"`` string literal should slip in alongside
+        the new symbol — future audits stay machine-checkable."""
+        from inference_optimizer.orchestrator import coordinator as coord_mod
+        body = Path(coord_mod.__file__).read_text(encoding="utf-8")
+        # The only allowed occurrences are the import line + the
+        # ``RESEARCH_LANE_NAME`` symbol usage. Hard-coded
+        # ``"research_lane"`` should not appear in dynamic_action's
+        # spec-builder.
+        spec_dispatch_block = body[
+            body.find("def _prepare_dynamic_action_dispatch"):
+            body.find("def _cleanup_dynamic_action_artifact_dir")
+        ]
+        assert '"research_lane"' not in spec_dispatch_block
