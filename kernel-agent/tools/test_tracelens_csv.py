@@ -2603,3 +2603,99 @@ def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
         task_groups=[],
     )
     assert summary["trace_health_warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# atom_gap2.md B3 — atom maps to ``inference`` analysis mode
+# ---------------------------------------------------------------------------
+def test_infer_analysis_mode_atom_returns_inference():
+    """B3 regression: atom traces are produced by the same torch
+    profiler API and the same chrome-trace JSON shape as sglang /
+    vllm. Pre-fix, atom fell through to ``default`` and got generic
+    torch grouping; now atom shares the inference-mode kernel
+    grouping with sglang/vllm.
+    """
+    assert tlr.infer_analysis_mode("atom", "") == "inference"
+    assert tlr.infer_analysis_mode("ATOM", "default") == "inference"
+    assert tlr.infer_analysis_mode("  atom  ", "default") == "inference"
+
+
+def test_infer_analysis_mode_sglang_vllm_unchanged():
+    """Regression guard: B3 must not accidentally change sglang /
+    vllm behaviour (was ``inference`` pre-fix, still ``inference``).
+    """
+    assert tlr.infer_analysis_mode("sglang", "") == "inference"
+    assert tlr.infer_analysis_mode("vllm", "default") == "inference"
+
+
+def test_infer_analysis_mode_explicit_request_wins():
+    """Caller-supplied non-default mode bypasses the framework default
+    for every framework (atom included)."""
+    assert tlr.infer_analysis_mode("atom", "training") == "training"
+    assert tlr.infer_analysis_mode("sglang", "training") == "training"
+    assert tlr.infer_analysis_mode("unknown", "training") == "training"
+
+
+def test_infer_analysis_mode_unknown_framework_stays_default():
+    """Frameworks outside the canonical set fall back to ``default``;
+    they don't get the inference-mode upgrade automatically.
+    """
+    assert tlr.infer_analysis_mode("trtllm", "") == "default"
+    assert tlr.infer_analysis_mode("", "") == "default"
+
+
+# ---------------------------------------------------------------------------
+# atom_gap2.md B2 — atom entries present in _FRAMEWORK_PKG_FALLBACK_ROOTS
+# ---------------------------------------------------------------------------
+def test_framework_pkg_fallback_roots_has_atom_entry():
+    """B2 regression: pre-fix, the offline source resolver silently
+    rejected atom kernel sources because the fallback table only
+    knew about aiter / sglang / vllm. The atom entry must include at
+    least the editable-install parent ``/app/ATOM`` so a relative
+    ``atom/model_engine/...`` path in a TraceLens CSV can be joined
+    against it.
+    """
+    table = tlr._FRAMEWORK_PKG_FALLBACK_ROOTS
+    assert "atom" in table, (
+        "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS — "
+        "atom_gap2.md B2 regression"
+    )
+    roots = table["atom"]
+    assert "/app/ATOM" in roots
+    # Site-packages variants for production wheels.
+    assert any("site-packages" in r or "dist-packages" in r for r in roots), (
+        f"atom fallback roots lack a site-packages entry: {roots!r}"
+    )
+
+
+def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
+    """End-to-end: when ``import atom`` doesn't fire (CSV-only
+    static-analysis path), the resolver still resolves a relative
+    ``atom/model_engine/model_runner.py`` against the synthetic atom
+    fallback root and returns the absolute path.
+    """
+    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
+    _seed_pkg(
+        tmp_path,
+        "atom",
+        "model_engine/model_runner.py",
+        funcs=("forward",),
+    )
+    monkeypatch.setattr(
+        tlr,
+        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
+        {"atom": (str(tmp_path),)},
+    )
+    # Force find_spec to miss so the test exercises the fallback path.
+    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "atom/model_engine/model_runner.py(125): forward",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(
+        tmp_path / "atom" / "model_engine" / "model_runner.py"
+    )
+    assert line == 125
+    assert func == "forward"
