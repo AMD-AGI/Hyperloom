@@ -20,8 +20,25 @@ LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}
 
 PRIMUS_CLAW_REPO="${PRIMUS_CLAW_REPO:-https://github.com/AMD-AGI/Primus-Claw.git}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
-TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens-internal.git}"
-TRACELENS_REF="${TRACELENS_REF:-release/hyperloom_integration_0.3.1}"
+# TraceLens: open-source AMD-AGI/TraceLens. Carries the full TraceLens.*
+# Python package, the TraceLens_generate_perf_report_* CLIs, the agent
+# skill bundle, and the SGLang/vLLM patch tree (examples/custom_workflows/
+# inference_analysis/) that _server_patcher reads at runtime. After the
+# 2026-05-18 OSS migration this is the only repo Hyperloom needs for the
+# baseline feature set.
+TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
+# Default to ``main`` until a TraceLens release that includes PR #668
+# (FlyDSL MoE perfmodel) is tagged. Pin to the resulting tag (e.g.
+# ``v0.5.0``) for reproducible installs once it lands.
+TRACELENS_REF="${TRACELENS_REF:-main}"
+# Optional TraceLens-internal extension (private). Adds roofline numbers,
+# gains estimates, and MI355/MI455 MAF data on top of the open-source
+# impact-score-only report. OFF by default — opt in by exporting
+# TRACELENS_INSTALL_INTERNAL=1 (clones into ${HYPERLOOM_DEPS_ROOT}/TraceLens-internal)
+# or by setting TRACELENS_INTERNAL_ROOT to point at an existing checkout.
+TRACELENS_INTERNAL_REPO="${TRACELENS_INTERNAL_REPO:-https://github.com/AMD-AGI/TraceLens-internal.git}"
+TRACELENS_INTERNAL_REF="${TRACELENS_INTERNAL_REF:-main}"
+TRACELENS_INSTALL_INTERNAL="${TRACELENS_INSTALL_INTERNAL:-0}"
 
 usage() {
   cat <<'EOF'
@@ -41,8 +58,10 @@ Options:
 
 Advanced env overrides:
   REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV,
-  OOB_SRC, INFERENCEX_PATH, TRACELENS_ROOT,
-  PRIMUS_CLAW_REPO, INFERENCEX_REPO, TRACELENS_REPO, TRACELENS_REF
+  OOB_SRC, INFERENCEX_PATH, TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT,
+  PRIMUS_CLAW_REPO, INFERENCEX_REPO,
+  TRACELENS_REPO, TRACELENS_REF,
+  TRACELENS_INSTALL_INTERNAL, TRACELENS_INTERNAL_REPO, TRACELENS_INTERNAL_REF
 EOF
 }
 
@@ -184,10 +203,39 @@ resolve_tracelens() {
     return 0
   fi
 
-  TRACELENS_ROOT="${HYPERLOOM_DEPS_ROOT}/TraceLens-internal"
-  clone_or_update "TraceLens-internal" "$TRACELENS_REPO" "$TRACELENS_ROOT" "$TRACELENS_REF"
+  TRACELENS_ROOT="${HYPERLOOM_DEPS_ROOT}/TraceLens"
+  clone_or_update "TraceLens" "$TRACELENS_REPO" "$TRACELENS_ROOT" "$TRACELENS_REF"
   export TRACELENS_ROOT
   log "TRACELENS_ROOT: ${TRACELENS_ROOT}"
+}
+
+resolve_tracelens_internal() {
+  # Opt-in: ON when TRACELENS_INTERNAL_ROOT is already exported (operator
+  # provided an existing checkout) or TRACELENS_INSTALL_INTERNAL is truthy.
+  # OFF by default keeps Local Mode on the open-source-only path (impact
+  # score, no roofline, MI300/MI325 MAF only).
+  local opt_in=0
+  if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then opt_in=1; fi
+  case "${TRACELENS_INSTALL_INTERNAL:-0}" in
+    1|true|TRUE|yes|YES) opt_in=1 ;;
+  esac
+  if [ "$opt_in" -eq 0 ]; then
+    log "TraceLens-internal: skipped (set TRACELENS_INSTALL_INTERNAL=1 to opt in)"
+    return 0
+  fi
+
+  if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+    [ -d "$TRACELENS_INTERNAL_ROOT" ] || die "TRACELENS_INTERNAL_ROOT is set but does not exist: ${TRACELENS_INTERNAL_ROOT}"
+    log "TRACELENS_INTERNAL_ROOT: using existing ${TRACELENS_INTERNAL_ROOT}"
+    export TRACELENS_INTERNAL_ROOT
+    return 0
+  fi
+
+  TRACELENS_INTERNAL_ROOT="${HYPERLOOM_DEPS_ROOT}/TraceLens-internal"
+  clone_or_update "TraceLens-internal" "$TRACELENS_INTERNAL_REPO" \
+    "$TRACELENS_INTERNAL_ROOT" "$TRACELENS_INTERNAL_REF"
+  export TRACELENS_INTERNAL_ROOT
+  log "TRACELENS_INTERNAL_ROOT: ${TRACELENS_INTERNAL_ROOT}"
 }
 
 write_local_env() {
@@ -207,6 +255,9 @@ write_local_env() {
     write_export OOB_SRC "$OOB_SRC"
     write_export INFERENCEX_PATH "$INFERENCEX_PATH"
     write_export TRACELENS_ROOT "$TRACELENS_ROOT"
+    if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+      write_export TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
+    fi
   } > "$LOCAL_SETUP_ENV"
   chmod 600 "$LOCAL_SETUP_ENV"
   log "wrote ${LOCAL_SETUP_ENV}"
@@ -266,6 +317,7 @@ main() {
   resolve_oob_src
   resolve_inferencex
   resolve_tracelens
+  resolve_tracelens_internal
   write_local_env
 
   print_next_steps
