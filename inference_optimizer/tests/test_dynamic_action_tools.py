@@ -1,4 +1,4 @@
-"""dynamic_action.MD P3 §4 — tool whitelist invariants."""
+"""Tests for the dynamic_action sub-agent tool whitelist."""
 
 from __future__ import annotations
 
@@ -29,9 +29,8 @@ from inference_optimizer.orchestrator.dynamic_action_tools import (
 # Surface invariants
 # ===========================================================================
 def test_tool_set_is_exactly_four_in_v1():
-    """P3 §4 — v1 surface is 3 live resources + 1 terminal signal.
-    ``run_bench`` is gated off by ``BENCH_TOOL_ENABLED_V1=False`` (G1).
-    Any drift must be a design change."""
+    """The live surface is 3 resources + 1 terminal signal; ``run_bench``
+    is gated off by ``BENCH_TOOL_ENABLED_V1=False``."""
     assert ALL_DYNAMIC_TOOLS == frozenset({
         "read_source",
         "read_session_artifact",
@@ -41,9 +40,8 @@ def test_tool_set_is_exactly_four_in_v1():
 
 
 def test_bench_registry_caps_within_global_ceiling():
-    """When v2 re-enables benches, every spec must respect the §4.1.c
-    global ceiling. Currently the registry is empty (G1), so the loop
-    is vacuously true — the check stays here as a forward guard."""
+    """Every registered bench must respect ``MAX_BENCH_WALL_CLOCK_SEC``;
+    vacuously true while the registry is empty."""
     for spec in BENCH_REGISTRY.values():
         assert spec.wall_clock_sec <= MAX_BENCH_WALL_CLOCK_SEC, (
             f"{spec.bench_id}: per-bench wall_clock_sec exceeds the "
@@ -52,9 +50,8 @@ def test_bench_registry_caps_within_global_ceiling():
 
 
 def test_bench_registry_disabled_in_v1():
-    """G1 — bench tool is gated off in v1 (real probes not implemented).
-    Registry is empty and TOOL_RUN_BENCH is absent from the live tool
-    surface."""
+    """``BENCH_TOOL_ENABLED_V1=False`` ⇒ registry empty and
+    ``TOOL_RUN_BENCH`` absent from the live tool surface."""
     from inference_optimizer.orchestrator.dynamic_action_tools import (
         ALL_DYNAMIC_TOOLS,
         BENCH_TOOL_ENABLED_V1,
@@ -156,11 +153,11 @@ def test_read_session_artifact_rejects_traversal(tmp_path: Path):
 
 
 # ===========================================================================
-# run_bench — v1 disabled (G1)
+# run_bench — disabled by default
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_run_bench_disabled_in_v1(tmp_path: Path):
-    """G1 — every run_bench call returns ``bench_tool_disabled_v1``
+    """Every ``run_bench`` call returns ``bench_tool_disabled_v1``
     regardless of bench_id or worktree state."""
     res = await run_bench("anything", worktree=tmp_path, call_id="c1")
     assert res["ok"] is False
@@ -169,8 +166,8 @@ async def test_run_bench_disabled_in_v1(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_run_bench_disabled_with_unknown_id_too(tmp_path: Path):
-    """The disabled gate fires before unknown_bench_id so the v1 surface
-    is uniform — sub-agent never sees per-bench failure reasons."""
+    """The disabled gate fires before ``unknown_bench_id`` so the
+    surface stays uniform — sub-agent never sees per-bench reasons."""
     res = await run_bench("not_a_bench", worktree=tmp_path, call_id="c1")
     assert res["reason"] == "bench_tool_disabled_v1"
 
@@ -179,8 +176,8 @@ async def test_run_bench_disabled_with_unknown_id_too(tmp_path: Path):
 async def test_run_bench_re_enabled_path_executes_script(
     tmp_path: Path, monkeypatch,
 ):
-    """Forward guard: when v2 flips BENCH_TOOL_ENABLED_V1 and registers
-    a bench, the runner subprocess path still works."""
+    """When ``BENCH_TOOL_ENABLED_V1`` is flipped and a bench is
+    registered, the subprocess path still works."""
     import inference_optimizer.orchestrator.dynamic_action_tools as tools_mod
     fake_dir = tmp_path / "benches"
     fake_dir.mkdir()

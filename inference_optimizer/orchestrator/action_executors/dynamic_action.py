@@ -1,21 +1,12 @@
-"""Stub ``dynamic_action`` executor — action_dynamic_plan/P1 §7 + P2 §6.
+"""Stub ``dynamic_action`` executor used when no ReAct backend is
+configured.
 
-The P1 dispatch skeleton + P2 artefact bundle are the productised
-parts; this executor stays a stub until P3 lands the multi-turn
-ReAct runner.
-
-Behaviour (P2):
-
-* Locate the artefact dir via ``ctx.task.params['artifact_path']``
-  (Coordinator-injected; falls back to ``ctx.extra['workspace']`` for
-  back-compat) and append one ``dispatch_history.jsonl`` row.
-* Write an empty ``proposal_set.json`` into the same dir so downstream
-  consumers see the canonical empty signal.
-* Return an empty ``proposal_set`` so the existing empty path
-  (specialist-equivalent) takes over without critic / grid runner.
-
-P3 swaps the executor body without touching upstream dispatch wiring
-or the artefact layout.
+* Locate the artefact dir from ``ctx.task.params['artifact_path']``
+  (falls back to ``ctx.extra['workspace']``) and append one closed-
+  schema ``SUB_AGENT_DONE`` row to ``dispatch_history.jsonl``.
+* Write an empty ``proposal_set.json`` into the same dir.
+* Return ``proposal_set=[]`` so the empty path takes over without
+  critic / grid runner.
 """
 
 from __future__ import annotations
@@ -36,10 +27,8 @@ def _now_iso() -> str:
 
 
 def _resolve_artifact_dir(ctx: RunnerContext) -> Path | None:
-    """Prefer the Coordinator-injected ``params['artifact_path']``
-    (P2 §6); fall back to the per-task workspace for legacy callers
-    that bypass the prepare hook (tests). Returns None when neither
-    source resolves."""
+    """Prefer ``params['artifact_path']``; fall back to the per-task
+    workspace; return None when neither resolves."""
     explicit = ctx.task.params.get("artifact_path")
     if explicit:
         return Path(explicit)
@@ -50,12 +39,8 @@ def _resolve_artifact_dir(ctx: RunnerContext) -> Path | None:
 
 
 async def dynamic_action_executor(ctx: RunnerContext) -> dict[str, Any]:
-    """Append one dispatch_history.jsonl row + write empty proposal_set.
-
-    The history row uses the unified ``SUB_AGENT_DONE`` closed schema
-    (G2) so consumers of dispatch_history can treat the stub uniformly
-    with the real runner.
-    """
+    """Append one ``SUB_AGENT_DONE`` history row + write empty
+    ``proposal_set.json``."""
     dyn_id = str(ctx.task.params.get("dyn_id") or ctx.task.task_id)
     artifact_dir = _resolve_artifact_dir(ctx)
     if artifact_dir is not None:
@@ -78,9 +63,8 @@ async def dynamic_action_executor(ctx: RunnerContext) -> dict[str, Any]:
                 "dyn_id=%s: %r",
                 dyn_id, exc,
             )
-        # Closed-schema history append; only when we can derive the
-        # session_dir from the artefact dir layout
-        # (``<session_dir>/agents/orchestration/dynamic_actions/<dyn_id>``).
+        # Append closed-schema history when the artefact dir matches
+        # the canonical session layout.
         session_dir = _session_dir_from_artifact(artifact_dir, dyn_id)
         if session_dir is not None:
             from ..dynamic_action_history import (
@@ -120,14 +104,9 @@ async def dynamic_action_executor(ctx: RunnerContext) -> dict[str, Any]:
 def _session_dir_from_artifact(
     artifact_dir: Path, dyn_id: str,
 ) -> Path | None:
-    """Walk the canonical layout back to the session root so the stub
-    can call the unified history writer without an extra plumb-through.
-
-    ``artifact_dir`` is
-    ``<session_dir>/agents/orchestration/dynamic_actions/<dyn_id>``;
-    we strip the four trailing path segments to recover the session
-    root. Returns ``None`` if the layout does not match.
-    """
+    """Recover ``session_dir`` from an
+    ``<sd>/agents/orchestration/dynamic_actions/<dyn_id>`` artefact
+    path; return ``None`` when the layout does not match."""
     if artifact_dir.name != dyn_id:
         return None
     candidate = artifact_dir.parent.parent.parent.parent
