@@ -36,6 +36,8 @@ from .dynamic_action_proposal import (
     validate_proposal,
 )
 from .dynamic_action_tools import (
+    BENCH_TOOL_ENABLED_V1,
+    DYNAMIC_RESOURCE_TOOLS,
     TOOL_APPLY_PATCH_IN_WORKTREE,
     TOOL_EMIT_PROPOSAL,
     TOOL_READ_SESSION_ARTIFACT,
@@ -325,12 +327,7 @@ class DynamicActionRunner:
                     )
                     break
 
-                if action.tool not in {
-                    TOOL_READ_SOURCE,
-                    TOOL_READ_SESSION_ARTIFACT,
-                    TOOL_RUN_BENCH,
-                    TOOL_APPLY_PATCH_IN_WORKTREE,
-                }:
+                if action.tool not in DYNAMIC_RESOURCE_TOOLS:
                     journal.append(JournalTurn(
                         turn=turn,
                         llm_text=raw_text,
@@ -479,6 +476,12 @@ class DynamicActionRunner:
                 dyn_id=dyn_id,
             )
         if action.tool == TOOL_RUN_BENCH:
+            if not BENCH_TOOL_ENABLED_V1:
+                return {
+                    "ok": False,
+                    "reason": "bench_tool_disabled_v1",
+                    "tool": action.tool,
+                }
             if worktree is None:
                 return {
                     "ok": False,

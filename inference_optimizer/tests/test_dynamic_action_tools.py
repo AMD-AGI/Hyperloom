@@ -28,20 +28,22 @@ from inference_optimizer.orchestrator.dynamic_action_tools import (
 # ===========================================================================
 # Surface invariants
 # ===========================================================================
-def test_tool_set_is_exactly_five():
-    """P3 §4 — surface is 4 resources + 1 terminal signal. Any drift
-    must be a design change (registry constants are the canonical
-    source of truth)."""
+def test_tool_set_is_exactly_four_in_v1():
+    """P3 §4 — v1 surface is 3 live resources + 1 terminal signal.
+    ``run_bench`` is gated off by ``BENCH_TOOL_ENABLED_V1=False`` (G1).
+    Any drift must be a design change."""
     assert ALL_DYNAMIC_TOOLS == frozenset({
         "read_source",
         "read_session_artifact",
-        "run_bench",
         "apply_patch_in_worktree",
         "emit_proposal",
     })
 
 
 def test_bench_registry_caps_within_global_ceiling():
+    """When v2 re-enables benches, every spec must respect the §4.1.c
+    global ceiling. Currently the registry is empty (G1), so the loop
+    is vacuously true — the check stays here as a forward guard."""
     for spec in BENCH_REGISTRY.values():
         assert spec.wall_clock_sec <= MAX_BENCH_WALL_CLOCK_SEC, (
             f"{spec.bench_id}: per-bench wall_clock_sec exceeds the "
@@ -49,14 +51,18 @@ def test_bench_registry_caps_within_global_ceiling():
         )
 
 
-def test_bench_registry_has_required_starter_set():
-    expected = {
-        "kernel_attention_timing",
-        "kernel_gemm_timing",
-        "kernel_kvcache_layout",
-        "inference_short_prompt",
-    }
-    assert set(BENCH_REGISTRY) == expected
+def test_bench_registry_disabled_in_v1():
+    """G1 — bench tool is gated off in v1 (real probes not implemented).
+    Registry is empty and TOOL_RUN_BENCH is absent from the live tool
+    surface."""
+    from inference_optimizer.orchestrator.dynamic_action_tools import (
+        ALL_DYNAMIC_TOOLS,
+        BENCH_TOOL_ENABLED_V1,
+        TOOL_RUN_BENCH,
+    )
+    assert BENCH_TOOL_ENABLED_V1 is False
+    assert BENCH_REGISTRY == {}
+    assert TOOL_RUN_BENCH not in ALL_DYNAMIC_TOOLS
 
 
 # ===========================================================================
@@ -150,59 +156,52 @@ def test_read_session_artifact_rejects_traversal(tmp_path: Path):
 
 
 # ===========================================================================
-# run_bench — unknown id + timeout
+# run_bench — v1 disabled (G1)
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_run_bench_unknown_id(tmp_path: Path):
-    res = await run_bench("not_a_bench", worktree=tmp_path, call_id="c1")
+async def test_run_bench_disabled_in_v1(tmp_path: Path):
+    """G1 — every run_bench call returns ``bench_tool_disabled_v1``
+    regardless of bench_id or worktree state."""
+    res = await run_bench("anything", worktree=tmp_path, call_id="c1")
     assert res["ok"] is False
-    assert res["reason"] == "unknown_bench_id"
-    assert "kernel_attention_timing" in res["allowed"]
+    assert res["reason"] == "bench_tool_disabled_v1"
 
 
 @pytest.mark.asyncio
-async def test_run_bench_executes_placeholder(tmp_path: Path):
-    """The shipped placeholder bench writes a marker JSON; ``run_bench``
-    surfaces exit_code 0 and the path to the scratch dir (which is
-    NOT recovered)."""
-    res = await run_bench(
-        "kernel_attention_timing", worktree=tmp_path, call_id="c1",
-    )
-    assert res["ok"] is True, res
-    assert res["exit_code"] == 0
-    assert "kernel_attention_timing" in res["stdout_tail"]
-    marker = Path(res["output_dir"]) / "result.json"
-    assert marker.is_file()
+async def test_run_bench_disabled_with_unknown_id_too(tmp_path: Path):
+    """The disabled gate fires before unknown_bench_id so the v1 surface
+    is uniform — sub-agent never sees per-bench failure reasons."""
+    res = await run_bench("not_a_bench", worktree=tmp_path, call_id="c1")
+    assert res["reason"] == "bench_tool_disabled_v1"
 
 
 @pytest.mark.asyncio
-async def test_run_bench_times_out(tmp_path: Path, monkeypatch):
-    """Force a bench that sleeps past its cap → ``timed_out`` reason."""
+async def test_run_bench_re_enabled_path_executes_script(
+    tmp_path: Path, monkeypatch,
+):
+    """Forward guard: when v2 flips BENCH_TOOL_ENABLED_V1 and registers
+    a bench, the runner subprocess path still works."""
+    import inference_optimizer.orchestrator.dynamic_action_tools as tools_mod
     fake_dir = tmp_path / "benches"
     fake_dir.mkdir()
-    slow_script = fake_dir / "kernel_attention_timing.sh"
-    slow_script.write_text(
-        "#!/usr/bin/env bash\nsleep 5\n", encoding="utf-8",
+    script = fake_dir / "probe.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\necho probe ok\n", encoding="utf-8",
     )
-    slow_script.chmod(0o755)
-    monkeypatch.setitem(
-        BENCH_REGISTRY,
-        "kernel_attention_timing",
-        type(BENCH_REGISTRY["kernel_attention_timing"])(
-            bench_id="kernel_attention_timing",
-            description="slow",
-            wall_clock_sec=1.0,
-            script_path="kernel_attention_timing.sh",
-        ),
+    script.chmod(0o755)
+    spec = tools_mod.BenchSpec(
+        bench_id="probe",
+        description="forward-guard probe",
+        wall_clock_sec=5.0,
+        script_path="probe.sh",
     )
+    monkeypatch.setattr(tools_mod, "BENCH_TOOL_ENABLED_V1", True)
+    monkeypatch.setitem(BENCH_REGISTRY, "probe", spec)
     res = await run_bench(
-        "kernel_attention_timing",
-        worktree=tmp_path,
-        call_id="c1",
-        bench_dir_root=fake_dir,
+        "probe", worktree=tmp_path, call_id="c1", bench_dir_root=fake_dir,
     )
-    assert res["ok"] is False
-    assert res["reason"] == "timed_out"
+    assert res["ok"] is True
+    assert res["exit_code"] == 0
 
 
 # ===========================================================================
