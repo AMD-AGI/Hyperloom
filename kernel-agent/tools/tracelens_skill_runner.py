@@ -126,7 +126,7 @@ def build_orchestrator_prompt(
     skill_path: Path,
     trace_path: Path,
     output_dir: Path,
-    tracelens_root: Path | None = None,
+    tracelens_root: Path,
     tracelens_internal_root: Path,
     platform: str,
     framework: str,
@@ -144,7 +144,6 @@ def build_orchestrator_prompt(
         exec_mode = "default"
 
     capture_text = str(capture_folder) if capture_folder else "N/A"
-    tracelens_root_text = str(tracelens_root) if tracelens_root else "N/A"
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
@@ -155,7 +154,7 @@ questions; proceed with the analysis.
 
 Execution context:
 - Environment: local
-- TraceLens root: {tracelens_root_text}
+- TraceLens root: {tracelens_root}
 - TraceLens-internal root: {tracelens_internal_root}
 - Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
 - Trace file path: {trace_path}
@@ -211,7 +210,7 @@ async def run_tracelens_skill(
     skill_path: Path,
     trace_path: Path,
     output_dir: Path,
-    tracelens_root: Path | None = None,
+    tracelens_root: Path,
     tracelens_internal_root: Path,
     platform: str,
     framework: str,
@@ -226,7 +225,7 @@ async def run_tracelens_skill(
     """Execute the standalone TraceLens skill with Claude SDK."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    prefix_path = write_local_cmd_prefix(output_dir, tracelens_internal_root)
+    prefix_path = write_local_cmd_prefix(output_dir, tracelens_root)
     prompt = build_orchestrator_prompt(
         skill_path=skill_path,
         trace_path=trace_path,
@@ -263,8 +262,8 @@ async def run_tracelens_skill(
     if model:
         kwargs["model"] = model
     # Supported by claude-agent-sdk used by the outer role backend; harmless in
-    # tests via FakeOptions and keeps Bash relative paths rooted at TraceLens-internal.
-    kwargs["cwd"] = str(tracelens_internal_root)
+    # tests via FakeOptions and keeps Bash relative paths rooted at TraceLens.
+    kwargs["cwd"] = str(tracelens_root)
 
     try:
         options = sdk_options_cls(**kwargs)

@@ -1781,7 +1781,7 @@ def _probe_external_mounts(
     return out
 
 
-# Both TraceLens CLI names ship from the same internal repo; the
+# Both TraceLens CLI names ship from the public repo; the
 # ``_inference`` variant is the canonical one for vLLM/SGLang traces
 # per SKILL.md but the legacy name remains valid for older builds.
 _TRACELENS_CLI_NAMES: tuple[str, ...] = (

@@ -2316,6 +2316,11 @@ def main() -> int:
                     f"TraceLens root not found: {tl_root} "
                     "(set TRACELENS_ROOT or pass --tracelens-root)"
                 )
+            if not tl_internal_root.exists():
+                raise FileNotFoundError(
+                    f"TraceLens-internal root not found: {tl_internal_root} "
+                    "(set TRACELENS_INTERNAL_ROOT or pass --tracelens-internal-root)"
+                )
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],
                         cwd=tl_root, log_path=log_path,
                         timeout_s=max(60, int(args.budget_minutes * 60)))

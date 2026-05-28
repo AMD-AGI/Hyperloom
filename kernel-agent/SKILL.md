@@ -233,7 +233,7 @@ and report it instead of crashing the resident session.
 ## TraceLens Requirements
 
 TraceLens runs through its CLI and its own skill. It is **one dependency**
-installed from **two source repos** (public base, then internal extensions).
+installed from **two source repos** (public base, then internal rehydration module).
 Install both inside the GPU container before Hyperloom bootstrap (see README
 Local Mode step 1):
 
@@ -249,7 +249,9 @@ TraceLens_generate_perf_report_pytorch_inference --help
 
 Container defaults: `/workspace/TraceLens` (`TRACELENS_ROOT`, public
 repo) and `/workspace/TraceLens-internal` (`TRACELENS_INTERNAL_ROOT`, internal repo —
-same TraceLens stack, extension install step).
+same TraceLens stack, rehydration module).  At analysis time, `TL_EXTENSION`
+is set to `$TRACELENS_INTERNAL_ROOT` in the orchestrator prompt so the
+analysis skill can locate the rehydration module.
 
 `install.sh` re-runs both editable installs and verifies the perf-report CLI
 is on PATH. If `tracelens_analysis` fails with "CLI not found", re-run

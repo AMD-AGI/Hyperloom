@@ -279,14 +279,14 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn("GEAK_MEMORY_STORE_PATH", ray_runtime_text)
         self.assertIn("GEAK_SAVE_TO_KNOWLEDGE_BASE", ray_runtime_text)
         self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens"', trace_tool_text)
+        self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens}"', install_text)
         self.assertNotIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
         # Read-only TRACELENS_INTERNAL_ROOT must trigger a writable mirror
         # under ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to GEAK / OOB),
-        # and write_env_file() must export the resolved TRACELENS_INTERNAL_ROOT so
-        # CLI subprocesses inherit the mirror instead of falling back to
-        # the read-only /wekafs default. Regression guard for the
-        # tracelens-oob-mirror change.
+        # and write_env_file() must export the resolved roots so CLI
+        # subprocesses inherit mirrors instead of falling back to the
+        # read-only /wekafs default.
         self.assertIn(
             'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"',
             install_text,
