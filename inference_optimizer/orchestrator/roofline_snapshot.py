@@ -229,6 +229,61 @@ def _num_delta(latest: float | None, baseline: float | None) -> float | None:
     return round(latest - baseline, 2)
 
 
+def build_roofline_comparison_from_history(
+    snapshots: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Build the ``roofline_comparison`` block straight from
+    :attr:`SharedState.roofline_snapshots` (preferred entry point post
+    PR #321).
+
+    Each entry in ``snapshots`` is the already-parsed dict written by
+    :meth:`SharedState.record_trace_analyze` (shape:
+    ``snapshot_id`` / ``ts`` / ``analysis_md_path`` / ``trace_input``
+    / ``compute_pct`` / ``idle_pct`` / ``comm_pct`` / ``top_bottleneck``
+    / ``top_kernel``). Returns ``None`` when history is empty so the
+    report-side caller can omit the section.
+
+    The list is append-only with ``snapshots[0]`` carrying the baseline
+    snapshot; ``snapshots[-1]`` carries the most recent watermark
+    refresh. Same snapshot_id (i.e. history length 1) → single_snapshot
+    mode; distinct ids → before_after with a populated ``delta`` block.
+    """
+    snapshots = list(snapshots or [])
+    if not snapshots:
+        return None
+    baseline = dict(snapshots[0])
+    latest = dict(snapshots[-1])
+    base_id = baseline.get("snapshot_id")
+    latest_id = latest.get("snapshot_id")
+    same_snapshot = (
+        isinstance(base_id, int)
+        and isinstance(latest_id, int)
+        and base_id == latest_id
+    )
+    mode = "single_snapshot" if same_snapshot else "before_after"
+    out: dict[str, Any] = {
+        "mode": mode,
+        "baseline": baseline,
+        "latest": latest,
+    }
+    if mode == "before_after":
+        base_eff = (baseline.get("top_kernel") or {}).get("efficiency_pct")
+        lat_eff = (latest.get("top_kernel") or {}).get("efficiency_pct")
+        out["delta"] = {
+            "compute_pct": _num_delta(
+                latest.get("compute_pct"), baseline.get("compute_pct"),
+            ),
+            "idle_pct": _num_delta(
+                latest.get("idle_pct"), baseline.get("idle_pct"),
+            ),
+            "comm_pct": _num_delta(
+                latest.get("comm_pct"), baseline.get("comm_pct"),
+            ),
+            "top_kernel_efficiency_pct": _num_delta(lat_eff, base_eff),
+        }
+    return out
+
+
 def build_roofline_comparison(
     baseline_meta: dict[str, Any],
     latest_meta: dict[str, Any],

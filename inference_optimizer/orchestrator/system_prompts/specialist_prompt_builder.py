@@ -317,7 +317,7 @@ class SpecialistPromptInputs:
     # Cortex KB sub-graph (§3.5 §6 part 4)
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
 
-    # Roofline / TraceLens evidence (§3.5 §6 part 4a — post-N31).
+    # Roofline / TraceLens evidence (§3.5 §6 part 4a).
     # Filled by ``Coordinator._warm_specialist_params`` from
     # :attr:`SharedState.last_trace_analyze`. Expected keys:
     # ``analysis_md_path``, ``roofline_snapshot_id``,
@@ -549,7 +549,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Section 4a — Roofline / TraceLens evidence (post-N31)
+# Section 4a — Roofline / TraceLens evidence
 # ---------------------------------------------------------------------------
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section.

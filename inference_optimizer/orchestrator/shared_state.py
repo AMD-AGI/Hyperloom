@@ -95,6 +95,14 @@ _DEFAULT_LAST_FAILURES = 10
 # in :meth:`SharedState.record_phase_transition`.
 _PHASE_HISTORY_CAP = 100
 
+# roofline_snapshots history cap. PRELUDE bootstrap writes #1; every
+# +10% watermark crossing writes a refresh. Even a pathological run
+# with 50 watermark crossings would stay well under this cap; the
+# limit only exists to prevent unbounded state.json growth if the
+# refresh policy ever loosens. Cap is enforced in
+# :meth:`SharedState.record_trace_analyze`.
+_ROOFLINE_SNAPSHOTS_CAP = 50
+
 # gap ledger caps. ``_GAPS_MAX_ENTRIES`` bounds the
 # total list so a pathological session can't blow up state.json;
 # ``_GAPS_ATTEMPTS_HISTORY`` bounds the per-gap ``attempts`` list so even
@@ -373,6 +381,22 @@ class SharedState:
     # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
+    # Append-only history of compact roofline snapshots used by
+    # ``report.py`` to render the ``## Roofline Comparison`` section.
+    # PR #321 retired the legacy ``last_trace_analyze_baseline``
+    # baseline-freeze field; the snapshot history preserves the first
+    # (baseline) snapshot across watermark-driven refreshes of
+    # ``last_trace_analyze`` so a real before/after comparison stays
+    # available even after multiple +10% refreshes overwrite the
+    # latest-snapshot cache.
+    #
+    # Each entry matches the shape returned by
+    # :func:`orchestrator.roofline_snapshot.build_roofline_snapshot`
+    # (snapshot_id / ts / compute_pct / idle_pct / comm_pct /
+    # top_bottleneck / top_kernel) plus ``analysis_md_path`` and
+    # ``trace_input`` for downstream re-extraction. Capped at
+    # ``MAX_ROOFLINE_SNAPSHOTS`` to bound on-disk state.json size.
+    roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # N27 — outer roofline failure counter. Bumped by
     # ``Coordinator._promote_to_shared_state`` on every failed
     # ``roofline`` task and reset to 0 on the next successful one.
@@ -2522,10 +2546,17 @@ class SharedState:
 
         On every successful call, ``roofline_snapshot_id`` is read from the
         previous ``last_trace_analyze`` and incremented by one — giving a
-        monotonic counter the orchestration prompt + N31 final-roofline
-        guard rely on. ``roofline_baseline_gain_at_snapshot`` captures
+        monotonic counter the orchestration prompt + the watermark-driven
+        freshness gate (:meth:`Coordinator._needs_roofline_for_watermark`)
+        both rely on. ``roofline_baseline_gain_at_snapshot`` captures
         ``cumulative_gain_validated`` at write time so the prompt can
         surface the gain delta since the report was taken.
+
+        A compact copy is also appended to
+        :attr:`roofline_snapshots` (PR #321 retired the legacy
+        ``last_trace_analyze_baseline`` field; the history list is the
+        new source for ``report.py``'s ``## Roofline Comparison``
+        before/after view).
 
         ``analysis_md_text`` is read verbatim from
         ``result['trace_report_path']``; OSErrors degrade silently to
@@ -2636,6 +2667,7 @@ class SharedState:
         if not isinstance(task_groups, list):
             task_groups = []
 
+        ts_iso = _now_iso()
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
@@ -2651,11 +2683,38 @@ class SharedState:
             "roofline_baseline_gain_at_snapshot": float(
                 self.cumulative_gain_validated,
             ),
-            "ts": _now_iso(),
+            "ts": ts_iso,
         }
         # Mirror the snapshot id at the top level so PolicyGate /
         # Coordinator can read it without the nested-dict lookup.
         self.roofline_snapshot_id = snapshot_id
+
+        # Append a compact history entry for the report-side Roofline
+        # Comparison renderer. Parses analysis.md once at write time so
+        # the renderer never has to (and the snapshot survives even if
+        # the on-disk file is later deleted). Best-effort: parsing
+        # errors degrade silently to None fields.
+        try:
+            from .roofline_snapshot import build_roofline_snapshot
+            history_entry = build_roofline_snapshot(
+                snapshot_id=snapshot_id,
+                ts=ts_iso,
+                analysis_md_path=str(analysis_md_path),
+            )
+            history_entry["trace_input"] = str(trace_input)
+            history_entry["analysis_md_path"] = str(analysis_md_path)
+            if not isinstance(self.roofline_snapshots, list):
+                self.roofline_snapshots = []
+            self.roofline_snapshots.append(history_entry)
+            if len(self.roofline_snapshots) > _ROOFLINE_SNAPSHOTS_CAP:
+                # Drop oldest non-baseline entries; always keep
+                # snapshot #1 so the report's "baseline" anchor never
+                # rotates away.
+                base = self.roofline_snapshots[0]
+                tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1):]
+                self.roofline_snapshots = [base, *tail]
+        except Exception:  # noqa: BLE001 — never block record on render concerns
+            pass
 
     def record_select_kernels(self, payload: dict[str, Any],
                               result: dict[str, Any]) -> None:
