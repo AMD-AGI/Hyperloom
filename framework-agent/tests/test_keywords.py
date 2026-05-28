@@ -64,6 +64,38 @@ def test_extract_nvidia_codenames() -> None:
     assert "moe" in out  # existing whitelist term preserved
 
 
+# ---------------------------------------------------------------------------
+# atom framework keyword coverage (atom_plan/phase3_open_framework_agent 3.3)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_atom_framework_token() -> None:
+    """``atom`` must survive extract_keywords so PR scouting can rank
+    ROCm/ATOM titles correctly. Listed alongside ``sglang``/``vllm``
+    in the technical-term whitelist."""
+    out = extract_keywords("improve atom fp8 moe throughput on mi300x")
+    assert "atom" in out
+    assert "fp8" in out
+    assert "moe" in out
+    assert "mi300x" in out
+
+
+def test_extract_atom_specific_terms() -> None:
+    """atom-flavoured PR titles often mention MTP / DP attention /
+    kv_cache_dtype / torch_profiler_dir. Pinning these here keeps the
+    primus_cortex search relevance on the atom-shaped axis instead of
+    collapsing to generic moe / attention matches."""
+    out = extract_keywords(
+        "atom mtp dp_attention kv_cache_dtype fp8 torch_profiler_dir on mi355x"
+    )
+    assert "atom" in out
+    assert "mtp" in out
+    assert "dp_attention" in out
+    assert "kv_cache_dtype" in out
+    assert "torch_profiler_dir" in out
+    assert "mi355x" in out
+
+
 def test_extract_realistic_io_framework_gap() -> None:
     """End-to-end check on the actual IO ``--framework-gap`` template.
 
