@@ -129,7 +129,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
 
         {
           "name": str (required, unique-in-round),
-          "extra_args" | "extra_sglang_args": str,
+          "extra_args" | "extra_server_args": str,
           "extra_envs": dict[str,str],
           "note": str,
           "provenance": str,            # default_grid / llm_direct / specialist:<domain>
@@ -154,12 +154,12 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     for raw in payload or []:
         if not isinstance(raw, dict) or not raw.get("name"):
             continue
-        args = str(raw.get("extra_args") or raw.get("extra_sglang_args") or "").strip()
+        args = str(raw.get("extra_args") or raw.get("extra_server_args") or "").strip()
         envs_raw = raw.get("extra_envs") or {}
         envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
         gv = GridVariant(
             name=str(raw["name"]),
-            extra_sglang_args=args,
+            extra_server_args=args,
             extra_envs=envs,
             note=str(raw.get("note") or raw.get("provenance") or ""),
         )
@@ -386,7 +386,7 @@ class ExploreExecutor:
             if fp:
                 return str(fp)
             return canonical_fingerprint(
-                str(entry.get("extra_sglang_args") or ""),
+                str(entry.get("extra_server_args") or ""),
                 dict(entry.get("extra_envs") or {}),
             )
 
@@ -411,7 +411,7 @@ class ExploreExecutor:
         unique_in_round: dict[str, GridVariant] = {}
         skipped_dup: list[dict[str, Any]] = []
         for gv in grid:
-            fp = canonical_fingerprint(gv.extra_sglang_args, gv.extra_envs)
+            fp = canonical_fingerprint(gv.extra_server_args, gv.extra_envs)
             gv.canonical_fp = fp  # type: ignore[attr-defined]
             if fp in seen_fps:
                 skipped_dup.append({
@@ -512,7 +512,7 @@ class ExploreExecutor:
                     tested_update[fp] = {
                         "fingerprint": fp,
                         "name": gv.name,
-                        "extra_sglang_args": gv.extra_sglang_args,
+                        "extra_server_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         "note": gv.note,
                         "outcome": "KILLED_OVERTIME",
@@ -539,7 +539,7 @@ class ExploreExecutor:
                     rejected_update.append({
                         "fingerprint": fp,
                         "name": gv.name,
-                        "extra_sglang_args": gv.extra_sglang_args,
+                        "extra_server_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         "note": gv.note,
                         "reason": "killed_overtime",
@@ -554,7 +554,7 @@ class ExploreExecutor:
                     losers.append({
                         "fingerprint": fp,
                         "name": gv.name,
-                        "extra_sglang_args": gv.extra_sglang_args,
+                        "extra_server_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         "provenance": provenance,
                         "gain_pct": None,
@@ -592,7 +592,7 @@ class ExploreExecutor:
                     if (
                         baseline_accuracy > 0
                         and is_high_accuracy_risk(
-                            extra_args=gv.extra_sglang_args,
+                            extra_args=gv.extra_server_args,
                             extra_envs=gv.extra_envs,
                         )
                     ):
@@ -619,7 +619,7 @@ class ExploreExecutor:
                 tested_update[fp] = {
                     "fingerprint": fp,
                     "name": gv.name,
-                    "extra_sglang_args": gv.extra_sglang_args,
+                    "extra_server_args": gv.extra_server_args,
                     "extra_envs": dict(gv.extra_envs),
                     "note": gv.note,
                     "outcome": outcome,
@@ -643,7 +643,7 @@ class ExploreExecutor:
                     keep_entry = {
                         "fingerprint": fp,
                         "name": gv.name,
-                        "extra_sglang_args": gv.extra_sglang_args,
+                        "extra_server_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         "note": gv.note,
                         "provenance": provenance,
@@ -656,7 +656,7 @@ class ExploreExecutor:
                         "kb_edge_id": kb_edge_id,
                     }
                     # Layer onto the running stack BEFORE rebench.
-                    next_args = _join_args(stack_extra_args, gv.extra_sglang_args)
+                    next_args = _join_args(stack_extra_args, gv.extra_server_args)
                     next_envs = dict(stack_extra_envs)
                     next_envs.update(gv.extra_envs)
                     in_batch_keeps.append(keep_entry)
@@ -670,7 +670,7 @@ class ExploreExecutor:
                         rebench_slot.mkdir(parents=True, exist_ok=True)
                         rebench_variant = GridVariant(
                             name=f"{gv.name}__stack_rebench",
-                            extra_sglang_args="",  # all args are in next_args
+                            extra_server_args="",  # all args are in next_args
                             extra_envs={},          # all envs are in next_envs
                             note="stack_rebench",
                         )
@@ -700,7 +700,7 @@ class ExploreExecutor:
                             if rb.extra_envs != next_envs:
                                 rebench_variant_envs = GridVariant(
                                     name=f"{gv.name}__stack_rebench_envs",
-                                    extra_sglang_args="",
+                                    extra_server_args="",
                                     extra_envs=next_envs,
                                     note="stack_rebench_envs",
                                 )
@@ -760,7 +760,7 @@ class ExploreExecutor:
                             rejected_update.append({
                                 "fingerprint": fp,
                                 "name": gv.name,
-                                "extra_sglang_args": gv.extra_sglang_args,
+                                "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs),
                                 "note": gv.note,
                                 "reason": "stack_unstable",
@@ -804,7 +804,7 @@ class ExploreExecutor:
                         "variant_name": gv.name,
                         "fingerprint": fp,
                         "gain_pct": gain,
-                        "extra_args": gv.extra_sglang_args,
+                        "extra_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         "provenance": provenance,
                         "ts": _now_iso(),
@@ -815,7 +815,7 @@ class ExploreExecutor:
                 rejected_update.append({
                     "fingerprint": fp,
                     "name": gv.name,
-                    "extra_sglang_args": gv.extra_sglang_args,
+                    "extra_server_args": gv.extra_server_args,
                     "extra_envs": dict(gv.extra_envs),
                     "note": gv.note,
                     "reason": reason or "not_keep",
@@ -828,7 +828,7 @@ class ExploreExecutor:
                 losers.append({
                     "fingerprint": fp,
                     "name": gv.name,
-                    "extra_sglang_args": gv.extra_sglang_args,
+                    "extra_server_args": gv.extra_server_args,
                     "extra_envs": dict(gv.extra_envs),
                     "provenance": provenance,
                     "gain_pct": gain,

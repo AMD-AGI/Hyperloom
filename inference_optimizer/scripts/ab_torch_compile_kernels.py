@@ -166,7 +166,7 @@ async def _profile_arm(
 
     return {
         "arm": name,
-        "extra_sglang_args": extra_sglang.strip(),
+        "extra_server_args": extra_sglang.strip(),
         "returncode": rc,
         "workspace": str(workspace) if workspace else None,
         "trace_dir": str(workspace / "torch_trace") if workspace else None,

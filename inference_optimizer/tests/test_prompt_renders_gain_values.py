@@ -34,7 +34,7 @@ def _make_state() -> SharedState:
             {
                 "name": "mem_fraction_0_85",
                 "fingerprint": "fp_a",
-                "extra_sglang_args": "--mem-fraction-static 0.85",
+                "extra_server_args": "--mem-fraction-static 0.85",
                 "extra_envs": {},
                 "note": "memory",
             },
@@ -43,7 +43,7 @@ def _make_state() -> SharedState:
             {
                 "name": "cuda_graph_max_bs_8",
                 "fingerprint": "fp_b",
-                "extra_sglang_args": "--cuda-graph-max-bs 8",
+                "extra_server_args": "--cuda-graph-max-bs 8",
                 "extra_envs": {},
                 "note": "cuda_graph",
                 "gain_pct": -1.05,
@@ -77,7 +77,7 @@ def _make_state() -> SharedState:
             {
                 "name": "qr_int4",
                 "fingerprint": "fp_c",
-                "extra_sglang_args": "",
+                "extra_server_args": "",
                 "extra_envs": {"VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4"},
                 "note": "tier5_comm",
                 "gain_pct": 3.33,
@@ -88,7 +88,7 @@ def _make_state() -> SharedState:
             {
                 "name": "attn_aiter",
                 "fingerprint": "fp_d",
-                "extra_sglang_args": "--attention-backend aiter",
+                "extra_server_args": "--attention-backend aiter",
                 "extra_envs": {},
                 "note": "tier1_attention",
                 "gain_pct": -2.10,
@@ -108,7 +108,7 @@ def _make_state() -> SharedState:
                 "name": "qr_int4",
                 "output_throughput": 1768.67,
                 "gain_pct": 3.33,
-                "extra_sglang_args": "",
+                "extra_server_args": "",
                 "extra_envs": {
                     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
                 },
@@ -119,7 +119,7 @@ def _make_state() -> SharedState:
             "name": "qr_int4",
             "output_throughput": 1768.67,
             "gain_pct": 3.33,
-            "extra_sglang_args": "",
+            "extra_server_args": "",
             "extra_envs": {
                 "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
             },
@@ -201,7 +201,7 @@ def test_format_variant_line_handles_missing_gain_and_envs():
     flag-less env-only variants render ``(no-flag)`` so the row is still
     a single, parseable line."""
     line = SharedState._format_variant_line({
-        "name": "mystery", "extra_sglang_args": "", "extra_envs": {},
+        "name": "mystery", "extra_server_args": "", "extra_envs": {},
     })
     assert "mystery" in line
     assert "no_meas" in line
