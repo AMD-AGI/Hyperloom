@@ -352,15 +352,16 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
         "fact_finalize", "ndjson_drain", "done",
     ]
     # All effective steps succeeded.
-    assert rows[1]["status"] == "done"   # report
-    assert rows[2]["status"] == "done"   # session_breakdown
-    assert rows[3]["status"] == "done"   # fact_finalize
-    assert rows[4]["status"] == "done"   # ndjson_drain
-    assert rows[5]["status"] == "done"   # done
+    assert rows[1]["status"] == "done"     # report
+    assert rows[2]["status"] == "done"     # session_breakdown
+    assert rows[3]["status"] == "done"     # fact_finalize
+    # ndjson_drain was retired alongside the v1 cortex_kb_client; the
+    # sequencer stub-emits "skipped" so close-step ledger consumers
+    # don't break on a missing entry.
+    assert rows[4]["status"] == "skipped"  # ndjson_drain (retired)
+    assert rows[5]["status"] == "done"     # done
     # close_sequence_done flag set.
     assert coord.shared_state.close_sequence_done is True
-    # Drain ran exactly once; session_commit was retired.
-    assert coord.cortex_kb.drain_calls == 1
     # v0.8 §3.2 §5.5 — sequencer last step must set stop_reason so
     # the main loop terminates on the next tick.
     assert coord.shared_state.stop_reason == "time_exhausted"
@@ -439,38 +440,10 @@ async def test_close_sequencer_skips_cortex_steps_when_no_cortex(coord):
     assert coord.shared_state.close_sequence_done is True
 
 
-@pytest.mark.asyncio
-async def test_close_sequencer_records_drain_incomplete(coord):
-    """NDJSON drain returns ``remaining > 0`` → drain step status='incomplete'
-    with detail of remaining count. Sequencer continues to done."""
-    coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.cortex_kb = _StubCortex(drain_remaining=12)
-    coord.shared_state.cortex_session_id = "sid"
-    await coord._on_enter_close(from_phase="SWEEP")
-    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
-    drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
-    assert drain_row["status"] == "incomplete"
-    assert "remaining=12" in drain_row["detail"]
-    # done step still reached.
-    assert coord.shared_state.close_sequence_done is True
-
-
-@pytest.mark.asyncio
-async def test_close_sequencer_records_drain_failure(coord):
-    """Drain raises → ndjson_drain step status='failed', sequencer still
-    reaches ``done`` so close_sequence_done flips."""
-    coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.cortex_kb = _StubCortex(drain_raises=OSError("disk full"))
-    coord.shared_state.cortex_session_id = "sid"
-
-    await coord._on_enter_close(from_phase="SWEEP")
-
-    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
-    drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
-    assert drain_row["status"] == "failed"
-    assert "disk full" in drain_row["detail"]
-    # done step still reached.
-    assert coord.shared_state.close_sequence_done is True
+# Tests for ``ndjson_drain`` status=incomplete / failed were removed
+# alongside the v1 cortex_kb_client retirement: the new RecipeKB
+# dispatcher writes are local-only, so there's no remote-write fan-out
+# queue to drain, and the sequencer always emits "skipped".
 
 
 # ===========================================================================
