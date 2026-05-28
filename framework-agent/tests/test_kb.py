@@ -74,11 +74,10 @@ class TestListAndMatch:
         assert kb._match_domains("totally unrelated free-form text") == []
 
     def test_match_domains_atom_keyword_hit(self) -> None:
-        """atom_plan/phase3_open_framework_agent 3.3: ``atom`` lives
-        under the framework domain alongside sglang / vllm so a gap
-        description mentioning atom can pull framework-domain KB
-        priors. Pinned here so a future trim of DOMAIN_KEYWORDS doesn't
-        silently drop it."""
+        """``atom`` lives under the framework domain alongside sglang /
+        vllm so a gap description mentioning atom can pull
+        framework-domain KB priors. Pinned here so a future trim of
+        DOMAIN_KEYWORDS doesn't silently drop it."""
         domains = kb._match_domains("improve atom moe throughput on mi300x")
         assert "framework" in domains, (
             f"atom must hit the framework domain; got {domains!r}"
@@ -297,17 +296,12 @@ class TestKbCli:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.3 / gap G5 — per-framework KB partition (`framework_optimization/<fw>/`)
+# Per-framework KB partition (`framework_optimization/<fw>/`)
 # ---------------------------------------------------------------------------
 
 
 class TestPathForFramework:
-    """``path_for_framework`` resolves the per-framework KB partition.
-
-    Matches the test the design ledger (`atom_plan/phase3_open_framework_agent/
-    3.5_tests_for_framework_agent_enablement.md`) called
-    ``test_kb_atom_partition_path_resolves``.
-    """
+    """``path_for_framework`` resolves the per-framework KB partition."""
 
     def test_atom_partition_path_resolves(self, kb_root: Path) -> None:
         path = kb.path_for_framework("atom")

@@ -69,8 +69,7 @@ from inference_optimizer.orchestrator.policy import (
 
 
 def _is_atom(inp: SpecialistPromptInputs) -> bool:
-    """Phase 6.1: switch ``_focus_*`` blocks to atom-flavoured hints
-    when the active session framework is atom.
+    """True when ``_focus_*`` blocks should use atom-flavoured hints.
 
     ``framework`` may be empty on legacy / test dispatches where the
     Coordinator did not plumb it; treat that as "use the canonical
@@ -455,9 +454,9 @@ class SpecialistPromptInputs:
     # ``Coordinator._warm_specialist_params``. Empty string means the
     # Coordinator didn't plumb it (legacy / test path); per-domain
     # focus helpers must treat an empty string as "fall back to the
-    # canonical sglang/vllm hint blocks". Phase 6.1 (atom UX polish)
-    # uses this field to switch the "what to read first" bullets to
-    # atom-equivalent source paths when ``framework == 'atom'``.
+    # canonical sglang/vllm hint blocks". Used to switch the
+    # "what to read first" bullets to atom-equivalent source paths
+    # when ``framework == 'atom'``.
     framework: str = ""
 
     # Local source navigation hint (§3.5 §6 part 7)

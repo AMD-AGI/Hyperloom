@@ -1,28 +1,22 @@
-"""Static guard: only the explicit Phase 4 back-compat surfaces are
-allowed to mention ``extra_sglang_args``.
+"""Static guard: only the explicit back-compat surfaces are allowed to
+mention ``extra_sglang_args``.
 
-Phase 4 of ``atom_plan/`` renamed the payload-surface field
-``extra_sglang_args`` -> ``extra_server_args``. The legacy name is
-kept alive as a *read-only* deprecation alias for one release. Every
-in-repo reference to the legacy string therefore falls into exactly
-one of the categories enumerated in :data:`ALLOWED_FILES`:
+The payload-surface field ``extra_sglang_args`` was renamed to
+``extra_server_args``. The legacy name is kept alive as a *read-only*
+deprecation alias. Every in-repo reference to the legacy string falls
+into exactly one of the categories enumerated in
+:data:`ALLOWED_FILES`:
 
 * The compat helper modules (Hyperloom + per-sub-agent shims).
 * The SharedState / GridVariant back-compat code paths.
 * Tests that explicitly assert on the deprecation alias behaviour.
 * Prompt / SKILL / explanatory text that names both keys so the LLM
   knows the alias exists for one release.
-* Plan / release-notes / migration history documents.
 
 Any *new* reference to the legacy name outside this allowlist is a
-regression (a missed rename target or a fresh writer site that
-emitted the legacy key by accident). The guard fails the build with
-a descriptive error message.
-
-When the deprecation alias is finally removed (one release after
-Phase 4 ships), the allowlist shrinks to the empty set and this
-guard becomes an absolute "no `extra_sglang_args` anywhere"
-assertion until the guard itself is retired.
+regression. When the deprecation alias is finally removed the
+allowlist shrinks to the empty set and this guard becomes an absolute
+"no `extra_sglang_args` anywhere" assertion until retired.
 """
 
 from __future__ import annotations
@@ -75,7 +69,7 @@ ALLOWED_FILES: dict[str, str] = {
     # ATOM_) are intentionally unchanged.
     "inference_optimizer/orchestrator/action_executors/_workload_envs.py":
         "docstring naming the renamed payload field for context",
-    # CI transform reads pre-Phase-4 session_breakdown.json artefacts.
+    # CI transform reads legacy-keyed session_breakdown.json artefacts.
     "ci/transform_to_session_summary_v2.py":
         "legacy session-breakdown JSON reader (operator-side back-compat)",
 
@@ -103,59 +97,50 @@ ALLOWED_FILES: dict[str, str] = {
     "robustness-agent/tests/test_payload_aliases_shim.py":
         "robustness-agent shim test surface",
 
-    # Plan / status documentation. Plan docs name both keys to
-    # describe the migration; the status doc records the rename
-    # decision. None of these are imported at runtime.
-    "atom_full_support.md":
-        "status document recording the Phase 4 rename plan",
-    "atom_gap1.md":
-        "design-vs-code gap report; references the legacy key as "
-        "audit context for Phase 4 readers",
-
-    # atom_gap1 follow-ups F2/F3 (Phase-4 reader-site sweep): readers
-    # that funnel external-envelope payloads through
-    # ``read_extra_server_args`` MUST mention the legacy key inline in
-    # the surrounding code comment so future archaeologists know why
-    # the call goes through the helper.
+    # Readers that funnel external-envelope payloads through
+    # ``read_extra_server_args`` mention the legacy key inline in the
+    # surrounding code comment to document why the call goes through
+    # the helper.
     "inference_optimizer/orchestrator/coordinator.py":
         "comments explain the read_extra_server_args call at the LLM "
-        "intent / sub-agent envelope read boundaries (gap G2)",
+        "intent / sub-agent envelope read boundaries",
     "inference_optimizer/orchestrator/kernel_request_handlers.py":
         "comments explain the read_extra_server_args call at the "
-        "integrate_patch sub-agent envelope read boundary (gap G2)",
+        "integrate_patch sub-agent envelope read boundary",
     "robustness-agent/src/robustness_agent/signals/repeated_payload.py":
         "_normalise_extra_server_args_key uses the shim to fold "
-        "legacy-keyed envelopes into the same fingerprint (gap G3)",
+        "legacy-keyed envelopes into the same fingerprint",
     "robustness-agent/tests/test_signals_repeated_payload.py":
         "regression test that legacy + canonical envelopes hash to "
-        "the same fingerprint (gap G3)",
+        "the same fingerprint",
 
-    # atom_gap2.md H1 (B1 fix): regression tests parametrise the
-    # ``_load_materialized_workload_metadata`` reader over (sglang,
-    # vllm, atom) including stray-EXTRA_SGLANG_ARGS cases for atom
-    # YAMLs, so the test source mentions the legacy name by design
-    # (the lowercase ``extra_sglang_args`` lives only inside a test
-    # function name ``test_atom_server_args_not_read_from_extra_sglang_args``).
+    # Regression tests parametrise the ``_load_materialized_workload_metadata``
+    # reader over (sglang, vllm, atom) including stray-EXTRA_SGLANG_ARGS
+    # cases for atom YAMLs, so the test source mentions the legacy name
+    # by design.
     "inference_optimizer/tests/test_kernel_request_handlers_units.py":
         "test_server_args_read_from_per_framework_env_key + "
         "test_atom_server_args_not_read_from_extra_sglang_args "
         "parametrise the materialised metadata reader",
 
-    # atom_gap2.md H3 (B4-B6 docs refresh): the IR-8 entry in
-    # SKILL.md now documents the Phase 4 compat-helper read path
-    # and names the legacy key in the bullet describing the alias.
+    # SKILL.md names the legacy extra_sglang_args alias as compat-surface
+    # context in the IR-8 entry.
     "inference_optimizer/SKILL.md":
         "IR-8 entry names the legacy extra_sglang_args alias as "
-        "Phase 4 compat surface context",
+        "compat-surface context",
+
+    # Migration audit / status notes (pending deletion). Listed so the
+    # guard does not flag them until the operator removes the files.
+    "atom_full_support.md":
+        "migration status note (slated for deletion)",
+    "atom_gap1.md":
+        "design-vs-code gap audit (slated for deletion)",
 }
 
 
-# Files under these top-level prefixes are skipped entirely. Plan
-# documents describe the migration in narrative form (every page in
-# atom_plan/phase4_rename_extra_server_args names the legacy key by
-# design); they are *documentation*, not code, and don't need an
-# explicit per-file allowlist entry.
+# Files under these top-level prefixes are skipped entirely.
 _SKIP_DIRECTORIES: tuple[str, ...] = (
+    # Plan / migration narrative tree (slated for deletion).
     "atom_plan/",
     ".git/",
     "node_modules/",
@@ -213,7 +198,7 @@ def test_no_legacy_writer_sites_outside_allowlist():
     unexpected = sorted(actual - allowed)
     assert not unexpected, (
         "Files mentioning the legacy 'extra_sglang_args' field name "
-        "outside the Phase 4 back-compat allowlist:\n  "
+        "outside the back-compat allowlist:\n  "
         + "\n  ".join(unexpected)
         + "\n\nEither (a) rename to 'extra_server_args' (preferred), "
         "or (b) if this is a deliberate back-compat surface, add the "

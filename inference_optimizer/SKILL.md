@@ -344,11 +344,9 @@ in-flight ones are dropped + redone.
 ### IR-8 — `--framework atom` is single-node only
 
 `--framework atom` runs the Magpie atom wrapper
-(`atom_mi*x.sh`) against `atom.entrypoints.openai_server`. After
-`atom_plan/` phases 1-6 (commits `feat(atom):` /
-`fix(atom):` series), the single remaining behavioural
-difference vs `--framework sglang` / `--framework vllm` is the
-multi-node guard. The CLI enforces it at launch time via
+(`atom_mi*x.sh`) against `atom.entrypoints.openai_server`. The single
+remaining behavioural difference vs `--framework sglang` /
+`--framework vllm` is the multi-node guard. The CLI enforces it at launch time via
 `_apply_atom_auto_tighten` (alias `_assert_atom_single_node`) in
 `cli.py`:
 
@@ -359,47 +357,38 @@ multi-node guard. The CLI enforces it at launch time via
 
 What runs on atom (parity with sglang/vllm except multi-node):
 
-* **Baseline** — Phase 1; `baseline_atom.yaml` is the shipped
-  default config.
-* **Profile / roofline / TraceLens** — Phase 1; Magpie
-  `atom_mi*x.sh` bridges `PROFILE=1` to atom's
-  `--torch-profiler-dir`. atom writes standard
+* **Baseline** — `baseline_atom.yaml` is the shipped default config.
+* **Profile / roofline / TraceLens** — Magpie `atom_mi*x.sh` bridges
+  `PROFILE=1` to atom's `--torch-profiler-dir`. atom writes standard
   `*.pt.trace.json.gz` chrome traces under
   `<workspace>/torch_trace/rank_<N>/`; TraceLens consumes them
   unchanged. `profile_atom.yaml` is the shipped profile config.
   `--enable-roofline` stays at its default (on) for atom;
-  ProfileExecutor / RooflineExecutor no longer short-circuit on
+  ProfileExecutor / RooflineExecutor do not short-circuit on
   `FRAMEWORK=atom`.
-* **EXPLORE** — Phase 6.2 added
-  `_default_grid_for_framework("atom", ...)` so an atom session
-  with empty `params.grid` (cold start) falls through to a
-  curated seed grid (`atom_level_{2,3}`,
-  `atom_prefix_cache`, `atom_kv_fp8` on FP8 models,
-  `atom_ep` / `atom_dp_attn` / `atom_mtp_{1,3}` gated on model
-  class, `atom_cudagraph_bracket` bracketing the live CONC).
-  Sglang / vllm still rely on LLM-emitted variants and fail with
-  `error_class="empty_grid"` if cold-started without LLM input.
-* **Kernel-agent** — Phase 2; atom source roots
-  (`/app/ATOM/atom/`) are in PolicyGate's allowlist,
-  `_REUSABLE_SOURCE_ROOTS` (orchestrator + kernel-agent), and
-  the server-flag pre-flight probe.
-* **Framework-agent** — Phase 3; atom repo URL
-  `https://github.com/ROCm/ATOM.git` in
-  `framework_agent.repo_map` + IO-side fallback.
-* **Specialist hints (serving / kernels / dist)** — Phase 6.1;
-  atom-flavoured "what to read first" bullets when
-  `framework=='atom'`.
-* **Sub-agent payload compat** — Phase 4 + `atom_gap1.md`:
-  every external-envelope reader funnels through
-  `read_extra_server_args` (canonical
-  `extra_server_args` + read-only legacy
-  `extra_sglang_args` alias with DeprecationWarning).
+* **EXPLORE** — `_default_grid_for_framework("atom", ...)` makes an
+  atom session with empty `params.grid` (cold start) fall through to a
+  curated seed grid (`atom_level_{2,3}`, `atom_prefix_cache`,
+  `atom_kv_fp8` on FP8 models, `atom_ep` / `atom_dp_attn` /
+  `atom_mtp_{1,3}` gated on model class, `atom_cudagraph_bracket`
+  bracketing the live CONC). Sglang / vllm still rely on LLM-emitted
+  variants and fail with `error_class="empty_grid"` if cold-started
+  without LLM input.
+* **Kernel-agent** — atom source roots (`/app/ATOM/atom/`) are in
+  PolicyGate's allowlist, `_REUSABLE_SOURCE_ROOTS` (orchestrator +
+  kernel-agent), and the server-flag pre-flight probe.
+* **Framework-agent** — atom repo URL
+  `https://github.com/ROCm/ATOM.git` in `framework_agent.repo_map` +
+  IO-side fallback.
+* **Specialist hints (serving / kernels / dist)** — atom-flavoured
+  "what to read first" bullets when `framework=='atom'`.
+* **Sub-agent payload compat** — every external-envelope reader funnels
+  through `read_extra_server_args` (canonical `extra_server_args` +
+  read-only legacy `extra_sglang_args` alias with DeprecationWarning).
 
-`_apply_atom_auto_tighten` no longer flips `--no-kernel` /
-`--no-framework` / `--no-enable-roofline`. The historical
-"source-patcher-free" carve-out was rescinded by Phase 2;
-kernel-agent reads atom source the same way it reads
-sglang/vllm source.
+`_apply_atom_auto_tighten` does not flip `--no-kernel` /
+`--no-framework` / `--no-enable-roofline`; kernel-agent reads atom
+source the same way it reads sglang/vllm source.
 
 ## Retired modules and rules (do not re-introduce)
 
@@ -531,7 +520,7 @@ supply session metadata directly via CLI flags / env vars:
 | Surface | CLI flag | Env var | Notes |
 |---|---|---|---|
 | Model path | `--model` | — | required |
-| Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` — atom triggers the IR-8 multi-node guard only (kernel-agent / framework-agent / profile / roofline all run on atom after atom_plan/ phases 1-3) |
+| Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` — atom triggers the IR-8 multi-node guard only (kernel-agent / framework-agent / profile / roofline all run on atom) |
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | `MODEL_CLASS` | drives `orchestrator/scoring.MODEL_CLASS_ACTION_PRIORS`; defaults to `moe_mla` when unset |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
@@ -863,12 +852,9 @@ Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 What this controls:
 - Which Magpie YAML the executors default to —
   `baseline_{sglang,vllm,atom}.yaml` and
-  `profile_{sglang,vllm,atom}.yaml`. After atom_plan/phase1
-  (`fix(atom): add profile_atom.yaml + _default_profile_config atom
-  branch`) atom has a dedicated `profile_atom.yaml`; the
-  per-framework resolver `_default_profile_config()` in
-  `action_executors/profile.py` picks the right file from
-  `$FRAMEWORK`.
+  `profile_{sglang,vllm,atom}.yaml`. The per-framework resolver
+  `_default_profile_config()` in `action_executors/profile.py` picks
+  the right file from `$FRAMEWORK`.
 - Which framework-specific seed grid the `explore` action falls
   back to when no `params.grid` is supplied. atom is the only
   framework with a programmatic seed today
@@ -887,10 +873,9 @@ locks `$FRAMEWORK` for the run. Resume re-reads `$FRAMEWORK` from the
 shell — set it when you resume a non-default session.
 
 **`--framework atom` specifics (IR-8):** single-node only
-(`--nodes>=2` fails fast). After `atom_plan/` phases 1-6
-kernel-agent, framework-agent, profile / roofline / TraceLens
-all run on atom; the only remaining auto-tighten is the
-multi-node guard. atom ships `--torch-profiler-dir` + HTTP
+(`--nodes>=2` fails fast). kernel-agent, framework-agent, profile /
+roofline / TraceLens all run on atom; the only remaining auto-tighten
+is the multi-node guard. atom ships `--torch-profiler-dir` + HTTP
 `/start_profile` `/stop_profile`, the Magpie atom wrapper bridges
 `PROFILE=1` to them, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. EXPLORE cold-start uses

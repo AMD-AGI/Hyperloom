@@ -566,8 +566,7 @@ PY
     return 0
   fi
   log "discovered framework roots: $roots"
-  # Phase-2 / atom_plan/phase2_open_kernel_agent/2.2: emit a
-  # framework-bucketed one-liner so operators (and the Phase 7
+  # Emit a framework-bucketed one-liner so operators (and the
   # preflight grep) can tell at a glance whether atom was picked up.
   local roots_summary
   roots_summary="$(ROOTS_INPUT="$roots" "$PYTHON" - <<'PY'

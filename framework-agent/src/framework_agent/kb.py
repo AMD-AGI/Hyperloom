@@ -28,13 +28,13 @@ from typing import Iterable
 from .models import Finding
 
 
-# atom_plan/phase3_open_framework_agent/3.3 — per-framework KB
-# partition root. Currently a flat ``<KB_ROOT>/framework_optimization/
-# <framework>/`` layout: a thin per-framework bucket layered on top of
-# the existing per-domain layout so framework-specific empirical
-# findings (sglang scheduler tweaks, vllm chunked-prefill recipes,
-# atom MTP / EP gotchas) can be kept out of the cross-framework
-# ``framework`` domain bag without contaminating it.
+# Per-framework KB partition root: flat
+# ``<KB_ROOT>/framework_optimization/<framework>/`` layout. A thin
+# per-framework bucket layered on top of the existing per-domain
+# layout so framework-specific empirical findings (sglang scheduler
+# tweaks, vllm chunked-prefill recipes, atom MTP / EP gotchas) can be
+# kept out of the cross-framework ``framework`` domain bag without
+# contaminating it.
 #
 # The directory is NOT created up-front — it's auto-created by
 # :func:`contribute_to_kb_for_framework` on first finding. Callers that
@@ -47,8 +47,8 @@ def path_for_framework(framework: str) -> Path:
     """Resolve the KB sub-partition path for a per-framework finding
     bag.
 
-    Phase 3.3 helper: returns ``<KB_ROOT>/framework_optimization/
-    <framework_lower>/`` for the active KB root. The framework name is
+    Returns ``<KB_ROOT>/framework_optimization/<framework_lower>/``
+    for the active KB root. The framework name is
     lowercased and stripped so call sites that pass ``"  Atom  "`` or
     ``"ATOM"`` resolve to the same partition as ``"atom"``. The
     partition directory may not exist on disk — callers MUST tolerate
@@ -73,7 +73,7 @@ def contribute_to_kb_for_framework(
     source: str,
     session_id: str,
 ) -> Path:
-    """Append a finding to the per-framework KB partition (Phase 3.3).
+    """Append a finding to the per-framework KB partition.
 
     Mirrors :func:`contribute_to_kb` but writes under
     :func:`path_for_framework` instead of the per-domain bucket.

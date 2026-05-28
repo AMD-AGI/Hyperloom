@@ -313,7 +313,7 @@ def test_prompt_includes_diff_url_when_present(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.4 — atom-candidate rendering parity
+# atom-candidate rendering parity
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "framework, diff_url",
@@ -349,13 +349,12 @@ def test_critic_prompt_renders_candidate_diff_url_across_frameworks(
 def test_critic_prompt_no_framework_specific_rule_text_for_atom(
     tmp_path: Path,
 ) -> None:
-    """atom_plan/phase3_open_framework_agent 3.4: the Critic prompt
-    body assembled for an atom candidate must not contain rule text
-    that's specific to sglang or vllm (e.g. ``"sglang-specific"``,
-    ``"vllm-specific"``). Concrete examples that *mention* sglang or
-    vllm are fine — the guard is on rule-flavour substrings that would
-    systematically bias the verdict against atom by reference to the
-    other frameworks' conventions."""
+    """The Critic prompt body assembled for an atom candidate must not
+    contain rule text that's specific to sglang or vllm (e.g.
+    ``"sglang-specific"``, ``"vllm-specific"``). Concrete examples that
+    *mention* sglang or vllm are fine — the guard is on rule-flavour
+    substrings that would systematically bias the verdict against atom
+    by reference to the other frameworks' conventions."""
     backend = _PromptCapturingBackend()
     stub = _CoordinatorStub(tmp_path, backend)
     cand = {

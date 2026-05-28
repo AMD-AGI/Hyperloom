@@ -27,9 +27,8 @@ def test_repo_url_for_framework_known():
 
 
 def test_repo_url_for_atom():
-    """atom_plan/phase3_open_framework_agent 3.1: atom must resolve to
-    the public ROCm/ATOM repo so ``fa phase-discover --framework atom``
-    has a target to scout."""
+    """atom must resolve to the public ROCm/ATOM repo so
+    ``fa phase-discover --framework atom`` has a target to scout."""
     assert repo_url_for_framework("atom") == (
         "https://github.com/ROCm/ATOM.git"
     )
@@ -58,7 +57,7 @@ def test_repo_url_for_framework_unknown_returns_empty():
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.5 cross-cutting static guards
+# Cross-cutting static guards
 # ---------------------------------------------------------------------------
 def test_repo_map_known_frameworks():
     """The canonical dict must enumerate exactly the three supported

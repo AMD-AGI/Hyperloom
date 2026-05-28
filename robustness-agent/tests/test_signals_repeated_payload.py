@@ -218,13 +218,13 @@ def test_inbox_and_coordinator_events_combined():
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 / gap G3 — legacy ``extra_sglang_args`` envelopes still
-# fingerprint to the same hash as canonical envelopes.
+# Legacy ``extra_sglang_args`` envelopes still fingerprint to the same
+# hash as canonical envelopes.
 # ---------------------------------------------------------------------------
 def _integrate_event(*, task_id: str, args_value: str, legacy: bool) -> dict:
     """Build an ``integrate`` family envelope. When ``legacy=True`` the
-    payload carries the pre-Phase-4 ``extra_sglang_args`` key; otherwise
-    the canonical ``extra_server_args`` key. Both rows are otherwise
+    payload carries the legacy ``extra_sglang_args`` key; otherwise the
+    canonical ``extra_server_args`` key. Both rows are otherwise
     identical so the projection should fingerprint them to the same
     hash.
     """

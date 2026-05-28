@@ -719,7 +719,7 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
 
 
 # ==============================================================================
-# Phase 2.3: framework-aware help-text probe (atom + multi-framework cache)
+# Framework-aware help-text probe (atom + multi-framework cache)
 # ==============================================================================
 
 
@@ -735,7 +735,7 @@ def _reset_help_cache():
 def test_probe_server_help_text_atom_returns_help_when_importable(
     _reset_help_cache, monkeypatch,
 ):
-    """Phase 2.3: the atom branch invokes
+    """The atom branch invokes
     ``atom.model_engine.arg_utils:EngineArgs.add_cli_args``. We mock
     subprocess.run to return a synthetic atom-help payload; the probe
     must return it verbatim and cache it for the second call."""
@@ -816,9 +816,9 @@ def test_probe_server_help_text_cache_keyed_by_framework(
 def test_probe_server_help_text_supports_all_three_frameworks(
     _reset_help_cache, monkeypatch,
 ):
-    """Phase 2.6 G3 cross-cutting guard: every first-class framework
-    must have a registered probe command and the helper must return a
-    ``str`` for each (success or failure path, doesn't matter)."""
+    """Cross-cutting guard: every first-class framework must have a
+    registered probe command and the helper must return a ``str`` for
+    each (success or failure path, doesn't matter)."""
     monkeypatch.setattr(
         subprocess, "run",
         lambda cmd, *a, **kw: subprocess.CompletedProcess(
@@ -865,9 +865,8 @@ def test_probe_sglang_help_text_back_compat_shim(
 def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     _reset_help_cache, monkeypatch,
 ):
-    """Phase 2.3 acceptance gate: when ``$FRAMEWORK=atom`` the
-    compatibility filter must validate variant flag literals against
-    the atom --help output, not sglang's. We mock the probe so atom's
+    """When ``$FRAMEWORK=atom`` the compatibility filter must validate
+    variant flag literals against the atom --help output, not sglang's. We mock the probe so atom's
     help advertises one flag but not another and confirm the variant
     with the unrecognised flag is dropped with a reason mentioning
     ``atom --help``."""

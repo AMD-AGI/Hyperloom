@@ -1,9 +1,9 @@
-"""Phase 4 back-compat coverage for the ``extra_sglang_args`` ->
+"""Back-compat coverage for the ``extra_sglang_args`` ->
 ``extra_server_args`` rename.
 
-After the bulk rename in 4.2 / 4.3 every production call site uses the
-canonical name, so the regular test surface no longer exercises the
-legacy-key code paths at all. This file re-introduces the legacy key
+After the bulk rename every production call site uses the canonical
+name, so the regular test surface no longer exercises the legacy-key
+code paths at all. This file re-introduces the legacy key
 intentionally at the few stable read-tolerant boundaries:
 
 * :func:`inference_optimizer.compat.payload_aliases.read_extra_server_args`
@@ -110,7 +110,7 @@ def test_grid_variant_canonical_only_emits_no_warning():
 # ---------------------------------------------------------------------------
 @pytest.mark.expects_legacy_alias_warning
 def test_migrate_legacy_keys_walks_nested_structures():
-    """The Phase 4 SharedState walker must reach into deeply-nested
+    """The SharedState walker must reach into deeply-nested
     lists/dicts (winners, baseline_artifacts, action_attempts) and
     rewrite *every* legacy key occurrence."""
     raw = {
@@ -139,8 +139,8 @@ def test_migrate_legacy_keys_walks_nested_structures():
 def test_shared_state_from_dict_silently_migrates_legacy_payload():
     """Loading a state.json that carries the legacy key must succeed
     and end up with the canonical key set everywhere. This is the
-    ``--resume`` smoke path for sessions started on a release that
-    pre-dates Phase 4. ``last_baseline`` is a dict-shaped SharedState
+    ``--resume`` smoke path for sessions started on a pre-rename
+    release. ``last_baseline`` is a dict-shaped SharedState
     field that carries the result payload from the baseline executor
     and historically held ``extra_sglang_args`` under its top-level."""
     raw = {

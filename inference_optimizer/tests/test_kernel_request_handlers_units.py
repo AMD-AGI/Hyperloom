@@ -206,12 +206,11 @@ class TestLoadMaterializedWorkloadMetadata:
     def test_server_args_read_from_per_framework_env_key(
         self, tmp_path, framework, env_name, expected_args,
     ):
-        """atom_gap2.md B1 regression: the handler must read the
-        per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot, not silently
-        default to ``EXTRA_SGLANG_ARGS`` on non-sglang sessions.
-        Pre-fix, atom sessions resolved to ``EXTRA_SGLANG_ARGS``
-        (empty) and dropped every atom-side flag from the kernel-opt
-        metadata.
+        """The handler must read the per-framework
+        ``EXTRA_<FRAMEWORK>_ARGS`` slot, not silently default to
+        ``EXTRA_SGLANG_ARGS`` on non-sglang sessions. Otherwise atom
+        sessions resolve to an empty ``EXTRA_SGLANG_ARGS`` and drop
+        every atom-side flag from the kernel-opt metadata.
         """
         cfg = tmp_path / f"magpie_{framework}.yaml"
         cfg.write_text(
@@ -233,14 +232,12 @@ class TestLoadMaterializedWorkloadMetadata:
         # the session is on.
         assert runtime["server_args"] == expected_args, (
             f"framework={framework!r} expected server_args="
-            f"{expected_args!r}; got {runtime['server_args']!r}. "
-            "Likely regression of atom_gap2.md B1."
+            f"{expected_args!r}; got {runtime['server_args']!r}."
         )
 
     def test_atom_server_args_not_read_from_extra_sglang_args(self, tmp_path):
-        """atom_gap2.md B1 sharper regression: when an atom YAML
-        carries BOTH ``EXTRA_ATOM_ARGS`` (real) AND a stray
-        ``EXTRA_SGLANG_ARGS`` (left over from a copy-paste), the
+        """When an atom YAML carries BOTH ``EXTRA_ATOM_ARGS`` (real) AND
+        a stray ``EXTRA_SGLANG_ARGS`` (left over from a copy-paste), the
         handler MUST pick the atom slot, not the sglang one.
         """
         cfg = tmp_path / "magpie_atom_mixed.yaml"
@@ -292,12 +289,12 @@ class TestEnrichCandidate:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.5: atom-aware reusable kernel detection
+# atom-aware reusable kernel detection
 # ---------------------------------------------------------------------------
 
 class TestReusableSourceRootsAtom:
-    """Phase 2.5 — atom layout prefixes participate in cross-task
-    kernel reuse alongside aiter/sglang/vllm."""
+    """atom layout prefixes participate in cross-task kernel reuse
+    alongside aiter/sglang/vllm."""
 
     def test_includes_atom_editable_path(self):
         # The matcher (``_is_runtime_generated_kernel``) lowercases its

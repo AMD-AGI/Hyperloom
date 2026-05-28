@@ -210,9 +210,8 @@ def probe_framework_source_roots_for_env() -> str:
 # ---------------------------------------------------------------------------
 # Discovery summary — operator-facing log helper.
 # install.sh consumes this to emit a one-line ``sglang=ok atom=ok ...``
-# summary after the colon-separated probe. Keep it stable across phases:
-# Phase 7 preflight greps the line. See atom_plan/phase2_open_kernel_agent/
-# 2.2_install_sh_source_root_probe.md.
+# summary after the colon-separated probe. Preflight greps the line, so
+# keep its format stable.
 # ---------------------------------------------------------------------------
 
 # Buckets are ordered so substring matching is deterministic — atom is

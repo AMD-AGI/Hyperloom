@@ -931,10 +931,10 @@ def test_default_profile_config_tracks_framework(monkeypatch):
 
 
 def test_default_profile_config_resolves_atom_when_env_set(monkeypatch):
-    """Phase 1: $FRAMEWORK=atom must resolve to profile_atom.yaml.
+    """$FRAMEWORK=atom must resolve to profile_atom.yaml.
 
-    Previously the resolver silently fell through to
-    profile_sglang.yaml whose top-level `framework: sglang` field made
+    Without this the resolver silently falls through to
+    profile_sglang.yaml whose top-level `framework: sglang` field makes
     Magpie launch `sglang_mi*x.sh` instead of `atom_mi*x.sh`. The
     dedicated atom profile YAML closes that gap; this test pins the
     resolver wiring."""
@@ -942,7 +942,7 @@ def test_default_profile_config_resolves_atom_when_env_set(monkeypatch):
     cfg = _default_profile_config()
     assert cfg.name == "profile_atom.yaml"
     assert cfg.exists(), (
-        "profile_atom.yaml must ship as a package asset (Phase 1)"
+        "profile_atom.yaml must ship as a package asset"
     )
 
 
@@ -978,10 +978,9 @@ def test_profile_atom_yaml_declares_atom_framework():
 def test_materialize_config_renders_atom_framework_under_profile(
     tmp_path, monkeypatch,
 ):
-    """Phase 1 acceptance gate: with FRAMEWORK=atom + PROFILE=1, the
-    rendered YAML must keep `framework: atom`. This is the gate that
-    prevents the original regression (silently rendering `framework:
-    sglang` under an atom-named session) from coming back."""
+    """With FRAMEWORK=atom + PROFILE=1, the rendered YAML must keep
+    `framework: atom`. This prevents the regression where atom-named
+    sessions silently render `framework: sglang`."""
     import yaml
     monkeypatch.setenv("FRAMEWORK", "atom")
     monkeypatch.setenv("PROFILE", "1")
@@ -998,8 +997,8 @@ def test_materialize_config_renders_atom_framework_under_profile(
 def test_materialize_atom_profile_does_not_inject_vllm_or_sglang_args(
     tmp_path, monkeypatch,
 ):
-    """Phase 1: the atom profile path must NOT inject any sglang/vllm
-    -specific profiler env or CLI flag into EXTRA_ATOM_ARGS / envs.
+    """The atom profile path must NOT inject any sglang/vllm-specific
+    profiler env or CLI flag into EXTRA_ATOM_ARGS / envs.
     atom's argparse would reject --profiler-config.* and the SGLang
     PROFILE_EXTRA_BODY HTTP protocol is meaningless on atom."""
     import yaml

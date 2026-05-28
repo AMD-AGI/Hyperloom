@@ -27,11 +27,11 @@ _TECHNICAL_TERMS = frozenset({
     "vllm", "sglang", "atom", "trtllm", "tensorrt", "lora", "qlora", "awq", "gptq",
     "marlin", "w4a16", "w8a8", "smoothquant", "activation_order",
     "custom_all_reduce", "custom_ar", "radix", "scheduler",
-    # atom-specific surfaces (atom_plan/phase3_open_framework_agent 3.3):
-    # PR titles in the ROCm/ATOM repo tend to mention these together;
-    # listing them here keeps the primus_cortex / github search relevance
-    # on the atom-shaped axis (MTP / EP / aiter routing) instead of
-    # collapsing to generic "moe" matches that surface unrelated PRs.
+    # atom-specific surfaces: PR titles in the ROCm/ATOM repo tend to
+    # mention these together; listing them here keeps the
+    # primus_cortex / github search relevance on the atom-shaped axis
+    # (MTP / EP / aiter routing) instead of collapsing to generic
+    # "moe" matches that surface unrelated PRs.
     "mtp", "ep", "moe_ep", "dp_attention", "dp", "kv_cache_dtype",
     "torch_profiler_dir",
     # GPU hardware codenames. Critical for relevance ranking: a gap such as

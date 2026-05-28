@@ -38,9 +38,9 @@ from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 
 
-# Phase 3.5 G4 cross-cutting guard. Add new frameworks here when
-# Hyperloom learns to drive them; the per-test parametrisation reads
-# this constant so a single edit propagates everywhere.
+# Cross-cutting framework parametrisation. Add new frameworks here
+# when Hyperloom learns to drive them; the per-test parametrisation
+# reads this constant so a single edit propagates everywhere.
 _FRAMEWORK_PARAMETRISATION: tuple[str, ...] = ("sglang", "vllm", "atom")
 
 
@@ -231,11 +231,10 @@ def test_pump_happy_path_discover_approve_enqueue(
     rows are written by the pump (the executor owns those).
 
     Parametrised across sglang / vllm / atom so the happy path is
-    pinned for every supported framework. The atom case covers
-    atom_plan/phase3_open_framework_agent: confirms the pump does not
-    raise on ``framework=atom`` (repo URL resolves) and that the
-    Critic prompt assembly handles atom candidates with no special-
-    casing required."""
+    pinned for every supported framework. The atom case confirms the
+    pump does not raise on ``framework=atom`` (repo URL resolves) and
+    that the Critic prompt assembly handles atom candidates with no
+    special-casing required."""
     captured_framework: dict[str, str] = {}
 
     async def _discover(**kwargs: Any) -> dict[str, Any]:

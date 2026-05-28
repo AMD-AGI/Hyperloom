@@ -776,7 +776,7 @@ def test_capability_summary_has_explore_row_with_legacy_aliases():
 
 
 # ===========================================================================
-# Phase 6.2 — _atom_default_grid + framework dispatch
+# _atom_default_grid + framework dispatch
 # ===========================================================================
 def _names(variants):
     return [v.name for v in variants]
@@ -784,8 +784,8 @@ def _names(variants):
 
 def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
     """MoE + MLA + MTP-capable model class (e.g. ``moe_mla``) unlocks
-    the full atom seed grid. Acceptance gate (Phase 6.2 README):
-    >= 5 variants; each gated branch present.
+    the full atom seed grid. Acceptance gate: >= 5 variants; each
+    gated branch present.
     """
     grid = _atom_default_grid(
         model_class="moe_mla", conc=64, isl=1024, osl=1024,
@@ -794,7 +794,10 @@ def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
     assert len(grid) >= 5, f"too few variants: {names}"
     # Base coverage.
     assert "atom_level_2" in names
-    assert "atom_level_3" in names
+    # ``atom_level_3`` not emitted: atom_mi*x.sh injects ``--level 3``
+    # as the bare baseline, so adding a level-3 variant here would A/B
+    # against itself.
+    assert "atom_level_3" not in names
     assert "atom_prefix_cache" in names
     # Model-class-gated branches.
     assert "atom_ep" in names, "MoE branch missing for moe_mla"
@@ -820,7 +823,9 @@ def test_atom_default_grid_dense_model_omits_moe_mla_mtp():
     assert "atom_mtp_1" not in names
     # Basic variants still present.
     assert "atom_level_2" in names
-    assert "atom_level_3" in names
+    # ``atom_level_3`` not emitted; see the rationale comment in the
+    # default-grid test above.
+    assert "atom_level_3" not in names
     assert "atom_prefix_cache" in names
 
 
@@ -925,8 +930,8 @@ def _write_atom_baseline_yaml(path: Path) -> None:
 async def test_explore_executor_atom_empty_grid_seeds_default_grid(
     sub_agent_runner, tmp_path, monkeypatch,
 ):
-    """G1 (atom_gap1.md): when the orchestration LLM emits an empty
-    grid on an atom session, ExploreExecutor must NOT return
+    """When the orchestration LLM emits an empty grid on an atom
+    session, ExploreExecutor must NOT return
     ``error_class='empty_grid'`` — it must fall through to
     ``_default_grid_for_framework('atom', ...)`` and run those
     variants.

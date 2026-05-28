@@ -6,16 +6,14 @@ Python packages (see ``framework_agent.repo_map`` for the same
 isolation pattern), so this shim is duplicated here rather than
 imported across package boundaries.
 
-Phase 4 of ``atom_plan/`` renamed the payload-surface field
-``extra_sglang_args`` -> ``extra_server_args``. The kernel-agent
-runtime is invoked over a JSON envelope by the Coordinator; this
-helper lets the runtime tolerate envelopes still carrying the legacy
-name (e.g. from a Hyperloom release predating Phase 4 or a saved KB
-record being replayed) while emitting only the canonical name on
-response.
+The payload-surface field ``extra_sglang_args`` was renamed to
+``extra_server_args``. The kernel-agent runtime is invoked over a
+JSON envelope by the Coordinator; this helper lets the runtime
+tolerate envelopes still carrying the legacy name (e.g. from a
+predating Hyperloom release or a saved KB record being replayed)
+while emitting only the canonical name on response.
 
-Removal target: the release *after* Hyperloom ships full atom
-support, in lockstep with Hyperloom's own compat helper.
+Removal target: in lockstep with Hyperloom's own compat helper.
 """
 
 from __future__ import annotations

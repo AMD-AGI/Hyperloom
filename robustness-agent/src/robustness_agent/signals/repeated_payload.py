@@ -266,10 +266,10 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
     payload = event.get("payload") or {}
     if not isinstance(payload, dict):
         return None
-    # Phase 4 / gap G3: legacy ``params.extra_sglang_args`` envelopes
-    # would otherwise walk to ``None`` for ``params.extra_server_args``
-    # and the same-fingerprint loop guard would silently miss a
-    # legacy-keyed retry burst. Normalise the canonical key in a
+    # Legacy ``params.extra_sglang_args`` envelopes would otherwise walk
+    # to ``None`` for ``params.extra_server_args`` and the
+    # same-fingerprint loop guard would silently miss a legacy-keyed
+    # retry burst. Normalise the canonical key in a
     # payload-local copy before projection so both legacy and
     # canonical envelopes produce identical fingerprints.
     payload = _normalise_extra_server_args_key(payload)

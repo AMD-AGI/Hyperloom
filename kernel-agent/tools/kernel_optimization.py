@@ -965,12 +965,11 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         runtime_flags.update(candidate["runtime_flags"])
     runtime_flags.setdefault("is_multigpu", bool(candidate.get("is_multigpu")))
     runtime_flags.setdefault("num_gpus_recommended", candidate.get("num_gpus_recommended"))
-    # Phase 4 of atom_plan/: the canonical payload key is
-    # ``extra_server_args`` (renamed from ``extra_sglang_args``); the
-    # local shim accepts both shapes on read so an envelope from a
-    # pre-Phase-4 Hyperloom release still works. The kernel-agent
-    # ``tools/`` directory is added to sys.path (not used as a
-    # package), so import the shim by bare module name.
+    # The canonical payload key is ``extra_server_args`` (renamed from
+    # the legacy ``extra_sglang_args``); the local shim accepts both
+    # shapes on read so envelopes still carrying the legacy key work.
+    # The kernel-agent ``tools/`` directory is added to sys.path (not
+    # used as a package), so import the shim by bare module name.
     from _payload_aliases import (  # type: ignore[import-not-found]
         read_extra_server_args as _read_eserver,
     )

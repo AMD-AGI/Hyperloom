@@ -137,11 +137,11 @@ def materialize_config_with_envs(
       ``CONC`` and ``ISL+OSL`` (longer sequences → fewer prompts to keep
       each variant under ~3-5 min wall time).
     * ``extra_server_args`` is the framework-neutral payload-surface
-      slot (renamed in Phase 4 of ``atom_plan/`` from the legacy
-      ``extra_sglang_args``). The materializer routes its value into
-      the framework-specific env name (``EXTRA_SGLANG_ARGS`` /
-      ``EXTRA_VLLM_ARGS`` / ``EXTRA_ATOM_ARGS``) based on the
-      framework declared in the YAML's ``benchmark.framework``.
+      slot (the legacy name was ``extra_sglang_args``). The
+      materializer routes its value into the framework-specific env
+      name (``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS`` /
+      ``EXTRA_ATOM_ARGS``) based on the framework declared in the
+      YAML's ``benchmark.framework``.
     * ``extra_envs`` overrides any of the above.
 
     Returns the path to the materialized YAML written under ``output_dir``.

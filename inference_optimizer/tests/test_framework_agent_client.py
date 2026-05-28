@@ -36,11 +36,11 @@ def test_repo_url_for_framework_known():
 
 
 def test_repo_url_for_framework_atom():
-    """atom_plan/phase3_open_framework_agent 3.1: atom resolves to
-    ROCm/ATOM regardless of whether ``framework_agent`` is on the
-    import path. ``fac.repo_url_for_framework`` delegates to the
-    canonical when available and to the inline fallback otherwise;
-    both must produce the same URL."""
+    """atom resolves to ROCm/ATOM regardless of whether
+    ``framework_agent`` is on the import path.
+    ``fac.repo_url_for_framework`` delegates to the canonical when
+    available and to the inline fallback otherwise; both must produce
+    the same URL."""
     assert fac.repo_url_for_framework("atom") == (
         "https://github.com/ROCm/ATOM.git"
     )
