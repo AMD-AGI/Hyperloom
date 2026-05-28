@@ -755,8 +755,10 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    if payload.get("roofline_json"):
-        cmd += ["--roofline-json", str(payload["roofline_json"])]
+    # PR-E: ``--roofline-json`` CLI param retired with the
+    # ``pmc_roofline`` action (2486a19). No producer for that JSON
+    # remains; the payload key is now silently ignored if a stale
+    # caller still passes it.
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60

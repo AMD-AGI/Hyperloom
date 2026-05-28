@@ -593,8 +593,26 @@ def test_write_reports_writes_kernel_roofline_sidecar(tmp_path):
     assert row["arithmetic_intensity"] == 0.45
     assert row["flops_per_byte"] == 0.45
     assert row["efficiency_percent"] == 31.2
-    assert row["compute_utilization_pct"] is None
-    assert row["bandwidth_utilization_pct"] is None
+    # PR-E: PMC-derived fields (compute_utilization_pct,
+    # bandwidth_utilization_pct, roofline_name, suggestion,
+    # recommended_actions, the LLM-free ``bottleneck`` re-classification)
+    # were retired with the pmc_roofline action (2486a19); the schema
+    # no longer carries these keys (downstream consumers .get()
+    # them and graceful-degrade).
+    for retired_key in (
+        "compute_utilization_pct",
+        "bandwidth_utilization_pct",
+        "roofline_name",
+        "suggestion",
+        "recommended_actions",
+        "bottleneck",
+    ):
+        assert retired_key not in row, (
+            f"PR-E: {retired_key!r} must be absent from per-kernel sidecar"
+        )
+    # Top-level ``roofline_json_path`` also gone — hyperloom never
+    # passed ``--roofline-json`` after pmc_roofline retirement.
+    assert "roofline_json_path" not in payload
 
 
 class TestKernelRooflinePathForRunPRCLayout:

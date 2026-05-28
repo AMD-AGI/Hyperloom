@@ -1654,48 +1654,20 @@ def roofline_match_key(name: str) -> str:
     return lower[:80]
 
 
-def load_roofline_results(path: str | None) -> dict[str, dict[str, Any]]:
-    if not path:
-        return {}
-    p = Path(path).expanduser()
-    if not p.exists():
-        return {}
-    try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    rows = payload.get("results") if isinstance(payload, dict) else payload
-    if not isinstance(rows, list):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        if isinstance(row, dict) and row.get("name"):
-            out[roofline_match_key(str(row["name"]))] = row
-    return out
-
-
-def merge_roofline_into_candidates(
-    candidates: list[dict[str, Any]],
-    roofline_by_name: dict[str, dict[str, Any]],
-) -> None:
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        roofline = roofline_by_name.get(roofline_match_key(str(item.get("name") or "")))
-        if roofline:
-            item["bottleneck"] = roofline.get("bottleneck", "unknown")
-            item["arithmetic_intensity"] = roofline.get("arithmetic_intensity")
-            item["compute_utilization_pct"] = roofline.get("compute_utilization_pct", 0.0)
-            item["bandwidth_utilization_pct"] = roofline.get("bandwidth_utilization_pct", 0.0)
-            item["suggestion"] = roofline.get("suggestion", "")
-            item["recommended_actions"] = roofline.get("recommended_actions") or []
-            item["roofline_name"] = roofline.get("name")
-        else:
-            item.setdefault("bottleneck", "unknown")
-            item.setdefault("arithmetic_intensity", None)
-            item.setdefault("compute_utilization_pct", None)
-            item.setdefault("bandwidth_utilization_pct", None)
-            item.setdefault("recommended_actions", [])
+# PR-E: ``load_roofline_results`` / ``merge_roofline_into_candidates`` and
+# the ``--roofline-json`` CLI parameter were the producer side of the PMC
+# / rocprof roofline pipeline retired by 2486a19 (Roofline-v2 toggles
+# default-on; ``pmc_roofline`` action + ``roofline_integration.py`` +
+# ``last_profile_roofline`` field all deleted). Per-kernel
+# ``compute_utilization_pct`` / ``bandwidth_utilization_pct`` /
+# ``roofline_name`` / ``suggestion`` / ``recommended_actions`` /
+# ``bottleneck`` come solely from that JSON; with no producer left they
+# are always ``None`` / ``""`` / ``[]`` on every invocation, so the
+# merge step + the kernel_roofline.json schema fields are dead code.
+# Downstream consumers that read these keys via ``.get(key, default)``
+# continue to graceful-degrade — see the follow-up cleanup PR for
+# consumer-side field removal (specialist_prompt_builder.py,
+# shared_state.summary_entry, breakdown collectors).
 
 
 def _first_non_empty(*values: Any) -> Any:
@@ -1711,6 +1683,13 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         candidate.get("arithmetic_intensity"),
         candidate.get("flops_per_byte"),
     )
+    # PR-E: PMC-derived fields (compute_utilization_pct,
+    # bandwidth_utilization_pct, roofline_name, suggestion,
+    # recommended_actions, the LLM-free bottleneck classification) were
+    # populated by the now-retired ``--roofline-json`` ingest path;
+    # they are removed from the per-kernel sidecar schema.
+    # ``bound_type`` (coarse compute-bound / memory-bound from trace
+    # analysis) survives as the bound classification surface.
     return {
         "kernel_id": candidate.get("kernel_id"),
         "name": candidate.get("name"),
@@ -1719,19 +1698,10 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "call_count": candidate.get("call_count"),
         "kernel_category": candidate.get("kernel_category"),
         "source_file": candidate.get("source_file"),
-        "bottleneck": _first_non_empty(
-            candidate.get("bottleneck"),
-            candidate.get("bound_type"),
-        ),
         "bound_type": candidate.get("bound_type"),
         "arithmetic_intensity": arithmetic_intensity,
         "flops_per_byte": candidate.get("flops_per_byte"),
         "efficiency_percent": candidate.get("efficiency_percent"),
-        "compute_utilization_pct": candidate.get("compute_utilization_pct"),
-        "bandwidth_utilization_pct": candidate.get("bandwidth_utilization_pct"),
-        "suggestion": candidate.get("suggestion") or "",
-        "roofline_name": candidate.get("roofline_name"),
-        "recommended_actions": list(candidate.get("recommended_actions") or []),
         "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
     }
 
@@ -1742,15 +1712,16 @@ def build_kernel_roofline_payload(
     trace_input_type: str,
     analysis_md_path: str,
     kernel_candidates_path: str,
-    roofline_json_path: str,
     candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Build the structured per-kernel roofline sidecar.
 
-    This sidecar is a view over TraceLens candidates plus optional
-    ``--roofline-json`` enrichment. It does not invent missing
-    utilization counters: absent compute/bandwidth utilization stays
-    ``null`` in JSON.
+    Pure projection of TraceLens-extracted hot kernels into the
+    dashboard schema (kernel_id, name, gpu_pct, bound_type,
+    arithmetic_intensity, efficiency_percent, ...). PMC-derived
+    fields (compute_utilization_pct / bandwidth_utilization_pct /
+    roofline_name) were retired with the ``pmc_roofline`` action in
+    2486a19; see :func:`_kernel_roofline_row` for the surviving set.
     """
     rows = [
         _kernel_roofline_row(candidate)
@@ -1764,7 +1735,6 @@ def build_kernel_roofline_payload(
         "trace_input_type": trace_input_type,
         "analysis_md_path": analysis_md_path,
         "kernel_candidates_path": kernel_candidates_path,
-        "roofline_json_path": roofline_json_path,
         "kernels": rows,
     }
 
@@ -2163,10 +2133,6 @@ def write_reports(
             str(existing_report_path) if existing_report_path else ""
         ),
         kernel_candidates_path=str(kernel_candidates_path),
-        roofline_json_path=(
-            str(Path(args.roofline_json).expanduser())
-            if getattr(args, "roofline_json", "") else ""
-        ),
         candidates=candidates,
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
@@ -2257,7 +2223,6 @@ def main() -> int:
         ),
     )
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
-    parser.add_argument("--roofline-json", default="")
     parser.add_argument(
         "--capture-folder",
         default=os.environ.get("TRACELENS_CAPTURE_FOLDER", ""),
@@ -2927,17 +2892,20 @@ def main() -> int:
                     "truth. Inspect the TraceLens skill log and report "
                     "upstream if reproducible."
                 )
-        roofline_by_name = load_roofline_results(args.roofline_json)
-        if roofline_by_name:
-            append_log(log_path, f"merged roofline results: {len(roofline_by_name)} kernels")
-        merge_roofline_into_candidates(candidates, roofline_by_name)
+        # PR-E: ``load_roofline_results`` / ``merge_roofline_into_candidates`` /
+        # the ``--roofline-json`` CLI flag and the ``roofline_json`` artifact
+        # alias were the producer side of the PMC pipeline retired by
+        # 2486a19 ("Flip Roofline-v2 toggles default-on + remove pmc_roofline
+        # action"); no producer for that JSON remains in hyperloom. The
+        # call sequence is reduced to ``write_reports`` directly — kernel
+        # candidates are emitted with the trace-derived fields only
+        # (gpu_pct / bound_type / arithmetic_intensity / efficiency_percent /
+        # reusable_native_kernel / kernel_category / source_file / ...).
         artifacts.update(write_reports(run_dir, trace_input_type=trace_input_type,
                                        trace_files=trace_files, candidates=candidates,
                                        args=args,
                                        existing_report_path=agent_report_path,
                                        trace_health_warnings=trace_health_warnings))
-        if args.roofline_json:
-            artifacts["roofline_json"] = str(Path(args.roofline_json).expanduser())
         artifacts["cli_log_path"] = str(log_path)
         artifacts["status_path"] = str(status_path)
 

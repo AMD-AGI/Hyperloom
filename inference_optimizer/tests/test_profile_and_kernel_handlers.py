@@ -1111,6 +1111,11 @@ async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monke
         {
             "trace_input": str(session_dir),
             "dry_run": True,
+            # PR-E: ``roofline_json`` payload key was the producer-side
+            # of the retired PMC pipeline (2486a19); the handler now
+            # silently ignores it (no producer, no consumer), so this
+            # stays in the payload purely to assert that no
+            # ``--roofline-json`` flag leaks into the CLI argv.
             "roofline_json": "/tmp/roofline.json",
             "capture_folder": "/tmp/capture_traces",
         },
@@ -1118,8 +1123,9 @@ async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monke
     )
     assert res["candidates_path"] == "/tmp/kernel_candidates.json"
     assert res["kernel_roofline_path"] == "/tmp/reports/kernel_roofline.json"
-    assert "--roofline-json" in captured["cmd"]
-    assert "/tmp/roofline.json" in captured["cmd"]
+    # PR-E: --roofline-json must NOT appear in the CLI argv anymore.
+    assert "--roofline-json" not in captured["cmd"]
+    assert "/tmp/roofline.json" not in captured["cmd"]
     assert "--capture-folder" in captured["cmd"]
     assert "/tmp/capture_traces" in captured["cmd"]
 
