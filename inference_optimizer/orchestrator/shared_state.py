@@ -266,6 +266,65 @@ class SharedState:
     # downstream executors fall back to materializing the shipped YAML
     # against current process env when this is empty.
     baseline_config_path: str = ""
+    # GAP 5 (KB tag completeness): runtime component versions populated
+    # by cli at boot from manifest / stack_fingerprint. Mirror of the
+    # equivalent fields written to ``recipe.attrs`` by the T0 backfill,
+    # exposed here so ``_collect_workload_tags`` can stamp them onto
+    # every lesson / pitfall write WITHOUT having to re-parse manifest
+    # at fact-write time.
+    #
+    # Shape: ``{"sglang": "0.5.11", "vllm": "0.19.0", "rocm": "6.2.0",
+    #           "aiter": "abc123", "image_digest": "sha256:..."}``.
+    # All keys optional; empty / "unknown" values are stripped before
+    # writing onto the recipe so KB attrs stays compact. Resume-safe
+    # because the field is JSON-serialised into state.json.
+    stack_fingerprint_meta: dict = field(default_factory=dict)
+    # GAP 5: extra workload-shape fields parsed from the materialized
+    # baseline YAML — ``max_running_requests`` / ``max_num_seqs`` /
+    # ``chunked_prefill_enabled`` / ``enable_torch_compile`` /
+    # ``quant_scheme`` / ``workload_mode``. These are *not* in the
+    # canonical id (would explode the recipe space) but they are
+    # crucial filters for the warm-start ladder and the lesson reader
+    # so future sessions can pick a closer prior.
+    #
+    # Populated by ``BaselineExecutor._promote_to_shared_state`` after
+    # the baseline YAML is materialized. Empty dict before first
+    # baseline result; downstream consumers tolerate missing keys.
+    baseline_workload_extra: dict = field(default_factory=dict)
+    # GAP 1 (warm-recipe replay) — one-shot guard so the PRELUDE
+    # auto-enqueue path doesn't fire twice for the same session
+    # (resume safety). The Coordinator flips this to True at the
+    # moment a ``replay_warm_recipe`` task is created; the field
+    # survives resume via state.json so a robustness restart cannot
+    # accidentally double-spend the replay budget. ``False`` is the
+    # default for fresh sessions.
+    warm_replay_attempted: bool = False
+    # GAP 1 supporting field — one-shot guard for
+    # ``_inject_warm_recipe_history_into_ledger``. Decoupled from
+    # ``warm_replay_attempted`` because the history injection is
+    # independent of whether the operator enabled warm replay:
+    # ``--no-warm-replay`` users still benefit from "don't retry
+    # known-failed variants". Resume-safe: persists into state.json
+    # so a robustness restart cannot double-inject the same rows.
+    warm_history_injected: bool = False
+    # GAP 1 — structured outcome of the warm-replay attempt so the
+    # report / prompt can render "we tried the KB best_config and
+    # got +X% (vs the recipe's claim of +Y%)". Shape::
+    #
+    #   {
+    #     "status":            "reproduced" | "drift" | "failed" | "skipped",
+    #     "expected_gain_pct": 25.0,
+    #     "actual_gain_pct":   23.5,
+    #     "warm_recipe_tier":  "T1_exact",
+    #     "warm_recipe_conf":  0.85,
+    #     "replay_task_id":    "task-uuid",
+    #     "reason":            "..."        # only on failed / skipped / drift
+    #   }
+    #
+    # Empty dict before the replay completes or when ``--no-warm-replay``
+    # is in effect. Persisted into state.json so resume + breakdown
+    # collectors see it.
+    warm_replay_outcome: dict = field(default_factory=dict)
     # Wall-clock seconds the baseline Magpie subprocess took to
     # finish (success path only). Populated by Coordinator from the
     # baseline executor's ``subprocess_runtime_sec`` and read by the
