@@ -242,9 +242,10 @@ def compose_critic_verdict_envelope(
 
     * ``envelope_dict`` matches :data:`CRITIC_VERDICT_FIELDS` exactly.
     * ``lifecycle_status`` is ``CRITIC_REJECTED`` when the final
-      verdict is reject/revise, ``DISPATCHED`` when approve (the
-      pipeline advances to integrate_patch; the integrate completion
-      hook flips the status to KEPT / REVERTED / INTEGRATE_FAILED).
+      verdict is reject/revise, ``INTEGRATING`` when approve (P6
+      §4 node C — the pipeline immediately dispatches the
+      integrate_patch task; the integrate completion hook flips the
+      status to KEPT / REVERTED / INTEGRATE_FAILED).
 
     Strictest-wins composition: if mechanical pre says
     reject/revise, the LLM verdict is ignored — mechanical layer is a
@@ -282,7 +283,7 @@ def compose_critic_verdict_envelope(
         cross_domain_flag=pre.cross_domain_flag,
     )
     if verdict == "approve":
-        return envelope, DynamicActionStatus.DISPATCHED
+        return envelope, DynamicActionStatus.INTEGRATING
     return envelope, DynamicActionStatus.CRITIC_REJECTED
 
 
