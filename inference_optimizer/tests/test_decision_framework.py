@@ -70,7 +70,7 @@ async def test_run_optimization_response_records_to_shared_state(
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
             "reusable_native_kernel_ids": ["k006"],
         }
@@ -116,10 +116,10 @@ async def test_run_optimization_response_records_to_shared_state(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_does_not_record_kernel_opt(
+async def test_trace_analyze_does_not_record_kernel_opt(
     session_dir, monkeypatch,
 ):
-    """Only run_optimization (not select_kernels) writes to last_kernel_opt."""
+    """Only run_optimization (not trace_analyze) writes to last_kernel_opt."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator import kernel_request_handlers
@@ -127,11 +127,11 @@ async def test_select_kernels_does_not_record_kernel_opt(
             return {"status": "ok", "hot_kernels": [{"kernel_id": "k001"}]}
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "select_kernels", fake,
+            "trace_analyze", fake,
         )
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "select_kernels",
+            payload={"target_agent": "kernel", "kind": "trace_analyze",
                      "params": {"trace_input": "/tmp/t.json"}},
         )
         await c._handle_intent("orchestration", intent)
