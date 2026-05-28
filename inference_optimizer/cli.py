@@ -3914,9 +3914,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Inference framework to benchmark / optimize. Resolution order: "
              "--framework > $FRAMEWORK env > sglang (default). Selection is "
              "session-wide; mixing frameworks in a single session is not "
-             "supported. NOTE: --framework atom is single-node-only and has "
-             "no profiler / framework-source-patcher integration; B3 "
-             "auto-tightens incompatible phases off when atom is selected.",
+             "supported. NOTE: --framework atom is single-node-only "
+             "(``--nodes>=2`` fails fast); profile / roofline, "
+             "kernel-agent, and framework-agent are all enabled on atom "
+             "after atom_plan/ phases 1-3. The auto-tighten guard now "
+             "only enforces ``--nodes 1``.",
     )
     opt.add_argument(
         "--nodes", type=int,
@@ -4545,7 +4547,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=_env_default_on("INFERENCE_OPTIMIZER_ENABLE_ROOFLINE"),
         help="Select which analysis action the Coordinator enqueues at "
-             "PRELUDE bootstrap and on every +10% watermark crossing. "
+             "PRELUDE bootstrap and on every +10%% watermark crossing. "
              "Default on: ``roofline`` (composite profile + "
              "trace_analyze + analysis.md). Pass ``--no-enable-roofline`` "
              "to use plain ``profile`` instead (lighter — captures the "
