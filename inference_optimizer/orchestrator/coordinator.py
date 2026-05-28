@@ -1254,7 +1254,17 @@ class Coordinator:
         10% watermark over ``last_roofline_tput`` — see
         :meth:`_needs_roofline_for_watermark`. EXPLORE entry no
         longer enqueues roofline.
+
+        dynamic_action.MD P1 §4.3 — reset the per-round dynamic_action
+        cap counter so a fresh EXPLORE entry restores the
+        ``MAX_DYNAMIC_PER_ROUND`` budget.
         """
+        try:
+            self.shared_state.reset_dynamic_action_round_count()
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "EXPLORE entry: reset_dynamic_action_round_count failed",
+            )
         plane = self.knowledge_plane
         if plane is None:
             return
