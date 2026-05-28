@@ -29,6 +29,32 @@ sourced-variant cap 的显式机械校验**。其余为可观察性与文档跟�
 
 ---
 
+## ✅ 状态更新 (`2026-05-29`)
+
+| Gap | 状态 | Commit |
+|---|---|---|
+| G1 — bench 工具 v1 关闭 | **CLOSED** | `e1d4191` |
+| G2 — dispatch_history 全 lifecycle | **CLOSED** | `c4af840` |
+| G3 — telemetry.json | **CLOSED** | `dfb35a4` |
+| G4 — MAX_DYNAMIC_SOURCED_VARIANTS 强制 | **CLOSED** | `b5a7394` |
+| G5 — CLI 旋钮 | **CLOSED** | `e6f9bd5` |
+| G6 — cumulative-diff 校验 | **CLOSED** | `f70fa61` |
+| G7 — JSON 解析错误日志 | **CLOSED** | `96470ff` |
+| G8 — proposal_set 长度防御 | **CLOSED** | `96470ff` |
+| G9 — cumulative_gain 语义文档 | **CLOSED** | `96470ff` |
+| G10 — degraded seed kit 日志 | **CLOSED** | `f70fa61` |
+| G11 — revise=reject v1 语义文档 | **CLOSED** | `96470ff` |
+| G12 — research_lane 常量化 | **CLOSED** | `f70fa61` |
+| G13 — dispatch_history 闭合 schemas | **CLOSED** | `c4af840` |
+| G14 — bench 集成测试 | N/A | G1 关闭后变 moot |
+| G15 — §2 文档回填 | **CLOSED** | 本提交 |
+| G16 — prompt §1.7 引用 | **CLOSED** | 本提交 |
+
+全部 16 个 gap 关闭。新增 invariant 测试 8 个（I-G4/G6/G8/G10/G12
++ history/telemetry），合计 dynamic_action 测试套件 ≥ 426 个。
+
+---
+
 ## 1. Critical — 阻塞真实 session 端到端
 
 ### G1. 全部 micro-bench 脚本均为 placeholder
