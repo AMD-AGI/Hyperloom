@@ -705,11 +705,14 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
-    # atom layout (atom_plan/phase2_open_kernel_agent/2.5). Keep in
-    # sync with ``inference_optimizer/orchestrator/kernel_request_handlers.py``
+    # atom layout (atom_plan/phase2_open_kernel_agent/2.5). The
+    # filesystem path is ``/app/ATOM/atom/`` but ``is_runtime_generated_kernel``
+    # lowercases inputs before substring matching, so the prefix below
+    # is stored lowercase to match. Keep in sync with
+    # ``inference_optimizer/orchestrator/kernel_request_handlers.py``
     # ``_REUSABLE_SOURCE_ROOTS`` — both lists feed the same
     # reusable-kernel classifier.
-    "/app/ATOM/atom/",
+    "/app/atom/atom/",
     "/opt/venv/lib/python3.10/site-packages/atom/",
     "/opt/venv/lib/python3.12/site-packages/atom/",
     "/usr/local/lib/python3.12/dist-packages/atom/",
