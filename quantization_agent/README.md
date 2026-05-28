@@ -7,7 +7,7 @@ natural-language prompt.
 
 **What it is.** A thin Claude-SDK driver. It loads `SKILL.md` as the runtime
 contract and lets the LLM invoke Quark's published skills end-to-end
-(`quark-ptq` → `quark-quantization-result-validator` → `quark-llm-eval`),
+(`quark-torch-ptq` → `quark-torch-result-validator` → `quark-torch-llm-eval`),
 classifies each attempt's workspace state into a 30-row outcome matrix, and
 exposes one diagnose-fix-retry loop on top.
 
@@ -18,7 +18,7 @@ All ML work runs inside Quark's skills.
 ## Requirements
 
 - `$QUARK_ROOT` pointing to an `amd-quark` checkout that contains
-  `.claude/skills/quark-ptq/SKILL.md` (and the validator / eval skills under
+  `.claude/skills/quark-torch-ptq/SKILL.md` (and the validator / eval skills under
   the same tree).
 - Python deps (`claude-agent-sdk`, `PyYAML`) come from Hyperloom's top-level
   `pyproject.toml` — no separate install script.
@@ -35,10 +35,10 @@ can infer from the prompt is what gets used.
 ### Example prompt
 
 ```text
-把 /group/.../Qwen/Qwen3-8B 量化为 mxfp4：其中 self_attn 模块用 fp8，
-kv_cache 用 fp8，导出到 <workspace>/quantized。导出后做
-quark-quantization-result-validator 校验，然后做 quark-llm-eval (gsm8k)。
-可接受 5% 的 eval gap。全程不需要人工交互。
+Quantize Qwen/Qwen3-8B to mxfp4, with self_attn modules and kv_cache
+in fp8, and export it to <workspace>/quantized.
+Use gsm8k as the benchmark and accept up to a 5% eval gap.
+No human interaction at any point.
 ```
 
 ### CLI
@@ -115,7 +115,7 @@ can read these directly:
 - `run_manifest.yaml` — Quark's workflow manifest (inputs, outputs, exec phases).
 - `model_analysis.json`, `quant_plan.json` — intake + plan outputs.
 - `validation_report.md` + `val_<step>.json` — validator results (4 steps).
-- `source_eval.md`, `quantized_eval.md` — raw `quark-llm-eval` Markdown.
+- `source_eval.md`, `quantized_eval.md` — raw `quark-torch-llm-eval` Markdown.
 - `eval_report.json` — synthesized eval summary (`source_score`,
   `quantized_score`, `relative_gap`, `within_threshold`).
 - `eval_gap_threshold.txt` — resolved acceptable gap (single float).

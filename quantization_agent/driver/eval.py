@@ -1,8 +1,8 @@
 """Eval-gap policy: threshold resolution + acceptance check.
 
-``quark-llm-eval`` runs one model at a time and only emits Markdown — there is
+``quark-torch-llm-eval`` runs one model at a time and only emits Markdown — there is
 no JSON sidecar and no built-in source-vs-quantized comparison. So SKILL.md is
-instructed to invoke ``quark-llm-eval`` twice (once on source, once on
+instructed to invoke ``quark-torch-llm-eval`` twice (once on source, once on
 quantized), parse the headline metric from both reports, and synthesize an
 agent-owned ``eval_report.json`` wrapper:
 

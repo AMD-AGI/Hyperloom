@@ -119,7 +119,7 @@ def _ask_operator(message: str) -> bool:
 def _has_fix_hypothesis(workspace: Path, attempt_number: int) -> bool:
     """Look for the hypothesis written by SKILL.md for the NEXT attempt.
 
-    Per §A.10, before re-running quark-ptq SKILL.md must drop a concrete fix
+    Per §A.10, before re-running quark-torch-ptq SKILL.md must drop a concrete fix
     plan at ``fix_hypothesis_attempt_<next>.md``. Absence is the gate that
     prevents blind retries.
     """

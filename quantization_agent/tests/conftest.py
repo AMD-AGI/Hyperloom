@@ -27,7 +27,7 @@ import pytest
 # rather than copy-paste markdown.
 _VALIDATION_REPORTS: dict[str, str] = {
     "all_ok": (
-        "## Validation Report — quark-quantization-result-validator\n\n"
+        "## Validation Report — quark-torch-result-validator\n\n"
         "**Step 4 — fuzzy tensor names**: ok\n\n"
         "**Step 1 — auxiliary files**: ok\n\n"
         "**Step 3 — config.json**: ok\n\n"

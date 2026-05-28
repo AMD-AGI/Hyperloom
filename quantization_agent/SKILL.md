@@ -10,9 +10,9 @@ description: >
 layer: hyperloom-subagent
 primary_artifact: quantized_model_dir
 delegates_to:
-  - Quark/.claude/skills/quark-ptq
-  - Quark/.claude/skills/quark-quantization-result-validator
-  - Quark/.claude/skills/quark-llm-eval
+  - Quark/.claude/skills/quark-torch-ptq
+  - Quark/.claude/skills/quark-torch-result-validator
+  - Quark/.claude/skills/quark-torch-llm-eval
 ---
 
 # quantization-agent — runtime contract
@@ -28,8 +28,8 @@ auto-recovery and the diagnose-fix-retry artifacts that bridge attempts.
 ## 1. Purpose & boundary
 
 Produce a quantized model from the user's natural-language prompt by chaining
-three Quark skills (intake/plan/execute via `quark-ptq`, validation via
-`quark-quantization-result-validator`, evaluation via `quark-llm-eval`).
+three Quark skills (intake/plan/execute via `quark-torch-ptq`, validation via
+`quark-torch-result-validator`, evaluation via `quark-torch-llm-eval`).
 Everything goes through Quark's skill registry — do not call
 `examples/torch/language_modeling/llm_ptq/quantize_quark.py` directly.
 
@@ -67,13 +67,13 @@ across phases.
 | # | Phase | Quark skill | Outputs into `<workspace>/` |
 |---|---|---|---|
 | 1 | `pre`      | — (you)                                | `session_context.json` (seed) |
-| 2 | `intake`   | quark-ptq Step 1                       | `model_analysis.json` |
-| 3 | `plan`     | quark-ptq Step 2                       | `quant_plan.json` |
-| 4 | `manifest` | quark-ptq Step 3                       | `run_manifest.yaml` |
-| 5 | `exec`     | quark-ptq Step 4a (PTQ)                | (in-flight; weights → `outputs.quantized_model_dir`) |
-| 6 | `export`   | quark-ptq Step 4b (serialize)          | `<quantized_model_dir>/*.safetensors`, `config.json`, tokenizer files |
-| 7 | `validate` | quark-quantization-result-validator    | `validation_report.md` |
-| 8 | `eval`     | quark-llm-eval ×2 + your parser        | `source_eval.md`, `quantized_eval.md`, `eval_report.json` |
+| 2 | `intake`   | quark-torch-ptq Step 1                       | `model_analysis.json` |
+| 3 | `plan`     | quark-torch-ptq Step 2                       | `quant_plan.json` |
+| 4 | `manifest` | quark-torch-ptq Step 3                       | `run_manifest.yaml` |
+| 5 | `exec`     | quark-torch-ptq Step 4a (PTQ)                | (in-flight; weights → `outputs.quantized_model_dir`) |
+| 6 | `export`   | quark-torch-ptq Step 4b (serialize)          | `<quantized_model_dir>/*.safetensors`, `config.json`, tokenizer files |
+| 7 | `validate` | quark-torch-result-validator    | `validation_report.md` |
+| 8 | `eval`     | quark-torch-llm-eval ×2 + your parser        | `source_eval.md`, `quantized_eval.md`, `eval_report.json` |
 
 Run validation in the order **4 → 1 → 3 → 2** (per validator §A.6 — that
 ordering surfaces the cheap checks first).
@@ -83,7 +83,7 @@ exist. If one is missing, follow §6 Auto-recover catalog before continuing.
 
 ## 4. Checkpoint protocol (Quark CRITICAL STOPs)
 
-Quark's `quark-ptq` workflow has three CRITICAL STOPs: Intake, Plan, Manifest.
+Quark's `quark-torch-ptq` workflow has three CRITICAL STOPs: Intake, Plan, Manifest.
 Each waits for `y` to proceed. Behavior depends on `interactive`:
 
 * `interactive=off` (CI): auto-accept defaults at every STOP, UNLESS the user
@@ -104,7 +104,7 @@ where we paused.
 
 ## 5. Eval flow (the part Quark doesn't do for you)
 
-`quark-llm-eval` takes ONE model at a time and emits Markdown only.
+`quark-torch-llm-eval` takes ONE model at a time and emits Markdown only.
 There is no JSON sidecar and no built-in source-vs-quantized comparison —
 **you must do both**.
 
@@ -127,7 +127,7 @@ anything else (→ #22 eval_env_unavailable).
 Default metric: gsm8k accuracy. If the user prompt names a different metric
 (e.g. "ppl on wikitext-2", "MMLU"), use that instead. The headline is
 typically the first `**Accuracy:** X.XXX` (or equivalent) line in
-`quark-llm-eval`'s output table.
+`quark-torch-llm-eval`'s output table.
 
 ### 5.3 Synthesize `eval_report.json`
 
@@ -164,16 +164,16 @@ phase chain after the fix.
 | ID | Fix |
 |---|---|
 | `intent_parse_failed` (#8) | Re-read user prompt; if missing required field (model path / target dtype / output dir), make a best-effort default and continue. Cap self-correction at 2 tries. |
-| `analysis_artifact_invalid_or_missing` (#10) | Re-invoke `quark-ptq` Step 1. |
-| `plan_artifact_invalid_or_missing` (#11) | Re-invoke `quark-ptq` Step 2. |
-| `manifest_artifact_invalid_or_missing` (#12) | Re-invoke `quark-ptq` Step 3. |
+| `analysis_artifact_invalid_or_missing` (#10) | Re-invoke `quark-torch-ptq` Step 1. |
+| `plan_artifact_invalid_or_missing` (#11) | Re-invoke `quark-torch-ptq` Step 2. |
+| `manifest_artifact_invalid_or_missing` (#12) | Re-invoke `quark-torch-ptq` Step 3. |
 | `must_have_config_missing_or_invalid` (#14) | `cp <source_model>/config.json <quantized_model_dir>/`; if vLLM-required keys (`model_type`, `architectures`) are absent, copy them from source's config. Re-run validator Step 3. |
 | `must_have_tokenizer_missing` (#15) | `cp <source_model>/tokenizer*` to `<quantized_model_dir>/`. Re-run validator Step 1. |
 | `must_validate_config_mismatch` (#17) | Diff config.json source vs quantized after stripping `quantization_config`. Copy the missing/diverged business-field values from source into quantized. Re-run validator Step 3. |
 | `should_have_aux_missing` (#19) | `cp` missing auxiliary files (`special_tokens_map.json`, `generation_config.json`, `chat_template.jinja`) from source to quantized. Re-run validator Step 1. |
 | `nice_to_have_skipped` (#20) | Record a note (write a `## Notes` line at the bottom of `validation_report.md`); do not retry. |
 | `eval_env_unavailable` (#22) | Skip eval; write `<workspace>/eval_skipped.txt` with the reason. |
-| `validation_report_absent` (#25) | Re-invoke `quark-quantization-result-validator` once. |
+| `validation_report_absent` (#25) | Re-invoke `quark-torch-result-validator` once. |
 | `must_validate_skipped` (#27) | Leave as-is — the Python runner will demote per `HYPERLOOM_QUANT_STRICT_VALIDATION`. |
 | `eval_oom` (#29) | Switch eval to serial loading (close source engine before opening quantized). Retry once. If still OOM, write `eval_skipped.txt` with `oom`. |
 
@@ -255,13 +255,13 @@ You may write any of these files; the Python runner reads them:
 
 | File | Owner | Meaning |
 |---|---|---|
-| `session_context.json` | you (seed) → Quark may augment | Pre-seeded context handed to quark-ptq. |
-| `model_analysis.json`  | quark-ptq Step 1 | Source model structural analysis. |
-| `quant_plan.json`      | quark-ptq Step 2 | Resolved quant plan. |
-| `run_manifest.yaml`    | quark-ptq Step 3 | Includes `outputs.quantized_model_dir`. |
+| `session_context.json` | you (seed) → Quark may augment | Pre-seeded context handed to quark-torch-ptq. |
+| `model_analysis.json`  | quark-torch-ptq Step 1 | Source model structural analysis. |
+| `quant_plan.json`      | quark-torch-ptq Step 2 | Resolved quant plan. |
+| `run_manifest.yaml`    | quark-torch-ptq Step 3 | Includes `outputs.quantized_model_dir`. |
 | `validation_report.md` | quark validator  | Per-step ok / FAIL / skipped. |
-| `source_eval.md`       | quark-llm-eval (you) | Source model headline metrics. Cached across retries. |
-| `quantized_eval.md`    | quark-llm-eval (you) | Quantized model headline metrics. Re-run every attempt. |
+| `source_eval.md`       | quark-torch-llm-eval (you) | Source model headline metrics. Cached across retries. |
+| `quantized_eval.md`    | quark-torch-llm-eval (you) | Quantized model headline metrics. Re-run every attempt. |
 | `eval_report.json`     | you | Synthesized wrapper — see §5.3. |
 | `eval_gap_threshold.txt` | you (optional) | Per-prompt threshold override. |
 | `eval_skipped.txt`     | you | Reason eval bailed (#22 / #28 / #29). |

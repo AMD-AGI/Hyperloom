@@ -36,7 +36,7 @@ def test_workspace_unwritable_from_sdk_error(build_workspace):
 def test_quark_skill_unavailable_from_sdk_error(build_workspace):
     ws = build_workspace()
     assert classify_attempt(
-        ws, sdk_error="Quark skill.md missing at .claude/skills/quark-ptq/SKILL.md"
+        ws, sdk_error="Quark skill.md missing at .claude/skills/quark-torch-ptq/SKILL.md"
     ) == OutcomeId.quark_skill_unavailable
 
 

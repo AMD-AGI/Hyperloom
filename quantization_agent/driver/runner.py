@@ -125,7 +125,7 @@ def build_attempt_prompt(
             f"\n\n## Retry context\nThis is attempt #{attempt_number}. The previous "
             f"attempt ended with outcome `{previous_outcome}`. Diagnose and apply the "
             f"fix you wrote in `fix_hypothesis_attempt_{attempt_number}.md` before "
-            f"re-running quark-ptq.{hint}"
+            f"re-running quark-torch-ptq.{hint}"
         )
 
     return f"""You are the Hyperloom quantization-agent.
