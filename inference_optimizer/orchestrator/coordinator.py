@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .. import cortex_kb_constants as C_KB
+from ..recipe_kb import RecipeKB, recipe_canonical_id
+from ..recipe_snapshot_constants import detect_framework_version
 from ..cortex_kb_client import (
     CortexKBClient,
     CortexKBError,
@@ -519,36 +521,32 @@ class Coordinator:
         bus_class: type[MessageBus] = MessageBus,
         compare_against_gpu: str | None = None,
         model_class: str | None = None,
-        cortex_kb: CortexKBClient | None = None,
+        cortex_kb: RecipeKB | None = None,
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
-        fact_writes_enabled: bool = True,
         warm_replay_enabled: bool = True,
         warm_replay_min_confidence: float = 0.7,
         warm_replay_min_reproduce_pct: float = 0.8,
     ):
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
-        # Cortex KB client.  When
-        # ``None`` (legacy cli path or ``--degraded-kb``) the
-        # ``_fact_write_hook`` and CLOSE-time fact-finalize become
-        # no-ops; the rest of the Coordinator behaves
-        # identically to v0.6.  The client itself is stateless apart
-        # from the per-session NDJSON queue, so it can be shared across
-        # threads (the Coordinator is single-event-loop anyway).
-        self.cortex_kb: CortexKBClient | None = cortex_kb
+        # Recipe-snapshot KB dispatcher.  When ``None`` (legacy cli
+        # path or ``--degraded-kb`` with a missing local store
+        # construction) the fact-write hooks become no-ops; the rest
+        # of the Coordinator behaves identically.  The dispatcher is
+        # thread-safe (LocalRecipeStore uses per-cid flock + thread
+        # mutex) so it can be shared across the single-event-loop
+        # Coordinator.
+        # Field name kept as ``cortex_kb`` for grep stability with the
+        # transitional ``cortex_kb=`` kwarg in the CLI / SDK callers;
+        # the type is now :class:`RecipeKB`.
+        self.cortex_kb: RecipeKB | None = cortex_kb
         # Per-session optimization journal — see
         # ``orchestrator/optimization_journal.py``. Lazy-instantiated
         # the first time a T3 hook runs (so SharedState is already
-        # populated with model/hardware/framework + the Cortex sid).
-        # Survives ``--degraded-kb`` and ``--no-fact-writes`` because
-        # it is local-only.
+        # populated with model/hardware/framework). Survives
+        # ``--degraded-kb`` because it is local-only.
         self._journal: Journal | None = None
-        # CLI gate for the direct fact-write surface (``propose_lesson``
-        # / ``propose_pitfall`` / ``update_recipe``). ``False`` keeps
-        # the journal active but skips every KB fact-write call — used
-        # for soak runs that don't want to pollute the shared KB.
-        self._fact_writes_enabled: bool = bool(fact_writes_enabled)
         # GAP 1 — warm-recipe replay controls (PRELUDE auto-apply of
         # the KB best_config). ``warm_replay_enabled=False`` flips the
         # gate off so the warm_start_recipe is rendered into prompts
@@ -1011,7 +1009,7 @@ class Coordinator:
         T2/T3 hypothesize/verify protocol; fact writes are session-
         less, so there is no remote sid to close.
         """
-        if self.cortex_kb is None or not self.cortex_kb.enabled:
+        if self.cortex_kb is None:
             return
         if getattr(self.shared_state, "close_sequence_done", False):
             # CLOSE phase sequencer already ran steps 3 + 4 inline; nothing
@@ -3119,35 +3117,17 @@ class Coordinator:
                 "fact_finalize", status="failed", detail=repr(exc)[:240],
             )
 
-        # ---------------- Step 3: NDJSON drain ----------------
-        if self.cortex_kb is not None and self.cortex_kb.enabled:
-            try:
-                drain_report = self.cortex_kb.drain_pending(
-                    timeout_sec=self.CLOSE_NDJSON_DRAIN_TIMEOUT_SEC,
-                )
-                remaining = int(drain_report.get("remaining", 0))
-                if remaining > 0:
-                    await self._record_close_step(
-                        "ndjson_drain",
-                        status="incomplete",
-                        detail=f"remaining={remaining}",
-                    )
-                else:
-                    await self._record_close_step(
-                        "ndjson_drain", status="done",
-                    )
-            except Exception as exc:  # noqa: BLE001 — defensive
-                log.exception("CLOSE step 3 (NDJSON drain) failed")
-                await self._record_close_step(
-                    "ndjson_drain", status="failed",
-                    detail=repr(exc)[:240],
-                )
-        else:
-            await self._record_close_step("ndjson_drain", status="skipped")
+        # ---------------- Step 3: (retired) NDJSON drain ----------------
+        # The v1 cortex_kb_client used an NDJSON pending queue +
+        # drain_pending() to retry failed central writes. Under the
+        # v2 RecipeKB design writes are local-only (no remote
+        # fan-out queue), so there is nothing to drain. The step is
+        # kept as a no-op marker so close-step ledger consumers
+        # don't break on a missing entry.
+        await self._record_close_step("ndjson_drain", status="skipped")
 
-        # (Step 4 — Cortex session commit — was retired alongside the
-        # T2/T3 hypothesize/verify protocol. Fact writes are session-less,
-        # so the only KB action at CLOSE is the NDJSON drain above.)
+        # (Step 4 — Cortex session commit — was retired earlier
+        # alongside the T2/T3 hypothesize/verify protocol.)
 
         # ---------------- Step 5: mark done ----------------
         self.shared_state.close_sequence_done = True
@@ -5146,11 +5126,138 @@ class Coordinator:
         different recipe rows — matching the new framework-scoped
         canonical id shape introduced alongside the warm-replay PR.
         """
-        from ..cortex_kb_client import recipe_canonical_id
-        workload = self.shared_state.model_name or "unknown_model"
-        hw = self.shared_state.gpu_type or "unknown_gpu"
-        framework = str(getattr(self.shared_state, "framework", "") or "")
-        return recipe_canonical_id(workload, hw, framework)
+        ss = self.shared_state
+        workload = ss.model_name or "unknown_model"
+        hw = ss.gpu_type or "unknown_gpu"
+        framework = str(getattr(ss, "framework", "") or "")
+        framework_version = str(getattr(ss, "framework_version", "") or "")
+        if not framework_version and framework:
+            framework_version = detect_framework_version(framework)
+        precision = str(getattr(ss, "precision", "") or "")
+        return recipe_canonical_id(
+            model=workload,
+            hardware=hw,
+            framework=framework,
+            framework_version=framework_version,
+            precision=precision,
+        )
+
+    def _kb_amend_recipe(
+        self,
+        *,
+        append_lesson: dict[str, Any] | None = None,
+        append_pitfall: dict[str, Any] | None = None,
+        recipe_overrides: dict[str, Any] | None = None,
+        provenance_details: dict[str, Any] | None = None,
+    ) -> None:
+        """Read-modify-write helper for the v2 recipe-snapshot KB.
+
+        Single replacement for the legacy v1 ``propose_lesson`` /
+        ``propose_pitfall`` / ``update_recipe`` calls. Loads the
+        live recipe row for the current 5-tuple, appends the
+        supplied lesson / pitfall (each is a single dict — the
+        caller picks the schema), merges any explicit
+        ``recipe_overrides``, and writes the row back. Best-effort:
+        any failure is logged + swallowed (the optimization journal
+        is a separate audit trail).
+
+        ``recipe_overrides`` follows the LocalRecipeStore.put_recipe
+        kwarg shape (``best_config`` / ``best_throughput`` /
+        ``what_worked`` / ``sessions`` / ``stack_fingerprint`` /
+        ``last_profiled`` / ``extras`` / ...). Anything not provided
+        is preserved from the live row.
+
+        Per the user's design choice (see commit 4d): lesson /
+        pitfall are appended to the recipe's array WITHOUT cross-
+        recipe deduplication. The same statement may appear in
+        multiple 5-tuple rows; that's intentional.
+        """
+        if self.cortex_kb is None:
+            return
+        try:
+            cid = self._workload_canonical_id()
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("_kb_amend_recipe: cid derivation failed")
+            return
+
+        ss = self.shared_state
+        framework = str(getattr(ss, "framework", "") or "")
+        framework_version = str(getattr(ss, "framework_version", "") or "")
+        if not framework_version and framework:
+            framework_version = detect_framework_version(framework)
+        precision = str(getattr(ss, "precision", "") or "")
+
+        try:
+            live = self.cortex_kb.get_recipe(canonical_id=cid) or {}
+        except Exception as exc:  # noqa: BLE001 — best-effort read
+            log.info(
+                "_kb_amend_recipe: get_recipe failed (%s); proceeding with empty live",
+                exc,
+            )
+            live = {}
+
+        lessons = list(live.get("lessons") or [])
+        if append_lesson is not None:
+            lessons.append(append_lesson)
+        pitfalls = list(live.get("pitfalls") or [])
+        if append_pitfall is not None:
+            pitfalls.append(append_pitfall)
+
+        # Build the put_recipe kwargs — preserve everything from live
+        # that the caller didn't override.
+        overrides = dict(recipe_overrides or {})
+        put_kwargs: dict[str, Any] = {
+            "canonical_id":      cid,
+            "model":             ss.model_name or "unknown_model",
+            "hardware":          ss.gpu_type   or "unknown_gpu",
+            "framework":         framework,
+            "framework_version": framework_version,
+            "precision":         precision,
+            "best_config":       overrides.get("best_config")
+                                  if "best_config" in overrides
+                                  else dict(live.get("best_config") or {}),
+            "best_throughput":   overrides.get("best_throughput")
+                                  if "best_throughput" in overrides
+                                  else float(live.get("best_throughput") or 0.0),
+            "what_worked":       overrides.get("what_worked")
+                                  if "what_worked" in overrides
+                                  else list(live.get("what_worked") or []),
+            "what_failed":       overrides.get("what_failed")
+                                  if "what_failed" in overrides
+                                  else list(live.get("what_failed") or []),
+            "remaining_gaps":    overrides.get("remaining_gaps")
+                                  if "remaining_gaps" in overrides
+                                  else list(live.get("remaining_gaps") or []),
+            "prs_tested":        overrides.get("prs_tested")
+                                  if "prs_tested" in overrides
+                                  else list(live.get("prs_tested") or []),
+            "pitfalls":          pitfalls,
+            "lessons":           lessons,
+            "last_profiled":     overrides.get("last_profiled")
+                                  if "last_profiled" in overrides
+                                  else str(live.get("last_profiled") or ""),
+            "stack_fingerprint": overrides.get("stack_fingerprint")
+                                  if "stack_fingerprint" in overrides
+                                  else dict(live.get("stack_fingerprint") or {}),
+            "sessions":          overrides.get("sessions")
+                                  if "sessions" in overrides
+                                  else list(live.get("sessions") or []),
+            "extras":            overrides.get("extras"),
+            "provenance":        {
+                "source":       "hyperloom-inference-optimizer",
+                "generator":    "coordinator",
+                "generated_at": datetime.now(timezone.utc).isoformat(
+                    timespec="microseconds",
+                ),
+                "details":      dict(provenance_details or {}),
+            },
+        }
+        try:
+            self.cortex_kb.put_recipe(**put_kwargs)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "_kb_amend_recipe: put_recipe failed for cid=%s", cid,
+            )
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
         """Route a Critic ``review_verdict`` to the per-variant or
@@ -5921,9 +6028,14 @@ class Coordinator:
             try:
                 # PR-A10: pass the (lowercased) hw_slug so the per-domain
                 # fallback in select_kb_for_domain can filter recipe
-                # candidates to the same GPU.
-                from ..cortex_kb_client import _slug as _kb_slug
-                hw_slug = _kb_slug(state.gpu_type or "", "")
+                # candidates to the same GPU. The slug rule mirrors the
+                # one ``recipe_kb`` uses (basename + lowercase + space/
+                # slash → underscore) so the two consumers agree.
+                _hw_raw = (state.gpu_type or "").strip()
+                hw_slug = (
+                    _hw_raw.rsplit("/", 1)[-1].lower()
+                    .replace(" ", "_").replace("/", "_")
+                ) if _hw_raw else ""
                 subgraph = plane.select_kb_for_domain(
                     domain, hw_slug=hw_slug or None,
                 )
@@ -7835,8 +7947,6 @@ class Coordinator:
     # ------------------------------------------------------------------
     # The methods below own the *fact* side of the KB integration —
     # everything we know to be true at KEEP / REVERT / CLOSE time.
-    # ``_fact_writes_enabled`` (--no-fact-writes CLI flag) gates the
-    # KB writes only; the local optimization_journal is always written.
     # ------------------------------------------------------------------
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
     # GAP 4 — read-modify-write source_session_ids cap. Bounded so the
@@ -8001,9 +8111,7 @@ class Coordinator:
             task_id=task.task_id,
         ))
 
-        if not getattr(self, "_fact_writes_enabled", True):
-            return
-        if self.cortex_kb is None or not self.cortex_kb.enabled:
+        if self.cortex_kb is None:
             return
 
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
@@ -8037,42 +8145,23 @@ class Coordinator:
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
                 measured_at=now_iso,
             )
-            # GAP 4 read-modify-write: merge source_session_ids[] so
-            # subsequent sessions accumulate validators rather than
-            # overwriting via KB shallow new-wins.
-            # R4-10 — when the read fails (transport / business
-            # error), DO NOT write the read-modify-write fields. KB
-            # shallow-merge would replace the existing list with our
-            # singleton, losing all accumulated validators. Write
-            # without those fields so the KB keeps its prior list
-            # untouched; the next session with a healthy read will
-            # rejoin the accumulation correctly.
-            lesson_extra = dict(extra or {})
-            try:
-                prior_lesson = self.cortex_kb.read_lesson_exact(statement=statement)
-                recent_ids, validated_count = self._merge_recent_session_ids(
-                    prior_lesson.get("attrs"), source_session_id,
-                )
-                lesson_extra.update({
-                    "source_session_ids": recent_ids,
-                    "validated_count": validated_count,
-                    "last_validated_at": now_iso,
-                })
-            except CortexKBError as exc:
-                log.info(
-                    "lesson read failed (%s); skipping source_session_ids "
-                    "merge to avoid clobbering KB's accumulated list",
-                    exc,
-                )
-            self.cortex_kb.propose_lesson(
-                statement=statement,
-                measured_impact=impact,
-                applicable_models=models,
-                applicable_hardware=hardware,
-                source_session_id=source_session_id,
-                source_task_id=task.task_id,
-                evidence=evidence_refs,
-                extra_attrs=lesson_extra,
+            # v2: append the lesson onto the recipe's lessons[] —
+            # no cross-recipe dedup / merge of source_session_ids
+            # (per the user-chosen design simplification).
+            self._kb_amend_recipe(
+                append_lesson={
+                    "statement":       statement,
+                    "measured_impact": impact,
+                },
+                provenance_details={
+                    "source_session_id": source_session_id,
+                    "source_task_id":    task.task_id,
+                    "evidence":          list(evidence_refs or []),
+                    "applicable_models":   list(models or []),
+                    "applicable_hardware": list(hardware or []),
+                    "extra":             dict(extra or {}),
+                    "now":               now_iso,
+                },
             )
             return
 
@@ -8081,32 +8170,20 @@ class Coordinator:
             description = self._build_statement(
                 change=change, severity=severity, kind="pitfall",
             )
-            pitfall_extra = dict(extra or {})
-            try:
-                prior_pitfall = self.cortex_kb.read_pitfall_exact(description=description)
-                recent_ids, validated_count = self._merge_recent_session_ids(
-                    prior_pitfall.get("attrs"), source_session_id,
-                )
-                pitfall_extra.update({
-                    "source_session_ids": recent_ids,
-                    "validated_count": validated_count,
-                    "last_validated_at": now_iso,
-                })
-            except CortexKBError as exc:
-                log.info(
-                    "pitfall read failed (%s); skipping source_session_ids "
-                    "merge to avoid clobbering KB's accumulated list",
-                    exc,
-                )
-            self.cortex_kb.propose_pitfall(
-                description=description,
-                severity=severity,
-                applicable_models=models,
-                applicable_hardware=hardware,
-                source_session_id=source_session_id,
-                source_task_id=task.task_id,
-                evidence=evidence_refs,
-                extra_attrs=pitfall_extra,
+            self._kb_amend_recipe(
+                append_pitfall={
+                    "description": description,
+                    "severity":    severity,
+                },
+                provenance_details={
+                    "source_session_id": source_session_id,
+                    "source_task_id":    task.task_id,
+                    "evidence":          list(evidence_refs or []),
+                    "applicable_models":   list(models or []),
+                    "applicable_hardware": list(hardware or []),
+                    "extra":             dict(extra or {}),
+                    "now":               now_iso,
+                },
             )
 
     def _build_statement(
@@ -8265,9 +8342,7 @@ class Coordinator:
             variant_name=variant_name,
         ))
 
-        if not getattr(self, "_fact_writes_enabled", True):
-            return
-        if self.cortex_kb is None or not self.cortex_kb.enabled:
+        if self.cortex_kb is None:
             return
 
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
@@ -8296,34 +8371,23 @@ class Coordinator:
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
                 measured_at=now_iso,
             )
-            # R4-10 — same read-failure guard as ``_record_fact_per_task``.
-            lesson_extra = dict(extra or {})
-            try:
-                prior_lesson = self.cortex_kb.read_lesson_exact(statement=statement)
-                recent_ids, validated_count = self._merge_recent_session_ids(
-                    prior_lesson.get("attrs"), source_session_id,
-                )
-                lesson_extra.update({
-                    "source_session_ids": recent_ids,
-                    "validated_count": validated_count,
-                    "last_validated_at": now_iso,
-                })
-            except CortexKBError as exc:
-                log.info(
-                    "per-variant lesson read failed (%s); skipping "
-                    "source_session_ids merge to avoid clobbering KB",
-                    exc,
-                )
-            self.cortex_kb.propose_lesson(
-                statement=statement,
-                measured_impact=impact,
-                applicable_models=models,
-                applicable_hardware=hardware,
-                source_session_id=source_session_id,
-                source_task_id=task.task_id,
-                source_variant_name=variant_name,
-                evidence=evidence_refs,
-                extra_attrs=lesson_extra,
+            # v2: per-variant lesson append onto recipe.lessons[]
+            # (no cross-recipe dedup, see _record_fact_per_task).
+            self._kb_amend_recipe(
+                append_lesson={
+                    "statement":       statement,
+                    "measured_impact": impact,
+                },
+                provenance_details={
+                    "source_session_id":   source_session_id,
+                    "source_task_id":      task.task_id,
+                    "source_variant_name": variant_name,
+                    "evidence":            list(evidence_refs or []),
+                    "applicable_models":   list(models or []),
+                    "applicable_hardware": list(hardware or []),
+                    "extra":               dict(extra or {}),
+                    "now":                 now_iso,
+                },
             )
             return
 
@@ -8336,33 +8400,21 @@ class Coordinator:
             description = self._build_statement(
                 change=change, severity=severity, kind="pitfall",
             )
-            pitfall_extra = dict(extra or {})
-            try:
-                prior_pitfall = self.cortex_kb.read_pitfall_exact(description=description)
-                recent_ids, validated_count = self._merge_recent_session_ids(
-                    prior_pitfall.get("attrs"), source_session_id,
-                )
-                pitfall_extra.update({
-                    "source_session_ids": recent_ids,
-                    "validated_count": validated_count,
-                    "last_validated_at": now_iso,
-                })
-            except CortexKBError as exc:
-                log.info(
-                    "per-variant pitfall read failed (%s); skipping "
-                    "source_session_ids merge to avoid clobbering KB",
-                    exc,
-                )
-            self.cortex_kb.propose_pitfall(
-                description=description,
-                severity=severity,
-                applicable_models=models,
-                applicable_hardware=hardware,
-                source_session_id=source_session_id,
-                source_task_id=task.task_id,
-                source_variant_name=variant_name,
-                evidence=evidence_refs,
-                extra_attrs=pitfall_extra,
+            self._kb_amend_recipe(
+                append_pitfall={
+                    "description": description,
+                    "severity":    severity,
+                },
+                provenance_details={
+                    "source_session_id":   source_session_id,
+                    "source_task_id":      task.task_id,
+                    "source_variant_name": variant_name,
+                    "evidence":            list(evidence_refs or []),
+                    "applicable_models":   list(models or []),
+                    "applicable_hardware": list(hardware or []),
+                    "extra":               dict(extra or {}),
+                    "now":                 now_iso,
+                },
             )
 
     def _build_session_snapshot(self) -> dict[str, Any]:
@@ -8529,15 +8581,15 @@ class Coordinator:
         # Model family — derived from model_name so future warm-start
         # queries (``find_recipe_with_fallback`` T3 / T6) can match on
         # family without re-running the slug logic at read time.
+        # ``model_family`` was used by the v1 fallback ladder
+        # (find_recipe_with_fallback). Under the v2 design we use
+        # the exact 5-tuple canonical_id without family fallback,
+        # so the family tag is no longer stamped here. (It would
+        # still be useful for reporting / dashboards; left as a
+        # follow-up if operators ask for it.)
         model_name = str(getattr(ss, "model_name", "") or "").strip()
         if model_name:
-            try:
-                from ..cortex_kb_client import model_family as _model_family
-                fam = _model_family(model_name)
-                if fam:
-                    out["model_family"] = fam
-            except Exception:  # noqa: BLE001 — defensive
-                pass
+            out["model_name"] = model_name
         for src_attr, dst_key in (
             ("precision",     "precision"),
             ("tp",            "tp"),
@@ -8726,9 +8778,7 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("optimization_journal.finalize failed")
 
-        if not getattr(self, "_fact_writes_enabled", True):
-            return
-        if self.cortex_kb is None or not self.cortex_kb.enabled:
+        if self.cortex_kb is None:
             return
         ss = self.shared_state
         model_name = getattr(ss, "model_name", "") or ""
@@ -8771,65 +8821,55 @@ class Coordinator:
                 str((s or {}).get("session_id") or "")
                 for s in my_sessions if isinstance(s, dict)
             }
-            # R4-10 — when read fails (transport / business error),
-            # DO NOT pass ``sessions=`` to update_recipe. The KB
-            # shallow-merge would replace its accumulated sessions[]
-            # with our singleton (current session only), wiping every
-            # prior session's history. Write without ``sessions=`` so
-            # the KB keeps its prior list intact; the next session
-            # with a healthy read will rejoin correctly. The trade-off:
-            # this session's entry is NOT added to the recipe history
-            # this round (the NDJSON-flusher retry will fix it on the
-            # subsequent successful read).
-            merged_sessions: list[dict[str, Any]] | None = None
-            try:
-                existing_point = self.cortex_kb.read_recipe_exact(
-                    model=model_name,
-                    hardware=gpu_type,
-                    framework=str(getattr(ss, "framework", "") or ""),
-                )
-                existing_sessions: list[dict[str, Any]] = []
-                prior_attrs = existing_point.get("attrs") or {}
-                for row in (prior_attrs.get("sessions") or []):
-                    if not isinstance(row, dict):
-                        continue
-                    if str(row.get("session_id") or "") in my_session_ids:
-                        # Resume / retry of the same session — our new
-                        # entry supersedes the prior one (carries the
-                        # latest gain_pct / stack_len). Skip historical.
-                        continue
-                    existing_sessions.append(dict(row))
-                merged_sessions = existing_sessions + my_sessions
-            except CortexKBError as exc:
-                log.info(
-                    "recipe read failed (%s); finalize will write WITHOUT "
-                    "sessions[] to avoid clobbering the KB's accumulated "
-                    "history. Next session's update_recipe will rejoin.",
-                    exc,
-                )
+            # v2: read-modify-write the recipe row through the
+            # dispatcher. Sessions[] is merged in-process under the
+            # cid lock (LocalRecipeStore.put_recipe holds flock for
+            # the whole archival sequence) so concurrent finalise
+            # writes don't tear each other.
+            merged_sessions: list[dict[str, Any]] = list(my_sessions)
+            if self.cortex_kb is not None:
+                try:
+                    cid = self._workload_canonical_id()
+                    existing_row = self.cortex_kb.get_recipe(canonical_id=cid) or {}
+                    existing_sessions: list[dict[str, Any]] = []
+                    for row in (existing_row.get("sessions") or []):
+                        if not isinstance(row, dict):
+                            continue
+                        if str(row.get("session_id") or "") in my_session_ids:
+                            # Resume / retry of the same session —
+                            # our new entry supersedes the prior one.
+                            continue
+                        existing_sessions.append(dict(row))
+                    merged_sessions = existing_sessions + my_sessions
+                except Exception as exc:  # noqa: BLE001 — defensive
+                    log.info(
+                        "recipe read failed (%s); finalize will append "
+                        "the current session only; the next finalize "
+                        "will catch up.",
+                        exc,
+                    )
 
-            kwargs: dict[str, Any] = {
-                "model":             model_name,
-                "hardware":          gpu_type,
-                "framework":         str(getattr(ss, "framework", "") or ""),
-                "best_config":       attrs["best_config"],
-                "best_throughput":   attrs["best_throughput"],
-                "what_worked":       attrs["what_worked"],
-                "what_failed":       attrs["what_failed"],
-                "stack_fingerprint": attrs["stack_fingerprint"],
-                "last_profiled":     attrs["last_profiled"],
-                "extra_attrs":       workload_tags if workload_tags else None,
-                "evidence":          [
-                    f"log:session-{getattr(ss, 'cortex_session_id', '') or self.session_dir.name}",
-                ],
-            }
-            if merged_sessions is not None:
-                kwargs["sessions"] = merged_sessions
-            self.cortex_kb.update_recipe(**kwargs)
-        # update_recipe → propose_point internally swallows CortexKBError
-        # and enqueues NDJSON, so this catch-all only matters for true
-        # programmer bugs (OSError writing pending file, attr lookups
-        # blowing up, …). Keeping it makes CLOSE step 2.5 best-effort.
+            self._kb_amend_recipe(
+                recipe_overrides={
+                    "best_config":       attrs["best_config"],
+                    "best_throughput":   attrs["best_throughput"],
+                    "what_worked":       attrs["what_worked"],
+                    "what_failed":       attrs["what_failed"],
+                    "stack_fingerprint": attrs["stack_fingerprint"],
+                    "last_profiled":     attrs["last_profiled"],
+                    "sessions":          merged_sessions,
+                    "extras":            dict(workload_tags or {}),
+                },
+                provenance_details={
+                    "phase": "close_finalize",
+                    "evidence": [
+                        f"log:session-{getattr(ss, 'cortex_session_id', '') or self.session_dir.name}",
+                    ],
+                },
+            )
+        # All KB I/O above is best-effort; this catch-all surfaces
+        # programmer bugs (attr lookups blowing up etc.) so CLOSE
+        # step 2.5 stays defensive.
         except Exception:  # noqa: BLE001 — defensive
             log.exception("update_recipe raised unexpectedly")
 
