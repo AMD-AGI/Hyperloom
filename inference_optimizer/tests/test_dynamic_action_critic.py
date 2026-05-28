@@ -339,9 +339,14 @@ def test_write_critic_verdict_lands_in_artifact_dir(tmp_path: Path):
 # CriticAgentBackend enrichment helper
 # ===========================================================================
 def test_provenance_literal_reads_top_level_and_nested():
+    """§1.2 strict literal — case-sensitive read at every layer
+    (P9 invariant I-3)."""
+    assert _proposal_provenance_literal(
+        {"provenance": "dynamic"},
+    ) == "dynamic"
     assert _proposal_provenance_literal(
         {"provenance": "Dynamic"},
-    ) == "dynamic"
+    ) == "Dynamic"  # NOT folded; downstream comparisons reject it
     assert _proposal_provenance_literal(
         {"params": {"provenance": "specialist:foo"}},
     ) == "specialist:foo"
