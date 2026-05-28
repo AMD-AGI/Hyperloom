@@ -1,5 +1,18 @@
 # How the Optimization Loop Works
 
+> ⚠️ **Stale content notice (May 2026).** This walkthrough still
+> describes a "Step 1: Classify the Model" automated action that has
+> been **removed** from the Hyperloom action graph. The Coordinator no
+> longer derives `model_class` from a `classify` step; it must be
+> supplied explicitly via the `--model-class` CLI flag (see the
+> "Migration Notes" section of the root [README](../README.md) and
+> [UPGRADING.md](UPGRADING.md)). The rest of the loop mechanics — DFS
+> scoring, dynamic branching, KB-driven priors — are still accurate, but
+> read "Step 1: Classify the Model" below as **"The user supplies
+> `model_class` on the CLI, which sets the same score-table priors
+> shown here."** A full rewrite is tracked in the documentation
+> backlog.
+
 A walkthrough of Hyperloom's DFS-guided inference optimization, showing how the agent builds a search tree, scores actions, explores branches, and improves over time. Each optimization run feeds a self-evolving knowledge base that makes the next run faster and more targeted. Uses the GLM-5-FP8 optimization (174 → 509 tok/s/GPU) as a running example.
 
 ---
