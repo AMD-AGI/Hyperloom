@@ -74,9 +74,13 @@ def test_critic_md_is_rules_fragment():
     # source of truth), then 65 → 75 to absorb F-phase v0.8 carve-out
     # bullets that overlap with N38's text, then 75 → 95 by issue #170
     # (Web verification — when/why/how to use web_search / web_fetch and
-    # the mandatory source-citation rule). Future bumps require equivalent
-    # justification (new mechanism, not just adding more action names).
-    assert len(lines) <= 95, (
+    # the mandatory source-citation rule), then 95 → 160 by
+    # dynamic_action.MD P4 (the cross-domain review block that fires
+    # when review_constraints.cross_domain=true — three additional
+    # rules + severity contract + hard-guard replay). Future bumps
+    # require equivalent justification (new mechanism, not just adding
+    # more action names).
+    assert len(lines) <= 160, (
         f"critic.md should be a concise fragment, got {len(lines)} non-empty lines"
     )
     assert "judge_bundle" in text
