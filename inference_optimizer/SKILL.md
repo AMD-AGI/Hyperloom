@@ -466,6 +466,20 @@ GEAK config path, and InferenceX path. Source it (don't try to derive these by
 hand). Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
 
+### Tool source fields (prompt → env, sandbox-only)
+
+Prompt fields naming read-only source trees consumed by sandbox-side
+`install.sh` / launcher. `export <K>="<v>"` in the launcher shell before
+`install.sh`. These are **sandbox-only** — do NOT forward them to the
+RayJob via `--rayjob-extra-env`; the RayJob pod has its own paths and
+does not consume these.
+
+| Prompt field | Env name | Consumer |
+|---|---|---|
+| `OOB_SRC: <path>` | `$OOB_SRC` | `kernel-agent/scripts/install.sh:ensure_oob` |
+| `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `inference_optimizer/scripts/install.sh:ensure_inferencex` |
+| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` |
+
 **Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
 `rsync -a` them into `$SESSION_DIR/vendor/<name>/` and override the matching
