@@ -8050,12 +8050,19 @@ class Coordinator:
                         "after baseline: %r", exc,
                     )
         elif task_kind == "profile":
-            # B2 (atom): profile_executor short-circuits to
-            # status="skipped" with error_class="atom_no_profiler" when
-            # FRAMEWORK=atom. Audit the no-op as "skipped" so the action
-            # ledger doesn't claim a fake promotion, and don't write any
-            # trace / profile_status fields. Still drop the pending gate
-            # for THIS task id so downstream proposals are not stuck.
+            # IR-8 fallback: profile_executor used to short-circuit on
+            # FRAMEWORK=atom with status="skipped" + error_class=
+            # "atom_no_profiler". That short-circuit was removed once
+            # Magpie's atom_mi*x.sh learned to bridge PROFILE=1 to
+            # atom's --torch-profiler-dir (atom natively supports torch
+            # profiler via /start_profile + /stop_profile). This
+            # ``skipped`` arm is now a *defensive* path: it still runs
+            # cleanly if an out-of-date Magpie clone is in play (the
+            # only realistic skipped producer left), or if a future
+            # executor returns skipped for a different reason. Audit
+            # the no-op as "skipped" so the action ledger doesn't claim
+            # a fake promotion, and drop the pending gate for THIS task
+            # id so downstream proposals are not stuck.
             if str(result.get("status") or "") == "skipped":
                 audit_decision = "skipped"
                 audit_extras = {
@@ -8178,14 +8185,17 @@ class Coordinator:
             # save() path persists the executor's mutations to disk.
             status = str(result.get("status") or "")
             if status == "skipped":
-                # B2 (atom): the roofline composite short-circuits to
-                # status="skipped" with error_class="atom_no_profiler"
-                # when FRAMEWORK=atom (no torch_profiler in Magpie v1).
-                # This is a structured no-op, not a failure: do NOT bump
+                # IR-8 fallback: the roofline composite used to short-
+                # circuit on FRAMEWORK=atom with status="skipped"
+                # because profile was a hard dependency and atom had
+                # no profiler wiring. That short-circuit was removed
+                # once Magpie's atom_mi*x.sh learned to bridge PROFILE=1
+                # to atom's --torch-profiler-dir. This arm is now the
+                # *defensive* path: an out-of-date Magpie clone (or a
+                # future skipped-emitting executor) still gets a clean
+                # no-op rather than a spurious "discarded". Do NOT bump
                 # ``roofline_failure_streak`` and do NOT touch the
-                # watermark / trace_analyze snapshot. Audit as skipped so
-                # the action ledger reflects the no-op rather than a
-                # spurious "discarded" decision.
+                # watermark / trace_analyze snapshot.
                 audit_decision = "skipped"
                 audit_extras = {
                     "error_class": result.get("error_class"),
