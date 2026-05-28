@@ -68,8 +68,8 @@ log = logging.getLogger(__name__)
 BASELINE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 )
-BASELINE_DEFAULT_TIMEOUT_SEC = 2400           # WARM-start cap, 40 min (aiter jit cache populated)
-BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap, 60 min (aiter jit cache empty/sparse)
+BASELINE_DEFAULT_TIMEOUT_SEC = 7800           # WARM-start cap, 130 min (raised for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 ~82 min workload)
+BASELINE_COLD_START_TIMEOUT_SEC = 9000        # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
 COLD_START_KERNEL_THRESHOLD = 20              # < N .so files under aiter jit/build/ ⇒ COLD
 
 # Legacy fallback probe order for aiter's JIT cache dir. Used only when

@@ -68,7 +68,7 @@ benchmark:
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  timeout_seconds: 2400              # 40 min hard cap (profile adds ~30-90s vs plain baseline)
+  timeout_seconds: 14400             # 4 h hard cap (Qwen-32B TP=1 profile with steady-state window can take ~3 h)
 
   profiler:
     torch_profiler:
