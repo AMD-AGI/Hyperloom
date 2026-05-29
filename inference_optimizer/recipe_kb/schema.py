@@ -29,10 +29,12 @@ We keep a small superset of arbor fields:
   The dispatcher uses them to round-trip rows back to ``/v1`` /
   audit.
 
-Schema translation between this arbor shape and the v2 wire shape
-the central kb-service speaks lives in
-:mod:`recipe_kb.dispatcher` (``_v2_to_arbor`` /
-``_arbor_to_v2``). The local store NEVER speaks v2 directly.
+Schema translation from the v2 wire shape (central kb-service) to
+this arbor shape lives in :mod:`recipe_kb.dispatcher`
+(``_v2_to_arbor``), applied on read. There is intentionally no
+reverse ``_arbor_to_v2``: writes are local-only and are never
+marshalled back to the v2 wire shape. The local store NEVER speaks
+v2 directly.
 """
 
 from __future__ import annotations
@@ -76,8 +78,14 @@ class PRResult:
 
 @dataclass
 class Pitfall:
-    """A "watch out for X" — operator-readable description."""
+    """A "watch out for X" — operator-readable description.
+
+    ``severity`` (e.g. ``crash`` / ``regress``) is a hyperloom superset
+    field the Coordinator stamps so the warm-start prompt can rank
+    pitfalls by disruption; arbor consumers simply ignore it.
+    """
     description: str
+    severity: str = ""
 
 
 @dataclass
@@ -88,9 +96,14 @@ class Lesson:
     under ``what_worked``); we keep ``Lesson`` because the v2 wire
     contract has a dedicated ``lessons`` array and the optimizer's
     Coordinator emits these distinct from ``what_worked``.
+
+    ``measured_impact`` is free-form: the Coordinator writes a
+    structured dict (``gain_pct`` / ``throughput_after`` / ...), but a
+    plain string is also accepted for arbor-compat — it is preserved
+    verbatim (never str()-ed) so the structured payload round-trips.
     """
     statement: str
-    measured_impact: str = ""
+    measured_impact: Any = ""
 
 
 @dataclass
@@ -128,14 +141,21 @@ class StackFingerprint:
 class SessionSummary:
     """One optimisation-session entry — one row per CLOSE.
 
-    Mirrors arbor's ``SessionSummary``. Coordinator's CLOSE phase
-    appends one of these on every successful exit so a recipe
-    accumulates a per-session change-log.
+    Superset of arbor's session log. The Coordinator's CLOSE finalize
+    writes ``session_id`` / ``gain_pct`` / ``stack_len`` — ``session_id``
+    is REQUIRED for the per-session dedup on rewrite (two finalises of
+    the same session must not double-append) and ``gain_pct`` feeds
+    warm-replay. arbor's ``date`` / ``throughput_before`` /
+    ``throughput_after`` / ``actions_taken`` stay available for arbor
+    consumers (all default to empty so a hyperloom-only write is valid).
     """
-    date: str
-    throughput_before: float
-    throughput_after: float
+    date: str = ""
+    throughput_before: float = 0.0
+    throughput_after: float = 0.0
     actions_taken: list[str] = field(default_factory=list)
+    session_id: str = ""
+    gain_pct: float = 0.0
+    stack_len: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +242,10 @@ class Recipe:
                  "outcome": p.outcome, "notes": p.notes}
                 for p in self.prs_tested
             ],
-            "pitfalls": [{"description": p.description} for p in self.pitfalls],
+            "pitfalls": [
+                {"description": p.description, "severity": p.severity}
+                for p in self.pitfalls
+            ],
             "lessons": [
                 {"statement": l.statement,
                  "measured_impact": l.measured_impact}
@@ -234,7 +257,10 @@ class Recipe:
                 {"date": s.date,
                  "throughput_before": float(s.throughput_before),
                  "throughput_after": float(s.throughput_after),
-                 "actions_taken": list(s.actions_taken)}
+                 "actions_taken": list(s.actions_taken),
+                 "session_id": s.session_id,
+                 "gain_pct": float(s.gain_pct),
+                 "stack_len": int(s.stack_len)}
                 for s in self.sessions
             ],
             "authority":     str(self.authority),
@@ -314,14 +340,17 @@ class Recipe:
                 if isinstance(p, dict)
             ],
             pitfalls=[
-                Pitfall(description=str(p.get("description") or ""))
+                Pitfall(
+                    description=str(p.get("description") or ""),
+                    severity=str(p.get("severity") or ""),
+                )
                 for p in (d.get("pitfalls") or [])
                 if isinstance(p, dict)
             ],
             lessons=[
                 Lesson(
                     statement=str(l.get("statement") or ""),
-                    measured_impact=str(l.get("measured_impact") or ""),
+                    measured_impact=l.get("measured_impact") or "",
                 )
                 for l in (d.get("lessons") or [])
                 if isinstance(l, dict)
@@ -336,6 +365,9 @@ class Recipe:
                     throughput_before=float(s.get("throughput_before") or 0.0),
                     throughput_after=float(s.get("throughput_after") or 0.0),
                     actions_taken=list(s.get("actions_taken") or []),
+                    session_id=str(s.get("session_id") or ""),
+                    gain_pct=float(s.get("gain_pct") or 0.0),
+                    stack_len=int(s.get("stack_len") or 0),
                 )
                 for s in (d.get("sessions") or [])
                 if isinstance(s, dict)
