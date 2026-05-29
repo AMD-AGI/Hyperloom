@@ -178,63 +178,69 @@ def test_build_sweep_params_accepts_isl_osl_as_pair_lists():
     assert out["isl_osl_configs"] == ["2048:512", "8192:1024"]
 
 
-def test_build_sweep_params_rejects_malformed_conc_values():
+@pytest.mark.parametrize(
+    "bad",
+    [None, [], "foo", [None], ["a", "b"], "1,2,3"],
+    ids=["none", "empty", "string", "list_of_none", "non_int_strings", "csv_string"],
+)
+def test_build_sweep_params_rejects_malformed_conc_values(bad):
     """conc_values must be a non-empty list of int-coercible values;
     anything else → fallback to default."""
     from inference_optimizer.orchestrator.action_executors.sweep import (
         DEFAULT_CONC_VALUES,
     )
 
-    for bad in (None, [], "foo", [None], ["a", "b"], "1,2,3"):
-        state = _BareState(
-            warm_start_recipe={"sweep_grid": {"conc_values": bad}},
-        )
-        out = Coordinator._build_sweep_params_from_recipe(state)
-        assert out["conc_values"] == DEFAULT_CONC_VALUES, (
-            f"bad conc_values={bad!r} should fall back to defaults"
-        )
+    state = _BareState(warm_start_recipe={"sweep_grid": {"conc_values": bad}})
+    out = Coordinator._build_sweep_params_from_recipe(state)
+    assert out["conc_values"] == DEFAULT_CONC_VALUES
 
 
-def test_build_sweep_params_rejects_malformed_isl_osl():
+@pytest.mark.parametrize(
+    "bad",
+    [None, [], "1024:1024", [None], [{"isl": 1024}], [[1024]]],
+    ids=["none", "empty", "string", "list_of_none", "dict_inside", "list_wrong_arity"],
+)
+def test_build_sweep_params_rejects_malformed_isl_osl(bad):
     """Non-list / wrong-shape isl_osl_configs → default fallback."""
     from inference_optimizer.orchestrator.action_executors.sweep import (
         DEFAULT_ISL_OSL,
     )
 
-    for bad in (None, [], "1024:1024", [None], [{"isl": 1024}], [[1024]]):
-        state = _BareState(
-            warm_start_recipe={"sweep_grid": {"isl_osl_configs": bad}},
-        )
-        out = Coordinator._build_sweep_params_from_recipe(state)
-        assert out["isl_osl_configs"] == DEFAULT_ISL_OSL, (
-            f"bad isl_osl_configs={bad!r} should fall back to defaults"
-        )
+    state = _BareState(warm_start_recipe={"sweep_grid": {"isl_osl_configs": bad}})
+    out = Coordinator._build_sweep_params_from_recipe(state)
+    assert out["isl_osl_configs"] == DEFAULT_ISL_OSL
 
 
-def test_build_sweep_params_rejects_non_positive_num_prompts_factor():
+@pytest.mark.parametrize(
+    "bad",
+    [0, -1, "x", None],
+    ids=["zero", "negative", "string", "none"],
+)
+def test_build_sweep_params_rejects_non_positive_num_prompts_factor(bad):
     """num_prompts_factor must be a positive int; zero / negative / non-int
     → default fallback."""
     from inference_optimizer.orchestrator.action_executors.sweep import (
         DEFAULT_NUM_PROMPTS_FACTOR,
     )
 
-    for bad in (0, -1, "x", None):
-        state = _BareState(
-            warm_start_recipe={
-                "sweep_grid": {"num_prompts_factor": bad},
-            },
-        )
-        out = Coordinator._build_sweep_params_from_recipe(state)
-        assert out["num_prompts_factor"] == DEFAULT_NUM_PROMPTS_FACTOR
+    state = _BareState(
+        warm_start_recipe={"sweep_grid": {"num_prompts_factor": bad}},
+    )
+    out = Coordinator._build_sweep_params_from_recipe(state)
+    assert out["num_prompts_factor"] == DEFAULT_NUM_PROMPTS_FACTOR
 
 
-def test_build_sweep_params_non_dict_recipe_falls_back():
+@pytest.mark.parametrize(
+    "bad",
+    [None, "raw text", 42, [], {"sweep_grid": "not a dict"}],
+    ids=["none", "string", "int", "list", "sweep_grid_not_dict"],
+)
+def test_build_sweep_params_non_dict_recipe_falls_back(bad):
     """recipe is not a dict at all → defaults; recipe.sweep_grid not a dict
     → defaults."""
-    for bad in (None, "raw text", 42, [], {"sweep_grid": "not a dict"}):
-        state = _BareState(warm_start_recipe=bad)  # type: ignore[arg-type]
-        out = Coordinator._build_sweep_params_from_recipe(state)
-        assert out["source"] == "skill_md_default"
+    state = _BareState(warm_start_recipe=bad)  # type: ignore[arg-type]
+    out = Coordinator._build_sweep_params_from_recipe(state)
+    assert out["source"] == "skill_md_default"
 
 
 # ===========================================================================

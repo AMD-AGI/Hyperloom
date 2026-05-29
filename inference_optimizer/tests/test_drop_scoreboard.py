@@ -22,7 +22,6 @@ from __future__ import annotations
 import importlib
 import json
 import logging
-import os
 from pathlib import Path
 
 import pytest

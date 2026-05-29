@@ -2,10 +2,10 @@
 # Robustness monitor for long-running ``inference_optimizer optimize`` runs.
 #
 # Polls ``$INFERENCE_OPTIMIZER_SESSION_DIR/state.json`` every 300s. On a
-# terminal ``stop_reason`` (``target_reached`` / ``no_more_leverage`` /
-# ``time_exhausted`` / ``max_ticks``), exits 0. If the optimizer process has
-# disappeared from ``/proc`` (crashed / killed), re-launches it with
-# ``--resume`` and updates ``$PID_FILE`` with the new pid. Logs the
+# terminal session (any ``stop_reason`` in ``STOP_REASON_VOCAB``, ``phase=CLOSE``,
+# or ``reports/final.md`` present), exits 0 without resuming. If the optimizer
+# process has disappeared from ``/proc`` *without* a terminal marker (unexpected
+# crash), re-launches it with ``--resume`` and updates ``$PID_FILE``. Logs the
 # resume invocation to ``$REPO_ROOT/optimizer_runs/resume_<ts>.log``.
 #
 # Required env (caller MUST export):
@@ -37,8 +37,10 @@
 #     2>&1 < /dev/null &
 #
 # Edit the defaults above before copying if your run uses different
-# values. The ``stop_reason`` interpretation matches the ``Monitoring``
-# section of SKILL.md (same terminal-state set).
+# values. Terminal detection is aligned with
+# ``inference_optimizer.orchestrator.phase_state.STOP_REASON_VOCAB`` (not a
+# hard-coded subset — ``baseline_failed`` and other failure sentinels must not
+# trigger auto-resume).
 
 set -u
 
@@ -58,23 +60,68 @@ read_stop() {
   python3 -c "import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); print((json.loads(p.read_text()).get('stop_reason') or '').strip() if p.exists() else '')" "$session_dir/state.json"
 }
 
+# Exit 0 when the session is finished (no auto-resume). Uses STOP_REASON_VOCAB
+# from phase_state when importable; falls back to a minimal set for offline use.
+is_terminal_session() {
+  python3 - "$session_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+sd = pathlib.Path(sys.argv[1])
+state_path = sd / "state.json"
+final_report = sd / "reports" / "final.md"
+
+if final_report.is_file():
+    print("final_report", file=sys.stderr)
+    raise SystemExit(0)
+
+if not state_path.is_file():
+    raise SystemExit(1)
+
+state = json.loads(state_path.read_text())
+phase = (state.get("phase") or "").strip()
+stop = (state.get("stop_reason") or "").strip()
+
+if phase == "CLOSE":
+    print(f"phase={phase}", file=sys.stderr)
+    raise SystemExit(0)
+
+try:
+    from inference_optimizer.orchestrator.phase_state import STOP_REASON_VOCAB
+except ImportError:
+    STOP_REASON_VOCAB = frozenset({
+        "target_reached", "no_more_leverage", "time_exhausted", "max_ticks",
+        "baseline_failed", "prelude_baseline_failed", "policy_loop",
+        "prelude_policy_loop", "emergency", "signal", "unknown", "custom",
+        "crash_threshold_exceeded", "user_stop_requested",
+        "time_exhausted_during_prelude", "cortex_t0_failed",
+        "cortex_drain_failed", "cortex_commit_failed",
+    })
+
+if stop and stop in STOP_REASON_VOCAB:
+    print(f"stop_reason={stop}", file=sys.stderr)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
 while [ "$(date +%s)" -lt "$deadline" ]; do
   pid=""
   [ -f "$PID_FILE" ] && read -r pid < "$PID_FILE" || true
 
-  case "$(read_stop)" in
-    target_reached|no_more_leverage|time_exhausted|max_ticks)
-      echo "[robustness] terminal $(date -Is)"
-      exit 0
-      ;;
-  esac
+  if is_terminal_session; then
+    echo "[robustness] terminal $(date -Is) phase=$(python3 -c "import json,pathlib; p=pathlib.Path('$session_dir/state.json'); s=json.loads(p.read_text()) if p.exists() else {}; print(s.get('phase',''))") stop_reason=$(read_stop)"
+    exit 0
+  fi
 
   if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
     sleep 300
     continue
   fi
 
-  echo "[robustness] optimizer stopped; resuming $(date -Is)"
+  echo "[robustness] optimizer stopped (no terminal marker); resuming $(date -Is)"
   resume_log="$REPO_ROOT/optimizer_runs/resume_$(date +%Y%m%d_%H%M%S).log"
   MAGPIE_PYTHON="${MAGPIE_PYTHON}" setsid nohup inference_optimizer --verbose optimize --resume \
     --target-gain "${TARGET_GAIN:-10}" --max-hours "${MAX_HOURS:-24}" \

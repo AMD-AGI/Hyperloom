@@ -20,11 +20,9 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.task_registry import Task
 
 
 # ---------------------------------------------------------------------------
@@ -251,3 +249,34 @@ def test_cli_default_research_lane_capacity_is_4():
     parser = cli_mod._build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
     assert args.research_lane_capacity == 4
+
+
+def test_cli_clamps_research_lane_capacity_above_six(tmp_path):
+    """MAX_RESEARCH_LANE_CAPACITY=6 is a hard cap; operator values
+    above 6 are silently clamped down (no warning). Verifies the
+    SharedState ends up holding the clamped value, not the raw arg."""
+    import argparse
+
+    from inference_optimizer.cli import _seed_shared_state
+    from inference_optimizer.orchestrator.policy import (
+        MAX_RESEARCH_LANE_CAPACITY,
+    )
+
+    # Minimal Namespace: _seed_shared_state directly accesses model /
+    # model_class / target_summary / max_hours (no getattr defaults);
+    # everything else uses getattr fallbacks.
+    args = argparse.Namespace(
+        research_lane_capacity=32,
+        model="/tmp/dummy-model",
+        model_class="",
+        target_summary="clamp test",
+        target_gain=0.0,
+        max_hours=0,
+    )
+    state = _seed_shared_state(
+        session_dir=tmp_path,
+        args=args,
+        session_id="clamp-test",
+    )
+    assert MAX_RESEARCH_LANE_CAPACITY == 6
+    assert state.research_lane_capacity == MAX_RESEARCH_LANE_CAPACITY

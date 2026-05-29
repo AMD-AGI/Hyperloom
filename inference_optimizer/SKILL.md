@@ -23,7 +23,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `profile`, `backends`, `params`, `sweep`, Kernel requests, `report`).
-- Kernel: responder path for `select_kernels`, `run_optimization`, `integrate`.
+- Kernel: responder path for `trace_analyze`, `run_optimization`, `integrate`.
 - Critic: proposal review (default: `--critic-agent` — drives the
   `critic-agent/` skill runtime with KB priors / session memory /
   `review_constraints`-gated verdicts). `--critic-mock` for offline /
@@ -34,7 +34,7 @@ The CLI starts a Python Coordinator that coordinates:
   intents. `--robustness-mock` for offline / smoke tests.
   - **Multi-node auto-downgrade (`--nodes >= 2`)**: the agent backend's
     `LocalProbeSource` targets sandbox-local resources only (ray status,
-    inference server, auth-proxy, GPU, FD, disk, shm). On multi-node every
+    inference server, GPU, FD, disk, shm). On multi-node every
     such resource lives in a separate pod (head / worker / RayJob), so each
     probe surfaces as a HIGH false positive that floods the bus. The CLI
     auto-downgrades to `--robustness-mock` (heartbeat only) and prints a
@@ -168,10 +168,10 @@ source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
 in the **same shell** that will spawn `inference_optimizer optimize`.
 Skipping install strikes silently *after* `baseline` succeeds: missing
-TraceLens/GEAK/OOB CLI → `select_kernels` / `kernel_opt` fail; dead
-auth-proxy → Claude SDK `401`; no live Ray head → `kernel_opt` tasks
-hang; missing `kernel-agent.env.sh` → first claude/codex call returns
-`401`. `install.sh --check-only` is a *diagnostic*, never a substitute.
+TraceLens/GEAK/OOB CLI → `trace_analyze` / `kernel_opt` fail; no live
+Ray head → `kernel_opt` tasks hang; missing `kernel-agent.env.sh` →
+first claude/codex call returns `401`. `install.sh --check-only` is a
+*diagnostic*, never a substitute.
 
 **Resume carve-out.** `... optimize --resume` may skip install only when
 ALL hold: (1) `install.sh` exited 0 earlier in the *same shell*; (2)
@@ -210,9 +210,13 @@ PolicyGate's `explore_requires_specialist_provenance` rule denies any
 to one of:
 
 - `provenance='specialist:<domain>'` — variant came from a
-  `specialist_done.proposal_set` entry. The canonical path.
+  `specialist_done.proposal_set` entry. The canonical path. **At most
+  ONE such variant per explore round** (rule
+  `explore_specialist_grid_max_one`); pick the strongest proposal and
+  defer the runners-up to a subsequent round.
 - `provenance='default_grid'` — cold-start fallback when no specialist
-  has produced a proposal_set yet. The executor uses its built-in grid.
+  has produced a proposal_set yet. The executor uses its built-in grid;
+  uncapped (several `default_grid` variants in one round is fine).
 
 The orchestration LLM is taught the specialist-first contract via
 `actions/_meta/specialist.yaml` (PR-A1) plus the orchestration prompt's
@@ -288,65 +292,81 @@ Coordinator hasn't fired yet. PolicyGate
 within `INFERENCE_OPTIMIZER_ASSESSMENT_MIN_INTERVAL_SEC`
 (default 1800s).
 
-## Integration Freeze (active 2026-05-24 → tag `f3-done`)
+### FRAMEWORK_PR phase
 
-This branch is in a managed integration phase against `origin/main`
-(roofline-v2 PR #288 + framework-agent PR #280). Until tag `f3-done`
-exists, the rules below apply to anyone (humans **and** LLM agents)
-touching this repository.
+Inserted between PRELUDE and EXPLORE. Gated by
+`SharedState.framework_phase_enabled` (CLI `--no-framework` opts
+out; default on). Coordinator owns the loop end-to-end — the LLM
+never proposes the `framework_pr` action; PolicyGate
+`framework_pr_action_not_llm_proposable` denies any attempt.
 
-### What you MUST NOT do
+Flow per tick (`_pump_framework_pr_phase`):
+1. If no pending/running `framework_pr` task and no current batch:
+   call `fa phase-discover` for a fresh candidate batch (model +
+   framework + gpu_type + `gaps[]`). Transient timeouts/errors do
+   NOT immediately flip the phase done — the pump retries up to
+   `DISCOVER_FAILURE_RETRY_LIMIT` (3) times before giving up.
+2. Pop the next candidate; route it through the Critic gate
+   (`_critic_review_framework_pr_candidate`). `approve` (or the
+   degraded `abstain`) falls through to enqueue; `reject` records a
+   `critic_denied` row in `framework_pr_phase_progress` and moves
+   on to the next candidate.
+3. Enqueue a `framework_pr` task with
+   `requires_lanes=[server_lifecycle, workspace_mutation, benchmark_lane]`.
+4. `FrameworkPrExecutor` (a) fetches the unified diff (curls
+   `candidate.diff_url` unless explicit `params.patches` are
+   supplied), (b) snapshots the live tree's HEAD SHA, (c)
+   `git apply`s the diff against the live framework_source_roots,
+   (d) runs `run_grid([single_variant])` for benchmarking. We do
+   NOT shell `fa phase-fetch` — apply targets the live tree, not an
+   fa-managed worktree.
+5. KEEP commits the change to the live tree (so the next candidate
+   stacks on top) and triggers a `cumulative_gain_validated` update
+   + watermark refresh
+   (`_maybe_enqueue_watermark_roofline(reason="framework_pr_keep_watermark")`).
+   REVERT runs `git reset --hard <pre_apply_sha>` to restore the
+   pre-apply state without touching prior KEEP commits.
+6. Per-candidate row recorded in `framework_pr_phase_progress`;
+   batch totals in `framework_pr_batches`.
 
-- **Do NOT** `git merge origin/main` directly. Use the cherry-pick
-  path documented in `plan_roofline_framework/F{0,1,2,3}_*.MD`. The
-  authoritative dry-run conflict map is
-  `docs/integration/dryrun_unmerged_*.log`.
-- **Do NOT** re-introduce `backends.py` / `params.py` /
-  `validate_stack.py` / `scoring.py`. They are intentionally deleted
-  (KB_design §3.4 / §3.9 / KB_gaps/Gap-10). See
-  `docs/integration/MUST_PRESERVE.md` for the full v0.8-asset list.
-- **Do NOT** add a `framework_pr first-explore priority` rule to
-  `system_prompts/orchestration.md`. It conflicts with **IR-4**
-  specialist-first contract. F2 absorbs the framework-agent
-  capability into `serving_specialist`'s `framework_pr_scout`
-  sub_kind instead — see
-  `docs/integration/MAIN_FEATURES_DROPPED.md` §3.
-- **Do NOT** add a `sequence_denial` rule that consumes
-  `backends_attempts` / `params_attempts` fields. v0.8 has no
-  writers for those zombies; the denial would be permanently true
-  and lock `kernel_opt` forever. F3-5 ships the v0.8 replacement
-  (`explore_attempts_minimum_before_kernel_opt`).
+Exit (`exit_normal_framework_pr`, 3-way precedence):
+- `framework_pr_force_exit_low_budget` — remaining wall-clock <
+  `0.6 × max_hours`.
+- `framework_pr_plateau` — 3 consecutive batches with
+  `max_gain_pct_observed_in_batch < 1.0`.
+- `framework_pr_phase_done` — `framework_pr_phase_done=True`
+  (set when `fa phase-discover` returns an empty batch).
 
-### What you MAY do
+Resume: same shape as EXPLORE — completed candidates skip via the
+task registry idempotency key (`framework_pr:<batch_id>:<cand_id>`),
+in-flight ones are dropped + redone.
 
-- New work that touches Coordinator / SharedState / PolicyGate must
-  rebase atop the F0 scaffolding commits (see tag
-  `pre-roofline-merge`..HEAD): placeholder `roofline_snapshot_id`
-  / `last_trace_analyze` / `roofline_saturation_history` fields,
-  the `TraceAnalyzeSnapshot` reader, EXPLORE/KERNEL/CLOSE allowlist
-  `roofline` placeholder, and the 5 F1/F2/F3 toggles
-  (`use_roofline_composite` / `framework_agent_enabled` /
-  `deny_direct_profile` / `gain_driven_kernel_opt` /
-  `roofline_saturation_advisory`).
-- Use the toggles to gate F1/F2/F3 features. All five default to
-  `False` — runtime behaviour at `f0-done` is identical to
-  `pre-roofline-merge`.
+## Retired modules and rules (do not re-introduce)
 
-### References
+These orchestrator modules were intentionally removed; the
+`actions/_meta/*.yaml` registry + `_grid_runner.py` + specialist-first
+EXPLORE flow replaced them. Re-adding them re-creates conflicting
+decision paths:
 
-- `plan_roofline_framework/README.md` — index + cherry-pick modes
-- `plan_roofline_framework/F{0,1,2,3}_*.MD` — phase playbooks
-- `docs/integration/MUST_PRESERVE.md` — v0.8 features that must
-  survive integration; `check_preserved.sh` enforces it
-- `docs/integration/MAIN_FEATURES_DROPPED.md` — main features
-  intentionally dropped, with replacement strategies
-- `docs/integration/dryrun_unmerged_*.log` — original conflict map
-- `docs/test-baselines/pre_roofline_merge_*.log` — 1624 passing baseline
-- `docs/test-baselines/known_failed_*.txt` — 5 pre-existing
-  failures that do NOT count against any phase verdict
-- Tag `pre-roofline-merge` — rollback anchor (last commit before F0)
-- Tags `f0-done` / `f1-done` / `f2-done` / `f3-done` — phase
-  completion anchors (each is its own rollback target)
+- `orchestrator/backends.py` (the action-routing one — distinct from
+  the LLM-adapter directory `orchestrator/backends/`)
+- `orchestrator/params.py`
+- `orchestrator/validate_stack.py`
+- `orchestrator/scoring.py`
+
+Related rules that look reasonable but break things:
+
+- **No `framework_pr first-explore priority` rule** in
+  `system_prompts/orchestration.md` — conflicts with **IR-4**.
+  Framework-agent runs in the dedicated **FRAMEWORK_PR** phase
+  before EXPLORE; the LLM never proposes the `framework_pr`
+  action (PolicyGate denies it via
+  `framework_pr_action_not_llm_proposable`). Use `--no-framework`
+  to skip the phase entirely.
+- **No `sequence_denial` rule** consuming `backends_attempts` /
+  `params_attempts` — those fields have no writers and would
+  permanently deny `kernel_opt`. Use
+  `explore_attempts_minimum_before_kernel_opt`.
 
 ## Setup
 
@@ -379,7 +399,7 @@ full inference optimizer session.
 
 The install phase always initializes the full Hyperloom runtime. Even if the
 user later passes `--no-kernel` at runtime, the installer still prepares
-kernel-agent / TraceLens / GEAK / OOB / auth-proxy; `--no-kernel` only means
+kernel-agent / TraceLens / GEAK / OOB CLI auth; `--no-kernel` only means
 that this `optimize` run skips the kernel optimization phase.
 
 `install.sh` installs everything in one shot (no `--with-*` flags to
@@ -401,14 +421,27 @@ of `inference_optimizer/install.sh`):
 | TraceLens internal (perf-report CLI) | `ensure_tracelens` (`cp -r` from read-only WekaFS mount to `${HYPERLOOM_ROOT}/TraceLens-internal` = `$USER_DATA_PATH/runtime/source-mirrors/TraceLens-internal`) |
 | GEAK CLI + `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` | `ensure_geak` |
 | Node.js/npm + OOB CLI + claude/codex npm CLIs + `@cursor/sdk` global install + `~/.claude/config.json` + `~/.codex/auth.json` | `ensure_node` + `ensure_oob` (mirrors `${HYPERLOOM_BUNDLE}/OOB` → `${HYPERLOOM_ROOT}/OOB/oob_cli`) |
-| OOB auth-proxy on `127.0.0.1:4002` (rewrites `x-api-key` → `Authorization: Bearer`; without it Claude SDK returns 401) | `ensure_auth_proxy.sh` |
-| `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL` exported to `kernel-agent.env.sh` if set in env (cursor backend uses Cursor's own gateway, not the `:4002` proxy). When `CURSOR_API_KEY` is unset, `cursor` is auto-skipped from default backend selection (`choose_backends` / `recommend_backends` / batch fallback ladder / `parallel_e2e_runner --backends` default); explicit user-supplied backends are still honored. | `write_env_file` |
+| `CURSOR_API_KEY` / `CURSOR_DEFAULT_MODEL` exported to `kernel-agent.env.sh` if set in env (cursor backend uses Cursor's own gateway). When `CURSOR_API_KEY` is unset, `cursor` is auto-skipped from default backend selection (`choose_backends` / `recommend_backends` / batch fallback ladder / `parallel_e2e_runner --backends` default); explicit user-supplied backends are still honored. | `write_env_file` |
 
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}` is
 regenerated by `install.sh` and contains the proxy-rewritten URLs, auth aliases,
 GEAK config path, and InferenceX path. Source it (don't try to derive these by
 hand). Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
+
+### Tool source fields (prompt → env, sandbox-only)
+
+Prompt fields naming read-only source trees consumed by sandbox-side
+`install.sh` / launcher. `export <K>="<v>"` in the launcher shell before
+`install.sh`. These are **sandbox-only** — do NOT forward them to the
+RayJob via `--rayjob-extra-env`; the RayJob pod has its own paths and
+does not consume these.
+
+| Prompt field | Env name | Consumer |
+|---|---|---|
+| `OOB_SRC: <path>` | `$OOB_SRC` | `kernel-agent/scripts/install.sh:ensure_oob` |
+| `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `inference_optimizer/scripts/install.sh:ensure_inferencex` |
+| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `kernel-agent/scripts/install.sh:ensure_tracelens` |
 
 **Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$OOB_SRC` / `$GEAK_REPO` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
@@ -463,7 +496,7 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 
 Quirks: with `set -u`, assign dependent vars on separate lines (chained
 `export A=... B=$A` can fail with `unbound variable`). The installer
-leaves a live Ray head; `ray status` must succeed because `select_kernels`
+leaves a live Ray head; `ray status` must succeed because `trace_analyze`
 submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 
 `_preflight()` runs every launch as the in-loop counterpart of IR-2.
@@ -474,13 +507,13 @@ Cite the linked section for fixes:
 |----|---|---|
 | 1  | Re-export auth aliases (`ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, ...) from `SAFE_API_KEY`. `OOB_BASE_URL` / `GEAK_BASE_URL` / `LLM_API_BASE` inherit `OPENAI_BASE_URL` directly (Bearer-native, no proxy). | — |
 | 2  | Auto-`pip install` missing `claude-agent-sdk>=0.1.65`, `openai>=1.50`, `httpx>=0.27` into `sys.executable` | `## Failure Handling` — `claude-agent-sdk not installed` |
-| 3  | Bootstrap `auth_proxy.py` source from `$OOB_SRC` (or `/wekafs/fully-local/{,inference_optimization/}OOB`) into `${HYPERLOOM_ROOT}/OOB/oob_cli/` (default `$USER_DATA_PATH/runtime/source-mirrors/OOB/oob_cli/`) if missing | `## Failure Handling` — `Claude SDK exit code 1` |
-| 4  | Re-run `ensure_auth_proxy.sh`; rewrite `~/.claude/config.json` `customApiUrl` and force-override `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` to the proxy URL (overriding any shell/`.env`/k8s value, logged on stdout). On retry-fail restores originals + WARN. | `### Recovery` |
+| 3  | Derive `ANTHROPIC_BASE_URL` from `OPENAI_BASE_URL` (strip trailing `/v1`); force-override both env vars to keep them consistent (overriding any shell/`.env`/k8s value, logged on stdout). | `### Recovery` |
+| 4  | Reset `~/.claude/config.json` `customApiUrl` to the upstream `ANTHROPIC_BASE_URL` so any stale `127.0.0.1:4002` value is replaced. | `### Recovery` |
 | 5  | ROCm hygiene (WARN-only): pop `HIP_VISIBLE_DEVICES` if `ROCR_VISIBLE_DEVICES` also set; visible-GPU count vs `$TP` via `rocm-smi --showid`; `/dev/shm` free ≥ 16 GiB | — |
 | 6  | Auto-install missing `ray` / `Magpie` / `InferenceX` (pod rebuild recovery) | — |
 | 7  | Auto-detect `--gpu-type` if not given | `## GPU Runner Type` |
 | 8  | WARN-only presence check: `node` / `claude` / `codex` CLIs + `@cursor/sdk` (resolved via `node -e "require.resolve('@cursor/sdk')"` against `$(npm root -g)`) | — |
-| 9  | Emit canonical `Preflight diagnostics:` block (`asset_root`, `session_dir` + resolving env var, `magpie_python`, `INFERENCEX_PATH`, aiter jit cache WARM/COLD + `.so` count + path, cold/warm timeouts, proxy URL). Paste verbatim into status reports. | `## Cold-start Discipline` |
+| 9  | Emit canonical `Preflight diagnostics:` block (`asset_root`, `session_dir` + resolving env var, `magpie_python`, `INFERENCEX_PATH`, aiter jit cache WARM/COLD + `.so` count + path, cold/warm timeouts, resolved `ANTHROPIC_BASE_URL`). Paste verbatim into status reports. | `## Cold-start Discipline` |
 | 10 | Hard model gate: `--claude-model` ∈ {`claude-opus-4-7` (preferred), `claude-opus-4-6` (fallback)}; probe `GET <OPENAI_BASE_URL>/models` with Bearer (3 retries 1s/3s/5s); rewrite to `4-6` if `4-7` missing; abort if neither present or gateway unreachable | `## Failure Handling` — model-gate errors |
 | 11 | Codex smoke-test (WARN-only): `--codex-model` checked when codex actually used (`--critic-agent` / `--critic-codex-bare` / `--kernel-codex`) | — |
 | 12 | Critic-agent runtime probe (when `--critic-agent` active): resolve `CRITIC_AGENT_ROOT` (env > sibling `$REPO_ROOT/critic-agent/` > abort), `python -m runtime.cli --help` (5s timeout); abort rc=2 if it fails. Default-sets `WORKSPACE_PATH` / `CRITIC_SESSION_MEMORY_DIR` / `CRITIC_KB_CLIENT_MODE`. | `## Critic Backend Selection` |
@@ -492,11 +525,11 @@ for the chained installer truth.
 ### Recovery
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
-the auth-proxy died. Re-run the supervisor and retry — both are idempotent:
+the gateway rejected the request. Check that `OPENAI_BASE_URL` / `SAFE_API_KEY`
+are set in `.env` (or the calling shell) and that the gateway is reachable:
 
 ```bash
-bash "$REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh"   # noop if healthy
-inference_optimizer optimize ... # rerun
+curl -sS -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" | head
 ```
 
 If `_preflight()` itself fails, run install in `--check-only` mode to see
@@ -825,7 +858,9 @@ because random prompts skew acceptance-rate results.
 Judge candidates over **{1k/1k, 8k/1k} × {low CONC, high CONC}** (high-CONC
 only when the model fits); KEEP only when throughput improves without
 unacceptable TTFT/E2E or correctness regression. Coordinator long runs default
-`max_candidates_per_round=5`; direct runner calls may pass `0` for the full grid.
+`max_candidates_per_round=3` (aligned with the per-specialist `proposal_set`
+cap — see `DEFAULT_SPECIALIST_MAX_PROPOSALS` in `orchestrator/policy.py`);
+direct runner calls may pass `0` for the full grid.
 
 ### Per-Run Asset Override (advanced)
 
@@ -920,9 +955,11 @@ artifacts; the CLI clears stale `stop_reason` and `crash_count` before retrying.
 ## Robustness Monitor for Long Runs
 
 For runs > 5 min, start a monitor in its own `setsid nohup` process. It polls
-`state.json` every 5 min, exits on terminal `stop_reason` (`target_reached` /
-`no_more_leverage` / `time_exhausted` / `max_ticks`), and resumes via
-`--resume` when the optimizer dies unexpectedly.
+`state.json` every 5 min, exits without resuming when the session is terminal
+(any `stop_reason` in `STOP_REASON_VOCAB`, `phase=CLOSE`, or
+`reports/final.md` present — including failure sentinels like
+`baseline_failed`), and resumes via `--resume` only when the optimizer dies
+without those markers (unexpected crash).
 
 ```bash
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
@@ -949,7 +986,7 @@ python3 - <<'PY'
 import json, os, pathlib
 s = json.loads((pathlib.Path(os.environ["SESSION"]) / "state.json").read_text())
 for k in ("stop_reason", "baseline_tput", "cumulative_gain", "current_best",
-          "last_kernel_opt", "last_select_kernels", "last_sweep"):
+          "last_kernel_opt", "last_trace_analyze", "last_sweep"):
     print(f"{k}: {s.get(k)}")
 print("params_search_last_round:", s.get("params_search", {}).get("last_round"))
 print("backends_search_last_round:", s.get("backends_search", {}).get("last_round"))
@@ -967,19 +1004,21 @@ python3 "$REPO_ROOT/inference_optimizer/scripts/event_counts.py" "$SESSION"
 The optimizer should:
 
 1. Establish or reuse `baseline_tput`.
-2. **Coordinator** auto-enqueues `roofline` (composite profile +
-  trace_analyze + analysis.md snapshot) on EXPLORE entry and KERNEL
-  entry when `--use-roofline-composite=true`. The LLM CANNOT propose
-  `roofline` — it is no longer in any phase allowlist. A fresh
-  roofline only re-fires when no snapshot exists, or when
-  `|cumulative_gain_validated - roofline_baseline_gain_at_snapshot|
-  > 10%`. When the toggle is off, EXPLORE runs no analysis at all and
-  KERNEL entry falls back to a plain auto-`profile`. Legacy LLM-
-  proposed `profile` is still allowed in EXPLORE / KERNEL as a manual
-  escape hatch (PolicyGate N9 denies it only when both
-  `--use-roofline-composite` and `--deny-direct-profile` are on).
-3. Run `select_kernels` once per trace/config and cache the result in
-  `last_select_kernels`.
+2. **Coordinator** auto-enqueues an analysis task at the end of
+  PRELUDE (after baseline) and again whenever validated tput crosses
+  the watermark (`current_tput / last_roofline_tput >= 1.10`;
+  compound 10% → 21% → 33% …). The task is `roofline` (composite
+  profile + trace_analyze + analysis.md snapshot) by default;
+  `--no-enable-roofline` switches it to plain `profile` (trace only,
+  no analysis.md) with otherwise-identical semantics. The LLM CANNOT
+  propose `roofline` or `profile` — PolicyGate denies both with
+  `rule='analysis_action_not_llm_proposable'`. While an analysis task
+  is in flight, `specialist` / `explore` / `kernel_opt` / `integrate`
+  / `deep_kernel_analysis` / `operator_tuning` / `vendor_kernel_config`
+  dispatches are blocked by PolicyGate
+  (`rule='wait_for_auto_roofline'`) until it lands.
+3. Run `trace_analyze` once per trace/config and cache the result in
+  `last_trace_analyze`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
 5. Require compile + correctness + microbench/E2E evidence before KEEP.
 6. Use `explore_search` to test parameters incrementally and remember
@@ -1134,7 +1173,7 @@ direct Codex). See `## Critic Backend Selection`.
 ### Run-time signals
 
 - `No accelerator` (Magpie): subprocess `PATH` must lead with `$(dirname "$PYTHON")` (or set `MAGPIE_PYTHON`); use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
-- Repeated `select_kernels` with unchanged trace/config: bug — reuse `last_select_kernels`.
+- Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
 - `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied` events for the same action/rule pair; all top actions may be locked or pruned. Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials` block. To recover: manually edit `state.json` to remove the action from `pruned_families`, clear `policy_denial_streak` / `stop_reason`, and re-propose with fresh `params.grid` content (omit stale `idempotency_key`).

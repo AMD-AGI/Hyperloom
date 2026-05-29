@@ -8,7 +8,6 @@ image detection fallbacks) so each branch has explicit coverage.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
 from types import SimpleNamespace

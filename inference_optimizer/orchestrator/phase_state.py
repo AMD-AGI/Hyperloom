@@ -1,4 +1,4 @@
-"""Phase state machine — v0.8 M2 (KB_design §3.2 + §3.8 + §3.10).
+"""Phase state machine — v0.8 M2.
 
 The Coordinator owns the run-level phase ("where are we in the optimization
 lifecycle") so that LLM-side decisions stay scoped to one phase at a time
@@ -14,14 +14,15 @@ Coordinator is the only writer of SharedState; this module just decides
 Design intent reference: ``KB_design/3.2_pipeline_phases/README.md``,
 ``KB_design/3.8_phase_state_machine/README.md``, ``KB_design/3.10_shared_state_evolution/README.md``.
 
-The five phases form a strictly monotonic chain (Inv-2.1 phase
+The six phases form a strictly monotonic chain (Inv-2.1 phase
 monotonicity):
 
 ::
 
-    PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE
-                   ↘ (no_kernel) ↗
-                   ↘──── any phase ────→ CLOSE  (terminal / abort)
+    PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE
+                ↘ (--no-framework) ↗
+                              ↘ (no_kernel) ↗
+                              ↘──── any phase ────→ CLOSE  (terminal / abort)
 
 ``recover`` is *phase-orthogonal* and not modeled as a transition.
 
@@ -32,14 +33,14 @@ v0.8 transition (M3 complete)
 -----------------------------
 The §3.2 design talks about ``explore`` (single merged action) and
 ``specialist`` (LLM sub-agent). M3 (``explore`` merge) and M5
-(``specialist``) have shipped; the v0.6 ``backends`` / ``params`` /
+(``specialist``) have shipped; the legacy ``backends`` / ``params`` /
 ``validate_stack`` action names are now closed at the PolicyGate
 boundary via the ``action_deprecated`` rule (KB_gaps/Gap-10 /
 KB_design §3.13 M3 §PR7). The EXPLORE allowed-action set reflects
 that — only ``explore`` / ``specialist`` / ``recover`` remain. The
 legacy executor modules and ``last_backends`` / ``backends_attempts``
-fields stay on :class:`SharedState` for v0.6 resume parity (Inv-10.1)
-but cannot be re-entered in a fresh v0.8 session.
+fields stay on :class:`SharedState` for legacy resume parity (Inv-10.1)
+but cannot be re-entered in a fresh session.
 """
 
 from __future__ import annotations
@@ -50,14 +51,16 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Phase identifiers + ordering (Inv-2.1: monotonic chain)
 # ---------------------------------------------------------------------------
-PHASE_PRELUDE = "PRELUDE"
-PHASE_EXPLORE = "EXPLORE"
-PHASE_KERNEL  = "KERNEL"
-PHASE_SWEEP   = "SWEEP"
-PHASE_CLOSE   = "CLOSE"
+PHASE_PRELUDE      = "PRELUDE"
+PHASE_FRAMEWORK_PR = "FRAMEWORK_PR"
+PHASE_EXPLORE      = "EXPLORE"
+PHASE_KERNEL       = "KERNEL"
+PHASE_SWEEP        = "SWEEP"
+PHASE_CLOSE        = "CLOSE"
 
 PHASE_NAMES: tuple[str, ...] = (
     PHASE_PRELUDE,
+    PHASE_FRAMEWORK_PR,
     PHASE_EXPLORE,
     PHASE_KERNEL,
     PHASE_SWEEP,
@@ -76,21 +79,21 @@ def phase_index(phase: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Phase ↔ allowed action set (KB_design §3.2 §5)
+# Phase ↔ allowed action set
 # ---------------------------------------------------------------------------
-# v0.8 view (KB_design §3.4 + §3.13 M3 §PR7 / KB_gaps/Gap-10):
+# v0.8 view:
 #
 # * EXPLORE allowlist contains the merged ``explore`` action and the
 #   ``specialist`` LLM sub-agent. The v0.6 ``backends`` / ``params`` /
 #   ``validate_stack`` are gone — PolicyGate's ``action_deprecated``
-#   rule (KB_gaps/Gap-10) denies them at the intent boundary with a
+#   rule denies them at the intent boundary with a
 #   structured replacement hint, so the LLM gets a single
 #   forward-pointing error instead of the misleading
 #   ``phase_incompatible`` "wait for the phase to advance" message.
 # * ``recover`` stays in every phase — phase-orthogonal per §3.2.
 # * ``session_breakdown`` is a CLOSE action (it materializes the
 #   report bundle). The v0.6 ``validate_stack`` rebench is now
-#   inlined into ``explore`` (KB_design §3.4 §4.4), so it disappears
+#   inlined into ``explore``, so it disappears
 #   from the EXPLORE allowlist alongside the other legacy names.
 #
 # Note: the dataclass fields ``last_backends`` / ``backends_attempts``
@@ -98,7 +101,28 @@ def phase_index(phase: str) -> int:
 # only the *entry points* close.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset({
-        "target_analysis", "baseline", "recover",
+        # ``roofline`` / ``profile`` are Coordinator-auto-enqueued at
+        # PRELUDE after baseline lands so the EXPLORE-phase first
+        # specialist sees a populated trace (and, when roofline is on,
+        # an ``analysis.md`` snapshot). The Coordinator picks the kind
+        # via ``shared_state.enable_roofline`` — both names sit in the
+        # allowlist so the internal-enqueue passes R1
+        # ``phase_incompatible``. LLM-side propose_action /
+        # delegate is denied by PolicyGate's
+        # ``analysis_action_not_llm_proposable`` rule for both names.
+        "target_analysis", "baseline", "roofline", "profile", "recover",
+    }),
+    PHASE_FRAMEWORK_PR: frozenset({
+        # Coordinator-internal phase between PRELUDE and EXPLORE.
+        # ``framework_pr`` is enqueued per candidate; the executor uses
+        # the same single-variant ``run_grid`` path as ``integrate_patch``
+        # so the latter stays in the allowlist as the consume side of
+        # the Critic-gated patch flow. ``roofline`` / ``profile`` are
+        # auto-enqueued on watermark crossings here too (KEEP path
+        # writes ``cumulative_gain_validated`` via the same single-
+        # writer hook). LLM-side ``framework_pr`` proposes are denied
+        # by ``framework_pr_action_not_llm_proposable``.
+        "framework_pr", "integrate_patch", "roofline", "profile", "recover",
     }),
     PHASE_EXPLORE: frozenset({
         # v0.8 canonical: merged grid runner + LLM specialist dispatch.
@@ -106,40 +130,31 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         # PR-A1 (Arbor-into-Hyperloom): specialists in EXPLORE may write
         # source patches into ``runs/specialist/<task_id>/worktree/``;
         # ``integrate_patch`` is the orchestrator-side serving-lane-locked
-        # apply+restart+gate step that consumes those patches. The action
-        # is deterministic (Python executor, no LLM) and bound to EXPLORE
-        # only — KERNEL still uses the ``integrate`` (kernel-owned) path.
+        # apply+restart+gate step that consumes those patches.
         "integrate_patch",
         # IR-7 (Honest self-stop): thin wrapper that dispatches the
         # session_steward_specialist domain. Coordinator also enqueues
         # this internally on plateau (bypasses PolicyGate); LLM-side
         # proposes are throttled by ``assess_remaining_gaps_throttle``.
         "assess_remaining_gaps",
-        # Local hotfix: ``profile`` stays in the EXPLORE allowlist so
-        # the sequence-gate (which requires non-empty
-        # ``last_profile_trace`` before any ``sequence_actions`` entry
-        # like ``explore`` can run) has an LLM-proposable escape
-        # hatch when ``use_roofline_composite`` is off. With composite
-        # on, the Coordinator's ``_on_enter_explore`` auto-roofline
-        # hook satisfies the same prereq.
-        # NOTE: ``roofline`` is intentionally NOT here — see the
-        # post-dict comment below.
-        "profile",
+        # ``roofline`` / ``profile`` are Coordinator-auto-enqueued mid-
+        # EXPLORE whenever the watermark check at the
+        # cumulative_gain_validated writer fires (10% step compound vs
+        # ``last_roofline_tput``). The Coordinator picks the kind via
+        # ``enable_roofline``; the auto_roofline_pending_task_id
+        # blocker holds dispatches until either kind lands.
+        "roofline", "profile",
         "recover",
     }),
     PHASE_KERNEL: frozenset({
-        # ``profile`` stays LLM-proposable so the operator can fall
-        # back to it when ``--use-roofline-composite=False`` (PolicyGate
-        # N9 denies direct ``profile`` only when the composite toggle
-        # AND ``--deny-direct-profile`` are both on; the auto-profile
-        # hook in :meth:`Coordinator._on_enter_kernel` already runs it
-        # automatically in that fallback configuration).
-        # NOTE: ``pmc_roofline`` was retired (action + executor removed);
-        # do not re-add — see post-dict comment about ``roofline``.
-        "profile",
         # KERNEL_OWNED_ACTIONS from policy.py.
         "kernel_opt", "integrate", "deep_kernel_analysis",
         "operator_tuning", "vendor_kernel_config",
+        # ``roofline`` / ``profile`` are auto-enqueued on watermark
+        # crossing here too — kernel integrate KEEPs flow through the
+        # same single-writer hook as explore/specialist KEEPs; mode is
+        # picked via ``enable_roofline``.
+        "roofline", "profile",
         "recover",
     }),
     PHASE_SWEEP: frozenset({
@@ -150,17 +165,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         "recover",
     }),
 }
-
-# v0.8 (post-N31 retirement): ``roofline`` is intentionally NOT in any
-# phase allowlist. The composite action is no longer LLM-proposable —
-# the Coordinator auto-enqueues it on EXPLORE entry and KERNEL entry
-# via ``_on_enter_explore`` / ``_on_enter_kernel`` (gated by the
-# ``use_roofline_composite`` toggle + the gain-only freshness gate in
-# :meth:`Coordinator._needs_fresh_roofline`). PolicyGate R1
-# ``phase_incompatible`` therefore denies any LLM
-# ``propose_action{action_name='roofline'}`` /
-# ``delegate{action_name='roofline'}``; internal Coordinator enqueues
-# bypass PolicyGate so they continue to work.
 
 
 def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
@@ -184,7 +188,7 @@ def allowed_actions_for(phase: str) -> tuple[str, ...]:
 
 
 # ---------------------------------------------------------------------------
-# phase_exit_reasons vocab (KB_design §3.2 §6)
+# phase_exit_reasons vocab
 # ---------------------------------------------------------------------------
 PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     # Normal exits
@@ -198,6 +202,10 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
     "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
     "explore_force_exit_low_budget",    # EXPLORE → next phase when total remaining or phase remaining drops below operator-configured thresholds
+    # FRAMEWORK_PR phase transitions (PR-A1 / FRAMEWORK_PR phase).
+    "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
+    "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
+    "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
 
     # Terminal exits (any phase → CLOSE)
     "robustness_escalated",
@@ -224,13 +232,13 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     # for breakdown collection.
     "phase_entered",
 
-    # v0.6 resume inference (lenient mapping).
+    # legacy resume inference (lenient mapping).
     "resumed_from_v06_inferred",
 })
 
 
 # ---------------------------------------------------------------------------
-# stop_reason vocab (KB_design §3.8 §6, closed enum)
+# stop_reason vocab
 # ---------------------------------------------------------------------------
 STOP_REASON_VOCAB: frozenset[str] = frozenset({
     # v0.6 sentinels — kept for backward compat (resume from old sessions).
@@ -260,6 +268,9 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "no_kernel_skipped",
     "sweep_done",
     "explore_force_exit_low_budget",
+    "framework_pr_phase_done",
+    "framework_pr_plateau",
+    "framework_pr_force_exit_low_budget",
 })
 
 
@@ -275,16 +286,26 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 # Default phase budgets (% of total wall-clock) — KB_design §3.8 §5.3
 # ---------------------------------------------------------------------------
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
-    PHASE_PRELUDE: 0.05,
-    PHASE_EXPLORE: 0.60,
-    PHASE_KERNEL:  0.25,
+    # PRELUDE bumped from 0.05 to 0.08 because the phase now owns the
+    # initial roofline (profile + trace_analyze) in addition to
+    # target_analysis + baseline. IR-6 force-exit thresholds only ever
+    # gated EXPLORE, so this bump is the only budget knob affected.
+    #
+    # FRAMEWORK_PR is *not* given a phase budget pct — the time wall is
+    # ``force_exit_hours_remaining_ratio * max_hours`` instead (default
+    # 0.6), matching the design's "leave at least 60% for the rest of
+    # the session" intent. Adding a pct here would skim from EXPLORE's
+    # 0.57 slice which the operators already tuned.
+    PHASE_PRELUDE: 0.08,
+    PHASE_EXPLORE: 0.47,
+    PHASE_KERNEL:  0.35,
     PHASE_SWEEP:   0.08,
     PHASE_CLOSE:   0.02,
 }
 
 
 # ---------------------------------------------------------------------------
-# Plateau judgment defaults (KB_design §3.8 §5.1 / §5.2 + §3.13 M7 §5)
+# Plateau judgment defaults
 # ---------------------------------------------------------------------------
 # Default thresholds the CLI exposes via --plateau-* flags. Kept here
 # (not in cli.py) so pure-function callers + tests can introspect the
@@ -316,9 +337,26 @@ DEFAULT_PLATEAU_KERNEL_LOOKBACK:          int   = 5
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:      float = 0.20
 
+# FRAMEWORK_PR plateau / force-exit knobs.
+#
+# * ``DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK`` — number of consecutive
+#   ``fa phase-discover`` batches we look back at when deciding the
+#   plateau condition (default 3).
+# * ``DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT`` — minimum per-batch
+#   ``max_gain_pct_observed_in_batch`` that counts as "non-flat" (default
+#   1.0%). The plateau fires when every one of the last
+#   ``lookback`` batches sits below this threshold.
+# * ``DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO`` — when
+#   ``remaining_minutes()/60 < ratio * max_hours`` we hard-exit
+#   FRAMEWORK_PR so EXPLORE/KERNEL/SWEEP/CLOSE still have room to run
+#   (default 0.6 → leave 60% of the original budget for downstream).
+DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK:                 int   = 3
+DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT:            float = 1.0
+DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
+
 
 # ---------------------------------------------------------------------------
-# escalate_strategy_change hint vocabulary (KB_design §3.8 §7.3 / §3.13 M7 §5.3)
+# escalate_strategy_change hint vocabulary
 # ---------------------------------------------------------------------------
 # Closed enum so the Coordinator + phase_state agree on which hints can
 # influence phase transitions / budgets. Unknown hints are logged but
@@ -379,7 +417,7 @@ def apply_escalate_budget_bump(
     resulting dict is suitable for assigning back into
     :attr:`SharedState.phase_budget_pct`.
 
-    KB_design §3.13 M7 §5.3 — "上限 80% (绝对值)".
+    "上限 80% (绝对值)".
     """
     phase_key = (phase or "").strip().upper()
     if phase_key not in PHASE_NAMES:
@@ -605,7 +643,7 @@ def should_force_exit_explore(
     return fired, evidence
 
 
-# ----------------------- plateau pure functions (KB_design §3.8 §5) --------
+# ----------------------- plateau pure functions --------
 def compute_plateau_explore(
     state: Any,
     *,
@@ -613,7 +651,7 @@ def compute_plateau_explore(
     keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
 ) -> tuple[bool, dict[str, Any]]:
-    """Real plateau_explore (KB_design §3.8 §5.1 + §3.13 M7 §5.1).
+    """Real plateau_explore.
 
     Returns ``(triggered, evidence)``. ``evidence`` always contains the
     decision inputs so phase_history can audit the call (even when
@@ -622,9 +660,9 @@ def compute_plateau_explore(
     Inputs (all read from :class:`SharedState`, pure):
 
     * ``explore_search.winners_history``: last K KEEP'd variants
-      (KB_design §3.4); ``gain_pct`` per row drives the
+; ``gain_pct`` per row drives the
       "recent_keep_gain" sum.
-    * ``specialist_rounds``: last K specialist rounds (KB_design §3.5);
+    * ``specialist_rounds``: last K specialist rounds;
       ``proposals_total`` + ``proposals_kept`` per row drive the
       empty-round detection.
 
@@ -666,7 +704,7 @@ def compute_plateau_explore(
     def _round_is_empty(row: Any) -> bool:
         if not isinstance(row, dict):
             return False
-        # Designed shape (KB_design §3.5): ``proposals_total`` /
+        # Designed shape: ``proposals_total`` /
         # ``proposals_kept`` (M5+); fall back to ``proposal_count``
         # for forward-compat with older round summaries.
         try:
@@ -717,7 +755,7 @@ def compute_plateau_kernel(
     revert_streak_threshold: int = DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
     keep_gain_threshold_pct: float = DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
 ) -> tuple[bool, dict[str, Any]]:
-    """Real plateau_kernel (KB_design §3.8 §5.2 + §3.13 M7 §5.2).
+    """Real plateau_kernel.
 
     Returns ``(triggered, evidence)``. Inputs (all SharedState):
 
@@ -775,7 +813,7 @@ def compute_plateau_kernel(
     # started with zero attempts on record — coupled with EXPLORE that
     # produced no KEEPs (e.g. force-exit on low budget), the session went
     # EXPLORE→KERNEL→SWEEP without ever spawning a single
-    # ``select_kernels`` / ``run_optimization`` request. Returning False
+    # ``trace_analyze`` / ``run_optimization`` request. Returning False
     # here lets the LLM (and the in-loop scheduling-police) actually
     # exercise the kernel phase before plateau is reconsidered.
     if not recent:
@@ -819,7 +857,7 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     Priority order:
 
     1. ``escalate_strategy_change`` hint of ``skip_to_close`` →
-       ``robustness_escalated`` (KB_design §3.8 §7.3 / §3.13 M7 §5.3).
+       ``robustness_escalated``.
     2. Coordinator-set ``stop_reason`` (any phase, any reason).
 
     Note: ``time_exhausted`` is signalled by the existing Coordinator
@@ -890,7 +928,7 @@ def exit_normal_explore(
     force_exit_hours_remaining: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
 ) -> tuple[str, dict[str, Any]] | None:
-    """EXPLORE normal exit (KB_design §3.8 §5.1 + §3.13 M7).
+    """EXPLORE normal exit.
 
     Priority order:
 
@@ -903,10 +941,10 @@ def exit_normal_explore(
     1. ``escalate_strategy_change`` hint ``skip_to_kernel`` →
        ``plateau_explore`` (``evidence='llm_escalation'``).
     2. Real ``plateau_explore`` (:func:`compute_plateau_explore`)
-       when v0.8 signals are present (``explore_search.winners_history``
+       when signals are present (``explore_search.winners_history``
        or ``specialist_rounds``).
     3. KB_gaps/Gap-15 R-09 transitional proxy
-       (``params_no_promote_streak``) when v0.8 signals are absent
+       (``params_no_promote_streak``) when signals are absent
        AND ``disable_legacy_proxy=False``. Evidence carries
        ``r09_provisional=True`` so the breakdown collector surfaces
        a ``plateau_proxy_provisional`` warning. Operators can set
@@ -1013,7 +1051,7 @@ def exit_normal_explore(
                 "backends_accepted": backends_accepted,
                 "note": (
                     "KB_design §3.14 R-09 — legacy params_no_promote_streak "
-                    "proxy fired (v0.8 signals empty); set "
+                    "proxy fired (signals empty); set "
                     "INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1 to forbid"
                 ),
             }
@@ -1108,7 +1146,7 @@ def exit_normal_kernel(
     plateau_keep_gain_pct: float = DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
     plateau_lookback: int = DEFAULT_PLATEAU_KERNEL_LOOKBACK,
 ) -> tuple[str, dict[str, Any]] | None:
-    """KERNEL normal exit (KB_design §3.8 §5.2 + §3.13 M7).
+    """KERNEL normal exit.
 
     Priority:
 
@@ -1173,13 +1211,176 @@ def exit_normal_sweep(
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     """Pull operator-tuned plateau thresholds off SharedState.
 
-    KB_design §3.13 M7 §4: CLI flags lock plateau thresholds at
+    CLI flags lock plateau thresholds at
     session start; phase_state reads them on every tick via
     :attr:`SharedState.plateau_overrides`. Empty / missing → library
     defaults.
     """
     overrides = getattr(state, "plateau_overrides", None) or {}
     return dict(overrides) if isinstance(overrides, dict) else {}
+
+
+def _framework_pr_batch_is_complete(
+    batch: dict[str, Any],
+    progress_by_batch: dict[str, int],
+) -> bool:
+    """A FRAMEWORK_PR batch is "complete" iff every candidate it carries
+    has a matching row in ``framework_pr_phase_progress`` (any terminal
+    status — KEEP / REVERT / apply_failed / enqueue_failed / critic_denied).
+
+    Used by the plateau judge so that a freshly-discovered batch whose
+    first candidate just got enqueued cannot cause an early exit. Without
+    this guard, ``max_gain_pct_observed_in_batch`` defaults to 0.0 on
+    creation, making the brand-new batch look like another "no gain"
+    data point and tripping plateau the moment ``lookback`` such 0.0
+    entries appear in the tail.
+    """
+    candidates = batch.get("candidates") or []
+    if not isinstance(candidates, list) or not candidates:
+        return True
+    total = sum(1 for c in candidates if isinstance(c, dict))
+    if total == 0:
+        return True
+    batch_id = str(batch.get("batch_id") or "")
+    processed = int(progress_by_batch.get(batch_id, 0))
+    return processed >= total
+
+
+def _framework_pr_pending_candidate_count(state: Any) -> int:
+    """Count candidates discovered into a batch but missing a progress
+    row. Surfaced in force-exit evidence so operators see how many
+    candidates were skipped by the wall-clock guard."""
+    batches = getattr(state, "framework_pr_batches", None) or []
+    if not isinstance(batches, list) or not batches:
+        return 0
+    progress = getattr(state, "framework_pr_phase_progress", None) or []
+    progress_by_batch: dict[str, int] = {}
+    for row in progress:
+        if isinstance(row, dict):
+            bid = str(row.get("batch_id") or "")
+            progress_by_batch[bid] = progress_by_batch.get(bid, 0) + 1
+    pending = 0
+    for batch in batches:
+        if not isinstance(batch, dict):
+            continue
+        candidates = batch.get("candidates") or []
+        if not isinstance(candidates, list):
+            continue
+        total = sum(1 for c in candidates if isinstance(c, dict))
+        bid = str(batch.get("batch_id") or "")
+        done = int(progress_by_batch.get(bid, 0))
+        pending += max(0, total - done)
+    return pending
+
+
+def exit_normal_framework_pr(
+    state: Any,
+    *,
+    max_hours: float | None = None,
+    now_unix: float | None = None,
+    lookback: int = DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
+    plateau_keep_gain_pct: float = DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+    force_exit_hours_remaining_ratio: float = (
+        DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO
+    ),
+) -> tuple[str, dict[str, Any]] | None:
+    """FRAMEWORK_PR normal exit.
+
+    Priority order:
+
+    0. HARD force-exit — fires when the session's remaining wall-clock
+       drops below ``force_exit_hours_remaining_ratio * max_hours``.
+       Reason: ``framework_pr_force_exit_low_budget``. Matches the
+       design's "leave the rest of the session breathing room" intent.
+       Evidence carries ``pending_candidate_count`` so operators see how
+       much was skipped.
+    1. Plateau — fires when the last ``lookback`` **fully-processed**
+       batches in ``state.framework_pr_batches`` each have
+       ``max_gain_pct_observed_in_batch < plateau_keep_gain_pct``. A
+       batch is fully-processed when every candidate it carries has a
+       matching row in ``framework_pr_phase_progress``; in-flight or
+       newly-discovered batches do NOT count toward the lookback. This
+       prevents the case where the pump enqueues the first candidate of
+       a fresh batch, ``max_gain_pct_observed_in_batch`` is still its
+       initial 0.0, and the plateau judge mistakes that for a real "no
+       gain" data point and exits early.
+    2. Normal completion — fires when the Coordinator marked the phase
+       done by setting ``state.framework_pr_phase_done = True`` (no
+       more candidates to enqueue / ``fa phase-discover`` returned 0).
+       Reason: ``framework_pr_phase_done``.
+
+    Returns ``None`` when none of the above apply (the Coordinator
+    stays in FRAMEWORK_PR and enqueues the next batch).
+    """
+    # Priority 0 — force-exit on remaining wall-clock.
+    if max_hours and max_hours > 0:
+        remaining_min_fn = getattr(state, "remaining_minutes", None)
+        if callable(remaining_min_fn):
+            try:
+                remaining_minutes = float(remaining_min_fn(now_unix=now_unix))
+            except TypeError:
+                remaining_minutes = float(remaining_min_fn())
+            except Exception:  # noqa: BLE001
+                remaining_minutes = float("inf")
+        else:
+            remaining_minutes = float("inf")
+        threshold_minutes = float(force_exit_hours_remaining_ratio) * float(max_hours) * 60.0
+        if remaining_minutes < threshold_minutes:
+            return "framework_pr_force_exit_low_budget", {
+                "evidence":               "force_exit",
+                "remaining_minutes":      remaining_minutes,
+                "threshold_minutes":      threshold_minutes,
+                "hours_remaining_ratio":  float(force_exit_hours_remaining_ratio),
+                "max_hours":              float(max_hours),
+                "pending_candidate_count": _framework_pr_pending_candidate_count(state),
+            }
+
+    # Priority 1 — plateau over the last ``lookback`` fully-processed batches.
+    batches = getattr(state, "framework_pr_batches", None) or []
+    lookback_int = int(lookback)
+    if isinstance(batches, list) and lookback_int > 0 and len(batches) >= lookback_int:
+        progress = getattr(state, "framework_pr_phase_progress", None) or []
+        progress_by_batch: dict[str, int] = {}
+        for row in progress:
+            if isinstance(row, dict):
+                bid = str(row.get("batch_id") or "")
+                progress_by_batch[bid] = progress_by_batch.get(bid, 0) + 1
+        complete_tail: list[dict[str, Any]] = []
+        # Walk newest-to-oldest, take the most recent ``lookback`` *complete*
+        # batches. Skipping incomplete batches means a still-pumping batch
+        # cannot count toward (or block) plateau.
+        for entry in reversed(batches):
+            if not isinstance(entry, dict):
+                continue
+            if _framework_pr_batch_is_complete(entry, progress_by_batch):
+                complete_tail.append(entry)
+                if len(complete_tail) >= lookback_int:
+                    break
+        if len(complete_tail) >= lookback_int:
+            max_gains: list[float] = []
+            for entry in complete_tail:
+                try:
+                    max_gains.append(
+                        float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
+                    )
+                except (TypeError, ValueError):
+                    max_gains.append(0.0)
+            if max_gains and all(g < float(plateau_keep_gain_pct) for g in max_gains):
+                return "framework_pr_plateau", {
+                    "evidence":              "plateau_judgment",
+                    "lookback":              lookback_int,
+                    "keep_gain_pct_threshold": float(plateau_keep_gain_pct),
+                    "batch_max_gains":       list(reversed(max_gains)),
+                }
+
+    # Priority 2 — Coordinator-signalled normal completion.
+    if bool(getattr(state, "framework_pr_phase_done", False)):
+        return "framework_pr_phase_done", {
+            "evidence": "no_more_candidates",
+            "batch_count": len(batches) if isinstance(batches, list) else 0,
+        }
+
+    return None
 
 
 def compute_next_phase(
@@ -1189,6 +1390,8 @@ def compute_next_phase(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
     disable_legacy_proxy: bool = False,
+    framework_phase_enabled: bool = False,
+    max_hours: float | None = None,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
@@ -1215,6 +1418,35 @@ def compute_next_phase(
         if term is not None:
             return PHASE_CLOSE, term[0], {"terminal": True, **term[1]}
         norm = exit_normal_prelude(state)
+        if norm is not None:
+            if framework_phase_enabled:
+                return PHASE_FRAMEWORK_PR, norm[0], norm[1]
+            # Framework phase off → straight through to EXPLORE with the
+            # historical ``prelude_done`` reason. The FRAMEWORK_PR phase
+            # has no dedicated "skipped" reason: --no-framework simply
+            # collapses the chain and the routing record stays
+            # backward-compatible with pre-FRAMEWORK_PR sessions.
+            return PHASE_EXPLORE, norm[0], norm[1]
+        return None
+
+    if current == PHASE_FRAMEWORK_PR:
+        norm = exit_normal_framework_pr(
+            state,
+            max_hours=max_hours,
+            now_unix=now_unix,
+            lookback=int(overrides.get(
+                "framework_pr_lookback",
+                DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
+            )),
+            plateau_keep_gain_pct=float(overrides.get(
+                "framework_pr_keep_gain_pct",
+                DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+            )),
+            force_exit_hours_remaining_ratio=float(overrides.get(
+                "framework_pr_force_exit_hours_ratio",
+                DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO,
+            )),
+        )
         if norm is not None:
             return PHASE_EXPLORE, norm[0], norm[1]
         return None
@@ -1287,10 +1519,10 @@ def compute_next_phase(
 
 
 # ---------------------------------------------------------------------------
-# v0.6 → v0.8 resume inference (KB_design §3.2 §8.4, §3.10 §5.2)
+# v0.6 → legacy resume inference
 # ---------------------------------------------------------------------------
 def infer_phase_from_state(state: Any) -> tuple[str, dict[str, Any]]:
-    """Best-effort inference for v0.6 sessions that lack a ``phase`` field.
+    """Best-effort inference for sessions that lack a ``phase`` field.
 
     Returns ``(phase, evidence)`` where evidence captures the inference
     inputs so phase_history surfaces an audit row.
@@ -1378,12 +1610,16 @@ __all__ = [
     "PHASE_CLOSE",
     "PHASE_EXIT_REASONS",
     "PHASE_EXPLORE",
+    "PHASE_FRAMEWORK_PR",
     "PHASE_INDEX",
     "PHASE_KERNEL",
     "PHASE_NAMES",
     "PHASE_PRELUDE",
     "PHASE_SWEEP",
     "STOP_REASON_VOCAB",
+    "DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK",
+    "DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT",
+    "DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO",
     "abort_prelude",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
@@ -1391,6 +1627,7 @@ __all__ = [
     "compute_plateau_explore",
     "compute_plateau_kernel",
     "exit_normal_explore",
+    "exit_normal_framework_pr",
     "exit_normal_kernel",
     "exit_normal_prelude",
     "exit_normal_sweep",

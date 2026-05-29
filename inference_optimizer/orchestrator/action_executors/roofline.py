@@ -37,6 +37,7 @@ entry can wire the stub instead.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -272,6 +273,24 @@ class RooflineExecutor:
         self.shared_state = shared_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        # B2: roofline = profile + trace_analyze, and profile is a hard
+        # dependency. atom has no torch_profiler integration in Magpie v1
+        # (profile_executor short-circuits to status="skipped"), so the
+        # composite cannot produce a trace and would otherwise return
+        # _failed("profile", ...). Short-circuit at the entrypoint so the
+        # Coordinator sees a clean "skipped" instead of a spurious failed
+        # roofline that would trigger RCA / current_best regression checks.
+        if os.environ.get("FRAMEWORK", "").strip().lower() == "atom":
+            return {
+                "status": "skipped",
+                "framework": "atom",
+                "error_class": "atom_no_profiler",
+                "error": (
+                    "roofline requires torch_profiler which atom (Magpie v1) "
+                    "does not provide; both sub-steps (profile, trace_analyze) "
+                    "are no-ops for this run. See atom_boost_tutorials.md §6."
+                ),
+            }
         # Lazy imports avoid pulling shell-out / yaml machinery at
         # module load time (consistent with how the BaselineExecutor
         # subclass is constructed lazily by cli).
@@ -426,48 +445,11 @@ class RooflineExecutor:
             )
 
         # Cache the trace_analyze result via existing C1 recorder.
-        # This writes analysis_md_text / roofline_snapshot_id /
-        # roofline_baseline_gain_at_snapshot etc. The recorder reads
-        # the previous snapshot_id from last_trace_analyze (kept
-        # intact above) and bumps it by one, giving us the
-        # monotonically-increasing snapshot counter.
+        # The recorder bumps roofline_snapshot_id by one against the
+        # previous snapshot (kept intact above) and writes
+        # analysis_md_text / analysis_md_path.
         self.shared_state.record_trace_analyze(ta_payload, ta_result)
         cached = self.shared_state.last_trace_analyze or {}
-
-        # F3-4 (Roofline-v2 / plan_roofline_framework): append a
-        # per-direction saturation snapshot to
-        # SharedState.roofline_saturation_history (capped at 10 most-
-        # recent entries) so the next orchestration tick's prompt can
-        # surface a soft "diminishing returns" advisory. Gated on
-        # SharedState.roofline_saturation_advisory; off by default to
-        # keep F1's prompt surface byte-identical until an operator
-        # flips the toggle.
-        if getattr(
-            self.shared_state, "roofline_saturation_advisory", False,
-        ):
-            try:
-                from ..roofline_snapshot import derive_saturation_per_direction
-                sat = derive_saturation_per_direction(
-                    str(cached.get("analysis_md_text") or ""),
-                )
-                record = {
-                    "snapshot_id": cached.get("roofline_snapshot_id"),
-                    **sat,
-                }
-                history = list(
-                    self.shared_state.roofline_saturation_history or [],
-                )
-                history.append(record)
-                if len(history) > 10:
-                    history = history[-10:]
-                self.shared_state.roofline_saturation_history = history
-            except Exception as exc:  # noqa: BLE001 — advisory is best-effort
-                # Bad parse shouldn't fail an otherwise-successful
-                # roofline; the advisory just stays empty until next run.
-                from logging import getLogger
-                getLogger(__name__).warning(
-                    "F3-4 saturation derivation failed: %r", exc,
-                )
 
         return {
             "status": "succeeded",

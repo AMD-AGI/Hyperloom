@@ -1,4 +1,4 @@
-"""KnowledgePlane facade — v0.8 M1+M4 (KB_design §3.6).
+"""KnowledgePlane facade — v0.8 M1+M4.
 
 Single point of contact between the Coordinator and the three
 external knowledge sources:
@@ -35,7 +35,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Mapping
 
-from ..cortex_kb_client import CortexKBClient
+# cortex_kb_client retired alongside the v1 graph KB. KnowledgePlane
+# now treats ``cortex_kb`` as an opaque optional client whose only
+# requirement is the legacy ``_post`` / ``propose_point`` /
+# ``enabled`` surface — which under the v2 design is never wired
+# (cli passes ``cortex_kb=None``), so the cortex_* methods on this
+# class are dead code retained only for grep-stability with old
+# call-sites.
 from ..paths import asset_actions_dir
 from .pr_monitor import (
     DEFAULT_PR_FEED_PER_REPO_LIMIT,
@@ -162,7 +168,7 @@ class KnowledgePlane:
     by :meth:`reset_round_caches`.
     """
 
-    cortex_kb: CortexKBClient | None = None
+    cortex_kb: Any = None  # legacy /v1/points client (always None under v2)
     pr_monitor: PRMonitorClient | None = None
     domain_repos: dict[str, DomainRepos] = field(default_factory=dict)
     pr_feed_window_days: int = DEFAULT_PR_FEED_WINDOW_DAYS
@@ -178,8 +184,8 @@ class KnowledgePlane:
     def from_clients(
         cls,
         *,
-        cortex_kb: CortexKBClient | None,
-        pr_monitor: PRMonitorClient | None,
+        cortex_kb: Any = None,
+        pr_monitor: PRMonitorClient | None = None,
         domain_repos: dict[str, DomainRepos] | None = None,
         pr_feed_window_days: int = DEFAULT_PR_FEED_WINDOW_DAYS,
         pr_feed_per_repo_limit: int = DEFAULT_PR_FEED_PER_REPO_LIMIT,
@@ -201,7 +207,7 @@ class KnowledgePlane:
         self.last_warnings = []
 
     # ------------------------------------------------------------------
-    # Read surface (KB_design §3.6 §4.1)
+    # Read surface
     # ------------------------------------------------------------------
     @property
     def pr_monitor_enabled(self) -> bool:
@@ -209,7 +215,14 @@ class KnowledgePlane:
 
     @property
     def cortex_enabled(self) -> bool:
-        return self.cortex_kb is not None and self.cortex_kb.enabled
+        # ``self.cortex_kb`` may be a legacy CortexKBClient (which
+        # has an ``.enabled`` attr) or ``None`` (the v2-default).
+        # Tolerant getattr so a future caller passing the v2
+        # RecipeKB dispatcher here doesn't AttributeError.
+        return (
+            self.cortex_kb is not None
+            and bool(getattr(self.cortex_kb, "enabled", True))
+        )
 
     def resolve_domain_repos(self, domain: str) -> DomainRepos | None:
         """Look up domain config; returns None for unknown domains."""
@@ -620,7 +633,7 @@ class KnowledgePlane:
         :attr:`last_warnings` so the breakdown collector can surface
         them in the ``warnings`` section.
 
-        Failure semantics (KB_design §3.13 M4 §10):
+        Failure semantics:
 
         - PR Monitor disabled (``--degraded-pr``) → ``([],
           ["pr_monitor:disabled"])``.
@@ -669,7 +682,7 @@ class KnowledgePlane:
         return prs, warnings
 
     # ------------------------------------------------------------------
-    # Write surface (KB_design §3.6 §4.2) — all writes are
+    # Write surface — all writes are
     # Coordinator-only; PolicyGate sits one call up.
     # ------------------------------------------------------------------
     def cortex_propose_point(
@@ -701,31 +714,6 @@ class KnowledgePlane:
             idempotency_key=idempotency_key,
         )
 
-    def cortex_hypothesize(
-        self,
-        *,
-        sid: str,
-        from_canonical: str,
-        to_canonical: str,
-        edge_type: str = "hypothetical",
-        reason: str = "",
-        attrs: Mapping[str, Any] | None = None,
-        evidence: list[str] | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        if not self.cortex_enabled:
-            return {"status": "skip_disabled", "tentative_edge_id": ""}
-        return self.cortex_kb.hypothesize(  # type: ignore[union-attr]
-            sid=sid,
-            from_canonical=from_canonical,
-            to_canonical=to_canonical,
-            edge_type=edge_type,
-            reason=reason,
-            attrs=attrs,
-            evidence=evidence,
-            idempotency_key=idempotency_key,
-        )
-
     def mint_pr_node(
         self,
         *,
@@ -738,7 +726,7 @@ class KnowledgePlane:
     ) -> dict[str, Any]:
         """Mint a Cortex ``pr_node`` for a PR referenced by a specialist.
 
-        KB_design §3.6 §5.2: when a specialist puts a PR reference in
+        when a specialist puts a PR reference in
         ``specialist_done.proposal_set[i].pr_evidence``, the Coordinator
         mint it as a Cortex point so future sessions can cite the
         same canonical_id (``pr.<repo>#<number>`` or
@@ -779,7 +767,7 @@ class KnowledgePlane:
 
 
 def pr_node_canonical_id(repo: str, *, number: int = 0, sha: str = "") -> str:
-    """Derive the Cortex canonical_id for one PR (KB_design §3.6 §5.2).
+    """Derive the Cortex canonical_id for one PR.
 
     Priority: ``pr.<repo>#<number>`` when ``number`` is positive;
     otherwise ``pr.<repo>@<sha>``. Falls back to
