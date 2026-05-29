@@ -1008,9 +1008,45 @@ def _kill_stale_servers() -> None:
     import time
 
     _KILL_PATTERNS = ("VLLM::Worker", "VLLM::EngineCore", "vllm.entrypoints",
-                      "vllm serve", "sglang.srt", "sglang.launch_server")
+                      "vllm serve", "sglang.srt", "sglang.launch_server",
+                      # atom server entrypoint (analogous to vllm.entrypoints).
+                      "atom.entrypoints", "atom.entrypoints.openai_server")
+
+    # atom spawns its ModelRunner workers via ``multiprocessing.spawn`` — their
+    # cmdline is the generic ``spawn_main ... --multiprocessing-fork`` so they
+    # cannot be matched by _KILL_PATTERNS. On server teardown they routinely
+    # orphan to init (ppid=1) yet keep their full HIP/VRAM reservation (~87 %
+    # of each MI3xx GPU for an 8B+ model), which OOM-kills the *next* atom
+    # server (baseline ok, then roofline/profile/explore all fail to allocate
+    # KV cache). We identify these survivors by the atom install (and aiter
+    # JIT cache) mmap'd into their address space — a signature the optimizer's
+    # own Ray / multiprocessing children never carry.
+    _FORK_MARKERS = (b"--multiprocessing-fork", b"spawn_main")
+    _ATOM_MAP_SIGNATURES = ("/ATOM/atom/", "/aiter/jit/", "/aiter-test/aiter/")
 
     my_pid = os.getpid()
+    try:
+        my_pgid = os.getpgrp()
+    except OSError:
+        my_pgid = -1
+
+    def _is_orphaned_atom_worker(pid: int, cmdline: bytes) -> bool:
+        if not any(m in cmdline for m in _FORK_MARKERS):
+            return False
+        # Never touch a worker that belongs to *our* process group.
+        try:
+            if my_pgid != -1 and os.getpgid(pid) == my_pgid:
+                return False
+        except (OSError, ProcessLookupError):
+            return False
+        try:
+            with open(f"/proc/{pid}/maps", "r", errors="replace") as fh:
+                maps = fh.read()
+        except (OSError, PermissionError):
+            return False
+        return any(sig in maps for sig in _ATOM_MAP_SIGNATURES)
+
+    killed_atom = False
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
@@ -1022,22 +1058,35 @@ def _kill_stale_servers() -> None:
         except (OSError, PermissionError):
             continue
         text = cmdline.replace(b"\0", b" ").decode("utf-8", "replace")
-        if any(pat in text for pat in _KILL_PATTERNS):
+        is_atom_server = "atom.entrypoints" in text
+        if any(pat in text for pat in _KILL_PATTERNS) or _is_orphaned_atom_worker(pid, cmdline):
+            killed_atom = killed_atom or is_atom_server or b"--multiprocessing-fork" in cmdline
+            # Kill the whole process group when we can — atom servers fan out
+            # ModelRunner children that must die with the leader.
+            try:
+                pgid = os.getpgid(pid)
+                if pgid not in (my_pgid, 0):
+                    os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
 
-    # Clear /dev/shm vllm/nccl/cuda segments that prevent re-binding.
-    for pattern in ("/dev/shm/vllm*", "/dev/shm/nccl*", "/dev/shm/cuda*"):
+    # Clear /dev/shm vllm/nccl/cuda/torch segments that prevent re-binding.
+    for pattern in ("/dev/shm/vllm*", "/dev/shm/nccl*", "/dev/shm/cuda*",
+                    "/dev/shm/torch*", "/dev/shm/atom*"):
         for f in glob.glob(pattern):
             try:
                 os.remove(f)
             except OSError:
                 pass
 
-    # Brief pause for KFD (ROCm kernel driver) async VRAM release.
-    time.sleep(2)
+    # Brief pause for KFD (ROCm kernel driver) async VRAM release. Atom workers
+    # hold tens-to-hundreds of GB, whose async teardown lags well past 2s, so
+    # give the driver longer to actually reclaim before the next server boots.
+    time.sleep(8 if killed_atom else 2)
 
 
 def _run_magpie(
