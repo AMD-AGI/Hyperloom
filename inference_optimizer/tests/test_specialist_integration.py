@@ -43,9 +43,6 @@ from inference_optimizer.orchestrator.backends.mock_backend import (
 from inference_optimizer.orchestrator.intent_parser import (
     Intent, IntentType,
 )
-from inference_optimizer.orchestrator.specialist_runner import (
-    DEFAULT_SPECIALIST_TOOLS,
-)
 from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 
 
