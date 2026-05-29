@@ -32,7 +32,7 @@ from typing import Any, Iterable
 
 import httpx
 
-from .base import Source, SourceData, SourceUnavailable
+from .base import SourceData, SourceUnavailable
 
 
 log = logging.getLogger(__name__)
@@ -1701,8 +1701,8 @@ async def _probe_gateway_health(
     """GET ``$OPENAI_BASE_URL/models`` with Bearer; classify the response.
 
     A 401 here (with the same auth token that critic + kernel-agent
-    use) means the upstream gateway has revoked / lost the key — the
-    auth_proxy at :4002 is healthy, so F3 won't fire; J1 fills the gap.
+    use) means the upstream gateway has revoked / lost the key — J1
+    surfaces this distinct from generic local-server unreachable.
     """
     out: dict[str, Any] = {
         "url": url, "reachable": False, "status": "error",

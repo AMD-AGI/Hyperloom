@@ -13,7 +13,6 @@ The schema each collector matches is defined in :mod:`.schema`.
 from __future__ import annotations
 
 import ast
-import glob
 import json
 import logging
 import os
@@ -1275,10 +1274,10 @@ def collect_capability_summary(
         state.get("cumulative_gain_validated")
     )
 
-    # v0.8 M3 — merged explore action capability row (KB_design §3.4 +
+    # merged explore action capability row (KB_design §3.4 +
     # §3.12 §4.2 "兼容 alias"). The backends / params / validate_stack
-    # rows stay alongside to keep v0.6 resume reports readable. On a
-    # pure v0.8 session those legacy rows will be ``not_attempted`` while
+    # rows stay alongside to keep legacy resume reports readable. On a
+    # pure session those legacy rows will be ``not_attempted`` while
     # ``explore`` carries the activity.
     explore = _capability_for_action(state, "explore")
     explore_search = state.get("explore_search") or {}
@@ -1304,21 +1303,21 @@ def collect_capability_summary(
             explore_search.get("winners_history") or []
         )
 
-    # v0.8 §3.12 §4.2 — specialist sub-agent capability row. Counts
+    # specialist sub-agent capability row. Counts
     # are derived from ``specialist_rounds`` so they always agree with
     # ``specialist_runs`` (Inv-12.2 single source).
     specialist_row = _specialist_capability_row(state)
     return {
         "geak":           geak_cap,
         "oob":            oob_cap,
-        # v0.8 M3 — primary row; backends/params/validate_stack are
+        # primary row; backends/params/validate_stack are
         # kept as compatibility aliases.
         "explore":        explore,
         "backends":       backends,
         "params":         params,
         "sweep":          sweep_cap,
         "validate_stack": validate,
-        # v0.8 §3.12 §4.2 — sub-agent visibility row.
+        # sub-agent visibility row.
         "specialist":     specialist_row,
     }
 
@@ -1649,7 +1648,7 @@ def _read_kernel_candidates(
     kernel agent uses to decide what to optimize.
 
     Resolves the file via:
-      1. ``state.last_select_kernels.candidates_path`` — orchestrator-recorded path
+      1. ``state.last_trace_analyze.candidates_path`` — orchestrator-recorded path
       2. ``session_dir / kernel-agent / runs / <session_id> / kernel_candidates.json``
          (new layout after the all-artefacts-under-USER_DATA_PATH migration)
       3. ``session_dir / kernel-agent / **/kernel_candidates.json`` glob fallback (new)
@@ -1657,8 +1656,13 @@ def _read_kernel_candidates(
          kernel_candidates.json`` (legacy double-nested layout from pre-migration
          sessions, kept for breakdown replay of historical runs)
       5. ``session_dir / kernel-agent-workspace / **/kernel_candidates.json`` glob fallback
+
+    Legacy ``state.last_select_kernels`` field (pre-M4) was removed
+    in this branch; historical state.json that still carries it is
+    silently ignored — the on-disk glob fallbacks above keep
+    breakdown replay working on old sessions.
     """
-    sk = state.get("last_select_kernels") or {}
+    sk = state.get("last_trace_analyze") or {}
     raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
     candidate_paths: list[Path] = []
     if raw_path:
@@ -1699,7 +1703,7 @@ def _read_kernel_candidates(
             hk = data.get("hot_kernels")
             if isinstance(hk, list):
                 return hk
-    # Final fallback: state.last_select_kernels.hot_kernels_top15.
+    # Final fallback: state.last_trace_analyze.hot_kernels_top15.
     # This is what the orchestrator actually copied out of
     # kernel_candidates.json — usually the same shape, just truncated to
     # 15. Used when the on-disk file is missing (e.g. test fixtures or
@@ -1884,7 +1888,7 @@ def _collect_detected_kernels(
     # 3) lifecycle stamps (selected / geak / oob / adopted_by / final_decision)
     selected_ids = {
         str(e.get("kernel_id") or "")
-        for e in ((state.get("last_select_kernels") or {}).get("hot_kernels_top15") or [])
+        for e in ((state.get("last_trace_analyze") or {}).get("hot_kernels_top15") or [])
         if isinstance(e, dict)
     }
     geak_idx = _index_invocations_by_kernel(geak)
@@ -1957,7 +1961,7 @@ def _collect_detected_kernels(
 
 
 def _collect_recommended_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
-    sk = state.get("last_select_kernels") or {}
+    sk = state.get("last_trace_analyze") or {}
     if not isinstance(sk, dict):
         return []
     out: list[dict[str, Any]] = []
@@ -2363,7 +2367,7 @@ def collect_critic_robustness(
                 "workdir": _rel(iter_dir, session_dir) or str(iter_dir),
             })
 
-    # v0.8 §3.12 §4.4 — kb_writes_summary mirrors the critic-agent's
+    # kb_writes_summary mirrors the critic-agent's
     # ``commit-review`` output count, grouped by verdict. Source is
     # the same ``critic-workdir/<iter>/review.json`` we already
     # parsed above so we don't re-read the disk.
@@ -2380,7 +2384,7 @@ def _critic_kb_writes_summary(
     critic_iters: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Build the ``critic_robustness.kb_writes_summary`` sub-block
-    (KB_design §3.12 §4.4).
+.
 
     Counts each iteration's verdict; downstream dashboards group on
     ``by_verdict`` to render the KEEP / REVERT / NEEDS_INFO mix.
@@ -2596,7 +2600,7 @@ def collect_telemetry(
         "system_profile_paths": [_rel(p, session_dir) or str(p) for p in _scan_system_profiles(session_dir)],
         "server_log_paths":     [_rel(p, session_dir) or str(p) for p in _scan_server_logs(session_dir)],
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
-        # v0.8 M6 (KB_design §3.7 + §3.12 §4.5) — per-lane occupancy
+        # per-lane occupancy
         # / capacity summary derived from the leases DB. Sits in the
         # telemetry section so cross-cluster dashboards can chart
         # lane usage alongside GPU power / temperature.
@@ -2620,7 +2624,7 @@ def _action_family(action: str) -> str:
         return "sweep"
     if s == "validate_stack":
         return "validate"
-    # v0.8 M3 — merged explore action (KB_design §3.4). Bucketed into
+    # merged explore action. Bucketed into
     # its own ``explore`` family so the attribution table can show a
     # single row that subsumes the legacy backends + params buckets.
     if s == "explore":
@@ -2729,8 +2733,8 @@ def collect_attribution(
     family_totals: dict[str, float] = {
         "kernel": 0.0, "backends": 0.0, "params": 0.0,
         "sweep": 0.0, "validate": 0.0, "other": 0.0,
-        # v0.8 M3 — explore family (subsumes backends+params on v0.8
-        # sessions; legacy buckets stay populated on v0.6 resume).
+        # explore family (subsumes backends+params on v0.8
+        # sessions; legacy buckets stay populated on legacy resume).
         "explore": 0.0,
     }
     for e in entries:
@@ -2773,7 +2777,7 @@ def collect_attribution(
             "cum_gain_after)."
         )
 
-    # v0.8 M7 (KB_design §3.12 §4.6 + §3.13 M7 §6) — per-phase gain
+    # per-phase gain
     # breakdown. Cross-references the optimization_stack with the
     # phase_history timestamps so each KEEP'd entry is bucketed into
     # the phase that was active at its acceptance time. EXPLORE
@@ -2787,9 +2791,9 @@ def collect_attribution(
         "source_breakdown": {
             "geak_pct_of_total":     round(geak_total, 2),
             "oob_pct_of_total":      round(oob_total, 2),
-            # v0.8 M3 — primary row.
+            # primary row.
             "explore_pct_of_total":  round(family_totals.get("explore", 0.0), 2),
-            # Legacy bucket aliases — preserved for v0.6 resume reports.
+            # Legacy bucket aliases — preserved for legacy resume reports.
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total":   round(family_totals.get("params", 0.0), 2),
             "sweep_pct_of_total":    round(family_totals.get("sweep", 0.0), 2),
@@ -3034,7 +3038,7 @@ def collect_source_files(
 
 
 # ---------------------------------------------------------------------------
-# §16 Phase segments — v0.8 M2 phase state machine (KB_design §3.2 + §3.12)
+# §16 Phase segments — v0.8 M2 phase state machine
 # ---------------------------------------------------------------------------
 def collect_phase_segments(
     state: dict[str, Any],
@@ -3128,7 +3132,7 @@ def collect_phase_segments(
 
 
 # ---------------------------------------------------------------------------
-# §15 KB Provenance — Cortex KB integration audit (v0.8 M1)
+# §15 KB Provenance — Cortex KB integration audit
 # ---------------------------------------------------------------------------
 def collect_kb_provenance(
     session_dir: Path,
@@ -3140,20 +3144,21 @@ def collect_kb_provenance(
 
     Three sources merged into one section:
 
-    1. SharedState (``state.json``) — ``cortex_session_id``,
-       ``cortex_session_summary`` (T4 result), ``warm_start_*``
-       snapshots, ``pending_kb_edges`` (T2 hypothesize edges not yet
-       verified).
+    1. SharedState (``state.json``) — ``cortex_session_id`` (hyperloom-
+       local id, NOT a KB sid) + ``warm_start_*`` snapshots.
     2. NDJSON queues (``runtime/cortex/.kb_*.ndjson``) — counts of
        drained / dead-letter rows. The flusher daemon writes one
        ``drain_bookmark`` per round; we just sum the deltas.
     3. Synchronous audit log (``runtime/cortex/.kb_audit.jsonl``) — per
-       Cortex CLI call status. Useful for diagnosing T0 / T4 sync
-       failures from the breakdown JSON alone.
+       Cortex CLI call status. Useful for diagnosing T0 sync failures
+       from the breakdown JSON alone.
 
     Returns a stable shape (always the same keys, even on a `--degraded-kb`
     session) so downstream readers (claw-stats-service) don't have to
-    branch.
+    branch. ``commit_summary`` / ``pending_edges`` / ``edges_promoted``
+    / ``edges_negated`` keys are kept (always empty) for back-compat
+    with claw-stats-service consumers that pre-date the T2/T3 protocol
+    retirement; remove in a future schema bump.
     """
     from ..session_paths import (
         cortex_audit_jsonl as _audit_path,
@@ -3162,11 +3167,10 @@ def collect_kb_provenance(
         cortex_flusher_pid as _flusher_pid_path,
         cortex_flusher_status_json as _flusher_status_path,
         cortex_pending_ndjson as _pending_path,
-        cortex_sid_file as _sid_path,
         pr_monitor_status_json as _pr_status_path,
     )
 
-    # v0.8 §3.6 + KB_gaps/Gap-02 — surface PR Monitor reachability
+    # v0.8 §3.6 + surface PR Monitor reachability
     # snapshot written at cli boot. We use ``warnings`` (top-level
     # breakdown.warnings) rather than a dedicated section so the
     # operator can grep for ``pr_monitor`` regardless of the schema
@@ -3221,7 +3225,6 @@ def collect_kb_provenance(
     flushed_path = _flushed_path(session_dir)
     dl_path = _dl_path(session_dir)
     audit_path = _audit_path(session_dir)
-    sid_path = _sid_path(session_dir)
 
     audit_tail = _read_last_n_audit(audit_path, n=50)
     # Status counts aggregated across the audit tail.
@@ -3230,38 +3233,11 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
-    # v0.8 M4 — ``points_created[]`` aggregation (KB_design §3.12 §4.4 +
-    # §3.13 M4 §4). We walk the *full* audit log (not just the tail) so
+    # ``points_created[]`` aggregation: walk the *full* audit log so
     # one entry per (canonical_id, kind) is exposed even on long
-    # sessions; ``set`` dedups in case the same point was re-proposed
-    # mid-session. Only rows with op='propose_point' and a non-empty
-    # canonical_id qualify; we surface kind/authority/source so the
-    # ``pr_node`` rows (M4) are distinguishable from
-    # ``optimization_node`` / ``workload_node`` / ``issue_node``.
-    #
-    # KB_gaps/Gap-08 — same walk also aggregates verify outcomes into
-    # ``edges_promoted`` / ``edges_negated`` lists so the breakdown
-    # reader can answer "which edges did this session promote /
-    # refute?" without re-parsing NDJSON. We look for both async
-    # (``op=enqueue, envelope_op=verify``) and sync
-    # (``op=cli, args=['session','verify',...]``) rows; dedup by edge_id
-    # so a flushed enqueue + its later sync replay don't double-count.
+    # sessions; ``set`` dedups re-proposed rows.
     points_created: list[dict[str, Any]] = []
     points_by_kind: dict[str, int] = {}
-    edges_promoted: list[str] = []
-    edges_negated: list[str] = []
-    _seen_verify_edges: set[str] = set()
-
-    def _record_verify(edge_id: str, outcome: str) -> None:
-        if not edge_id or edge_id in _seen_verify_edges:
-            return
-        outcome_l = (outcome or "").strip().lower()
-        if outcome_l == "confirmed":
-            edges_promoted.append(edge_id)
-            _seen_verify_edges.add(edge_id)
-        elif outcome_l == "refuted":
-            edges_negated.append(edge_id)
-            _seen_verify_edges.add(edge_id)
 
     try:
         if audit_path.exists():
@@ -3277,84 +3253,60 @@ def collect_kb_provenance(
                         continue
                     if not isinstance(row, dict):
                         continue
-                    op_name = str(row.get("op") or "")
-                    if op_name == "propose_point":
-                        canonical = str(row.get("canonical_id") or "").strip()
-                        kind = str(row.get("kind") or "").strip()
-                        if not canonical or not kind:
-                            continue
-                        key = (canonical, kind)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        points_created.append({
-                            "canonical_id": canonical,
-                            "kind":         kind,
-                            "authority":    str(row.get("authority") or ""),
-                            "source":       str(row.get("source") or ""),
-                            "status":       str(row.get("status") or ""),
-                            "ts":           str(row.get("ts") or ""),
-                        })
-                        points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
-                    elif (
-                        op_name == "enqueue"
-                        and str(row.get("envelope_op") or "") == "verify"
-                    ):
-                        _record_verify(
-                            str(row.get("payload_edge") or ""),
-                            str(row.get("payload_outcome") or ""),
-                        )
-                    elif op_name == "cli":
-                        args = row.get("args") or []
-                        if (
-                            isinstance(args, list)
-                            and len(args) >= 4
-                            and args[0] == "session"
-                            and args[1] == "verify"
-                        ):
-                            edge_id = ""
-                            outcome = ""
-                            i = 2
-                            while i < len(args) - 1:
-                                if args[i] == "--edge":
-                                    edge_id = str(args[i + 1] or "")
-                                    i += 2
-                                elif args[i] == "--outcome":
-                                    outcome = str(args[i + 1] or "")
-                                    i += 2
-                                else:
-                                    i += 1
-                            _record_verify(edge_id, outcome)
+                    if str(row.get("op") or "") != "propose_point":
+                        continue
+                    canonical = str(row.get("canonical_id") or "").strip()
+                    kind = str(row.get("kind") or "").strip()
+                    if not canonical or not kind:
+                        continue
+                    key = (canonical, kind)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    points_created.append({
+                        "canonical_id": canonical,
+                        "kind":         kind,
+                        "authority":    str(row.get("authority") or ""),
+                        "source":       str(row.get("source") or ""),
+                        "status":       str(row.get("status") or ""),
+                        "ts":           str(row.get("ts") or ""),
+                    })
+                    points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
     except OSError as exc:
         warnings.append(f"kb_provenance: failed to scan {audit_path}: {exc!r}")
 
     cortex_sid = (state.get("cortex_session_id") or "").strip()
-    if not cortex_sid and sid_path.exists():
-        try:
-            cortex_sid = sid_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            cortex_sid = ""
-
-    commit_summary = state.get("cortex_session_summary") or {}
-    pending_edges = state.get("pending_kb_edges") or []
     warm = state.get("warm_start_recipe") or {}
     pitfalls = state.get("warm_start_pitfalls") or []
+    lessons = state.get("warm_start_lessons") or []
+    # GAP 1 — warm-recipe replay outcome (one-shot reproduce of the KB
+    # best_config at PRELUDE). Empty dict before the replay completes /
+    # when ``--no-warm-replay`` was set; otherwise carries:
+    #   {status, expected_gain_pct, actual_gain_pct,
+    #    warm_recipe_tier, warm_recipe_conf, replay_task_id, reason}
+    warm_replay_outcome = state.get("warm_replay_outcome") or {}
 
     out: dict[str, Any] = {
         "cortex_session_id":      cortex_sid,
         "warm_start_ts":          state.get("warm_start_ts") or "",
         "warm_start_recipe_seen": bool(warm and warm.get("raw")),
+        "warm_start_recipe_tier": str(warm.get("tier") or "") if isinstance(warm, dict) else "",
         "warm_start_pitfall_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
+        "warm_start_lesson_count": len(lessons) if isinstance(lessons, list) else 0,
+        # GAP 1 — operator-visible replay summary. The outcome dict is
+        # passed through verbatim so dashboards can render status
+        # transitions over time.
+        "warm_replay": dict(warm_replay_outcome) if isinstance(warm_replay_outcome, dict) else {},
+        "warm_replay_attempted":   bool(state.get("warm_replay_attempted")),
+        "warm_history_injected":   bool(state.get("warm_history_injected")),
         "stack_fingerprint":      manifest.get("stack_fingerprint") or {},
-        "pending_edges": [
-            {
-                "proposal_msg_id": row.get("proposal_msg_id", ""),
-                "edge_id":         row.get("edge_id", ""),
-                "action":          row.get("action", ""),
-                "ts":              row.get("ts", ""),
-            }
-            for row in pending_edges if isinstance(row, dict)
-        ],
+        # Always-empty back-compat lists (T2 hypothesize protocol retired).
+        # Consumers that diff session_breakdown.json for "pending edges"
+        # / "edges_promoted" must stop relying on these in a follow-up
+        # schema bump.
+        "pending_edges":          [],
+        "edges_promoted":         [],
+        "edges_negated":          [],
         "queue": {
             "pending_lines":     _count_lines(pending_path),
             "flushed_bookmarks": _count_lines(flushed_path),
@@ -3362,23 +3314,15 @@ def collect_kb_provenance(
         },
         "audit_tail_count":     len(audit_tail),
         "audit_status_counts":  status_counts,
-        # v0.8 M4 — full session points-created roll-up (KB_design §3.12
-        # §4.4). Sorted by canonical_id for stable diffing.
         "points_created":        sorted(
             points_created, key=lambda r: r.get("canonical_id", ""),
         ),
         "points_by_kind":        points_by_kind,
-        # KB_gaps/Gap-08 / KB_design §3.12 §4.4 — per-edge T3
-        # verify roll-up. Sorted for stable diffing.
-        "edges_promoted":        sorted(edges_promoted),
-        "edges_negated":         sorted(edges_negated),
+        # Empty placeholder kept for back-compat with claw-stats-service.
         "commit_summary": {
-            "status":             str(commit_summary.get("status") or "")
-                if isinstance(commit_summary, dict) else "",
-            "promoted_edges":     list(commit_summary.get("promoted_edges") or [])
-                if isinstance(commit_summary, dict) else [],
-            "derived_summary_id": str(commit_summary.get("derived_summary_id") or "")
-                if isinstance(commit_summary, dict) else "",
+            "status":             "",
+            "promoted_edges":     [],
+            "derived_summary_id": "",
         },
         "flusher_status": _collect_flusher_status(
             session_dir,
@@ -3410,7 +3354,7 @@ def _collect_flusher_status(
 ) -> dict[str, Any]:
     """Merge ``.kb_flusher_status.json`` (boot marker) with a live
     ``kill -0 $pid`` probe so the breakdown reader sees one stable
-    shape (KB_gaps/Dead-E §6).
+    shape.
     """
     base: dict[str, Any] = {
         "enabled":       False,
@@ -3461,7 +3405,7 @@ def _collect_flusher_status(
 
 
 # ---------------------------------------------------------------------------
-# v0.8 §3.12 §4.3 — specialist_runs section
+# specialist_runs section
 # ---------------------------------------------------------------------------
 def collect_specialist_runs(
     session_dir: Path,
@@ -3472,7 +3416,7 @@ def collect_specialist_runs(
 ) -> list[dict[str, Any]]:
     """Build the ``specialist_runs`` breakdown section.
 
-    Two data sources merge here (KB_design §3.12 §4.3):
+    Two data sources merge here:
 
     1. ``state.json.specialist_rounds[]`` — per-round summary the
        Coordinator writes after every EXPLORE specialist dispatch.

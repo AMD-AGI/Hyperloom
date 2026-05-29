@@ -1,4 +1,4 @@
-"""Session manifest writer (DESIGN v0.6.1 §23).
+"""Session manifest writer ().
 
 The manifest is the **first** file written to a session directory after
 ``make_session_dir()`` runs and is the canonical session-resume tag.
@@ -23,7 +23,7 @@ Schema v3 (dependencies added)::
       "image":             "<registry>/<repo>:<tag>" or null,
       "model_path":        "...",
       "model_name":        "...",
-      "framework":         "sglang|vllm",
+      "framework":         "sglang|vllm|atom",
       "gpu_type":          "mi300x|mi325x|mi355x|''",
       "tp":                N or null,
       "workload":          {"isl":..., "osl":..., "max_model_len":...,
@@ -87,7 +87,7 @@ from .session_paths import manifest_path
 
 log = logging.getLogger(__name__)
 
-# Schema bumped to 3 in v0.8 M1 to add ``stack_fingerprint`` (rocm / aiter /
+# Schema bumped to 3 in the legacy release to add ``stack_fingerprint`` (rocm / aiter /
 # sglang / vllm versions, mandatory attrs for Cortex KB ``session begin``
 # per KB_design §3.6.5.1 + §3.13 M1) plus the ``dependencies`` provenance
 # block (Magpie / InferenceX commit + remote — bugs.md §C #1). Older v2
@@ -363,23 +363,40 @@ def build_manifest(
         "pid":               os.getpid(),
         "host":              platform.node() or socket.gethostname() or "",
         "image":             _detect_image(),
-        # v0.8 M1 — Cortex KB ``session begin`` requires the stack
-        # fingerprint as a mandatory attribute (KB_design §3.6.5.1). We
+        # Cortex KB ``session begin`` requires the stack
+        # fingerprint as a mandatory attribute. We
         # snapshot it on manifest write so resume-after-redeploy can
         # detect drift (``--cortex-strict-fingerprint``).
         "stack_fingerprint": _detect_stack_fingerprint(),
-        # v0.8 M5 — research_lane capacity locked at session start
-        # (KB_design §3.7 §4.4). Resume reads this back into SharedState
+        # research_lane capacity locked at session start
+        #. Resume reads this back into SharedState
         # so a mid-session restart can't change concurrency semantics.
         "research_lane_capacity": int(
             getattr(args, "research_lane_capacity", 1) or 1
         ) if args is not None else 1,
-        # KB_design_continue §3.3 — IR-3 soft-degrade audit.
+        # IR-3 soft-degrade audit.
         "kb_degraded_reason": (
             getattr(args, "kb_degraded_reason", None) if args is not None else None
         ),
         "pr_degraded_reason": (
             getattr(args, "pr_degraded_reason", None) if args is not None else None
+        ),
+        # GAP 1 — Warm-recipe replay flags. Persisted into manifest so
+        # robustness_monitor.sh resume / cross-machine resume picks up
+        # the same gate thresholds rather than reverting to defaults.
+        # The ``warm_replay_enabled`` field is the inverted form of
+        # ``--no-warm-replay`` so the YAML reads more naturally.
+        "warm_replay_enabled": (
+            not bool(getattr(args, "no_warm_replay", False))
+            if args is not None else True
+        ),
+        "warm_replay_min_confidence": (
+            float(getattr(args, "warm_replay_min_confidence", 0.7) or 0.7)
+            if args is not None else 0.7
+        ),
+        "warm_replay_min_reproduce_pct": (
+            float(getattr(args, "warm_replay_min_reproduce_pct", 0.8) or 0.8)
+            if args is not None else 0.8
         ),
     }
 

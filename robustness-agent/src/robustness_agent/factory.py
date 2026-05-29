@@ -23,10 +23,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-import httpx
 
 import os
 
@@ -132,19 +130,11 @@ def build_reactor_components(
             "config.robustness_server_url is empty",
         )
 
-    # Auto-include the auth-proxy health endpoint so F3 has something
-    # to probe even if the operator forgot to configure
-    # ``health_probe_targets``. Same auto-probe story for the inference
-    # server (sglang/vLLM/Magpie) — without it, an SGLang SIGSTOP fires
-    # no symptom because the default ``health_probe_targets`` list is
-    # empty and operators routinely forget to populate it.
+    # Auto-include the local inference server health endpoint so an
+    # SGLang/vLLM/Magpie SIGSTOP fires a symptom — without it, the
+    # default ``health_probe_targets`` list is empty and operators
+    # routinely forget to populate it.
     probe_targets = list(config.health_probe_targets)
-    if (
-        config.auto_probe_auth_proxy
-        and config.auth_proxy_health_url
-        and config.auth_proxy_health_url not in probe_targets
-    ):
-        probe_targets.append(config.auth_proxy_health_url)
     if (
         config.auto_probe_inference_server
         and config.inference_server_health_url
@@ -302,9 +292,6 @@ def build_reactor_components(
             min_pending_ticks=config.kernel_pipeline_min_pending_ticks,
             min_geak_sigterm_attempts=(
                 config.kernel_pipeline_min_geak_sigterm_attempts
-            ),
-            auth_proxy_url_marker=(
-                config.kernel_pipeline_auth_proxy_url_marker
             ),
             min_cursor_401_hits=(
                 config.kernel_pipeline_min_cursor_401_hits

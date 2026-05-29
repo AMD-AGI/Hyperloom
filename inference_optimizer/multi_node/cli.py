@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import json
 import os
 import sys
@@ -69,6 +70,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ..paths import mn_profile_trace_root
 from ._internal import safe_client, ray_dashboard, workload_spec
 from ._internal.log import info, warn, err
 
@@ -221,6 +223,61 @@ def _checkpoint_create_rayjob_state(
     state.setdefault("ray_address", "")
     _save_state(state)
     info(f"checkpointed rayjob_id={wid} to {STATE_FILE}")
+
+
+def _write_rayjob_meta(
+    *,
+    wid: str,
+    workspace: str,
+    session_id: str | None,
+    owner_id: str | None,
+    display_name: str,
+    nodes: int,
+    gpus_per_node: int,
+) -> None:
+    """Drop a per-session meta JSON under the multi-node profile-trace root.
+
+    Path: ``<workspace_root>/profile-traces/<rayjob_id>/<session_id>``.
+
+    The file ties this RayJob workload back to the sandbox session that
+    created it so operators can correlate ``profile-traces/<wid>/torch_trace/``
+    artefacts (already produced under the same ``<wid>/`` parent by
+    ``launch_multinode.py``) with the originating Claw session without
+    walking the SaFE API. Co-locating meta with traces means a single
+    ``rsync`` of ``profile-traces/<wid>/`` carries both the data and its
+    provenance.
+
+    Skipped entirely when ``session_id`` is empty / None: the file name
+    is the session id itself, so a missing id leaves us nowhere to write.
+    This mirrors the label-injection skip rule in :func:`cmd_create_rayjob`.
+
+    Best-effort: any filesystem error (read-only mount, quota, permission)
+    is logged at WARN and swallowed. Meta is audit data, not a critical
+    path of RayJob creation; failing the workload because we couldn't
+    write a sidecar JSON would be a worse outcome than missing the meta.
+    """
+    if not session_id:
+        return
+    meta_path = mn_profile_trace_root() / wid / session_id
+    payload: dict[str, Any] = {
+        "rayjob_id": wid,
+        "session_id": session_id,
+        "owner_id": owner_id,
+        "workspace": workspace,
+        "display_name": display_name,
+        "nodes": nodes,
+        "gpus_per_node": gpus_per_node,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    try:
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        info(f"rayjob meta written to {meta_path}")
+    except OSError as exc:
+        warn(f"failed to write rayjob meta to {meta_path}: {exc}")
 
 
 def _require_state(*keys: str) -> dict[str, Any]:
@@ -529,17 +586,20 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
     if not args.workspace:
         info(f"workspace derived from $SAFE_WORKSPACE: {workspace}")
 
-    # display_name resolution: --display-name > $DISPLAY_NAME env >
-    # generated `multi_node_<unix-ts>` fallback. Repeating create-rayjob
-    # reuses the same RayJob id once checkpointed (unless --recreate or the
-    # prior workload hit a terminal failure phase).
+    # display_name resolution: $DISPLAY_NAME env > --display-name > fallback.
     display_name = (
-        args.display_name
-        or os.environ.get("DISPLAY_NAME", "").strip()
+        os.environ.get("DISPLAY_NAME", "").strip()
+        or args.display_name
         or f"multi_node_{int(time.time())}"
     )
-    if not args.display_name:
-        info(f"displayName derived from {'$DISPLAY_NAME' if os.environ.get('DISPLAY_NAME') else 'auto-generated'}: {display_name}")
+    info(f"displayName: {display_name}")
+
+    # session_id: read from $CLAW_SESSION_ID (Brain-injected at sandbox
+    # start). When unset we skip the label so dev / local runs without
+    # Brain don't fail; production sandboxes always have it exported.
+    session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
+    if session_id:
+        info(f"sessionId derived from $CLAW_SESSION_ID: {session_id}")
 
     body = workload_spec.build_rayjob_workload_body(
         workspace=workspace,
@@ -552,6 +612,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
         ephemeral_gi_per_node=args.ephemeral_per_node,
         description=args.description,
         owner_id=owner_id,
+        session_id=session_id,
         extra_env=env,
         extra_labels=extra_labels,
     )
@@ -595,6 +656,15 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
             info(f"creating RayJob workload (workspace={workspace} nodes={args.nodes})")
             wid = safe.create_workload(body)
             info(f"workload created: {wid}")
+            _write_rayjob_meta(
+                wid=wid,
+                workspace=workspace,
+                session_id=session_id,
+                owner_id=owner_id,
+                display_name=display_name,
+                nodes=args.nodes,
+                gpus_per_node=args.gpus_per_node,
+            )
 
         _checkpoint_create_rayjob_state(wid=wid, workspace=workspace, args=args)
 
@@ -721,13 +791,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     state = _require_state("head_pod_ip")
     head_ip = state["head_pod_ip"]
 
-    # Source the env file written by bootstrap so PATH points at /opt/venv,
-    # then verify each binary is on PATH.
+    # Source env file (PATH → /opt/venv), then verify ``ray`` on PATH.
+    # ``oob`` / ``claude`` / ``codex`` excluded: head pod never invokes
+    # these CLIs (see bootstrap.sh "# --- 2. / 2c. (removed)" comments).
     script = (
         "set -e; "
         "if [ -f /etc/profile.d/hyperloom-env.sh ]; "
         "then source /etc/profile.d/hyperloom-env.sh; fi; "
-        "for bin in oob claude codex ray; do "
+        "for bin in ray; do "
         "  echo \"-- which $bin --\"; "
         "  which \"$bin\" || { echo \"MISSING: $bin\" >&2; exit 1; }; "
         "done; "
@@ -965,14 +1036,16 @@ def _build_multinode_launch_entrypoint(
     py = _read_pod_script("launch_multinode.py")
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
     extra_args = args.extra_args or ""
-    # Multi-node only: pin SGLANG_TORCH_PROFILER_DIR to a wekafs path
+    # Multi-node only: pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path
     # that both server pods and the sandbox can read. Resolution
     # (first-match wins):
     #   1. $HYPERLOOM_MN_PROFILE_TRACE_DIR env — set by
     #      ``inference_optimizer.cli._provision_multi_node_rayjob_stack``
     #      when ``optimize`` provisions the RayJob in-process.
     #   2. Derive from state.json's ``rayjob_id`` —
-    #      ``/wekafs/hyperloom/profile-traces/<rayjob>/torch_trace``.
+    #      ``<mn_profile_trace_root>/<rayjob>/torch_trace`` where the
+    #      root is anchored on ``$USER_DATA_PATH`` (see
+    #      ``inference_optimizer.paths.mn_profile_trace_root``).
     #      Triggered when the agent calls ``multi_node create-rayjob``
     #      + ``restart-server`` directly (without going through
     #      ``inference_optimizer.cli._run_optimize``); in that path the
@@ -983,7 +1056,20 @@ def _build_multinode_launch_entrypoint(
         _st = _load_state()
         _rid = str(_st.get("rayjob_id") or "").strip()
         if _rid:
-            profiler_dir = f"/wekafs/hyperloom/profile-traces/{_rid}/torch_trace"
+            _profiler_path = mn_profile_trace_root() / _rid / "torch_trace"
+            # Ensure the shared trace dir exists before the pod-side
+            # sglang/vllm process tries to write into it. Best-effort:
+            # asymmetric mounts (sandbox read-only, pod read-write) may
+            # PermissionError here yet still work pod-side, so we WARN
+            # and continue rather than aborting the restart.
+            try:
+                _profiler_path.mkdir(parents=True, exist_ok=True)
+            except OSError as _exc:
+                warn(
+                    f"cannot mkdir profile-traces dir {_profiler_path}: {_exc}; "
+                    f"pod-side launch will retry the mkdir"
+                )
+            profiler_dir = str(_profiler_path)
             info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
     profiler_arg = f"--torch-profiler-dir {profiler_dir!r} " if profiler_dir else ""
     # Expert parallel size. ep <= 1 => no flag (sglang/vllm legacy
@@ -1955,7 +2041,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--display-name", default=None,
         help="Optional human-readable RayJob name (shows up in SaFE UI). "
-             "Resolution: --display-name > $DISPLAY_NAME env > "
+             "Resolution: $DISPLAY_NAME env > --display-name > "
              "auto-generated multi_node_<unix-ts>.",
     )
     sp.add_argument("--description", default=None)

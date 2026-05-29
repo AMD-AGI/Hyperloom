@@ -115,9 +115,10 @@ class OpenAIHttpClient:
 class AnthropicHttpClient:
     """Minimal Anthropic Messages-API client.
 
-    Targets the same auth-proxy on ``http://127.0.0.1:4002`` that
-    ClaudeBackend uses; the proxy rewrites ``x-api-key`` to
-    ``Authorization: Bearer`` for the upstream AMD gateway.
+    Talks directly to the upstream gateway pointed at by
+    ``ANTHROPIC_BASE_URL``. The AMD primus-safe gateway accepts
+    ``x-api-key`` natively, so the legacy auth-proxy on
+    ``127.0.0.1:4002`` is no longer in the loop.
     """
 
     base_url: str

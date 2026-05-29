@@ -1,4 +1,4 @@
-"""PR Monitor REST client — v0.8 M4 (KB_design §3.6 §5.2 + §3.13 M4).
+"""PR Monitor REST client — v0.8 M4.
 
 Stdlib-only (``urllib``) client for the
 ``primus-cortex-pr-api`` REST surface (see
@@ -6,7 +6,7 @@ Stdlib-only (``urllib``) client for the
 :class:`KnowledgePlane` facade to warm specialist prompts with recent PR
 summaries from the repos a given domain cares about.
 
-Design priorities (KB_design §3.6 + §3.13 M4 §10):
+Design priorities:
 
 1. **Stdlib-only** so the client works in stripped sandboxes that
    don't have ``requests`` or ``httpx``. ``urllib`` is enough for the
@@ -392,7 +392,7 @@ class PRMonitorClient:
         expected to forward both into the specialist prompt builder
         (``pr_feed`` section + ``warnings`` log).
 
-        Filtering rules (KB_design §3.13 M4 §5):
+        Filtering rules:
 
         - ``state=all`` (open + merged + closed merged together).
         - ``since = now - window_days`` (ISO ``YYYY-MM-DDTHH:MM:SSZ``).

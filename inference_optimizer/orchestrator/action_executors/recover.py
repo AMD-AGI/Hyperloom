@@ -22,7 +22,7 @@ and performs a tiered, escalating cleanup:
 We deliberately do NOT:
 
 * reload the ``amdgpu`` kernel module,
-* restart the pod / container / Ray head / auth-proxy,
+* restart the pod / container / Ray head,
 * touch ``~/.claude/config.json`` or any other persistent runtime config.
 
 These would either kill the running optimizer (so resume would be the
@@ -58,7 +58,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
 import signal
 import subprocess

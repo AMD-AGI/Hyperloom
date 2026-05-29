@@ -101,7 +101,7 @@ distils a list of `Finding` records into a single markdown blob.
 | Mode | Behaviour | Dependencies |
 |---|---|---|
 | `with_llm=False` (default) | Pure-Python: emits H2 header + one `###` block per finding + `## Aggregate metrics` tail for repeating keys. Deterministic. | none |
-| `with_llm=True` | Lazy-imports `claude_agent_sdk`; raises `RuntimeError` with install hint when SDK is absent. Drives `sdk.query()` synchronously via `asyncio.run`. | `pip install '.[claude]'` + auth proxy (see kernel-agent `scripts/ensure_auth_proxy.sh`) |
+| `with_llm=True` | Lazy-imports `claude_agent_sdk`; raises `RuntimeError` with install hint when SDK is absent. Drives `sdk.query()` synchronously via `asyncio.run`. | `pip install '.[claude]'` + `$OPENAI_BASE_URL` + `$SAFE_API_KEY` |
 
 The CLI mirrors this contract:
 

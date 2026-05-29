@@ -90,51 +90,63 @@ def _make_query_factory(messages: list[Any]):
 # ===========================================================================
 # validate_emit_intent_input
 # ===========================================================================
-def test_validate_emit_intent_input_minimal_ok():
-    validate_emit_intent_input({
-        "intent_type": "send_message",
-        "payload": {"topic": "heartbeat"},
-    })
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            {"intent_type": "send_message", "payload": {"topic": "heartbeat"}},
+            id="minimal_send_message",
+        ),
+        pytest.param(
+            {
+                "intent_type": "review_verdict",
+                "payload": {"target_proposal_msg_id": "abc", "verdict": "approve"},
+            },
+            id="review_verdict_full",
+        ),
+    ],
+)
+def test_validate_emit_intent_input_accepts_well_formed(payload):
+    validate_emit_intent_input(payload)
 
 
-def test_validate_emit_intent_input_unknown_intent_type():
-    with pytest.raises(IntentValidationError, match="unknown intent_type"):
-        validate_emit_intent_input({"intent_type": "objection", "payload": {}})
-
-
-def test_validate_emit_intent_input_missing_intent_type():
-    with pytest.raises(IntentValidationError, match="requires both"):
-        validate_emit_intent_input({"payload": {"topic": "x"}})
-
-
-def test_validate_emit_intent_input_payload_must_be_object():
-    with pytest.raises(IntentValidationError, match="must be an object"):
-        validate_emit_intent_input({
-            "intent_type": "send_message", "payload": "not_object",
-        })
-
-
-def test_validate_emit_intent_input_unexpected_top_keys():
-    with pytest.raises(IntentValidationError, match="unexpected keys"):
-        validate_emit_intent_input({
-            "intent_type": "send_message",
-            "payload": {"topic": "heartbeat"},
-            "extra": "nope",
-        })
-
-
-def test_validate_emit_intent_input_review_verdict_payload():
-    validate_emit_intent_input({
-        "intent_type": "review_verdict",
-        "payload": {"target_proposal_msg_id": "abc", "verdict": "approve"},
-    })
-
-
-def test_validate_emit_intent_input_review_verdict_missing_target():
-    with pytest.raises(IntentValidationError, match="target_proposal_msg_id"):
-        validate_emit_intent_input({
-            "intent_type": "review_verdict", "payload": {"verdict": "approve"},
-        })
+@pytest.mark.parametrize(
+    "payload, error_match",
+    [
+        pytest.param(
+            {"intent_type": "objection", "payload": {}},
+            "unknown intent_type",
+            id="unknown_intent_type",
+        ),
+        pytest.param(
+            {"payload": {"topic": "x"}},
+            "requires both",
+            id="missing_intent_type",
+        ),
+        pytest.param(
+            {"intent_type": "send_message", "payload": "not_object"},
+            "must be an object",
+            id="payload_must_be_object",
+        ),
+        pytest.param(
+            {
+                "intent_type": "send_message",
+                "payload": {"topic": "heartbeat"},
+                "extra": "nope",
+            },
+            "unexpected keys",
+            id="unexpected_top_keys",
+        ),
+        pytest.param(
+            {"intent_type": "review_verdict", "payload": {"verdict": "approve"}},
+            "target_proposal_msg_id",
+            id="review_verdict_missing_target",
+        ),
+    ],
+)
+def test_validate_emit_intent_input_rejects_malformed(payload, error_match):
+    with pytest.raises(IntentValidationError, match=error_match):
+        validate_emit_intent_input(payload)
 
 
 # ===========================================================================
