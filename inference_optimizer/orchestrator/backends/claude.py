@@ -28,16 +28,15 @@ import importlib
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 from ..intent_parser import (
     Intent,
-    IntentType,
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import Backend, BackendError, BackendTurnResult
+from .base import BackendError, BackendTurnResult
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,

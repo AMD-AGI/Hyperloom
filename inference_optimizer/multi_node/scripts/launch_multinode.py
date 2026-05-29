@@ -39,7 +39,6 @@ import argparse
 import json
 import os
 import shlex
-import socket
 import subprocess
 import pathlib
 import sys
