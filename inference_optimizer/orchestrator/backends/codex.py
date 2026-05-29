@@ -35,15 +35,14 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from ..intent_parser import (
-    Intent,
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import Backend, BackendError, BackendTurnResult
+from .base import BackendError, BackendTurnResult
 
 
 _OUTPUT_INSTRUCTIONS = """
