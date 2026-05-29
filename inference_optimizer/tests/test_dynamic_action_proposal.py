@@ -98,6 +98,18 @@ def test_validate_proposal_rejects_each_forbidden_field(field_name: str):
     assert r.reason == "forbidden_field_present"
 
 
+def test_validate_proposal_rejects_overlong_name():
+    from inference_optimizer.orchestrator.dynamic_action_proposal import (
+        MAX_PROPOSAL_NAME_CHARS,
+    )
+    r = validate_proposal(
+        _good_proposal(name="x" * (MAX_PROPOSAL_NAME_CHARS + 1)),
+        spec_scope_domains=SCOPE,
+    )
+    assert r.ok is False
+    assert r.reason == "name_too_long"
+
+
 def test_validate_proposal_rejects_unknown_field():
     p = _good_proposal()
     p["unexpected_extra"] = True
