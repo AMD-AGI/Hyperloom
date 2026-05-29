@@ -464,12 +464,34 @@ class DynamicActionRunner:
         worktree = (
             runs_root(session_dir) / "dynamic" / dyn_id / "worktree"
         )
-        wt, err = _setup_worktree(
-            base, worktree, branch=f"dynamic-{dyn_id}",
-        )
+        branch = f"dynamic-{dyn_id}"
+        # Drop any leftover worktree + branch from a crashed / abandoned
+        # prior dispatch so ``git worktree add`` does not fail with
+        # "branch already exists".
+        self._prune_stale_worktree(base, worktree, branch)
+        wt, err = _setup_worktree(base, worktree, branch=branch)
         if wt is None:
             return None, base, f"worktree_setup_failed: {err}"
         return wt, base, ""
+
+    @staticmethod
+    def _prune_stale_worktree(base: Path, worktree: Path, branch: str) -> None:
+        """Best-effort cleanup of a stale per-dyn_id worktree + branch."""
+        import subprocess
+        cmds = (
+            ["git", "-C", str(base), "worktree", "remove", "--force",
+             str(worktree)],
+            ["git", "-C", str(base), "worktree", "prune"],
+            ["git", "-C", str(base), "branch", "-D", branch],
+        )
+        for cmd in cmds:
+            try:
+                subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    timeout=20.0, check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
 
     async def _dispatch_tool(
         self,
@@ -481,12 +503,16 @@ class DynamicActionRunner:
         call_id: str,
     ) -> dict[str, Any]:
         if action.tool == TOOL_READ_SOURCE:
-            return read_source(str(action.args.get("path") or ""))
+            return read_source(
+                str(action.args.get("path") or ""),
+                action.args.get("max_bytes"),
+            )
         if action.tool == TOOL_READ_SESSION_ARTIFACT:
             return read_session_artifact(
                 session_dir,
                 str(action.args.get("path") or ""),
                 dyn_id=dyn_id,
+                max_bytes=action.args.get("max_bytes"),
             )
         if action.tool == TOOL_RUN_BENCH:
             if not BENCH_TOOL_ENABLED_V1:

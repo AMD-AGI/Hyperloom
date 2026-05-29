@@ -1012,7 +1012,9 @@ def _build_dynamic_action_executor(
         float(wall_clock_raw) if wall_clock_raw
         else DEFAULT_WALL_CLOCK_BUDGET_SEC
     )
-    backend = ClaudeBackend(model=model, max_turns_default=1)
+    backend = ClaudeBackend(
+        model=model, max_turns_default=1, raw_completion=True,
+    )
     runner = DynamicActionRunner(
         backend,
         wall_clock_budget_sec=wall_clock,
