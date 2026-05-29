@@ -24,9 +24,6 @@ Output: a sequence of bullet-pointed events ending with the final state.
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
-from pathlib import Path
 
 from ..orchestrator.backends import (
     MockBackend,

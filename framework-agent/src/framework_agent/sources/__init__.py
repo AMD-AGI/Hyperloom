@@ -30,13 +30,11 @@ from typing import Iterable
 from ..logging_setup import get_logger
 from ..keywords import (
     extract_keywords,
-    score_title_against_keywords,
     score_title_with_anti_signal,
 )
 from ..models import Candidate, ExploreRequest
 from ._shared import GitHubPr
 from . import github as github_backend
-from . import primus_cortex as primus_cortex_backend
 from .primus_cortex import (
     PrimusCortexError,
     list_perf_prs,
