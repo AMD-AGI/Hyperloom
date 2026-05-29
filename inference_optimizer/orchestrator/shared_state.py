@@ -231,6 +231,11 @@ class SharedState:
     osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
+    # When False (CLI ``--no-explore``) the EXPLORE phase is skipped:
+    # PRELUDE / FRAMEWORK_PR route straight to KERNEL (or SWEEP when
+    # kernel is also disabled). Mirrors the ``kernel_enabled`` /
+    # ``framework_phase_enabled`` opt-out pattern.
+    explore_enabled: bool = True
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
