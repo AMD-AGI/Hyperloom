@@ -141,7 +141,7 @@ def materialize_dynamic_patch_workspace(
     name = str(proposal.get("name") or "patch").strip() or "patch"
     safe_name = "".join(
         c if c.isalnum() or c in "._-" else "_" for c in name
-    )
+    )[:80]
     patch_path = patches_dir / f"001_{safe_name}.patch"
     patch_text = str(proposal.get("patch_text") or "")
     if not patch_text.endswith("\n"):

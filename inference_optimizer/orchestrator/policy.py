@@ -2178,13 +2178,36 @@ class PolicyGate:
                 f"domain keys",
                 rule="dynamic_payload_schema",
             )
-        scope_domains = [str(d or "").strip() for d in scope_domains_raw]
-        scope_domains = [d for d in scope_domains if d]
+        # Dedup (order-preserving) so a repeated entry cannot inflate a
+        # single-domain dispatch into a fake cross-domain one.
+        scope_domains = list(dict.fromkeys(
+            d for d in (str(d or "").strip() for d in scope_domains_raw) if d
+        ))
+        # All-kernel scope is a kernel-only patch in disguise — checked
+        # before the min-length rule so it keeps its dedicated reason
+        # code even after dedup collapses a repeated kernel literal.
+        if scope_domains and all(
+            d.lower() == DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL
+            for d in scope_domains
+        ):
+            raise PolicyDenied(
+                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: every "
+                f"scope_domains entry is "
+                f"{DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL!r}; that is a "
+                f"kernel-only patch in disguise",
+                rule="dynamic_kernel_only_disallowed",
+                hint=(
+                    "Kernel-only patches must go through the kernel "
+                    "agent (REQUEST{target_agent='kernel', ...}); "
+                    "dynamic_action is for genuine cross-domain "
+                    "synthesis."
+                ),
+            )
         if len(scope_domains) < DYNAMIC_ACTION_MIN_SCOPE_DOMAINS:
             raise PolicyDenied(
                 f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: "
-                f"scope_domains has {len(scope_domains)} entries; "
-                f"minimum is {DYNAMIC_ACTION_MIN_SCOPE_DOMAINS}",
+                f"scope_domains has {len(scope_domains)} distinct "
+                f"entries; minimum is {DYNAMIC_ACTION_MIN_SCOPE_DOMAINS}",
                 rule="dynamic_scope_too_narrow",
                 hint=(
                     "dynamic_action is for cross-domain patches; "
@@ -2248,9 +2271,10 @@ class PolicyGate:
 
         offending_side_effects: list[str] = []
         for se in side_effects:
+            se_norm = se.lower()
             if (
-                se in KERNEL_OWNED_ACTIONS
-                or se in DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES
+                se_norm in KERNEL_OWNED_ACTIONS
+                or se_norm in DYNAMIC_ACTION_SIDE_EFFECT_RED_LINES
             ):
                 offending_side_effects.append(se)
         if offending_side_effects:
@@ -2265,23 +2289,6 @@ class PolicyGate:
                     "independent server lifecycle."
                 ),
             )
-        if all(
-            d == DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL for d in scope_domains
-        ):
-            raise PolicyDenied(
-                f"delegate{{action='{DYNAMIC_ACTION_NAME}'}}: every "
-                f"scope_domains entry is "
-                f"{DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL!r}; that is a "
-                f"kernel-only patch in disguise",
-                rule="dynamic_kernel_only_disallowed",
-                hint=(
-                    "Kernel-only patches must go through the kernel "
-                    "agent (REQUEST{target_agent='kernel', ...}); "
-                    "dynamic_action is for genuine cross-domain "
-                    "synthesis."
-                ),
-            )
-
         # Round-cap accounting; only enforced when shared_state is
         # wired (legacy unit tests pass without it).
         if state is not None:

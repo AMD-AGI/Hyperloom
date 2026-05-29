@@ -529,6 +529,19 @@ class TestInvariant_5_NoServerNoMagpie:
                     f"violates I-5"
                 )
 
+    @pytest.mark.parametrize("variant", ["Server", "MAGPIE", "Magpie"])
+    def test_inv_red_line_case_insensitive(self, variant: str):
+        """Case variants of a red-line side effect must still be denied."""
+        gate = _gate()
+        payload = _delegate_payload(params={
+            "side_effects_declared": [variant],
+        })
+        with pytest.raises(PolicyDenied) as excinfo:
+            gate.validate_intent("orchestration", Intent(
+                type=IntentType.DELEGATE, payload=payload,
+            ))
+        assert excinfo.value.rule == "dynamic_side_effects_red_line"
+
 
 # ===========================================================================
 # I-6 — Dynamic action cannot declare its own metric.
@@ -554,6 +567,18 @@ class TestInvariant_6_NoSelfMetric:
             "motivation_gap_text": "accuracy gate probe",
             "scope_domains": SCOPE,
             "side_effects_declared": ["accuracy_gate"],
+        })
+        with pytest.raises(PolicyDenied) as excinfo:
+            gate.validate_intent("orchestration", Intent(
+                type=IntentType.DELEGATE, payload=payload,
+            ))
+        assert excinfo.value.rule == "dynamic_side_effects_red_line"
+
+    @pytest.mark.parametrize("variant", ["Metric", "Accuracy_Gate", "METRIC"])
+    def test_inv_metric_red_line_case_insensitive(self, variant: str):
+        gate = _gate()
+        payload = _delegate_payload(params={
+            "side_effects_declared": [variant],
         })
         with pytest.raises(PolicyDenied) as excinfo:
             gate.validate_intent("orchestration", Intent(
@@ -715,6 +740,19 @@ class TestInvariant_RoundCap:
         with pytest.raises(PolicyDenied) as excinfo:
             gate.validate_intent("orchestration", bad)
         assert excinfo.value.rule == "dynamic_sourced_variant_cap_exceeded"
+
+    def test_inv_scope_domains_dedup_blocks_fake_cross_domain(self):
+        """A repeated domain cannot inflate a single-domain dispatch
+        into a fake cross-domain one."""
+        gate = _gate()
+        payload = _delegate_payload(params={
+            "scope_domains": ["serving_specialist", "serving_specialist"],
+        })
+        with pytest.raises(PolicyDenied) as excinfo:
+            gate.validate_intent("orchestration", Intent(
+                type=IntentType.DELEGATE, payload=payload,
+            ))
+        assert excinfo.value.rule == "dynamic_scope_too_narrow"
 
     def test_inv_single_dynamic_sourced_variant_passes(self):
         """A single dynamic-sourced variant within the cap should pass
