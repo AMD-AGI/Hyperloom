@@ -9,7 +9,6 @@ The tests focus on the new commands; the legacy ones (``write-verdict``,
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest

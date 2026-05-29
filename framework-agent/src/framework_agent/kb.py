@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import datetime
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable

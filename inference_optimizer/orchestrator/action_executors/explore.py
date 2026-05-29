@@ -61,9 +61,9 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
+from ._explore_roofline_filter import filter_variants_by_roofline
 from ._grid_runner import (
     GridVariant,
-    VariantResult,
     _resolve_session_dir,
     run_grid,
     sanitize_result_dir,
@@ -185,6 +185,75 @@ def _gain_pct(tput: float | None, base_tput: float) -> float | None:
     return (float(tput) - base_tput) / base_tput * 100.0
 
 
+# ---------------------------------------------------------------------------
+# Auto-derived per-variant hard timeout
+# ---------------------------------------------------------------------------
+# The legacy class default (``variant_timeout_sec=2400``) is a smoke-workload
+# floor: it works for fast benches (small models, high TP, short OSL) where
+# the baseline run lands in well under 40 min, but on Qwen3-32B TP=1 BF16
+# CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 the baseline itself takes ~70 min
+# and every variant times out before producing a measurement. Rather than
+# pick a new universal constant (which would just push the failure mode to
+# the next slow-workload combination), we auto-derive the cap from the
+# *measured* baseline runtime that the Coordinator already injects, with a
+# safety margin above the soft kill ratio so the layered design (soft kill
+# → hard cap) is preserved.
+#
+# Operator can still override per-task via ``params['variant_timeout_sec']``
+# or globally via ``--explore-variant-timeout-sec`` (mirrored into
+# SharedState by cli.py and re-injected into every explore task by the
+# Coordinator). Floor + ceiling guard against pathological inputs.
+DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400      # 40 min — legacy smoke-workload default
+DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC = 14400   # 4 h — matches roofline composite budget
+DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN = 0.5   # hard cap ≥ baseline × (kill_ratio + 0.5)
+
+
+def _compute_explore_variant_timeout(
+    baseline_runtime_sec: float,
+    kill_ratio: float,
+    *,
+    floor_sec: int = DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC,
+    ceiling_sec: int = DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC,
+    safety_margin: float = DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN,
+) -> int:
+    """Derive the per-variant hard timeout from the measured baseline.
+
+    Returns ``floor_sec`` when ``baseline_runtime_sec`` is unknown / non-positive
+    (cold start, baseline failed, fresh resume before baseline replays). Once
+    baseline lands, scales with the actual workload runtime so slow models
+    get appropriate budget without operator tuning.
+
+    The hard cap is intentionally **above** the soft kill ratio
+    (``baseline_runtime_sec × kill_ratio``); the soft kill is the designed
+    upper bound for "this variant is slower than baseline" and the hard cap
+    is the catastrophic backstop for hung subprocesses. Inverting them — as
+    the legacy 2400 s constant does on slow workloads — defeats the layered
+    design (the hard cap fires before the soft kill ever gets a chance).
+
+    Args:
+        baseline_runtime_sec: Measured wall-clock of the baseline action.
+            Coordinator-injected via ``task.params['baseline_runtime_sec']``.
+            Pass ``0`` (or any non-positive) to force the ``floor_sec``
+            fallback.
+        kill_ratio: ``--explore-overtime-kill-ratio``. Treated as ``1.0`` if
+            below 1.0 so the derived timeout never underflows the soft kill.
+        floor_sec: Lower bound. Default preserves legacy smoke-workload
+            behaviour (40 min) for any path that calls with no baseline.
+        ceiling_sec: Upper bound. Default 4 h matches the roofline composite
+            timeout; bumping further would risk a single hung variant
+            burning a meaningful slice of the wall-clock budget.
+        safety_margin: Additive margin on top of ``kill_ratio`` so the hard
+            cap stays above the soft kill. ``0.5`` ≈ 50 % of the baseline
+            runtime as headroom for one-off variant cold starts (e.g.
+            ``--enable-torch-compile`` AOTI compile, fresh aiter shapes).
+    """
+    if baseline_runtime_sec <= 0:
+        return int(floor_sec)
+    effective_kill_ratio = max(1.0, float(kill_ratio))
+    derived = float(baseline_runtime_sec) * (effective_kill_ratio + float(safety_margin))
+    return int(max(floor_sec, min(ceiling_sec, derived)))
+
+
 def _join_args(*parts: str) -> str:
     return " ".join(p.strip() for p in parts if p and p.strip())
 
@@ -282,8 +351,6 @@ class ExploreExecutor:
             float(params.get("accuracy_baseline") or 0.0)
             or float(params.get("baseline_accuracy") or 0.0)
         )
-        timeout_sec = int(params.get("variant_timeout_sec",
-                                      self.variant_timeout_sec))
         keep_threshold_pct = float(params.get(
             "keep_threshold_pct", self.keep_threshold_pct,
         ))
@@ -323,6 +390,41 @@ class ExploreExecutor:
             )
         else:
             overtime_deadline_sec = None
+
+        # Resolve the per-variant hard cap. Precedence:
+        #   1. ``params['variant_timeout_sec']`` — explicit per-task override
+        #      (LLM proposal, operator-injected via Coordinator from the
+        #      ``--explore-variant-timeout-sec`` CLI flag, or
+        #      ``INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC`` env).
+        #   2. Auto-derive from the measured baseline runtime + soft kill
+        #      ratio (both Coordinator-injected). Scales with the actual
+        #      workload so slow models don't time out before producing a
+        #      measurement; see ``_compute_explore_variant_timeout``.
+        #   3. ``self.variant_timeout_sec`` — class default, retained as a
+        #      conservative floor when the auto-derive has no baseline yet
+        #      (cold start / first round).
+        explicit_timeout = params.get("variant_timeout_sec")
+        if explicit_timeout is not None:
+            timeout_sec = int(explicit_timeout)
+        else:
+            # Operator-tunable headroom. When unset (or negative), fall back
+            # to the helper's default. Negative values clamp to 0 (no
+            # headroom — hard cap collapses onto the soft kill ratio).
+            safety_margin_raw = params.get("variant_timeout_safety_margin")
+            try:
+                safety_margin = (
+                    max(0.0, float(safety_margin_raw))
+                    if safety_margin_raw is not None
+                    else DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN
+                )
+            except (TypeError, ValueError):
+                safety_margin = DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN
+            timeout_sec = _compute_explore_variant_timeout(
+                baseline_runtime_sec=baseline_runtime_sec,
+                kill_ratio=overtime_kill_ratio,
+                floor_sec=int(self.variant_timeout_sec),
+                safety_margin=safety_margin,
+            )
 
         # Resolve framework from materialized YAML (informational only —
         # both sglang and vllm route through the same EXTRA_*_ARGS env;
@@ -433,6 +535,46 @@ class ExploreExecutor:
             "explore dedup: payload=%d → runnable=%d (ledger_dup+round_dup=%d)",
             len(grid), len(runnable), len(skipped_dup),
         )
+
+        # Opt-in roofline-categorized filter (PR-B).
+        # Coordinator-injected ``roofline_hard_gate=True`` together with a
+        # non-empty ``roofline_saturation_snapshot`` activates the gate;
+        # the executor drops variants whose flags target only directions
+        # the latest roofline run reports above the saturation threshold.
+        # Dropped variants land in ``skipped_dup`` with
+        # ``reason='roofline_saturated'`` so the per-variant outcomes
+        # collector and ``state.json`` audit trail surface them next to
+        # the dedup skips. Default is off — when ``roofline_hard_gate``
+        # is missing / falsy, the soft advisory remains the only signal
+        # (legacy behaviour).
+        if bool(params.get("roofline_hard_gate", False)) and runnable:
+            saturation_snapshot = params.get("roofline_saturation_snapshot")
+            if isinstance(saturation_snapshot, dict) and saturation_snapshot:
+                kept_runnable, dropped_by_roofline = filter_variants_by_roofline(
+                    runnable, saturation_snapshot,
+                )
+                if dropped_by_roofline:
+                    for entry in dropped_by_roofline:
+                        skipped_dup.append({
+                            "name": entry.get("name", ""),
+                            "extra_sglang_args": entry.get("extra_sglang_args", ""),
+                            "reason": "roofline_saturated",
+                            "categories": entry.get("categories", []),
+                            "saturated_directions": entry.get(
+                                "saturated_directions", [],
+                            ),
+                        })
+                    log.info(
+                        "explore roofline gate: %d/%d variants dropped "
+                        "(saturated=%s)",
+                        len(dropped_by_roofline),
+                        len(runnable),
+                        ",".join(sorted(
+                            d for d, p in saturation_snapshot.items()
+                            if isinstance(p, (int, float)) and float(p) >= 80.0
+                        )),
+                    )
+                runnable = kept_runnable
 
         round_id_seed = int(search.get("cursor") or 0) + 1
         round_id = f"explore-{round_id_seed:03d}"

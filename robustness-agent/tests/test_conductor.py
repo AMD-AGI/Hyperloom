@@ -7,7 +7,6 @@ import sqlite3
 import time
 from pathlib import Path
 
-import pytest
 
 from robustness_agent.conductor import ConductorReader, IntentEmitter
 from robustness_agent.models import Alert, Severity
