@@ -502,6 +502,35 @@ class SharedState:
     # ``variant_timeout_sec`` is a sufficient backstop). Default 1.10
     # (kill at +10 % over baseline wall-clock).
     explore_overtime_kill_ratio: float = 1.10
+    # Per-variant hard timeout override for ExploreExecutor. Mirrored from
+    # ``--explore-variant-timeout-sec`` (CLI) /
+    # ``INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC`` (env) at session
+    # start. ``0`` means "auto-derive from baseline_runtime_sec * (kill_ratio
+    # + safety_margin)" — see ``explore._compute_explore_variant_timeout``.
+    # An explicit positive value pins the cap (e.g. CI smoke runs that want
+    # a tight bound regardless of baseline). The Coordinator injects this
+    # into every explore task's params so the executor's call site honors
+    # it without each LLM proposal having to re-emit it.
+    explore_variant_timeout_sec_override: int = 0
+    # Headroom on top of the soft kill ratio when the executor auto-derives
+    # the per-variant hard cap: ``timeout = baseline_runtime_sec *
+    # (kill_ratio + safety_margin)``. Default 0.5 (≈ 50 % of baseline as
+    # buffer for one-off variant cold starts: torch.compile AOTI compile,
+    # fresh aiter shapes, spec-decoding draft load). Mirrored from
+    # ``--explore-variant-timeout-safety-margin`` (CLI) /
+    # ``INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN`` (env).
+    # Has no effect when ``explore_variant_timeout_sec_override > 0``
+    # (operator-pinned timeout bypasses the auto-derive).
+    explore_variant_timeout_safety_margin: float = 0.5
+    # Opt-in hard filter: when True AND the latest
+    # ``roofline_saturation_history`` snapshot has at least one direction
+    # crossing the saturation threshold, ExploreExecutor drops every
+    # variant whose flags target ONLY saturated directions before running
+    # the grid. Variants targeting at least one non-saturated direction
+    # (or that don't match the categorization table) are kept. The
+    # existing ``roofline_saturation_advisory`` (soft prompt hint) stays
+    # unchanged. Mirrored from ``--explore-roofline-hard-gate`` (CLI).
+    explore_roofline_hard_gate: bool = False
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
