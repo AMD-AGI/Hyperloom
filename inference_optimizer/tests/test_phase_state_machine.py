@@ -17,7 +17,6 @@ Covers the additive subset of M2 implemented in this PR:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 

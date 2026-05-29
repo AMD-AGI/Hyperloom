@@ -18,7 +18,6 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,

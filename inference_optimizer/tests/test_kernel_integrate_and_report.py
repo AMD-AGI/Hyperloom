@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -13,9 +12,7 @@ import yaml
 
 from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.action_executors import (
-    BaselineExecutor,
     ReportExecutor,
-    report_executor,
 )
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
@@ -24,9 +21,8 @@ from inference_optimizer.orchestrator.backends import (
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
-from inference_optimizer.orchestrator.task_registry import Task
 from inference_optimizer.orchestrator.sub_agent_runner import (
-    RunnerContext, SubAgentRunner,
+    SubAgentRunner,
 )
 from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager, SqliteLeaseBackend,

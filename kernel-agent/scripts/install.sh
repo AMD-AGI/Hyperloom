@@ -104,10 +104,15 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
   fi
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
-# memory together. Keep this overridable so future GEAK fixes can move Hyperloom
-# forward without reworking the installer contract.
-GEAK_REF="${GEAK_REF:-v3.2.0}"
+# Pin GEAK to the save-and-test-diff-fallthrough fix tip
+# (https://github.com/AMD-AGI/GEAK/pull/244, not yet released as a tag).
+# We pin to the *commit SHA* of the branch tip, NOT the branch name, so a
+# future force-push / rebase upstream cannot silently change what every
+# fresh install gets.
+# TODO(post-GEAK-PR-244): once PR #244 lands and ships in a new GEAK tag,
+# revert this pin to the tag (e.g. v3.2.1) for stronger discoverability.
+# Operators can override with GEAK_REF=<tag|branch|sha>.
+GEAK_REF="${GEAK_REF:-ec61bdbdb151904ec187a8d89518afb969c53737}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
@@ -668,7 +673,18 @@ ensure_geak() {
     mkdir -p "${HYPERLOOM_ROOT}" "$(dirname "$GEAK_CONFIG")" "$(dirname "$GEAK_MEMORY_STORE_PATH_VAL")"
   fi
   if [ ! -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
-    run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
+    # ``git clone --branch`` only accepts tags / branches, not SHAs. Detect
+    # a 7-40 hex char SHA and use a fetch-checkout dance instead so the
+    # SHA pin above stays shallow. GitHub serves shallow SHA fetches
+    # (uploadpack.allowReachableSHA1InWant=true).
+    if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      run git init -q "${HYPERLOOM_ROOT}/geak"
+      run git -C "${HYPERLOOM_ROOT}/geak" remote add origin "$GEAK_REPO"
+      run git -C "${HYPERLOOM_ROOT}/geak" fetch --depth 1 origin "$GEAK_REF"
+      run git -C "${HYPERLOOM_ROOT}/geak" checkout -q FETCH_HEAD
+    else
+      run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
+    fi
   else
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
   fi
