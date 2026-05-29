@@ -103,7 +103,14 @@ DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 # checkout (left over from earlier non-hyperloom layouts on some sandboxes).
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_INFERENCEX_PATH = "/wekafs/hyperloom/InferenceX"
+# OOB + TraceLens live next to InferenceX on the same hyperloom-managed mount.
+# Like DEFAULT_INFERENCEX_PATH these are core42 fallbacks; --oob-path /
+# --tracelens-root (or SAFE_OPTIMIZE_* env) override per-cluster.
+DEFAULT_OOB_PATH = "/wekafs/hyperloom/OOB"
+DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
+DEFAULT_MAX_HOURS = 12.0
+DEFAULT_RESULTS_PATH = "$RESULT_DIR"
 
 _KERNEL_BACKEND_ALIASES = {
     "geak": "GEAK",
@@ -673,9 +680,13 @@ class SafeOptimizeClient:
         mode: str = "local",
         gpu_type: str | None = None,
         inferencex_path: str | None = None,
+        oob_path: str | None = None,
+        tracelens_root: str | None = None,
         prompt_prefix: str | None = None,
         prompt_suffix: str | None = None,
         kernel_backends: list[str] | None = None,
+        max_hours: float | None = None,
+        results_path: str | None = None,
     ) -> dict:
         # Pick the workspace for this submit. Default = self.submit_workspace
         # (single-workspace mode). When a round-robin pool is configured,
@@ -709,6 +720,10 @@ class SafeOptimizeClient:
             "concurrency": concurrency,
             "kernelBackends": list(kernel_backends or DEFAULT_KERNEL_BACKENDS),
         }
+        if max_hours and max_hours > 0:
+            body["maxHours"] = max_hours
+        if results_path:
+            body["resultsPath"] = results_path
         if image:
             body["image"] = image
         # Override SaFE backend's wrong-for-core42 defaults (MI355X /
@@ -717,6 +732,10 @@ class SafeOptimizeClient:
             body["gpuType"] = gpu_type
         if inferencex_path:
             body["inferencexPath"] = inferencex_path
+        if oob_path:
+            body["oobPath"] = oob_path
+        if tracelens_root:
+            body["tracelensRoot"] = tracelens_root
         # Optional prefix/suffix forwarded to BuildHyperloomPrompt on the
         # SaFE side. We use this to point the skill at the alternate
         # inference_optimizer SKILL.md the batch lives in, before the
@@ -1065,9 +1084,13 @@ def process_model(
     mode: str,
     gpu_type: str | None = None,
     inferencex_path: str | None = None,
+    oob_path: str | None = None,
+    tracelens_root: str | None = None,
     prompt_prefix: str | None = None,
     prompt_suffix: str | None = None,
     kernel_backends: list[str] | None = None,
+    max_hours: float | None = None,
+    results_path: str | None = None,
     pool_metadata: dict | None = None,
 ) -> SubmissionRecord:
     rec = SubmissionRecord(
@@ -1103,6 +1126,10 @@ def process_model(
     rec.overrides["mode"] = mode
     if kernel_backends:
         rec.overrides["kernel_backends"] = kernel_backends
+    if max_hours:
+        rec.overrides["max_hours"] = max_hours
+    if results_path:
+        rec.overrides["results_path"] = results_path
 
     if dry_run:
         rec.status = "dry-run"
@@ -1188,8 +1215,10 @@ def process_model(
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
             mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path,
+            oob_path=oob_path, tracelens_root=tracelens_root,
             prompt_prefix=prompt_prefix, prompt_suffix=prompt_suffix,
-            kernel_backends=kernel_backends)
+            kernel_backends=kernel_backends, max_hours=max_hours,
+            results_path=results_path)
     except Exception as e:
         rec.status = "failed"
         rec.error = f"submit_task: {e}"
@@ -2194,6 +2223,13 @@ def _build_parser() -> argparse.ArgumentParser:
                              f"(defaults to $SAFE_OPTIMIZE_INFERENCEX_PATH then "
                              f"'{DEFAULT_INFERENCEX_PATH}'). SaFE backend default is "
                              f"/hyperloom/InferenceX which doesn't exist on core42.")
+    parser.add_argument("--oob-path", default="",
+                        help=f"OOB checkout path inside the sandbox (defaults to "
+                             f"$SAFE_OPTIMIZE_OOB_PATH then '{DEFAULT_OOB_PATH}').")
+    parser.add_argument("--tracelens-root", default="",
+                        help=f"TraceLens checkout path inside the sandbox (defaults "
+                             f"to $SAFE_OPTIMIZE_TRACELENS_ROOT then "
+                             f"'{DEFAULT_TRACELENS_ROOT}').")
     parser.add_argument("--prompt-prefix",
                         default=_load_default_prompt_prefix(),
                         help="Free-form prefix prepended to the SaFE-generated "
@@ -2210,6 +2246,15 @@ def _build_parser() -> argparse.ArgumentParser:
                              "to SaFE's kernelBackends field. Aliases: geak, "
                              "claude, codex, cursor. Default: geak,claude,codex "
                              "(GEAK first).")
+    parser.add_argument("--max-hours", type=float,
+                        default=float(os.environ.get("SAFE_OPTIMIZE_MAX_HOURS", DEFAULT_MAX_HOURS)),
+                        help="Max hours passed to the Hyperloom optimizer prompt "
+                             "(default: 12).")
+    parser.add_argument("--results-path",
+                        default=os.environ.get("SAFE_OPTIMIZE_RESULTS_PATH", DEFAULT_RESULTS_PATH),
+                        help="Results path passed to SaFE's prompt builder "
+                             "(default: $RESULT_DIR so the prompt respects the "
+                             "CI-selected persistent/ephemeral result root).")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="HuggingFace token (or set $HF_TOKEN)")
 
@@ -2309,6 +2354,12 @@ def main() -> int:
     inferencex_path = (args.inferencex_path
                        or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
                        or DEFAULT_INFERENCEX_PATH)
+    oob_path = (args.oob_path
+                or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
+                or DEFAULT_OOB_PATH)
+    tracelens_root = (args.tracelens_root
+                      or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT")
+                      or DEFAULT_TRACELENS_ROOT)
     try:
         kernel_backends = parse_kernel_backends(args.kernel_opt_backends)
     except ValueError as e:
@@ -2321,8 +2372,8 @@ def main() -> int:
 
     log.info("SaFE base_url=%s register_workspace=%s submit_workspace=%s volume=%s",
              base_url, register_workspace, submit_workspace, volume)
-    log.info("Cluster prompt fields: gpu_type=%s inferencex_path=%s",
-             gpu_type, inferencex_path)
+    log.info("Cluster prompt fields: gpu_type=%s inferencex_path=%s oob_path=%s tracelens_root=%s",
+             gpu_type, inferencex_path, oob_path, tracelens_root)
     log.info("Kernel backends: %s", ", ".join(kernel_backends))
     if submit_workspaces_pool:
         log.info("submit round-robin pool: %s (overrides --submit-workspace)",
@@ -2382,9 +2433,13 @@ def main() -> int:
             mode=args.mode,
             gpu_type=gpu_type,
             inferencex_path=inferencex_path,
+            oob_path=oob_path,
+            tracelens_root=tracelens_root,
             prompt_prefix=args.prompt_prefix or None,
             prompt_suffix=args.prompt_suffix or None,
             kernel_backends=kernel_backends,
+            max_hours=args.max_hours,
+            results_path=args.results_path,
             pool_metadata=pool_metadata,
         )
         records.append(rec)
