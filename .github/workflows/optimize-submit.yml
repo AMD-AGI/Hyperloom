@@ -115,6 +115,10 @@ on:
         description: 'InferenceX checkout path inside the sandbox.'
         required: false
         default: '/wekafs/hyperloom/InferenceX'
+      kernel_opt_backends:
+        description: 'Kernel optimization backends forwarded to SaFE (GEAK first by default).'
+        required: false
+        default: 'geak,claude,codex'
       prompt_prefix:
         # Canonical prompt prefix lives in ci/prompt_prefix.txt (single
         # source of truth, used by ALL trigger sources: schedule, dispatch,
@@ -152,9 +156,9 @@ on:
         required: false
         default: true
       task_timeout_min:
-        description: 'Per-task wait timeout in minutes (project1 smoke default 180 = 3h)'
+        description: 'Per-task wait timeout in minutes (default 480 = 8h)'
         required: false
-        default: '180'
+        default: '480'
       all_artifacts:
         description: 'Download every artifact (default off — only optimization_report + ci_metrics)'
         type: boolean
@@ -280,6 +284,7 @@ jobs:
           INPUT_MODE:             ${{ github.event.inputs.mode }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_INFERENCEX_PATH:  ${{ github.event.inputs.inferencex_path }}
+          INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
           SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event.inputs.submit_workspaces }}
@@ -315,6 +320,9 @@ jobs:
           fi
           if [ -n "${INPUT_INFERENCEX_PATH:-}" ]; then
             ARGS+=(--inferencex-path "${INPUT_INFERENCEX_PATH}")
+          fi
+          if [ -n "${INPUT_KERNEL_OPT_BACKENDS:-}" ]; then
+            ARGS+=(--kernel-opt-backends "${INPUT_KERNEL_OPT_BACKENDS}")
           fi
           # Hard guarantee: SaFE promptPrefix MUST be non-empty. Workflow
           # input is only populated on workflow_dispatch — for schedule
