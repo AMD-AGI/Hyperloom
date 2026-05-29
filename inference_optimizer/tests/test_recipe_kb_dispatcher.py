@@ -207,21 +207,21 @@ def test_v2_framework_version_label_is_read(kb: RecipeKB) -> None:
     assert out["version"] == 7
 
 
-def test_v2_legacy_version_label_falls_back_to_framework_version(
-    kb: RecipeKB,
-) -> None:
-    """Rows ingested before the remote standardised on
-    ``framework_version`` keyed the 4th dimension as ``labels.version``.
-    Read it as a fallback so pre-migration data isn't lost."""
+def test_v2_legacy_version_label_is_not_read(kb: RecipeKB) -> None:
+    """The remote KB has migrated the 4th identity dimension to
+    ``framework_version``; the legacy ``labels.version`` key is no
+    longer read. A row carrying only the legacy key yields an empty
+    ``framework_version`` (no fallback). The top-level row revision
+    ``version`` stays independent."""
     cid = _cid()
     v2_payload = {
         "canonical_id": cid,
-        "version":      7,  # row revision — must NOT leak into framework_version
+        "version":      7,  # row revision — independent of identity
         "labels": {
             "model":     "remote-model",
             "hardware":  "mi300x",
             "framework": "sglang",
-            "version":   "0.4.5",  # legacy framework-version key
+            "version":   "0.4.5",  # legacy key — must be ignored now
             "precision": "fp8",
         },
         "body":    {},
@@ -233,7 +233,7 @@ def test_v2_legacy_version_label_falls_back_to_framework_version(
         )
         out = kb.get_recipe(canonical_id=cid)
     assert out is not None
-    assert out["framework_version"] == "0.4.5"
+    assert out["framework_version"] == ""
     assert out["version"] == 7
 
 
