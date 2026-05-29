@@ -17,7 +17,7 @@ reactor protocol where every tick must emit at least one intent.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from ..role.prompt_inputs import InboxItem, ReactorContext
 from ..sources.base import SourceData

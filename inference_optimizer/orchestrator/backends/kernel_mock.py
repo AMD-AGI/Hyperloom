@@ -18,7 +18,7 @@ import re
 from typing import Any
 
 from ..intent_parser import Intent, IntentType
-from .base import Backend, BackendTurnResult
+from .base import BackendTurnResult
 
 
 # Coordinator renders inbox rows as:

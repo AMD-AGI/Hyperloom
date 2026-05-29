@@ -27,7 +27,6 @@ from inference_optimizer.orchestrator.action_executors.profile import (
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
-    MockTurn,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
@@ -36,7 +35,7 @@ from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager, SqliteLeaseBackend,
 )
 from inference_optimizer.orchestrator.sub_agent_runner import (
-    RunnerContext, SubAgentRunner,
+    SubAgentRunner,
 )
 from inference_optimizer.manifest import build_manifest
 from inference_optimizer.paths import make_session_dir
@@ -701,7 +700,6 @@ def test_materialize_profile_kill_switch_default_is_on(
     be invoked so users on TraceLens-patched images get the enhanced
     flags without any opt-in step. Symmetric to the kill-switch test
     above."""
-    import yaml
     _clear_workload_env(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
     counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
@@ -2229,8 +2227,19 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
-def test_optimization_wrapper_timeout_sec_geak_default_90min():
-    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 90 * 60 + 180
+def test_optimization_wrapper_timeout_sec_geak_default_full_mode_130min(monkeypatch):
+    # Default tracks ``$GEAK_RUN_MODE`` (full -> 130 min) so the
+    # orchestrator wrapper agrees with the kernel-agent installer /
+    # driver defaults (PR #301 + matching orchestrator-side fix).
+    monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
+    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 130 * 60 + 180
+
+
+def test_optimization_wrapper_timeout_sec_geak_quick_mode_70min(monkeypatch):
+    monkeypatch.setenv("GEAK_RUN_MODE", "quick")
+    monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
+    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 70 * 60 + 180
 
 
 def test_optimization_wrapper_timeout_sec_oob_default_60min():
