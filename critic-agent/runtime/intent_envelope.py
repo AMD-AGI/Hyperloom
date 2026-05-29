@@ -1,6 +1,6 @@
 """Build and validate Coordinator-compatible intent envelopes.
 
-The Coordinator (DESIGN v0.6 §14) accepts intent envelopes of the form
+The Coordinator () accepts intent envelopes of the form
 
 ```
 {"intents": [{"intent_type": "<type>", "payload": {...}}, ...]}
@@ -34,7 +34,7 @@ from .errors import IntentEnvelopeValidationError
 ENVELOPE_SCHEMA_VERSION = "v0.6"
 
 
-# Intent types the Critic role is allowed to emit (DESIGN v0.6 §7.6 +
+# Intent types the Critic role is allowed to emit ( +
 # ``_CRITIC_INTENTS`` in agent_role.py).
 ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset({
     "review_verdict",

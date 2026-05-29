@@ -5,17 +5,15 @@ Hyperloom proper** but manifest as opaque hangs / 401 storms inside the
 session:
 
 * **J1 ``gateway_auth_outage``** — ``OPENAI_BASE_URL/models`` returns
-  401 / forbidden when probed with ``$SAFE_API_KEY``. The auth_proxy
-  on ``:4002`` is healthy (F3 stays silent), but the upstream gateway
-  has lost or revoked the key. Every claude/codex CLI will now fail
-  with HTTP 401 at the *gateway* level — distinct from the proxy
-  death F3 detects.
+  401 / forbidden when probed with ``$SAFE_API_KEY``. The upstream
+  gateway has lost or revoked the key. Every claude/codex CLI will
+  now fail with HTTP 401 at the gateway level.
 
 * **J2 ``wekafs_degraded``** — ``stat`` on any of
   ``$TRACELENS_ROOT`` / ``$INFERENCEX_PATH`` / ``$OOB_SRC`` either
   errored or took longer than the configured budget. WekaFS is the
   read-only source mount Hyperloom relies on for source-code, traces,
-  and benchmark scripts; ``select_kernels`` and the OOB CLI hang
+  and benchmark scripts; ``trace_analyze`` and the OOB CLI hang
   silently when the mount goes slow / drops.
 
 * **J3 ``tracelens_cli_missing``** — neither
@@ -128,8 +126,7 @@ def _gateway_symptoms(
                 summary=(
                     f"upstream LLM gateway returned {status_code}/{status} "
                     f"on {gateway.get('url')!r}; every claude/codex CLI "
-                    f"will now fail at the gateway (distinct from the "
-                    f"local auth_proxy)"
+                    f"will now fail at the gateway"
                 ),
                 evidence={
                     "url": gateway.get("url"),
@@ -141,8 +138,7 @@ def _gateway_symptoms(
                 source="local",
                 suggestion=(
                     "rotate $SAFE_API_KEY at https://llm.amd.com/ and "
-                    "re-export; the auth_proxy is healthy but the "
-                    "upstream key is revoked / expired"
+                    "re-export; the upstream key is revoked / expired"
                 ),
             )
         ]
@@ -186,7 +182,7 @@ def _mount_symptoms(
                     subject={"path": path},
                     source="local",
                     suggestion=(
-                        "WekaFS mount may have dropped; select_kernels / "
+                        "WekaFS mount may have dropped; trace_analyze / "
                         "OOB CLI / benchmark scripts will hang. Check "
                         "the read-only mount; consider re-mounting"
                     ),
@@ -222,7 +218,7 @@ def _mount_symptoms(
                 source="local",
                 suggestion=(
                     "WekaFS read latency degrading; if it persists, "
-                    "select_kernels / OOB CLI requests will time out"
+                    "trace_analyze / OOB CLI requests will time out"
                 ),
             )
         )
@@ -251,7 +247,7 @@ def _tracelens_symptoms(
             severity=SymptomSeverity.HIGH,
             summary=(
                 f"neither TraceLens CLI is on PATH "
-                f"(checked: {sorted(found.keys())!r}); select_kernels "
+                f"(checked: {sorted(found.keys())!r}); trace_analyze "
                 f"will fail every tick until install.sh is re-run"
             ),
             evidence={

@@ -68,7 +68,7 @@ jobs:
           fi
 
       - name: Update reply-ownership labels
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           SAFE_TEAM_JSON: ${{ steps.team.outputs.members }}
           SAFE_TEAM_SOURCE: ${{ steps.team.outputs.source }}

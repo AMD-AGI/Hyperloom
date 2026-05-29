@@ -1,6 +1,6 @@
-"""CodexBackend — DESIGN v0.6 §7.3 / §14.3.
+"""CodexBackend
 
-Codex roles (only ``critic`` in v0.6) talk to GPT-style models via the
+Codex roles (only ``critic`` in the legacy release) talk to GPT-style models via the
 OpenAI SDK; per DESIGN §5.1.1 they're **no-tools by default**, so the
 intent transport is JSON-in-text:
 
@@ -15,12 +15,12 @@ intent transport is JSON-in-text:
 
 Authentication:
 
-* `OPENAI_BASE_URL` (or `ANTHROPIC_BASE_URL`) — proxy endpoint
+* `OPENAI_BASE_URL` (or `ANTHROPIC_BASE_URL`) — gateway endpoint
 * `ANTHROPIC_AUTH_TOKEN` (or `OPENAI_API_KEY`) — auth token
-  The AMD proxy serves both Claude AND OpenAI models from the same URL,
+  The AMD gateway serves both Claude AND OpenAI models from the same URL,
   hence we accept the ANTHROPIC_* env vars too. OPENAI_BASE_URL is the
-  canonical (install.sh/ensure_auth_proxy.sh agree); ANTHROPIC_BASE_URL is
-  kept as a legacy fallback.
+  canonical (install.sh agrees); ANTHROPIC_BASE_URL is kept as a legacy
+  fallback.
 
 Test seam:
 
@@ -35,15 +35,14 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from ..intent_parser import (
-    Intent,
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import Backend, BackendError, BackendTurnResult
+from .base import BackendError, BackendTurnResult
 
 
 _OUTPUT_INSTRUCTIONS = """
@@ -115,19 +114,19 @@ def _extract_envelope(text: str) -> dict | None:
 
 @dataclass
 class CodexBackend:
-    """Production Codex backend (DESIGN v0.6 §14.3). Implements :class:`Backend`."""
+    """Production Codex backend (). Implements :class:`Backend`."""
 
     model: str = "gpt-5.4"
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
-    # Canonical LiteLLM env (install.sh/ensure_auth_proxy.sh agree). When two
-    # base-URL envs coexist, OPENAI_BASE_URL wins; ANTHROPIC_BASE_URL is the
-    # legacy fallback.
+    # Canonical LiteLLM env (install.sh agrees). When two base-URL envs
+    # coexist, OPENAI_BASE_URL wins; ANTHROPIC_BASE_URL is the legacy
+    # fallback.
     base_url_env: str = "OPENAI_BASE_URL"
     max_completion_tokens: int = 2000
     name: str = "codex"
     # Wall-clock cap for one ``run()`` call. Mirrors ClaudeBackend's
     # ``call_timeout_s``: the AsyncOpenAI client honours per-request
-    # timeouts internally but a stalled auth proxy can still block the
+    # timeouts internally but a stalled gateway can still block the
     # ``await create(...)`` for the full TCP timeout. Bounding it at
     # asyncio level guarantees the orchestrator reactor never sits idle
     # past this budget.

@@ -20,7 +20,6 @@ import gzip
 import http.server
 import io
 import json
-import os
 import socketserver
 import threading
 import time

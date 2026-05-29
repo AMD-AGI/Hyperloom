@@ -1,4 +1,4 @@
-"""ActionRegistry — DESIGN v0.6 §16.
+"""ActionRegistry
 
 Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per
 action). The corresponding markdown body at ``actions/<name>.md`` is
@@ -52,9 +52,9 @@ v0.6 vs v0.5 schema:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..paths import asset_actions_dir
 
@@ -123,7 +123,6 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     # exploration — everything else (run benchmarks / variants /
     # diagnostics to GENERATE data)
     "baseline":                "exploration",
-    "profile":                 "exploration",
     "roofline":                "exploration",
     "params":                  "exploration",
     "backends":                "exploration",

@@ -214,11 +214,17 @@ class KernelAgentToolTests(unittest.TestCase):
 
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"', install_text)
         self.assertIn('GEAK_REF="${GEAK_REF:-v3.2.0}"', install_text)
+        self.assertIn("ensure_rocm_torch_for_geak()", install_text)
+        self.assertIn("KERNEL_AGENT_SKIP_TORCH_GATE", install_text)
+        self.assertIn("rocm-smi --showid", install_text)
         # pip flags are factored into `_PIP_FLAGS`; assert the core flags
         # survive (prefix match allows future additions) and the install line
         # references the variable.
         self.assertIn('_PIP_FLAGS="-q --no-cache-dir', install_text)
-        self.assertIn('python3 -m pip install ${_PIP_FLAGS} "${HYPERLOOM_ROOT}/geak"', install_text)
+        self.assertIn(
+            'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${HYPERLOOM_ROOT}/geak"',
+            install_text,
+        )
         # GEAK v3.2.0 ships 4 MCP tool folders; minisweagent imports
         # profiler_mcp / cross_session_memory_mcp / automated_test_discovery
         # in addition to rag-mcp. Metrix is consumed transitively as a
@@ -247,7 +253,7 @@ class KernelAgentToolTests(unittest.TestCase):
             install_text,
         )
         self.assertIn(
-            'python3 -m pip install ${_PIP_FLAGS} \\\n'
+            'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \\\n'
             '        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"',
             install_text,
         )
@@ -756,6 +762,27 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
     propagation, every GEAK attempt will silently die at $3 again.
     """
 
+    def setUp(self) -> None:
+        import tempfile
+        # _resolve_geak_config() requires GEAK_CONFIG to point at a file
+        # containing "model_class: litellm". Create a minimal stub so tests
+        # that exercise _build_cmd() can run without a real install.
+        self._cfg_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        )
+        self._cfg_file.write("model:\n  model_class: litellm\n")
+        self._cfg_file.flush()
+        self._cfg_file.close()
+        self._prev_geak_config = os.environ.get("GEAK_CONFIG")
+        os.environ["GEAK_CONFIG"] = self._cfg_file.name
+
+    def tearDown(self) -> None:
+        if self._prev_geak_config is None:
+            os.environ.pop("GEAK_CONFIG", None)
+        else:
+            os.environ["GEAK_CONFIG"] = self._prev_geak_config
+        Path(self._cfg_file.name).unlink(missing_ok=True)
+
     # Source-text match: ArgumentParser does not surface ``default=...``
     # in ``--help`` output, so the most direct way to lock the contract
     # is to assert the exact ``add_argument`` expression. If anyone
@@ -779,6 +806,30 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
         self.assertIn(self._EXPECTED_DEFAULT_EXPR, src,
                       "parallel_e2e_runner.py --geak-cost-limit default "
                       "must mirror kernel_optimization.py (0.0 / env-overridable)")
+
+    def test_parallel_e2e_runner_run_json_invokes_subprocess(self) -> None:
+        """run_json must have its subprocess dependency imported."""
+        import importlib.util
+        import tempfile
+
+        tool = ROOT / "tools" / "parallel_e2e_runner.py"
+        spec = importlib.util.spec_from_file_location("parallel_e2e_runner", tool)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        assert spec is not None and spec.loader is not None
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as td:
+            result = module.run_json(
+                [
+                    sys.executable,
+                    "-c",
+                    'import json; print(json.dumps({"ok": True}))',
+                ],
+                env=os.environ.copy(),
+                timeout_s=10,
+                log_path=Path(td) / "run.log",
+            )
+        self.assertEqual(result, {"ok": True})
 
     def test_env_var_overrides_default(self) -> None:
         """End-to-end smoke: HYPERLOOM_GEAK_COST_LIMIT must reach

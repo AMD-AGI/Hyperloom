@@ -1,6 +1,6 @@
 """Kernel decision-path renderer — per-kid causal chain.
 
-Surfaces ``select_kernels → kernel_opt(GEAK|OOB) → integrate →
+Surfaces ``trace_analyze → kernel_opt(GEAK|OOB) → integrate →
 validate_stack`` as a single grouped section per kernel id, so the
 reader can follow what the orchestrator did to one kernel without
 cross-referencing the global phase timeline + kernel_lifecycle tables.
