@@ -13,7 +13,6 @@ The schema each collector matches is defined in :mod:`.schema`.
 from __future__ import annotations
 
 import ast
-import glob
 import json
 import logging
 import os
