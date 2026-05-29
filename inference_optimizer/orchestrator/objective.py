@@ -1,4 +1,4 @@
-"""Objective abstraction — DESIGN v0.6 §11.
+"""Objective abstraction
 
 The Objective is the goal that drives early-stop, pressure scoring, and
 the Orchestration prompt. The Coordinator's long-run loop checks

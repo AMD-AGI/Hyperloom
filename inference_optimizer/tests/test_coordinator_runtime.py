@@ -18,30 +18,41 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from inference_optimizer.orchestrator import coordinator
+from inference_optimizer.orchestrator.action_executors import (
+    _multi_node_server_lifecycle,
+    report_executor,
+)
 from inference_optimizer.orchestrator.backends import (
     Backend,
     MockBackend,
     MockTurn,
     ScriptedPlan,
 )
-from inference_optimizer.orchestrator.coordinator import Coordinator
+from inference_optimizer.orchestrator.coordinator import (
+    _BASELINE_FINGERPRINT_KEYS,
+    _baseline_params_fingerprint,
+    _resolve_silent_ticks_closing_threshold,
+    Coordinator,
+)
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.sub_agent_runner import (
-    RunnerContext,
-    SubAgentResult,
     SubAgentRunner,
 )
-from inference_optimizer.orchestrator.task_registry import TaskRegistry
+from inference_optimizer.orchestrator.task_registry import Task, TaskRegistry
 from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from inference_optimizer.paths import db_path_for, make_session_dir
+from inference_optimizer.paths import make_session_dir
+from inference_optimizer.session_paths import target_baseline_json
 from inference_optimizer.storage import SqliteConnection
 
 
@@ -293,52 +304,6 @@ async def test_backend_error_streak_resets_after_successful_turn(
         ]
         assert len(backend_unhealthy) == 2
         assert backend_unhealthy[-1].payload["consecutive_errors"] == 2
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_coordinator_stops_when_no_more_leverage(session_dir):
-    backends = _build_backends({})
-    c = Coordinator(session_dir, backends=backends)
-    try:
-        c.shared_state.baseline_tput = 100.0
-        c.shared_state.current_best = {"action": "backends", "tput": 101.0}
-        c.shared_state.params_no_promote_streak = 5
-        # Use the actual registered grid length so adding a new variant
-        # (e.g. N22 added torch_compile_on) doesn't break this test.
-        from inference_optimizer.orchestrator.action_executors.params import (
-            DEFAULT_PARAMS_GRID,
-        )
-        _grid_size = len(DEFAULT_PARAMS_GRID)
-        c.shared_state.params_search = {
-            "cursor": _grid_size,
-            "tested": {f"v{i}": {} for i in range(_grid_size)},
-            "accepted": [],
-            "rejected": [],
-        }
-        # Phase 4 of the dedup-by-fingerprint plan: backends now has its
-        # own ledger and the no-leverage gate also requires it to be
-        # exhausted. Stamp the executor's exhaustion flag so this test
-        # reproduces the "everything explored" terminal state.
-        c.shared_state.backends_search = {
-            "backends_search_exhausted": True,
-            "tested": {},
-        }
-        c.shared_state.last_trace_analyze = {
-            "reusable_native_kernel_ids": ["k003", "k006", "k007"],
-        }
-        c.shared_state.rejected_kernel_ids = ["k003"]
-        c.shared_state.rejected_kernel_patches = [
-            {"kernel_id": "k006", "reason": "max_e2e_attempts_3_without_keep"},
-            {"kernel_id": "k007", "reason": "revert_decision"},
-        ]
-        c.shared_state.save(session_dir)
-
-        stop_reason = await c.run(max_ticks=5, tick_interval_sec=0.0)
-
-        assert stop_reason == "no_more_leverage"
-        assert c.shared_state.stop_reason == "no_more_leverage"
     finally:
         await c.stop()
 
@@ -598,7 +563,7 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = "/tmp/trace-a.json.gz"
-        c.shared_state.last_select_kernels = {}
+        c.shared_state.last_trace_analyze = {}
         c.shared_state.save(session_dir)
 
         await c.tick(1)
@@ -631,7 +596,10 @@ async def test_execution_checklist_is_in_orchestration_prompt(session_dir):
         prompt = await c._compose_prompt("orchestration")
 
         assert "Execution checklist" in prompt
-        assert "profile is required now" in prompt
+        # Post single-path refactor: the TODO is the wait-for-Coordinator-
+        # internal-analysis hint, not the legacy "profile is required now".
+        assert "Coordinator-internal analysis" in prompt
+        assert "last_profile_trace" in prompt
     finally:
         await c.stop()
 
@@ -706,5 +674,734 @@ async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
         hits = [m for m in denied if m.payload.get("kind") == "policy_denied"]
         assert hits, "expected a policy_denied observation"
         assert hits[0].payload["rule"] == "role"
+    finally:
+        await c.stop()
+
+
+# ===========================================================================
+# (formerly test_coordinator_audit_wiring.py)
+# ===========================================================================
+"""End-to-end Coordinator wiring tests for the audit trail."""
+
+
+def _silent_backends() -> dict[str, object]:
+    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
+    return {
+        "orchestration": MockBackend(silent, name="o"),
+        "kernel":        MockBackend(silent, name="k"),
+        "critic":        MockBackend(silent, name="c"),
+        "robustness":    MockBackend(silent, name="r"),
+    }
+
+
+def _mute_action_scoring(coordinator: Coordinator) -> None:
+    """v0.8 §3.9 — scoreboard retired (KB_design §3.9 Inv-9.1). The
+    old helper used to clear the seeded ``action_scores`` map; the
+    map no longer exists so this is a no-op kept for back-compat."""
+    return None
+
+
+def _mk_task(kind: str, task_id: str = "t-aud-1") -> Task:
+    return Task(
+        task_id=task_id,
+        kind=kind,
+        state="queued",
+        params={},
+        idempotency_key=f"idem-{task_id}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_records_success_attempt(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task = _mk_task("baseline", "t-base-1")
+        result = {
+            "output_throughput": 1500.0,
+            "accuracy": 0.81,
+            "materialized_config": "/tmp/baseline.with_envs.yaml",
+            "workspace": "/runs/baseline/t-base-1",
+        }
+        await c._promote_to_shared_state("baseline", result, task=task)
+        last = c.shared_state.last_baseline
+        assert last
+        assert last["status"] == "succeeded"
+        assert last["decision"] == "promoted"
+        assert last["key_metric"] == pytest.approx(1500.0)
+        assert last["key_metric_kind"] == "output_throughput"
+        assert last["extras"]["accuracy"] == 0.81
+        assert len(c.shared_state.baseline_attempts) == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_profile_records_success_attempt(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task = _mk_task("profile", "t-prof-1")
+        result = {
+            "main_trace_path": "/tmp/trace.json",
+            "output_throughput": 1234.5,
+            "workspace": "/runs/profile/t-prof-1",
+        }
+        await c._promote_to_shared_state("profile", result, task=task)
+        last = c.shared_state.last_profile
+        assert last["status"] == "succeeded"
+        assert last["decision"] == "promoted"
+        assert last["extras"]["trace_path"] == "/tmp/trace.json"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_explore_records_success_attempt(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.current_best = {"action": "baseline", "tput": 800.0}
+        task = _mk_task("explore", "t-ex-1")
+        result = {
+            "status": "succeeded",
+            "winners": [{
+                "name": "v1",
+                "extra_sglang_args": "--foo",
+                "extra_envs": {"K": "1"},
+            }],
+            "best_variant": {
+                "name": "v1",
+                "extra_sglang_args": "--foo",
+                "extra_envs": {"K": "1"},
+            },
+            "output_throughput": 900.0,
+            "best_gain_pct": 12.5,
+            "base_tput": 800.0,
+            "round_id": "round-1",
+        }
+        await c._promote_to_shared_state("explore", result, task=task)
+        last = c.shared_state.last_explore
+        assert last["status"] == "succeeded"
+        assert last["decision"] == "promoted"
+        assert last["extras"]["best_variant_name"] == "v1"
+        assert last["extras"]["winners_count"] == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_sweep_records_discarded_attempt(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task = _mk_task("sweep", "t-sw-1")
+        result = {
+            "grid_size": 4,
+            "best_overall": {"name": "c8_isl1k_osl1k", "tput": 1200.0},
+            "pareto_front": [{"name": "a"}, {"name": "b"}],
+        }
+        await c._promote_to_shared_state("sweep", result, task=task)
+        last = c.shared_state.last_sweep_attempt = c.shared_state.last_sweep
+        assert c.shared_state.sweep_attempts[-1]["status"] == "succeeded"
+        assert c.shared_state.sweep_attempts[-1]["decision"] == "discarded"
+        assert c.shared_state.sweep_attempts[-1]["extras"]["grid_size"] == 4
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_explore_updates_validated_gain(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 1000.0
+        c.shared_state.current_best = {"action": "baseline", "tput": 1000.0}
+        task = _mk_task("explore", "t-ex-rebench")
+        result = {
+            "status": "succeeded",
+            "winners": [{
+                "name": "kv_fp8",
+                "extra_sglang_args": "--kv-cache-fp8",
+                "extra_envs": {},
+            }],
+            "best_variant": {
+                "name": "kv_fp8",
+                "extra_sglang_args": "--kv-cache-fp8",
+                "extra_envs": {},
+            },
+            "output_throughput": 1100.0,
+            "best_gain_pct": 10.0,
+            "round_id": "round-rebench",
+        }
+        await c._promote_to_shared_state("explore", result, task=task)
+        assert c.shared_state.cumulative_gain_validated == pytest.approx(10.0)
+        assert c.shared_state.cumulative_gain_validated_stack_len == \
+            len(c.shared_state.optimization_stack)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_records_failure(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task = _mk_task("baseline", "t-fail-1")
+        result = {
+            "status": "failed",
+            "error_class": "no_report",
+            "error": "benchmark_report.json missing under runs/...",
+            "workspace": "/runs/baseline/t-fail-1/benchmark_sglang_xyz",
+            "reported_success": False,
+        }
+        await c._handle_unpromotable_result(task, result)
+        assert len(c.shared_state.baseline_attempts) == 1
+        attempt = c.shared_state.baseline_attempts[-1]
+        assert attempt["status"] == "failed"
+        assert attempt["decision"] == "no_promote"
+        assert attempt["error_class"] == "no_report"
+        assert len(c.shared_state.last_action_failures) == 1
+        fail = c.shared_state.last_action_failures[-1]
+        assert fail["action"] == "baseline"
+        assert fail["error_class"] == "no_report"
+        assert c.shared_state.baseline_failure_streak == 1
+        assert c.shared_state.stop_reason in ("", None)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_third_failure_sets_stop_reason(
+    session_dir,
+):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        for i in range(3):
+            await c._handle_unpromotable_result(
+                _mk_task("baseline", f"t-{i}"),
+                {"status": "failed", "error_class": "no_report",
+                 "error": "missing"},
+            )
+        assert c.shared_state.baseline_failure_streak == 3
+        assert c.shared_state.stop_reason == "baseline_failed"
+        assert len(c.shared_state.last_action_failures) == 3
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        await c._handle_unpromotable_result(
+            _mk_task("explore", "t-ex-fail"),
+            {"status": "failed", "error_class": "subprocess_nonzero",
+             "error": "rc=1\nstderr blob"},
+        )
+        assert c.shared_state.baseline_failure_streak == 0
+        assert c.shared_state.stop_reason in ("", None)
+        assert len(c.shared_state.explore_attempts) == 1
+        assert c.shared_state.explore_attempts[-1]["status"] == "failed"
+        assert len(c.shared_state.last_action_failures) == 1
+        fail = c.shared_state.last_action_failures[-1]
+        assert fail["action"] == "explore"
+        assert fail["stderr_tail"] is not None
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_kernel_action_records_global_only(
+    session_dir,
+):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        await c._handle_unpromotable_result(
+            _mk_task("kernel_opt", "t-ko-fail"),
+            {"status": "failed", "error_class": "timeout",
+             "error": "wall-clock exceeded"},
+        )
+        assert not hasattr(c.shared_state, "kernel_opt_attempts_audit")
+        assert len(c.shared_state.last_action_failures) == 1
+        entry = c.shared_state.last_action_failures[-1]
+        assert entry["action"] == "kernel_opt"
+        assert entry["error_class"] == "timeout"
+        assert entry["stderr_tail"] is not None
+    finally:
+        await c.stop()
+
+
+# ===========================================================================
+# (formerly test_coordinator_baseline_fingerprint.py)
+# ===========================================================================
+"""Baseline-params fingerprint capture in the Coordinator audit trail."""
+
+
+def _mk_baseline_task(params: dict, *, task_id: str = "t-fp-1") -> Task:
+    return Task(
+        task_id=task_id,
+        kind="baseline",
+        state="queued",
+        params=params,
+        idempotency_key=f"idem-{task_id}",
+    )
+
+
+def test_fingerprint_keys_covers_recovery_surface():
+    expected = {
+        "benchmark_script", "result_dir", "extra_sglang_args",
+        "extra_envs", "model_path", "gpu_type", "config_path",
+        "disable_run_eval",
+    }
+    assert set(_BASELINE_FINGERPRINT_KEYS) == expected
+
+
+def test_fingerprint_normalizes_extra_envs_order():
+    fp1 = _baseline_params_fingerprint({"extra_envs": {"A": "1", "B": "2"}})
+    fp2 = _baseline_params_fingerprint({"extra_envs": {"B": "2", "A": "1"}})
+    assert fp1 == fp2
+    assert fp1["extra_envs"] == [["A", "1"], ["B", "2"]]
+
+
+def test_fingerprint_missing_keys_become_none_or_empty():
+    fp = _baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
+    assert fp["benchmark_script"] == "sglang_mi300x.sh"
+    assert fp["result_dir"] is None
+    assert fp["extra_sglang_args"] is None
+    assert fp["extra_envs"] == []
+    assert fp["model_path"] is None
+    fp_with_empty = _baseline_params_fingerprint({
+        "benchmark_script": "sglang_mi300x.sh",
+        "extra_envs": {},
+    })
+    assert fp == fp_with_empty
+
+
+def test_fingerprint_stringifies_scalar_values():
+    fp = _baseline_params_fingerprint({
+        "benchmark_script": "sglang_mi300x.sh",
+        "model_path": "/wekafs/models/DeepSeek-R1",
+        "gpu_type": "mi300x",
+    })
+    assert all(isinstance(v, str) for k, v in fp.items() if v is not None and k != "extra_envs")
+
+
+def test_fingerprint_different_overrides_produce_different_fingerprints():
+    a = _baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
+    b = _baseline_params_fingerprint({"benchmark_script": "dsr1_fp8_mi300x.sh"})
+    c = _baseline_params_fingerprint({"result_dir": "/workspace"})
+    d = _baseline_params_fingerprint({"extra_sglang_args": "--mem-fraction-static 0.9"})
+    encoded = {json.dumps(x, sort_keys=True) for x in (a, b, c, d)}
+    assert len(encoded) == 4
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_records_fingerprint(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task = _mk_baseline_task({
+            "benchmark_script": "sglang_mi300x.sh",
+            "model_path": "/wekafs/models/DeepSeek-R1",
+            "gpu_type": "mi300x",
+        })
+        result = {
+            "output_throughput": 1500.0,
+            "materialized_config": "/tmp/baseline.with_envs.yaml",
+            "workspace": "/runs/baseline/t-fp-1",
+        }
+        await c._promote_to_shared_state("baseline", result, task=task)
+        last = c.shared_state.last_baseline
+        assert last["status"] == "succeeded"
+        fp = last["extras"]["fingerprint"]
+        assert fp["benchmark_script"] == "sglang_mi300x.sh"
+        assert fp["model_path"] == "/wekafs/models/DeepSeek-R1"
+        assert fp["gpu_type"] == "mi300x"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_records_fingerprint(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task = _mk_baseline_task({
+            "benchmark_script": "dsr1_fp8_mi300x.sh",
+        })
+        result = {
+            "status": "failed",
+            "error_class": "no_report",
+            "error": "benchmark_report.json missing",
+        }
+        await c._handle_unpromotable_result(task, result)
+        attempt = c.shared_state.baseline_attempts[-1]
+        assert attempt["status"] == "failed"
+        fp = attempt["extras"]["fingerprint"]
+        assert fp["benchmark_script"] == "dsr1_fp8_mi300x.sh"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_non_baseline_omits_fingerprint(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task = Task(
+            task_id="t-ex-fail",
+            kind="explore",
+            state="queued",
+            params={"benchmark_script": "sglang_mi300x.sh"},
+            idempotency_key="idem-ex",
+        )
+        await c._handle_unpromotable_result(task, {"status": "failed"})
+        attempt = c.shared_state.explore_attempts[-1]
+        assert attempt["status"] == "failed"
+        assert "fingerprint" not in attempt["extras"]
+    finally:
+        await c.stop()
+
+
+# ===========================================================================
+# (formerly test_coordinator_failed_variants_audit.py)
+# ===========================================================================
+"""Regression tests for ``_summarize_failed_variants`` + PR-3 timeout."""
+
+
+def test_summarize_failed_variants_returns_empty_when_input_not_list():
+    assert coordinator._summarize_failed_variants(None) == []
+    assert coordinator._summarize_failed_variants("not a list") == []
+    assert coordinator._summarize_failed_variants(42) == []
+    assert coordinator._summarize_failed_variants({}) == []
+
+
+def test_summarize_failed_variants_returns_empty_when_no_failures():
+    rows = [
+        {"name": "v1", "status": "succeeded", "output_throughput": 640.0},
+        {"name": "v2", "status": "succeeded", "output_throughput": 643.9},
+    ]
+    assert coordinator._summarize_failed_variants(rows) == []
+
+
+def test_summarize_failed_variants_projects_expected_keys():
+    rows = [
+        {
+            "name": "max_num_seqs_128",
+            "status": "failed",
+            "error_class": "mn_server_restart_failed",
+            "error": (
+                "server /health did not return 200 within 1800s "
+                "(url=http://10.245.131.67:8888/health, "
+                "last_err=ConnectError: All connection attempts failed)"
+            ),
+            "extra_sglang_args": "--max-num-seqs 128",
+        },
+        {
+            "name": "max_num_seqs_512",
+            "status": "succeeded",
+            "output_throughput": 510.0,
+        },
+    ]
+    out = coordinator._summarize_failed_variants(rows)
+    assert len(out) == 1
+    assert out[0] == {
+        "name": "max_num_seqs_128",
+        "error_class": "mn_server_restart_failed",
+        "error_excerpt": (
+            "server /health did not return 200 within 1800s "
+            "(url=http://10.245.131.67:8888/health, "
+            "last_err=ConnectError: All connection attempts failed)"
+        ),
+        "extra_sglang_args": "--max-num-seqs 128",
+    }
+
+
+def test_summarize_failed_variants_truncates_error_excerpt_at_400_chars():
+    huge_err = "x" * 5000
+    rows = [
+        {
+            "name": "v",
+            "status": "failed",
+            "error_class": "ec",
+            "error": huge_err,
+            "extra_sglang_args": "",
+        },
+    ]
+    out = coordinator._summarize_failed_variants(rows)
+    assert out[0]["error_excerpt"] is not None
+    assert len(out[0]["error_excerpt"]) == 400
+
+
+def test_summarize_failed_variants_caps_max_entries():
+    rows = [
+        {
+            "name": f"v{i}",
+            "status": "failed",
+            "error_class": "ec",
+            "error": "boom",
+            "extra_sglang_args": f"--arg {i}",
+        }
+        for i in range(50)
+    ]
+    out = coordinator._summarize_failed_variants(rows)
+    assert len(out) == 10
+    assert [e["name"] for e in out] == [f"v{i}" for i in range(10)]
+
+
+def test_summarize_failed_variants_skips_non_dict_rows():
+    rows = [
+        None,
+        "garbage",
+        {"name": "real", "status": "failed", "error_class": "ec", "error": "msg"},
+        42,
+    ]
+    out = coordinator._summarize_failed_variants(rows)
+    assert len(out) == 1
+    assert out[0]["name"] == "real"
+
+
+def test_summarize_failed_variants_handles_missing_optional_fields():
+    rows = [{"name": "v", "status": "failed"}]
+    out = coordinator._summarize_failed_variants(rows)
+    assert out == [{
+        "name": "v",
+        "error_class": None,
+        "error_excerpt": None,
+        "extra_sglang_args": "",
+    }]
+
+
+def test_default_health_timeout_is_900s_not_1800s():
+    assert _multi_node_server_lifecycle.DEFAULT_HEALTH_TIMEOUT_S == 900
+
+
+# ===========================================================================
+# (formerly test_n33_idle_closing_and_critic_archival.py)
+# ===========================================================================
+"""N33: critic auto-approve archival actions + Coordinator silent-tick
+early-closing.
+"""
+
+
+def _write_marker_target_baseline(session_dir: Path) -> None:
+    path = target_baseline_json(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "status": "no_target",
+            "reason": "no_target_gpu_configured",
+            "row_count": 0,
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_resolve_silent_ticks_closing_threshold_default(monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", raising=False)
+    assert _resolve_silent_ticks_closing_threshold() == 120
+
+
+def test_resolve_silent_ticks_closing_threshold_override(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "5")
+    assert _resolve_silent_ticks_closing_threshold() == 5
+
+
+def test_resolve_silent_ticks_closing_threshold_disabled(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
+    assert _resolve_silent_ticks_closing_threshold() == 0
+
+
+def test_resolve_silent_ticks_closing_threshold_garbage(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "not-a-number")
+    assert _resolve_silent_ticks_closing_threshold() == 120
+
+
+def test_shared_state_default_consecutive_silent_ticks_is_zero():
+    s = SharedState()
+    assert s.consecutive_silent_ticks == 0
+
+
+@pytest.mark.asyncio
+async def test_silent_ticks_increment_when_run_is_idle(session_dir, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        await c.run(max_ticks=3, tick_interval_sec=0.0)
+        assert c.shared_state.consecutive_silent_ticks >= 3
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_silent_ticks_disabled_by_zero_threshold(
+    session_dir, monkeypatch,
+):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_IDLE_CLOSE_TICKS", "0")
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        reason = await c.run(max_ticks=5, tick_interval_sec=0.0)
+        assert reason == "max_ticks"
+        assert c.shared_state.consecutive_silent_ticks >= 5
+        assert c.shared_state.closing_phase is False
+    finally:
+        await c.stop()
+
+
+def test_critic_md_carves_out_archival_actions():
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "orchestrator" / "system_prompts" / "critic.md"
+    )
+    text = path.read_text(encoding="utf-8")
+    assert "archival actions" in text.lower()
+    assert "`report`" in text
+    assert "`session_breakdown`" in text
+    assert "`target_analysis`" in text
+    assert "Always `approve` archival actions" in text
+
+
+# ===========================================================================
+# (formerly test_n34_dispatcher_resilience_and_report_stop.py)
+# ===========================================================================
+"""N34: dispatcher resilience to disappearing ``tasks`` rows +
+report-task triggers run-loop exit.
+"""
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_runner_swallows_tasknotfound_on_final_transition(
+    tmp_path,
+):
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    payload = {
+        "tput": 4632.8,
+        "params_search_update": {"tested": {"fp1": {"name": "v1"}}},
+    }
+
+    async def long_runner(ctx):
+        db.raw.execute("DELETE FROM tasks WHERE task_id=?", (ctx.task.task_id,))
+        db.raw.commit()
+        return payload
+
+    sub.register_executor("params", long_runner)
+    task = await tr.create(kind="params", params={}, idempotency_key="k-params-1")
+    res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    assert res.result == payload, (
+        "executor result must survive the TaskNotFound -- the dispatcher "
+        "uses it to update params_search ledger; losing it stalls N19c"
+    )
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_runner_swallows_tasknotfound_on_initial_transition(
+    tmp_path, caplog,
+):
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    ran = {"called": False}
+
+    async def runner(ctx):
+        ran["called"] = True
+        return {"tput": 1.0}
+
+    sub.register_executor("baseline", runner)
+    task = await tr.create(
+        kind="baseline", params={}, idempotency_key="k-baseline-1",
+    )
+    db.raw.execute("DELETE FROM tasks WHERE task_id=?", (task.task_id,))
+    db.raw.commit()
+
+    with caplog.at_level("WARNING"):
+        res = await sub.run_task(task)
+
+    assert ran["called"] is True
+    assert res.state == "succeeded"
+    assert res.result == {"tput": 1.0}
+    assert any(
+        "vanished" in rec.message.lower()
+        and "_transition_resilient" in rec.message
+        for rec in caplog.records
+    ), "expected the disappearing-row warning to fire"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_runner_normal_path_still_records_transitions(
+    tmp_path,
+):
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1.0}))
+    task = await tr.create(kind="baseline", params={}, idempotency_key="k-ok")
+    res = await sub.run_task(task)
+    assert res.state == "succeeded"
+    after = await tr.get(task.task_id)
+    assert after.state == "succeeded"
+    db.close()
+
+
+async def _async_return(value: Any) -> Any:
+    return value
+
+
+@pytest.mark.asyncio
+async def test_report_success_sets_stop_reason(session_dir):
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.save(session_dir)
+    try:
+        task = await c.tasks.create(
+            kind="report",
+            params={"session_dir": str(session_dir)},
+            idempotency_key="k-report-1",
+        )
+        await c._pump_dispatcher_once()
+        after = await c.tasks.get(task.task_id)
+        assert after.state == "succeeded"
+        assert c.shared_state.stop_reason == "report_emitted"
+        on_disk = json.loads((session_dir / "state.json").read_text())
+        assert on_disk["stop_reason"] == "report_emitted"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_report_success_does_not_overwrite_prior_stop_reason(session_dir):
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.stop_reason = "target_reached"
+    c.shared_state.save(session_dir)
+    try:
+        task = await c.tasks.create(
+            kind="report",
+            params={"session_dir": str(session_dir)},
+            idempotency_key="k-report-pre-set",
+        )
+        await c._pump_dispatcher_once()
+        after = await c.tasks.get(task.task_id)
+        assert after.state == "succeeded"
+        assert c.shared_state.stop_reason == "target_reached"
     finally:
         await c.stop()

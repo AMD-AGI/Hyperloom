@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 import requests
-import urllib3
 
 
 def _fmt_num(v: Any) -> str:
@@ -194,6 +193,32 @@ def _build_payload(
         "columns": [{"width": 6}, {"width": 3}, {"width": 2}, {"width": 3}, {"width": 3}, {"width": 3}],
         "rows": table_rows,
     })
+
+    # Footer: per-model perf-leaderboard publish count, on the LAST card only
+    # (avoid spam-repeating the same number across every chunk for big batches).
+    # Counts are computed by the workflow's "Count perf-leaderboard publish
+    # status" step (walks task-artifacts-merged/**/perf_publish_marker.txt)
+    # and injected via the PERF_PUBLISH_OK / PERF_PUBLISH_TOTAL env vars.
+    if part == total_parts:
+        try:
+            perf_ok    = int(os.environ.get("PERF_PUBLISH_OK")    or 0)
+            perf_total = int(os.environ.get("PERF_PUBLISH_TOTAL") or 0)
+        except ValueError:
+            perf_ok = perf_total = 0
+        if perf_total > 0:
+            failed = perf_total - perf_ok
+            tail = (
+                f"perf-leaderboard publish: **{perf_ok}/{perf_total}** sent"
+                + (f" · {failed} failed" if failed else "")
+            )
+            body.append({
+                "type": "TextBlock",
+                "text": tail,
+                "wrap": True,
+                "isSubtle": True,
+                "spacing": "Small",
+            })
+
     return {
         "type": "message",
         "attachments": [{
@@ -227,13 +252,19 @@ def main() -> int:
         print("summary has no rows; skipping webhook")
         return 0
 
-    urllib3.disable_warnings()
     chunks = [rows[i:i + args.rows_per_card] for i in range(0, len(rows), args.rows_per_card)]
     for idx, chunk in enumerate(chunks, 1):
         body = _build_payload(chunk, rows, idx, len(chunks), args.dashboard_url)
         body_bytes = len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
         print(f"Webhook part {idx}/{len(chunks)}: {len(chunk)} rows, {body_bytes} bytes")
-        response = requests.post(args.url, json=body, timeout=args.timeout, verify=False)
+        response = requests.post(
+            args.url,
+            json=body,
+            timeout=args.timeout,
+            verify=os.environ.get(
+                "SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True)
+            ),
+        )
         print(f"Webhook part {idx}: HTTP {response.status_code}")
         if response.status_code >= 300:
             print(response.text[:500])

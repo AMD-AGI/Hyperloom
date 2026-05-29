@@ -14,7 +14,6 @@ Discovery strategy:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
@@ -238,21 +237,13 @@ class Config:
     kernel_pipeline_min_pending_ticks: int = 3
     # F2
     kernel_pipeline_min_geak_sigterm_attempts: int = 2
-    # F3 — substring matched against ``health_probe_targets`` URLs
-    # to fork ``local_server_unreachable`` into ``auth_proxy_unhealthy``.
-    kernel_pipeline_auth_proxy_url_marker: str = "127.0.0.1:4002"
     # F4
     kernel_pipeline_min_cursor_401_hits: int = 3
     # F5
     kernel_pipeline_min_kernels_with_no_progress: int = 3
-    # When set, auto-append the auth-proxy health URL to
-    # ``health_probe_targets`` so F3 has something to probe even when
-    # operators didn't configure it explicitly.
-    auto_probe_auth_proxy: bool = True
-    auth_proxy_health_url: str = "http://127.0.0.1:4002/health"
-    # Mirror of ``auto_probe_auth_proxy`` but for the local inference
-    # server (sglang / vLLM / Magpie). Without this default, B1 testing
-    # showed that sglang SIGSTOP fires no symptom because operators must
+    # Auto-append the local inference server health URL to
+    # ``health_probe_targets``. Without this default, B1 testing showed
+    # that sglang SIGSTOP fires no symptom because operators must
     # remember to put the URL into ``health_probe_targets`` manually.
     # 127.0.0.1:8888 is the Hyperloom Magpie wrapper default; if the
     # operator runs on a different port they can override via Config

@@ -44,83 +44,21 @@ if [ ! -x "$HYPERLOOM_VENV/bin/python3" ]; then
     exit 1
 fi
 
-# --- 2. Install OOB CLI + claude/codex CLIs. These are required by
-#        IR-7/IR-7b for kernel optimization. They are NOT in the base image.
-#        Real installation is delegated to install_oob.sh / install_cli.sh
-#        if the upstream skill ships them; otherwise this is a no-op stub
-#        and the verify subcommand will catch the missing binary.
-if [ -x "$HYPERLOOM_VENV/bin/pip" ]; then
-    echo "bootstrap.sh: pip-installing oob (best effort)..."
-    "$HYPERLOOM_VENV/bin/pip" install --quiet --upgrade oob 2>>"$LOG_DIR/bootstrap_oob.log" || \
-        echo "bootstrap.sh: WARN — oob pip install failed; verify will surface this." >&2
-fi
+# --- 2. (removed) OOB CLI install. The multi-node kernel-agent path uses
+#        ``multi_node kernel-bench`` (NodeAffinity-hard-pinned to the head
+#        pod via ``kernel_bench_multinode.py``); the head pod runs the
+#        bench script directly, no OOB CLI is invoked inside the pod.
+#        ``oob_submit.run_via_ray`` (the legacy single-node ray.remote
+#        entrypoint) is not the path LLMs are prompted to take on
+#        ``--nodes >= 2``. See ``multi_node/SKILL.md`` and
+#        ``kernel-agent/tools/kernel_optimization.py:1244-1283``.
 
-# --- 2b. Install OOB CLI from WekaFS source (the framework image lacks it).
-OOB_SRC="${OOB_SRC:-/wekafs/hyperloom/OOB}"
-if [ -d "$OOB_SRC" ] && [ -x "$HYPERLOOM_VENV/bin/pip" ]; then
-    echo "bootstrap.sh: installing OOB from $OOB_SRC"
-    if [ -f "$OOB_SRC/requirements.txt" ]; then
-        "$HYPERLOOM_VENV/bin/pip" install --quiet --no-cache-dir -r "$OOB_SRC/requirements.txt" 2>>"$LOG_DIR/bootstrap_oob.log" || \
-            echo "bootstrap.sh: WARN — OOB requirements install failed (see $LOG_DIR/bootstrap_oob.log)" >&2
-    fi
-    "$HYPERLOOM_VENV/bin/pip" install --quiet --no-cache-dir "$OOB_SRC" 2>>"$LOG_DIR/bootstrap_oob.log" || \
-        echo "bootstrap.sh: WARN — OOB pip install from $OOB_SRC failed (see $LOG_DIR/bootstrap_oob.log)" >&2
-fi
-
-# --- 2c. Install claude + codex CLIs via npm (best-effort; require node).
-# Bring up Node.js if missing (use a portable WekaFS prebuilt or apt).
-NODE_OK=0
-if command -v node >/dev/null 2>&1; then
-    if node -e 'process.exit(parseInt(process.versions.node.split(".")[0],10) >= 18 ? 0 : 1)' 2>/dev/null; then
-        NODE_OK=1
-    fi
-fi
-if [ "$NODE_OK" -eq 0 ]; then
-    NODE_TARBALL_CANDIDATES=(
-        "/wekafs/weilei/claw-dev/node-prebuilt/node-v22.18.0-linux-x64.tar.xz"
-        "/opt/yarn-v1.22.22/../node-v22-linux-x64.tar.xz"
-    )
-    INSTALLED_NODE=0
-    for cand in "${NODE_TARBALL_CANDIDATES[@]}"; do
-        if [ -f "$cand" ]; then
-            echo "bootstrap.sh: extracting node prebuilt from $cand"
-            mkdir -p /opt/node && tar -xJf "$cand" -C /opt/node --strip-components=1
-            ln -sfn /opt/node/bin/node /usr/local/bin/node
-            ln -sfn /opt/node/bin/npm /usr/local/bin/npm
-            ln -sfn /opt/node/bin/npx /usr/local/bin/npx
-            INSTALLED_NODE=1; break
-        fi
-    done
-    if [ "$INSTALLED_NODE" -eq 0 ]; then
-        # Fallback: apt-get (works on Debian-based images with network).
-        if command -v apt-get >/dev/null 2>&1; then
-            echo "bootstrap.sh: installing nodejs via apt-get"
-            apt-get update -qq 2>>"$LOG_DIR/bootstrap_apt.log" || true
-            apt-get install -y --no-install-recommends nodejs npm 2>>"$LOG_DIR/bootstrap_apt.log" ||                 echo "bootstrap.sh: WARN — apt nodejs install failed (see $LOG_DIR/bootstrap_apt.log)" >&2
-        fi
-    fi
-fi
-
-if command -v npm >/dev/null 2>&1; then
-    export NODE_TLS_REJECT_UNAUTHORIZED=0
-    echo "bootstrap.sh: installing @anthropic-ai/claude-code via npm"
-    npm install -g @anthropic-ai/claude-code 2>>"$LOG_DIR/bootstrap_npm.log" >/dev/null || \
-        echo "bootstrap.sh: WARN — claude-code npm install failed (see $LOG_DIR/bootstrap_npm.log)" >&2
-    echo "bootstrap.sh: installing @openai/codex via npm"
-    npm install -g @openai/codex@0.100.0 2>>"$LOG_DIR/bootstrap_npm.log" >/dev/null || \
-        echo "bootstrap.sh: WARN — codex npm install failed (see $LOG_DIR/bootstrap_npm.log)" >&2
-
-    # The prebuilt node sets npm prefix to /opt/node so binaries live in
-    # /opt/node/bin. Force-symlink them into /usr/local/bin so verify and
-    # downstream callers find them on the standard PATH.
-    for cli_bin in claude codex; do
-        if [ -x "/opt/node/bin/$cli_bin" ]; then
-            ln -sfn "/opt/node/bin/$cli_bin" "/usr/local/bin/$cli_bin"
-        fi
-    done
-else
-    echo "bootstrap.sh: WARN — npm not found; claude/codex CLIs will be missing" >&2
-fi
+# --- 2c. (removed, multi-node only) claude/codex CLI install.
+#        Multi-node head pod never invokes claude/codex CLI directly:
+#        claude_agent_sdk runs as a Python lib inside the sandbox;
+#        critic-agent runs as a sandbox subprocess; kernel-bench fans out
+#        a python bench script (NodeAffinity-pinned to head) without
+#        forking any CLI. So Node.js + npm packages are not needed here.
 
 # --- 3. Render /etc/profile.d/hyperloom-env.sh so every later REST job
 #        can ``source`` it and inherit the same PATH + credentials. We

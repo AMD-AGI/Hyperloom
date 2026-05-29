@@ -13,7 +13,7 @@ Hosts construct ``request.json``, invoke
 ``inference_optimizer.orchestrator.intent_parser.validate_envelope``).
 
 Keeping the agent on the far side of a subprocess boundary is a
-deliberate architectural choice — see DESIGN v0.6 §13 and the project
+deliberate architectural choice — see and the project
 handover. The reactor still lives in :mod:`robustness_agent.role` and
 :mod:`robustness_agent.signals`; this package is *transport only*.
 """

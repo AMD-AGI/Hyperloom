@@ -37,14 +37,12 @@ For a true 2h end-to-end run with a hard target, prefer the CLI::
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 
 from ..orchestrator.action_executors import (
     baseline_executor,
     explore_executor,
-    profile_executor,
     report_executor,
     sweep_executor,
 )
@@ -124,7 +122,6 @@ async def _run(ticks: int, target_gain: float) -> int:
     }
     coordinator = Coordinator(session_dir, backends=backends)
     coordinator.sub.register_executor("baseline", baseline_executor)
-    coordinator.sub.register_executor("profile",  profile_executor)
     coordinator.sub.register_executor("explore",  explore_executor)
     coordinator.sub.register_executor("sweep",    sweep_executor)
     coordinator.sub.register_executor("report",   report_executor)

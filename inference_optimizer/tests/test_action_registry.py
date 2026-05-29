@@ -19,7 +19,6 @@ Covers:
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 import yaml
@@ -33,7 +32,6 @@ from inference_optimizer.orchestrator.action_registry import (
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
-from inference_optimizer.paths import asset_actions_dir
 
 
 # ===========================================================================
@@ -113,7 +111,7 @@ def registry() -> ActionRegistry:
 
 def test_registry_loads_p1_1_actions(registry):
     names = set(registry.names())
-    expected = {"baseline", "target_analysis", "profile", "explore", "report"}
+    expected = {"baseline", "target_analysis", "explore", "report"}
     assert expected.issubset(names)
 
 
@@ -128,19 +126,12 @@ def test_registry_baseline_metadata(registry):
     assert baseline.lease_ttl_sec == 4200
 
 
-def test_registry_profile_uses_profile_lane(registry):
-    p = registry.get("profile")
-    assert p is not None
-    assert p.requires_lanes == ("profile_lane",)
-    assert p.family == "analysis"
-
-
 def test_registry_by_family(registry):
     """report belongs to family=shallow per DESIGN §16.1, not prep."""
     prep = {a.name for a in registry.by_family("prep")}
     assert {"baseline", "target_analysis"}.issubset(prep)
     analysis = {a.name for a in registry.by_family("analysis")}
-    assert "profile" in analysis
+    assert "roofline" in analysis
     shallow = {a.name for a in registry.by_family("shallow")}
     assert "report" in shallow
     assert "explore" in shallow
