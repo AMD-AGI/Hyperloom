@@ -1090,7 +1090,9 @@ class Coordinator:
 
         * Skip when ``cortex_kb`` is ``None`` (legacy callers
           who don't even pass a client).
-        * Skip when ``cortex_kb.enabled is False`` (``--degraded-kb``).
+        * ``--degraded-kb`` does NOT skip here: under the v2 design it
+          still writes the local store (``RecipeKB.enabled`` is always
+          True); only ``cortex_kb=None`` opts out of T0 entirely.
         * Skip when ``shared_state.cortex_session_id`` is already
           non-empty (the cli already ran T0, or a resume picked up
           the prior sid).
@@ -1102,7 +1104,7 @@ class Coordinator:
         cli's fail-fast contract.
         """
         client = self.cortex_kb
-        if client is None or not getattr(client, "enabled", False):
+        if client is None or not getattr(client, "enabled", True):
             return
         state = self.shared_state
         if (state.cortex_session_id or "").strip():
@@ -1135,28 +1137,16 @@ class Coordinator:
             "boot_origin": "coordinator_fallback",
         }
         try:
-            # SDK callers don't have a CLI ``args`` namespace to feed
-            # into ``_build_recipe_kb_dispatcher``, so we wire a
-            # minimal local-only dispatcher here. ``--cortex-kb-url``
-            # / ``--local-kb-root`` from the operator's CLI are NOT
-            # honoured on this fallback path — SDK callers wanting a
-            # remote read should construct their own dispatcher.
-            import os as _os
-            from pathlib import Path as _Path
-            from ..recipe_kb import LocalRecipeStore, RecipeKB
+            # Reuse the dispatcher the Coordinator already holds so T0
+            # anchors the SAME local store that the KEEP/REVERT/CLOSE
+            # writes target. (A throwaway local-only dispatcher here
+            # used to risk pointing at a different root than
+            # ``self.cortex_kb`` — operator ``--cortex-kb-url`` /
+            # ``--local-kb-root`` are already baked into ``client``.)
             from .cortex_t0 import run_t0_anchor
 
-            _root = (
-                _os.environ.get("HYPERLOOM_LOCAL_KB_ROOT")
-                or (
-                    f"{_os.environ['USER_DATA_PATH']}/kb"
-                    if _os.environ.get("USER_DATA_PATH")
-                    else "/workspace/hyperloom/kb"
-                )
-            )
-            kb = RecipeKB(local=LocalRecipeStore(root=_Path(_root)), remote=None)
             run_t0_anchor(
-                kb,
+                client,
                 state,
                 workload=workload,
                 hw=hw,
@@ -2072,7 +2062,9 @@ class Coordinator:
             state.warm_history_injected = True
             return 0
         recipe = warm.get("recipe") or {}
-        recipe_attrs = (recipe.get("attrs") or {}) if isinstance(recipe, dict) else {}
+        # v2 arbor shape keeps ``what_failed`` at the top level; v1
+        # nested it under ``attrs``. Fall back to the recipe itself.
+        recipe_attrs = (recipe.get("attrs") or recipe) if isinstance(recipe, dict) else {}
         what_failed = recipe_attrs.get("what_failed") or []
         if not isinstance(what_failed, list) or not what_failed:
             state.warm_history_injected = True
@@ -2205,7 +2197,11 @@ class Coordinator:
         recipe = warm.get("recipe") or {}
         if not isinstance(recipe, dict):
             recipe = {}
-        recipe_attrs = recipe.get("attrs") or {}
+        # v2 RecipeKB returns the arbor shape with best_config /
+        # sessions at the TOP LEVEL (no ``attrs`` wrapper); the retired
+        # v1 cortex_kb_client nested them under ``attrs``. Fall back to
+        # the recipe dict itself so both shapes round-trip.
+        recipe_attrs = recipe.get("attrs") or recipe
         best_config = recipe_attrs.get("best_config") or {}
         if not isinstance(best_config, dict):
             best_config = {}
@@ -2428,10 +2424,10 @@ class Coordinator:
                 "gain_pct":          round(measured_gain, 3),
                 "workspace":         str(result.get("workspace") or ""),
                 "ts":                datetime.now(timezone.utc).isoformat(),
-                # ``source_session_id`` here points at the warm-recipe
-                # tier that produced this entry (T1_exact / T1_exact_legacy
-                # / T2_same_shape) — useful for the session_breakdown
-                # "where did this gain come from" attribution.
+                # ``source_tier`` here records the warm-recipe tier that
+                # produced this entry (``exact`` / ``relative``) — useful
+                # for the session_breakdown "where did this gain come
+                # from" attribution.
                 "source_tier":       outcome.get("warm_recipe_tier", ""),
                 "source_confidence": outcome.get("warm_recipe_conf", 0.0),
             }
@@ -5074,19 +5070,17 @@ class Coordinator:
                 return explicit_params
         return self._gap_anchor_canonical_id()
 
-    def _gap_anchor_canonical_id(self) -> str:
-        """M1 placeholder for the gap anchor.
+    def _workload_canonical_id(self) -> str:
+        """Canonical 5-tuple recipe id for the current workload.
 
-        Per "M1 simplification — use
-        ``workload_node.canonical_id`` as the from side of every
-        hypothesize edge". M5 specialist framework will introduce real
-        ``issue_node`` anchors keyed by gap descriptors. Centralising
-        the derivation here keeps the migration to M5 a single-line
-        change.
-
-        Framework is plumbed so sglang and vLLM gaps anchor on
-        different recipe rows — matching the new framework-scoped
-        canonical id shape introduced alongside the warm-replay PR.
+        KEEP / REVERT / CLOSE all amend the recipe row keyed by this
+        id (via :meth:`_kb_amend_recipe`). It MUST stay consistent
+        with ``cortex_t0.run_t0_anchor``'s derivation so the row that
+        warm-start anchored is exactly the row the writes land on.
+        ``run_t0_anchor`` stamps the resolved ``framework`` /
+        ``framework_version`` back onto SharedState, so reading them
+        here yields the same values T0 used (no write/read cid split
+        when the operator didn't pass ``--framework-version``).
         """
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"
@@ -5103,6 +5097,19 @@ class Coordinator:
             framework_version=framework_version,
             precision=precision,
         )
+
+    def _gap_anchor_canonical_id(self) -> str:
+        """M1 placeholder for the gap anchor.
+
+        Per "M1 simplification — use ``workload_node.canonical_id`` as
+        the from side of every hypothesize edge". M5 specialist
+        framework will introduce real ``issue_node`` anchors keyed by
+        gap descriptors. Delegates to :meth:`_workload_canonical_id`
+        so the gap anchor and the KEEP/REVERT/CLOSE write target never
+        diverge (framework is plumbed so sglang and vLLM gaps anchor
+        on different recipe rows).
+        """
+        return self._workload_canonical_id()
 
     def _kb_amend_recipe(
         self,
@@ -5149,11 +5156,18 @@ class Coordinator:
             framework_version = detect_framework_version(framework)
         precision = str(getattr(ss, "precision", "") or "")
 
+        # Read the LOCAL authoritative row for the read-modify-write.
+        # We deliberately bypass the remote-first dispatcher read here:
+        # writes are local-only, so the row we must NOT clobber is the
+        # one this session already wrote locally. A remote-first read
+        # could return an older/wider central row and silently drop the
+        # lessons / pitfalls this session just appended.
         try:
-            live = self.cortex_kb.get_recipe(canonical_id=cid) or {}
+            live = self.cortex_kb.local.get_recipe(canonical_id=cid) or {}
         except Exception as exc:  # noqa: BLE001 — best-effort read
             log.info(
-                "_kb_amend_recipe: get_recipe failed (%s); proceeding with empty live",
+                "_kb_amend_recipe: local get_recipe failed (%s); "
+                "proceeding with empty live",
                 exc,
             )
             live = {}
@@ -5168,6 +5182,22 @@ class Coordinator:
         # Build the put_recipe kwargs — preserve everything from live
         # that the caller didn't override.
         overrides = dict(recipe_overrides or {})
+        # Preserve T0-stamped top-level extras (model_class /
+        # image_digest / tp / ep / ...) across the amend: ``live`` has
+        # them splatted at the top level, so pull the non-reserved keys
+        # back out and merge the caller's extras on top (caller wins).
+        # Keys mirror ``recipe_kb.schema.Recipe`` well-known fields.
+        _reserved = {
+            "canonical_id", "version", "created_at", "updated_at",
+            "model", "hardware", "framework", "framework_version",
+            "precision", "best_config", "best_throughput",
+            "what_worked", "what_failed", "remaining_gaps",
+            "prs_tested", "pitfalls", "lessons", "last_profiled",
+            "stack_fingerprint", "sessions", "authority", "confidence",
+            "evidence_refs", "provenance",
+        }
+        prior_extras = {k: v for k, v in live.items() if k not in _reserved}
+        merged_extras = {**prior_extras, **(overrides.get("extras") or {})}
         put_kwargs: dict[str, Any] = {
             "canonical_id":      cid,
             "model":             ss.model_name or "unknown_model",
@@ -5204,7 +5234,18 @@ class Coordinator:
             "sessions":          overrides.get("sessions")
                                   if "sessions" in overrides
                                   else list(live.get("sessions") or []),
-            "extras":            overrides.get("extras"),
+            "extras":            merged_extras,
+            # Preserve audit fields across the amend instead of letting
+            # put_recipe reset them to its defaults each time.
+            "authority":         overrides.get("authority")
+                                  if "authority" in overrides
+                                  else str(live.get("authority") or "EXPERIENTIAL"),
+            "confidence":        overrides.get("confidence")
+                                  if "confidence" in overrides
+                                  else float(live.get("confidence") or 0.85),
+            "evidence_refs":     overrides.get("evidence_refs")
+                                  if "evidence_refs" in overrides
+                                  else list(live.get("evidence_refs") or []),
             "provenance":        {
                 "source":       "hyperloom-inference-optimizer",
                 "generator":    "coordinator",
@@ -7911,51 +7952,6 @@ class Coordinator:
     # everything we know to be true at KEEP / REVERT / CLOSE time.
     # ------------------------------------------------------------------
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
-    # GAP 4 — read-modify-write source_session_ids cap. Bounded so the
-    # KB row doesn't bloat indefinitely; the bounded-list semantic still
-    # gives us "how many recent sessions validated this lesson" while
-    # keeping the per-row JSON small enough to read on every write.
-    FACT_RECENT_SESSIONS_CAP: int = 10
-
-    def _merge_recent_session_ids(
-        self,
-        existing_attrs: Mapping[str, Any] | None,
-        my_session_id: str,
-    ) -> tuple[list[str], int]:
-        """Read-modify-write helper for ``source_session_ids[]`` +
-        ``validated_count``.
-
-        Pulls the prior list off ``existing_attrs`` (which the caller
-        obtained via :meth:`CortexKBClient.read_lesson_exact` /
-        :meth:`read_pitfall_exact`), removes any prior occurrence of
-        ``my_session_id`` (resume / retry safety so we don't double-
-        count the same session) and appends a fresh entry at the end.
-        Caps the list at :data:`FACT_RECENT_SESSIONS_CAP` to keep the
-        KB row bounded.
-
-        ``validated_count`` is computed as ``len(merged_list)`` rather
-        than ``prior_count + 1`` because the cap means raw "+1" would
-        eventually undercount (10 sessions write, the 11th writes, cap
-        drops the oldest, count=10 looks the same as before). Using
-        ``len`` exposes the "saturated at the cap" semantic correctly
-        for the prompt renderer.
-
-        Returns ``(merged_list, validated_count)``.
-        """
-        attrs = dict(existing_attrs or {})
-        prior_ids = attrs.get("source_session_ids")
-        if not isinstance(prior_ids, list):
-            prior_ids = []
-        cleaned: list[str] = [
-            str(s) for s in prior_ids
-            if s and str(s) != my_session_id
-        ]
-        my_id = str(my_session_id).strip()
-        if my_id:
-            cleaned.append(my_id)
-        cleaned = cleaned[-self.FACT_RECENT_SESSIONS_CAP:]
-        return cleaned, len(cleaned)
-
     def _ensure_journal(self) -> Journal:
         """Lazy-instantiate the per-session :class:`Journal`.
 
@@ -8789,10 +8785,15 @@ class Coordinator:
             # the whole archival sequence) so concurrent finalise
             # writes don't tear each other.
             merged_sessions: list[dict[str, Any]] = list(my_sessions)
+            existing_row: dict[str, Any] = {}
             if self.cortex_kb is not None:
                 try:
                     cid = self._workload_canonical_id()
-                    existing_row = self.cortex_kb.get_recipe(canonical_id=cid) or {}
+                    # Read the LOCAL row (authoritative for writes) so the
+                    # session merge + better-throughput guard compare
+                    # against what this session already persisted, not a
+                    # possibly-stale central row.
+                    existing_row = self.cortex_kb.local.get_recipe(canonical_id=cid) or {}
                     existing_sessions: list[dict[str, Any]] = []
                     for row in (existing_row.get("sessions") or []):
                         if not isinstance(row, dict):
@@ -8811,17 +8812,41 @@ class Coordinator:
                         exc,
                     )
 
+            overrides: dict[str, Any] = {
+                "what_worked":   attrs["what_worked"],
+                "what_failed":   attrs["what_failed"],
+                "last_profiled": attrs["last_profiled"],
+                "sessions":      merged_sessions,
+                "extras":        dict(workload_tags or {}),
+            }
+            # Only overwrite best_config / best_throughput when THIS
+            # session is an actual improvement (or the row has none).
+            # A CLOSE that ended without a validated win
+            # (best_throughput == 0.0) must NOT clobber a better
+            # historical config. Omitting the keys makes
+            # ``_kb_amend_recipe`` preserve the live values.
+            my_tput = float(attrs.get("best_throughput") or 0.0)
+            try:
+                live_tput = float(existing_row.get("best_throughput") or 0.0)
+            except (TypeError, ValueError):
+                live_tput = 0.0
+            if my_tput > live_tput:
+                overrides["best_config"] = attrs["best_config"]
+                overrides["best_throughput"] = my_tput
+            # Merge stack_fingerprint rather than replace: T0 stamps
+            # vllm_version / aiter_commit / rocm_version; CLOSE only has
+            # the ``{"sha": ...}`` digest. Replacing would drop the
+            # version keys, so keep live keys and overlay non-empty new
+            # ones.
+            merged_fp = dict(existing_row.get("stack_fingerprint") or {})
+            for fp_key, fp_val in (attrs.get("stack_fingerprint") or {}).items():
+                if fp_val not in (None, "", {}):
+                    merged_fp[fp_key] = fp_val
+            if merged_fp:
+                overrides["stack_fingerprint"] = merged_fp
+
             self._kb_amend_recipe(
-                recipe_overrides={
-                    "best_config":       attrs["best_config"],
-                    "best_throughput":   attrs["best_throughput"],
-                    "what_worked":       attrs["what_worked"],
-                    "what_failed":       attrs["what_failed"],
-                    "stack_fingerprint": attrs["stack_fingerprint"],
-                    "last_profiled":     attrs["last_profiled"],
-                    "sessions":          merged_sessions,
-                    "extras":            dict(workload_tags or {}),
-                },
+                recipe_overrides=overrides,
                 provenance_details={
                     "phase": "close_finalize",
                     "evidence": [

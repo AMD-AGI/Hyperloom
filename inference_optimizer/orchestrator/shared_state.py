@@ -328,8 +328,8 @@ class SharedState:
     #     "status":            "reproduced" | "drift" | "failed" | "skipped",
     #     "expected_gain_pct": 25.0,
     #     "actual_gain_pct":   23.5,
-    #     "warm_recipe_tier":  "T1_exact",
-    #     "warm_recipe_conf":  0.85,
+    #     "warm_recipe_tier":  "exact",
+    #     "warm_recipe_conf":  1.0,
     #     "replay_task_id":    "task-uuid",
     #     "reason":            "..."        # only on failed / skipped / drift
     #   }
