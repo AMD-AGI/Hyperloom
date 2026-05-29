@@ -15,15 +15,15 @@
 #   3. InferenceX checkout: clone latest from upstream (no SHA pin yet),
 #      sets INFERENCEX_PATH for runtime
 #   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
-#      bring-up, Node/npm, TraceLens, GEAK, OOB and the auth-proxy. kernel-agent
-#      itself is the canonical owner of those — we just chain to it
-#      so users have a single entry point.
+#      bring-up, Node/npm, TraceLens, GEAK, OOB and CLI auth-file setup.
+#      kernel-agent itself is the canonical owner of those — we just
+#      chain to it so users have a single entry point.
 #
 # kernel-agent's install.sh owns Ray + ray start, TraceLens, GEAK, OOB
-# auth-proxy. inference_optimizer's install.sh owns Magpie / InferenceX
-# / the inference_optimizer Python package itself. The two are
-# composable: kernel-agent works standalone; inference_optimizer drags
-# kernel-agent in via this script.
+# CLI auth files. inference_optimizer's install.sh owns Magpie /
+# InferenceX / the inference_optimizer Python package itself. The two
+# are composable: kernel-agent works standalone; inference_optimizer
+# drags kernel-agent in via this script.
 
 set -euo pipefail
 
@@ -35,10 +35,47 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 
 # Single artefact root: everything writable defaults to $USER_DATA_PATH so
 # operators can monitor a run end-to-end by tailing one directory. Magpie
-# clone, source mirrors, generated env / GEAK config, and the pod-local
-# auth-proxy state all derive from $HYPERLOOM_RUNTIME_DIR.
+# clone, source mirrors, and generated env / GEAK config all derive from
+# $HYPERLOOM_RUNTIME_DIR.
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+DOTENV_LOADED_COUNT=0
+
+load_dotenv_no_clobber() {
+  DOTENV_LOADED_COUNT=0
+  [ -f "$REPO_ROOT/.env" ] || return 0
+  local loaded=0
+  local raw key value
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    [ -z "$raw" ] && continue
+    case "$raw" in \#*) continue ;; esac
+    case "$raw" in export\ *) raw="${raw#export }" ;; esac
+    case "$raw" in *=*) ;; *) continue ;; esac
+    key="${raw%%=*}"
+    value="${raw#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    [ -z "$key" ] && continue
+    if [ -z "${!key:-}" ]; then
+      export "$key=$value"
+      loaded=$((loaded + 1))
+    fi
+  done < "$REPO_ROOT/.env"
+  DOTENV_LOADED_COUNT="$loaded"
+  return 0
+}
+
+# Load .env before deriving USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR so a
+# freshly-copied .env.template can be the single configuration entrypoint.
+# The loader is no-clobber: explicit shell exports always win.
+load_dotenv_no_clobber
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
@@ -64,7 +101,7 @@ Installs:
   - Magpie (cloned to $HYPERLOOM_RUNTIME_DIR/Magpie by default)
   - Detects/exports INFERENCEX_PATH
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
-    Node/npm, TraceLens, GEAK, OOB CLI, and the OOB auth-proxy.
+    Node/npm, TraceLens, GEAK, and OOB CLI auth.
   - Chains to framework-agent/scripts/install.sh for the `fa` CLI
     used by the `framework_pr` bandit arm at optimize-time.
     framework-agent is fully standalone; the chain just makes the
@@ -110,6 +147,66 @@ run() {
     "$@"
   fi
 }
+
+# Preflight credential validation. Mirrors the gate in
+# kernel-agent/scripts/install.sh so users invoking the inference-optimizer
+# installer directly (the canonical entrypoint) get the same fail-fast
+# behaviour as users running kernel-agent on its own. Without this, a
+# missing SAFE_API_KEY / OPENAI_BASE_URL slips past pip install, Magpie
+# clone, InferenceX clone (~10+ minutes of work) and only surfaces when the
+# chained kernel-agent installer reaches GEAK config generation.
+#
+# Loader (env wins; never overwrites a key that is already set):
+#   env > $REPO_ROOT/.env
+#
+# Strict mode by design: --check-only / --dry-run is the only path that
+# downgrades the die to a warn (introspection mode, no install runs).
+preflight_load_dotenv() {
+  load_dotenv_no_clobber
+  if [ "${DOTENV_LOADED_COUNT:-0}" -gt 0 ]; then
+    log "loaded ${DOTENV_LOADED_COUNT} missing var(s) from $REPO_ROOT/.env (env wins)"
+  fi
+}
+
+preflight_validate_credentials() {
+  preflight_load_dotenv
+  local missing=()
+  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
+  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
+  if [ "${#missing[@]}" -eq 0 ]; then
+    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+    return 0
+  fi
+  local env_file_status
+  if [ -f "$REPO_ROOT/.env" ]; then
+    env_file_status="present"
+  else
+    env_file_status="not found"
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
+         "continuing because --check-only / --dry-run is active. The " \
+         "chained kernel-agent installer will still fail later unless " \
+         "these are set before a real install."
+    return 0
+  fi
+  cat >&2 <<EOF
+[inference-optimizer ERROR] Missing required credential(s): ${missing[*]}
+
+Tried loading from:
+  - shell environment
+  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+
+Fix one of:
+  1. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
+  2. Export directly into the shell before re-running:
+       export SAFE_API_KEY=sk-xxxxx
+       export OPENAI_BASE_URL=https://gateway.example.com/v1
+EOF
+  exit 2
+}
+preflight_validate_credentials
 
 # --- 0. Resolve PYTHON ---
 # On hyperloom / sgl-workspace containers the canonical ROCm stack lives in
@@ -501,7 +598,7 @@ chain_kernel_agent() {
     warn "kernel-agent installer not found at $script"
     return 0
   fi
-  log "delegating ray + TraceLens + GEAK + OOB + auth-proxy to ${script}"
+  log "delegating ray + TraceLens + GEAK + OOB CLI auth to ${script}"
   export REPO_ROOT KERNEL_AGENT_ROOT MAGPIE_DIR HYPERLOOM_ROOT
   export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
   export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGENT_ROOT}}"
@@ -585,23 +682,32 @@ PY
 _probe_framework_source_roots
 
 # ---------------------------------------------------------------------------
-# F2-1 — framework-agent (PR #280 sibling skill).
+# framework-agent (sibling skill — drives the standalone FRAMEWORK_PR
+# phase via ``fa phase-discover`` for batch enumeration. The
+# Coordinator's executor handles the apply/bench loop directly, so
+# ``phase-fetch`` / ``phase-emit-proposal`` ship for ad-hoc use but
+# are not on the inference_optimizer hot path). Owns its own python
+# deps and venv layout; we only need to invoke its installer.
 #
-# The framework-agent ships as a sibling tool that ``serving_specialist``
-# subprocesses can shell out to (``fa candidates`` + ``git fetch refs/pull/...``)
-# under the ``framework_pr_scout`` sub_kind. It owns its own python deps
-# and venv layout; we only need to invoke its installer.
+# Install is ON by default to match the runtime default
+# (``SharedState.framework_phase_enabled = True``). Opt out by
+# exporting ``INFERENCE_OPTIMIZER_NO_FRAMEWORK=1`` before install
+# (mirrors the runtime ``--no-framework`` CLI flag).
 #
-# Install is ON by default to match the orchestrator-side defaults
-# (``SharedState.framework_agent_enabled = True`` and the ``--framework-
-# agent-enabled`` CLI flag's ``_env_default_on`` semantics). Opt out by
-# exporting ``INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0`` before
-# install (the runtime CLI flag obeys the same env knob with the same
-# semantics, so flipping it to ``0`` keeps install + runtime aligned).
+# Back-compat: the legacy ``INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0``
+# knob is still honoured for one release with a deprecation warning so
+# operator scripts don't break. Remove on the next cleanup pass.
 # ---------------------------------------------------------------------------
 ensure_framework_agent() {
-  if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-1}" = "0" ]; then
-    log "framework-agent: skipped (INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0)"
+  if [ -n "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED:-}" ]; then
+    warn "INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED is deprecated; use INFERENCE_OPTIMIZER_NO_FRAMEWORK=1 to opt out"
+    if [ "${INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED}" = "0" ]; then
+      log "framework-agent: skipped (legacy INFERENCE_OPTIMIZER_FRAMEWORK_AGENT_ENABLED=0)"
+      return 0
+    fi
+  fi
+  if [ "${INFERENCE_OPTIMIZER_NO_FRAMEWORK:-0}" = "1" ]; then
+    log "framework-agent: skipped (INFERENCE_OPTIMIZER_NO_FRAMEWORK=1)"
     return 0
   fi
   local fa_dir="${INFERENCE_OPTIMIZER_REPO:-$(pwd)}/framework-agent"

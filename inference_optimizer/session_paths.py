@@ -1,4 +1,4 @@
-"""Per-session path helpers (DESIGN v0.6.1 §23).
+"""Per-session path helpers ().
 
 Single source of truth for every path *inside* a session directory. The
 skeleton itself is created by :func:`paths.make_session_dir`; this module
@@ -66,17 +66,27 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # ``specialist`` is yaml-less (v0.8 M5, parameterised by
 # ``params.domain``) so it is added explicitly.
 # ``support`` was added in 2026-05 alongside the real ``recover``
-# executor (Change C of the gpu-leak-robustness-fix plan); the v0.8
+# executor (Change C of the gpu-leak-robustness-fix plan); the legacy
 # stub-action purge (Gap-13) removed the dream / re_explore /
 # comm_optimization / compiler_tuning yamls, so ``recover`` is the
 # only fallback ``support`` entry.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
-    "baseline", "profile",
-    # F1-2.5 (Roofline-v2): composite analysis action that supersedes
-    # the retired ``pmc_roofline`` action; pipeline_phase 'analysis'
-    # already includes it in the registry-derived set, the fallback
-    # only matters when the yaml can't be loaded.
-    "roofline",
+    "baseline",
+    # GAP 1 — Coordinator-internal warm-recipe replay. Same workspace
+    # shape as ``baseline`` (under ``runs/replay_warm_recipe/<task_id>/``);
+    # included so the registry-loader-failure path still pre-mkdirs the
+    # workspace for the replay task that the PRELUDE hook will enqueue.
+    "replay_warm_recipe",
+    # Coordinator-internal analysis actions. Which one runs is chosen
+    # by ``shared_state.enable_roofline`` (``--enable-roofline`` /
+    # ``--no-enable-roofline``, default on): ``roofline`` is the
+    # composite action (profile + trace_analyze + analysis.md
+    # snapshot); ``profile`` is the lighter trace-only fallback. Both
+    # land under ``runs/<kind>/<task_id>/`` so both names need a
+    # fallback entry for the loader-failure path. LLM proposals of
+    # either name are denied by PolicyGate
+    # (``analysis_action_not_llm_proposable``).
+    "roofline", "profile",
     "sweep",
     "explore",
     "specialist",
@@ -86,6 +96,11 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     # ``explore`` already includes it in the registry-derived set, the
     # fallback only matters when the yaml can't be loaded.
     "integrate_patch",
+    # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor
+    # mirroring integrate_patch (applies an upstream PR + benches +
+    # KEEP/REVERT). pipeline_phase=explore puts it in the registry-derived
+    # runs/<kind>/ set; the fallback only matters on registry load failure.
+    "framework_pr",
     # IR-7 (Saturday May 2026): ``assess_remaining_gaps`` is a thin
     # wrapper that dispatches the ``session_steward_specialist``
     # domain. Pipeline_phase ``explore`` includes it in the
@@ -115,7 +130,7 @@ def _runs_actions() -> frozenset[str]:
         registry = ActionRegistry().load()
     except Exception:
         return _RUNS_ACTIONS_FALLBACK
-    # v0.8 M5 (KB_design §3.5 §10) — ``specialist`` is a synthetic action
+    # ``specialist`` is a synthetic action
     # with no yaml meta (parameterised by ``params.domain``); the
     # registry-derived path can't see it, so we always add it explicitly.
     return frozenset(
@@ -311,12 +326,12 @@ def target_analysis_report_md(session_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Cortex KB integration paths (v0.8 M1 — KB_design §3.6, §3.13 M1)
+# Cortex KB integration paths
 # ---------------------------------------------------------------------------
 # Single source of truth for every file under ``<sd>/runtime/cortex/``. The
 # directory itself is created by :func:`paths.make_session_dir`; the helpers
 # below only compute the well-known file names.  Callers MUST go through
-# these helpers (no ad-hoc string concatenation) so the v0.8 NDJSON
+# these helpers (no ad-hoc string concatenation) so the legacy NDJSON
 # protocol stays homogeneous across producers / consumers (CortexKBClient,
 # flusher daemon, breakdown collector, robustness monitor).
 def cortex_dir(session_dir: Path) -> Path:
@@ -383,9 +398,43 @@ def cortex_audit_jsonl(session_dir: Path) -> Path:
     return cortex_dir(session_dir) / ".kb_audit.jsonl"
 
 
+# ---------------------------------------------------------------------------
+# recipe-snapshot v2 — per-session bookkeeping.
+#
+# Lives under a separate ``runtime/recipe_snapshot/`` subtree (NOT
+# ``runtime/cortex/``) so the v2 dispatcher can stay decoupled from
+# the legacy ``/v1/points`` client during the gradual cutover.
+#
+# History: under the original Phase 1 design this directory also held
+# ``.pending.ndjson`` / ``.flushed.ndjson`` / ``.dead_letter.ndjson``
+# queues for failed central-server writes. Those have been retired —
+# under the local-write design (commit "feat(recipe_kb): local-only
+# recipe-snapshot store with history archival") writes never go to
+# the central server, so the failed-write fan-out has nothing to
+# queue. Only the read-side audit log (``.audit.jsonl``) and the
+# directory itself survive; both are kept for the dispatcher's
+# remote-failure logging path.
+# ---------------------------------------------------------------------------
+def recipe_snapshot_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/`` — dispatcher / remote-client
+    per-session bookkeeping root.
+    """
+    return Path(session_dir) / "runtime" / "recipe_snapshot"
+
+
+def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only
+    synchronous audit of every recipe-snapshot remote READ call
+    (success or failure) the dispatcher made directly. Writes are
+    local-only and don't traverse this audit (the local store has
+    its own atomic write contract).
+    """
+    return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
+
+
 def pr_monitor_status_json(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.pr_monitor_status.json`` — one-shot marker
-    written by ``cli._bootstrap_knowledge_plane`` (KB_gaps/Gap-02) with
+    written by ``cli._bootstrap_knowledge_plane`` with
     the boot-time PR Monitor reachability snapshot. Breakdown collector
     reads it to emit ``warnings`` entries like ``pr_monitor:disabled``
     or ``pr_monitor:unreachable`` so dashboards can light up on
@@ -408,7 +457,7 @@ def cortex_flusher_pid(session_dir: Path) -> Path:
 
 def cortex_flusher_status_json(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.kb_flusher_status.json`` — one-shot marker
-    written by ``cli._maybe_spawn_kb_flusher`` (KB_gaps/Dead-E) with the
+    written by ``cli._maybe_spawn_kb_flusher`` with the
     boot-time flusher spawn decision. Breakdown collector merges this
     with the live pid-file check to populate
     ``kb_provenance.flusher_status``.

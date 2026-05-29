@@ -1,4 +1,4 @@
-"""Structured-intent transport (DESIGN v0.6 §14).
+"""Structured-intent transport ().
 
 Two transports share the same envelope schema:
 
@@ -18,7 +18,6 @@ v0.6 changes vs v0.5:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -46,7 +45,7 @@ class IntentType(str, Enum):
     FORCE_DISPATCH = "force_dispatch"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
-    # v0.8 M5 — specialist sub-agent exit protocol (KB_design §3.5 §7).
+    # specialist sub-agent exit protocol.
     # specialist tasks (LLM sub-agents on the research_lane) close their
     # lifecycle with exactly one SPECIALIST_DONE intent. PolicyGate R3
     # checks from_agent prefix + gap/domain match + payload schema; see
@@ -112,21 +111,21 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.ALERT:           ("severity", "summary"),
     IntentType.REQUEST:         ("target_agent", "kind"),
     IntentType.RESPONSE:        ("in_reply_to", "kind"),
-    # v0.8 KB_gaps/Gap-11 (KB_design §3.5 §5 / M5 §5 step 5): the
+    # v0.8 KB_gaps/Gap-11: the
     # ``verdict`` / ``verdict_map`` choice is mutually exclusive but
     # one of them must be present. We require only the structural
     # ``target_proposal_msg_id`` field here; the
     # ``verdict``/``verdict_map`` mutual exclusion is enforced by
     # :func:`_validate_review_verdict_payload` below (called from
     # :func:`validate_envelope`) so the per-variant variant_name
-    # schema can be validated in one place alongside the v0.6 single-
+    # schema can be validated in one place alongside the legacy single-
     # verdict shape.
     IntentType.REVIEW_VERDICT:  ("target_proposal_msg_id",),
     IntentType.KILL_TASK:       ("task_id", "reason"),
     IntentType.FORCE_DISPATCH:  ("task_id", "reason"),
     IntentType.PRUNE_BRANCH:    ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
-    # v0.8 M5 — specialist exit envelope. ``proposal_set`` is a list (may
+    # specialist exit envelope. ``proposal_set`` is a list (may
     # be empty when ``empty=true``); per-variant schema is enforced by
     # PolicyGate R3 (``policy._validate_specialist_done``) since the
     # intent_parser sees only the envelope skeleton.
@@ -175,7 +174,7 @@ EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
                     "specialist_done: {gap_canonical_id, domain, "
                     "proposal_set: [variant...], empty, summary, "
                     "confidence?, new_findings?, residual_questions?} — "
-                    "specialist-only, exactly one per task (KB_design §3.5 §7)."
+                    "specialist-only, exactly one per task."
                 ),
             },
         },
@@ -242,7 +241,7 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
                     f"intents[{i}] (type={it.value}) missing required "
                     f"payload field: {required!r}"
                 )
-        # v0.8 KB_gaps/Gap-11 — REVIEW_VERDICT shape branch.
+        # REVIEW_VERDICT shape branch.
         if it is IntentType.REVIEW_VERDICT:
             _validate_review_verdict_payload(payload, index=i)
         validated.append(Intent(type=it, payload=dict(payload)))
@@ -252,11 +251,11 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
 def _validate_review_verdict_payload(
     payload: dict[str, Any], *, index: int,
 ) -> None:
-    """Enforce the v0.8 REVIEW_VERDICT envelope schema.
+    """Enforce the legacy REVIEW_VERDICT envelope schema.
 
     KB_design §3.5 §5 / M5 §5 step 5 — Critic Review returns one of:
 
-    * ``verdict``: legacy v0.6 single-verdict shape for one-proposal
+    * ``verdict``: legacy single-verdict shape for one-proposal
       reviews (kernel_opt / integrate / report / specialist dispatch
       etc.). Free-form string; PolicyGate later checks it against
       :data:`policy.REVIEW_VERDICTS`.
@@ -282,7 +281,7 @@ def _validate_review_verdict_payload(
     if has_single and has_map:
         raise IntentValidationError(
             f"intents[{index}] (type=review_verdict): 'verdict' and "
-            f"'verdict_map' are mutually exclusive (KB_design §3.5 §5)"
+            f"'verdict_map' are mutually exclusive"
         )
     if has_map:
         vm = payload["verdict_map"]

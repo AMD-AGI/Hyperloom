@@ -16,13 +16,6 @@ P2#7 documented:
   is too short for that kernel's ``select_patch`` round; extending it
   or skipping the kernel is the only fix.
 
-* **F3 ``auth_proxy_unhealthy``** — the ``127.0.0.1:4002`` health
-  probe is unreachable. Forks off the generic ``local_server_unreachable``
-  signal because the auth_proxy is special: when it dies every
-  claude/codex CLI call returns ``401`` so the entire OOB pipeline
-  collapses, and the operator needs the specific hint to run
-  ``ensure_auth_proxy.sh``.
-
 * **F4 ``cursor_auth_storm``** — ``optimization_attempts.jsonl`` shows
   ``backend=cursor`` AND ``report_text`` carrying a ``401`` /
   authentication-failure marker across at least ``min_cursor_401_hits``
@@ -39,8 +32,7 @@ P2#7 documented:
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
@@ -48,14 +40,6 @@ from ..sources.base import SourceData
 from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
-
-
-# URL substring that identifies the auth_proxy among generic local
-# server health probes. Operators may override via the config field
-# below if they relocate the proxy port; we expose the marker rather
-# than the full URL because ``health_probe_targets`` strings may carry
-# ``/health`` / ``/v1/models`` suffixes that need to be stripped.
-_AUTH_PROXY_URL_MARKER: str = "127.0.0.1:4002"
 
 
 # Markers we treat as "GEAK budget killed the run" in
@@ -89,8 +73,6 @@ class KernelPipelineConfig:
     min_pending_ticks: int = 3
     # F2 — same kernel_id has GEAK backend SIGTERM'd this many times.
     min_geak_sigterm_attempts: int = 2
-    # F3 — auth_proxy URL marker (substring match on probe URL).
-    auth_proxy_url_marker: str = _AUTH_PROXY_URL_MARKER
     # F4 — cursor 401 marker count threshold.
     min_cursor_401_hits: int = 3
     # F5 — kernel_ids with no PARTIAL→KEEP progression across the
@@ -247,58 +229,6 @@ def _geak_budget_symptoms(
                     "extend GEAK budget for this kernel OR prune it from "
                     "the kernel_opt rotation — current budget cannot "
                     "produce a verdict"
-                ),
-            )
-        )
-    return out
-
-
-# ---------------------------------------------------------------------------
-# F3 — Auth-proxy unhealthy (fork from generic local_server_unreachable)
-# ---------------------------------------------------------------------------
-
-def _auth_proxy_symptoms(
-    data: SourceData, cfg: KernelPipelineConfig,
-) -> list[Symptom]:
-    """Fork :data:`local_server_health` rows by URL.
-
-    The generic ``local_server_unreachable`` signal already emits a
-    MEDIUM/HIGH alert for any down probe target; this rule re-emits
-    the auth-proxy hit as a *specific* HIGH symptom because the fix
-    is well-known (``ensure_auth_proxy.sh``).
-    """
-    entries = data.local_server_health
-    if not isinstance(entries, list) or not entries:
-        return []
-    out: list[Symptom] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("reachable"):
-            continue
-        url = str(entry.get("url") or "")
-        if cfg.auth_proxy_url_marker not in url:
-            continue
-        out.append(
-            Symptom(
-                name="auth_proxy_unhealthy",
-                severity=SymptomSeverity.HIGH,
-                summary=(
-                    f"auth_proxy at {url!r} unreachable "
-                    f"(status={entry.get('status')!r}); every "
-                    f"claude/codex CLI will now return 401"
-                ),
-                evidence={
-                    "url": url,
-                    "status": entry.get("status"),
-                    "status_code": entry.get("status_code"),
-                    "error": entry.get("error"),
-                },
-                subject={"url": url},
-                source="local",
-                suggestion=(
-                    "run $REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh; "
-                    "the supervisor is idempotent and will relaunch a stuck proxy"
                 ),
             )
         )
@@ -465,7 +395,7 @@ def evaluate_kernel_pipeline_signals(
     *,
     config: KernelPipelineConfig | None = None,
 ) -> list[Symptom]:
-    """Stateless slice of F (F2 / F3 / F4 / F5).
+    """Stateless slice of F (F2 / F4 / F5).
 
     F1 ``ray_pending_starvation`` is stateful (consecutive-tick streak)
     and lives in :class:`RayPendingDetector`; the classifier instantiates
@@ -474,7 +404,6 @@ def evaluate_kernel_pipeline_signals(
     cfg = config or KernelPipelineConfig()
     out: list[Symptom] = []
     out.extend(_geak_budget_symptoms(data, cfg))
-    out.extend(_auth_proxy_symptoms(data, cfg))
     out.extend(_cursor_auth_storm_symptoms(data, cfg))
     out.extend(_kernel_opt_no_progress_symptoms(data, cfg))
     return out

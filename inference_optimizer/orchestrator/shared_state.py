@@ -1,4 +1,4 @@
-"""SharedState — DESIGN v0.6 §8.3 / §17.2.
+"""SharedState
 
 Persistent session-level state that all reactors read (via prompt injection)
 and that PolicyGate uses to enforce CORE_STATE_FIELDS guards.
@@ -8,7 +8,7 @@ Backed by JSON at ``$SESSION_DIR/state.json``. The file write is atomic
 The Coordinator is the **only** writer; LLM agents go through
 ``UPDATE_STATE`` intents which the Coordinator validates + persists.
 
-v0.6 fields:
+fields:
 
     session_id          str   — set by Coordinator at session creation
     model_name          str   — e.g. "meta-llama/Llama-3.1-8B-Instruct"
@@ -27,7 +27,7 @@ v0.6 fields:
     max_minutes         int   — wall-clock budget (0 = unlimited)
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
-                                `select_kernels` REQUEST `trace_input` param
+                                `trace_analyze` REQUEST `trace_input` param
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# v0.8 §3.9 — the ``orchestrator.scoring`` module was retired; the
+# the ``orchestrator.scoring`` module was retired; the
 # v0.6 ``ActionScore`` / ``rank_top_k`` / ``target_gap_multiplier``
 # imports below are gone. The LLM now decides by reading facts
 # (phase / gaps / KB), not by consuming a system-side priority
@@ -88,14 +88,14 @@ _DEFAULT_ATTEMPTS_HISTORY = 20
 # prompt; older failures stay in the event log but drop from the prompt.
 _DEFAULT_LAST_FAILURES = 10
 
-# v0.8 M2 — phase_history cap. There are only 5 phases in the line
-# (PRELUDE/EXPLORE/KERNEL/SWEEP/CLOSE) so 100 rows is wildly generous;
+# phase_history cap. There are only 6 phases in the line
+# (PRELUDE/FRAMEWORK_PR/EXPLORE/KERNEL/SWEEP/CLOSE) so 100 rows is wildly generous;
 # the only realistic path to hitting it is repeated escalate/recover
 # loops, which we'd want surfaced as a warning anyway. Cap is enforced
 # in :meth:`SharedState.record_phase_transition`.
 _PHASE_HISTORY_CAP = 100
 
-# v0.8 KB_gaps/Gap-09 — gap ledger caps. ``_GAPS_MAX_ENTRIES`` bounds the
+# gap ledger caps. ``_GAPS_MAX_ENTRIES`` bounds the
 # total list so a pathological session can't blow up state.json;
 # ``_GAPS_ATTEMPTS_HISTORY`` bounds the per-gap ``attempts`` list so even
 # a hot gap with 200 KEEP/REVERT events stays cheap to render. Both caps
@@ -111,7 +111,7 @@ _GAPS_ATTEMPTS_HISTORY = 20
 # helpers so adding a new audit action is a one-line change.
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "sweep", "explore",
-    # F1-3 (Roofline-v2 / plan_roofline_framework) + N10: the composite
+    # F1-3 (Roofline-v2 / ) + N10: the composite
     # ``roofline`` action runs profile + trace_analyze atomically.
     # Audit each attempt so the prompt's RECENT ACTION ATTEMPTS block
     # surfaces the snapshot id + analysis_md_path the executor produced
@@ -136,7 +136,7 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-#: v0.8 §3.10 §5.1 — top-level state.json schema version. v0.6 did
+#: top-level state.json schema version. v0.6 did
 #: not write a value; ``from_dict`` treats an absent key as
 #: ``schema_version=1`` and runs the §3.10 §5.2 migration step,
 #: bumping to ``LATEST_STATE_SCHEMA_VERSION`` on the first save.
@@ -147,12 +147,12 @@ LATEST_STATE_SCHEMA_VERSION: int = 2
 class TraceAnalyzeSnapshot:
     """Reference shape for ``SharedState.last_trace_analyze``.
 
-    F0 placeholder added by ``plan_roofline_framework/F0_pre_merge.MD`` §9.
+    placeholder added by ``F0_pre_merge.MD`` §9.
     F1 will populate the canonical 11-field dict via
     ``SharedState.record_trace_analyze`` (ported from main); this dataclass
     serves as a typed reader on the consumer side via :meth:`from_dict`.
 
-    The on-disk shape stays a plain ``dict`` so the legacy v0.6 ``state.json``
+    The on-disk shape stays a plain ``dict`` so the legacy ``state.json``
     round-trip (Inv-10.1 fact-layer compatibility) keeps working.
     """
 
@@ -192,8 +192,8 @@ class TraceAnalyzeSnapshot:
 
 @dataclass
 class SharedState:
-    # v0.8 §3.10 §5.1 — versioned state.json schema. Bumped by the
-    # migration step in :meth:`from_dict` whenever a v0.6 payload is
+    # versioned state.json schema. Bumped by the
+    # migration step in :meth:`from_dict` whenever a payload is
     # loaded. Fresh sessions are born at the latest version.
     schema_version: int = LATEST_STATE_SCHEMA_VERSION
     session_id: str = ""
@@ -211,7 +211,7 @@ class SharedState:
     framework: str = ""
     gpu_type: str = ""
     # Workload metadata mirrored from manifest.json at session start
-    # (KB_design_continue §3.4 / TP-leak fix). Used by:
+    #. Used by:
     #   * Coordinator._warm_specialist_params to populate
     #     specialist task params so SpecialistPromptInputs renders
     #     real hardware context in "## 2. HARDWARE CONTEXT" instead
@@ -225,7 +225,28 @@ class SharedState:
     # PRECISION) so downstream executors see the same values the
     # original run used. Zero / empty means "unspecified".
     tp: int = 0
+    # Expert-parallel size for MoE inference. Mirror of the ``EP`` env
+    # var (cli writes both at boot). Stored on SharedState so resume in
+    # a fresh shell that hasn't ``export EP`` still recovers the
+    # original value — without this, KB warm-start queries would lose
+    # the EP filter on resume and the recipe anchor's ``ep`` tag would
+    # become unreliable. Multi-node lifecycle scripts still read the
+    # env var; this field is the resume-safe authority.
+    ep: int = 0
     precision: str = ""
+    # Recipe-snapshot v2 canonical id is a five-tuple
+    # ``model + hardware + framework + framework_version + precision``;
+    # ``framework_version`` is the only one not derivable from existing
+    # SharedState fields, so it lives here. Populated by ``cli`` from
+    # ``--framework-version`` (operator override) or, when omitted,
+    # auto-detected via :func:`recipe_snapshot_constants.detect_framework_version`
+    # (best-effort: imports the framework's top-level package and reads
+    # ``__version__``). Mirrored to env ``FRAMEWORK_VERSION`` on resume so
+    # downstream executors see the same value the original run used.
+    # Empty string means "unknown" — the recipe canonical_id falls back
+    # to ``unknown_version`` and KB lookups for this dimension lose
+    # specificity (rows still write under that slug).
+    framework_version: str = ""
     conc: int = 0
     isl: int = 0
     osl: int = 0
@@ -258,6 +279,65 @@ class SharedState:
     # downstream executors fall back to materializing the shipped YAML
     # against current process env when this is empty.
     baseline_config_path: str = ""
+    # GAP 5 (KB tag completeness): runtime component versions populated
+    # by cli at boot from manifest / stack_fingerprint. Mirror of the
+    # equivalent fields written to ``recipe.attrs`` by the T0 backfill,
+    # exposed here so ``_collect_workload_tags`` can stamp them onto
+    # every lesson / pitfall write WITHOUT having to re-parse manifest
+    # at fact-write time.
+    #
+    # Shape: ``{"sglang": "0.5.11", "vllm": "0.19.0", "rocm": "6.2.0",
+    #           "aiter": "abc123", "image_digest": "sha256:..."}``.
+    # All keys optional; empty / "unknown" values are stripped before
+    # writing onto the recipe so KB attrs stays compact. Resume-safe
+    # because the field is JSON-serialised into state.json.
+    stack_fingerprint_meta: dict = field(default_factory=dict)
+    # GAP 5: extra workload-shape fields parsed from the materialized
+    # baseline YAML — ``max_running_requests`` / ``max_num_seqs`` /
+    # ``chunked_prefill_enabled`` / ``enable_torch_compile`` /
+    # ``quant_scheme`` / ``workload_mode``. These are *not* in the
+    # canonical id (would explode the recipe space) but they are
+    # crucial filters for the warm-start ladder and the lesson reader
+    # so future sessions can pick a closer prior.
+    #
+    # Populated by ``BaselineExecutor._promote_to_shared_state`` after
+    # the baseline YAML is materialized. Empty dict before first
+    # baseline result; downstream consumers tolerate missing keys.
+    baseline_workload_extra: dict = field(default_factory=dict)
+    # GAP 1 (warm-recipe replay) — one-shot guard so the PRELUDE
+    # auto-enqueue path doesn't fire twice for the same session
+    # (resume safety). The Coordinator flips this to True at the
+    # moment a ``replay_warm_recipe`` task is created; the field
+    # survives resume via state.json so a robustness restart cannot
+    # accidentally double-spend the replay budget. ``False`` is the
+    # default for fresh sessions.
+    warm_replay_attempted: bool = False
+    # GAP 1 supporting field — one-shot guard for
+    # ``_inject_warm_recipe_history_into_ledger``. Decoupled from
+    # ``warm_replay_attempted`` because the history injection is
+    # independent of whether the operator enabled warm replay:
+    # ``--no-warm-replay`` users still benefit from "don't retry
+    # known-failed variants". Resume-safe: persists into state.json
+    # so a robustness restart cannot double-inject the same rows.
+    warm_history_injected: bool = False
+    # GAP 1 — structured outcome of the warm-replay attempt so the
+    # report / prompt can render "we tried the KB best_config and
+    # got +X% (vs the recipe's claim of +Y%)". Shape::
+    #
+    #   {
+    #     "status":            "reproduced" | "drift" | "failed" | "skipped",
+    #     "expected_gain_pct": 25.0,
+    #     "actual_gain_pct":   23.5,
+    #     "warm_recipe_tier":  "exact",
+    #     "warm_recipe_conf":  1.0,
+    #     "replay_task_id":    "task-uuid",
+    #     "reason":            "..."        # only on failed / skipped / drift
+    #   }
+    #
+    # Empty dict before the replay completes or when ``--no-warm-replay``
+    # is in effect. Persisted into state.json so resume + breakdown
+    # collectors see it.
+    warm_replay_outcome: dict = field(default_factory=dict)
     # Wall-clock seconds the baseline Magpie subprocess took to
     # finish (success path only). Populated by Coordinator from the
     # baseline executor's ``subprocess_runtime_sec`` and read by the
@@ -286,7 +366,7 @@ class SharedState:
     # EVERY KEEP'd entry of ``optimization_stack`` applied end-to-end.
     # The plain ``cumulative_gain`` field only sums per-round gains
     # (which do not compose linearly), so the validated number is
-    # what the final report quotes. v0.8 M3 + KB_gaps/Gap-10 — the
+    # what the final report quotes. the
     # rebench runs inline inside the merged ``explore`` action's
     # per-KEEP loop; the standalone v0.6 ``validate_stack`` action
     # is denied by PolicyGate. Stays 0.0 until the first KEEP
@@ -298,6 +378,13 @@ class SharedState:
     # the current stack still matches the validated number, or whether
     # the TODO 4 stack-rebench guard should fire after new KEEPs landed.
     cumulative_gain_validated_stack_len: int = 0
+    # Tput (tok/s/GPU) measured at the most recent successful roofline
+    # task; serves as the watermark for the gain-driven roofline refresh
+    # policy. Coordinator enqueues a fresh roofline task whenever
+    # ``baseline_tput * (1 + cumulative_gain_validated/100) /
+    # last_roofline_tput >= 1.10`` (a 10% step over the last
+    # measurement, compound). Initialised from the PRELUDE roofline.
+    last_roofline_tput: float = 0.0
     stop_reason: str = ""
     # Closing phase — set when the wall-clock deadline fires. While True,
     # Coordinator skips reactor passes and only pumps the dispatcher to
@@ -305,7 +392,7 @@ class SharedState:
     closing_phase: bool = False
     closing_started_unix: float = 0.0
     closing_report_task_id: str = ""
-    # v0.8 §3.2 §5.5 / KB_gaps/Gap-06 — set to True at the END of the
+    # set to True at the END of the
     # CLOSE phase 5-step sequencer (after step 5). cli.finally reads
     # this to short-circuit its emergency ``session_breakdown.json``
     # write so the sequencer's artifact isn't overwritten by a
@@ -343,29 +430,29 @@ class SharedState:
     # Orchestration uses this to decide whether re-profiling would change the
     # hot-kernel distribution; identical args means the same trace.
     last_profile_args: str = ""
-    # Cached result of the most recent `select_kernels` request keyed by
-    # `trace_input`. Coordinator short-circuits subsequent identical requests
-    # so Orchestration does not waste budget re-analysing the same trace.
-    last_select_kernels: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
-    # F0-8 — roofline-v2 placeholder fields (PR #288 integration).
+    # Roofline-v2 trace-analyze cache (canonical, post-M4 rename).
     #
-    # ``last_trace_analyze`` mirrors the canonical 11-field dict main's
-    # ``record_trace_analyze`` writes (see ``TraceAnalyzeSnapshot.from_dict``
-    # for the reader-side schema). F1 ports the writer; until then these
-    # stay default-empty and no consumer reads them.
+    # ``last_trace_analyze`` is the canonical 11-field dict written by
+    # :meth:`record_trace_analyze` after a successful ``trace_analyze``
+    # sub-step (typically driven by ``RooflineExecutor``). Coordinator
+    # short-circuits subsequent identical ``trace_analyze`` requests off
+    # this cache so Orchestration does not waste budget re-analysing the
+    # same trace.
     #
     # ``roofline_snapshot_id`` mirrors ``last_trace_analyze['roofline_snapshot_id']``
     # at the top level for fast PolicyGate / Coordinator access (avoids the
     # nested-dict lookup on hot paths).
     #
-    # ``roofline_saturation_history`` is appended by F3-4's saturation
-    # advisory derivation; capped at 10 entries by the writer.
+    # Pre-M4 ``last_select_kernels`` field was removed in this branch
+    # (commit "drop select_kernels alias…") — all readers must use
+    # ``last_trace_analyze``. Resume of a stale state.json that still
+    # carries ``last_select_kernels`` will silently drop the extra key
+    # via :meth:`_apply_loaded_state`.
     # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
-    roofline_saturation_history: list[dict[str, Any]] = field(default_factory=list)
     # N27 — outer roofline failure counter. Bumped by
     # ``Coordinator._promote_to_shared_state`` on every failed
     # ``roofline`` task and reset to 0 on the next successful one.
@@ -377,26 +464,70 @@ class SharedState:
     roofline_failure_streak: int = 0
 
     # ------------------------------------------------------------------
-    # F0-10 — F1/F2/F3 integration toggles (default off).
-    #
-    # Each is mirrored from the matching ``cli.py`` flag at session start.
-    # F0-8 + F0-10 leave them at False so behavior is identical to tag
-    # ``pre-roofline-merge``; subsequent F-steps flip individual toggles
-    # to ``True`` only after their smoke gates pass.
+    # Feature toggles (mirrored from ``cli.py`` flags at session start).
     # ------------------------------------------------------------------
-    # The three Roofline-v2 / framework-agent toggles default to ON
-    # — RooflineExecutor is the canonical analysis path, framework-
-    # agent is wired by default, and PolicyGate's N9 rule denies the
-    # legacy ``profile`` propose path. Operators opt out via the
-    # matching ``--no-...`` CLI flags or env vars set to ``0``.
-    use_roofline_composite: bool = True
-    framework_agent_enabled: bool = True
-    deny_direct_profile: bool = True
-    # Cheap-rounds gain gate + saturation advisory stay opt-in
-    # (default off) — both lock kernel_opt / mutate the prompt only
-    # when the operator has tuned the thresholds for their workload.
+    # FRAMEWORK_PR phase toggle. When True (the default) the Coordinator
+    # routes PRELUDE → FRAMEWORK_PR → EXPLORE; the FRAMEWORK_PR phase
+    # batches ``fa phase-discover`` candidates, runs each through the
+    # standard Critic-gated ``integrate_patch``-style benchmark, and
+    # KEEPs winners to ``optimization_stack``. Operators opt out via
+    # ``--no-framework`` (PRELUDE → EXPLORE directly, ``prelude_done``
+    # reason preserved). Replaces the v0.8 ``framework_agent_enabled``
+    # serving-sub-kind toggle; PolicyGate's
+    # ``framework_pr_action_not_llm_proposable`` rule keeps the LLM
+    # from proposing the action itself.
+    framework_phase_enabled: bool = True
+    # FRAMEWORK_PR phase progress tracker. One entry per candidate
+    # benchmark, written by the FrameworkPrExecutor: ``{candidate_id,
+    # pr_url, batch_id, status, pre_tput, post_tput, gain_pct, kept,
+    # ts}``. Used by the breakdown collector + the phase exit logic's
+    # plateau judgment (lookback over the per-batch max gain).
+    framework_pr_phase_progress: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
+    # One row per ``fa phase-discover`` batch: ``{batch_id, ts,
+    # candidate_count, max_gain_pct_observed_in_batch}``. Read by
+    # ``exit_normal_framework_pr`` for the plateau gate (default: 3
+    # consecutive batches with max gain < 1% → exit).
+    framework_pr_batches: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
+    # Coordinator sets this to True when the FRAMEWORK_PR loop has no
+    # more candidates to run (``fa phase-discover`` returned 0 or every
+    # candidate in the latest batch has been tried). ``compute_next_phase``
+    # consults this for the ``framework_pr_phase_done`` exit reason.
+    framework_pr_phase_done: bool = False
+    # Consecutive ``fa phase-discover`` failures (timeout / non-zero
+    # exit / parse error). The Coordinator's discover loop bumps this
+    # on each failure and resets to 0 on a successful batch. Phase is
+    # only marked done after ``DISCOVER_FAILURE_RETRY_LIMIT`` (default
+    # 3) consecutive failures, so a transient network blip or a slow
+    # PR scan no longer collapses the whole FRAMEWORK_PR phase
+    # silently.
+    framework_pr_discover_failures: int = 0
+    # FRAMEWORK_PR Critic-gate decisions, one row per reviewed candidate:
+    # ``{candidate_id, batch_id, verdict, rationale, ts}``. The
+    # Coordinator's pump calls the Critic backend before each
+    # ``_enqueue_framework_pr_task``; ``approve`` proceeds, ``reject``
+    # records a ``critic_denied`` progress row instead. The cache lets a
+    # resume avoid double-calling the Critic on candidates the prior run
+    # already reviewed.
+    framework_pr_critic_decisions: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
+    # When True (the default) the Coordinator's auto-managed analysis
+    # action — at PRELUDE bootstrap and on every +10% watermark
+    # crossing — is ``roofline`` (composite: profile + trace_analyze +
+    # analysis.md snapshot). When False the same trigger paths enqueue
+    # plain ``profile`` instead (no trace_analyze, no analysis.md);
+    # behaviour is otherwise identical (same idempotency keys, same
+    # pending-task gate, same watermark anchor update). Both kinds
+    # remain Coordinator-internal and are denied by PolicyGate when
+    # proposed by the LLM (``analysis_action_not_llm_proposable``).
+    enable_roofline: bool = True
+    # Cheap-rounds gain gate is opt-in — only locks ``kernel_opt`` when
+    # the operator has tuned the thresholds for their workload.
     gain_driven_kernel_opt: bool = False
-    roofline_saturation_advisory: bool = False
     # Per-variant overtime kill multiplier for ExploreExecutor: when
     # > 0 AND ``baseline_runtime_sec`` > 0, single-variant Magpie runs
     # in the explore loop are killed once their wall-clock exceeds
@@ -413,6 +544,35 @@ class SharedState:
     # ``variant_timeout_sec`` is a sufficient backstop). Default 1.10
     # (kill at +10 % over baseline wall-clock).
     explore_overtime_kill_ratio: float = 1.10
+    # Per-variant hard timeout override for ExploreExecutor. Mirrored from
+    # ``--explore-variant-timeout-sec`` (CLI) /
+    # ``INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC`` (env) at session
+    # start. ``0`` means "auto-derive from baseline_runtime_sec * (kill_ratio
+    # + safety_margin)" — see ``explore._compute_explore_variant_timeout``.
+    # An explicit positive value pins the cap (e.g. CI smoke runs that want
+    # a tight bound regardless of baseline). The Coordinator injects this
+    # into every explore task's params so the executor's call site honors
+    # it without each LLM proposal having to re-emit it.
+    explore_variant_timeout_sec_override: int = 0
+    # Headroom on top of the soft kill ratio when the executor auto-derives
+    # the per-variant hard cap: ``timeout = baseline_runtime_sec *
+    # (kill_ratio + safety_margin)``. Default 0.5 (≈ 50 % of baseline as
+    # buffer for one-off variant cold starts: torch.compile AOTI compile,
+    # fresh aiter shapes, spec-decoding draft load). Mirrored from
+    # ``--explore-variant-timeout-safety-margin`` (CLI) /
+    # ``INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN`` (env).
+    # Has no effect when ``explore_variant_timeout_sec_override > 0``
+    # (operator-pinned timeout bypasses the auto-derive).
+    explore_variant_timeout_safety_margin: float = 0.5
+    # Opt-in hard filter: when True AND the latest
+    # ``roofline_saturation_history`` snapshot has at least one direction
+    # crossing the saturation threshold, ExploreExecutor drops every
+    # variant whose flags target ONLY saturated directions before running
+    # the grid. Variants targeting at least one non-saturated direction
+    # (or that don't match the categorization table) are kept. The
+    # existing ``roofline_saturation_advisory`` (soft prompt hint) stays
+    # unchanged. Mirrored from ``--explore-roofline-hard-gate`` (CLI).
+    explore_roofline_hard_gate: bool = False
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
@@ -431,15 +591,15 @@ class SharedState:
     # symmetry.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
-    # v0.8 M3 + KB_gaps/Dead-A/Dead-C — ``last_backends`` / ``last_params``
-    # / ``last_validate_stack`` are v0.6 resume-parity zombies: the
+    # ``last_backends`` / ``last_params``
+    # / ``last_validate_stack`` are legacy resume-parity zombies: the
     # legacy actions are denied at PolicyGate so new sessions never
     # write to them, but the field shape must stay so a resumed v0.6
     # ``state.json`` round-trips (Inv-10.1 fact-layer compatibility).
     last_backends: dict[str, Any] = field(default_factory=dict)
     last_params: dict[str, Any] = field(default_factory=dict)
     last_validate_stack: dict[str, Any] = field(default_factory=dict)
-    # v0.8 M3 — merged explore action snapshot (KB_design §3.4). Same
+    # merged explore action snapshot. Same
     # schema as the other ``last_<action>`` mirrors.
     last_explore: dict[str, Any] = field(default_factory=dict)
     # Roofline-v2 N10: composite roofline action audit snapshot +
@@ -451,14 +611,14 @@ class SharedState:
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # v0.8 M3 + KB_gaps/Dead-A/Dead-C — ``backends_attempts`` /
+    # ``backends_attempts`` /
     # ``params_attempts`` / ``validate_stack_attempts`` are kept as
     # zero-write resume-parity zombies for the same Inv-10.1 reason
     # as the snapshot mirrors above.
     backends_attempts: list[dict[str, Any]] = field(default_factory=list)
     params_attempts: list[dict[str, Any]] = field(default_factory=list)
     validate_stack_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # v0.8 M3 — explore audit log. Capped per _DEFAULT_ATTEMPTS_HISTORY.
+    # explore audit log. Capped per _DEFAULT_ATTEMPTS_HISTORY.
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Roofline-v2 N10: per-tick roofline audit log (capped). Records the
     # snapshot_id / analysis_md_path each successful invocation produced.
@@ -497,18 +657,18 @@ class SharedState:
     # this to nudge Orch off the params plateau. Reset to 0 whenever
     # current_best advances.
     params_no_promote_streak: int = 0
-    # v0.6 DFS ledger (params / backends). Kept on the dataclass for
-    # v0.6 resume parity (Inv-10.1); v0.8 sessions read ``explore_search``
+    # DFS ledger (params / backends). Kept on the dataclass for
+    # legacy resume parity (Inv-10.1); sessions read ``explore_search``
     # below. ``tested`` is keyed by content fingerprint so two variants
     # with identical args + envs under different names collapse.
     params_search: dict[str, Any] = field(default_factory=dict)
     backends_search: dict[str, Any] = field(default_factory=dict)
-    # v0.8 M3 — unified explore ledger (KB_design §3.4 Inv-4.1 "single
-    # ledger"). Merges the v0.6 ``backends_search`` + ``params_search``
+    # unified explore ledger (KB_design §3.4 Inv-4.1 "single
+    # ledger"). Merges the legacy ``backends_search`` + ``params_search``
     # ledgers into one persistent DFS state for the merged ``explore``
     # action. ``tested`` is keyed by canonical_fingerprint (content-based,
     # see ``action_executors._canonical_fingerprint``), same hashing as
-    # ``variant_fingerprint`` so the v0.6 ledgers migrate losslessly.
+    # ``variant_fingerprint`` so the ledgers migrate losslessly.
     #
     # Schema (M3, may grow in M5/M6 with specialist provenance):
     #
@@ -546,7 +706,7 @@ class SharedState:
     # subsequent stack rebench. Items the rebench evicted live in
     # ``rejected`` with ``reason='stack_unstable'``.
     explore_search: dict[str, Any] = field(default_factory=dict)
-    # v0.8 M5 — specialist sub-agent rolling state (KB_design §3.5 +
+    # specialist sub-agent rolling state (KB_design §3.5 +
     # §3.10 §4.1). Each entry summarises one EXPLORE round of specialist
     # dispatch (M5: 1 entry per round; M6 grows to N when 6 domains run
     # concurrently). Schema (per round):
@@ -565,7 +725,6 @@ class SharedState:
     #                                      # explore round finishes
     #     "proposals_rejected": int,
     #     "proposals_skipped": int,
-    #     "kb_edge_ids": [str, ...],       # M5 simplified; M6 per-variant
     #     "confidence_avg": float | None,
     #     "domain_breakdown": {domain_key: {...}},
     #     "notes": [str, ...],
@@ -574,7 +733,7 @@ class SharedState:
     # Per-domain "empty proposal_set" streak. Reset on a non-empty
     # specialist_done; Robustness reads this to escalate when a
     # specialist domain consistently fails to produce ideas
-    # (KB_design §3.5 §13 / §3.9).
+    #.
     specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
     # IR-7 — session_steward_specialist (honest self-stop). The
     # Coordinator dispatches this domain on EXPLORE plateau and routes
@@ -587,7 +746,7 @@ class SharedState:
     last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
     remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
     steward_continuation_used: bool = False
-    # v0.8 M5 — last specialist task snapshot (parity with other
+    # last specialist task snapshot (parity with other
     # ``last_<action>`` mirrors; useful for the orchestration prompt
     # to surface "last round's specialist outcome").
     last_specialist: dict[str, Any] = field(default_factory=dict)
@@ -626,24 +785,24 @@ class SharedState:
     # storm detector fires when this crosses the configured cap
     # without a single non-empty proposal_set in the same window.
     explore_specialist_dispatched_count: int = 0
-    # v0.8 M5 — research_lane capacity locked at session start
-    # (KB_design §3.7 §4.4). M5 default is 1 (single-specialist series);
+    # research_lane capacity locked at session start
+    #. M5 default is 1 (single-specialist series);
     # M6 raises to 6 (concurrent). PolicyGate denies mid-session
     # mutation because it's listed in CORE_STATE_FIELDS.
     research_lane_capacity: int = 1
-    # v0.8 M7 — escalate_strategy_change carry-over field
-    # (KB_design §3.8 §7.3 + §3.13 M7 §5.3). The Coordinator's
+    # escalate_strategy_change carry-over field
+    #. The Coordinator's
     # ``_handle_escalate_strategy_change`` writes the validated
     # ``next_action_hint`` here so the phase_state machine can see it
     # on the next ``compute_next_phase`` pass; the field is cleared
     # by the Coordinator once the hint has been acted on (so the
     # phase machine doesn't re-trigger on the same hint).
     pending_escalate_hint: str = ""
-    # v0.8 M7 — last cleared escalate hint (audit only). Useful for
+    # last cleared escalate hint (audit only). Useful for
     # the breakdown to surface "we honored a llm_escalation here".
     last_consumed_escalate_hint: str = ""
     last_consumed_escalate_hint_ts: str = ""
-    # v0.8 M7 — per-phase plateau threshold overrides locked at
+    # per-phase plateau threshold overrides locked at
     # session start (CLI flags, KB_design §3.13 M7 §4). Empty dict
     # means "use library defaults"; phase_state reads these fields
     # for the dispatcher's phase-decision call.
@@ -674,7 +833,7 @@ class SharedState:
     synergy_attempted: list[str] = field(default_factory=list)
 
     # ---------------------------------------------------------------
-    # v0.8 §3.9 — the v0.6 ``action_scores`` decision system was retired.
+    # the legacy ``action_scores`` decision system was retired.
     # The Coordinator no longer maintains a per-action numeric
     # priority; instead the Orchestration prompt surfaces facts
     # (phase / gaps / KB sub-graphs / specialist proposal_set) and
@@ -687,17 +846,12 @@ class SharedState:
     #                                  M2 / legacy resume paths so
     #                                  ``phase_state.exit_normal_explore``
     #                                  fallback proxy keeps working;
-    #                                  not written by v0.8 Coordinator.
+    #                                  not written by Coordinator.
     #
     # Monotonic Coordinator tick counter. Bumped once per
     # ``Coordinator.run()`` / ``Coordinator.tick(n)`` iteration; kept
     # so plateau / phase budget math has a stable monotonic anchor.
     tick: int = 0
-    # Monotonic per-session experiment counter. Bumped once per
-    # ``propose_action`` (T2) so :func:`experiment_canonical_id`
-    # produces a stable ``exp:{sid}:{iter:04d}`` aligned with the KB
-    # ``experiment`` kind schema (KB_design_continue §3.5).
-    session_iter_index: int = 0
     # Remaining gain-pct target gap (0.0 means "no target"). Coordinator
     # refreshes this when the run objective is ``gain_pct=N``. Kept
     # because the prompt builder + breakdown rely on it for the
@@ -705,14 +859,14 @@ class SharedState:
     target_gap_pct: float = 0.0
 
     # ------------------------------------------------------------------
-    # v0.8 M2 — Phase state machine fields (KB_design §3.2 + §3.10)
+    # Phase state machine fields
     # ------------------------------------------------------------------
-    # ``phase`` is the run-level pipeline phase (PRELUDE / EXPLORE /
-    # KERNEL / SWEEP / CLOSE).  Coordinator is the only writer
+    # ``phase`` is the run-level pipeline phase (PRELUDE / FRAMEWORK_PR /
+    # EXPLORE / KERNEL / SWEEP / CLOSE). Coordinator is the only writer
     # (PolicyGate adds it to CORE_STATE_FIELDS); LLM agents can read
     # via prompt injection but cannot update_state. Empty string
     # signals "phase machine not yet initialised" — Coordinator
-    # initialises on construction. v0.6 resume infers a value via
+    # initialises on construction. legacy resume infers a value via
     # :func:`phase_state.infer_phase_from_state`.
     phase: str = ""
     # ISO UTC timestamp the current phase was entered. Used by
@@ -726,42 +880,35 @@ class SharedState:
     # :func:`phase_state.make_history_row` and conforms to KB_design
     # §3.2 §6 (reason must be in ``PHASE_EXIT_REASONS``).  Capped at
     # ``_PHASE_HISTORY_CAP`` so a runaway transition never bloats
-    # state.json (unlikely — there are only 5 phases — but defensive).
+    # state.json (unlikely — at most ~6 phases in the chain — but defensive).
     phase_history: list[dict[str, Any]] = field(default_factory=list)
-    # Wall-clock budget percentages per phase (KB_design §3.8 §5.3).
+    # Wall-clock budget percentages per phase.
     # Coordinator populates from CLI flags / defaults at construction
     # time; persisted so resume picks up the exact split the original
     # run used. Empty dict means "use library defaults".
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
-    # v0.8 M1 — Cortex KB integration fields (KB_design §3.6 / §3.10)
+    # Cortex KB integration fields
     # ------------------------------------------------------------------
     # Coordinator-only writers. Listed in PolicyGate.CORE_STATE_FIELDS so
     # any LLM ``update_state`` intent that touches these is denied
     # (Inv-1 single writer). LLM consumers read them indirectly via
     # prompt injection.
     #
-    # ``cortex_session_id`` is the sid returned by the Cortex
-    # ``session begin`` call at T0. Empty string means either
-    # ``--degraded-kb`` was selected for this run or the session has not
-    # yet reached T0. Written **once** in PRELUDE; never overwritten.
+    # ``cortex_session_id`` is the hyperloom-local session identifier
+    # carried into KB fact-write attrs (``source_session_id``) for
+    # cross-session traceability. It is **not** a KB-side session id
+    # (the KB session begin/commit protocol was retired); it now
+    # defaults to ``session_dir.name`` when T0 mints it.
     cortex_session_id: str = ""
-    # T4 ``session commit`` payload snapshot: ``{"status": "committed",
-    # "promoted_edges": [...], "negation_edges": [...],
-    # "derived_summary_id": "..."}``. Empty dict until commit succeeds.
-    # Drives the ``breakdown.kb_provenance.commit`` section and the
-    # operator-visible "what survived this session" summary.
+    # Retired: the KB ``session commit`` protocol was removed alongside
+    # T2/T3. The field is kept (always ``{}``) for state.json resume
+    # back-compat — the next ``state.save`` writes an empty dict and
+    # the breakdown collector tolerates a missing summary. The
+    # ``breakdown.kb_provenance.commit`` section is now derived from
+    # ``drain_pending`` results instead.
     cortex_session_summary: dict[str, Any] = field(default_factory=dict)
-    # Tentative edge_ids created by T2 ``session hypothesize`` that have
-    # not yet been ``verify``-d by T3. Crash-recovery rule (KB_design
-    # §3.13 M1 §7 "resume"): on resume the Coordinator inspects this
-    # list and routes orphans through ``propose-edge + late_verified``
-    # rather than ``verify`` (avoids 404 from a stale edge that never
-    # made it past the NDJSON queue). Capped indirectly by the in-flight
-    # proposal count — proposals removed from ``pending_proposals`` also
-    # drop their edge_id here.
-    pending_kb_edges: list[dict[str, Any]] = field(default_factory=list)
     # T0 snapshot of ``find-recipe`` raw output (CLI ``--format text``,
     # one entry per recipe row). v0.8 M1 only **records** this — it is
     # not yet injected into the orchestration prompt; that happens in M5
@@ -769,16 +916,33 @@ class SharedState:
     # without re-parsing. Empty dict on first-ever session for a
     # (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    # T0 snapshot of ``traps`` output (known pitfalls list). Same
-    # injection-deferral story as ``warm_start_recipe``.
+    # T0 snapshot of ``pitfalls`` output (negative priors from prior
+    # REVERT / crash / OOM decisions on this (model, hardware),
+    # optionally filtered by framework). List of KB point dicts
+    # (each with ``{canonical_id, kind, attrs, confidence, ...}``),
+    # mirroring ``warm_start_lessons``. Consumed by the specialist
+    # prompt's "§ 5c. KNOWN PITFALLS" section.
+    #
+    # Schema change history: pre-fix this field held
+    # ``[{"raw": <json_string>}]`` because the broken
+    # ``traps(symptom=...)`` reader returned an opaque JSON blob.
+    # Resume from such a snapshot is tolerated (the prompt section
+    # filters out rows without ``attrs.description``).
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
+    # T0 snapshot of ``lessons`` output (positive priors from prior
+    # KEEPs on this (model, hardware), optionally filtered by
+    # framework). Symmetric with ``warm_start_pitfalls``; consumed
+    # by the specialist prompt's "§ 5b. RELATED LESSONS" section.
+    # Empty when Cortex was bypassed (``--degraded-kb``) or T0
+    # failed.
+    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
     # bypassed (``--degraded-kb``) or T0 failed.
     warm_start_ts: str = ""
 
     # ------------------------------------------------------------------
-    # v0.8 KB_gaps/Gap-09 — structured gaps ledger (KB_design §3.3 /
-    # §3.5 / §3.9 §6). Replaces the v0.6 proxy block (which derived
+    # structured gaps ledger (KB_design §3.3 /
+    # §3.5 / §3.9 §6). Replaces the proxy block (which derived
     # decision input from ``last_action_failures`` +
     # ``explore_search.winners_history``) with a structured, dedup'd
     # list of unresolved bottlenecks. Coordinator is the sole writer
@@ -786,7 +950,7 @@ class SharedState:
     # prompt injection. Listed in :data:`policy.CORE_STATE_FIELDS` so
     # any LLM ``update_state{changes={gaps: ...}}`` intent is denied.
     #
-    # Refresh entry points (KB_gaps/Gap-09 §5.4):
+    # Refresh entry points:
     #   1. baseline completion           — initial gap extraction
     #   2. EXPLORE round KEEP/REVERT     — append to gap.attempts
     #   3. Cortex traverse(issue_node)   — merge cross-session priors
@@ -833,7 +997,7 @@ class SharedState:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        # v0.8 §3.10 §5 — unified migration entry point. A v0.6 state.json
+        # unified migration entry point. A v0.6 state.json
         # has no top-level ``schema_version`` field; treat the absence as
         # ``schema_version=1`` and run the §3.10 §5.2 field-mapping step.
         # The function is idempotent (Inv-10.3): re-loading a v0.8
@@ -848,8 +1012,8 @@ class SharedState:
         # crash. Unknown keys are dropped; missing keys fall back to defaults.
         known = {f for f in cls.__dataclass_fields__}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # v0.8 §3.9 — drop the v0.6 scoreboard fields from the loaded
-        # dict (KB_design §3.9 §7). The dataclass no longer carries
+        # drop the legacy scoreboard fields from the loaded
+        # dict. The dataclass no longer carries
         # ``action_scores`` so it would be filtered out anyway; we
         # also strip ``params_no_promote_streak`` /
         # ``score_violation`` / ``cooldown_until_tick`` / ``streak_*``
@@ -867,6 +1031,11 @@ class SharedState:
             "score_mult",
             "effective_score",
             "last_action_score_snapshot",
+            # Removed in this branch: M4 renamed select_kernels →
+            # trace_analyze; the legacy mirror field was dropped so all
+            # readers use ``last_trace_analyze``. Resume of an older
+            # state.json silently discards this slot.
+            "last_select_kernels",
         )
         legacy_seen: list[tuple[str, int]] = []
         for legacy in _legacy_drop_fields:
@@ -891,7 +1060,7 @@ class SharedState:
             if mode == "warn":
                 log.warning(
                     "v0.8 §3.9: dropped legacy scoreboard fields from "
-                    "state.json (%s). KB_design §3.9 §7 — set "
+                    "state.json (%s). set "
                     "--legacy-action-scores=drop to silence this.",
                     summary,
                 )
@@ -913,15 +1082,15 @@ class SharedState:
         filtered["backends_search"] = cls._migrate_search_ledger(
             filtered.get("backends_search"), schema_target=1,
         )
-        # v0.8 M3 — merge the v0.6 backends_search + params_search ledgers
-        # into the unified ``explore_search`` ledger (KB_design §3.4 §4.3).
+        # merge the legacy backends_search + params_search ledgers
+        # into the unified ``explore_search`` ledger.
         # The merge is one-shot at load: subsequent ExploreExecutor runs
         # only touch ``explore_search``; the legacy ledgers stay around
         # (deprecated, read-only) so an emergency rollback to v0.6 still
         # has its data. ``record_*_accepted`` / executor updates from the
         # legacy backends/params executors continue to write to the old
         # ledgers — the merge function is idempotent under repeated calls,
-        # so an interleaved v0.6 fallback + v0.8 resume picks up cleanly.
+        # so an interleaved v0.6 fallback + legacy resume picks up cleanly.
         explore_before = filtered.get("explore_search") or {}
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
@@ -945,7 +1114,7 @@ class SharedState:
                     f"explore_search (tested={tested_after})"
                 )
 
-        # v0.8 §3.10 §5.3 — fact-layer integrity check. ``strict``
+        # fact-layer integrity check. ``strict``
         # (the default) aborts when a fact-layer key was present in a
         # *non-empty* legacy state.json but couldn't be loaded into
         # the dataclass (caller dropped it / type mismatch). ``lenient``
@@ -990,12 +1159,12 @@ class SharedState:
                         f"--migration-mode=lenient to continue."
                     )
 
-        # v0.8 §3.10 §5.1 — bump schema_version once migrations finish.
-        # Idempotent: a v0.8 payload already at the latest version
+        # bump schema_version once migrations finish.
+        # Idempotent: a payload already at the latest version
         # short-circuits the helper at the top of this function.
         filtered["schema_version"] = LATEST_STATE_SCHEMA_VERSION
 
-        # v0.8 §3.10 §5.3 — operator-visible migration log. ``strict``
+        # operator-visible migration log. ``strict``
         # (default) is silent on info-level events but surfaces fatal
         # fact-layer errors elsewhere (e.g. CLI bootstrap); ``lenient``
         # downgrades any fact-layer error logged downstream. Here we
@@ -1122,7 +1291,7 @@ class SharedState:
         last merge (tracked via ``existing.merged_from_legacy_sig``),
         the call is a no-op other than re-stamping defensive defaults.
 
-        Conflict resolution (KB_design §3.4 §4.3 §"resume 迁移"):
+        Conflict resolution:
 
         * ``tested`` — union by fingerprint; outcome rank
           ``KEEP > REVERT > SKIPPED`` wins the row.
@@ -1182,7 +1351,7 @@ class SharedState:
                  "KEEP_UNSTABLE": 2, "": 0}
 
         def _outcome_for(entry: dict[str, Any]) -> str:
-            """Map a legacy ledger entry to the v0.8 outcome vocabulary."""
+            """Map a legacy ledger entry to the outcome vocabulary."""
             outcome = str(entry.get("outcome") or "").upper().strip()
             if outcome:
                 return outcome
@@ -1490,7 +1659,7 @@ class SharedState:
         }
 
     # ------------------------------------------------------------------
-    # v0.8 M7 — stop_reason ENUM validator (KB_design §3.8 §6 + §10)
+    # stop_reason ENUM validator
     # ------------------------------------------------------------------
     def set_stop_reason(
         self,
@@ -1538,7 +1707,7 @@ class SharedState:
         import logging as _logging
         _logging.getLogger(__name__).warning(
             "stop_reason=%r not in STOP_REASON_VOCAB; mapped to 'unknown' "
-            "(KB_design §3.8 Inv-8.3). Set "
+            ". Set "
             "INFERENCE_OPTIMIZER_STRICT_STOP_REASON=1 to fail-fast.",
             text,
         )
@@ -1592,7 +1761,7 @@ class SharedState:
         return row
 
     # ------------------------------------------------------------------
-    # v0.8 M7 — escalate hint plumbing (KB_design §3.8 §7.3)
+    # escalate hint plumbing
     # ------------------------------------------------------------------
     def set_pending_escalate_hint(self, hint: str) -> str:
         """Stash the LLM-supplied hint for the next phase compute pass.
@@ -1626,7 +1795,7 @@ class SharedState:
         return hint
 
     # ------------------------------------------------------------------
-    # v0.8 M2 — phase machine writer (Coordinator-only, Inv-1 + Inv-8.1)
+    # phase machine writer (Coordinator-only, Inv-1 + Inv-8.1)
     # ------------------------------------------------------------------
     def record_phase_transition(
         self,
@@ -2506,13 +2675,14 @@ class SharedState:
         payload: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
-        """F1-1 — write the canonical 11-field ``last_trace_analyze`` dict.
+        """write the canonical 11-field ``last_trace_analyze`` dict.
 
         Called by :class:`RooflineExecutor` (F1-2) after a successful
-        ``trace_analyze`` sub-step. Distinct from the legacy
-        :meth:`record_select_kernels` writer below, which writes a thinner
-        ``last_select_kernels`` schema for the ``select_kernels_handler``
-        path and stays in place for backward compatibility.
+        ``trace_analyze`` sub-step, and by the inline programmatic
+        handler path in :meth:`Coordinator._handle_request` when an LLM
+        emits a ``trace_analyze`` request directly. Single canonical
+        writer for this cache — the M4 legacy ``record_select_kernels``
+        twin was removed in this branch.
 
         On every successful call, ``roofline_snapshot_id`` is read from the
         previous ``last_trace_analyze`` and incremented by one — giving a
@@ -2525,10 +2695,6 @@ class SharedState:
         ``result['trace_report_path']``; OSErrors degrade silently to
         empty text (the ``analysis_md_path`` field still lets a future
         ``read_artifact`` intent re-fetch it on demand).
-
-        Cherry-picked from /wekafs/zgong/Hyperloom main @ c6f0a71
-        ``shared_state.py:1508`` ; verbatim except for the docstring tying
-        it to F1-1 / F1-2 of this branch's integration plan.
         """
         if not isinstance(result, dict):
             return
@@ -2615,121 +2781,6 @@ class SharedState:
         # Coordinator can read it without the nested-dict lookup.
         self.roofline_snapshot_id = snapshot_id
 
-    def record_select_kernels(self, payload: dict[str, Any],
-                              result: dict[str, Any]) -> None:
-        """Cache the latest select_kernels output keyed by trace_input.
-
-        We persist a wider window than the prompt-visible top5 so that when
-        the very top GPU consumers are vendor-binary kernels (Tensile / CK)
-        Orchestration still sees lower-ranked but **reusable native** entries
-        (e.g. AITER RMSNorm) and can dispatch ``run_optimization`` against
-        them instead of looping on rejected ones.
-
-        We also persist ``trace_health_warnings`` so Orchestration's prompt
-        surfaces the structured routing signals produced by the TraceLens
-        analyzer (Hyperloom v0.4 finishing-touches T3 / T4):
-
-        * ``high_gpu_idle_pct`` — Executive Summary's ``Idle %`` exceeded
-          the gate threshold; per Report_Interfacing.docx §2 (idle-gate
-          sanity check) the LLM should pivot to parameter optimization
-          rather than kernel rewriting in this regime.
-        * ``tracelens_analysis_failed`` — the TraceLens subprocess crashed
-          permanently (perf-CLI missing, ``analysis.md`` not produced,
-          timeout, …); Coordinator already demoted this to ``status=ok``
-          + empty ``hot_kernels`` at the handler boundary, but the LLM
-          still needs to *see* the failure so it picks parameter
-          optimization explicitly instead of inferring "TraceLens is
-          still running" from the empty list.
-
-        Without this pass-through the warnings produced upstream are
-        dropped at the SharedState boundary and Orchestration cannot
-        ground its routing decisions on them.
-        """
-        if not isinstance(result, dict):
-            return
-        trace_input = (
-            (payload or {}).get("trace_input")
-            or (payload or {}).get("trace_dir")
-            or ""
-        )
-        candidates_path = result.get("candidates_path") or ""
-        if not candidates_path:
-            artifacts = result.get("artifact_paths") or {}
-            if isinstance(artifacts, dict):
-                candidates_path = artifacts.get("kernel_candidates", "") or ""
-        hot = result.get("hot_kernels") or []
-        summary: list[dict[str, Any]] = []
-        reusable_ids: list[str] = []
-        for entry in hot[:15] if isinstance(hot, list) else []:
-            if not isinstance(entry, dict):
-                continue
-            kid = entry.get("kernel_id")
-            reusable = bool(entry.get("reusable_native_kernel"))
-            summary.append({
-                "kernel_id": kid,
-                "name": entry.get("name"),
-                "gpu_pct": entry.get("gpu_pct"),
-                "bottleneck": entry.get("bottleneck"),
-                "arithmetic_intensity": entry.get("arithmetic_intensity"),
-                "source_file": entry.get("source_file"),
-                "reusable_native_kernel": reusable,
-                "recommended_backends": entry.get("recommended_backends") or [],
-                "recommended_actions": entry.get("recommended_actions") or [],
-            })
-            if reusable and kid:
-                reusable_ids.append(str(kid))
-
-        # T3 / T4: keep the structured warning list verbatim — handler
-        # already shaped each entry into the documented form (code,
-        # severity, message, plus code-specific extras like idle_pct or
-        # returncode). We filter to ``dict`` to be defensive against a
-        # buggy tool emitting non-dict junk, but otherwise pass through
-        # untouched so the LLM sees the full diagnostic.
-        raw_warnings = result.get("trace_health_warnings") or []
-        warnings_cleaned: list[dict[str, Any]] = []
-        if isinstance(raw_warnings, list):
-            for entry in raw_warnings:
-                if isinstance(entry, dict) and entry.get("code"):
-                    warnings_cleaned.append(dict(entry))
-
-        # 893bc6f: propagate ``task_groups`` from the handler result so
-        # the multi-KEEP integrate queue's source-of-truth lookups stay
-        # in sync with what ``_batch_kernel_candidates`` dispatched.
-        # Without this, ``untried_hot_reusable_kernels()`` and
-        # ``next_pending_keep_kernel_id()`` see ``task_groups=[]`` and
-        # fall through to per-kernel logic — e.g. for
-        # ``primary=k004 kids=[k003, k004]`` they treat k003 as an
-        # untried independent kernel even though dispatching k004
-        # already covered the same AST function.
-        task_groups = result.get("task_groups") or []
-        if not isinstance(task_groups, list):
-            task_groups = []
-        # F1-1: ``record_trace_analyze`` is the canonical writer for
-        # the 11-field ``last_trace_analyze`` (snapshot_id /
-        # analysis_md_text / baseline_gain_at_snapshot / …). This
-        # legacy ``record_select_kernels`` writer stays in place for
-        # backwards-compatible callers and only mirrors the slim
-        # ``last_select_kernels`` schema; task_groups is added so the
-        # downstream lookups behave identically regardless of which
-        # path populated SharedState.
-        cached = {
-            "trace_input": str(trace_input),
-            "candidates_path": str(candidates_path),
-            "hot_kernels_top15": summary,
-            "task_groups": task_groups,
-            "reusable_native_kernel_ids": reusable_ids,
-            "trace_health_warnings": warnings_cleaned,
-            "ts": _now_iso(),
-        }
-        self.last_select_kernels = cached
-        # Main M4 main merge: ``last_trace_analyze`` is the canonical
-        # post-rename name (RooflineExecutor / `record_trace_analyze`
-        # writes a richer schema there, but the legacy
-        # ``record_select_kernels`` writer must also mirror its slim
-        # schema into ``last_trace_analyze`` so the policy gate's cache
-        # lookup (which prefers the canonical field) finds the entry.
-        self.last_trace_analyze = dict(cached)
-
     def record_sweep(self, result: dict[str, Any]) -> None:
         if not isinstance(result, dict):
             return
@@ -2756,7 +2807,7 @@ class SharedState:
         }
 
     # ------------------------------------------------------------------
-    # v0.8 M5 — specialist round bookkeeping (KB_design §3.5 / §3.10)
+    # specialist round bookkeeping
     # ------------------------------------------------------------------
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
         """Append one round summary to ``specialist_rounds``.
@@ -2798,7 +2849,7 @@ class SharedState:
         return self.specialist_domain_empty_streak[d]
 
     # ------------------------------------------------------------------
-    # v0.8 KB_gaps/Gap-09 — gaps ledger helpers (KB_design §3.3 / §3.5)
+    # gaps ledger helpers
     # ------------------------------------------------------------------
     def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
         """Return the gap entry matching ``canonical_id`` (or ``None``).
@@ -3031,7 +3082,7 @@ class SharedState:
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
         """Merge an ExploreExecutor search update into persistent state.
 
-        v0.8 M3 (KB_design §3.4). The executor returns a ledger
+        v0.8 M3. The executor returns a ledger
         increment containing ``tested`` (full fingerprint-keyed map),
         ``rejected`` (list), ``winners_history`` increment,
         ``synergy_attempted`` increment, ``last_round``, etc. The
@@ -3163,7 +3214,7 @@ class SharedState:
     ) -> None:
         """Persist the AST-discovered flag list for a framework.
 
-        Called by ExploreExecutor (and historically by the v0.6
+        Called by ExploreExecutor (and historically by the legacy
         BackendsExecutor / ParamsExecutor) when they first run
         ``discover_*_flags()`` on a fresh session. The Orchestration prompt
         surfaces the union so the LLM can synthesize new GridVariant
@@ -3247,7 +3298,7 @@ class SharedState:
             )
 
     # ------------------------------------------------------------------
-    # v0.8 §3.9 — scoring helpers removed (KB_design §3.9 Inv-9.1)
+    # scoring helpers removed
     # ------------------------------------------------------------------
     # The v0.6 ``get_action_score`` / ``put_action_score`` /
     # ``all_action_scores`` / ``to_action_scores_summary`` API has
@@ -3260,15 +3311,10 @@ class SharedState:
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
-    def increment_session_iter_index(self) -> int:
-        """Bump the per-session experiment iter counter and return it."""
-        self.session_iter_index = int(self.session_iter_index or 0) + 1
-        return self.session_iter_index
-
     # Note: main commit 8e69732 also ports ``to_action_scores_summary``
-    # — a render helper for the v0.6 ``Action scores`` prompt block.
+    # — a render helper for the legacy ``Action scores`` prompt block.
     # KB_design §3.9 retired the scoreboard on this branch (see
-    # docs/integration/MAIN_FEATURES_DROPPED.md §4), so the helper
+    # the retired-features list §4), so the helper
     # has no live consumer and is intentionally omitted.
 
     def append_stack_gain_entry(
@@ -3541,6 +3587,7 @@ class SharedState:
         """
         from .phase_state import (
             DEFAULT_PHASE_BUDGET_PCT,
+            PHASE_NAMES,
             normalize_budget_pct,
             phase_elapsed_seconds,
         )
@@ -3570,8 +3617,9 @@ class SharedState:
         mm = float(self.max_minutes or 0.0)
         total_budget_sec = mm * 60.0
         lines: list[str] = []
-        # Stable order — by PHASE_INDEX so the operator sees the chain.
-        for phase in ("PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+        # Stable order — iterate ``PHASE_NAMES`` so any phase added to
+        # the chain (e.g. FRAMEWORK_PR) renders automatically.
+        for phase in PHASE_NAMES:
             if phase not in elapsed_per_phase:
                 continue
             elapsed = elapsed_per_phase[phase]
@@ -3643,7 +3691,7 @@ class SharedState:
         """Render :attr:`gaps` for Orchestration / specialist prompt injection.
 
         KB_design §3.3 / §3.5: surfaces the structured gap list that
-        replaced the v0.6 ``last_action_failures`` proxy. Returns an
+        replaced the legacy ``last_action_failures`` proxy. Returns an
         empty string when ``gaps`` is empty so callers can skip the
         whole section header on cold-start sessions.
 
@@ -3722,37 +3770,14 @@ class SharedState:
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
-            f"last_select_kernels={self._format_last_select_kernels()}",
-            # Main M4 main merge: ``last_trace_analyze`` mirrors the
-            # canonical post-rename name; both keys carry the same
-            # slim cache schema, so we render both lines for backward
-            # compatibility with prompt-format-stable tests on either
-            # side (legacy regression_locks expects `last_trace_analyze=`).
+            # Canonical post-M4 cache key; legacy ``last_select_kernels``
+            # was removed in this branch (callers must use this field).
             f"last_trace_analyze={self._format_last_trace_analyze()}",
-            # F1-4 (Roofline-v2 / plan_roofline_framework F1): when the
-            # roofline composite toggle is on, surface the full TraceLens
-            # ``analysis.md`` (snapshot id + gain in the bookend header)
-            # so the orchestration LLM grounds propose_action decisions
-            # in the actual report. Toggle stays default-off through F1
-            # so the legacy ``last_select_kernels`` summary remains the
-            # single source of TraceLens-derived state for existing
-            # sessions; F1-6 flips the default once smoke clears.
-            *(
-                [f"analysis_md={self._format_analysis_md_full()}"]
-                if getattr(self, "use_roofline_composite", False)
-                else []
-            ),
-            # F3-4 — Roofline saturation soft advisory. The helper
-            # returns "" when the toggle is off, when no roofline has
-            # run yet, or when no direction crossed the saturation
-            # threshold — so the prompt section is entirely absent in
-            # the common case.
-            *(
-                [_advisory]
-                if (_advisory := self._format_roofline_saturation_advisory())
-                else []
-            ),
-            # v0.8 §3.9 — the streak counter is a *fact* the LLM may
+            # Full TraceLens ``analysis.md`` (snapshot id + gain in the
+            # bookend header) so the orchestration LLM grounds
+            # propose_action decisions in the actual report.
+            f"analysis_md={self._format_analysis_md_full()}",
+            # the streak counter is a *fact* the LLM may
             # read (KEEP/REVERT counts are explicitly allowed per
             # Inv-9.1); only system-side *priorities* (action_scores)
             # were removed. The plateau judges also consume this on
@@ -3938,7 +3963,7 @@ class SharedState:
         ``params_search.accepted`` is built from ``_variant_to_dict()`` and
         does NOT persist ``gain_pct``; the matching ``tested[fingerprint]``
         entry does. ``backends_search.accepted`` already stamps gain on
-        promote (legacy v0.6 ledger written via resume migration only), so
+        promote (legacy ledger written via resume migration only), so
         this is a no-op there. Pulling the value across at render time
         keeps the renderer symmetric and avoids a second writer for
         accepted entries.
@@ -4111,9 +4136,14 @@ class SharedState:
         md_text = cached.get("analysis_md_text") or ""
         if not md_text:
             return (
-                "(no TraceLens snapshot yet — propose `roofline` to "
-                "produce one; roofline is a composite action that "
-                "runs profile + trace_analyze atomically)"
+                "(no TraceLens snapshot yet — analysis is auto-enqueued "
+                "by the Coordinator at the end of PRELUDE and on every "
+                "+10% validated-gain crossing; wait for the pending "
+                "task to land, or continue with specialist / explore "
+                "work that does not need analysis.md. PolicyGate denies "
+                "any LLM-emitted propose_action/delegate against "
+                "`roofline` or `profile` with rule "
+                "`analysis_action_not_llm_proposable`.)"
             )
         md_text = self._strip_base64_data_urls(md_text)
         snap = cached.get("roofline_snapshot_id", "?")
@@ -4129,80 +4159,13 @@ class SharedState:
             f"=== End TraceLens Analysis ===\n"
         )
 
-    def _format_roofline_saturation_advisory(self) -> str:
-        """F3-4 (Roofline-v2 / plan_roofline_framework F3): render a
-        soft 'diminishing returns' advisory for directions whose
-        saturation in the latest snapshot is at or above the threshold.
-
-        Returns the empty string when:
-
-        * the toggle ``roofline_saturation_advisory`` is off, or
-        * ``roofline_saturation_history`` is empty (no roofline run
-          yet), or
-        * no direction in the latest snapshot crossed the threshold.
-
-        This is **soft**: the advisory only flags the cost-vs-reward
-        trade-off; it never tells the LLM to stop dispatching toward
-        that direction. PolicyGate has no companion hard-gating rule
-        (deliberate decision per
-        ``plan_roofline_framework/F3_policygate_advisory.MD`` §2 — a
-        single noisy trace must not permanently close a direction).
-
-        Threshold + per-direction labels are pulled from
-        ``inference_optimizer.orchestrator.roofline_snapshot`` so the
-        producer (RooflineExecutor) and consumer (this renderer) share
-        one source of truth.
-        """
-        if not getattr(self, "roofline_saturation_advisory", False):
-            return ""
-        history = list(getattr(self, "roofline_saturation_history", []) or [])
-        if not history:
-            return ""
-        last = history[-1]
-        if not isinstance(last, dict):
-            return ""
-        from inference_optimizer.orchestrator.roofline_snapshot import (
-            SATURATION_ADVISORY_THRESHOLD_PCT,
-            _SATURATION_LABEL_MAP,
-        )
-        sat_lines: list[str] = []
-        for direction in _SATURATION_LABEL_MAP:
-            try:
-                pct = float(last.get(direction, 0.0) or 0.0)
-            except (TypeError, ValueError):
-                continue
-            if pct >= SATURATION_ADVISORY_THRESHOLD_PCT:
-                sat_lines.append(f"  - {direction}: {pct:.1f}% saturated")
-        if not sat_lines:
-            return ""
-        snap_id = last.get("snapshot_id", "?")
-        return (
-            f"=== Roofline Saturation Advisory (snapshot #{snap_id}) ===\n"
-            f"The following directions are at or above "
-            f"{SATURATION_ADVISORY_THRESHOLD_PCT:.0f}% saturation; further\n"
-            "work in these areas typically yields diminishing returns. You\n"
-            "MAY still dispatch into them when you have a specific hypothesis\n"
-            "(e.g. an upstream PR or a known refactor) — this is a soft hint,\n"
-            "not a hard rule.\n"
-            + "\n".join(sat_lines) + "\n"
-            "=== End Saturation Advisory ==="
-        )
-
-    def _format_last_select_kernels(self) -> str:
-        return self._format_select_kernels_blob(self.last_select_kernels)
-
     def _format_last_trace_analyze(self) -> str:
-        # Main M4 renamed ``select_kernels`` → ``trace_analyze`` and the
-        # back-compat path ships the same dict shape under both keys; on
-        # this branch ``last_trace_analyze`` is populated alongside
-        # ``last_select_kernels`` for resume + v0.6 prompt-format parity.
-        # Prefer ``last_trace_analyze`` (canonical post-M4), fall back to
-        # ``last_select_kernels`` (legacy writer) so tests that seed only
-        # one of the two keys still render meaningfully.
-        blob = self.last_trace_analyze or self.last_select_kernels
-        return self._format_select_kernels_blob(blob)
+        # Canonical post-M4 cache key. Legacy ``last_select_kernels``
+        # field was removed in this branch — see SharedState dataclass
+        # docstring.
+        return self._format_trace_analyze_blob(self.last_trace_analyze)
 
-    def _format_select_kernels_blob(self, blob: dict[str, Any] | None) -> str:
+    def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
         if not blob:
             return "(none)"
         ids = [

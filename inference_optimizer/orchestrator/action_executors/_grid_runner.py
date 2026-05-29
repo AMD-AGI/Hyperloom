@@ -11,7 +11,6 @@ stay tiny and only declare the grid (the marathon DFS playbook).
 from __future__ import annotations
 
 import asyncio
-import copy
 import hashlib
 import json
 import logging
@@ -20,7 +19,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -133,7 +131,7 @@ def _resolve_session_dir() -> Path:
 
 
 _MAGPIE_CWD_DEFAULT = "/tmp"
-_VARIANT_TIMEOUT_SEC_DEFAULT = 2400
+_VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 workload
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +786,11 @@ def sanitize_result_dir(value: Any) -> str | None:
 def server_args_env_name(framework: str | None) -> str:
     """Return the Magpie env var used to append backend server args."""
     name = str(framework or "").strip().lower()
+    # atom check first: "atom" is not a substring of vllm/sglang, but keep
+    # ordering explicit so future framework names with overlapping substrings
+    # cannot accidentally match the wrong branch.
+    if "atom" in name:
+        return "EXTRA_ATOM_ARGS"
     if "vllm" in name:
         return "EXTRA_VLLM_ARGS"
     return "EXTRA_SGLANG_ARGS"
