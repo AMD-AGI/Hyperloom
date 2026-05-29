@@ -110,6 +110,7 @@ DEFAULT_OOB_PATH = "/wekafs/hyperloom/OOB"
 DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
+DEFAULT_TARGET_GAIN = 30.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
 
 _KERNEL_BACKEND_ALIASES = {
@@ -686,6 +687,7 @@ class SafeOptimizeClient:
         prompt_suffix: str | None = None,
         kernel_backends: list[str] | None = None,
         max_hours: float | None = None,
+        target_gain: float | None = None,
         results_path: str | None = None,
     ) -> dict:
         # Pick the workspace for this submit. Default = self.submit_workspace
@@ -722,6 +724,8 @@ class SafeOptimizeClient:
         }
         if max_hours and max_hours > 0:
             body["maxHours"] = max_hours
+        if target_gain and target_gain > 0:
+            body["targetGain"] = target_gain
         if results_path:
             body["resultsPath"] = results_path
         if image:
@@ -1090,6 +1094,7 @@ def process_model(
     prompt_suffix: str | None = None,
     kernel_backends: list[str] | None = None,
     max_hours: float | None = None,
+    target_gain: float | None = None,
     results_path: str | None = None,
     pool_metadata: dict | None = None,
 ) -> SubmissionRecord:
@@ -1128,6 +1133,8 @@ def process_model(
         rec.overrides["kernel_backends"] = kernel_backends
     if max_hours:
         rec.overrides["max_hours"] = max_hours
+    if target_gain:
+        rec.overrides["target_gain"] = target_gain
     if results_path:
         rec.overrides["results_path"] = results_path
 
@@ -1218,7 +1225,7 @@ def process_model(
             oob_path=oob_path, tracelens_root=tracelens_root,
             prompt_prefix=prompt_prefix, prompt_suffix=prompt_suffix,
             kernel_backends=kernel_backends, max_hours=max_hours,
-            results_path=results_path)
+            target_gain=target_gain, results_path=results_path)
     except Exception as e:
         rec.status = "failed"
         rec.error = f"submit_task: {e}"
@@ -2250,6 +2257,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         default=float(os.environ.get("SAFE_OPTIMIZE_MAX_HOURS", DEFAULT_MAX_HOURS)),
                         help="Max hours passed to the Hyperloom optimizer prompt "
                              "(default: 12).")
+    parser.add_argument("--target-gain", type=float,
+                        default=float(os.environ.get("SAFE_OPTIMIZE_TARGET_GAIN", DEFAULT_TARGET_GAIN)),
+                        help="Target gain %% passed to the Hyperloom optimizer prompt "
+                             "(default: 30).")
     parser.add_argument("--results-path",
                         default=os.environ.get("SAFE_OPTIMIZE_RESULTS_PATH", DEFAULT_RESULTS_PATH),
                         help="Results path passed to SaFE's prompt builder "
@@ -2439,6 +2450,7 @@ def main() -> int:
             prompt_suffix=args.prompt_suffix or None,
             kernel_backends=kernel_backends,
             max_hours=args.max_hours,
+            target_gain=args.target_gain,
             results_path=args.results_path,
             pool_metadata=pool_metadata,
         )
