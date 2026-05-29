@@ -9,7 +9,7 @@ name: SaFE Optimize Submit
 #                                    models > candidates_file (+ batch slice)
 #                                    > hf_top (live HF API).
 #                                    Emits matrix JSON for stage 2.
-#   2. optimize   (matrix, hyperloom-4hhzn) — one model per parallel job.
+#   2. optimize   (matrix, hyperloom-xk6sm) — one model per parallel job.
 #                                    Each job pre-pulls its own repo to
 #                                    /wekafs/models BEFORE calling SaFE
 #                                    register, so download is overlapped
@@ -17,7 +17,7 @@ name: SaFE Optimize Submit
 #                                    prewarm stage that blocks optimize).
 #                                    max-parallel capped by `max_parallel`
 #                                    input (sandbox has 128 GPU available).
-#   3. summarize  (hyperloom-4hhzn) — aggregate per-task artifacts into a
+#   3. summarize  (hyperloom-xk6sm) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
 #                                    Gain% desc, with medals), publish the
 #                                    normalized results to the Hyperloom
@@ -81,9 +81,9 @@ on:
         required: false
         default: '7'
       max_parallel:
-        description: 'Max parallel optimize jobs (sandbox has 128 GPU; safe ceiling is ~128)'
+        description: 'Max parallel optimize jobs (project1 temp pool: keep <=6)'
         required: false
-        default: '20'
+        default: '6'
       submit_workspaces:
         # Comma-separated round-robin pool. Empty = use single
         # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret (current behavior =
@@ -108,13 +108,13 @@ on:
         type: choice
         options: [local, claw]
       gpu_type:
-        description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
+        description: 'GPU type tag (project1 temp default MI325X).'
         required: false
-        default: ''
+        default: 'MI325X'
       inferencex_path:
-        description: 'InferenceX checkout path inside the sandbox. Leave empty to use script default (/wekafs/hyperloom/InferenceX for core42).'
+        description: 'InferenceX checkout path inside the sandbox.'
         required: false
-        default: ''
+        default: '/wekafs/hyperloom/InferenceX'
       prompt_prefix:
         # Canonical prompt prefix lives in ci/prompt_prefix.txt (single
         # source of truth, used by ALL trigger sources: schedule, dispatch,
@@ -138,7 +138,7 @@ on:
       target_gpu:
         description: 'Reference GPU for InferenceX comparison in the summary table'
         required: false
-        default: 'mi300x'
+        default: 'mi325x'
         type: choice
         options: [mi300x, b200, h100, mi355x, mi325x]
       wait_for_completion:
@@ -152,9 +152,9 @@ on:
         required: false
         default: true
       task_timeout_min:
-        description: 'Per-task wait timeout in minutes (default 480 = 8h)'
+        description: 'Per-task wait timeout in minutes (project1 smoke default 180 = 3h)'
         required: false
-        default: '480'
+        default: '180'
       all_artifacts:
         description: 'Download every artifact (default off — only optimization_report + ci_metrics)'
         type: boolean
@@ -174,7 +174,8 @@ jobs:
   # ── Stage 1: build matrix ────────────────────────────────────────────────────
   prepare:
     name: Build matrix
-    runs-on: hyperloom-mh826
+    # Project1 temporary smoke branch: use the Project1 ARC scale set.
+    runs-on: hyperloom-xk6sm
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -216,21 +217,22 @@ jobs:
     name: optimize-${{ matrix.key }}
     needs: prepare
     if: needs.prepare.outputs.count != '0'
-    runs-on: hyperloom-4hhzn
-    # 8h per-task timeout + buffer for register/wait/collect.
+    runs-on: hyperloom-xk6sm
+    # Project1 smoke timeout + buffer for register/wait/collect.
     timeout-minutes: 600
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(github.event.inputs.max_parallel || '20') }}
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
-      CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
-      SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
-      HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
+      # Project1 temporary smoke branch.
+      CLAW_API_KEY:                     ${{ secrets.PROJECT1_CLAW_API_KEY }}
+      SAFE_BASE_URL:                    https://project1.tw325.primus-safe.amd.com/
+      HARBOR_PREFIX:                    harbor.project1.tw325.primus-safe.amd.com/proxy
       HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
-      SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
-      SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
-      SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
+      SAFE_OPTIMIZE_REGISTER_WORKSPACE: project1-dev
+      SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   project1-dev
+      SAFE_OPTIMIZE_VOLUME:             /wekafs
     steps:
       - uses: actions/checkout@v6
 
@@ -522,14 +524,10 @@ jobs:
     name: Build summary
     needs: optimize
     if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
-    # Run on the self-hosted hyperloom-4hhzn runner (a K8s pod in the
-    # core42-hyperloom namespace) so the Publish step can reach the
-    # hyperloom-results-service ingress at core42.primus-safe.amd.com.
-    # hyperloom-4hhzn mounts /wekafs as RW (vs. hyperloom-mh826 which was RO),
-    # which is what the optimize stage needs for prewarm to actually write
-    # models into /wekafs/models/. Keeping the summary on the same pool
-    # avoids one-cluster-vs-another pitfalls.
-    runs-on: hyperloom-4hhzn
+    # Project1 temporary smoke branch: keep summary on the same Project1
+    # ARC runner pool as optimize so downloaded artifacts, /wekafs access,
+    # and perf-leaderboard publish behaviour match the model job.
+    runs-on: hyperloom-xk6sm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
