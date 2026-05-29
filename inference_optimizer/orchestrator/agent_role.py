@@ -41,11 +41,10 @@ References:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
 
 from ..paths import asset_system_prompts_dir
 from .intent_parser import IntentType
