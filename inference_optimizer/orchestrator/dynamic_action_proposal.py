@@ -248,6 +248,10 @@ FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset({
 # Provenance is a strict literal, no composite form.
 EXPECTED_PROVENANCE: str = "dynamic"
 
+# Upper bound on ``name`` length; keeps the synthesised patch filename
+# (``001_<name>.patch``) well under the filesystem limit.
+MAX_PROPOSAL_NAME_CHARS: int = 80
+
 # Cap on the number of entries the runner accepts per dispatch.
 MAX_PROPOSAL_SET_LEN: int = 1
 
@@ -377,6 +381,13 @@ def validate_proposal(
             detail=f"fields={missing!r}",
         )
 
+    name = str(proposal.get("name") or "").strip()
+    if len(name) > MAX_PROPOSAL_NAME_CHARS:
+        return ProposalValidationResult(
+            ok=False, reason="name_too_long",
+            detail=f"len={len(name)} max={MAX_PROPOSAL_NAME_CHARS}",
+        )
+
     provenance = str(proposal.get("provenance") or "").strip()
     if provenance != EXPECTED_PROVENANCE:
         return ProposalValidationResult(
@@ -494,6 +505,7 @@ __all__ = [
     "EXPECTED_PROVENANCE",
     "FORBIDDEN_PROPOSAL_FIELDS",
     "LAST_OUTCOME_BY_STATUS",
+    "MAX_PROPOSAL_NAME_CHARS",
     "MAX_PROPOSAL_REJECTS",
     "MAX_PROPOSAL_SET_LEN",
     "MOTIVATION_GAP_SHORT_MAX_CHARS",
