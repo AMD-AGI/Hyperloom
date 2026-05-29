@@ -454,3 +454,42 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
         self.assertEqual(
             source_type_for("pseudo_op::moe_fused_aiter", ""), "unknown",
         )
+
+
+class TestPseudoOpSourceFallback(unittest.TestCase):
+    """GEAK source resolution must fall back off pseudo-op frame labels.
+
+    A TraceLens launcher path for a synthetic FlyDSL pseudo-op is a
+    profiler frame label (e.g. ``aiter/fused_moe.py(986): fused_moe_2stages``),
+    not a file GEAK can open. ``_resolve_source_file`` must prefer an
+    explicit, readable ``--source-file`` in that case, while still
+    preferring a real candidate source_file over the LLM-supplied path
+    in the normal (non-pseudo-op) case.
+    """
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import kernel_optimization
+        self.mod = kernel_optimization
+
+    def test_frame_label_candidate_falls_back_to_real_explicit(self) -> None:
+        real = str(Path(__file__).resolve())  # any guaranteed-real file
+        cand = {"source_file": "aiter/fused_moe.py(986): fused_moe_2stages"}
+        out = self.mod._resolve_source_file(real, cand, "k001")
+        self.assertEqual(out, real)
+
+    def test_real_candidate_still_wins_over_llm(self) -> None:
+        real = str(Path(__file__).resolve())
+        cand = {"source_file": real}
+        out = self.mod._resolve_source_file("/tmp/some_other.py", cand, "k002")
+        self.assertEqual(out, real)
+
+    def test_empty_candidate_uses_llm(self) -> None:
+        out = self.mod._resolve_source_file("/tmp/x.py", {"source_file": ""}, "k003")
+        self.assertEqual(out, "/tmp/x.py")
+
+    def test_both_unresolvable_returns_candidate(self) -> None:
+        """No real file anywhere -> keep candidate (existing behaviour)."""
+        cand = {"source_file": "aiter/fused_moe.py(986): fused_moe_2stages"}
+        out = self.mod._resolve_source_file("/no/such/file.py", cand, "k004")
+        self.assertEqual(out, "aiter/fused_moe.py(986): fused_moe_2stages")

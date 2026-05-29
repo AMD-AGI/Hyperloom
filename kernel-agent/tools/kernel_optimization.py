@@ -199,6 +199,33 @@ def _resolve_source_file(
     llm = str(llm_source or "").strip()
     if not cand_source:
         return llm
+
+    # A TraceLens "launcher path" can be a profiler *frame label* such as
+    # ``aiter/fused_moe.py(986): fused_moe_2stages`` rather than a real file.
+    # This is the norm for synthetic pseudo-ops (e.g. TraceLens PR #668's
+    # ``pseudo_op::moe_flydsl_stage1/2``, which inherit a frame-label launcher
+    # path from the ``aiter::fused_moe_`` donor). GEAK cannot open a frame
+    # label, so when the candidate source is not a readable file but the
+    # caller supplied a real one, prefer the explicit source_file. This is the
+    # source-resolution analogue of the pseudo-op fast path in
+    # ``tracelens_analysis.source_type_for``.
+    def _is_real_file(p: str) -> bool:
+        try:
+            return bool(p) and Path(p).is_file()
+        except (OSError, RuntimeError):
+            return False
+
+    if not _is_real_file(cand_source) and _is_real_file(llm):
+        if log_path is not None:
+            append_log(
+                log_path,
+                f"[source-fallback] kernel_id={kernel_id} candidate "
+                f"source_file={cand_source!r} is not a readable file "
+                f"(likely a pseudo-op frame label); using explicit "
+                f"source_file={llm!r}",
+            )
+        return llm
+
     if llm and Path(cand_source) != Path(llm):
         try:
             differ = Path(cand_source).resolve(strict=False) != Path(llm).resolve(strict=False)
