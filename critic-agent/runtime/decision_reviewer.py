@@ -40,10 +40,8 @@ log = logging.getLogger(__name__)
 from .errors import (
     InboxParseError,
     IntentEnvelopeValidationError,
-    RequestValidationError,
     ReviewValidationError,
     RuntimeAdapterError,
-    ScopeError,
 )
 from .inbox_parser import parse_inbox_prompt
 from .intent_envelope import (
@@ -60,7 +58,6 @@ from .metrics import CRITIC_REVIEW_VERDICT_TOTAL, get_registry
 from .request_models import (
     COORDINATOR_INBOX,
     CRITICAL_CONTEXT_KEYS,
-    CONTEXT_DIMENSIONS,
     CriticRequest,
     DECISION_REQUEST,
     KB_DRAFT_REQUEST,

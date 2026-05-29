@@ -24,10 +24,7 @@ Covers KB_design §3.7 (resource lane redesign) + §3.13 M6:
 from __future__ import annotations
 
 import asyncio
-import json
 import sqlite3
-import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -39,7 +36,6 @@ from inference_optimizer.orchestrator.resource_lock import (
     LaneFull,
     ResourceLockManager,
     SqliteLeaseBackend,
-    StaleLeaseError,
 )
 from inference_optimizer.storage import SqliteConnection
 from inference_optimizer.storage.schema import (

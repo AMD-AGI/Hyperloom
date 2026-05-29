@@ -166,7 +166,6 @@ def test_prompt_grid_hint_no_longer_advertises_llm_direct():
 # 4. Orchestration rules fragment — PR-A9 contract present
 # ---------------------------------------------------------------------------
 def test_orchestration_rules_fragment_documents_pr_a9():
-    from pathlib import Path
     from inference_optimizer.paths import asset_system_prompts_dir
     text = (asset_system_prompts_dir() / "orchestration.md").read_text(
         encoding="utf-8",

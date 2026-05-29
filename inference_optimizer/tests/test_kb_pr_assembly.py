@@ -16,15 +16,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
 from inference_optimizer.orchestrator.knowledge_plane import KnowledgePlane
-from inference_optimizer.orchestrator.specialist_domains import (
-    SPECIALIST_DOMAINS,
-    get_domain,
-)
 
 
 # ---------------------------------------------------------------------------
