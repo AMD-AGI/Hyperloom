@@ -119,9 +119,7 @@ def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
 # * v2 ``labels.{model,hardware,framework,framework_version,precision}``
 #   → top-level arbor identity fields (so an arbor consumer can read
 #   them without parsing canonical_id). The remote kb-service and local
-#   store both standardise on ``framework_version`` for the 4th identity
-#   dimension; the legacy ``labels.version`` key is still read as a
-#   fallback for rows ingested before that migration.
+#   store both key the 4th identity dimension as ``framework_version``.
 # * v2-only fields (``authority``, ``confidence``, ``evidence_refs``,
 #   ``provenance``, ``canonical_id``, ``version``, ``created_at``,
 #   ``updated_at``) pass through unchanged — they're additive on top
@@ -156,9 +154,7 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
         "model":             str(labels.get("model") or ""),
         "hardware":          str(labels.get("hardware") or ""),
         "framework":         str(labels.get("framework") or ""),
-        "framework_version": str(
-            labels.get("framework_version") or labels.get("version") or ""
-        ),
+        "framework_version": str(labels.get("framework_version") or ""),
         "precision":         str(labels.get("precision") or ""),
         # arbor payload pulled out of body / metrics
         "best_config":       dict(body.get("best_config") or {}),
