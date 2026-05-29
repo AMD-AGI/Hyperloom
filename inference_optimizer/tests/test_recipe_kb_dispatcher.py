@@ -178,6 +178,65 @@ def test_get_recipe_returns_remote_when_remote_hits(kb: RecipeKB) -> None:
     assert out["best_throughput"]  == 30000.0
 
 
+def test_v2_framework_version_label_is_read(kb: RecipeKB) -> None:
+    """Both the remote kb-service and the local store standardise on
+    ``framework_version`` for the 4th identity dimension. A remote row
+    that uses it is surfaced directly. The top-level recipe ``version``
+    (row revision) stays independent of it."""
+    cid = _cid()
+    v2_payload = {
+        "canonical_id": cid,
+        "version":      7,  # row revision — must NOT leak into framework_version
+        "labels": {
+            "model":             "remote-model",
+            "hardware":          "mi300x",
+            "framework":         "sglang",
+            "framework_version": "0.4.5",
+            "precision":         "fp8",
+        },
+        "body":    {},
+        "metrics": {},
+    }
+    with respx.mock(base_url=KB_URL) as mock:
+        mock.post(PATH_RECIPES_SEARCH).mock(
+            return_value=httpx.Response(200, json={"recipes": [v2_payload]}),
+        )
+        out = kb.get_recipe(canonical_id=cid)
+    assert out is not None
+    assert out["framework_version"] == "0.4.5"
+    assert out["version"] == 7
+
+
+def test_v2_legacy_version_label_falls_back_to_framework_version(
+    kb: RecipeKB,
+) -> None:
+    """Rows ingested before the remote standardised on
+    ``framework_version`` keyed the 4th dimension as ``labels.version``.
+    Read it as a fallback so pre-migration data isn't lost."""
+    cid = _cid()
+    v2_payload = {
+        "canonical_id": cid,
+        "version":      7,  # row revision — must NOT leak into framework_version
+        "labels": {
+            "model":     "remote-model",
+            "hardware":  "mi300x",
+            "framework": "sglang",
+            "version":   "0.4.5",  # legacy framework-version key
+            "precision": "fp8",
+        },
+        "body":    {},
+        "metrics": {},
+    }
+    with respx.mock(base_url=KB_URL) as mock:
+        mock.post(PATH_RECIPES_SEARCH).mock(
+            return_value=httpx.Response(200, json={"recipes": [v2_payload]}),
+        )
+        out = kb.get_recipe(canonical_id=cid)
+    assert out is not None
+    assert out["framework_version"] == "0.4.5"
+    assert out["version"] == 7
+
+
 def test_get_recipe_falls_through_to_local_when_remote_empty(
     kb: RecipeKB, local_store: LocalRecipeStore,
 ) -> None:
@@ -243,6 +302,9 @@ def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
         mock.post(PATH_RECIPES_SEARCH).mock(side_effect=_capture)
         kb.get_recipe(canonical_id=cid)
     label_match = captured.get("label_match") or {}
+    # Remote kb-service and local store both key the 4th identity
+    # dimension as ``framework_version``; the decoded label_match uses
+    # that key directly (no translation).
     assert set(label_match) == {
         "model", "hardware", "framework", "framework_version", "precision",
     }
