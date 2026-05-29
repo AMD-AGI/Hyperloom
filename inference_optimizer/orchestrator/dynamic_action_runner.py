@@ -371,9 +371,21 @@ class DynamicActionRunner:
                     "turn_cap_exhausted", None,
                 )
         except asyncio.CancelledError:
-            terminal = (
-                DynamicRunnerTerminalState.ABANDONED,
-                "external_kill", None,
+            # Persist the ABANDONED terminal (journal + empty
+            # proposal_set + worktree teardown) before propagating, so
+            # the cancel is auditable immediately instead of relying on
+            # the next resume sweep.
+            self._finalise(
+                dyn_id=dyn_id,
+                state=DynamicRunnerTerminalState.ABANDONED,
+                reason="external_kill",
+                journal_path=str(journal_path),
+                journal=journal,
+                normalised_proposal=None,
+                worktree=worktree,
+                worktree_base=worktree_base,
+                session_dir=session_dir,
+                turns_used=len([j for j in journal if j.turn > 0]),
             )
             raise
         finally:
