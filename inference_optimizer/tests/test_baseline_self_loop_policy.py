@@ -22,7 +22,6 @@ from inference_optimizer.orchestrator.backends import (
 )
 from inference_optimizer.orchestrator.coordinator import (
     Coordinator,
-    _baseline_params_fingerprint,
 )
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.task_registry import Task
@@ -259,7 +258,7 @@ async def test_sequence_denial_no_self_loop_for_other_actions(session_dir):
     try:
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.last_profile_trace = "/tmp/fake-trace"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/fake-trace",
             # Roofline-v2 N3: backends now requires fresh analysis_md_text.
             "analysis_md_text": "FAKE_REPORT",

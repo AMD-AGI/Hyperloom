@@ -87,10 +87,12 @@ def test_policy_allows_grid_with_default_grid_variant():
 
 
 def test_policy_allows_grid_with_specialist_provenance():
+    """Single specialist:* variant is allowed. Multi-specialist grids
+    are covered by ``explore_specialist_grid_max_one`` in
+    test_explore_grid_limits.py."""
     gate = _gate()
     intent = _delegate([
         {"name": "v1", "provenance": "specialist:serving_specialist"},
-        {"name": "v2", "provenance": "specialist:kernel_switch_specialist"},
     ])
     gate.validate_intent("orchestration", intent)  # no raise
 
@@ -164,7 +166,6 @@ def test_prompt_grid_hint_no_longer_advertises_llm_direct():
 # 4. Orchestration rules fragment — PR-A9 contract present
 # ---------------------------------------------------------------------------
 def test_orchestration_rules_fragment_documents_pr_a9():
-    from pathlib import Path
     from inference_optimizer.paths import asset_system_prompts_dir
     text = (asset_system_prompts_dir() / "orchestration.md").read_text(
         encoding="utf-8",

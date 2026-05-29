@@ -1,4 +1,4 @@
-"""SpecialistRunner — v0.8 M5 (KB_design §3.5 + §3.13 M5).
+"""SpecialistRunner — v0.8 M5.
 
 The second sub-agent form factor. Whereas the deterministic
 :class:`SubAgentRunner` dispatches Python executors (BaselineExecutor,
@@ -12,14 +12,14 @@ mechanism + idempotency_key contract. They differ in:
 * execution: SpecialistRunner spawns an :class:`Backend.run` loop over
   up to ``max_turns`` turns instead of calling a Python executor.
 * tool surface: the runner passes a tightly-scoped tool whitelist into
-  the Backend (KB_design §3.5 §10 / §3.11 R5).
+  the Backend.
 * output: the runner harvests exactly one ``specialist_done`` intent
   from the transcript; any other intent type is logged and ignored.
-* workspace: per ``runs/specialist/<task_id>/`` (KB_design §3.5 §8):
+* workspace: per ``runs/specialist/<task_id>/``:
   ``prompt.md`` / ``transcript.jsonl`` / ``heartbeat.json`` /
   ``tool_calls.jsonl`` / ``specialist_done.json``.
 
-Failure modes (KB_design §3.5 §9 / §3.13 M5 §6) are folded into one
+Failure modes are folded into one
 recovery primitive: every exit path synthesises a ``specialist_done``
 payload so the upstream EXPLORE round never blocks on a missing
 result. ``status`` carries the original outcome
@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from ..session_paths import runs_dir
-from .backends.base import Backend, BackendError
+from .backends.base import BackendError
 from .intent_parser import Intent, IntentType
 from .specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -57,6 +57,7 @@ from .specialist_subprocess import (
     _pick_worktree_base,
     _setup_worktree,
 )
+from .policy import DEFAULT_SPECIALIST_MAX_PROPOSALS
 from .sub_agent_runner import RunnerContext, SubAgentResult
 from .system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -71,7 +72,7 @@ log = logging.getLogger(__name__)
 # :mod:`policy`. We re-export the tuples below so legacy importers
 # (and the runner itself) still see the historical names without a
 # code rewrite, but PolicyGate and SpecialistRunner now share a
-# single source of truth (KB_design §3.11 §4.4 / §4.5).
+# single source of truth.
 from .policy import (
     CORTEX_KB_READ_TOOL_NAMES as _CORTEX_KB_READ,
     KB_WRITE_TOOL_NAMES as _KB_WRITE,
@@ -152,10 +153,9 @@ class _PreparedRun:
     subprocess execution paths. Internal to :class:`SpecialistRunner`."""
 
     domain: SpecialistDomain | None = None
-    # F2-3: per-domain sub_kind selected at dispatch time (e.g.
-    # 'framework_pr_scout'). Empty string = default per-domain prompt /
-    # tool whitelist. Threaded through so :meth:`_resolve_tools` can
-    # apply differential MCP-tool gating.
+    # Per-domain sub_kind selected at dispatch time. Empty string =
+    # default per-domain prompt. Threaded through so domain-specific
+    # focus helpers can specialise when needed.
     sub_kind: str = ""
     gap: str = ""
     max_turns: int = 0
@@ -203,7 +203,7 @@ def build_empty_specialist_done(
     """Return the canonical empty ``specialist_done`` payload.
 
     Used by every failure path in this module + by the Coordinator's
-    ``kill_task`` synth path (KB_design §3.5 §9 / §3.13 M5 §6). Guarantees
+    ``kill_task`` synth path. Guarantees
     the payload satisfies PolicyGate R3 schema (``empty=true``,
     ``proposal_set=[]``, non-empty summary).
     """
@@ -291,15 +291,7 @@ class SpecialistRunner:
         self.per_turn_max_seconds = float(per_turn_max_seconds)
         self.knowledge_plane = knowledge_plane
 
-    # F2-3: framework-agent MCP tool prefix (for the optional
-    # ``mcp__fa__candidates`` / ``mcp__fa__fetch_pr`` server PR #280
-    # ships alongside the ``fa`` CLI). The ``fa`` CLI itself is
-    # invoked via the existing ``Bash`` tool, so this prefix only
-    # matters when the operator wires the fa MCP server. Centralised
-    # here so the whitelist policy stays a single source of truth.
-    _FA_MCP_TOOL_PREFIX: str = "mcp__fa__"
-
-    def _resolve_tools(self, sub_kind: str = "") -> tuple[str, ...]:
+    def _resolve_tools(self) -> tuple[str, ...]:
         """Return the per-task tool whitelist.
 
         Gated on:
@@ -307,12 +299,6 @@ class SpecialistRunner:
         * KnowledgePlane PR Monitor / Cortex KB availability — strips
           ``mcp__pr_monitor__*`` / ``mcp__cortex_kb__*`` whenever the
           corresponding surface is disabled.
-        * F2-3 framework-agent sub_kind — strips ``mcp__fa__*`` when
-          ``sub_kind != 'framework_pr_scout'`` so the default serving
-          path can never accidentally call the fa MCP server even if
-          the operator pre-loaded it into ``default_tools``. The fa CLI
-          itself is invoked via the existing ``Bash`` whitelist entry
-          when the sub_kind authorises it.
         * Always enforces :data:`SPECIALIST_TOOL_DENYLIST` last
           (defense in depth — caller may have extended ``default_tools``
           carelessly).
@@ -336,15 +322,6 @@ class SpecialistRunner:
                     t for t in tools
                     if not t.startswith("mcp__cortex_kb__")
                 ]
-        # F2-3: differential framework-agent gating. The default
-        # tool set never carries ``mcp__fa__*`` today, but we strip
-        # defensively so an operator-extended default_tools tuple
-        # still respects the sub_kind boundary.
-        if sub_kind != "framework_pr_scout":
-            tools = [
-                t for t in tools
-                if not t.startswith(self._FA_MCP_TOOL_PREFIX)
-            ]
         tools = [t for t in tools if t not in SPECIALIST_TOOL_DENYLIST]
         return tuple(tools)
 
@@ -398,9 +375,8 @@ class SpecialistRunner:
         ).strip()
         max_turns = int(params.get("max_turns") or self.default_max_turns)
         domain = get_domain(domain_key)
-        # F2-3 — propagate sub_kind from the dispatch params so
-        # _resolve_tools can apply differential gating. Empty = default
-        # per-domain prompt + tool whitelist.
+        # propagate sub_kind from the dispatch params for per-domain
+        # focus helpers. Empty = default per-domain prompt.
         sub_kind = str(params.get("sub_kind") or "").strip()
 
         workspace = self._resolve_workspace(ctx)
@@ -463,11 +439,14 @@ class SpecialistRunner:
                 # a valid SpecialistPromptInputs.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
                 sub_kind=str(params.get("sub_kind") or ""),
-                pr_candidates=list(params.get("pr_candidates") or []),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(
                     params.get("warm_start_pitfalls") or []
                 ),
+                warm_start_lessons=list(
+                    params.get("warm_start_lessons") or []
+                ),
+                session_snapshot=dict(params.get("session_snapshot") or {}),
                 pr_feed=list(params.get("pr_feed") or []),
                 pr_monitor_available=bool(
                     params.get("pr_monitor_available", True)
@@ -493,10 +472,24 @@ class SpecialistRunner:
                 isl=int(params.get("isl") or 0),
                 osl=int(params.get("osl") or 0),
                 max_model_len=int(params.get("max_model_len") or 0),
+                # GAP 8 — runtime fingerprint surfaced to the prompt so
+                # ``_format_version_note`` can annotate version-mismatched
+                # lessons / pitfalls. Both empty when the Coordinator
+                # didn't warm them (legacy callers / pre-PR sessions).
+                framework=str(params.get("framework") or ""),
+                framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(
                     str(workspace_for_prompt) if workspace_for_prompt else ""
                 ),
                 notes=str(params.get("notes") or ""),
+                # proposal_set cap (single source of truth: policy.py).
+                # Coordinator._warm_specialist_params seeds this; clamp
+                # defensively in case a caller passes a larger value.
+                max_proposals=max(1, min(
+                    DEFAULT_SPECIALIST_MAX_PROPOSALS,
+                    int(params.get("max_proposals") or
+                        DEFAULT_SPECIALIST_MAX_PROPOSALS),
+                )),
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
@@ -516,7 +509,7 @@ class SpecialistRunner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             notes=notes,
-            resolved_tools=self._resolve_tools(sub_kind),
+            resolved_tools=self._resolve_tools(),
         )
 
     # ------------------------------------------------------------------
@@ -781,6 +774,28 @@ class SpecialistRunner:
         done_payload["domain"] = domain.key
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
+        # Hard truncate proposal_set to the single-source-of-truth cap.
+        # The prompt asks the specialist to self-curate, but we never
+        # trust LLM output for size limits — anything beyond the cap is
+        # dropped before persist so the on-disk artifact, Coordinator
+        # bookkeeping, Critic review and explore-grid materialisation
+        # all see the same N≤cap shape. ``proposals_truncated_from`` is
+        # picked up by ``coordinator._build_specialist_round_entry`` for
+        # the session_breakdown audit trail.
+        _proposals = done_payload["proposal_set"]
+        if (
+            isinstance(_proposals, list)
+            and len(_proposals) > DEFAULT_SPECIALIST_MAX_PROPOSALS
+        ):
+            _original_len = len(_proposals)
+            done_payload["proposal_set"] = (
+                _proposals[:DEFAULT_SPECIALIST_MAX_PROPOSALS]
+            )
+            done_payload["proposals_truncated_from"] = _original_len
+            notes.append(
+                f"proposal_set_truncated:{_original_len}->"
+                f"{DEFAULT_SPECIALIST_MAX_PROPOSALS}"
+            )
         if "empty" not in done_payload:
             done_payload["empty"] = not bool(done_payload["proposal_set"])
         if "summary" not in done_payload:
@@ -878,7 +893,7 @@ class SpecialistRunner:
         )
 
     # ------------------------------------------------------------------
-    # Workspace file protocol (KB_design §3.5 §8)
+    # Workspace file protocol
     # ------------------------------------------------------------------
     def _resolve_workspace(self, ctx: RunnerContext) -> Path | None:
         # Prefer the workspace SubAgentRunner pre-mkdir'd, fall back to

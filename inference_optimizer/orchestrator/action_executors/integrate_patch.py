@@ -8,7 +8,7 @@ KEEPs the patch (advances the optimization stack) or REVERTs it
 
 This is the orchestrator-side counterpart of Arbor's ``integrate`` step
 in the optimization loop. It is a **deterministic Python executor**
-(no LLM driver) — the only place in the v0.8 + PR-A2 design where
+(no LLM driver) — the only place in the legacy + PR-A2 design where
 ``git apply`` against framework_source_roots is allowed (Inv-5.1
 updated: specialists author patches into their isolated worktree;
 this executor is the single integration channel).
@@ -55,13 +55,10 @@ Outputs (dict, returned to the bus as ``delegated_result.result``):
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
-import shutil
 import subprocess
-import time
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +80,7 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_KEEP_THRESHOLD_PCT = 0.2
-DEFAULT_VARIANT_TIMEOUT_SEC = 2400
+DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 long workload
 
 
 def _now_iso() -> str:
@@ -585,13 +582,12 @@ class IntegratePatchExecutor:
     ) -> None:
         """F2-5: append a JSONL record to
         ``framework-agent/kb/framework_optimization/lessons.jsonl``
-        when the integrated patch came from the framework_pr_scout
-        sub-kind.
+        when the integrated patch came from the FRAMEWORK_PR phase.
 
         Strict no-op when the proposal carries any other provenance,
         or when the proposal is missing both ``fa_pr_url`` and
         ``fa_pr_sha`` (the dedup keys; without them the record is
-        useless to future ``fa candidates`` runs). Errors during
+        useless to future ``fa phase-discover`` runs). Errors during
         the write are logged + swallowed so a flaky shared filesystem
         cannot fail an otherwise-successful integrate.
         """

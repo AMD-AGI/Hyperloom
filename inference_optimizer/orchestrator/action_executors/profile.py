@@ -1,6 +1,6 @@
 """Real ``profile`` ActionRunner — Magpie SGLang run with torch profiler on.
 
-DESIGN v0.6 §16 profile action.
+ profile action.
 
 Reuses the BaselineExecutor shell-out machinery; the only meaningful
 difference is the YAML config — the profile config has
@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from ...paths import asset_root
+from ...paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
     ensure_benchmark_serving_patched,
@@ -280,7 +280,7 @@ def _validate_trace_structure(
 PROFILE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
 )
-PROFILE_DEFAULT_TIMEOUT_SEC = 2400     # Magpie + sglang profile is heavier, 40 min wall cap
+PROFILE_DEFAULT_TIMEOUT_SEC = 14400    # 4 h wall cap; Qwen3-32B TP=1 profile needs ~3 h with steady-state window
 
 
 def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
@@ -358,16 +358,18 @@ class ProfileExecutor(BaselineExecutor):
         return _default_profile_config()
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
-        """Return the shared wekafs torch-trace base for multi-node, or ''.
+        """Return the shared torch-trace base dir for multi-node, or ''.
 
         Returns the SAME base dir for every profile round in the session.
         ``cli.py`` exports it as
         ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` =
-        ``/wekafs/hyperloom/profile-traces/<rayjob>/torch_trace`` at
-        provisioning time. Sglang server's ``SGLANG_TORCH_PROFILER_DIR``
-        is pinned to this base on first launch (see
-        ``multi_node/scripts/launch_multinode.py``), so all profile
-        rounds write trace.json.gz files into a single shared dir.
+        ``<mn_profile_trace_root>/<rayjob>/torch_trace`` at provisioning
+        time, where ``mn_profile_trace_root`` is anchored on
+        ``$USER_DATA_PATH`` (see :func:`inference_optimizer.paths.
+        mn_profile_trace_root`). Sglang server's
+        ``SGLANG_TORCH_PROFILER_DIR`` is pinned to this base on first
+        launch (see ``multi_node/scripts/launch_multinode.py``), so all
+        profile rounds write trace.json.gz files into a single shared dir.
 
         The ``__call__`` mtime gate (records ``task_started_unix`` and
         filters trace files newer than that) is what isolates the
@@ -380,11 +382,27 @@ class ProfileExecutor(BaselineExecutor):
         sees that env. A single shared base + mtime gate is the simplest
         fix that keeps resume's 14-min cold-start saving intact.
 
-        Falls back to ``/wekafs/hyperloom/profile-traces/default/torch_trace``
-        if HYPERLOOM_MN_PROFILE_TRACE_DIR is missing so the executor still
-        produces a usable path rather than crashing.
+        Three-tier resolution (each non-empty result short-circuits):
+
+        1. ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` env (in-process provision).
+        2. State-file ``rayjob_id`` →
+           ``<mn_profile_trace_root>/<rayjob>/torch_trace``. Mirrors
+           ``multi_node/cli.py::cmd_restart_server`` so out-of-band
+           launches (agent invokes ``multi_node create-rayjob`` directly,
+           without going through ``inference_optimizer.cli._run_optimize``)
+           still get a per-RayJob unique dir.
+        3. ``<mn_profile_trace_root>/default-<pid>/torch_trace`` —
+           last-resort guard against concurrent sandbox processes
+           silently writing into a shared ``default/`` dir when both
+           env and state-file are missing. The pid uniquely partitions
+           per Python process inside the sandbox; collisions across
+           sandboxes would require BOTH a state-file gap AND the same
+           pid recycled, which is functionally never.
+
+        The resolved dir is mkdir'd best-effort so a sandbox-side reader
+        doesn't immediately FileNotFoundError on probe.
         """
-        from ._multi_node_env import is_multi_node
+        from ._multi_node_env import is_multi_node, rayjob_id_from_state
         if not is_multi_node():
             return ""
         provisioned = os.environ.get(
@@ -392,7 +410,23 @@ class ProfileExecutor(BaselineExecutor):
         ).strip()
         if provisioned:
             return provisioned
-        return "/wekafs/hyperloom/profile-traces/default/torch_trace"
+        # Tier 2: derive from state-file rayjob_id (out-of-band launches).
+        rid = rayjob_id_from_state()
+        if rid:
+            scoped = mn_profile_trace_root() / rid / "torch_trace"
+        else:
+            # Tier 3: pid-scoped last-resort so concurrent sandboxes
+            # never share a dir.
+            scoped = mn_profile_trace_root() / f"default-{os.getpid()}" / "torch_trace"
+        try:
+            scoped.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning(
+                "cannot mkdir multi-node profile fallback dir %s: %s; "
+                "downstream readers may FileNotFoundError",
+                scoped, exc,
+            )
+        return str(scoped)
 
     def _after_materialize_config(
         self, config_path: Path, output_dir: Path,
@@ -459,6 +493,24 @@ class ProfileExecutor(BaselineExecutor):
         return None
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        # B2: atom (Magpie v1) has no torch_profiler wiring. atom_mi*x.sh
+        # accepts PROFILE=1 but silently no-ops; injecting sglang/vllm
+        # TraceLens flags into EXTRA_ATOM_ARGS would crash atom's argparse.
+        # Short-circuit here so the EXPLORE specialist's occasional profile
+        # proposal degrades to a skipped delegated_result instead of a
+        # spurious failed run. Coordinator already treats skipped as
+        # non-fatal (no RCA escalation, no current_best mutation).
+        if os.environ.get("FRAMEWORK", "").strip().lower() == "atom":
+            return {
+                "status": "skipped",
+                "framework": "atom",
+                "error_class": "atom_no_profiler",
+                "error": (
+                    "atom framework has no torch_profiler integration in "
+                    "Magpie v1; profile/roofline are no-ops for this run. "
+                    "See atom_boost_tutorials.md §6."
+                ),
+            }
         # Override action label so per-task output lands under runs/profile/
         # rather than runs/baseline/ when the runner derives the path.
         params = ctx.task.params or {}

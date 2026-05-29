@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
 
 from robustness_agent.role.prompt_inputs import (
     ReactorContext,
     SharedStateSnapshot,
 )
 from robustness_agent.signals import (
-    Symptom,
     SymptomSeverity,
     evaluate_local_health_signals,
 )

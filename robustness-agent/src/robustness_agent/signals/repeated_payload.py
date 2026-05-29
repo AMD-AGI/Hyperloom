@@ -33,7 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ..role.prompt_inputs import InboxItem, ReactorContext

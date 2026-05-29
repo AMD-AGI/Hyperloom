@@ -104,10 +104,15 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
   fi
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
-# memory together. Keep this overridable so future GEAK fixes can move Hyperloom
-# forward without reworking the installer contract.
-GEAK_REF="${GEAK_REF:-v3.2.0}"
+# Pin GEAK to the save-and-test-diff-fallthrough fix tip
+# (https://github.com/AMD-AGI/GEAK/pull/244, not yet released as a tag).
+# We pin to the *commit SHA* of the branch tip, NOT the branch name, so a
+# future force-push / rebase upstream cannot silently change what every
+# fresh install gets.
+# TODO(post-GEAK-PR-244): once PR #244 lands and ships in a new GEAK tag,
+# revert this pin to the tag (e.g. v3.2.1) for stronger discoverability.
+# Operators can override with GEAK_REF=<tag|branch|sha>.
+GEAK_REF="${GEAK_REF:-ec61bdbdb151904ec187a8d89518afb969c53737}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
@@ -207,10 +212,10 @@ CURSOR_API_KEY_VAL="${CURSOR_API_KEY:-}"
 CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh}"
 
 # Install everything by default. The previous lazy `--with-geak / --with-oob`
-# scheme caused recurring "OOB proxy not running, request errored, found
-# the missing service after the fact" issues — when the resident skill
-# triggered a kernel-opt that needed claude/codex but install.sh had only
-# brought up GEAK, the auth-proxy was missing and every CLI request 401'd.
+# scheme caused recurring "missing dependency discovered at request time"
+# issues — when the resident skill triggered a kernel-opt that needed
+# claude/codex but install.sh had only brought up GEAK, the CLI auth files
+# were missing and every request 401'd.
 # Per user direction: "kernel-agent skills do not differentiate, just install everything". The
 # old --with-* / --all-backends / --backend flags are accepted but no-op
 # for backwards compatibility with existing call sites.
@@ -227,8 +232,8 @@ Usage: install.sh [options]
 Always installs (no --with-* selectivity any more):
   ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
   Node.js/npm, GEAK CLI/config, OOB + claude/codex CLI auth,
-  LLM proxy env/auth, and the OOB auth-proxy on :4002
-  (via ensure_auth_proxy.sh).
+  and LLM gateway env/auth (claude/codex CLIs talk to the gateway
+  directly; the legacy auth-proxy on :4002 has been retired).
 
 Options:
   --check-only       Verify current environment, do not install
@@ -277,6 +282,58 @@ verify_die() {
   if [ "$CHECK_ONLY" -eq 1 ]; then warn "$1"; else die "$1"; fi
 }
 
+# Preflight credential validation. The env+.env fallback loader above
+# (lines 89-105) only LOADS missing keys; it does not VALIDATE that they
+# were actually provided. Without this gate, a missing SAFE_API_KEY or
+# OPENAI_BASE_URL would slip past pip install / GEAK clone / aiter JIT
+# (~10-20 minutes of work) and only blow up at the final
+# generate_geak_litellm_config step (line ~670). Fail fast here so the
+# operator can fix .env / export before any expensive work happens.
+#
+# Strict mode by design: no bypass env var. The chained installer
+# steps (GEAK config, OOB CLI auth) all need real credentials, so an
+# install without them cannot finish anyway. The only downgrade path
+# is --check-only / --dry-run, which is for introspection only and
+# does not actually install.
+preflight_validate_credentials() {
+  local missing=()
+  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
+  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
+  if [ "${#missing[@]}" -eq 0 ]; then
+    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+    return 0
+  fi
+  local env_file_status
+  if [ -f "$REPO_ROOT/.env" ]; then
+    env_file_status="present"
+  else
+    env_file_status="not found"
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
+         "continuing because --check-only / --dry-run is active. GEAK " \
+         "config generation will still fail later unless these are set " \
+         "before a real install."
+    return 0
+  fi
+  cat >&2 <<EOF
+[kernel-agent ERROR] Missing required credential(s): ${missing[*]}
+
+Tried loading from:
+  - shell environment
+  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+
+Fix one of:
+  1. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
+  2. Export directly into the shell before re-running:
+       export SAFE_API_KEY=sk-xxxxx
+       export OPENAI_BASE_URL=https://gateway.example.com/v1
+EOF
+  exit 2
+}
+preflight_validate_credentials
+
 run() {
   log "$*"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -287,6 +344,70 @@ run() {
 ensure_python() {
   python3 --version >/dev/null || die "python3 is required"
   python3 -m pip --version >/dev/null || die "pip is required"
+}
+
+# Pip constraint file emitted by ensure_rocm_torch_for_geak() that pins the
+# on-disk torch so GEAK pip installs cannot swap ROCm torch for PyPI CUDA torch.
+GEAK_PIP_CONSTRAINT_FILE=""
+
+ensure_rocm_torch_for_geak() {
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if [ "${KERNEL_AGENT_SKIP_TORCH_GATE:-0}" = "1" ]; then
+    warn "KERNEL_AGENT_SKIP_TORCH_GATE=1 set; not pinning torch for GEAK install"
+    return 0
+  fi
+  # Gate on rocm-smi: only enforce torch hygiene on actual ROCm pods.
+  # Non-ROCm hosts (CI/dev) get no interference, no pin.
+  if ! command -v rocm-smi >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! rocm-smi --showid >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Probe torch via importlib.metadata so the pinned version matches the
+  # dist-info string pip uses (torch.__version__ may drop local segments).
+  local probe status torch_version hip cuda_str
+  probe="$(python3 - <<'PY' 2>/dev/null || true
+import importlib.metadata as _m
+try:
+    import torch
+except Exception as exc:
+    print("import_error|||" + type(exc).__name__ + ": " + str(exc)[:160])
+else:
+    try:
+        ver = _m.version("torch")
+    except Exception:
+        ver = getattr(torch, "__version__", "")
+    print("|".join([
+        "ok",
+        ver,
+        getattr(torch.version, "hip", None) or "",
+        getattr(torch.version, "cuda", None) or "",
+    ]))
+PY
+)"
+  IFS='|' read -r status torch_version hip cuda_str <<< "$probe"
+  if [ "$status" != "ok" ]; then
+    warn "torch not importable from python3 on ROCm pod"
+    warn "GEAK rag-mcp would pull torch from PyPI (= NVIDIA CUDA wheel) and corrupt the ROCm stack"
+    warn "Fix: use the canonical ROCm Python (usually /opt/venv/bin/python3) or install ROCm torch first"
+    warn "Override (NOT recommended): KERNEL_AGENT_SKIP_TORCH_GATE=1"
+    die "refusing GEAK install on ROCm pod without an importable torch"
+  fi
+
+  # Pin the exact dist-info version (incl. +rocm... local segment) so GEAK
+  # transitive deps cannot silently swap the on-disk torch for PyPI CUDA torch.
+  GEAK_PIP_CONSTRAINT_FILE="${HYPERLOOM_RUNTIME_DIR}/geak_pip_constraints.txt"
+  mkdir -p "$(dirname "$GEAK_PIP_CONSTRAINT_FILE")"
+  printf 'torch==%s\n' "${torch_version}" > "$GEAK_PIP_CONSTRAINT_FILE"
+  if [ -z "$hip" ]; then
+    warn "torch=${torch_version} on ROCm pod is not a ROCm build (hip=none, cuda=${cuda_str:-none}); pinning to block replacement but ROCm stack may be broken"
+  else
+    log "pinned torch==${torch_version} (hip=${hip}) via ${GEAK_PIP_CONSTRAINT_FILE}"
+  fi
 }
 
 # PR-D §3: pin `git` and `patch` so the TraceLens server patcher has the
@@ -567,7 +688,18 @@ ensure_geak() {
     mkdir -p "${HYPERLOOM_ROOT}" "$(dirname "$GEAK_CONFIG")" "$(dirname "$GEAK_MEMORY_STORE_PATH_VAL")"
   fi
   if [ ! -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
-    run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
+    # ``git clone --branch`` only accepts tags / branches, not SHAs. Detect
+    # a 7-40 hex char SHA and use a fetch-checkout dance instead so the
+    # SHA pin above stays shallow. GitHub serves shallow SHA fetches
+    # (uploadpack.allowReachableSHA1InWant=true).
+    if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      run git init -q "${HYPERLOOM_ROOT}/geak"
+      run git -C "${HYPERLOOM_ROOT}/geak" remote add origin "$GEAK_REPO"
+      run git -C "${HYPERLOOM_ROOT}/geak" fetch --depth 1 origin "$GEAK_REF"
+      run git -C "${HYPERLOOM_ROOT}/geak" checkout -q FETCH_HEAD
+    else
+      run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
+    fi
   else
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
   fi
@@ -577,7 +709,12 @@ ensure_geak() {
     # branch needs --break-system-packages; pip in a venv treats it as a
     # no-op so the flag is safe to keep unconditionally).
     _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
-    run python3 -m pip install ${_PIP_FLAGS} "${HYPERLOOM_ROOT}/geak"
+    ensure_rocm_torch_for_geak
+    _PIP_CONSTRAINT_ARGS=""
+    if [ -n "${GEAK_PIP_CONSTRAINT_FILE:-}" ] && [ -f "${GEAK_PIP_CONSTRAINT_FILE}" ]; then
+      _PIP_CONSTRAINT_ARGS="--constraint ${GEAK_PIP_CONSTRAINT_FILE}"
+    fi
+    run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${HYPERLOOM_ROOT}/geak"
     # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
     # by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
@@ -593,7 +730,7 @@ ensure_geak() {
     # break install with "File ... does not exist".
     for _geak_mcp in rag-mcp profiler-mcp \
                     cross-session-memory-mcp automated-test-discovery; do
-      run python3 -m pip install ${_PIP_FLAGS} \
+      run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \
         "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
     done
     # Patch GEAK's bundled prompt YAML to remove the misleading
@@ -904,81 +1041,48 @@ ensure_llm_auth_files() {
     return
   fi
   mkdir -p /root/.claude /root/.codex
+  # The Anthropic SDK appends /v1 itself, so strip a trailing /v1 from
+  # the OpenAI-style upstream URL when writing customApiUrl.
+  local _anthropic_url="${OOB_BASE_URL_VAL%/}"
+  _anthropic_url="${_anthropic_url%/v1}"
   cat > /root/.claude/config.json <<EOF
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
   "primaryApiKey": "${OOB_API_KEY_VAL}",
-  "customApiUrl": "${OOB_BASE_URL_VAL}"
+  "customApiUrl": "${_anthropic_url}"
 }
 EOF
   chmod 600 /root/.claude/config.json
-  # Codex 0.100.0 won't send Authorization to non-openai.com endpoints; the
-  # 4002 auth-proxy injects PROXY_AUTH_TOKEN instead. Writing OPENAI_API_KEY
-  # here would survive that injection but the gateway still rejects with
-  # "token not present" because codex never actually transmits the value.
-  # Keep the field empty so codex stays in apikey-mode without leaking the
-  # SaFE key into any client header.
+  # Codex 0.100.0 reads ~/.codex/auth.json before env and does not fall
+  # back when OPENAI_API_KEY is empty; write the real key for direct auth.
   cat > /root/.codex/auth.json <<EOF
 {
   "auth_mode": "apikey",
-  "OPENAI_API_KEY": ""
+  "OPENAI_API_KEY": "${OOB_API_KEY_VAL}"
 }
 EOF
   chmod 600 /root/.codex/auth.json
 }
 
-# Delegate to the standalone idempotent supervisor script. It handles the
-# port probe + curl probe + stuck-proxy restart cases. Sourcing it lets us
-# pick up its PROXY_*_BASE_URL exports for write_env_file.
-ensure_auth_proxy() {
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    return 0
-  fi
-  local script
-  script="$(dirname "$0")/ensure_auth_proxy.sh"
-  if [ ! -f "$script" ]; then
-    warn "ensure_auth_proxy.sh not found at $script"
-    return 0
-  fi
-  # Re-export the env vars the helper expects, then capture its KEY=VALUE
-  # output and source it back so PROXY_*_BASE_URL land in this shell.
-  local out
-  if ! out=$(
-    HYPERLOOM_ROOT="$HYPERLOOM_ROOT" \
-    OOB_BASE_URL="$OOB_BASE_URL_VAL" \
-    OOB_API_KEY="$OOB_API_KEY_VAL" \
-    bash "$script" 2>&1
-  ); then
-    warn "ensure_auth_proxy.sh failed; OOB requests may 401"
-    echo "$out" | sed 's/^/  /' >&2
-    return 0
-  fi
-  echo "$out" | sed 's/^/[ensure-auth-proxy] /'
-  while IFS='=' read -r key value; do
-    case "$key" in
-      PROXY_ANTHROPIC_BASE_URL) PROXY_ANTHROPIC_BASE_URL="$value" ;;
-      PROXY_OPENAI_BASE_URL)    PROXY_OPENAI_BASE_URL="$value" ;;
-    esac
-  done <<<"$out"
-}
-
 # Write a pod-local kernel-agent env file users should source so subsequent CLI calls
-# (and Ray workers via runtime_env) pick up the proxy-rewritten URLs.
+# (and Ray workers via runtime_env) pick up the upstream gateway URLs.
 write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
-  # ensure_auth_proxy.sh now always emits PROXY_*_BASE_URL on success
-  # (both the just-started and the healthy-noop branches). If we still don't
-  # have them, the supervisor either failed or OOB_BASE_URL was empty —
-  # either way the kernel-agent env would silently lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL,
-  # which is the exact failure mode that lets externally-preset upstream
-  # URLs leak into Claude/Codex CLIs and 401-hang the SDK. Warn loudly so
-  # the install operator notices instead of debugging at runtime.
-  if [ -z "${PROXY_ANTHROPIC_BASE_URL:-}" ] || [ -z "${PROXY_OPENAI_BASE_URL:-}" ]; then
-    warn "PROXY_*_BASE_URL not captured from ensure_auth_proxy.sh; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
-    warn "This means an externally-preset ANTHROPIC_BASE_URL will reach Claude CLI directly and hang on gateway 401"
+  # Warn loudly if OOB_BASE_URL is empty — kernel-agent env would silently
+  # lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL and CLIs would resort to whatever
+  # was in the operator's shell rc, defeating the point of this file.
+  if [ -z "${OOB_BASE_URL_VAL:-}" ]; then
+    warn "OOB_BASE_URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
+  fi
+  # Anthropic SDK appends /v1 itself, so strip a trailing /v1 from the
+  # OpenAI-style upstream URL when exporting ANTHROPIC_BASE_URL.
+  local _anthropic_url=""
+  if [ -n "${OOB_BASE_URL_VAL:-}" ]; then
+    _anthropic_url="${OOB_BASE_URL_VAL%/}"
+    _anthropic_url="${_anthropic_url%/v1}"
   fi
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
@@ -994,8 +1098,8 @@ write_env_file() {
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
-    [ -n "${PROXY_ANTHROPIC_BASE_URL:-}" ] && echo "export ANTHROPIC_BASE_URL='${PROXY_ANTHROPIC_BASE_URL}'"
-    [ -n "${PROXY_OPENAI_BASE_URL:-}" ] && echo "export OPENAI_BASE_URL='${PROXY_OPENAI_BASE_URL}'"
+    [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
+    [ -n "${OOB_BASE_URL_VAL:-}" ] && echo "export OPENAI_BASE_URL='${OOB_BASE_URL_VAL}'"
     [ -n "${OOB_API_KEY_VAL}" ] && {
       echo "export SAFE_API_KEY='${OOB_API_KEY_VAL}'"
       echo "export ANTHROPIC_API_KEY='${OOB_API_KEY_VAL}'"
@@ -1120,7 +1224,6 @@ main() {
   ensure_geak
   ensure_rag_index
   ensure_oob
-  ensure_auth_proxy
   write_env_file
 
   report_status

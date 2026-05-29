@@ -1,4 +1,4 @@
-"""SQLite schema for the unified Coordinator state DB (DESIGN v0.6 §13.1 / ADR-42).
+"""SQLite schema for the unified Coordinator state DB ().
 
 Five tables consolidated into a single WAL database
 ``$SESSION_DIR/storage/coordinator.db``:
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 
-# v0.8 M6 — bump from 1 → 2 to mark the leases PK widening +
+# bump from 1 → 2 to mark the leases PK widening +
 # lane_capacity table introduction. ``ensure_schema`` migrates v1 DBs
 # in place by recreating ``leases`` with the new PK; the migration is
 # defensive against active sessions because BEGIN IMMEDIATE serialises
@@ -34,7 +34,7 @@ import sqlite3
 SCHEMA_VERSION = 2
 
 
-# v0.8 M6 — default lane capacities. ``research_lane`` defaults to 1
+# default lane capacities. ``research_lane`` defaults to 1
 # (M5 single-specialist) so a fresh DB without operator config still
 # runs the M5 behaviour; the CLI flag ``--research-lane-capacity``
 # upgrades this row at session boot. Serving lanes stay at 1 (Inv-7.1).
@@ -51,7 +51,7 @@ _DDL = [
     # ------------------------------------------------------------------
     # leases — Resource Lock Manager (DESIGN §3.5 + KB_design §3.7 §4.1)
     # ------------------------------------------------------------------
-    # v0.8 M6 — PK is the composite ``(lane, holder_id)``. The capacity
+    # PK is the composite ``(lane, holder_id)``. The capacity
     # cap per lane lives in ``lane_capacity``; ``acquire_many`` selects
     # the current holder count and rolls back when ``count >= capacity``.
     """
@@ -70,7 +70,7 @@ _DDL = [
     "CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_leases_lane ON leases(lane)",
     # ------------------------------------------------------------------
-    # lane_capacity — v0.8 M6 (KB_design §3.7 §4.1)
+    # lane_capacity — v0.8 M6
     # ------------------------------------------------------------------
     """
     CREATE TABLE IF NOT EXISTS lane_capacity (
@@ -150,7 +150,7 @@ _MANAGED_TABLES = (
 
 
 def _migrate_leases_v1_to_v2(cur: sqlite3.Cursor) -> bool:
-    """In-place upgrade of the v0.6 ``leases`` table to the v0.8 M6 schema.
+    """In-place upgrade of the legacy ``leases`` table to the legacy M6 schema.
 
     Returns ``True`` when a migration actually ran, ``False`` when the
     existing table already has the composite PK. Safe to call on an
@@ -284,7 +284,7 @@ def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
 def ensure_schema(conn: sqlite3.Connection) -> int:
     """Idempotently create all tables; record the current schema version.
 
-    v0.8 M6 — also runs the v1 → v2 ``leases`` PK widening when needed
+    also runs the v1 → v2 ``leases`` PK widening when needed
     and seeds ``lane_capacity`` defaults. The whole sequence runs in
     one transaction so a concurrent reader never observes an
     intermediate state (a reader either sees the v1 schema or the v2

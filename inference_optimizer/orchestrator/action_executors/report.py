@@ -1,4 +1,4 @@
-"""Real ``report`` ActionRunner — DESIGN v0.6 §16 report action.
+"""Real ``report`` ActionRunner report action.
 
 Reads the session's SharedState + bus event log and produces:
 

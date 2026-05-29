@@ -1,6 +1,6 @@
 r"""Parse the Coordinator-style ``_compose_prompt`` text into structured fields.
 
-The Coordinator (DESIGN v0.6 §8.3 / §13.1) hands every reactor a prompt with
+The Coordinator () hands every reactor a prompt with
 the following layout:
 
 ```
@@ -50,7 +50,7 @@ from .request_models import Proposal
 # words. Capture group 1 is the trimmed title.
 _SECTION_RE = re.compile(r"^\s*===\s*(.+?)\s*===\s*$")
 
-# Inbox row layout (matches Coordinator._compose_prompt). Hex32 is the v0.6
+# Inbox row layout (matches Coordinator._compose_prompt). Hex32 is the legacy
 # canonical msg_id, but we accept any non-empty hex run.
 _INBOX_ROW_RE = re.compile(
     r"^\s*seq=(?P<seq>\d+)\s+"

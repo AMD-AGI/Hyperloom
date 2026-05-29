@@ -30,7 +30,6 @@ from typing import Any
 from ..base import (
     Decision,
     RenderedSection,
-    fmt_pct,
     md_table,
     register_renderer,
 )

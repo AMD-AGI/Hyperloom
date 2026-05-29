@@ -1,6 +1,6 @@
 """Agent-stall detection.
 
-DESIGN v0.6 §7.4: the robustness role is expected to detect "agent
+: the robustness role is expected to detect "agent
 stalls (>3min no message processed)" and emit medium-severity alerts.
 
 We compute the "last activity" timestamp per agent from
@@ -17,7 +17,7 @@ reactor protocol where every tick must emit at least one intent.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from ..role.prompt_inputs import InboxItem, ReactorContext
 from ..sources.base import SourceData

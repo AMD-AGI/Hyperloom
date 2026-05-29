@@ -35,8 +35,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     total_v = sb.get("validated_total_pct")
     rows = [
-        # v0.8 M3 — explore subsumes backends+params on v0.8 sessions;
-        # legacy rows kept for v0.6 resume reports.
+        # explore subsumes backends+params on sessions;
+        # legacy rows kept for legacy resume reports.
         ["explore",  sb.get("explore_pct_of_total"),  sb.get("explore_share_pct")],
         ["backends", sb.get("backends_pct_of_total"), sb.get("backends_share_pct")],
         ["params",   sb.get("params_pct_of_total"),   sb.get("params_share_pct")],
