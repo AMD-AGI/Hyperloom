@@ -189,7 +189,6 @@ def _make_bare_shared_state():
     warmup branch.
     """
     from dataclasses import dataclass, field
-    from typing import Any
 
     @dataclass
     class _SS:
