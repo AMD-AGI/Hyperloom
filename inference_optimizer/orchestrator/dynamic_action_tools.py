@@ -159,9 +159,12 @@ def read_source(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     target = Path(raw)
     if not target.is_absolute():
         return _error("path_must_be_absolute", path=raw)
+    if ".." in target.parts:
+        return _error("path_traversal_denied", path=raw)
+    # Containment is checked on the resolved path so symlinks + ``..``
+    # cannot escape the framework source roots.
     roots = resolve_source_file_allowlist()
-    target_str = str(target)
-    if not any(target_str.startswith(root) for root in roots):
+    if not any(_path_under(target, Path(root)) for root in roots):
         return _error("path_outside_framework_source_roots", path=raw)
     if not target.exists():
         return _error("not_found", path=raw)
@@ -208,16 +211,22 @@ def read_session_artifact(
     for seg in SESSION_ARTIFACT_DENY_SEGMENTS:
         if seg in raw:
             return _error("path_in_deny_list", path=raw, segment=seg)
-    if raw.startswith("agents/orchestration/dynamic_actions/"):
-        suffix = raw[len("agents/orchestration/dynamic_actions/"):]
-        head = suffix.split("/", 1)[0]
-        if head and head != dyn_id:
-            return _error(
-                "cross_dyn_id_isolation",
-                path=raw,
-                requested_dyn_id=head,
-                current_dyn_id=dyn_id,
-            )
+    # Cross-dyn_id isolation covers both the per-dispatch artefact dir
+    # and the per-dispatch worktree under runs/dynamic/.
+    for prefix in (
+        "agents/orchestration/dynamic_actions/",
+        "runs/dynamic/",
+    ):
+        if raw.startswith(prefix):
+            head = raw[len(prefix):].split("/", 1)[0]
+            if head and head != dyn_id:
+                return _error(
+                    "cross_dyn_id_isolation",
+                    path=raw,
+                    requested_dyn_id=head,
+                    current_dyn_id=dyn_id,
+                )
+            break
     target = (Path(session_dir) / raw).resolve()
     if not _path_under(target, Path(session_dir)):
         return _error("path_escapes_session_dir", path=raw)
