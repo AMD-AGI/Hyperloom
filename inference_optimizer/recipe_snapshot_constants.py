@@ -23,7 +23,12 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Default endpoint
 # ---------------------------------------------------------------------------
-DEFAULT_KB_URL: Final[str] = "http://kb-service.primus-cortex.svc.cluster.local"
+# NOTE: there is intentionally NO ``DEFAULT_KB_URL`` constant. The old
+# central kb-service default (``kb-service.primus-cortex.svc.cluster.local``)
+# was retired — the optimizer never silently connects to a remote KB.
+# A remote read source is consulted ONLY when an operator explicitly
+# passes ``--cortex-kb-url`` / ``$CORTEX_KB_URL``; otherwise the store
+# is local-only (see ``recipe_kb.RemoteRecipeClient`` / ``cli``).
 
 # Mount prefix per the spec (``Conventions`` section). Every endpoint
 # path below is the suffix after this prefix. The client concatenates
@@ -427,7 +432,6 @@ def format_recipe_path(template: str, canonical_id: str) -> str:
 
 
 __all__ = [
-    "DEFAULT_KB_URL",
     "MOUNT_PREFIX",
     "PATH_HEALTH",
     "PATH_OPENAPI",
