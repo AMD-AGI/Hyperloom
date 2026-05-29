@@ -45,8 +45,7 @@ from inference_optimizer.recipe_kb import (
     recipe_canonical_id,
 )
 from inference_optimizer.recipe_snapshot_constants import (
-    PATH_RECIPE_TPL,
-    format_recipe_path,
+    PATH_RECIPES_SEARCH,
 )
 
 
@@ -196,8 +195,9 @@ def test_item4_central_kb_reads_central_writes_local(
     with respx.mock(base_url=central_url) as mock:
         # No write routes — any HTTP call from the dispatcher.put
         # path would fail the test.
-        mock.get(format_recipe_path(PATH_RECIPE_TPL, cid)).mock(
-            return_value=httpx.Response(200, json=central_payload),
+        # Remote reads go through the single /recipes/search route.
+        mock.post(PATH_RECIPES_SEARCH).mock(
+            return_value=httpx.Response(200, json={"recipes": [central_payload]}),
         )
         kb.put_recipe(
             canonical_id=cid,
@@ -251,7 +251,8 @@ def test_item5_unreachable_central_falls_back_to_local(
 
     # Central server unreachable — any call returns 503.
     with respx.mock(base_url=central_url) as mock:
-        mock.get(format_recipe_path(PATH_RECIPE_TPL, cid)).mock(
+        # Central unreachable on the search route → fall back to local.
+        mock.post(PATH_RECIPES_SEARCH).mock(
             return_value=httpx.Response(503, json={"detail": "warming up"}),
         )
         # 1. WRITE: still goes local (the dispatcher writes always go
@@ -544,11 +545,17 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
     assert set(on_disk["sessions"][0]) >= {
         "date", "throughput_before", "throughput_after", "actions_taken",
     }
-    # Finding / Failure / Gap / Pitfall sub-shapes.
+    # Finding / Failure / Gap sub-shapes (pure arbor).
     assert set(on_disk["what_worked"][0])    == {"description", "measured_impact"}
     assert set(on_disk["what_failed"][0])    == {"description", "reason"}
     assert set(on_disk["remaining_gaps"][0]) == {"description", "metrics"}
-    assert set(on_disk["pitfalls"][0])       == {"description"}
+    # Pitfall is arbor's ``description`` plus hyperloom's optional
+    # ``severity`` superset field (same spirit as the ``>=`` checks on
+    # sessions / stack_fingerprint above — a superset of arbor, never a
+    # v2 wire key). The Coordinator stamps ``severity`` for warm-start
+    # ranking; arbor consumers ignore the extra key.
+    assert set(on_disk["pitfalls"][0]) >= {"description"}
+    assert set(on_disk["pitfalls"][0]) <= {"description", "severity"}
 
     # The v2 wire-spec key names MUST NOT appear at the top level
     # (they're translated by the dispatcher only on read from

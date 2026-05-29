@@ -1,20 +1,24 @@
 """Shared T0 (PRELUDE) Cortex anchor — KB warm-start only.
 
-The T0 anchor is the boot-time Cortex KB ritual every session must
-run before EXPLORE starts. With the hypothesize/verify protocol
-retired (no more KB-side session), T0 is now a pure **read** plus
-a small recipe-anchor backfill:
+The T0 anchor is the boot-time KB ritual every session runs before
+EXPLORE starts. Under the v2 RecipeKB design it is a pure **read**
+plus a small recipe-anchor metadata backfill:
 
-1. ``find_recipe_with_fallback`` snapshot → ``.kb_warm.json`` +
-   ``SharedState.warm_start_recipe`` (graceful fallback ladder:
-   exact → same-family → same-class → same-hw → cross-hw).
-2. ``traps`` snapshot → ``.kb_pitfalls.json`` +
-   ``SharedState.warm_start_pitfalls``.
-3. (Optional) ``propose_point(kind=recipe)`` to backfill model-family
-   / model-class / framework attrs onto the recipe anchor when they
-   are missing — keeps PR-A10's same-family fallback queryable for
-   future sessions. The first KEEP / CLOSE update_recipe call will
-   create the anchor on demand anyway, so this step is best-effort.
+1. warm-start via a single ``RecipeKB.get_recipe(canonical_id)`` →
+   ``.kb_warm.json`` + ``SharedState.warm_start_recipe``. Remote goes
+   through the one ``/recipes/search`` route (5-tuple ``label_match``;
+   the server does any exact-vs-relative fallback); local is an exact
+   read of the on-disk recipe.json. The hit is classified ``exact``
+   (returned ``canonical_id`` equals the request) or ``relative`` (the
+   server returned a neighbouring 5-tuple), else ``miss``.
+2. embedded ``pitfalls`` / ``lessons`` → ``.kb_pitfalls.json`` /
+   ``.kb_lessons.json`` + ``SharedState.warm_start_pitfalls`` /
+   ``warm_start_lessons`` — read straight off the warm-start recipe
+   row (1:1 with the recipe under v2; no separate query).
+3. a single ``put_recipe`` metadata stamp (read-modify-write against
+   the LOCAL store) so this 5-tuple's row carries the latest tracing
+   tuple. The first KEEP / CLOSE write refreshes best_config anyway,
+   so this step is best-effort.
 
 The two callers parameterise the helper via two knobs:
 
@@ -303,13 +307,30 @@ def run_t0_anchor(
         precision=_precision or "",
     )
 
-    # Read-modify-write: load existing payload (if any) so this
-    # T0 metadata stamp doesn't clobber best_config / sessions /
-    # what_worked / etc. that the prior CLOSE wrote.
+    # Persist the resolved framework + framework_version back onto
+    # SharedState so the CLOSE/KEEP write path
+    # (coordinator._workload_canonical_id) derives an IDENTICAL cid.
+    # T0 may have lifted framework_version from the stack fingerprint
+    # or importlib auto-detect; the coordinator has neither source, so
+    # without this write-back its re-derivation could differ and the
+    # KEEP/REVERT/CLOSE writes would land on a different recipe row
+    # than the one warm-start just anchored.
+    if _framework:
+        shared_state.framework = _framework
+    if _fw_version:
+        shared_state.framework_version = _fw_version
+
+    # Read-modify-write: load the LOCAL payload (if any) so this T0
+    # metadata stamp doesn't clobber best_config / sessions /
+    # what_worked / etc. that the prior CLOSE wrote locally. We read the
+    # LOCAL store (not the remote-first dispatcher) for the same reason
+    # ``coordinator._kb_amend_recipe`` does: the row we must not lose is
+    # the one this operator wrote locally; a remote-first read could
+    # merge an older central row and downgrade local data on the put.
     try:
-        live = kb.get_recipe(canonical_id=cid) or {}
+        live = kb.local.get_recipe(canonical_id=cid) or {}
     except Exception as exc:  # noqa: BLE001 — defensive
-        log.info("T0 anchor get_recipe non-fatal failure: %s", exc)
+        log.info("T0 anchor local get_recipe non-fatal failure: %s", exc)
         live = {}
 
     # Merge prior extras with the new ones we want to stamp; new
@@ -372,11 +393,14 @@ def run_t0_anchor(
     except Exception:  # noqa: BLE001 — defensive
         log.exception("T0 anchor put_recipe raised unexpectedly")
 
-    # warm_start_recipe — exact 5-tuple lookup, no fallback ladder
-    # under the v2 design. A cold-start session for a model whose
-    # exact 5-tuple has no prior recipe row simply cold-starts;
-    # the optimizer's specialist prompt knows how to handle empty
-    # warm-start.
+    # warm_start_recipe — ONE call through the dispatcher. Remote goes
+    # via the single /recipes/search route (5-tuple label_match) and
+    # the SERVER decides exact-vs-relative match + fallback; local is
+    # an exact arbor-style read of this 5-tuple's recipe.json. We
+    # classify the hit by comparing the returned row's canonical_id to
+    # the requested one: equal => exact (this precise 5-tuple existed);
+    # different => the server returned a relative (fallback) match for a
+    # neighbouring 5-tuple.
     warm_point: dict[str, Any] = {}
     warm_tier: str = "miss"
     warm_conf: float = 0.0
@@ -387,8 +411,16 @@ def run_t0_anchor(
         row = None
     if isinstance(row, dict) and row:
         warm_point = row
-        warm_tier = "exact"
-        warm_conf = 1.0
+        if str(row.get("canonical_id") or "") == cid:
+            warm_tier = "exact"
+            warm_conf = 1.0
+        else:
+            # Server-side fallback returned a neighbouring 5-tuple's
+            # recipe. Still useful as a prior; confidence sits at the
+            # warm-replay trigger threshold (0.7) so it is verified-
+            # before-applied rather than trusted blindly.
+            warm_tier = "relative"
+            warm_conf = 0.7
     # Keep the on-disk warm.json envelope shape stable so existing
     # readers (kb_explorer, breakdown collectors) keep working;
     # new readers should prefer shared_state.warm_start_recipe.
