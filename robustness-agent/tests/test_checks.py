@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from pathlib import Path
@@ -14,7 +13,7 @@ from robustness_agent.checks.event_check import EventCheck
 from robustness_agent.checks.stall_check import StallCheck
 from robustness_agent.conductor import ConductorReader
 from robustness_agent.config import Config
-from robustness_agent.models import ConductorEvent, DiskSnapshot, Severity
+from robustness_agent.models import ConductorEvent, DiskSnapshot
 
 from .conftest import FakeProvider
 

@@ -19,7 +19,6 @@ Covers:
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 import yaml
@@ -33,7 +32,6 @@ from inference_optimizer.orchestrator.action_registry import (
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
-from inference_optimizer.paths import asset_actions_dir
 
 
 # ===========================================================================
