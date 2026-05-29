@@ -24,7 +24,7 @@ constructs one detector instance per reactor and calls
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ..role.prompt_inputs import ReactorContext

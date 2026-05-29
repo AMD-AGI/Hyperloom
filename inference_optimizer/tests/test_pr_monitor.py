@@ -21,22 +21,16 @@ Covers KB_design §3.6 + §3.13 M4:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from inference_optimizer.orchestrator.knowledge_plane import (
-    DOMAIN_REPOS_WILDCARD,
-    DomainRepos,
     KnowledgePlane,
     load_domain_repos,
     pr_node_canonical_id,
 )
 from inference_optimizer.orchestrator.pr_monitor import (
-    DEFAULT_PR_FEED_WINDOW_DAYS,
     DEFAULT_PR_MONITOR_URL,
     PRMonitorClient,
     PRMonitorError,
