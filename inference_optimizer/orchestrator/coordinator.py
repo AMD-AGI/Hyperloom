@@ -60,6 +60,7 @@ from .policy import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from .resource_lock import (
+    KNOWN_LANES,
     ResourceLockManager,
     SqliteLeaseBackend,
     _expand_lanes,
@@ -1940,6 +1941,29 @@ class Coordinator:
             getattr(self.shared_state, "enable_roofline", True),
         ) else "profile"
 
+    def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
+        """Resolve ``(requires_lanes, lease_ttl_sec)`` for a task kind
+        from the ActionRegistry so manually-created tasks inherit the
+        same resource isolation + lease budget the dispatcher applies.
+
+        ``requires_lanes`` is filtered to :data:`KNOWN_LANES` — the
+        registry list also carries capability tags (e.g. ``emit_intent``)
+        that are not dispatcher lanes and would otherwise wedge the task
+        in ``_expand_lanes``. Returns ``([], 0)`` for an unknown action
+        or when the registry is unavailable.
+        """
+        reg = getattr(self, "action_registry", None)
+        if reg is None:
+            return [], 0
+        meta = reg.get(kind)
+        if meta is None:
+            return [], 0
+        lanes = [
+            lane for lane in (getattr(meta, "requires_lanes", ()) or ())
+            if lane in KNOWN_LANES
+        ]
+        return lanes, int(getattr(meta, "lease_ttl_sec", 0) or 0)
+
     async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
         """Build + enqueue a Coordinator-internal analysis task.
 
@@ -1992,10 +2016,13 @@ class Coordinator:
         # written by commits before this PR enqueue at most one extra
         # analysis task on the first resume tick (no compat shim,
         # acceptable per operator decision; see pr.md Migration notes).
+        lanes, ttl = self._registry_lanes_ttl(kind)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=kind,
             params=params,
             idempotency_key=f"internal-analysis-{reason}",
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
         )
         if was_existing:
             log.info(
@@ -5411,10 +5438,13 @@ class Coordinator:
                 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
+        lanes, ttl = self._registry_lanes_ttl(pending.action_name)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
             params=params,
             idempotency_key=f"approved-{pending.proposal_msg_id}",
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
         )
         if was_existing:
             # Defensive path — `approved-{proposal_msg_id}` is unique per
@@ -5639,10 +5669,13 @@ class Coordinator:
             idempotency_key = (
                 str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
             )
+            lanes, ttl = self._registry_lanes_ttl(action_name)
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind=action_name,
                 params=params,
                 idempotency_key=idempotency_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
             )
             if not was_existing:
                 break
