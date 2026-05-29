@@ -103,6 +103,16 @@ DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 # checkout (left over from earlier non-hyperloom layouts on some sandboxes).
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_INFERENCEX_PATH = "/wekafs/hyperloom/InferenceX"
+DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
+
+_KERNEL_BACKEND_ALIASES = {
+    "geak": "GEAK",
+    "claude": "Claude Code",
+    "claude-code": "Claude Code",
+    "claude code": "Claude Code",
+    "codex": "Codex",
+    "cursor": "Cursor",
+}
 
 # Canonical prompt prefix lives in ci/prompt_prefix.txt next to this script.
 # Single source of truth — same file is read by the GitHub workflow Submit
@@ -133,6 +143,28 @@ def _load_default_prompt_prefix() -> str:
     except OSError:
         pass
     return ""
+
+
+def parse_kernel_backends(raw: str | None) -> list[str]:
+    """Normalize user-facing kernel backend names for SaFE's API payload."""
+
+    if not raw:
+        return list(DEFAULT_KERNEL_BACKENDS)
+    out: list[str] = []
+    for part in raw.replace(";", ",").split(","):
+        item = part.strip()
+        if not item:
+            continue
+        key = item.lower()
+        normalized = _KERNEL_BACKEND_ALIASES.get(key)
+        if normalized is None:
+            raise ValueError(
+                f"unknown kernel backend {item!r}; expected one of "
+                "geak, claude, codex, cursor"
+            )
+        if normalized not in out:
+            out.append(normalized)
+    return out or list(DEFAULT_KERNEL_BACKENDS)
 
 # Architectures well-supported by SGLang on ROCm 7.x.
 SGLANG_ARCHS: set[str] = {
@@ -643,6 +675,7 @@ class SafeOptimizeClient:
         inferencex_path: str | None = None,
         prompt_prefix: str | None = None,
         prompt_suffix: str | None = None,
+        kernel_backends: list[str] | None = None,
     ) -> dict:
         # Pick the workspace for this submit. Default = self.submit_workspace
         # (single-workspace mode). When a round-robin pool is configured,
@@ -674,7 +707,7 @@ class SafeOptimizeClient:
             "isl": isl,
             "osl": osl,
             "concurrency": concurrency,
-            "kernelBackends": ["Claude Code"],
+            "kernelBackends": list(kernel_backends or DEFAULT_KERNEL_BACKENDS),
         }
         if image:
             body["image"] = image
@@ -1034,6 +1067,7 @@ def process_model(
     inferencex_path: str | None = None,
     prompt_prefix: str | None = None,
     prompt_suffix: str | None = None,
+    kernel_backends: list[str] | None = None,
     pool_metadata: dict | None = None,
 ) -> SubmissionRecord:
     rec = SubmissionRecord(
@@ -1067,6 +1101,8 @@ def process_model(
     display_name = f"{repo_id.split('/')[-1]}-{precision.lower()}-{framework}-mi300x"
     rec.display_name = display_name
     rec.overrides["mode"] = mode
+    if kernel_backends:
+        rec.overrides["kernel_backends"] = kernel_backends
 
     if dry_run:
         rec.status = "dry-run"
@@ -1152,7 +1188,8 @@ def process_model(
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
             mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path,
-            prompt_prefix=prompt_prefix, prompt_suffix=prompt_suffix)
+            prompt_prefix=prompt_prefix, prompt_suffix=prompt_suffix,
+            kernel_backends=kernel_backends)
     except Exception as e:
         rec.status = "failed"
         rec.error = f"submit_task: {e}"
@@ -2167,6 +2204,12 @@ def _build_parser() -> argparse.ArgumentParser:
                         default=os.environ.get("SAFE_OPTIMIZE_PROMPT_SUFFIX", ""),
                         help="Optional free-form suffix appended to the SaFE-generated "
                              "Hyperloom prompt. (env: $SAFE_OPTIMIZE_PROMPT_SUFFIX)")
+    parser.add_argument("--kernel-opt-backends",
+                        default=os.environ.get("SAFE_OPTIMIZE_KERNEL_BACKENDS", ""),
+                        help="Comma-separated kernel optimization backends to send "
+                             "to SaFE's kernelBackends field. Aliases: geak, "
+                             "claude, codex, cursor. Default: geak,claude,codex "
+                             "(GEAK first).")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="HuggingFace token (or set $HF_TOKEN)")
 
@@ -2266,6 +2309,11 @@ def main() -> int:
     inferencex_path = (args.inferencex_path
                        or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
                        or DEFAULT_INFERENCEX_PATH)
+    try:
+        kernel_backends = parse_kernel_backends(args.kernel_opt_backends)
+    except ValueError as e:
+        log.error("%s", e)
+        return 2
 
     if not api_key and not args.dry_run:
         log.error("no API key set (CLAW_API_KEY / SAFE_API_KEY / --api-key)")
@@ -2275,6 +2323,7 @@ def main() -> int:
              base_url, register_workspace, submit_workspace, volume)
     log.info("Cluster prompt fields: gpu_type=%s inferencex_path=%s",
              gpu_type, inferencex_path)
+    log.info("Kernel backends: %s", ", ".join(kernel_backends))
     if submit_workspaces_pool:
         log.info("submit round-robin pool: %s (overrides --submit-workspace)",
                  ",".join(submit_workspaces_pool))
@@ -2335,6 +2384,7 @@ def main() -> int:
             inferencex_path=inferencex_path,
             prompt_prefix=args.prompt_prefix or None,
             prompt_suffix=args.prompt_suffix or None,
+            kernel_backends=kernel_backends,
             pool_metadata=pool_metadata,
         )
         records.append(rec)
