@@ -387,16 +387,16 @@ async def test_p3_scenario_12_external_kill_marks_abandoned(tmp_path: Path):
     )
     with pytest.raises(asyncio.CancelledError):
         await runner.run(_ctx(tmp_path))
-    journal = Path(
-        dynamic_action_artifact_dir(tmp_path, "dyn-0-1")
-        / "sub_agent_journal.md",
+    art = dynamic_action_artifact_dir(tmp_path, "dyn-0-1")
+    # Cancel now finalises before re-raising: the ABANDONED journal +
+    # an empty proposal_set must be persisted, not left to a later
+    # resume sweep.
+    assert (art / "sub_agent_journal.md").is_file()
+    proposal_set = json.loads(
+        dynamic_action_proposal_set_path(tmp_path, "dyn-0-1").read_text(),
     )
-    # finally-block wrote the journal even though CancelledError
-    # propagated; the journal file must exist (write happens after
-    # the worktree cleanup in finally only when finalise runs — for
-    # ABANDONED the journal is reset by the partial flow; we only
-    # assert the artefact dir survives).
-    assert journal.parent.is_dir()
+    assert proposal_set["empty"] is True
+    assert proposal_set["proposal_set"] == []
 
 
 # ===========================================================================
