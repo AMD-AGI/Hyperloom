@@ -1070,6 +1070,13 @@ class Coordinator:
             getattr(self.shared_state, "kernel_enabled", True)
         )
 
+    def _explore_enabled(self) -> bool:
+        # Mirror the persisted ``explore_enabled`` flag — CLI's
+        # ``--no-explore`` collapses PRELUDE / FRAMEWORK_PR straight to
+        # KERNEL (or SWEEP when --no-kernel is also set). EXPLORE is a
+        # phase, not a role, so there is no role-registry gate here.
+        return bool(getattr(self.shared_state, "explore_enabled", True))
+
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick.
 
@@ -1104,6 +1111,7 @@ class Coordinator:
             framework_phase_enabled=bool(
                 getattr(state, "framework_phase_enabled", True)
             ),
+            explore_enabled=self._explore_enabled(),
             max_hours=max_hours_arg,
         )
         if next_phase is None:
