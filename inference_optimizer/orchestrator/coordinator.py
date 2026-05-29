@@ -36,13 +36,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from .. import cortex_kb_constants as C_KB
 from ..recipe_kb import RecipeKB, recipe_canonical_id
 from ..recipe_snapshot_constants import detect_framework_version
-from ..cortex_kb_client import (
-    CortexKBClient,
-    CortexKBError,
-)
+
+# Severity tags previously imported from cortex_kb_constants. Kept as
+# inline string literals here since the recipe-snapshot v2 schema has
+# no fixed enum for severity; arbor's recipe.json doesn't either.
+# Coordinator only uses these two values.
+_SEVERITY_CRASH:   str = "crash"
+_SEVERITY_REGRESS: str = "regress"
 from . import phase_state as _phase_state
 from .optimization_journal import (
     Journal,
@@ -992,79 +994,39 @@ class Coordinator:
         self.db.close()
 
     async def _cortex_t4_hook(self) -> None:
-        """T4 — drain NDJSON pending queue + finalize recipe.
+        """T4 — finalize recipe at session end.
 
         Called from :meth:`stop` once the reactor / dispatcher loops
         have torn down. Acts as a safety net for the crash / Ctrl-C
         path where the CLOSE phase sequencer did not get to run.
 
         When the CLOSE phase sequencer ran
-        (``close_sequence_done=True``), it already drained the NDJSON
-        queue and called ``cortex_finalize_recipe_and_journal``
-        inline. We early-return so the hook is a no-op in that case
-        — the journal is already finalised and the recipe anchor
-        already carries this session.
+        (``close_sequence_done=True``), it already called
+        ``cortex_finalize_recipe_and_journal`` inline. We
+        early-return so the hook is a no-op in that case — the
+        journal is already finalised and the recipe row already
+        carries this session.
 
-        The legacy ``session_commit`` step was retired alongside the
-        T2/T3 hypothesize/verify protocol; fact writes are session-
-        less, so there is no remote sid to close.
+        Under the v2 RecipeKB design writes are local-only and the
+        legacy NDJSON pending-queue / drain_pending() path is
+        retired. The only T4 action is the safety-net recipe
+        finalize.
         """
         if self.cortex_kb is None:
             return
         if getattr(self.shared_state, "close_sequence_done", False):
-            # CLOSE phase sequencer already ran steps 3 + 4 inline; nothing
-            # left for stop() to do here.
             return
         sid = (self.shared_state.cortex_session_id or "").strip()
         if not sid:
             return
-        # Fact finalize — safety net for the stop() path. The CLOSE
-        # sequencer already runs this as step 2.5; calling it again
-        # here is a no-op (KB merge is idempotent and the journal's
-        # finalize is a write-through of the same fields).
         try:
             self.cortex_finalize_recipe_and_journal()
         except Exception:  # noqa: BLE001 — defensive
             log.exception("cortex T4 fact_finalize fallback failed")
-        # 1. Drain async queue. NDJSON drains *can* take meaningful time
-        #    when Cortex was unreachable mid-run; 60s is the documented
-        #    upper bound.
-        #
-        # Resilience contract (operator requirement May 2026 — "if KB is
-        # not available, do not affect the main logic"): a drain that
-        # raises (programmer bug — drain_pending itself catches every
-        # KB error) or that leaves rows queued (the COMMON CASE when KB
-        # is unreachable for the whole session) must NOT set a
-        # ``stop_reason``. ``stop_reason`` is the LLM-visible "why we
-        # stopped" surface; tagging "cortex_drain_failed" on a routine
-        # KB outage would (a) mislead specialists into thinking the
-        # session ended in failure and (b) violate the soft-degrade
-        # contract. The kb_flusher daemon will pick up leftover rows
-        # next time KB is reachable.
-        try:
-            drain_report = self.cortex_kb.drain_pending(timeout_sec=60.0)
-        except Exception as exc:  # noqa: BLE001 — defensive
-            log.exception("cortex T4 drain_pending failed (KB outage, ignored)")
-            try:
-                self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
-                log.exception("cortex T4 SharedState.save after drain failed")
-            return
-        if drain_report.get("remaining", 0) > 0:
-            log.warning(
-                "cortex T4 drain incomplete: %s remaining; flusher daemon "
-                "should drain on next pickup. Not setting stop_reason — "
-                "KB outage is a soft-degrade signal, not a session "
-                "failure.",
-                drain_report,
-            )
-        # KB session_commit was retired alongside the hypothesize/verify
-        # protocol — fact writes are session-less, so there is no remote
-        # session to close. The drain above is the only T4 KB action.
         try:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
-            log.exception("cortex T4 SharedState.save after drain failed")
+            log.exception("cortex T4 SharedState.save failed")
 
     # ==================================================================
     # phase state machine
@@ -8046,17 +8008,17 @@ class Coordinator:
             return None
         error_class = str(result_dict.get("error_class") or "").lower()
         if error_class in ("crash", "oom", "hang"):
-            return C_KB.SEVERITY_CRASH
+            return _SEVERITY_CRASH
         status = str(result_dict.get("status") or "").lower()
         if status in ("crash", "oom", "hang"):
-            return C_KB.SEVERITY_CRASH
+            return _SEVERITY_CRASH
         gain = result_dict.get("gain_pct")
         try:
             gain_pct = float(gain) if gain is not None else None
         except (TypeError, ValueError):
             gain_pct = None
         if gain_pct is not None and gain_pct <= self.PITFALL_REGRESS_THRESHOLD_PCT:
-            return C_KB.SEVERITY_REGRESS
+            return _SEVERITY_REGRESS
         return None
 
     def _journal_entry_phase(self) -> str:
