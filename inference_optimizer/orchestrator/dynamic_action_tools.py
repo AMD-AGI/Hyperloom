@@ -115,6 +115,22 @@ def _ok(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     return out
 
 
+def _effective_read_limit(max_bytes: int | None) -> int:
+    """Resolve a caller-supplied ``max_bytes`` against the hard cap.
+
+    ``None`` / non-positive falls back to ``MAX_READ_SOURCE_CHARS``;
+    any positive value is clamped down to it so a sub-agent can ask
+    for a smaller targeted read but never exceed the ceiling.
+    """
+    try:
+        n = int(max_bytes) if max_bytes is not None else 0
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return MAX_READ_SOURCE_CHARS
+    return min(n, MAX_READ_SOURCE_CHARS)
+
+
 def _path_under(child: Path, parent: Path) -> bool:
     try:
         child.resolve().relative_to(parent.resolve())
@@ -126,12 +142,14 @@ def _path_under(child: Path, parent: Path) -> bool:
 # ---------------------------------------------------------------------------
 # read_source
 # ---------------------------------------------------------------------------
-def read_source(path: str) -> dict[str, Any]:
+def read_source(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     """Read a file under ``framework_source_roots``.
 
-    Failures (path outside roots, missing file, oversize, etc.) are
-    returned as ``_error`` envelopes so the sub-agent can self-correct
-    without aborting the turn loop.
+    ``max_bytes`` lets the sub-agent request a smaller targeted read;
+    it is clamped to ``MAX_READ_SOURCE_CHARS`` and defaults to it.
+    Failures (path outside roots, missing file, etc.) are returned as
+    ``_error`` envelopes so the sub-agent can self-correct without
+    aborting the turn loop.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -153,9 +171,10 @@ def read_source(path: str) -> dict[str, Any]:
         text = target.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return _error("read_failed", path=raw, detail=repr(exc))
-    truncated = len(text) > MAX_READ_SOURCE_CHARS
+    limit = _effective_read_limit(max_bytes)
+    truncated = len(text) > limit
     if truncated:
-        text = text[:MAX_READ_SOURCE_CHARS]
+        text = text[:limit]
     return _ok({
         "path": raw,
         "content": text,
@@ -169,11 +188,13 @@ def read_source(path: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 def read_session_artifact(
     session_dir: Path, relative_path: str, *, dyn_id: str,
+    max_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Read a whitelisted artefact under ``session_dir``.
 
     ``dyn_id`` is the current dispatch's id; reads addressed at any
     *other* ``dynamic_actions/<other_id>/`` directory are denied.
+    ``max_bytes`` is clamped to ``MAX_READ_SOURCE_CHARS``.
     """
     raw = str(relative_path or "").strip()
     if not raw:
@@ -208,9 +229,10 @@ def read_session_artifact(
         text = target.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return _error("read_failed", path=raw, detail=repr(exc))
-    truncated = len(text) > MAX_READ_SOURCE_CHARS
+    limit = _effective_read_limit(max_bytes)
+    truncated = len(text) > limit
     if truncated:
-        text = text[:MAX_READ_SOURCE_CHARS]
+        text = text[:limit]
     return _ok({
         "path": raw,
         "content": text,
