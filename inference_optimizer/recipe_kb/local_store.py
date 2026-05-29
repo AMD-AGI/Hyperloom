@@ -1042,7 +1042,10 @@ def _normalise_pitfalls(items: list[Any] | None) -> list[dict[str, Any]]:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({"description": str(d.get("description") or "")})
+        out.append({
+            "description": str(d.get("description") or ""),
+            "severity":    str(d.get("severity") or ""),
+        })
     return out
 
 
@@ -1054,7 +1057,9 @@ def _normalise_lessons(items: list[Any] | None) -> list[dict[str, Any]]:
             continue
         out.append({
             "statement":       str(d.get("statement") or ""),
-            "measured_impact": str(d.get("measured_impact") or ""),
+            # Free-form (Coordinator writes a structured dict) — keep
+            # verbatim instead of str()-ing a dict into a lossy string.
+            "measured_impact": d.get("measured_impact") or "",
         })
     return out
 
@@ -1073,11 +1078,22 @@ def _normalise_sessions(items: list[Any] | None) -> list[dict[str, Any]]:
             tput_after = float(d.get("throughput_after") or 0.0)
         except (TypeError, ValueError):
             tput_after = 0.0
+        try:
+            gain_pct = float(d.get("gain_pct") or 0.0)
+        except (TypeError, ValueError):
+            gain_pct = 0.0
+        try:
+            stack_len = int(d.get("stack_len") or 0)
+        except (TypeError, ValueError):
+            stack_len = 0
         out.append({
             "date":              str(d.get("date") or ""),
             "throughput_before": tput_before,
             "throughput_after":  tput_after,
             "actions_taken":     list(d.get("actions_taken") or []),
+            "session_id":        str(d.get("session_id") or ""),
+            "gain_pct":          gain_pct,
+            "stack_len":         stack_len,
         })
     return out
 

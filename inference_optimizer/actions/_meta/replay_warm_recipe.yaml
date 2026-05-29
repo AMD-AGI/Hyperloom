@@ -57,8 +57,9 @@ params_schema:
   warm_recipe_tier:
     type: string
     description: |
-      ``T1_exact`` / ``T1_exact_legacy`` / ``T2_same_shape`` — the
-      fallback-ladder tier that produced this recipe.
+      ``exact`` (precise 5-tuple hit) / ``relative`` (server-returned
+      neighbouring 5-tuple) — the warm-start tier that produced this
+      recipe.
   warm_recipe_conf:
     type: number
     description: |
