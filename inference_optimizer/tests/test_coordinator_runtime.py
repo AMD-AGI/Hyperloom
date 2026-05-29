@@ -18,7 +18,6 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -45,8 +44,6 @@ from inference_optimizer.orchestrator.coordinator import (
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.sub_agent_runner import (
-    RunnerContext,
-    SubAgentResult,
     SubAgentRunner,
 )
 from inference_optimizer.orchestrator.task_registry import Task, TaskRegistry
@@ -54,7 +51,7 @@ from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from inference_optimizer.paths import db_path_for, make_session_dir
+from inference_optimizer.paths import make_session_dir
 from inference_optimizer.session_paths import target_baseline_json
 from inference_optimizer.storage import SqliteConnection
 

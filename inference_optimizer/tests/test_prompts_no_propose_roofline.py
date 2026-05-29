@@ -20,7 +20,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 
 
 # Files whose content is rendered into LLM context. Tests / docs /
