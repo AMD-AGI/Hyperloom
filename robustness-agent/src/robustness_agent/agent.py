@@ -24,7 +24,7 @@ from .checks.event_check import EventCheck
 from .checks.stall_check import StallCheck
 from .conductor import ConductorReader, IntentEmitter
 from .config import Config
-from .models import Alert, Severity
+from .models import Alert
 from .monitors.gpu_monitor import GpuMonitor
 from .monitors.log_tailer import LogTailer
 from .monitors.process_monitor import ProcessMonitor

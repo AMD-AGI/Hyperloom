@@ -56,7 +56,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from import_session_breakdown import (  # noqa: E402
-    parse_file,
     looks_like_session_breakdown,
     looks_like_v1_flat_schema,
     looks_like_universal_schema,

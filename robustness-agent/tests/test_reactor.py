@@ -174,7 +174,6 @@ async def test_reactor_falls_back_to_secondary_when_primary_fails(tmp_path: Path
 @pytest.mark.asyncio
 async def test_reactor_drops_invalid_intents_emitted_by_extra_evaluator(tmp_path: Path):
     from robustness_agent.role.envelope import Intent, IntentType
-    from robustness_agent.signals import Symptom, SymptomSeverity
 
     class CustomLadder(ActionLadder):
         def _intents_for(self, sym):  # type: ignore[override]
