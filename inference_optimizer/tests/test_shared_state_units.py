@@ -9,9 +9,7 @@ This module fills in the gap with small targeted tests.
 
 from __future__ import annotations
 
-from pathlib import Path
 
-import pytest
 
 from inference_optimizer.orchestrator.shared_state import SharedState
 

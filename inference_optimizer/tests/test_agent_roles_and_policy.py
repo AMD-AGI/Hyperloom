@@ -22,7 +22,6 @@ from __future__ import annotations
 import pytest
 
 from inference_optimizer.orchestrator.agent_role import (
-    AgentRole,
     BackendType,
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,

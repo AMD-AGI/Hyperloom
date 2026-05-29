@@ -20,7 +20,6 @@ import logging
 import signal
 import sys
 import time
-from pathlib import Path
 
 from .config import Config
 from .factory import build_reactor_components
