@@ -202,6 +202,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
     "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
     "explore_force_exit_low_budget",    # EXPLORE → next phase when total remaining or phase remaining drops below operator-configured thresholds
+    "no_more_leverage",                 # EXPLORE/KERNEL → SWEEP (non-terminal): steward stop_session or the _has_no_more_leverage safety net via the skip_to_sweep hint. Reclassified from a terminal stop_reason — it now winds the session down through SWEEP → CLOSE instead of aborting.
     # FRAMEWORK_PR phase transitions (PR-A1 / FRAMEWORK_PR phase).
     "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
     "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
@@ -210,7 +211,6 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     # Terminal exits (any phase → CLOSE)
     "robustness_escalated",
     "target_reached",
-    "no_more_leverage",
     "time_exhausted",
     "time_exhausted_during_prelude",
     "user_stop_requested",
@@ -363,13 +363,23 @@ DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
 # do NOT change phase (defensive — prevents an arbitrary
 # robustness-emitted string from steering the state machine).
 ESCALATE_HINT_SKIP_TO_KERNEL:      str = "skip_to_kernel"
+ESCALATE_HINT_SKIP_TO_SWEEP:       str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE:       str = "skip_to_close"
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET:  str = "extend_kernel_budget"
 ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
 
+# ``skip_to_sweep`` is the non-terminal "no more leverage" signal: it
+# winds EXPLORE (or KERNEL) down to SWEEP → CLOSE *without* terminating
+# the optimization. Unlike ``skip_to_close`` (which is terminal via
+# ``_global_terminal`` → ``robustness_escalated``), ``skip_to_sweep``
+# still runs the SWEEP validation pass and produces a clean report.
+# It is set by the IR-7 steward's ``stop_session`` verdict and by the
+# Coordinator's ``_has_no_more_leverage`` safety net — both of which
+# used to set a terminal ``stop_reason='no_more_leverage'``.
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset({
     ESCALATE_HINT_SKIP_TO_KERNEL,
+    ESCALATE_HINT_SKIP_TO_SWEEP,
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
     ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
@@ -973,6 +983,15 @@ def exit_normal_explore(
             "evidence": "llm_escalation",
             "hint": hint,
         }
+    # Non-terminal "no more leverage" signal (steward stop_session or the
+    # Coordinator's _has_no_more_leverage safety net). Winds EXPLORE down
+    # to SWEEP (skipping KERNEL) → CLOSE rather than aborting the session.
+    # compute_next_phase routes the ``no_more_leverage`` reason to SWEEP.
+    if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
+        return "no_more_leverage", {
+            "evidence": "no_more_leverage",
+            "hint": hint,
+        }
     explore_search = getattr(state, "explore_search", None) or {}
     has_v08_signals = (
         isinstance(explore_search, dict)
@@ -1154,10 +1173,18 @@ def exit_normal_kernel(
        defer to the global terminal handler (caller writes
        ``stop_reason=robustness_escalated``). Returns ``None`` here so
        the global path wins.
-    2. Real :func:`compute_plateau_kernel` (KB_design §3.8 §5.2
+    2. ``skip_to_sweep`` hint (non-terminal "no more leverage" from the
+       _has_no_more_leverage safety net) → ``no_more_leverage``; KERNEL
+       already exits to SWEEP so this just forces the wind-down now.
+    3. Real :func:`compute_plateau_kernel` (KB_design §3.8 §5.2
        OR-of clauses).
-    3. Phase budget exhausted.
+    4. Phase budget exhausted.
     """
+    if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
+        return "no_more_leverage", {
+            "evidence": "no_more_leverage",
+            "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
+        }
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0
     triggered, evidence = compute_plateau_kernel(
@@ -1479,6 +1506,11 @@ def compute_next_phase(
             )),
         )
         if norm is not None:
+            # Non-terminal "no more leverage" → wind down to SWEEP,
+            # skipping the KERNEL hop (the steward / safety net judged
+            # there is no leverage left to chase). SWEEP → CLOSE follows.
+            if norm[0] == "no_more_leverage":
+                return PHASE_SWEEP, norm[0], norm[1]
             if kernel_enabled:
                 return PHASE_KERNEL, norm[0], norm[1]
             return PHASE_SWEEP, "no_kernel_skipped", {
@@ -1605,6 +1637,7 @@ __all__ = [
     "ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX",
     "ESCALATE_HINT_SKIP_TO_CLOSE",
     "ESCALATE_HINT_SKIP_TO_KERNEL",
+    "ESCALATE_HINT_SKIP_TO_SWEEP",
     "ESCALATE_HINT_VOCAB",
     "PHASE_ALLOWED_ACTIONS",
     "PHASE_CLOSE",
