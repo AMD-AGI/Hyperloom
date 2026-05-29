@@ -122,6 +122,39 @@ def test_read_source_max_bytes_none_uses_hard_cap(tmp_path: Path, monkeypatch):
     assert res["bytes_returned"] == MAX_READ_SOURCE_CHARS
 
 
+def test_read_source_rejects_dotdot_escape(tmp_path: Path, monkeypatch):
+    """A ``..`` path that string-prefixes a root but escapes it via the
+    filesystem is denied."""
+    root = tmp_path / "root"
+    (root).mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP SECRET", encoding="utf-8")
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", str(root),
+    )
+    res = read_source(str(root / ".." / "secret.txt"))
+    assert res["ok"] is False
+    assert res["reason"] in ("path_traversal_denied",
+                             "path_outside_framework_source_roots")
+
+
+def test_read_source_rejects_symlink_escape(tmp_path: Path, monkeypatch):
+    """A symlink inside a root that points outside it is denied
+    (containment checked on the resolved path)."""
+    root = tmp_path / "root"
+    root.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP SECRET", encoding="utf-8")
+    link = root / "leak.txt"
+    link.symlink_to(secret)
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", str(root),
+    )
+    res = read_source(str(link))
+    assert res["ok"] is False
+    assert res["reason"] == "path_outside_framework_source_roots"
+
+
 # ===========================================================================
 # read_session_artifact — whitelist + cross-dyn_id isolation
 # ===========================================================================
@@ -158,6 +191,33 @@ def test_read_session_artifact_cross_dyn_id_isolation(tmp_path: Path):
         dyn_id="dyn-0-1",
     )
     assert res["reason"] == "cross_dyn_id_isolation"
+
+
+def test_read_session_artifact_cross_dyn_isolation_runs_dynamic(tmp_path: Path):
+    """Cross-dyn isolation also covers another dispatch's worktree
+    under runs/dynamic/<other>."""
+    other = tmp_path / "runs/dynamic/dyn-9-9/worktree/x.py"
+    other.parent.mkdir(parents=True)
+    other.write_text("x", encoding="utf-8")
+    res = read_session_artifact(
+        tmp_path,
+        "runs/dynamic/dyn-9-9/worktree/x.py",
+        dyn_id="dyn-0-1",
+    )
+    assert res["reason"] == "cross_dyn_id_isolation"
+
+
+def test_read_session_artifact_own_runs_dynamic_allowed(tmp_path: Path):
+    own = tmp_path / "runs/dynamic/dyn-0-1/worktree/x.py"
+    own.parent.mkdir(parents=True)
+    own.write_text("ok", encoding="utf-8")
+    res = read_session_artifact(
+        tmp_path,
+        "runs/dynamic/dyn-0-1/worktree/x.py",
+        dyn_id="dyn-0-1",
+    )
+    assert res["ok"] is True
+    assert res["content"] == "ok"
 
 
 def test_read_session_artifact_happy_path(tmp_path: Path):
