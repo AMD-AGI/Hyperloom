@@ -1187,9 +1187,9 @@ class Coordinator:
             _root = (
                 _os.environ.get("HYPERLOOM_LOCAL_KB_ROOT")
                 or (
-                    f"{_os.environ['USER_DATA_PATH']}/recipe_kb"
+                    f"{_os.environ['USER_DATA_PATH']}/kb"
                     if _os.environ.get("USER_DATA_PATH")
-                    else "/workspace/hyperloom/recipe_kb"
+                    else "/workspace/hyperloom/kb"
                 )
             )
             kb = RecipeKB(local=LocalRecipeStore(root=_Path(_root)), remote=None)
