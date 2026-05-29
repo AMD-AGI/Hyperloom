@@ -2712,17 +2712,22 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
 def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     """Resolve the local recipe-snapshot KB root.
 
+    The contract per the local-kb-recipe-snapshot-requirements doc
+    (§2): "本地 KB 路径固定放在 ``${USER_DATA_PATH}/kb``". The
+    ``--local-kb-root`` and ``$HYPERLOOM_LOCAL_KB_ROOT`` overrides
+    exist for tests + sandbox isolation; the default for the
+    operator-visible runtime path is fixed.
+
     Resolution ladder (highest priority first):
 
-    1. ``--local-kb-root <path>`` — explicit operator override.
-    2. ``$HYPERLOOM_LOCAL_KB_ROOT`` — env override (mirrors the
-       same precedence pattern we use for ``--cortex-kb-url``).
-    3. ``$USER_DATA_PATH/recipe_kb/`` — per-user default; matches
-       the rest of the optimizer's session-data layout so a single
-       USER_DATA_PATH override moves the whole KB tail.
-    4. ``/workspace/hyperloom/recipe_kb/`` — container fallback
-       when even ``$USER_DATA_PATH`` isn't set (degraded sandbox /
-       fresh-image boot).
+    1. ``--local-kb-root <path>`` — explicit operator override
+       (typically only used by tests).
+    2. ``$HYPERLOOM_LOCAL_KB_ROOT`` — env override.
+    3. ``$USER_DATA_PATH/kb`` — the documented default. A single
+       ``USER_DATA_PATH`` override moves the whole KB tail.
+    4. ``/workspace/hyperloom/kb`` — container fallback when
+       ``$USER_DATA_PATH`` isn't set (degraded sandbox / fresh-image
+       boot).
 
     The directory is NOT created here — :class:`LocalRecipeStore`
     handles lazy creation on first write so a degraded run that
@@ -2736,8 +2741,8 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
         return Path(str(explicit).strip())
     user_data = os.environ.get("USER_DATA_PATH", "").strip()
     if user_data:
-        return Path(user_data) / "recipe_kb"
-    return Path("/workspace/hyperloom") / "recipe_kb"
+        return Path(user_data) / "kb"
+    return Path("/workspace/hyperloom") / "kb"
 
 
 def _build_recipe_kb_dispatcher(
@@ -4914,8 +4919,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filesystem root for the local recipe-snapshot KB store. "
              "All writes (put_recipe / append_attempt / delete_recipe) go "
              "here regardless of --cortex-kb-url. Defaults to "
-             "$HYPERLOOM_LOCAL_KB_ROOT, then $USER_DATA_PATH/recipe_kb/, "
-             "then /workspace/hyperloom/recipe_kb/. Layout is a 5-level "
+             "$HYPERLOOM_LOCAL_KB_ROOT, then $USER_DATA_PATH/kb, "
+             "then /workspace/hyperloom/kb. Layout is a 5-level "
              "directory tree keyed by canonical_id components "
              "(model -> hardware -> framework -> framework_version -> "
              "precision); each leaf holds recipe.json + history/ + "
