@@ -690,6 +690,56 @@ def test_analyze_gate_clears_when_cache_matches_trace(session_dir):
     assert todo == ""
 
 
+def test_analyze_gate_clears_when_only_trace_analyze_populated(session_dir):
+    """Repro: M4 renamed the cache field ``last_select_kernels`` ->
+    ``last_trace_analyze``. The production ``select_kernels`` handler
+    populates ONLY ``last_trace_analyze`` (canonical), leaving the legacy
+    ``last_select_kernels`` empty. The TODO 3/5 analyze gate MUST read the
+    canonical field so it clears after select_kernels runs; otherwise the
+    orchestration loops re-emitting ``select_kernels`` forever and
+    ``kernel_opt`` never fires (observed: every session stalled at
+    kernel_opt_attempts=0)."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {}  # legacy field stays empty post-M4
+    s.last_trace_analyze = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "candidates_path": "/tmp/cands.json",
+        "reusable_native_kernel_ids": ["k001", "k002"],
+    }
+    todo = coord._required_next_step()
+    assert "analyze is required now" not in todo, (
+        "TODO 3/5 select_kernels loop: the analyze gate read the legacy "
+        f"last_select_kernels instead of canonical last_trace_analyze: {todo!r}"
+    )
+
+
+def test_all_reusable_kernels_rejected_reads_canonical_trace_analyze(session_dir):
+    """Companion to the analyze-gate fix: ``_all_reusable_kernels_rejected``
+    must read the canonical ``last_trace_analyze`` cache. Reading the legacy
+    ``last_select_kernels`` (empty post-M4) made it return True (vacuously
+    'all rejected'), which would let the KERNEL phase wind down / skip
+    kernel_opt entirely once the select_kernels TODO loop was fixed."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _write_baseline_json(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.last_profile_trace = "/tmp/profile.tar.gz"
+    s.last_select_kernels = {}  # legacy field empty post-M4
+    s.last_trace_analyze = {
+        "trace_input": "/tmp/profile.tar.gz",
+        "reusable_native_kernel_ids": ["k001", "k002"],
+    }
+    # No kernel rejected yet -> NOT all rejected (k001/k002 still tryable).
+    assert coord._all_reusable_kernels_rejected() is False
+    # After both rejected -> all rejected.
+    s.rejected_kernel_ids = ["k001", "k002"]
+    assert coord._all_reusable_kernels_rejected() is True
+
+
 def test_select_kernels_gate_still_blocks_run_optimization_request(session_dir):
     """The request-layer gate on ``run_optimization`` MUST still fire
     when ``last_select_kernels`` is stale. This is the sole remaining

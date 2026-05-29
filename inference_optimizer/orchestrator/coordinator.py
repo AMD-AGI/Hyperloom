@@ -2595,7 +2595,17 @@ class Coordinator:
         }
 
     def _all_reusable_kernels_rejected(self) -> bool:
-        select = self.shared_state.last_select_kernels or {}
+        # Main M4 renamed the cache field ``last_select_kernels`` ->
+        # ``last_trace_analyze``; read the canonical field first (legacy
+        # fallback for resume parity). Reading the legacy field alone made
+        # this return True post-M4 (empty reusable set), which would let the
+        # KERNEL phase skip kernel_opt entirely once the select_kernels TODO
+        # loop was fixed.
+        select = (
+            self.shared_state.last_trace_analyze
+            or self.shared_state.last_select_kernels
+            or {}
+        )
         reusable = {
             str(k) for k in (select.get("reusable_native_kernel_ids") or [])
             if k
@@ -3131,7 +3141,18 @@ class Coordinator:
             # only -- explore actions (params/backends/sweep/report) are
             # not blocked; only run_optimization is hard-gated on the
             # same cache by `_sequence_denial_for_request`.
-            cached = self.shared_state.last_select_kernels or {}
+            # Main M4 renamed the cache field ``last_select_kernels`` ->
+            # ``last_trace_analyze``; the handler now populates ONLY the
+            # canonical field, so read it first (legacy fallback for resume
+            # parity). Reading the legacy field alone made this TODO loop
+            # forever — every select_kernels_done landed in last_trace_analyze
+            # but the gate kept re-asking for select_kernels (kernel_opt never
+            # fired). Mirror the read order used by _sequence_denial_for_request.
+            cached = (
+                self.shared_state.last_trace_analyze
+                or self.shared_state.last_select_kernels
+                or {}
+            )
             current_trace = self.shared_state.last_profile_trace
             cache_matches_trace = (
                 isinstance(cached, dict)
@@ -3140,7 +3161,7 @@ class Coordinator:
             if not cache_matches_trace:
                 return (
                     "TODO 3/5: analyze is required now. last_profile_trace "
-                    f"={current_trace!r} but last_select_kernels is "
+                    f"={current_trace!r} but last_trace_analyze is "
                     "empty/stale; TraceLens has not yet produced "
                     "analysis.md for this trace. Emit "
                     "request{target_agent='kernel', kind='select_kernels', "

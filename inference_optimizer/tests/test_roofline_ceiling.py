@@ -595,12 +595,16 @@ class TestResolveEffectiveConcurrency:
         )
         assert _resolve_effective_concurrency(state) == 64
 
-    def test_state_conc_8_default_still_takes_precedence_over_yaml(
+    def test_baseline_yaml_conc_is_authoritative_over_stale_state_conc(
         self, tmp_path,
     ):
-        """If operator explicitly sets state.conc (>0), trust them
-        regardless of the baseline yaml. Only conc=0 triggers the
-        yaml fallback."""
+        """P0 fix (priority inverted): the materialized baseline yaml's
+        ``CONC`` is the ground truth the Magpie subprocess actually ran
+        with, so it wins over ``state.conc`` even when the latter is
+        positive. This reproduces the e2e bug where ``state.conc`` stayed
+        at the SharedState default 8 while the run actually used CONC=64
+        (session 095726Z): the old code returned 8 and under-counted the
+        ceiling ~8x; the fix returns 64."""
         from inference_optimizer.orchestrator.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
@@ -610,12 +614,12 @@ class TestResolveEffectiveConcurrency:
             encoding="utf-8",
         )
         state = SimpleNamespace(
-            conc=8,  # explicit operator value
+            conc=8,  # stale SharedState default
             last_baseline={
                 "extras": {"materialized_config": str(yaml_path)},
             },
         )
-        assert _resolve_effective_concurrency(state) == 8
+        assert _resolve_effective_concurrency(state) == 64
 
     def test_missing_yaml_falls_back_to_one(self):
         from inference_optimizer.orchestrator.roofline_ceiling import (
@@ -689,12 +693,70 @@ class TestResolveEffectiveConcurrency:
             last_baseline={"extras": {"materialized_config": str(yaml_path)}},
         )
         peak_with_yaml = compute_peak_from_state(state)
-        # Same call but conc=1 (state.conc set explicitly to 1, no fallback)
+        # Drop the yaml so resolution falls through to state.conc=1 (yaml is
+        # authoritative under the P0 fix, so it would otherwise still win).
+        state.last_baseline = {}
         state.conc = 1
         peak_with_conc_1 = compute_peak_from_state(state)
         # batch=64 amortizes weight reads 64×, so the yaml-resolved peak
         # must be substantially higher than the conc=1 peak.
         assert peak_with_yaml > 10 * peak_with_conc_1
+
+
+class TestMoEBatchSaturation:
+    """P1 fix: the MoE weight-read term grows with batch as the union of
+    activated experts saturates toward all experts. A constant
+    ``active_weight_bytes`` (B=1 routing) over-amortizes at high batch and
+    inflates the ceiling (within% collapses below the real value)."""
+
+    _COMMON = dict(
+        gpu_type="mi355x", num_gpus=1, weight_bytes=60_000_000_000,
+        num_layers=48, num_kv_heads=4, head_dim=128, kv_dtype_bytes=2.0,
+        isl=256, osl=256,
+    )
+
+    def test_saturates_to_dense_at_high_batch(self):
+        # 128 experts, top-8 → activated_fraction = min(1, B*8/128); at
+        # B=16 it hits 1.0, so weight read == full weight_bytes == dense.
+        moe = compute_theoretical_peak_output_tok_per_sec(
+            **self._COMMON, concurrency=64,
+            num_experts=128, experts_per_tok=8,
+            expert_weight_bytes=53_000_000_000,
+        )
+        dense = compute_theoretical_peak_output_tok_per_sec(
+            **self._COMMON, concurrency=64,  # no expert fields -> weight_bytes
+        )
+        assert moe == pytest.approx(dense, rel=1e-6)
+
+    def test_saturation_lowers_ceiling_vs_constant_active(self):
+        # Old behaviour: constant active_weight_bytes regardless of batch.
+        old = compute_theoretical_peak_output_tok_per_sec(
+            **self._COMMON, concurrency=64,
+            active_weight_bytes=10_000_000_000,
+        )
+        # Fixed: expert union saturates at B=64 -> effective weight ~ full.
+        new = compute_theoretical_peak_output_tok_per_sec(
+            **self._COMMON, concurrency=64,
+            num_experts=128, experts_per_tok=8,
+            expert_weight_bytes=53_000_000_000,
+        )
+        # Larger effective weight -> lower ceiling -> within% rises to a
+        # sensible value instead of collapsing.
+        assert new < old
+
+    def test_batch1_matches_active(self):
+        # At B=1 the saturated weight == non_expert + (k/n)*expert == active.
+        non_expert = 60_000_000_000 - 53_000_000_000
+        active = non_expert + int((8 / 128) * 53_000_000_000)
+        sat = compute_theoretical_peak_output_tok_per_sec(
+            **self._COMMON, concurrency=1,
+            num_experts=128, experts_per_tok=8,
+            expert_weight_bytes=53_000_000_000,
+        )
+        constant_active = compute_theoretical_peak_output_tok_per_sec(
+            **self._COMMON, concurrency=1, active_weight_bytes=active,
+        )
+        assert sat == pytest.approx(constant_active, rel=1e-3)
 
 
 class TestHWSpecsTable:

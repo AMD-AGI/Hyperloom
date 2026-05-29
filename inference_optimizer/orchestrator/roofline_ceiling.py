@@ -120,6 +120,13 @@ class ModelMeta:
     head_dim: int
     weight_dtype_bytes: float
     active_weight_bytes: int = 0
+    # MoE expert decomposition (0 for dense). Enables batch-aware expert
+    # saturation in the peak formula: at batch B the union of activated
+    # experts approaches all of them, so the weight-read term must grow
+    # from ``active`` (B=1) toward the full ``weight_bytes`` (high B).
+    num_experts: int = 0
+    experts_per_tok: int = 0
+    expert_weight_bytes: int = 0
 
 
 def _read_total_size(model_path: Path) -> int | None:
@@ -213,10 +220,35 @@ def _compute_active_weight_bytes(
         safetensors mismatch (quantized experts, accounting drift);
         stay safe and keep the dense-equivalent divisor
     """
+    active, _total_expert, _ne, _ept = _compute_expert_decomposition(
+        cfg, weight_bytes=weight_bytes, dtype_bytes=dtype_bytes,
+    )
+    return active
+
+
+def _compute_expert_decomposition(
+    cfg: dict[str, Any],
+    *,
+    weight_bytes: int,
+    dtype_bytes: float,
+) -> tuple[int, int, int, int]:
+    """MoE decomposition for the batch-aware roofline.
+
+    Returns ``(active_weight_bytes, total_expert_bytes, num_experts,
+    experts_per_tok)``. ``active_weight_bytes`` is the B=1 per-token weight
+    IO (non-expert + routed fraction of experts). ``total_expert_bytes`` is
+    the full routed-expert pool, used by the peak formula to grow the
+    weight term from ``active`` (B=1) toward ``weight_bytes`` as the batch
+    saturates the activated-expert union.
+
+    Safe degrade (dense / unknown geometry): returns
+    ``(weight_bytes, 0, 0, 0)`` so callers fall back to the dense
+    ``weight_bytes`` divisor and skip expert saturation.
+    """
     num_experts = int(cfg.get("num_experts") or 0)
     experts_per_tok = int(cfg.get("num_experts_per_tok") or 0)
     if num_experts <= 0 or experts_per_tok <= 0:
-        return int(weight_bytes)
+        return int(weight_bytes), 0, 0, 0
     hidden_size = int(cfg.get("hidden_size") or 0)
     num_layers = int(cfg.get("num_hidden_layers") or 0)
     moe_inter = int(
@@ -225,18 +257,23 @@ def _compute_active_weight_bytes(
         or 0
     )
     if hidden_size <= 0 or num_layers <= 0 or moe_inter <= 0 or dtype_bytes <= 0:
-        return int(weight_bytes)
+        return int(weight_bytes), 0, 0, 0
     expert_bytes_per_layer = (
         num_experts * 3 * hidden_size * moe_inter * dtype_bytes
     )
     total_expert_bytes = int(num_layers * expert_bytes_per_layer)
     if total_expert_bytes <= 0 or total_expert_bytes >= int(weight_bytes):
-        return int(weight_bytes)
+        return int(weight_bytes), 0, 0, 0
     non_expert_bytes = int(weight_bytes) - total_expert_bytes
     active_expert_bytes = int(
         (experts_per_tok / num_experts) * total_expert_bytes
     )
-    return non_expert_bytes + active_expert_bytes
+    return (
+        non_expert_bytes + active_expert_bytes,
+        total_expert_bytes,
+        num_experts,
+        experts_per_tok,
+    )
 
 
 def load_model_meta(
@@ -268,8 +305,10 @@ def load_model_meta(
     dtype_bytes = _resolve_dtype_bytes(
         cfg.get("torch_dtype") or precision_hint
     )
-    active_weight_bytes = _compute_active_weight_bytes(
-        cfg, weight_bytes=weight_bytes, dtype_bytes=dtype_bytes,
+    active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok = (
+        _compute_expert_decomposition(
+            cfg, weight_bytes=weight_bytes, dtype_bytes=dtype_bytes,
+        )
     )
     return ModelMeta(
         weight_bytes=weight_bytes,
@@ -278,6 +317,9 @@ def load_model_meta(
         head_dim=_derive_head_dim(cfg),
         weight_dtype_bytes=dtype_bytes,
         active_weight_bytes=active_weight_bytes,
+        num_experts=num_experts,
+        experts_per_tok=experts_per_tok,
+        expert_weight_bytes=total_expert_bytes,
     )
 
 
@@ -312,6 +354,9 @@ def compute_theoretical_peak_output_tok_per_sec(
     osl: int,
     concurrency: int,
     active_weight_bytes: int = 0,
+    num_experts: int = 0,
+    experts_per_tok: int = 0,
+    expert_weight_bytes: int = 0,
 ) -> float:
     """Decode-only memory-bound ceiling for ``output_throughput``.
 
@@ -348,11 +393,33 @@ def compute_theoretical_peak_output_tok_per_sec(
     # Average KV-cache length during decode: read isl + already-decoded
     # tokens, averaged over the osl decode steps.
     kv_seq_len = max(int(isl) + int(osl) // 2, 1)
-    effective_weight = (
-        int(active_weight_bytes)
-        if active_weight_bytes and active_weight_bytes > 0
-        else int(weight_bytes)
-    )
+    # Per-decode-step weight IO. For MoE, the union of experts activated
+    # across the ``batch`` tokens saturates toward all of them as batch
+    # grows: at B=1 only ``experts_per_tok/num_experts`` fire (==
+    # active_weight_bytes); by B≈num_experts/experts_per_tok essentially
+    # every expert is read each step (== weight_bytes). Model that with
+    # ``activated_fraction = min(1, B * experts_per_tok / num_experts)``;
+    # using a constant ``active_weight_bytes`` here would over-amortize the
+    # expert weights at high batch and inflate the ceiling. Dense models
+    # (num_experts==0) keep the full ``weight_bytes`` read each step.
+    if (
+        num_experts > 0
+        and experts_per_tok > 0
+        and expert_weight_bytes > 0
+    ):
+        non_expert_bytes = max(int(weight_bytes) - int(expert_weight_bytes), 0)
+        activated_fraction = min(
+            1.0, batch * experts_per_tok / num_experts
+        )
+        effective_weight = (
+            non_expert_bytes + activated_fraction * int(expert_weight_bytes)
+        )
+    else:
+        effective_weight = float(
+            int(active_weight_bytes)
+            if active_weight_bytes and active_weight_bytes > 0
+            else int(weight_bytes)
+        )
     bytes_per_token_total = (
         effective_weight / batch + kv_bytes * kv_seq_len
     )
@@ -361,50 +428,60 @@ def compute_theoretical_peak_output_tok_per_sec(
     return bw_total_bytes_per_sec / bytes_per_token_total
 
 
+def _read_baseline_yaml_conc(state: Any) -> int:
+    """Read ``benchmark.envs.CONC`` from the materialized baseline yaml.
+
+    This is the ground-truth concurrency the Magpie subprocess actually
+    ran with. Returns ``0`` when the file / field is unreadable.
+    """
+    last_bl = getattr(state, "last_baseline", None) or {}
+    if not isinstance(last_bl, dict):
+        return 0
+    extras = last_bl.get("extras") or {}
+    cfg_path = extras.get("materialized_config") if isinstance(extras, dict) else ""
+    if not cfg_path:
+        return 0
+    try:
+        import yaml as _yaml
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = _yaml.safe_load(f) or {}
+        envs = (cfg.get("benchmark") or {}).get("envs") or {}
+        raw = envs.get("CONC")
+        if raw is not None:
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+    except Exception:  # noqa: BLE001 — yaml IO / parse is best-effort
+        pass
+    return 0
+
+
 def _resolve_effective_concurrency(state: Any) -> int:
-    """Best-effort resolution of the concurrency the actual benchmark used.
+    """Resolve the concurrency the actual benchmark ran with.
 
-    Fallback chain (any positive value wins):
+    Priority (authoritative first):
 
-      1. ``state.conc`` (SharedState field, populated by ``cli._init_fresh_
-         session`` from ``$CONC`` / yaml). Subject to a default-vs-stale
-         pitfall: when an operator launches without ``--conc`` / ``$CONC``,
-         this stays at the SharedState dataclass default (typically 8)
-         while the materialized baseline yaml carries the ci-config
-         ``CONC: 64``. Reading state.conc alone produces an 8x
-         under-counted ceiling.
-      2. ``state.last_baseline.extras.materialized_config`` →
-         ``envs.CONC`` in the on-disk baseline yaml. This is the
-         ground-truth value the Magpie subprocess actually ran with;
-         we treat it as authoritative whenever the file is readable.
+      1. ``state.last_baseline.extras.materialized_config`` →
+         ``benchmark.envs.CONC`` in the on-disk baseline yaml. This is the
+         ground-truth value the Magpie subprocess actually ran with, so it
+         is authoritative whenever the file is readable. It is checked
+         FIRST because ``state.conc`` has a default-vs-stale pitfall: when
+         an operator launches without ``--conc`` / ``$CONC``, ``state.conc``
+         stays at the SharedState dataclass default (typically 8) while the
+         yaml carries the real ``CONC: 64`` — reading ``state.conc`` first
+         (the old behaviour) produced an 8x under-counted ceiling.
+      2. ``state.conc`` (SharedState field) when the yaml is unavailable.
       3. ``1`` as the ultimate fallback so the formula divisor never
-         degenerates (and matches the single-stream interpretation).
+         degenerates (matches the single-stream interpretation).
 
     Returns ``int`` >= 1.
     """
+    yaml_conc = _read_baseline_yaml_conc(state)
+    if yaml_conc > 0:
+        return yaml_conc
     conc = int(getattr(state, "conc", 0) or 0)
     if conc > 0:
         return conc
-    last_bl = getattr(state, "last_baseline", None) or {}
-    if isinstance(last_bl, dict):
-        extras = last_bl.get("extras") or {}
-        cfg_path = (
-            extras.get("materialized_config")
-            if isinstance(extras, dict) else ""
-        )
-        if cfg_path:
-            try:
-                import yaml as _yaml
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cfg = _yaml.safe_load(f) or {}
-                envs = (cfg.get("benchmark") or {}).get("envs") or {}
-                raw = envs.get("CONC")
-                if raw is not None:
-                    parsed = int(raw)
-                    if parsed > 0:
-                        return parsed
-            except Exception:  # noqa: BLE001 — yaml IO / parse is best-effort
-                pass
     return 1
 
 
@@ -416,9 +493,10 @@ def compute_peak_from_state(state: Any) -> float:
     the value into history entries unconditionally.
 
     Concurrency is resolved via :func:`_resolve_effective_concurrency`
-    (state.conc → baseline yaml envs.CONC → 1), not ``state.conc``
-    directly, so a SharedState default-8 does not under-count the
-    divisor for a session whose actual benchmark CONC was 64.
+    (baseline yaml envs.CONC → state.conc → 1), so a SharedState default-8
+    does not under-count the divisor for a session whose actual benchmark
+    CONC was 64. MoE expert saturation is batch-aware via the expert
+    decomposition fields passed below.
     """
     meta = load_model_meta(
         getattr(state, "model_path", ""),
@@ -431,6 +509,9 @@ def compute_peak_from_state(state: Any) -> float:
         num_gpus=int(getattr(state, "tp", 0) or 0),
         weight_bytes=meta.weight_bytes,
         active_weight_bytes=meta.active_weight_bytes,
+        num_experts=meta.num_experts,
+        experts_per_tok=meta.experts_per_tok,
+        expert_weight_bytes=meta.expert_weight_bytes,
         num_layers=meta.num_layers,
         num_kv_heads=meta.num_kv_heads,
         head_dim=meta.head_dim,
