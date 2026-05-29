@@ -2516,6 +2516,14 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
         Path(__file__).resolve().parent / "scripts" / "preflight_kb.sh"
     )
     env = os.environ.copy()
+    # Only probe a remote KB the operator explicitly configured. A
+    # ``--cortex-kb-url`` flag isn't visible to the probe script via
+    # the environment unless we inject it here; with neither flag nor
+    # ``$CORTEX_KB_URL`` set the script sees an empty URL and skips the
+    # KB branch (local-only — there is no hard-coded default to probe).
+    cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
+    if cortex_url:
+        env["CORTEX_KB_URL"] = cortex_url
     if explicit_kb:
         env["SKIP_KB_PROBE"] = "1"
     if explicit_pr:
@@ -2777,11 +2785,10 @@ def _build_recipe_kb_dispatcher(
     if not cortex_url:
         cortex_url = (os.environ.get("CORTEX_KB_URL", "") or "").strip()
     if not cortex_url:
-        # No URL configured anywhere — local-only. We deliberately
-        # do NOT fall back to ``DEFAULT_KB_URL`` here: the default
-        # only applies when the operator HAS opted in to remote
-        # reads but didn't override the URL. With nothing
-        # configured we infer "operator wants local-only".
+        # No URL configured anywhere — local-only. There is no
+        # hard-coded default endpoint to fall back to (the old central
+        # kb-service default was retired): with nothing configured the
+        # operator wants local-only.
         return RecipeKB(local=local_store, remote=None)
 
     remote = RemoteRecipeClient(
@@ -4825,12 +4832,14 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="cortex_kb_url",
         type=str,
         default=None,
-        help="Override CORTEX_KB_URL for this run (default: env value or "
-             "http://kb-service.primus-cortex.svc.cluster.local). Under "
-             "the recipe-snapshot v2 cutover the central kb-service is "
-             "queried for READS only (writes always go to --local-kb-root); "
-             "an unreachable URL degrades the dispatcher to local-only "
-             "transparently — no need to also pass --degraded-kb.",
+        help="Remote recipe-snapshot KB URL (read-only) for this run; "
+             "also settable via $CORTEX_KB_URL. Leave it UNSET to run "
+             "fully local — there is no default endpoint, so the "
+             "optimizer never connects to a remote KB unless you pass "
+             "this explicitly. Writes always go to --local-kb-root "
+             "regardless; an explicitly-configured but unreachable URL "
+             "degrades the dispatcher to local-only transparently (no "
+             "need to also pass --degraded-kb).",
     )
     opt.add_argument(
         "--local-kb-root",
@@ -4896,11 +4905,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.7,
         help="Minimum ``warm_start_recipe.confidence`` required to "
-             "trigger the auto-replay. Default 0.7 means only T1_exact "
-             "(0.85) / T1_exact_legacy (0.80) / T2_same_shape (0.70) "
-             "fire; same-class / same-hw / cross-hw fall-throughs do "
-             "not (their best_config is too far from this workload to "
-             "be worth a verify spend).",
+             "trigger the auto-replay. Default 0.7 means an ``exact`` "
+             "5-tuple hit (conf 1.0) and a server-returned ``relative`` "
+             "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
+             "does not. Raise it above 0.7 to require an exact hit "
+             "before spending a verify on the warm config.",
     )
     opt.add_argument(
         "--warm-replay-min-reproduce-pct",
