@@ -1,18 +1,15 @@
-"""Regression tests for the auth-proxy URL force-override in ``_preflight``.
+"""Regression tests for direct-gateway auth setup in ``_preflight``.
 
-The skill's failure mode that motivated these tests:
+The failure mode that motivated these tests:
 
-* User has ``ANTHROPIC_BASE_URL`` already set in env (shell rc, ``.env``,
-  k8s secret, container env) pointing at the upstream gateway.
-* Old ``_preflight()`` used ``os.environ.setdefault`` for ``ANTHROPIC_BASE_URL``
-  → the externally-preset URL was preserved → Claude CLI bypassed the auth-proxy
-  on ``127.0.0.1:4002`` → x-api-key reached the gateway → 401 → SDK hung at
-  "Waiting for first result before closing stdin".
+* User has legacy ``ANTHROPIC_BASE_URL`` / auth aliases in env (shell rc,
+  ``.env``, k8s secret, container env) pointing at the retired local
+  ``127.0.0.1:4002`` auth-proxy or carrying an old key.
+* ``_preflight()`` must rewrite the URL and key aliases so Claude/Codex
+  talk directly to the upstream gateway with the current ``SAFE_API_KEY``.
 
-These tests pin the new contract: when the auth-proxy is alive,
-``ANTHROPIC_BASE_URL`` and ``OPENAI_BASE_URL`` are force-overridden to the
-proxy URL regardless of preset value, and the two vars are kept consistent
-on both the success and the fallback paths.
+These tests pin the new contract: auth-proxy is retired; URL and key
+aliases are made consistent with ``OPENAI_BASE_URL`` / ``SAFE_API_KEY``.
 """
 
 from __future__ import annotations
@@ -29,46 +26,16 @@ from inference_optimizer import cli
 
 
 # ---------------------------------------------------------------------------
-# pure helper: _derive_proxy_urls
-# ---------------------------------------------------------------------------
-def test_derive_proxy_urls_strips_trailing_v1_for_anthropic_only():
-    upstream = "https://oci-slc.example-internal-host.invalid/api/v1/llm-proxy/v1"
-    a, o = cli._derive_proxy_urls(upstream, 4002)
-    assert a == "http://127.0.0.1:4002/api/v1/llm-proxy"
-    assert o == "http://127.0.0.1:4002/api/v1/llm-proxy/v1"
-
-
-def test_derive_proxy_urls_no_v1_suffix_keeps_path():
-    upstream = "https://gateway.example/llm/proxy"
-    a, o = cli._derive_proxy_urls(upstream, 4002)
-    # No trailing /v1, so anthropic and openai paths are identical.
-    assert a == "http://127.0.0.1:4002/llm/proxy"
-    assert o == "http://127.0.0.1:4002/llm/proxy"
-
-
-def test_derive_proxy_urls_honours_custom_port():
-    a, o = cli._derive_proxy_urls(
-        "https://x/api/v1/llm-proxy/v1", proxy_port=4099
-    )
-    assert a == "http://127.0.0.1:4099/api/v1/llm-proxy"
-    assert o == "http://127.0.0.1:4099/api/v1/llm-proxy/v1"
-
-
-# ---------------------------------------------------------------------------
 # _preflight() override semantics
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def stub_install_steps(monkeypatch):
-    """Stub out the heavyweight install steps so _preflight() is fast.
-
-    We only care about the auth-proxy override block here; the ray/Magpie/
-    InferenceX install paths are exercised elsewhere.
-    """
+    """Stub out heavyweight install steps so _preflight() is fast."""
     monkeypatch.setattr(cli, "_load_dotenv_fallback", lambda: None)
     # N24: _load_kernel_agent_env_fallback now hard-fails (sys.exit 2)
     # when $USER_DATA_PATH/runtime/kernel-agent.env.sh is missing. The
-    # auth-proxy override block under test runs after that fallback in
-    # _preflight() and is completely orthogonal to kernel-agent env, so
+    # auth override block under test runs after that fallback in
+    # _preflight() and is orthogonal to kernel-agent env, so
     # stub it out alongside _load_dotenv_fallback. The real fail-loud
     # behaviour is exercised by test_n24_kernel_agent_env_hardfail.
     monkeypatch.setattr(cli, "_load_kernel_agent_env_fallback", lambda: None)
@@ -115,183 +82,79 @@ def clean_url_env(monkeypatch):
     return monkeypatch
 
 
-# ---------------------------------------------------------------------------
-def test_override_replaces_external_anthropic_base_url(
-    stub_install_steps, clean_url_env, monkeypatch
-):
-    """External ANTHROPIC_BASE_URL → upstream MUST be replaced by proxy URL."""
-    upstream_openai = "https://gateway.example/api/v1/llm-proxy/v1"
-    upstream_anthropic = "https://gateway.example/api/v1/llm-proxy"  # different host on purpose
-    proxy_anthropic = "http://127.0.0.1:4002/api/v1/llm-proxy"
-    proxy_openai = "http://127.0.0.1:4002/api/v1/llm-proxy/v1"
-
-    monkeypatch.setenv("SAFE_API_KEY", "ak-test-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", upstream_openai)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", upstream_anthropic)
-
-    def _fake_proxy(safe_key, base_url):
-        # _preflight passes OPENAI_BASE_URL as base_url; the helper would
-        # normally derive proxy URLs from it. Return what the live helper
-        # returns on success.
-        return (proxy_anthropic, proxy_openai)
-
-    monkeypatch.setattr(cli, "_ensure_auth_proxy_and_claude_config", _fake_proxy)
-
-    cli._preflight()
-
-    import os as _os
-    assert _os.environ["ANTHROPIC_BASE_URL"] == proxy_anthropic
-    assert _os.environ["OPENAI_BASE_URL"] == proxy_openai
-    # OOB / GEAK / LLM_API_BASE keep upstream — they speak Bearer natively.
-    assert _os.environ["OOB_BASE_URL"] == upstream_openai
-    assert _os.environ["GEAK_BASE_URL"] == upstream_openai
-    assert _os.environ["LLM_API_BASE"] == upstream_openai
-
-
-def test_override_when_anthropic_was_unset(
-    stub_install_steps, clean_url_env, monkeypatch
-):
-    """When ANTHROPIC_BASE_URL was never set, override should still apply."""
-    upstream = "https://gateway.example/api/v1/llm-proxy/v1"
-    proxy_anthropic = "http://127.0.0.1:4002/api/v1/llm-proxy"
-    proxy_openai = "http://127.0.0.1:4002/api/v1/llm-proxy/v1"
-
-    monkeypatch.setenv("SAFE_API_KEY", "ak-test-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", upstream)
-    # ANTHROPIC_BASE_URL deliberately unset.
-    monkeypatch.setattr(
-        cli,
-        "_ensure_auth_proxy_and_claude_config",
-        lambda *a, **kw: (proxy_anthropic, proxy_openai),
+def test_derive_anthropic_base_url_strips_openai_v1_suffix():
+    assert (
+        cli._derive_anthropic_base_url(
+            "https://gateway.example/api/v1/llm-proxy/v1/"
+        )
+        == "https://gateway.example/api/v1/llm-proxy"
     )
 
-    cli._preflight()
 
-    import os as _os
-    assert _os.environ["ANTHROPIC_BASE_URL"] == proxy_anthropic
-    assert _os.environ["OPENAI_BASE_URL"] == proxy_openai
-
-
-def test_consistency_invariant_on_success(
-    stub_install_steps, clean_url_env, monkeypatch
+def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
 ):
-    """ANTHROPIC_BASE_URL and OPENAI_BASE_URL must always agree on host:port."""
-    monkeypatch.setenv("SAFE_API_KEY", "ak-test-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway/api/v1/llm-proxy/v1")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://different-host/api")
-    monkeypatch.setattr(
-        cli,
-        "_ensure_auth_proxy_and_claude_config",
-        lambda *a, **kw: (
-            "http://127.0.0.1:4002/api/v1/llm-proxy",
-            "http://127.0.0.1:4002/api/v1/llm-proxy/v1",
-        ),
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAFE_API_KEY", "new-safe-key")
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL",
+        "https://gateway.example/api/v1/llm-proxy/v1",
+    )
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL",
+        "http://127.0.0.1:4002/api/v1/llm-proxy",
+    )
+    for name in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "OOB_API_KEY",
+        "GEAK_API_KEY",
+        "LLM_API_KEY",
+        "AMD_LLM_API_KEY",
+    ):
+        monkeypatch.setenv(name, "old-key")
+    for name in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+        monkeypatch.setenv(name, "http://127.0.0.1:4002/api/v1/llm-proxy/v1")
+
+    config_dir = tmp_path / ".claude"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        '{"primaryApiKey":"old-key","customApiUrl":"http://127.0.0.1:4002/v1"}',
+        encoding="utf-8",
     )
 
-    cli._preflight()
+    resolved = cli._preflight()
 
-    import os as _os
-    from urllib.parse import urlparse
-
-    a = urlparse(_os.environ["ANTHROPIC_BASE_URL"])
-    o = urlparse(_os.environ["OPENAI_BASE_URL"])
-    assert (a.scheme, a.hostname, a.port) == (o.scheme, o.hostname, o.port)
-
-
-def test_proxy_failure_falls_back_to_orig(
-    stub_install_steps, clean_url_env, monkeypatch
-):
-    """When auth-proxy returns None, originals are restored (consistency kept)."""
-    orig_anthropic = "https://core42.example-internal-host.invalid/api/v1/llm-proxy"
-    orig_openai = "https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1"
-
-    monkeypatch.setenv("SAFE_API_KEY", "ak-test-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", orig_openai)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", orig_anthropic)
-    monkeypatch.setattr(
-        cli, "_ensure_auth_proxy_and_claude_config", lambda *a, **kw: None
+    assert resolved == (
+        "https://gateway.example/api/v1/llm-proxy",
+        "https://gateway.example/api/v1/llm-proxy/v1",
     )
+    assert cli.os.environ["ANTHROPIC_BASE_URL"] == resolved[0]
+    assert cli.os.environ["OPENAI_BASE_URL"] == resolved[1]
+    for name in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "OOB_API_KEY",
+        "GEAK_API_KEY",
+        "LLM_API_KEY",
+        "AMD_LLM_API_KEY",
+    ):
+        assert cli.os.environ[name] == "new-safe-key"
+    for name in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+        assert cli.os.environ[name] == resolved[1]
 
-    cli._preflight()
-
-    import os as _os
-    # Originals restored — nothing was force-overridden because proxy is down.
-    assert _os.environ["ANTHROPIC_BASE_URL"] == orig_anthropic
-    assert _os.environ["OPENAI_BASE_URL"] == orig_openai
-
-
-def test_proxy_failure_with_unset_anthropic_keeps_unset(
-    stub_install_steps, clean_url_env, monkeypatch
-):
-    """If the user had no ANTHROPIC_BASE_URL preset and proxy is down, we
-    must NOT leak ``OPENAI_BASE_URL`` into ``ANTHROPIC_BASE_URL`` — the
-    consistency invariant says "both proxy or both orig" and orig here
-    means "unset"."""
-    orig_openai = "https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1"
-
-    monkeypatch.setenv("SAFE_API_KEY", "ak-test-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", orig_openai)
-    # ANTHROPIC_BASE_URL deliberately unset.
-    monkeypatch.setattr(
-        cli, "_ensure_auth_proxy_and_claude_config", lambda *a, **kw: None
-    )
-
-    cli._preflight()
-
-    import os as _os
-    assert "ANTHROPIC_BASE_URL" not in _os.environ
-    assert _os.environ["OPENAI_BASE_URL"] == orig_openai
+    config_text = (config_dir / "config.json").read_text(encoding="utf-8")
+    assert "127.0.0.1:4002" not in config_text
+    assert '"primaryApiKey": "new-safe-key"' in config_text
+    assert '"customApiUrl": "https://gateway.example/api/v1/llm-proxy"' in config_text
 
 
 # ---------------------------------------------------------------------------
-# _proxy_alive — TCP probe
-# ---------------------------------------------------------------------------
-def test_proxy_alive_returns_false_on_refused(monkeypatch):
-    import socket
-
-    class _RefusingSocket:
-        def __init__(self, *a, **kw):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a, **kw):
-            return False
-
-        def settimeout(self, _t):
-            pass
-
-        def connect(self, _addr):
-            raise ConnectionRefusedError()
-
-    monkeypatch.setattr(socket, "socket", _RefusingSocket)
-    assert cli._proxy_alive(4002) is False
-
-
-def test_proxy_alive_returns_true_on_connect(monkeypatch):
-    import socket
-
-    class _ConnectingSocket:
-        def __init__(self, *a, **kw):
-            self.connected = False
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a, **kw):
-            return False
-
-        def settimeout(self, _t):
-            pass
-
-        def connect(self, _addr):
-            self.connected = True
-
-    monkeypatch.setattr(socket, "socket", _ConnectingSocket)
-    assert cli._proxy_alive(4002) is True
-
-
 # ---------------------------------------------------------------------------
 # _ensure_python_sdks
 # ---------------------------------------------------------------------------
@@ -369,103 +232,6 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
     captured = capsys.readouterr().out
     assert "installing claude-agent-sdk" in captured
     assert "installed claude-agent-sdk" in captured
-
-
-# ---------------------------------------------------------------------------
-# _ensure_oob_proxy_source
-# ---------------------------------------------------------------------------
-def test_ensure_oob_proxy_source_no_op_when_present(monkeypatch, tmp_path, capsys):
-    """auth_proxy.py already at HYPERLOOM_ROOT/OOB/oob_cli/ → returns True silently."""
-    hyperloom_root = tmp_path / "hyperloom"
-    target_dir = hyperloom_root / "OOB" / "oob_cli"
-    target_dir.mkdir(parents=True)
-    (target_dir / "auth_proxy.py").write_text("# stub\n", encoding="utf-8")
-
-    monkeypatch.setenv("HYPERLOOM_ROOT", str(hyperloom_root))
-
-    # No fallback candidates should ever be touched
-    monkeypatch.setattr(
-        cli, "_OOB_SRC_CANDIDATES",
-        ("/nonexistent/path/A", "/nonexistent/path/B"),
-    )
-    monkeypatch.delenv("OOB_SRC", raising=False)
-
-    assert cli._ensure_oob_proxy_source() is True
-    captured = capsys.readouterr().out
-    # Must not log a bootstrap message — file was already there.
-    assert "bootstrapped auth_proxy.py" not in captured
-    assert "WARNING" not in captured
-
-
-def test_ensure_oob_proxy_source_bootstraps_from_first_candidate(
-    monkeypatch, tmp_path, capsys,
-):
-    """Missing target → copy from first existing candidate."""
-    hyperloom_root = tmp_path / "hyperloom"  # empty; target absent
-
-    src_a = tmp_path / "src_a"
-    src_a.mkdir()
-    (src_a / "auth_proxy.py").write_text("# v1\n", encoding="utf-8")
-    (src_a / "other.py").write_text("# helper\n", encoding="utf-8")
-
-    src_b = tmp_path / "src_b"
-    src_b.mkdir()
-    (src_b / "auth_proxy.py").write_text("# v2\n", encoding="utf-8")
-
-    monkeypatch.setenv("HYPERLOOM_ROOT", str(hyperloom_root))
-    monkeypatch.delenv("OOB_SRC", raising=False)
-    monkeypatch.setattr(
-        cli, "_OOB_SRC_CANDIDATES", (str(src_a), str(src_b)),
-    )
-
-    assert cli._ensure_oob_proxy_source() is True
-    target = hyperloom_root / "OOB" / "oob_cli" / "auth_proxy.py"
-    assert target.is_file()
-    assert target.read_text(encoding="utf-8") == "# v1\n"  # first candidate wins
-    # Sibling file from the source dir should also be copied (copytree).
-    assert (hyperloom_root / "OOB" / "oob_cli" / "other.py").is_file()
-    assert "bootstrapped auth_proxy.py" in capsys.readouterr().out
-
-
-def test_ensure_oob_proxy_source_env_override_wins(
-    monkeypatch, tmp_path, capsys,
-):
-    """$OOB_SRC takes precedence over the hard-coded candidate list."""
-    hyperloom_root = tmp_path / "hyperloom"
-
-    env_src = tmp_path / "env_src"
-    env_src.mkdir()
-    (env_src / "auth_proxy.py").write_text("# from-env\n", encoding="utf-8")
-
-    other_src = tmp_path / "other"
-    other_src.mkdir()
-    (other_src / "auth_proxy.py").write_text("# from-default\n", encoding="utf-8")
-
-    monkeypatch.setenv("HYPERLOOM_ROOT", str(hyperloom_root))
-    monkeypatch.setenv("OOB_SRC", str(env_src))
-    monkeypatch.setattr(cli, "_OOB_SRC_CANDIDATES", (str(other_src),))
-
-    assert cli._ensure_oob_proxy_source() is True
-    target = hyperloom_root / "OOB" / "oob_cli" / "auth_proxy.py"
-    assert target.read_text(encoding="utf-8") == "# from-env\n"
-
-
-def test_ensure_oob_proxy_source_warns_when_no_source(
-    monkeypatch, tmp_path, capsys,
-):
-    """No source anywhere → returns False + WARNING line."""
-    hyperloom_root = tmp_path / "hyperloom"
-    monkeypatch.setenv("HYPERLOOM_ROOT", str(hyperloom_root))
-    monkeypatch.delenv("OOB_SRC", raising=False)
-    monkeypatch.setattr(
-        cli, "_OOB_SRC_CANDIDATES",
-        (str(tmp_path / "missing_a"), str(tmp_path / "missing_b")),
-    )
-
-    assert cli._ensure_oob_proxy_source() is False
-    out = capsys.readouterr().out
-    assert "WARNING" in out
-    assert "auth_proxy.py source not located" in out
 
 
 # ---------------------------------------------------------------------------
@@ -628,30 +394,6 @@ def test_validate_claude_model_aborts_when_catalog_unreachable(monkeypatch, caps
     err = capsys.readouterr().err
     assert "gateway catalog unreachable" in err
     assert "Refusing to start" in err
-
-
-def test_validate_claude_model_uses_proxy_url_when_available(monkeypatch):
-    """When auth-proxy is alive AND no env override is set, probe routes
-    through 127.0.0.1:4002. The two env knobs
-    (``INFERENCE_OPTIMIZER_CATALOG_PROBE_URL`` /
-    ``OPENAI_BASE_URL``) take precedence over the proxy_urls argument,
-    so clear them here to isolate the proxy fallback path."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    seen_base_urls: list[str] = []
-
-    def _capture_probe(**kw):
-        seen_base_urls.append(kw["base_url"])
-        return {"claude-opus-4-7"}
-
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _capture_probe)
-    proxy_urls = (
-        "http://127.0.0.1:4002/api/v1/llm-proxy",       # anthropic
-        "http://127.0.0.1:4002/api/v1/llm-proxy/v1",    # openai (this one probed)
-    )
-    args = _make_args(claude_model="claude-opus-4-7")
-    cli._validate_and_resolve_claude_model(args, proxy_urls)
-    assert seen_base_urls == [proxy_urls[1]]
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +740,54 @@ def test_ir3_both_flags_short_circuit(marker_path):
     assert args.pr_monitor_enabled is False
     assert args.kb_degraded_reason == "explicit_flag"
     assert args.pr_degraded_reason == "explicit_flag"
+
+
+# ---------------------------------------------------------------------------
+# 8. No --cortex-kb-url / no $CORTEX_KB_URL → KB probe skipped, stays
+#    local-only WITHOUT soft-degrading. The probe script is handed no
+#    CORTEX_KB_URL (the old hard-coded default was retired).
+# ---------------------------------------------------------------------------
+def test_ir3_no_kb_url_skips_probe_local_only(marker_path, monkeypatch):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    args = _ns()  # no cortex_kb_url attribute → treated as unset
+    seen_env: dict = {}
+
+    def _runner(cmd, env=None, check=False, timeout=None):
+        seen_env.update(env or {})
+        # Mirror preflight_kb.sh's empty-URL behaviour: KB branch skipped.
+        _write_marker(
+            marker_path, kb_reachable=False, pr_reachable=True, kb_skipped=True,
+        )
+        return subprocess.CompletedProcess(cmd, 0)
+
+    with patch.object(cli_module.subprocess, "run", side_effect=_runner):
+        cli_module._run_ir3_preflight(args)
+    # No URL was injected into the probe environment.
+    assert "CORTEX_KB_URL" not in seen_env
+    # Skipped (not unreachable) → no soft-degrade.
+    assert args.cortex_enabled is True
+    assert args.kb_degraded_reason is None
+
+
+# ---------------------------------------------------------------------------
+# 9. Explicit --cortex-kb-url → injected into the probe environment so
+#    only the operator-configured URL is probed.
+# ---------------------------------------------------------------------------
+def test_ir3_explicit_kb_url_injected_into_probe_env(marker_path, monkeypatch):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    args = _ns(cortex_kb_url="http://my-kb.example")
+    seen_env: dict = {}
+
+    def _runner(cmd, env=None, check=False, timeout=None):
+        seen_env.update(env or {})
+        _write_marker(marker_path, kb_reachable=True, pr_reachable=True)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    with patch.object(cli_module.subprocess, "run", side_effect=_runner):
+        cli_module._run_ir3_preflight(args)
+    assert seen_env.get("CORTEX_KB_URL") == "http://my-kb.example"
+    assert args.cortex_enabled is True
+    assert args.kb_degraded_reason is None
 
 
 # ---------------------------------------------------------------------------

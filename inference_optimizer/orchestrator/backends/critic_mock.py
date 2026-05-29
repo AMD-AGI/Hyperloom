@@ -23,7 +23,7 @@ import re
 from typing import Any
 
 from ..intent_parser import Intent, IntentType
-from .base import Backend, BackendTurnResult
+from .base import BackendTurnResult
 
 
 # DESIGN §13.1 inbox rendering format. Coordinator._compose_prompt emits:

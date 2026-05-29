@@ -19,9 +19,9 @@ This file exercises the v0.8 upgrade across the four layers it touches:
   :meth:`_handle_verdict_map` — routes batch verdicts to the new
   per-variant dispatcher, pins the map on
   :class:`PendingProposal.verdict_map`, mirrors it back onto the bus,
-  filters the materialised grid down to the ``approve`` subset, and
-  fires :meth:`_cortex_t3_critic_rejected` for every ``reject`` so the
-  KB view captures critic-rejected edges before the executor runs.
+  and filters the materialised grid down to the ``approve`` subset.
+  (The legacy ``_cortex_t3_critic_rejected`` KB mirror was removed
+  alongside the T2/T3 hypothesize/verify protocol.)
 * :func:`build_critic_prompt` — the OUTPUT PROTOCOL section advertises
   the new ``verdict_map`` shape and explains the precedence rules.
 """
@@ -219,6 +219,10 @@ class _BareSharedState:
 
     cortex_session_id: str = "sid-test"
     save_count: int = 0
+    # ``_materialize_approved_proposal`` reads this field to gate
+    # dispatch on a pending auto-roofline task; empty string means
+    # "nothing in flight" and the gate is a no-op.
+    auto_roofline_pending_task_id: str = ""
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
@@ -300,7 +304,6 @@ def _seed_explore_proposal(
     *,
     msg_id: str = "msg-1",
     variants: list[str] | None = None,
-    kb_edge_ids: dict[str, str] | None = None,
 ) -> PendingProposal:
     variants = variants or ["v_a", "v_b", "v_c", "v_d"]
     grid = [
@@ -312,7 +315,6 @@ def _seed_explore_proposal(
         action_name="explore",
         predicted_gain_pct=1.0,
         payload={"action_name": "explore", "params": {"grid": grid}},
-        kb_edge_ids=dict(kb_edge_ids or {}),
     )
     coord.state.pending_proposals[msg_id] = pending
     return pending
@@ -439,89 +441,11 @@ async def test_verdict_map_unknown_variant_is_dropped_and_logged(coord):
 
 
 # --- KB refute -------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_verdict_map_rejected_variants_fire_kb_refuted(coord):
-    pending = _seed_explore_proposal(coord, kb_edge_ids={
-        "v_a": "edge-a", "v_b": "edge-b", "v_c": "edge-c", "v_d": "edge-d",
-    })
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject", "rationale": "kb refuted"},
-                "v_c": {"verdict": "reject", "rationale": "duplicate"},
-                "v_d": {"verdict": "needs_review"},  # NOT refuted
-            },
-        },
-    )
-    await coord._handle_review_verdict("critic", intent)
-    refuted = coord.cortex_kb.verify_calls
-    # Two refute calls — one per rejected variant. needs_review is not a refute.
-    refuted_edges = sorted(r["edge_id"] for r in refuted)
-    assert refuted_edges == ["edge-b", "edge-c"]
-    for call in refuted:
-        assert call["outcome"] == "refuted"
-        # Idempotency key carries the variant name at the tail.
-        assert call["idempotency_key"].endswith(":v_b") or \
-               call["idempotency_key"].endswith(":v_c")
-        assert call["promote_authority"] is None
-
-
-@pytest.mark.asyncio
-async def test_verdict_map_skip_kb_refuted_when_no_edge_id(coord):
-    """No T2 edge (e.g. --degraded-kb run) → silently skip the refute
-    so the verdict_map path still works end-to-end."""
-    pending = _seed_explore_proposal(coord, kb_edge_ids={})
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject"},
-            },
-        },
-    )
-    await coord._handle_review_verdict("critic", intent)
-    assert coord.cortex_kb.verify_calls == []
-
-
-@pytest.mark.asyncio
-async def test_verdict_map_skip_kb_refuted_when_cortex_disabled(coord):
-    coord.cortex_kb = None  # type: ignore[assignment]
-    pending = _seed_explore_proposal(coord, kb_edge_ids={"v_b": "edge-b"})
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject"},
-            },
-        },
-    )
-    # Must not raise.
-    await coord._handle_review_verdict("critic", intent)
-
-
-@pytest.mark.asyncio
-async def test_verdict_map_skip_kb_refuted_when_no_session_id(coord):
-    coord.shared_state.cortex_session_id = ""
-    pending = _seed_explore_proposal(coord, kb_edge_ids={"v_b": "edge-b"})
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject"},
-            },
-        },
-    )
-    await coord._handle_review_verdict("critic", intent)
-    assert coord.cortex_kb.verify_calls == []
+# The legacy ``_cortex_t3_critic_rejected`` path that fired a KB ``refuted``
+# verify for every critic-rejected variant was removed alongside the
+# T2/T3 hypothesize/verify protocol. Rejection is still captured in the
+# verdict event + breakdown collector; the previously-tested KB-mirror
+# behaviour no longer exists.
 
 
 # --- bus mirror ------------------------------------------------------------
@@ -674,10 +598,6 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     pending = _seed_explore_proposal(
         coord,
         variants=["v_a", "v_b", "v_c", "v_d"],
-        kb_edge_ids={
-            "v_a": "edge-a", "v_b": "edge-b",
-            "v_c": "edge-c", "v_d": "edge-d",
-        },
     )
     # Make sure shared_state has the minimum surface
     # ``_materialize_approved_proposal`` needs.
@@ -697,9 +617,6 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     grid = create_calls[0]["params"]["grid"]
     names = [v["name"] for v in grid]
     assert names == ["v_a", "v_c"]
-    # KB edge stamping still works under the filter.
-    assert grid[0].get("kb_edge_id") == "edge-a"
-    assert grid[1].get("kb_edge_id") == "edge-c"
     # critic_filtered_count records 4 - 2 = 2 dropped.
     assert create_calls[0]["params"]["critic_filtered_count"] == 2
 
@@ -733,7 +650,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
 
     coord.tasks = _StubTaskRegistry()
     pending = _seed_explore_proposal(
-        coord, variants=["v_a", "v_b", "v_c"], kb_edge_ids={},
+        coord, variants=["v_a", "v_b", "v_c"],
     )
 
     @dataclass
@@ -746,6 +663,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
+        auto_roofline_pending_task_id: str = ""
 
         def save(self, _session_dir):
             self.save_count += 1
@@ -774,9 +692,10 @@ def _delegate_coord(tmp_path: Path):
     """Coordinator double exposing just the surface ``_handle_delegate``
     needs to reach (and stop at) the explore re-route branch.
 
-    Stubs out ``is_pruned`` / ``_sequence_denial_for_action`` /
-    ``_cortex_t2_hook`` so we never reach the per-test-irrelevant
-    pruned + sequence + cortex sub-systems.
+    Stubs out ``is_pruned`` / ``_sequence_denial_for_action`` so we
+    never reach the per-test-irrelevant pruned + sequence
+    sub-systems. (The legacy ``_cortex_t2_hook`` stub is gone — the
+    method itself was removed alongside the T2/T3 protocol.)
     """
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
@@ -797,7 +716,6 @@ def _delegate_coord(tmp_path: Path):
     c._record_observation = AsyncMock()  # type: ignore[method-assign]
     c._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
     c._sequence_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
-    c._cortex_t2_hook = AsyncMock()  # type: ignore[method-assign]
     # _handle_delegate's deprecation guard reads from policy directly.
     # We bypass it by short-circuiting the guard at the source.
     c.policy = None
@@ -840,9 +758,6 @@ async def test_delegate_explore_with_grid_routes_to_pending_proposals(tmp_path: 
     assert pending.action_name == "explore"
     assert pending.from_agent == "orchestration"
     assert pending.payload["params"]["grid"] == grid
-    # T2 hook fires on the proposal path so KB edge ids land on the
-    # PendingProposal before Critic review.
-    coord._cortex_t2_hook.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -920,7 +835,22 @@ def _build_specialist_prompt_text(max_proposals: int) -> str:
     return system_prompt + "\n" + user_prompt
 
 
-def test_specialist_prompt_renders_default_top_5_cap():
+def test_default_specialist_max_proposals_is_three():
+    """Single-source-of-truth check: policy.py owns the cap (=3) and
+    specialist_prompt_builder re-exports it. Both must agree."""
+    from inference_optimizer.orchestrator.policy import (
+        DEFAULT_SPECIALIST_MAX_PROPOSALS,
+    )
+    from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
+        DEFAULT_SPECIALIST_MAX_PROPOSALS as PROMPT_DEFAULT,
+    )
+    assert DEFAULT_SPECIALIST_MAX_PROPOSALS == 3
+    assert PROMPT_DEFAULT == 3
+
+
+def test_specialist_prompt_renders_max_proposals_5():
+    """Caller can still override to a larger value at the prompt layer
+    (the SpecialistRunner separately clamps to the policy cap)."""
     text = _build_specialist_prompt_text(max_proposals=5)
     # Section 8 hard cap line.
     assert "AT MOST **5** entries" in text
@@ -931,9 +861,381 @@ def test_specialist_prompt_renders_default_top_5_cap():
     assert "reviews each surviving variant" in text
 
 
-def test_specialist_prompt_renders_override():
+def test_specialist_prompt_renders_default_top_3_cap():
     text = _build_specialist_prompt_text(max_proposals=3)
     assert "AT MOST **3** entries" in text
     assert "top-3" in text
-    # The default 5 must not appear when the override is set.
+    # The legacy default 5 must not appear when the cap is 3.
     assert "AT MOST **5** entries" not in text
+
+
+# ==============================================================================
+# critic prompt builder (formerly test_critic_prompt_builder.py)
+# ==============================================================================
+
+
+class TestCriticPromptBuilder:
+    """Tests for :mod:`critic_prompt_builder`."""
+
+    @pytest.fixture
+    def registry(self):
+        from inference_optimizer.orchestrator.action_registry import ActionRegistry
+        return ActionRegistry().load()
+
+    @staticmethod
+    def _rules_path():
+        from inference_optimizer.paths import asset_system_prompts_dir
+        return asset_system_prompts_dir() / "critic.md"
+
+    def test_section_headers_present(self, registry):
+        from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder import (
+            build_critic_prompt,
+        )
+        from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+            default_enabled_actions,
+        )
+        text = build_critic_prompt(
+            action_registry=registry,
+            enabled_actions=default_enabled_actions(no_kernel=False),
+            framework="sglang",
+            kernel_enabled=True,
+            max_minutes=120,
+            rules_fragment_path=self._rules_path(),
+        )
+        for header in (
+            "## 1. MISSION",
+            "## 2. RUN CONTEXT",
+            "## 3. KNOWN ACTIONS",
+            "## 4. DEFAULT VERDICT",
+            "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
+            "## 5b. KERNEL-OWNED CARVE-OUT",
+            "## 6. RULES",
+            "## 7. OUTPUT PROTOCOL",
+        ):
+            assert header in text, f"missing {header}"
+
+    def test_deterministic(self, registry):
+        from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder import (
+            build_critic_prompt,
+        )
+        from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+            default_enabled_actions,
+        )
+        kwargs = dict(
+            action_registry=registry,
+            enabled_actions=default_enabled_actions(no_kernel=False),
+            framework="vllm",
+            kernel_enabled=True,
+            max_minutes=60,
+            rules_fragment_path=self._rules_path(),
+        )
+        assert build_critic_prompt(**kwargs) == build_critic_prompt(**kwargs)
+
+    def test_full_prompt_contains_all_registered_actions(self, registry):
+        """Regression guard: every action in _meta must appear in §3."""
+        from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder import (
+            build_critic_prompt,
+        )
+        text = build_critic_prompt(
+            action_registry=registry,
+            enabled_actions=registry.names(),
+            framework="sglang",
+            kernel_enabled=True,
+            max_minutes=60,
+            rules_fragment_path=self._rules_path(),
+        )
+        for name in registry.names():
+            assert f"**{name}**" in text, f"action {name!r} missing from KNOWN ACTIONS"
+
+    def test_validate_stack_in_both_modes(self, registry):
+        from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder import (
+            build_critic_prompt,
+        )
+        from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+            default_enabled_actions,
+        )
+        for no_kernel in (False, True):
+            enabled = default_enabled_actions(no_kernel=no_kernel)
+            text = build_critic_prompt(
+                action_registry=registry,
+                enabled_actions=enabled,
+                framework="sglang",
+                kernel_enabled=not no_kernel,
+                max_minutes=60,
+                rules_fragment_path=self._rules_path(),
+            )
+            assert "validate_stack" in text, (
+                f"validate_stack missing (no_kernel={no_kernel})"
+            )
+
+    def test_no_kernel_mode_drops_kernel_owned(self, registry):
+        from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder import (
+            build_critic_prompt,
+        )
+        from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
+            default_enabled_actions,
+        )
+        text = build_critic_prompt(
+            action_registry=registry,
+            enabled_actions=default_enabled_actions(no_kernel=True),
+            framework="sglang",
+            kernel_enabled=False,
+            max_minutes=60,
+            rules_fragment_path=self._rules_path(),
+        )
+        assert "## 5. KERNEL-OWNED CARVE-OUT" not in text
+        for name in ("kernel_opt", "integrate", "deep_kernel_analysis"):
+            assert f"**{name}**" not in text, (
+                f"{name} should not appear in no-kernel catalogue"
+            )
+
+
+# ==============================================================================
+# critic_robustness breakdown renderer
+# (formerly test_critic_robustness_renderer_units.py)
+# ==============================================================================
+
+
+class TestCriticRobustnessRenderer:
+    """Exercises the four observable shapes of the collector input: empty,
+    prompt-only V1 payloads, V2 dicts with empty fields, and fully-populated
+    entries with a truncated rationale.
+    """
+
+    @staticmethod
+    def _render(payload):
+        from inference_optimizer.breakdown.reporters._renderers import (
+            critic_robustness as cr_mod,
+        )
+        return cr_mod.render({"critic_robustness": payload})
+
+    def test_empty_returns_skipped(self):
+        from inference_optimizer.breakdown.reporters.base import RenderedSection
+        out = self._render([])
+        assert isinstance(out, RenderedSection)
+        assert out.section_id == "critic_robustness"
+        assert out.skipped is True
+        assert any("no critic robustness" in s.lower() for s in out.key_facts)
+
+    def test_prompt_only_v1_payload_is_skipped(self):
+        out = self._render(["raw prompt"])
+        assert out.skipped is True
+        assert any("prompt-only" in w for w in out.warnings)
+
+    def test_empty_payloads_v2_is_skipped(self):
+        out = self._render([
+            {"prompt": "x", "response": None, "decision": "", "rationale": ""},
+        ])
+        assert out.skipped is True
+        assert any("non-actionable" in w for w in out.warnings)
+
+    def test_populated_payload_renders_markdown_table(self):
+        out = self._render([
+            {
+                "ts": "2026-05-13T01:01:01Z",
+                "action": "kernel_opt",
+                "decision": "KEEP",
+                "pass_count": 3,
+                "fail_count": 1,
+                "rationale": "Improved attention kernel reduces decode latency by 4%.",
+            },
+            {
+                "prompt": "raw fallback",
+            },
+        ])
+        assert out.skipped is False
+        assert "decision" in out.markdown_block
+        assert "kernel_opt" in out.markdown_block
+
+    def test_excess_rows_truncated_with_banner(self):
+        from inference_optimizer.breakdown.reporters._renderers import (
+            critic_robustness as cr_mod,
+        )
+        rows = [
+            {
+                "decision": "KEEP",
+                "pass_count": 1,
+                "fail_count": 0,
+                "ts": f"t{i}",
+            }
+            for i in range(cr_mod._MAX_ROWS + 5)
+        ]
+        out = self._render(rows)
+        assert out.skipped is False
+        assert "Showing first" in out.markdown_block
+
+
+# ==============================================================================
+# N38 — per-action verdict_class metadata
+# (formerly test_n38_action_verdict_class.py)
+# ==============================================================================
+
+
+class TestN38ActionVerdictClass:
+    """N38 (May 2026) — structural fix: per-action ``verdict_class``
+    metadata so newly added actions don't reintroduce the N33/N35/N37
+    deadlocks. Pins the ActionMetadata field, the default classifier
+    bucket mapping, the CriticAgentBackend constructor wiring, and the
+    critic.md primary lookup.
+    """
+
+    def test_action_metadata_has_verdict_class_field(self):
+        from inference_optimizer.orchestrator.action_registry import (
+            ActionMetadata,
+        )
+        fields = {f.name for f in ActionMetadata.__dataclass_fields__.values()}
+        assert "verdict_class" in fields, (
+            "ActionMetadata must declare verdict_class field so per-action "
+            "policy can be looked up in critic review_constraints"
+        )
+
+    def test_default_classifier_covers_all_registered_actions(self):
+        from inference_optimizer.orchestrator.action_registry import (
+            ActionRegistry,
+        )
+        reg = ActionRegistry().load()
+        all_actions = reg.all()
+        assert all_actions, "expected ActionRegistry to load >= 1 action"
+        missing = [a.name for a in all_actions if not a.verdict_class]
+        assert not missing, (
+            f"actions missing verdict_class default: {missing} -- update the "
+            f"default classifier in action_registry.py or add the field to "
+            f"the yaml"
+        )
+
+    def test_default_classifier_matches_expected_buckets(self):
+        from inference_optimizer.orchestrator.action_registry import (
+            ActionRegistry,
+        )
+        reg = ActionRegistry().load()
+
+        def klass(name: str) -> str:
+            a = reg.get(name)
+            assert a is not None, f"action {name!r} not registered"
+            return a.verdict_class
+
+        assert klass("integrate") == "promotion"
+        for n in ("report", "session_breakdown", "target_analysis"):
+            assert klass(n) == "archival", n
+        registered_exploration = (
+            "baseline", "profile", "roofline", "explore", "sweep",
+            "kernel_opt", "operator_tuning", "vendor_kernel_config",
+            "deep_kernel_analysis", "recover",
+        )
+        for n in registered_exploration:
+            if reg.get(n) is None:
+                continue
+            assert klass(n) == "exploration", n
+
+    def test_critic_agent_backend_accepts_action_verdict_policy(self, tmp_path):
+        from inference_optimizer.orchestrator.backends.critic_agent import (
+            CriticAgentBackend,
+        )
+        root = tmp_path / "critic-agent"
+        (root / "runtime").mkdir(parents=True)
+        (root / "runtime" / "cli.py").write_text("# stub")
+        sd = tmp_path / "session"
+        sd.mkdir()
+
+        def _fake_client_factory():
+            class _C: pass
+            return _C()
+
+        def _fake_runtime_caller_factory():
+            def _caller(call): return None
+            return _caller
+
+        backend = CriticAgentBackend(
+            critic_agent_root=root,
+            session_dir=sd,
+            codex_client_factory=_fake_client_factory,
+            runtime_caller_factory=_fake_runtime_caller_factory,
+            static_context={"model": "m", "framework": "sglang"},
+            action_verdict_policy={"baseline": "exploration", "integrate": "promotion"},
+        )
+        assert backend.action_verdict_policy == {
+            "baseline": "exploration", "integrate": "promotion",
+        }
+
+    def test_critic_agent_backend_injects_policy_into_judge_bundle(self, tmp_path):
+        import asyncio
+        import json as _json
+        from inference_optimizer.orchestrator.backends.critic_agent import (
+            CriticAgentBackend,
+            RuntimeCall,
+        )
+        root = tmp_path / "critic-agent"
+        (root / "runtime").mkdir(parents=True)
+        (root / "runtime" / "cli.py").write_text("# stub")
+        sd = tmp_path / "session"
+        sd.mkdir()
+
+        captured_bundle: dict = {}
+
+        class _FakeAsyncOpenAI:
+            def __init__(self): self.chat = _FakeChat(captured_bundle)
+        class _FakeChat:
+            def __init__(self, bucket): self.completions = _FakeCompletions(bucket)
+        class _FakeCompletions:
+            def __init__(self, bucket): self._b = bucket
+            async def create(self, *, model, messages, max_completion_tokens):
+                user_msg = messages[-1]["content"]
+                self._b["user_prompt"] = user_msg
+                class _Choice:
+                    message = type("M", (), {"content": _json.dumps({
+                        "review_verdicts": [],
+                    })})()
+                    finish_reason = "stop"
+                return type("R", (), {"choices": [_Choice()]})()
+
+        def _fake_runtime_caller_factory():
+            def _caller(call: RuntimeCall) -> None:
+                if call.phase == "prepare-review":
+                    bundle = {
+                        "kind": "coordinator_inbox",
+                        "session_id": "test",
+                        "proposals": [{"msg_id": "abc", "action_name": "params"}],
+                        "review_constraints": {
+                            "allowed_verdicts": ["approve", "advise"],
+                        },
+                    }
+                    call.out_path.write_text(_json.dumps(bundle), encoding="utf-8")
+                else:
+                    call.out_path.write_text(_json.dumps({
+                        "intent_envelope": {"intents": []},
+                    }), encoding="utf-8")
+            return _caller
+
+        backend = CriticAgentBackend(
+            critic_agent_root=root,
+            session_dir=sd,
+            codex_client_factory=_FakeAsyncOpenAI,
+            runtime_caller_factory=_fake_runtime_caller_factory,
+            static_context={"model": "m", "framework": "sglang"},
+            action_verdict_policy={
+                "params": "exploration", "integrate": "promotion",
+            },
+        )
+        asyncio.run(backend.run(prompt="hello"))
+
+        assert "action_verdict_policy" in captured_bundle.get("user_prompt", ""), (
+            "action_verdict_policy must appear in the JSON prompt sent to "
+            "the LLM-critic so it can look up each proposal's class"
+        )
+        assert "promotion" in captured_bundle["user_prompt"]
+
+    def test_critic_md_mentions_action_verdict_policy_lookup(self):
+        from pathlib import Path as _Path
+        p = (
+            _Path(__file__).resolve().parent.parent
+            / "orchestrator" / "system_prompts" / "critic.md"
+        )
+        text = p.read_text(encoding="utf-8")
+        assert "action_verdict_policy" in text, (
+            "critic.md must mention action_verdict_policy so the LLM-critic "
+            "treats it as the primary per-proposal lookup; otherwise newly "
+            "added actions will hit the same N33/N35/N37 chicken-and-egg "
+            "deadlock"
+        )
+        for klass in ("archival", "exploration", "promotion"):
+            assert klass in text.lower(), klass

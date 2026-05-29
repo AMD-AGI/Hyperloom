@@ -24,23 +24,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from inference_optimizer.orchestrator import phase_state
 from inference_optimizer.orchestrator.phase_state import (
-    DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-    DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
-    DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
-    DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
     ESCALATE_HINT_BUDGET_BUMP_CAP,
     ESCALATE_HINT_BUDGET_BUMP_DELTA,
-    ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-    ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_VOCAB,
     PHASE_CLOSE,
-    PHASE_EXPLORE,
-    PHASE_KERNEL,
     STOP_REASON_VOCAB,
     apply_escalate_budget_bump,
     compute_next_phase,
@@ -231,7 +222,7 @@ def test_plateau_kernel_empty_attempts_does_not_trigger():
     with an empty ``kernel_integrate_attempts`` ledger — coupled with
     EXPLORE that produced no KEEPs (e.g. force-exit on low budget),
     the session went EXPLORE → KERNEL → SWEEP without ever spawning a
-    single ``select_kernels`` / ``run_optimization`` request.
+    single ``trace_analyze`` / ``run_optimization`` request.
     """
     state = SimpleNamespace(kernel_integrate_attempts={})
     triggered, ev = compute_plateau_kernel(state)

@@ -1,4 +1,4 @@
-"""ResourceLockManager + SqliteLeaseBackend (DESIGN v0.6 §3.5 + KB_design §3.7).
+"""ResourceLockManager + SqliteLeaseBackend ( + KB_design §3.7).
 
 All ``acquire_many`` writes happen inside a single ``BEGIN IMMEDIATE``
 transaction, giving the "all or nothing" property the lane semantics
@@ -12,7 +12,7 @@ the conflicting lanes to the requested set before the SQL acquire — e.g.
 task transparently asks for ``[benchmark_lane, profile_lane]`` and lets
 the per-lane capacity check enforce the mutual exclusion.
 
-v0.8 M6 multi-holder semantics (KB_design §3.7):
+v0.8 M6 multi-holder semantics:
 
 * ``leases`` PK widened to ``(lane, holder_id)`` so the same lane can
   carry multiple concurrent holders (e.g. ``research_lane`` with
@@ -54,9 +54,9 @@ KNOWN_LANES = (
     "workspace_mutation",
     "benchmark_lane",
     "profile_lane",
-    # v0.8 M5 (KB_design §3.7) — research_lane carries LLM specialist
+    # research_lane carries LLM specialist
     # sub-agents. M5 keeps capacity=1 (single specialist at a time)
-    # so the v0.6 leases-table PK-on-lane semantics still hold; M6
+    # so the legacy leases-table PK-on-lane semantics still hold; M6
     # widens capacity to 6 with a (lane, holder_id) schema upgrade.
     # research_lane has NO LANE_CONFLICTS with the four serving lanes
     # (Inv-7.2): a specialist reading source / KB / PR can coexist
@@ -70,7 +70,7 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
     "profile_lane":   frozenset({"benchmark_lane", "server_lifecycle"}),
     "server_lifecycle": frozenset({"benchmark_lane", "profile_lane"}),
     "workspace_mutation": frozenset(),
-    # v0.8 M5 — Inv-7.2 research_lane does not conflict with any
+    # Inv-7.2 research_lane does not conflict with any
     # serving-side lane. (Capacity caps come from a separate table in
     # M6; M5 still uses single-holder PK.)
     "research_lane": frozenset(),
@@ -123,7 +123,7 @@ class LaneBusy(RuntimeError):
 
 class LaneFull(RuntimeError):
     """Raised by ``acquire_many`` when a requested lane has reached its
-    per-lane ``capacity`` cap (KB_design §3.7 §5.1).
+    per-lane ``capacity`` cap.
 
     Distinct from :class:`LaneBusy`: ``LaneFull`` is a pure capacity
     decision (e.g. research_lane with N holders, N == capacity); no
@@ -163,7 +163,7 @@ class SqliteLeaseBackend:
         """Acquire every lane in ``lanes`` (plus their transitive
         cross-lane conflicts) as a single atomic batch.
 
-        v0.8 M6 (KB_design §3.7) — capacity-aware:
+        capacity-aware:
 
         * Counts *non-expired* holders per lane (skipping any row that
           shares ``holder_id`` so a retry from the same holder is a
@@ -275,7 +275,7 @@ class SqliteLeaseBackend:
                 if len(live) >= cap:
                     # Multi-holder lane (cap > 1) full → LaneFull.
                     # Single-holder lane (cap == 1) full → LaneBusy
-                    # for back-compat with v0.6 callers that pattern-
+                    # for back-compat with the legacy contract callers that pattern-
                     # match on ``LaneBusy``.
                     if cap > 1:
                         full.append(lane)
@@ -320,7 +320,7 @@ class SqliteLeaseBackend:
     async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
         """Refresh ``expires_at`` for every lane this holder owns.
 
-        v0.8 M6 — keys on the composite ``(lane, holder_id)`` PK so a
+        keys on the composite ``(lane, holder_id)`` PK so a
         multi-holder lane (research_lane with capacity > 1) only
         bumps this holder's row, not the others.
         """
@@ -437,13 +437,13 @@ class ResourceLockManager:
     """Coordinator-facing wrapper.
 
     v0.8 M6 adds non-blocking acquire + multi-holder observability so
-    the concurrent dispatcher (KB_design §3.7 §4.3) can fan tasks out
+    the concurrent dispatcher can fan tasks out
     per tick without spinning on lane busy errors.
     """
 
     def __init__(self, backend: SqliteLeaseBackend):
         self.backend = backend
-        # Per-process counters (KB_design §3.12 §4.5 lane_timeline). The
+        # Per-process counters. The
         # leases DB is the authoritative source for current state;
         # these counters track *cumulative* acquire / lane-full /
         # lane-busy events for the lifetime of this process so the

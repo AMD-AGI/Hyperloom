@@ -1,4 +1,10 @@
-"""End-to-end reactor + backend adapter tests."""
+"""End-to-end reactor + backend adapter tests, plus L1/L2 finalizer
+integration.
+
+Backend-adapter level tests (subprocess transport: prompt -> ReactorContext
+parsing + reactor tick advancement) live in test_runtime_cli.py — that's
+where the host-visible JSON-IO contract is exercised end-to-end.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +15,7 @@ import pytest
 
 from robustness_agent.decision.action_ladder import ActionLadder, ActionLadderConfig
 from robustness_agent.decision.policy_aware import PolicyAware
+from robustness_agent.finalize.postmortem import PostmortemFinalizer
 from robustness_agent.findings.sink import FindingSink, FindingSinkConfig
 from robustness_agent.role.envelope import IntentType
 from robustness_agent.role.prompt_inputs import (
@@ -26,6 +33,8 @@ from robustness_agent.sources.base import (
 
 
 class _FakeSource:
+    """Stub source that returns a fixed snapshot or raises a fixed exception."""
+
     def __init__(self, name: str, snapshot: SourceData | Exception):
         self.name = name
         self._snapshot = snapshot
@@ -61,10 +70,45 @@ def _build_reactor(
     return Reactor(components), sink
 
 
-def _ctx(crash_count: int = 0, *, session_id: str = "sess-1", now_unix: float = 1.0) -> ReactorContext:
+def _build_reactor_with_finalizer(
+    *, tmp_path: Path, session_id: str = "sess-1",
+) -> tuple[Reactor, PostmortemFinalizer]:
+    primary = _FakeSource("primary", SourceData(sources_used=["primary"]))
+    fallback = _FakeSource("fb", SourceData(sources_used=["fb"]))
+    router = DegradeRouter(
+        primary, fallback, fail_threshold=2, recheck_interval_s=0.0,
+    )
+    sink = FindingSink(
+        FindingSinkConfig(session_dir=tmp_path, session_id=session_id)
+    )
+    finalizer = PostmortemFinalizer(
+        session_dir=tmp_path, session_id=session_id,
+    )
+    components = ReactorComponents(
+        router=router,
+        classifier=Classifier(crash_config=CrashConfig(medium_threshold=2)),
+        ladder=ActionLadder(config=ActionLadderConfig(cooldown_ticks=0)),
+        policy=PolicyAware(),
+        sink=sink,
+        finalizer=finalizer,
+    )
+    return Reactor(components), finalizer
+
+
+def _ctx(
+    crash_count: int = 0,
+    *,
+    session_id: str = "sess-1",
+    now_unix: float = 1.0,
+    stop_reason: str = "",
+) -> ReactorContext:
     return ReactorContext(
         tick_index=0,
-        shared_state=SharedStateSnapshot(session_id=session_id, crash_count=crash_count),
+        shared_state=SharedStateSnapshot(
+            session_id=session_id,
+            crash_count=crash_count,
+            stop_reason=stop_reason,
+        ),
         inbox=[],
         now_unix=now_unix,
     )
@@ -73,6 +117,7 @@ def _ctx(crash_count: int = 0, *, session_id: str = "sess-1", now_unix: float = 
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_reactor_emits_heartbeat_when_no_symptoms(tmp_path: Path):
@@ -104,6 +149,7 @@ async def test_reactor_emits_alert_for_crash_count_and_persists_finding(tmp_path
 # DegradeRouter integration
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_reactor_falls_back_to_secondary_when_primary_fails(tmp_path: Path):
     primary = _FakeSource("server", SourceUnavailable("down"))
@@ -115,10 +161,6 @@ async def test_reactor_falls_back_to_secondary_when_primary_fails(tmp_path: Path
         ),
     )
     reactor, _ = _build_reactor(primary=primary, fallback=fallback, tmp_path=tmp_path)
-    # Two consecutive failures degrade primary; we only need one tick to see
-    # fallback used because fail_threshold=1 would degrade immediately. With
-    # threshold=2 the first tick still falls through to fallback after primary
-    # exception.
     intents = await reactor.tick(_ctx())
     assert any(i.type is IntentType.ALERT for i in intents)
     assert any(i.payload.get("severity") == "high" for i in intents if i.type is IntentType.ALERT)
@@ -128,10 +170,10 @@ async def test_reactor_falls_back_to_secondary_when_primary_fails(tmp_path: Path
 # Policy filtering
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_reactor_drops_invalid_intents_emitted_by_extra_evaluator(tmp_path: Path):
     from robustness_agent.role.envelope import Intent, IntentType
-    from robustness_agent.signals import Symptom, SymptomSeverity
 
     class CustomLadder(ActionLadder):
         def _intents_for(self, sym):  # type: ignore[override]
@@ -151,10 +193,65 @@ async def test_reactor_drops_invalid_intents_emitted_by_extra_evaluator(tmp_path
     )
     reactor = Reactor(components)
     intents = await reactor.tick(_ctx(crash_count=2))
-    # The bogus intent should be filtered, keeping only the canonical alert.
     assert all(i.payload.get("severity") for i in intents if i.type is IntentType.ALERT)
 
 
-# Backend-adapter level tests (subprocess transport: prompt -> ReactorContext
-# parsing + reactor tick advancement) live in test_runtime_cli.py — that's
-# where the host-visible JSON-IO contract is exercised end-to-end.
+# ---------------------------------------------------------------------------
+# Finalizer integration (formerly test_reactor_finalize.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reactor_does_not_finalize_while_stop_reason_empty(
+    tmp_path: Path,
+):
+    reactor, finalizer = _build_reactor_with_finalizer(tmp_path=tmp_path)
+    await reactor.tick(_ctx(stop_reason=""))
+    assert finalizer.is_finalized() is False
+    assert not (tmp_path / "reports" / "robustness_postmortem.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_reactor_finalizes_on_stop_reason_transition(tmp_path: Path):
+    reactor, finalizer = _build_reactor_with_finalizer(tmp_path=tmp_path)
+    await reactor.tick(_ctx(stop_reason=""))
+    await reactor.tick(_ctx(stop_reason="budget_exhausted"))
+    assert finalizer.is_finalized() is True
+    md = (tmp_path / "reports" / "robustness_postmortem.md").read_text(
+        encoding="utf-8",
+    )
+    assert "budget_exhausted" in md
+
+
+@pytest.mark.asyncio
+async def test_reactor_finalize_fires_only_once(tmp_path: Path):
+    reactor, finalizer = _build_reactor_with_finalizer(tmp_path=tmp_path)
+    await reactor.tick(_ctx(stop_reason="budget_exhausted"))
+    md_path = tmp_path / "reports" / "robustness_postmortem.md"
+    md_path.write_text("MUTATED\n", encoding="utf-8")
+    await reactor.tick(_ctx(stop_reason="budget_exhausted"))
+    await reactor.tick(_ctx(stop_reason="other_reason"))
+    assert md_path.read_text(encoding="utf-8") == "MUTATED\n"
+
+
+@pytest.mark.asyncio
+async def test_reactor_finalize_optional_when_disabled(tmp_path: Path):
+    primary = _FakeSource("primary", SourceData(sources_used=["primary"]))
+    fallback = _FakeSource("fb", SourceData(sources_used=["fb"]))
+    router = DegradeRouter(
+        primary, fallback, fail_threshold=2, recheck_interval_s=0.0,
+    )
+    sink = FindingSink(
+        FindingSinkConfig(session_dir=tmp_path, session_id="sess-1")
+    )
+    components = ReactorComponents(
+        router=router,
+        classifier=Classifier(crash_config=CrashConfig(medium_threshold=2)),
+        ladder=ActionLadder(config=ActionLadderConfig(cooldown_ticks=0)),
+        policy=PolicyAware(),
+        sink=sink,
+        finalizer=None,
+    )
+    reactor = Reactor(components)
+    await reactor.tick(_ctx(stop_reason="end"))
+    assert not (tmp_path / "reports" / "robustness_postmortem.md").exists()

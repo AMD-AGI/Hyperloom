@@ -1,4 +1,4 @@
-"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude (DESIGN v0.6 §14.2).
+"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude ().
 
 P1-5 implementation:
 
@@ -28,16 +28,15 @@ import importlib
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 from ..intent_parser import (
     Intent,
-    IntentType,
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import Backend, BackendError, BackendTurnResult
+from .base import BackendError, BackendTurnResult
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
@@ -76,7 +75,7 @@ payload={{"topic":"heartbeat","body_md":"ok"}}.
 def _import_sdk() -> tuple[Any, Any, Any]:
     """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise.
 
-    Only ``claude_agent_sdk`` is supported in v0.6 — legacy
+    Only ``claude_agent_sdk`` is supported in the legacy release — legacy
     ``claude_code_sdk`` was deprecated upstream.
     """
     try:
@@ -95,7 +94,7 @@ def _import_sdk() -> tuple[Any, Any, Any]:
 
 @dataclass
 class ClaudeBackend:
-    """Production Claude backend (DESIGN v0.6 §14.2). Implements :class:`Backend`.
+    """Production Claude backend (). Implements :class:`Backend`.
 
     Args:
         model: Claude model id (e.g. ``"claude-opus-4-7"``); defaults to
@@ -116,10 +115,9 @@ class ClaudeBackend:
     max_turns_default: int = 4
     enable_mcp_emit_intent: bool = True
     # Wall-clock cap for one ``run()`` call. The claude-agent-sdk shells
-    # out to the ``claude`` CLI which talks to the AMD auth-proxy; if the
-    # proxy is stopped/unreachable the subprocess can hang on TCP for
-    # minutes, stalling the orchestrator reactor and preventing the
-    # robustness pass from publishing ``auth_proxy_unhealthy``. 120s is
+    # out to the ``claude`` CLI which talks to the AMD primus-safe
+    # gateway; if the gateway is unreachable the subprocess can hang
+    # on TCP for minutes, stalling the orchestrator reactor. 120s is
     # well above a normal turn (~10–30s) but bounds the worst case.
     call_timeout_s: float = 120.0
 
