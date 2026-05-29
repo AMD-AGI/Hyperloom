@@ -3015,8 +3015,33 @@ class Coordinator:
                     stop_reason = "target_reached"
                     break
                 if await self._has_no_more_leverage():
-                    stop_reason = "no_more_leverage"
-                    break
+                    # No-more-leverage is no longer terminal: instead of
+                    # aborting, wind the session down through SWEEP ->
+                    # CLOSE via the skip_to_sweep hint. Only nudge from
+                    # EXPLORE/KERNEL; SWEEP/CLOSE already own their own
+                    # wind-down (auto-sweep / report), and PRELUDE never
+                    # satisfies the safety net. The next tick's
+                    # _advance_phase_if_needed picks the hint up and
+                    # routes to SWEEP, whose entry hook auto-enqueues a
+                    # sweep task (so the safety net stops firing).
+                    phase_now = (self.shared_state.phase or "").strip().upper()
+                    if phase_now in (
+                        _phase_state.PHASE_EXPLORE,
+                        _phase_state.PHASE_KERNEL,
+                    ) and (
+                        self.shared_state.pending_escalate_hint
+                        != _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP
+                    ):
+                        self.shared_state.set_pending_escalate_hint(
+                            _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP,
+                        )
+                        self.shared_state.save(self.session_dir)
+                        log.info(
+                            "Coordinator: no-more-leverage safety net fired "
+                            "in phase=%s; set skip_to_sweep hint "
+                            "(non-terminal wind-down to SWEEP -> CLOSE)",
+                            phase_now,
+                        )
                 if (
                     deadline is not None
                     and time.monotonic() >= deadline
@@ -6357,7 +6382,9 @@ class Coordinator:
 
         Side effects depending on ``recommendation``:
 
-        * ``stop_session``    → ``state.set_stop_reason('no_more_leverage')``.
+        * ``stop_session``    → ``state.set_pending_escalate_hint('skip_to_sweep')``
+          (non-terminal: winds EXPLORE down to SWEEP → CLOSE rather than
+          aborting the session).
         * ``advance_to_kernel`` → ``state.set_pending_escalate_hint('skip_to_kernel')``.
         * ``continue_explore`` → append ``next_gap_canonical_id`` to
           ``state.gaps[]``, reset ``params_no_promote_streak`` and
@@ -6432,10 +6459,14 @@ class Coordinator:
         # Route — the heavy work is mostly already in helper writers
         # on SharedState.
         if raw_rec == "stop_session":
-            self.shared_state.set_stop_reason("no_more_leverage")
+            from .phase_state import ESCALATE_HINT_SKIP_TO_SWEEP
+            self.shared_state.set_pending_escalate_hint(
+                ESCALATE_HINT_SKIP_TO_SWEEP,
+            )
             log.info(
                 "steward: recommendation='stop_session' for task=%s "
-                "-> stop_reason='no_more_leverage'",
+                "-> pending_escalate_hint='skip_to_sweep' (non-terminal; "
+                "EXPLORE -> SWEEP -> CLOSE)",
                 task.task_id,
             )
         elif raw_rec == "advance_to_kernel":
