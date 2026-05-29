@@ -297,8 +297,8 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     # the session" intent. Adding a pct here would skim from EXPLORE's
     # 0.57 slice which the operators already tuned.
     PHASE_PRELUDE: 0.08,
-    PHASE_EXPLORE: 0.57,
-    PHASE_KERNEL:  0.25,
+    PHASE_EXPLORE: 0.47,
+    PHASE_KERNEL:  0.35,
     PHASE_SWEEP:   0.08,
     PHASE_CLOSE:   0.02,
 }
