@@ -30,7 +30,6 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import kernel_optimization as ko  # noqa: E402

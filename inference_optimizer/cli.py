@@ -893,7 +893,6 @@ def _build_specialist_executor(
         SpecialistRunner,
     )
     from .orchestrator.specialist_subprocess import SpecialistSubprocessConfig
-    from .orchestrator.sub_agent_runner import SubAgentResult
 
     claude_model = (
         (getattr(args, "specialist_model", None) or args.claude_model)

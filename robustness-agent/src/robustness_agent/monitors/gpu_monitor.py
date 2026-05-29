@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
 
 from ..config import Config
 from ..models import Alert, GpuSnapshot, Severity
