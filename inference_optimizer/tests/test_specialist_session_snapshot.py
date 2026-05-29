@@ -143,7 +143,7 @@ def test_build_session_snapshot_exposes_warm_replay_outcome(tmp_path: Path):
         "status": "reproduced",
         "actual_gain_pct": 23.5,
         "expected_gain_pct": 25.0,
-        "warm_recipe_tier": "T1_exact",
+        "warm_recipe_tier": "exact",
     }
     coord = _make_coord(tmp_path, state=state)
     snap = coord._build_session_snapshot()
