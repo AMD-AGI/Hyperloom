@@ -2253,8 +2253,8 @@ def _build_parser() -> argparse.ArgumentParser:
                              f"{', '.join(DEFAULT_ARTIFACT_PATTERNS)})")
     parser.add_argument("--artifacts-dir", default="task-artifacts",
                         help="Local directory where per-task artifacts land (default: ./task-artifacts)")
-    parser.add_argument("--task-timeout-min", type=int, default=480,
-                        help="Per-task wait timeout in minutes (default: 480 = 8h)")
+    parser.add_argument("--task-timeout-min", type=int, default=720,
+                        help="Per-task wait timeout in minutes (default: 720 = 12h)")
     parser.add_argument("--poll-interval-s", type=int, default=60,
                         help="How often to poll task status, seconds (default: 60)")
     parser.add_argument("--wait-parallel", type=int, default=8,
