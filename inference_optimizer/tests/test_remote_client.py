@@ -36,7 +36,6 @@ from inference_optimizer.recipe_kb import (
 )
 from inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_HTTP_TIMEOUT_SEC,
-    DEFAULT_KB_URL,
     DEFAULT_RETRY_ATTEMPTS,
     FOREGROUND_HTTP_TIMEOUT_SEC,
     FOREGROUND_RETRY_ATTEMPTS,
@@ -351,10 +350,15 @@ def test_kb_url_falls_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert c.kb_url == "http://env-url.example"
 
 
-def test_kb_url_default_when_no_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_url_no_env_forces_local_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No explicit URL and no ``$CORTEX_KB_URL`` → the client forces
+    ``enabled=False`` (local-only). The old hard-coded central
+    kb-service default was retired, so there is nothing to fall back
+    to and the optimizer never silently connects to a remote KB."""
     monkeypatch.delenv("CORTEX_KB_URL", raising=False)
     c = RemoteRecipeClient()
-    assert c.kb_url == DEFAULT_KB_URL
+    assert c.enabled is False
+    assert c.kb_url is None
 
 
 def test_explicit_kb_url_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
