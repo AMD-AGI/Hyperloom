@@ -229,7 +229,7 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         # Seed prerequisites so arbitrary proposals are accepted.
         c1.shared_state.baseline_tput = 100.0
         c1.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c1.shared_state.last_select_kernels = {
+        c1.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
             # Roofline-v2 N3: backends now requires fresh analysis_md_text.
             "analysis_md_text": "FAKE_REPORT",
@@ -335,3 +335,223 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
         assert len(c2.state.pending_proposals) == 1
     finally:
         await c2.stop()
+
+
+# ===========================================================================
+# N23 — --resume is N17-layout-aware (formerly test_n23_resume_per_session.py)
+# ===========================================================================
+
+
+class TestN23ResumePerSession:
+    """``--resume`` must understand the N17 per-session layout: workspace
+    is the parent of ``<model>/<UTC ts>/``. The fallback contract is:
+
+    * leave $USER_DATA_PATH alone (workspace level) so runtime/ resolves;
+    * pick the LATEST per-session subdir under ``<model>/<ts>/`` when no
+      ``--resume-from`` is given;
+    * accept ``--resume-from`` as an explicit override (must be under
+      workspace_root, must exist);
+    * pin INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR to the resolved subdir
+      BEFORE any state load, so subprocesses inherit it.
+
+    These tests exercise the path-resolution layer
+    (``inference_optimizer.paths.find_latest_per_session_dir``) the
+    ``--resume`` block delegates to.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_env(self, monkeypatch, tmp_path):
+        from inference_optimizer import paths as _paths
+        monkeypatch.setenv(_paths.ENV_USER_DATA_PATH, str(tmp_path))
+        monkeypatch.delenv(_paths.ENV_CURRENT_SESSION_DIR, raising=False)
+        monkeypatch.delenv(_paths.ENV_SESSION_LAYOUT, raising=False)
+
+    def test_resume_picks_latest_subdir_after_two_launches(self, tmp_path):
+        from inference_optimizer import paths as _paths
+        sd1 = _paths.make_session_dir(model_name="DeepSeek-R1-0528")
+        assert _paths.find_latest_per_session_dir() == sd1
+        assert _paths.find_latest_per_session_dir(model_name="DeepSeek-R1-0528") == sd1
+
+        later_ts = "29990101T000000Z"
+        sd2 = tmp_path / "DeepSeek-R1-0528" / later_ts
+        sd2.mkdir(parents=True)
+
+        assert _paths.find_latest_per_session_dir() == sd2
+        assert _paths.find_latest_per_session_dir(model_name="DeepSeek-R1-0528") == sd2
+
+    def test_resume_does_not_mutate_user_data_path(self, tmp_path):
+        from inference_optimizer import paths as _paths
+        sd = _paths.make_session_dir(model_name="Qwen3-32B")
+        import os as _os
+        assert _os.environ[_paths.ENV_USER_DATA_PATH] == str(tmp_path)
+        assert _os.environ[_paths.ENV_CURRENT_SESSION_DIR] == str(sd)
+        assert _paths.workspace_root() == tmp_path
+        assert tmp_path in sd.parents
+
+    def test_resume_falls_back_to_flat_when_no_per_session_subdir(self, tmp_path):
+        from inference_optimizer import paths as _paths
+        assert _paths.find_latest_per_session_dir() is None
+
+    def test_resume_from_explicit_path_must_be_under_workspace_root(
+        self, tmp_path, monkeypatch,
+    ):
+        from inference_optimizer import paths as _paths
+        sd = _paths.make_session_dir(model_name="Qwen3-32B")
+        assert tmp_path.resolve() in sd.resolve().parents
+
+        foreign = tmp_path.parent / "stranger_workspace" / "sess"
+        foreign.mkdir(parents=True)
+        try:
+            foreign.resolve().relative_to(tmp_path.resolve())
+            assert False, "foreign path should not be under workspace_root"
+        except ValueError:
+            pass
+
+    def test_latest_picks_across_models_when_model_name_omitted(self, tmp_path):
+        from inference_optimizer import paths as _paths
+        (tmp_path / "ModelA").mkdir()
+        (tmp_path / "ModelA" / "20260101T000000Z").mkdir()
+        (tmp_path / "ModelB").mkdir()
+        (tmp_path / "ModelB" / "20260520T000000Z").mkdir()
+        (tmp_path / "ModelC").mkdir()
+        (tmp_path / "ModelC" / "20260315T000000Z").mkdir()
+
+        picked = _paths.find_latest_per_session_dir()
+        assert picked is not None
+        assert picked.parent.name == "ModelB"
+        assert picked.name == "20260520T000000Z"
+
+    def test_workspace_shared_dirs_never_picked_as_session(self, tmp_path):
+        from inference_optimizer import paths as _paths
+        (tmp_path / "runtime").mkdir()
+        (tmp_path / "runtime" / "20990101T000000Z").mkdir()
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "logs" / "20990101T000000Z").mkdir()
+        (tmp_path / "RealModel").mkdir()
+        (tmp_path / "RealModel" / "20260518T100000Z").mkdir()
+
+        picked = _paths.find_latest_per_session_dir()
+        assert picked is not None
+        assert picked.parent.name == "RealModel"
+        assert "runtime" not in str(picked)
+        assert "logs" not in str(picked)
+
+
+# ===========================================================================
+# N24 — _load_kernel_agent_env_fallback hard-fails on bad state
+# (formerly test_n24_kernel_agent_env_hardfail.py)
+# ===========================================================================
+
+
+class TestN24KernelAgentEnvHardFail:
+    """Pre-N24 the fallback printed a WARN and let ``_preflight()``
+    continue when ``$USER_DATA_PATH/runtime/kernel-agent.env.sh`` was
+    missing or empty — silently masking the most common N17 misuse
+    (USER_DATA_PATH pointed at a per-session subdir). N24 aborts with
+    sys.exit(2) and a clear actionable message so operators notice
+    within seconds instead of after a 10h silent stall.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_env(self, monkeypatch):
+        for var in (
+            "HYPERLOOM_KERNEL_AGENT_ROOT",
+            "KERNEL_AGENT_ENV",
+            "USER_DATA_PATH",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_noop_when_root_already_set(self, monkeypatch, capsys):
+        from inference_optimizer import cli
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
+        cli._load_kernel_agent_env_fallback()
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert out.err == ""
+
+    def test_aborts_when_no_user_data_path(self, monkeypatch, capsys):
+        from inference_optimizer import cli
+        with pytest.raises(SystemExit) as excinfo:
+            cli._load_kernel_agent_env_fallback()
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "USER_DATA_PATH" in err
+        assert "install.sh" in err
+
+    def test_aborts_when_env_file_missing(self, tmp_path, monkeypatch, capsys):
+        from inference_optimizer import cli
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        with pytest.raises(SystemExit) as excinfo:
+            cli._load_kernel_agent_env_fallback()
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "kernel-agent.env.sh" in err
+        assert "install.sh" in err
+        assert str(tmp_path) in err
+
+    def test_aborts_when_env_file_does_not_define_root(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        from inference_optimizer import cli
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        (runtime / "kernel-agent.env.sh").write_text(
+            "# stale file\nexport SOMETHING_ELSE=1\n", encoding="utf-8",
+        )
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        with pytest.raises(SystemExit) as excinfo:
+            cli._load_kernel_agent_env_fallback()
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "HYPERLOOM_KERNEL_AGENT_ROOT" in err
+        assert "stale" in err or "malformed" in err
+
+    def test_sources_vars_on_success(self, tmp_path, monkeypatch, capsys):
+        from inference_optimizer import cli
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        (runtime / "kernel-agent.env.sh").write_text(
+            "# valid env file\n"
+            "export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\n"
+            "export KERNEL_AGENT_LOG_LEVEL=INFO\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        cli._load_kernel_agent_env_fallback()
+        import os as _os
+        assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/opt/kernel-agent"
+        assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "INFO"
+        out = capsys.readouterr().out
+        assert "loaded" in out
+        assert "kernel-agent" in out
+
+    def test_env_wins_over_file(self, tmp_path, monkeypatch, capsys):
+        from inference_optimizer import cli
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        (runtime / "kernel-agent.env.sh").write_text(
+            "export HYPERLOOM_KERNEL_AGENT_ROOT=/from/file\n"
+            "export KERNEL_AGENT_LOG_LEVEL=INFO\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("KERNEL_AGENT_LOG_LEVEL", "DEBUG")
+        cli._load_kernel_agent_env_fallback()
+        import os as _os
+        assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/file"
+        assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
+
+    def test_explicit_kernel_agent_env_overrides_user_data_path(
+        self, tmp_path, monkeypatch,
+    ):
+        from inference_optimizer import cli
+        custom = tmp_path / "custom-loc.sh"
+        custom.write_text(
+            "export HYPERLOOM_KERNEL_AGENT_ROOT=/from/custom\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("KERNEL_AGENT_ENV", str(custom))
+        monkeypatch.setenv("USER_DATA_PATH", "/nonexistent/should-not-be-used")
+        cli._load_kernel_agent_env_fallback()
+        import os as _os
+        assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/custom"

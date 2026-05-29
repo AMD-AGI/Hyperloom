@@ -1,6 +1,6 @@
 """Translate Symptoms into Coordinator Intents.
 
-The ladder has three tiers, matching DESIGN v0.6 §13.2 / §19.3:
+The ladder has three tiers, matching:
 
 1. **observe** — low severity: emit ``send_message(topic="observation")``
    so the orchestration agent has visibility but no pause is triggered.
@@ -421,8 +421,7 @@ class ActionLadder:
                     reason="gateway_auth_outage",
                     next_action_hint=(
                         "rotate $SAFE_API_KEY at https://llm.amd.com/ "
-                        "and re-export; the local auth_proxy is healthy "
-                        "(F3 silent) but the upstream key is revoked"
+                        "and re-export; the upstream gateway key is revoked"
                     ),
                     severity="high",
                 )
@@ -439,7 +438,7 @@ class ActionLadder:
                     reason="wekafs_degraded",
                     next_action_hint=(
                         f"WekaFS mount degraded ({evidence.get('env_name')}); "
-                        f"select_kernels / OOB CLI / benchmark scripts "
+                        f"trace_analyze / OOB CLI / benchmark scripts "
                         f"will hang or time out until the mount recovers"
                     ),
                     severity="high",
@@ -528,19 +527,6 @@ class ActionLadder:
                         f"budget on kernel_id={evidence.get('kernel_id', '?')}; "
                         f"extend --geak-budget-min above 90 OR prune this "
                         f"kernel from rotation"
-                    ),
-                    severity="high",
-                )
-            )
-        elif sym.name == "auth_proxy_unhealthy":
-            # F3: :4002 down → every OOB CLI returns 401.
-            intents.append(
-                build_escalate(
-                    reason="auth_proxy_unhealthy",
-                    next_action_hint=(
-                        "run $REPO_ROOT/kernel-agent/scripts/ensure_auth_proxy.sh "
-                        "(idempotent); kernel_opt / OOB attempts will keep "
-                        "failing with HTTP 401 until the proxy is back"
                     ),
                     severity="high",
                 )

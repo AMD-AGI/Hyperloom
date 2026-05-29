@@ -25,19 +25,26 @@ from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 # ``integrate_patch`` is the new orchestrator-side apply+restart+gate
 # step that consumes specialist worktree patches.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
-    # prep (2)
+    # prep (3)
     "target_analysis":      "prep",
     "baseline":             "prep",
-    # analysis (2) — F1-2.5 (Roofline-v2 / plan_roofline_framework F1):
-    # ``roofline`` is the v0.8 composite action that runs profile +
-    # trace_analyze atomically and surfaces analysis.md to the next
-    # orchestration tick. It supersedes the retired ``pmc_roofline``
-    # action (PMC counter / rocprof gathering); ``profile`` stays as
-    # the legacy escape hatch (PolicyGate's N9 rule denies direct
-    # ``profile`` propose when ``--deny-direct-profile`` is on, which
-    # is the default).
-    "profile":              "analysis",
+    # GAP 1 — Coordinator-internal one-shot warm-recipe replay.
+    # Same prep family as ``baseline`` (it is essentially a re-baseline
+    # with the KB best_config applied). PolicyGate denies LLM
+    # propose_action / delegate via ``analysis_action_not_llm_proposable``.
+    "replay_warm_recipe":   "prep",
+    # analysis (2) — Coordinator-internal analysis actions, selected
+    # at runtime by ``shared_state.enable_roofline`` (``--enable-roofline``
+    # / ``--no-enable-roofline``, default on):
+    #   * ``roofline`` — composite (profile + trace_analyze +
+    #     analysis.md snapshot);
+    #   * ``profile`` — lightweight trace-only fallback.
+    # Both are registered so the Coordinator-internal task path can
+    # dispatch them through SubAgentRunner. PolicyGate denies LLM
+    # propose_action / delegate for either name
+    # (``analysis_action_not_llm_proposable``).
     "roofline":             "analysis",
+    "profile":              "analysis",
     # shallow (5) — v0.8 M3 + KB_gaps/Dead-A merged the v0.6
     # ``backends`` / ``params`` / ``validate_stack`` actions into
     # ``explore``; their yamls + executors were physically deleted.
@@ -45,6 +52,10 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # EXPLORE-phase serving-lane-locked patch integration step.
     "explore":              "shallow",
     "integrate_patch":      "shallow",
+    # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor.
+    # Mirrors integrate_patch's role for the new phase; LLM may not
+    # propose it (framework_pr_action_not_llm_proposable, Stage 3).
+    "framework_pr":         "shallow",
     "sweep":                "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",

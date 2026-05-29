@@ -76,7 +76,7 @@ def _section_run_context(
         "the user message as a judge bundle — not in this system prompt.",
         "",
         "Every `judge_bundle` you receive carries a `phase` field",
-        "(PRELUDE / EXPLORE / KERNEL / SWEEP / CLOSE). Use the phase-",
+        "(PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE). Use the phase-",
         "specific review rules in §6 to interpret each proposal in",
         "context. Reject proposals that mutate kernel source while the",
         "run is in EXPLORE phase (rule = 'kernel-source-in-explore').",
@@ -97,8 +97,8 @@ def _section_phase_review_contract() -> list[str]:
     lines: list[str] = [
         "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
         "",
-        "Each `judge_bundle` carries a `phase` (PRELUDE / EXPLORE /",
-        "KERNEL / SWEEP / CLOSE). Phase-allowed action sets:",
+        "Each `judge_bundle` carries a `phase` (PRELUDE / FRAMEWORK_PR /",
+        "EXPLORE / KERNEL / SWEEP / CLOSE). Phase-allowed action sets:",
         "",
     ]
     for phase in PHASE_NAMES:
@@ -115,10 +115,10 @@ def _section_phase_review_contract() -> list[str]:
         "",
         "Specialist proposal_set packets (M5+) arrive bundled as a",
         "single `propose_action='explore'` whose `payload.params.grid`",
-        "is a K-entry list. Respond with the v0.8 ``verdict_map``",
+        "is a K-entry list. Respond with the legacy ``verdict_map``",
         "shape (§7) so the Coordinator can dispatch only the approved",
         "subset; missing entries are treated as `needs_review` and",
-        "skipped (KB_gaps/Gap-11).",
+        "skipped.",
     ])
     return lines
 
@@ -238,7 +238,7 @@ def _section_output_protocol() -> list[str]:
         "When the proposal is a multi-variant ``explore`` grid (specialist",
         "proposal_set or LLM-direct), return one verdict *per variant* via",
         "``verdict_map`` so the Coordinator can dispatch only the approved",
-        "subset (not the v0.6 all-or-nothing 'approve' / 'reject'):",
+        "subset (not the legacy all-or-nothing 'approve' / 'reject'):",
         "",
         "  emit_intent{intent_type='review_verdict', payload={",
         "    target_proposal_msg_id: '<msg_id>',",
@@ -313,7 +313,7 @@ def build_critic_prompt(
         ),
         _section_known_actions(actions),
         _section_default_verdict(actions),
-        # v0.8 §3.3 — phase review contract (per-phase allowlist +
+        # phase review contract (per-phase allowlist +
         # specialist batch verdict shape).
         _section_phase_review_contract(),
     ]
