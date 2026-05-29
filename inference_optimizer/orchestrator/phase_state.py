@@ -1410,6 +1410,21 @@ def exit_normal_framework_pr(
     return None
 
 
+def _post_prelude_target(*, explore_enabled: bool, kernel_enabled: bool) -> str:
+    """First active phase after PRELUDE / FRAMEWORK_PR.
+
+    EXPLORE when enabled; otherwise KERNEL when enabled; otherwise SWEEP.
+    Mirrors the EXPLORE-exit fallthrough (kernel disabled → SWEEP) so the
+    ``--no-explore`` opt-out collapses the chain the same way
+    ``--no-kernel`` does at the EXPLORE→ boundary.
+    """
+    if explore_enabled:
+        return PHASE_EXPLORE
+    if kernel_enabled:
+        return PHASE_KERNEL
+    return PHASE_SWEEP
+
+
 def compute_next_phase(
     state: Any,
     *,
@@ -1418,6 +1433,7 @@ def compute_next_phase(
     now_unix: float | None = None,
     disable_legacy_proxy: bool = False,
     framework_phase_enabled: bool = False,
+    explore_enabled: bool = True,
     max_hours: float | None = None,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
@@ -1448,12 +1464,20 @@ def compute_next_phase(
         if norm is not None:
             if framework_phase_enabled:
                 return PHASE_FRAMEWORK_PR, norm[0], norm[1]
-            # Framework phase off → straight through to EXPLORE with the
-            # historical ``prelude_done`` reason. The FRAMEWORK_PR phase
-            # has no dedicated "skipped" reason: --no-framework simply
-            # collapses the chain and the routing record stays
-            # backward-compatible with pre-FRAMEWORK_PR sessions.
-            return PHASE_EXPLORE, norm[0], norm[1]
+            # Framework phase off → straight through to the first active
+            # phase with the historical ``prelude_done`` reason. Neither
+            # FRAMEWORK_PR nor EXPLORE has a dedicated "skipped" reason:
+            # --no-framework / --no-explore simply collapse the chain and
+            # the routing record stays backward-compatible with
+            # pre-FRAMEWORK_PR sessions. ``explore_skipped`` evidence is
+            # stamped when EXPLORE is bypassed (--no-explore).
+            target = _post_prelude_target(
+                explore_enabled=explore_enabled, kernel_enabled=kernel_enabled,
+            )
+            evidence = dict(norm[1])
+            if target != PHASE_EXPLORE:
+                evidence["explore_skipped"] = True
+            return target, norm[0], evidence
         return None
 
     if current == PHASE_FRAMEWORK_PR:
@@ -1475,7 +1499,15 @@ def compute_next_phase(
             )),
         )
         if norm is not None:
-            return PHASE_EXPLORE, norm[0], norm[1]
+            # FRAMEWORK_PR → EXPLORE normally; --no-explore collapses
+            # straight to KERNEL (or SWEEP when --no-kernel too).
+            target = _post_prelude_target(
+                explore_enabled=explore_enabled, kernel_enabled=kernel_enabled,
+            )
+            evidence = dict(norm[1])
+            if target != PHASE_EXPLORE:
+                evidence["explore_skipped"] = True
+            return target, norm[0], evidence
         return None
 
     if current == PHASE_EXPLORE:
