@@ -39,7 +39,6 @@ from inference_optimizer.orchestrator.backends import (
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
-from inference_optimizer.orchestrator.message_bus import Message
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.task_registry import Task
 from inference_optimizer.paths import make_session_dir

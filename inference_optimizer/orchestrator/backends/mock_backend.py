@@ -20,12 +20,11 @@ Usage::
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from ..intent_parser import Intent
-from .base import Backend, BackendError, BackendTurnResult
+from .base import BackendTurnResult
 
 
 @dataclass

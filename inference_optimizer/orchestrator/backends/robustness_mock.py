@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..intent_parser import Intent, IntentType
-from .base import Backend, BackendTurnResult
+from .base import BackendTurnResult
 
 
 @dataclass
