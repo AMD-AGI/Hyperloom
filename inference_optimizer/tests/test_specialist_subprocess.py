@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -40,7 +39,6 @@ from inference_optimizer.orchestrator.specialist_runner import (
 )
 from inference_optimizer.orchestrator.specialist_subprocess import (
     SpecialistSubprocessConfig,
-    SpecialistSubprocessDispatcher,
     _pick_worktree_base,
     _setup_worktree,
 )

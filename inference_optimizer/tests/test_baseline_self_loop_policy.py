@@ -22,7 +22,6 @@ from inference_optimizer.orchestrator.backends import (
 )
 from inference_optimizer.orchestrator.coordinator import (
     Coordinator,
-    _baseline_params_fingerprint,
 )
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.task_registry import Task

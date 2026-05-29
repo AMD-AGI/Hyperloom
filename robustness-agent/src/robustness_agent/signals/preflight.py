@@ -35,10 +35,10 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from ..role.prompt_inputs import ReactorContext, SharedStateSnapshot
+from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
