@@ -16,7 +16,6 @@ import pytest
 
 from robustness_agent.config import Config
 from robustness_agent.models import (
-    Alert,
     GpuSnapshot,
     ProcessInfo,
     ServerHealthStatus,
