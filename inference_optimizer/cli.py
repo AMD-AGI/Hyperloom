@@ -2895,25 +2895,27 @@ def _bootstrap_cortex_kb(
 
 
 # ---------------------------------------------------------------------------
-# v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle
+# Retired (v2 RecipeKB cutover): the Cortex KB flusher daemon was a
+# background NDJSON drainer for failed central-server writes. Under
+# the local-write design writes are local-only so there is nothing
+# to drain. The two helpers below are kept as no-op stubs that
+# write a "skipped" status marker for the breakdown collector,
+# preserving the on-disk layout for a few session-cycles while
+# downstream consumers catch up.
 # ---------------------------------------------------------------------------
 def _maybe_spawn_kb_flusher(
     args: argparse.Namespace,
     *,
     session_dir: Path,
 ) -> tuple[subprocess.Popen | None, Path]:
-    """Spawn ``scripts.cortex_kb_flusher`` for this session and return the
-    handle + pid path.
+    """No-op shim — flusher daemon is retired.
 
-    KB_design §3.6 / §3.14 R-01/R-02 require a background NDJSON drainer
-    so the main loop never blocks on Cortex outages. Pre-Dead-E the
-    daemon code existed but the cli never launched it; this helper is
-    the missing link.
-
-    Returns ``(None, pid_path)`` when spawn is skipped (``--degraded-kb``,
-    ``--no-kb-flusher``, or a healthy prior daemon is still bound to
-    ``pid_path``). A status marker is always written so the breakdown
-    collector can surface the boot-time decision.
+    Returns ``(None, pid_path)`` and writes a status marker with
+    ``reason="retired_v2_local_write"`` so the breakdown collector
+    surfaces the cutover state. Full retirement (deleting the
+    helper + its callers + the status marker / pid path machinery)
+    happens in a follow-up commit alongside the cortex_kb_client
+    module deletion.
     """
     from .session_paths import (
         cortex_dir,
@@ -2925,96 +2927,27 @@ def _maybe_spawn_kb_flusher(
     status_path = cortex_flusher_status_json(session_dir)
     cortex_root = cortex_dir(session_dir)
     cortex_root.mkdir(parents=True, exist_ok=True)
-
-    cortex_enabled = bool(getattr(args, "cortex_enabled", True))
-    flusher_enabled = bool(getattr(args, "kb_flusher_enabled", True))
-    interval_sec = float(getattr(args, "kb_flusher_interval_sec", 5.0) or 5.0)
-    batch_size = int(getattr(args, "kb_flusher_batch_size", 50) or 50)
-    cortex_kb_url = (getattr(args, "cortex_kb_url", None) or "").strip() or None
-
-    def _write_status(
-        *,
-        spawned: bool,
-        pid: int | None,
-        cmd: list[str],
-        reason: str,
-    ) -> None:
-        payload = {
-            "enabled":       cortex_enabled and flusher_enabled,
-            "spawned":       spawned,
-            "pid":           pid,
-            "cmd":           cmd,
-            "cortex_kb_url": cortex_kb_url,
-            "interval_sec":  interval_sec,
-            "batch_size":    batch_size,
-            "reason":        reason,
-            "ts":            datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "pid_path":      str(pid_path),
-        }
-        try:
-            status_path.parent.mkdir(parents=True, exist_ok=True)
-            status_path.write_text(
-                json.dumps(payload, sort_keys=True, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            log.warning("kb_flusher status marker write failed: %s", exc)
-
-    if not cortex_enabled:
-        _write_status(spawned=False, pid=None, cmd=[], reason="cortex_disabled")
-        print("Cortex KB flusher: SKIPPED (--degraded-kb)")
-        return None, pid_path
-    if not flusher_enabled:
-        _write_status(spawned=False, pid=None, cmd=[], reason="flag_disabled")
-        print("Cortex KB flusher: SKIPPED (--no-kb-flusher)")
-        return None, pid_path
-
-    if pid_path.exists():
-        try:
-            prior = int(pid_path.read_text(encoding="utf-8").strip().splitlines()[0])
-            os.kill(prior, 0)
-            _write_status(
-                spawned=False, pid=prior, cmd=[],
-                reason=f"prior_alive_pid={prior}",
-            )
-            print(f"Cortex KB flusher: REUSED (existing daemon pid={prior})")
-            return None, pid_path
-        except (OSError, ValueError, IndexError):
-            try:
-                pid_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    cmd: list[str] = [
-        sys.executable, "-m", "inference_optimizer.scripts.cortex_kb_flusher",
-        "--session-dir", str(session_dir),
-        "--interval-sec", str(interval_sec),
-    ]
-    if cortex_kb_url:
-        cmd.extend(["--cortex-kb-url", cortex_kb_url])
-
+    payload = {
+        "enabled":       False,
+        "spawned":       False,
+        "pid":           None,
+        "cmd":           [],
+        "cortex_kb_url": (getattr(args, "cortex_kb_url", None) or "").strip() or None,
+        "interval_sec":  0.0,
+        "batch_size":    0,
+        "reason":        "retired_v2_local_write",
+        "ts":            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "pid_path":      str(pid_path),
+    }
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(
+            json.dumps(payload, sort_keys=True, indent=2),
+            encoding="utf-8",
         )
     except OSError as exc:
-        log.warning("kb_flusher spawn failed: %s", exc)
-        _write_status(
-            spawned=False, pid=None, cmd=cmd,
-            reason=f"spawn_failed:{exc!r}"[:240],
-        )
-        print(f"Cortex KB flusher: SPAWN FAILED ({exc!r})")
-        return None, pid_path
-
-    _write_status(spawned=True, pid=proc.pid, cmd=cmd, reason="spawned")
-    print(
-        f"Cortex KB flusher: SPAWNED pid={proc.pid} "
-        f"interval={interval_sec}s batch={batch_size}"
-    )
-    return proc, pid_path
+        log.warning("kb_flusher status marker write failed: %s", exc)
+    return None, pid_path
 
 
 def _stop_kb_flusher(
@@ -3023,37 +2956,23 @@ def _stop_kb_flusher(
     *,
     grace_sec: float = 10.0,
 ) -> None:
-    """Graceful shutdown for the flusher daemon spawned by
-    :func:`_maybe_spawn_kb_flusher`. Best-effort: never raises.
-    """
+    """No-op shim — flusher is retired (always spawned proc=None)."""
     if proc is None:
         return
-    if proc.poll() is not None:
+    # Defensive: if a stale prior daemon still exists, terminate it.
+    if proc.poll() is None:
         try:
-            pid_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=grace_sec)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
     try:
-        proc.send_signal(signal.SIGTERM)
-        proc.wait(timeout=grace_sec)
-    except subprocess.TimeoutExpired:
-        log.warning(
-            "kb_flusher did not exit within %.1fs of SIGTERM; killing pid=%d",
-            grace_sec, proc.pid,
-        )
-        try:
-            proc.kill()
-            proc.wait(timeout=2.0)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("kb_flusher kill failed: %s", exc)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("kb_flusher graceful shutdown failed: %s", exc)
-    finally:
-        try:
-            pid_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        pid_path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
