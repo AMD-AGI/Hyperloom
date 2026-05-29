@@ -11,11 +11,10 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 
-from ray_runtime import quiet_ray_init, safe_runtime_env
+from ray_runtime import quiet_ray_init
 
 
 def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0,

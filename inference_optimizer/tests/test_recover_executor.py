@@ -8,7 +8,6 @@ Coordinator rely on, plus the on-disk ``result.json`` audit trail.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import signal
