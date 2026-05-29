@@ -162,9 +162,9 @@ def test_build_dispatcher_no_remote_when_degraded_kb(
 def test_build_dispatcher_no_remote_when_no_url(
     env_clean: None, tmp_path: Path,
 ) -> None:
-    """No URL anywhere → local-only. We deliberately do NOT fall
-    through to DEFAULT_KB_URL (the default applies only when the
-    operator opted in to remote reads but didn't override the URL).
+    """No URL anywhere → local-only. There is no hard-coded default
+    endpoint to fall back to (the old central kb-service default was
+    retired), so the dispatcher wires ``remote=None``.
     """
     args = _ns(local_kb_root=str(tmp_path))
     kb = _build_recipe_kb_dispatcher(args)

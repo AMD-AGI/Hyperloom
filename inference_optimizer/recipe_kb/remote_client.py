@@ -256,9 +256,11 @@ class RemoteRecipeClient:
     instance into the dispatcher and the caller path stays uniform.
 
     Args:
-        kb_url: Optional override of the central kb-service URL.
-            ``None`` reads ``CORTEX_KB_URL`` env or
-            :data:`recipe_snapshot_constants.DEFAULT_KB_URL`.
+        kb_url: Central kb-service URL (read-only). When neither this
+            nor ``CORTEX_KB_URL`` is set the client forces
+            ``enabled=False`` (local-only) — there is NO hard-coded
+            default endpoint. A remote KB is consulted only when an
+            operator explicitly supplies a URL.
         timeout_sec: Per-HTTP-call timeout. Env override
             ``CORTEX_KB_HTTP_TIMEOUT_SEC``. Defaults to the
             ``foreground=True`` profile (2s) since the dispatcher's
@@ -292,9 +294,15 @@ class RemoteRecipeClient:
 
     def __post_init__(self) -> None:
         if not self.kb_url:
-            self.kb_url = (
-                os.environ.get("CORTEX_KB_URL") or C.DEFAULT_KB_URL
-            )
+            self.kb_url = (os.environ.get("CORTEX_KB_URL") or "").strip() or None
+        if not self.kb_url:
+            # No URL configured anywhere. The old central-service
+            # default was retired, so there is nothing to fall back
+            # to: force local-only. A disabled client short-circuits
+            # every read to "no info" without a network call —
+            # identical to ``remote=None`` in the dispatcher.
+            # Operators opt in to a remote KB only by passing a URL.
+            self.enabled = False
         if self.timeout_sec is None:
             profile_default = (
                 C.FOREGROUND_HTTP_TIMEOUT_SEC if self.foreground
