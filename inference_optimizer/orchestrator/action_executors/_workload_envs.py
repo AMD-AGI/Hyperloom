@@ -293,14 +293,28 @@ def materialize_config_with_envs(
             else:
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
         if is_atom:
-            # atom: nothing to inject. profile_num_prompts is still set
-            # above so the bench client gets a window large enough to
-            # reach steady state (same TraceLens #194 formula as
-            # sglang/vllm — the start/stop boundary is just HTTP-driven
-            # rather than iteration-driven). atom writes trace files to
+            # atom writes trace files to
             # <torch_profiler_dir>/rank_<N>/*.pt.trace.json.gz which our
             # _candidate_trace_dirs probe matches unchanged.
-            pass
+            #
+            # atom's profiler is HTTP-driven (POST /start_profile at server-up,
+            # /stop_profile at run end) and — unlike sglang's start_step/num_steps
+            # or vLLM's delay_iterations/max_iterations — has NO internal capture
+            # window: it records the ENTIRE bench-client run. The only lever that
+            # bounds atom's profiled decode-iteration count is the *workload
+            # length* (OSL) + prompt count, and OSL can only be clamped at the
+            # Magpie client layer (`--output-len`), never from this Python layer.
+            #
+            # Therefore the atom profile window lives in ONE place — Magpie's
+            # atom_mi*x.sh, which clamps OSL + NUM_PROMPTS when PROFILE=1 (see
+            # ATOM_PROFILE_OSL / ATOM_PROFILE_NUM_PROMPTS). We must NOT also force
+            # the sglang/vllm steady-state NUM_PROMPTS here: at OSL=1024 that
+            # ~780-prompt window is ~4096 decode iters, which starves aiter's
+            # shared-memory broadcast ring ("No available shared memory broadcast
+            # block found in 60s") until a tiny BROADCAST collective trips the
+            # 600s NCCL watchdog and aborts the run *before* /stop_profile flushes
+            # — leaving rank_*/ empty. Defer to Magpie (single source of truth).
+            profile_num_prompts = None
         elif "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
             profiler_args_parts = [
