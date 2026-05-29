@@ -48,10 +48,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .cortex_kb_client import (
-    CortexKBClient,
-    CortexKBError,
-)
 from .orchestrator.action_executors import (
     TargetAnalysisExecutor,
     baseline_executor,
@@ -3066,7 +3062,7 @@ def _stop_kb_flusher(
 def _bootstrap_knowledge_plane(
     args: argparse.Namespace,
     *,
-    cortex_client: "CortexKBClient | None",
+    cortex_client: Any = None,
     session_dir: Path | None = None,
 ) -> "KnowledgePlane":
     """Construct the :class:`KnowledgePlane` facade for one session.
@@ -3146,8 +3142,14 @@ def _bootstrap_knowledge_plane(
                 "(breakdown.warnings will miss pr_monitor row)", exc,
             )
 
+    # NOTE: ``cortex_kb=None`` per the local-kb-recipe-snapshot
+    # design (§3 of the requirements doc): the central kb-service
+    # is only consulted as a recipe-read source via the RecipeKB
+    # dispatcher; KnowledgePlane's legacy /v1/points read+write
+    # surface is no longer wired. PR Monitor (a separate service)
+    # is still routed through KnowledgePlane.
     return KnowledgePlane.from_clients(
-        cortex_kb=cortex_client,
+        cortex_kb=None,
         pr_monitor=pr_client,
         domain_repos=load_domain_repos(),
         pr_feed_window_days=window_days,

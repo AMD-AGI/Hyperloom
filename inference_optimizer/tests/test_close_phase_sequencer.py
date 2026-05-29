@@ -575,7 +575,16 @@ async def test_cortex_t4_hook_short_circuits_when_sequencer_done(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_cortex_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path):
     """Crash / Ctrl-C path: sequencer didn't run, so stop()'s
-    ``_cortex_t4_hook`` MUST still drain as a safety net."""
+    ``_cortex_t4_hook`` MUST still call recipe-finalize as a
+    safety net.
+
+    History note: under the v1 cortex_kb_client this test asserted
+    ``drain_calls == 1``. The v1 NDJSON pending queue is retired
+    under the local-write design, so the safety-net is now the
+    recipe-finalize path; the drain assertion would always fail.
+    The hook still needs to be invoked, so we instead assert
+    ``finalize_calls == 1`` on the stub.
+    """
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -595,5 +604,11 @@ async def test_cortex_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path)
     coord.shared_state.cortex_session_id = "sid-fallback"
     coord.shared_state.close_sequence_done = False
 
+    finalize_calls: list[int] = []
+
+    def _spy() -> None:
+        finalize_calls.append(1)
+
+    coord.cortex_finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
     await coord._cortex_t4_hook()
-    assert coord.cortex_kb.drain_calls == 1
+    assert finalize_calls == [1]
