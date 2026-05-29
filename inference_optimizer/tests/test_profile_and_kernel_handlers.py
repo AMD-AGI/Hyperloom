@@ -826,10 +826,13 @@ def test_materialize_config_atom_profile_skips_tracelens_flags(
     ``atom_mi*x.sh`` (sourced from ``$ATOM_TORCH_PROFILER_DIR``), not via
     EXTRA_ATOM_ARGS.
 
-    Also asserts NUM_PROMPTS is still bumped by the TraceLens #194
-    steady-state formula (the formula applies to atom too, since the
-    InferenceX bench client opens / closes the profile window via
-    HTTP after that many prompts have been processed)."""
+    Also asserts the atom profile render still produces a positive
+    NUM_PROMPTS. Note: unlike sglang/vllm, Hyperloom does NOT force the
+    TraceLens #194 steady-state NUM_PROMPTS for atom — atom's profiler has
+    no engine-level capture window (it records the whole run), so the
+    profile window (OSL + NUM_PROMPTS clamp) is owned solely by Magpie's
+    atom_mi*x.sh when PROFILE=1. Here we only verify a sane (>0) workload
+    size is rendered and no sglang/vllm flags leak."""
     import yaml
     monkeypatch.setenv("FRAMEWORK", "atom")
     monkeypatch.setenv("PROFILE", "1")
@@ -855,15 +858,15 @@ def test_materialize_config_atom_profile_skips_tracelens_flags(
     assert "PROFILE_EXTRA_BODY" not in envs, (
         f"atom render must not produce SGLang PROFILE_EXTRA_BODY: {envs!r}"
     )
-    # IR-8: the steady-state NUM_PROMPTS is still applied to atom so the
-    # bench client has enough prompts to push past warmup before the
-    # HTTP /stop_profile call. The exact value depends on CONC / OSL /
-    # RANDOM_RANGE_RATIO from baseline_atom.yaml; just verify it was
-    # set + is materially above the YAML's CONC*10 default.
+    # IR-8: Hyperloom defers atom's profile-window sizing to Magpie's
+    # atom_mi*x.sh (which clamps OSL + NUM_PROMPTS under PROFILE=1), so this
+    # layer must NOT force the sglang/vllm steady-state NUM_PROMPTS for atom.
+    # We only assert a sane (>0) workload size is rendered; the actual
+    # profile window is bounded downstream in the bridge.
     num_prompts = envs.get("NUM_PROMPTS")
     assert num_prompts is not None and int(num_prompts) > 0, (
-        f"atom profile path must still set NUM_PROMPTS from the "
-        f"TraceLens steady-state formula: {envs!r}"
+        f"atom profile render must still produce a positive NUM_PROMPTS "
+        f"(window clamp itself is owned by Magpie atom_mi*x.sh): {envs!r}"
     )
 
 
