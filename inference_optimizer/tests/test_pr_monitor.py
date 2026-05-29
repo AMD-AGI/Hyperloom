@@ -374,11 +374,8 @@ def test_plane_cortex_write_helpers_skip_when_disabled():
     plane = KnowledgePlane.from_clients(cortex_kb=None, pr_monitor=None)
     out = plane.cortex_propose_point(canonical_id="x", kind="pr_node")
     assert out["status"] == "skip_disabled"
-    out2 = plane.cortex_hypothesize(
-        sid="", from_canonical="a", to_canonical="b",
-    )
-    assert out2["status"] == "skip_disabled"
-    assert out2["tentative_edge_id"] == ""
+    # ``cortex_hypothesize`` was retired with the T2/T3 protocol; no
+    # facade method exists to test the disabled path against anymore.
 
 
 # ===========================================================================
