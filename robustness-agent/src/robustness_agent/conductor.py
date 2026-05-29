@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .models import Alert, ConductorEvent, Severity
+from .models import Alert, ConductorEvent
 
 log = logging.getLogger(__name__)
 

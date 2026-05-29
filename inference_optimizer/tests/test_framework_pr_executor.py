@@ -17,12 +17,11 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from inference_optimizer.orchestrator.action_executors.framework_pr import (
-    DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     FrameworkPrExecutor,
     _candidate_slug,
     _fetch_diff_to_path,
