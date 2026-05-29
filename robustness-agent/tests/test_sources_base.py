@@ -13,7 +13,6 @@ import pytest
 from robustness_agent.sources.base import (
     DegradeRouter,
     HealthState,
-    Source,
     SourceData,
     SourceUnavailable,
 )
