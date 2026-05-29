@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 
@@ -10,10 +9,6 @@ import pytest
 
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
-    MockCriticBackend,
-    MockKernelBackend,
-    MockRobustnessBackend,
-    MockTurn,
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.action_executors import report_executor
@@ -23,7 +18,6 @@ from inference_optimizer.orchestrator.coordinator import (
 )
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.objective import (
-    Objective,
     ObjectiveError,
     TargetBaselineObjective,
     TargetGainObjective,

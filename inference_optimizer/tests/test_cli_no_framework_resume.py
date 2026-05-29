@@ -3,8 +3,6 @@ introduced by the P2.c+d fix."""
 
 from __future__ import annotations
 
-import os
-from unittest import mock
 
 import pytest
 
