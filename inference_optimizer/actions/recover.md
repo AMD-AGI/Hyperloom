@@ -84,8 +84,8 @@ privileges the sandbox typically lacks):
 
 * `pkill -f sglang` / `pkill -f vllm` (violates kernel-agent IR-5).
 * Reloading the `amdgpu` kernel module or restarting the pod.
-* Touching `~/.claude/config.json`, the auth-proxy, Ray, or any other
-  long-lived runtime service.
+* Touching `~/.claude/config.json`, Ray, or any other long-lived
+  runtime service.
 
 ## Output (`runs/recover/<task_id>/result.json`)
 

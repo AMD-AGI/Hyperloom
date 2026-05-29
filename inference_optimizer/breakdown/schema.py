@@ -20,11 +20,11 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-#: v0.8 §3.12 §6 — breakdown schema version. v2 adds the
+#: breakdown schema version. v2 adds the
 #: ``specialist_runs`` section, ``capability_summary.specialist``
 #: row, ``critic_robustness.kb_writes_summary`` sub-block, and the
 #: top-level ``action_timeline`` / ``explore_search`` v1-reader
-#: aliases. Inv-12.1 guarantees a v0.6 / v0.7 reader can still
+#: aliases. Inv-12.1 guarantees a v0.6 / reader can still
 #: consume the file because v2 only *adds* fields.
 SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
 
@@ -58,7 +58,7 @@ class WorkloadObjective(TypedDict, total=False):
 
 
 class Workload(TypedDict, total=False):
-    framework: str                # sglang / vllm
+    framework: str                # sglang / vllm / atom
     framework_version: str
     model_name: str
     model_path: str
@@ -147,7 +147,7 @@ class Final(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 class PhaseEvent(TypedDict, total=False):
     ts: str
-    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / select_kernels / integrate
+    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
     task_id: str
     kernel_id: str | None         # only for kernel-owned actions
     status: str                   # succeeded / failed
@@ -169,7 +169,7 @@ class CapabilityEntry(TypedDict, total=False):
     tested: int                   # for backends/params/explore: distinct variants tested
     best_gain_pct: float | None
     reason: str                   # human readable, e.g. "kernel-claude only this run"
-    # v0.8 M3 explore-specific (KB_design §3.4 + §3.12 §4.2):
+    # v0.8 M3 explore-specific:
     keep_unstable_count: int      # KEEP'd variants evicted by inlined stack rebench
     winners_history: int          # cumulative explore_search.winners_history length
 
@@ -177,14 +177,14 @@ class CapabilityEntry(TypedDict, total=False):
 class CapabilitySummary(TypedDict, total=False):
     geak: CapabilityEntry
     oob: CapabilityEntry
-    # v0.8 M3 — primary explore row; ``backends`` / ``params`` /
+    # primary explore row; ``backends`` / ``params`` /
     # ``validate_stack`` are kept as compatibility aliases (§3.12 §4.2).
     explore: CapabilityEntry
     backends: CapabilityEntry
     params: CapabilityEntry
     sweep: CapabilityEntry
     validate_stack: CapabilityEntry
-    # v0.8 §3.12 §4.2 — specialist sub-agent capability row. ``tested``
+    # specialist sub-agent capability row. ``tested``
     # = total proposals_total across all rounds; ``keeps`` =
     # proposals_kept; ``attempts`` = number of dispatch rounds.
     specialist: CapabilityEntry
@@ -376,7 +376,7 @@ class RobustnessSignal(TypedDict, total=False):
 class CriticRobustness(TypedDict, total=False):
     critic_iterations: list[CriticIteration]
     robustness_signals: list[RobustnessSignal]
-    # v0.8 §3.12 §4.4 — counts of KB writes proxied through the
+    # counts of KB writes proxied through the
     # critic agent's ``commit-review`` protocol (Coordinator
     # actually performs the writes; the critic only authors them).
     kb_writes_summary: "CriticKBWritesSummary"
@@ -395,7 +395,7 @@ class GpuMonitorAggregate(TypedDict, total=False):
 
 
 class LaneTimelineEntry(TypedDict, total=False):
-    """One row of the v0.8 M6 lane occupancy summary (KB_design §3.12 §4.5).
+    """One row of the legacy M6 lane occupancy summary.
 
     Surfaces resource_lock state (per-lane capacity vs. live holders +
     lifetime expired-lease count) into the breakdown's ``telemetry``
@@ -415,7 +415,7 @@ class Telemetry(TypedDict, total=False):
     system_profile_paths: list[str]
     server_log_paths: list[str]
     gpu_monitor_aggregate: GpuMonitorAggregate
-    # v0.8 M6 — per-lane capacity / occupancy summary.
+    # per-lane capacity / occupancy summary.
     lane_timeline: list[LaneTimelineEntry]
 
 
@@ -438,7 +438,7 @@ class StackGainEntry(TypedDict, total=False):
 class SourceBreakdown(TypedDict, total=False):
     geak_pct_of_total: float
     oob_pct_of_total: float
-    # v0.8 M3 — primary explore family bucket.
+    # primary explore family bucket.
     explore_pct_of_total: float
     backends_pct_of_total: float
     params_pct_of_total: float
@@ -477,16 +477,16 @@ class Attribution(TypedDict, total=False):
     # validated / single_source / reconstructed / missing
     method: str
     source_breakdown: SourceBreakdown
-    # v0.8 M7 — per-phase gain attribution.
+    # per-phase gain attribution.
     phase_breakdown: PhaseBreakdown
     notes: list[str]              # human-readable caveats
 
 
 # ---------------------------------------------------------------------------
-# §16 Phase segments — v0.8 M2 phase state machine (KB_design §3.2 + §3.12)
+# §16 Phase segments — v0.8 M2 phase state machine
 # ---------------------------------------------------------------------------
 class PhaseSegment(TypedDict, total=False):
-    phase: str                 # PRELUDE / EXPLORE / KERNEL / SWEEP / CLOSE
+    phase: str                 # PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE
     from_phase: str            # previous phase (empty for first segment)
     entered_ts: str            # iso UTC of entry
     entered_unix: float | None
@@ -498,7 +498,7 @@ class PhaseSegment(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# §15 KB Provenance — Cortex KB integration (v0.8 M1)
+# §15 KB Provenance — Cortex KB integration
 # ---------------------------------------------------------------------------
 class KBPendingEdge(TypedDict, total=False):
     proposal_msg_id: str
@@ -520,7 +520,7 @@ class KBCommitSummary(TypedDict, total=False):
 
 
 class KBPointCreated(TypedDict, total=False):
-    """One row in ``kb_provenance.points_created`` (v0.8 M4).
+    """One row in ``kb_provenance.points_created``.
 
     ``kind`` ∈ {workload_node / issue_node / optimization_node /
     pr_node / attempt_node / ...}. ``pr_node`` rows are the M4
@@ -554,23 +554,45 @@ class KBFlusherStatus(TypedDict, total=False):
     pid_path: str                  # absolute path to .kb_flusher.pid
 
 
+class WarmReplayOutcome(TypedDict, total=False):
+    """GAP 1 — warm-recipe replay result. Empty {} when the replay
+    never fired (``--no-warm-replay`` / low confidence / no recipe);
+    otherwise one of ``in_flight`` / ``reproduced`` / ``drift`` /
+    ``failed`` / ``skipped`` with the per-status fields populated."""
+    status: str
+    expected_gain_pct: float
+    actual_gain_pct: float
+    throughput_after: float
+    warm_recipe_tier: str
+    warm_recipe_conf: float
+    replay_task_id: str
+    error_class: str
+    reason: str
+
+
 class KBProvenance(TypedDict, total=False):
     cortex_session_id: str
     warm_start_ts: str
     warm_start_recipe_seen: bool
+    warm_start_recipe_tier: str
     warm_start_pitfall_count: int
+    warm_start_lesson_count: int
+    # GAP 1 — operator-visible warm-replay summary.
+    warm_replay: WarmReplayOutcome
+    warm_replay_attempted: bool
+    warm_history_injected: bool
     stack_fingerprint: dict[str, str]
     pending_edges: list[KBPendingEdge]
     queue: KBQueueStats
     audit_tail_count: int
     audit_status_counts: dict[str, int]
-    # v0.8 M4 (KB_design §3.12 §4.4) — points created during this session.
+    # points created during this session.
     points_created: list[KBPointCreated]
     points_by_kind: dict[str, int]
     commit_summary: KBCommitSummary
     # v0.8 KB_gaps/Dead-E — Cortex KB flusher daemon lifecycle marker.
     flusher_status: KBFlusherStatus
-    # KB_design_continue §3.3 — IR-3 soft-degrade audit. Values:
+    # IR-3 soft-degrade audit. Values:
     # ``None`` (KB / PR Monitor reachable, no degrade), ``"explicit_flag"``
     # (operator passed ``--degraded-{kb,pr}``), or ``"ir3_auto"`` (IR-3
     # probe failed and cli auto-enabled the corresponding degrade).
@@ -579,13 +601,13 @@ class KBProvenance(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# v0.8 §3.12 §4.3 — specialist_runs section
+# specialist_runs section
 # ---------------------------------------------------------------------------
 class SpecialistDomainBreakdown(TypedDict, total=False):
     """Per-domain attribution for one ``specialist_rounds`` entry.
 
     Mirror of ``SharedState.specialist_rounds[i].domain_breakdown[domain]``
-    contents (KB_design §3.5 §10).
+    contents.
     """
     dispatched: int
     proposals_total: int
@@ -607,7 +629,7 @@ class SpecialistTranscriptRef(TypedDict, total=False):
 
 
 class SpecialistRound(TypedDict, total=False):
-    """One element of ``specialist_runs`` (KB_design §3.12 §4.3)."""
+    """One element of ``specialist_runs``."""
     round_id: int
     dispatched_at: str
     completed_at: str
@@ -617,6 +639,9 @@ class SpecialistRound(TypedDict, total=False):
     proposals_kept: int
     proposals_rejected: int
     proposals_skipped: int
+    # Retired field — was populated by the T2 hypothesize hook (now
+    # gone). Kept on the schema so claw-stats-service readers that
+    # destructure specialist_runs[] don't break; always empty.
     kb_edge_ids: list[str]
     confidence_avg: float | None
     domain_breakdown: dict[str, SpecialistDomainBreakdown]
@@ -625,7 +650,7 @@ class SpecialistRound(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# v0.8 §3.12 §4.4 — critic_robustness.kb_writes_summary sub-block
+# critic_robustness.kb_writes_summary sub-block
 # ---------------------------------------------------------------------------
 class CriticKBWritesSummary(TypedDict, total=False):
     """Summary of critic-agent ``commit-review`` outputs (Coordinator
@@ -657,7 +682,7 @@ class SessionBreakdown(TypedDict, total=False):
     workload: Workload
     baseline: Baseline
     final: Final
-    # v0.8 §3.12 §4.2 — ``phase_timeline`` retained for v1-reader
+    # ``phase_timeline`` retained for v1-reader
     # compat as the flat per-action timeline (``action_timeline`` is
     # the canonical v2 name; see below). ``phase_segments`` carries
     # the phase-boundary view (M2).
@@ -670,7 +695,7 @@ class SessionBreakdown(TypedDict, total=False):
     geak_invocations: list[Invocation]
     oob_invocations: list[Invocation]
     kernel_lifecycle: KernelLifecycle
-    # v0.8 §3.12 §5 — ``param_search`` is the v1-reader compat alias
+    # ``param_search`` is the v1-reader compat alias
     # for the merged ``explore_search`` ledger; both fields carry
     # identical data so an old reader doesn't see a missing key.
     param_search: ParamSearch
@@ -679,8 +704,8 @@ class SessionBreakdown(TypedDict, total=False):
     critic_robustness: CriticRobustness
     telemetry: Telemetry
     attribution: Attribution
-    kb_provenance: KBProvenance      # v0.8 M1 — Cortex KB audit
-    # v0.8 §3.12 §4.3 — specialist sub-agent dispatch records.
+    kb_provenance: KBProvenance      # Cortex KB audit
+    # specialist sub-agent dispatch records.
     specialist_runs: list[SpecialistRound]
 
     warnings: list[str]

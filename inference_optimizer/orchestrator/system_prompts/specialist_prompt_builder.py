@@ -1,4 +1,4 @@
-"""Specialist sub-agent prompt assembler — v0.8 M5 (KB_design §3.5 §6).
+"""Specialist sub-agent prompt assembler — v0.8 M5.
 
 The Coordinator hands the SpecialistRunner a typed input bundle and
 this module returns the fully-assembled 9-section prompt. The 9 sections
@@ -38,11 +38,16 @@ from ..specialist_domains import (
 _NONE_PLACEHOLDER = "(none)"
 
 
-# Soft cap on how many entries a specialist may emit in its final
-# ``proposal_set``. Enforced via prompt instructions only (the Critic
-# rejects any marginal-quality survivors against KB priors). Override
-# per-task via ``SpecialistPromptInputs.max_proposals``.
-DEFAULT_SPECIALIST_MAX_PROPOSALS = 5
+# Cap on how many entries a specialist may emit in its final
+# ``proposal_set``. Re-exported from ``orchestrator/policy.py`` so the
+# prompt-side soft cap (self-curation instruction in Section 8) and the
+# SpecialistRunner-side hard truncate (write path) stay aligned. The
+# Critic separately rejects any marginal-quality survivors against KB
+# priors. Override per-task via ``SpecialistPromptInputs.max_proposals``
+# (still clamped to this value by the runner).
+from inference_optimizer.orchestrator.policy import (
+    DEFAULT_SPECIALIST_MAX_PROPOSALS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +64,7 @@ DEFAULT_SPECIALIST_MAX_PROPOSALS = 5
 #   domain — sourced from KB_design lessons + Arbor's lessons table).
 #
 # When a domain key is missing from this map, ``_section_identity``
-# falls back to the generic body (the v0.8 M5 default).
+# falls back to the generic body (the legacy M5 default).
 # ---------------------------------------------------------------------------
 
 
@@ -212,22 +217,29 @@ def _focus_session_steward_specialist(
         "one of three exits: continue exploring, advance to kernel phase, or",
         "stop the session. You are NOT proposing knobs or patches.",
         "",
-        "**What to read first** (no Bash needed — everything is in",
-        "$SESSION_DIR/state.json which the Coordinator pre-warms below):",
-        "- ``optimization_stack`` — what's been KEEP'd. Count entries +",
-        "  inspect ``gain_per_stack_entry`` for diminishing returns.",
-        "- ``explore_search.rejected`` — REVERT reasons grouped by",
-        "  ``stack_unstable`` / ``gain_below_threshold``. A long tail of",
-        "  one kind is a signal.",
-        "- ``specialist_rounds`` — empty_streak counters per domain. Three",
-        "  consecutive ``empty=True`` rounds across the active domains is a",
-        "  hard plateau signal.",
-        "- ``gaps[]`` — open gaps the Coordinator believes still exist.",
-        "  If non-empty and the recommended specialist domain has not been",
-        "  exhausted, ``continue_explore`` may be justified.",
-        "- ``policy_denial_history`` (tail) — when the LLM has been",
+        "**What to read first** — the Coordinator inlines a panoramic",
+        "state digest into **§ 5d. SESSION SNAPSHOT** below. Use that as",
+        "your primary evidence; you may use ``Bash`` to ``cat",
+        "$SESSION_DIR/state.json`` only if § 5d is empty (KB-degraded",
+        "boot) or you need a field that isn't included. Key signals:",
+        "- ``optimization_stack_len`` + ``gain_per_stack_entry_tail`` —",
+        "  diminishing returns over the last 5 KEEPs.",
+        "- ``rejected_counts`` — REVERT reasons aggregated from",
+        "  ``explore_search.rejected``. A long tail of one kind",
+        "  (``stack_unstable`` / ``gain_below_threshold``) is a signal.",
+        "- ``specialist_empty_streak`` — per-domain empty-round counter.",
+        "  Three consecutive ``empty=True`` rounds across the active",
+        "  domains is a hard plateau signal.",
+        "- ``gaps_count`` + ``gaps_top5_canonical_ids`` — open gaps the",
+        "  Coordinator believes still exist. If non-empty and the",
+        "  recommended specialist domain has not been exhausted,",
+        "  ``continue_explore`` may be justified.",
+        "- ``policy_denial_history_tail`` — when the LLM has been",
         "  thrashing against the same rule, this is evidence that further",
         "  exploration is unlikely to land KEEPs.",
+        "- ``steward_continuation_used`` — IR-7 antiloop flag; if True",
+        "  you've already burned your one continuation and must NOT",
+        "  recommend ``continue_explore`` again.",
         "",
         "**Output protocol** (your single ``specialist_done`` payload must",
         "carry these extra fields beyond the standard schema):",
@@ -302,6 +314,15 @@ class SpecialistPromptInputs:
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
+    # GAP 5 / GAP 8 — runtime fingerprint surfaced into prompts so the
+    # specialist can judge "is this lesson from an old framework still
+    # applicable?". ``framework`` is the active backend (sglang / vllm);
+    # ``framework_version`` is the precise install version (e.g. "0.5.11").
+    # Both empty when SharedState doesn't carry them (legacy SDK
+    # callers / pre-PR sessions); the prompt renderer treats absent
+    # values as "no version annotation".
+    framework: str = ""
+    framework_version: str = ""
 
     # Gap statement (§3.5 §6 part 3)
     gap_canonical_id: str = ""
@@ -324,21 +345,27 @@ class SpecialistPromptInputs:
     # Recipe summary from T0 ``find-recipe`` (§3.5 §6 part 5)
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
+    # T0 ``lessons`` query result — positive priors from prior KEEPs
+    # on (model, hardware), sorted by KB-side confidence. Rendered as
+    # § 5b for the specialist (separate from § 5 recipe so the LLM can
+    # reason about each independently).
+    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
+    # IR-7 — session_steward_specialist panoramic state digest. Only
+    # populated when the dispatcher is dispatching a session_steward
+    # task (other specialists get an empty dict and the section is
+    # skipped entirely). See ``Coordinator._build_session_snapshot``
+    # for the field shape. Rendered as § 5d.
+    session_snapshot: dict[str, Any] = field(default_factory=dict)
 
     # PR feed (§3.5 §6 part 6)
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
-    # F2-3 framework_pr_scout sub_kind: Coordinator pre-fetched PR
-    # candidates from ``fa candidates`` (metadata only — diff bodies
-    # the specialist fetches itself via the curl template in the
-    # rendered FRAMEWORK PR CANDIDATES section). Empty list → section
-    # renders empty / placeholder. ``sub_kind`` mirrors the dispatch
-    # ``params.sub_kind`` so the section can short-circuit when the
-    # specialist is NOT a framework_pr_scout (avoid leaking PR feed
-    # noise into other domains).
+    # Generic sub_kind passthrough from the dispatch params. Still
+    # routed into the prompt so per-domain ``_focus_*`` helpers can
+    # specialise on it where useful; the legacy ``framework_pr_scout``
+    # branch was retired with the FRAMEWORK_PR phase migration.
     sub_kind: str = ""
-    pr_candidates: list[dict[str, Any]] = field(default_factory=list)
 
     # Local source navigation hint (§3.5 §6 part 7)
     framework_source_roots: tuple[str, ...] = ()
@@ -359,7 +386,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "## 1. IDENTITY & AUTONOMY",
         "",
         f"You are a fully autonomous **{inp.domain.key}** dispatched by the",
-        f"Hyperloom Coordinator (KB_design §3.5). Layer: {inp.domain.layer}.",
+        f"Hyperloom Coordinator. Layer: {inp.domain.layer}.",
         f"KB anchor: {inp.domain.kb_anchor}.",
         "",
         f"Description: {inp.domain.description or '(generic)'}",
@@ -477,6 +504,7 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     return (
         not inp.kb_subgraph
         and not inp.warm_start_recipe
+        and not inp.warm_start_lessons
         and not inp.warm_start_pitfalls
         and not inp.pr_feed
     )
@@ -573,10 +601,9 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     if not isinstance(ev, dict) or not ev:
         rows.append(
             "(none — no fresh roofline snapshot has been recorded yet. "
-            "The Coordinator auto-enqueues `roofline` on EXPLORE / "
-            "KERNEL entry when `--use-roofline-composite=true`; if you "
-            "are seeing this, either the toggle is off OR the snapshot "
-            "is still in-flight.)"
+            "The Coordinator auto-enqueues `roofline` at the end of "
+            "PRELUDE and again after every 10% watermark crossing; if "
+            "you are seeing this, the snapshot is still in-flight.)"
         )
         return rows
 
@@ -648,21 +675,214 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
 # ---------------------------------------------------------------------------
 def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 5. WARM-START RECIPE SUMMARY", ""]
-    has_recipe = bool(inp.warm_start_recipe)
-    has_pitfalls = bool(inp.warm_start_pitfalls)
-    if not has_recipe and not has_pitfalls:
+    if not inp.warm_start_recipe:
         rows.append(_NONE_PLACEHOLDER)
         return rows
-    if has_recipe:
-        rows.append("**find-recipe result:**")
-        rows.append("```json")
-        rows.append(json.dumps(inp.warm_start_recipe, sort_keys=True, indent=2))
-        rows.append("```")
-    if has_pitfalls:
-        rows.append("")
-        rows.append("**Known pitfalls (do NOT repeat):**")
-        for p in inp.warm_start_pitfalls:
-            rows.append(f"- {json.dumps(p, sort_keys=True)}")
+    rows.append("**find-recipe result:**")
+    rows.append("```json")
+    rows.append(json.dumps(inp.warm_start_recipe, sort_keys=True, indent=2))
+    rows.append("```")
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Section 5b — Related lessons (positive priors from prior KEEPs)
+# ---------------------------------------------------------------------------
+def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
+    """Render KB ``kind=lesson`` points that previous KEEP decisions
+    on this (model, hardware) wrote — the positive counterpart of
+    the § 5 pitfalls block.
+
+    Each lesson is shown compactly: the ``statement`` line (one
+    actionable claim) + the ``measured_impact`` string (the numeric
+    delta from the prior session), with ``applicable_models`` /
+    ``applicable_hardware`` collapsed into a single header so the
+    specialist can scan a dozen lessons at a glance instead of
+    reading JSON dumps.
+    """
+    rows = ["## 5b. RELATED LESSONS (prior KEEPs on this model+hw)", ""]
+    if not inp.warm_start_lessons:
+        rows.append(_NONE_PLACEHOLDER)
+        return rows
+    for point in inp.warm_start_lessons:
+        attrs = (point or {}).get("attrs") or {}
+        statement = str(attrs.get("statement") or "").strip()
+        if not statement:
+            continue
+        impact_str = _render_measured_impact(attrs.get("measured_impact"))
+        # Optional: confidence + source session hint + validator count
+        # for "how transferable is this lesson?".
+        conf = point.get("confidence")
+        meta_bits: list[str] = []
+        if isinstance(conf, (int, float)) and conf > 0:
+            meta_bits.append(f"conf={float(conf):.2f}")
+        # GAP 4 — surface the validated_count first because "5 sessions
+        # confirmed this" is the strongest cross-session signal. Fall
+        # back to the singular ``source_session_id`` for legacy rows.
+        vc = attrs.get("validated_count")
+        if isinstance(vc, int) and vc > 1:
+            meta_bits.append(f"validated={vc}")
+        recent_ids = attrs.get("source_session_ids")
+        if isinstance(recent_ids, list) and recent_ids:
+            meta_bits.append(f"recent={recent_ids[-1]}")
+        else:
+            src_sid = str(attrs.get("source_session_id") or "").strip()
+            if src_sid:
+                meta_bits.append(f"src={src_sid}")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        # GAP 8 — version mismatch annotation. Surface this AFTER the
+        # statement so the LLM sees ``- **X works on sglang** [from
+        # sglang@0.4.5, you're on 0.5.11]`` and can decide if the
+        # lesson still applies. Client-side ranking already downweighted
+        # the lesson, but the LLM gets the final call.
+        version_note = _format_version_note(inp, attrs)
+        rows.append(f"- **{statement}**{meta}{version_note}")
+        if impact_str:
+            rows.append(f"    impact: {impact_str}")
+    if len(rows) == 2:  # only the header + blank line, all lessons filtered out
+        rows.append(_NONE_PLACEHOLDER)
+    return rows
+
+
+def _format_version_note(
+    inp: SpecialistPromptInputs, lesson_attrs: dict[str, Any],
+) -> str:
+    """GAP 8 — render a ``[from sglang@X.Y, you're on A.B]`` annotation
+    when the lesson's framework_version differs from the current session.
+
+    Returns an empty string when:
+
+    * The lesson didn't carry a framework_version (legacy / pre-PR row).
+    * The current session doesn't know its own framework_version
+      (legacy SDK caller without manifest stack_fingerprint).
+    * The versions match exactly.
+
+    Format is intentionally compact (single bracket pair) so it
+    doesn't dominate the bullet line; the meaningful action is "LLM
+    still gets to decide".
+    """
+    lesson_fv = str(lesson_attrs.get("framework_version") or "").strip()
+    current_fv = (inp.framework_version or "").strip()
+    if not lesson_fv or not current_fv:
+        return ""
+    if lesson_fv == current_fv:
+        return ""
+    framework_label = (inp.framework or "framework").strip() or "framework"
+    return f" [from {framework_label}@{lesson_fv}, you're on {current_fv}]"
+
+
+def _render_measured_impact(raw: Any) -> str:
+    """Back-compat renderer for ``attrs.measured_impact``.
+
+    Two shapes accepted:
+
+    * Dict (GAP 3 — new shape): formatted as
+      ``+12.3% (tput=678.0, depth=3, 2026-05-26)``.
+    * String (legacy): returned verbatim.
+    * Anything else (None / numbers): returned as ``str(raw)`` or "".
+    """
+    if isinstance(raw, dict):
+        parts: list[str] = []
+        gain = raw.get("gain_pct")
+        if isinstance(gain, (int, float)):
+            parts.append(f"+{float(gain):.2f}%")
+        tput = raw.get("throughput_after")
+        if isinstance(tput, (int, float)):
+            parts.append(f"tput={float(tput):.1f}")
+        depth = raw.get("stack_depth_at_apply")
+        if isinstance(depth, int):
+            parts.append(f"depth={depth}")
+        when = str(raw.get("measured_at") or "").strip()
+        if when:
+            parts.append(when[:10])  # keep yyyy-mm-dd for compactness
+        return ", ".join(parts)
+    if isinstance(raw, str):
+        return raw.strip()
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+# ---------------------------------------------------------------------------
+# Section 5d — Session snapshot (session_steward specialist only)
+# ---------------------------------------------------------------------------
+def _section_session_snapshot(inp: SpecialistPromptInputs) -> list[str]:
+    """Inline the panoramic SharedState digest the session_steward
+    specialist consumes to decide ``continue_explore`` /
+    ``advance_to_kernel`` / ``stop_session``.
+
+    Returns an empty list (section omitted entirely) when
+    ``session_snapshot`` is empty, so non-steward specialists never
+    see this section. The dispatcher populates this dict only for
+    ``session_steward_specialist`` tasks (see
+    :meth:`Coordinator._warm_specialist_params`).
+
+    Renders as a single fenced JSON block — small enough that the LLM
+    parses it in one pass, structured enough that the field-name
+    references in the focus block resolve to concrete values.
+    """
+    snap = inp.session_snapshot or {}
+    if not snap:
+        return []
+    rows = [
+        "## 5d. SESSION SNAPSHOT (panoramic state for steward decision)",
+        "",
+        "```json",
+        json.dumps(snap, sort_keys=True, indent=2),
+        "```",
+    ]
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Section 5c — Known pitfalls (anti-priors from prior REVERTs)
+# ---------------------------------------------------------------------------
+def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
+    """Render KB ``kind=pitfall`` points that previous REVERT / crash /
+    OOM decisions on this (model, hardware) wrote — the negative
+    counterpart of § 5b lessons.
+
+    Same compact rendering as lessons: ``description`` (one actionable
+    anti-pattern) + ``severity`` tag, with optional ``conf`` / ``src``
+    metadata. The "do NOT repeat" framing is critical — the specialist
+    must understand these are *forbidden* paths, not suggestions.
+
+    Replaces the legacy ``raw`` JSON-dump rendering that the old
+    ``traps(symptom=...)`` reader produced (which the LLM couldn't
+    reliably parse).
+    """
+    rows = ["## 5c. KNOWN PITFALLS (do NOT repeat — prior REVERTs)", ""]
+    if not inp.warm_start_pitfalls:
+        rows.append(_NONE_PLACEHOLDER)
+        return rows
+    for point in inp.warm_start_pitfalls:
+        attrs = (point or {}).get("attrs") or {}
+        description = str(attrs.get("description") or "").strip()
+        if not description:
+            continue
+        severity = str(attrs.get("severity") or "").strip()
+        conf = point.get("confidence")
+        meta_bits: list[str] = []
+        if severity:
+            meta_bits.append(f"severity={severity}")
+        if isinstance(conf, (int, float)) and conf > 0:
+            meta_bits.append(f"conf={float(conf):.2f}")
+        # GAP 4 — repeat observations strengthen the "don't try this" signal.
+        vc = attrs.get("validated_count")
+        if isinstance(vc, int) and vc > 1:
+            meta_bits.append(f"observed={vc}")
+        recent_ids = attrs.get("source_session_ids")
+        if isinstance(recent_ids, list) and recent_ids:
+            meta_bits.append(f"recent={recent_ids[-1]}")
+        else:
+            src_sid = str(attrs.get("source_session_id") or "").strip()
+            if src_sid:
+                meta_bits.append(f"src={src_sid}")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        version_note = _format_version_note(inp, attrs)
+        rows.append(f"- **{description}**{meta}{version_note}")
+    if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
+        rows.append(_NONE_PLACEHOLDER)
     return rows
 
 
@@ -686,89 +906,6 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
             if isinstance(labels, list) and labels else ""
         )
         rows.append(f"- {title} — <{url}>{labels_text}")
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# Section 6b — Framework PR candidates (F2-3 framework_pr_scout sub_kind)
-# ---------------------------------------------------------------------------
-def _section_framework_pr_candidates(
-    inp: SpecialistPromptInputs,
-) -> list[str]:
-    """Render the FRAMEWORK PR CANDIDATES section for serving_specialist
-    runs with ``sub_kind='framework_pr_scout'``.
-
-    Coordinator pre-fetches the PR list via the ``fa candidates`` CLI
-    (see :mod:`framework_agent_client`); the section instructs the
-    specialist how to pull each PR's diff body via ``curl`` inside the
-    subprocess sandbox (the diff itself is too large to inline here).
-
-    Returns an empty list (section omitted) when the specialist is not
-    a framework_pr_scout OR when no candidates landed (graceful
-    degrade for offline / fa-binary-missing scenarios).
-    """
-    if (inp.sub_kind or "").strip() != "framework_pr_scout":
-        return []
-    candidates = inp.pr_candidates or []
-    if not isinstance(candidates, list) or not candidates:
-        return []
-    rows = ["## 6b. FRAMEWORK PR CANDIDATES", ""]
-    rows.append(
-        f"Coordinator pre-fetched these **{len(candidates)}** PR "
-        "candidates from `fa candidates`. Diff bodies are NOT included; "
-        "fetch them yourself before authoring patches."
-    )
-    rows.append("")
-    rows.append("| # | repo | pr_number | ref | title | summary | score | diff_url |")
-    rows.append("|---|---|---:|---|---|---|---:|---|")
-    for i, c in enumerate(candidates[:20], start=1):
-        if not isinstance(c, dict):
-            continue
-        repo = str(c.get("repo") or "")
-        pr_number = c.get("pr_number") or c.get("number") or ""
-        ref = str(c.get("ref") or "")
-        title = str(c.get("title") or "").replace("|", "/")
-        summary = str(c.get("summary") or "").replace("|", "/")
-        if len(summary) > 140:
-            summary = summary[:137] + "..."
-        score = c.get("score")
-        score_str = (
-            f"{float(score):.2f}" if isinstance(score, (int, float))
-            else "—"
-        )
-        diff_url = str(c.get("diff_url") or c.get("source_url") or "")
-        rows.append(
-            f"| {i} | {repo} | {pr_number} | {ref} | {title} | "
-            f"{summary} | {score_str} | {diff_url} |"
-        )
-    rows.append("")
-    rows.append("### How to fetch a PR diff")
-    rows.append("")
-    rows.append(
-        "```bash"
-    )
-    rows.append(
-        "mkdir -p $WORKTREE/incoming"
-    )
-    rows.append(
-        "curl -fsSL -o $WORKTREE/incoming/<pr_number>.diff '<diff_url>'"
-    )
-    rows.append(
-        "git -C $FRAMEWORK_ROOT apply --check "
-        "$WORKTREE/incoming/<pr_number>.diff"
-    )
-    rows.append(
-        "# Then re-author into worktree/patches/NNN_<slug>.patch via Edit"
-    )
-    rows.append("```")
-    rows.append("")
-    rows.append(
-        "**Iron rule:** do NOT commit a raw GitHub diff into "
-        "`worktree/patches/` — always Edit your own `.patch` so "
-        "`integrate_patch` can attribute provenance correctly. The "
-        "incoming GitHub diff is reference material; the patches/ "
-        "entry is your own work product."
-    )
     return rows
 
 
@@ -850,7 +987,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         }, sort_keys=True, indent=2),
         "```",
         "",
-        "Field contract (KB_design §3.5 §7 + PR-A2 Arbor extensions):",
+        "Field contract:",
         "",
         "- ``proposal_set`` items reuse the §3.4 explore variant schema.",
         (
@@ -864,8 +1001,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         (
             "- The Critic reviews each surviving variant against the KB "
             "before benchmarking, so a marginal-quality proposal costs you "
-            "a reject (and a refuted KB edge that will follow you on "
-            "future rounds)."
+            "a reject (and a pitfall fact that will warn future sessions "
+            "off the same dead-end)."
         ),
         "- ``patches_written`` (PR-A2) lists paths (relative to your",
         "  workspace or worktree) of any unified-diff patch files you",
@@ -874,8 +1011,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "- ``empty=true`` is legitimate when you have no actionable proposals;",
         "  in that case ``proposal_set=[]`` and you must put the reason in",
         "  ``summary``.",
-        "- ``new_findings`` becomes HYPOTHESIZED KB edges at T4 commit even",
-        "  when not KEEP'd this round — surface anything you learned.",
+        "- ``new_findings`` is your free-form summary of anything you",
+        "  learned this round — Coordinator funnels it into the KB",
+        "  fact-write pipeline (lesson on KEEP, pitfall on REVERT).",
         "- ``residual_questions`` carries to the next specialist round.",
         "",
         "**Heartbeat (Channel B only):** When running in subprocess mode,",
@@ -918,7 +1056,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "   the throughput + accuracy gate. (PR-A2, Arbor-into-Hyperloom:",
         "   Inv-5.1 updated.)",
         "3. **NEVER** call ``cortex-kb`` write endpoints (propose-point /",
-        "   propose-edge / hypothesize / ingest-attempt / verify / commit)",
+        "   propose-edge / propose-lesson / propose-pitfall / update-recipe)",
         "   directly. The Coordinator owns KB writes (PolicyGate R4). KB",
         "   read context is pre-warmed into Section 4 of this prompt; the",
         "   specialist subprocess has no live KB connection.",
@@ -953,23 +1091,26 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_iron_rules(inp),
     ]
     user_sections = [
-        _section_hardware(inp),
-        _section_gap(inp),
-        _section_kb_subgraph(inp),
-        _section_roofline_evidence(inp),
-        _section_recipe(inp),
-        _section_pr_feed(inp),
-        _section_source_hint(inp),
+        _section_hardware(inp),           # 0: § 1
+        _section_gap(inp),                # 1: § 2-3
+        _section_kb_subgraph(inp),        # 2: § 4
+        _section_roofline_evidence(inp),  # 3: § 4a
+        _section_recipe(inp),             # 4: § 5
+        _section_lessons(inp),            # 5: § 5b
+        _section_pitfalls(inp),           # 6: § 5c
+        _section_pr_feed(inp),            # 7: § 6
+        _section_source_hint(inp),        # 8: § 7
     ]
-    # F2-3: framework_pr_scout candidates ride right after PR feed so
-    # the specialist sees PR Monitor warm cache + the fa-fetched
-    # candidates in adjacent sections. Returns an empty list for any
-    # other sub_kind / empty candidate list, so non-framework_pr_scout
-    # specialists never see this section.
-    fa_candidates_section = _section_framework_pr_candidates(inp)
-    if fa_candidates_section:
-        # Insert after the PR feed section (index 5 in the list above).
-        user_sections.insert(6, fa_candidates_section)
+    # § 5d session snapshot — only the session_steward specialist
+    # populates ``session_snapshot``; for everyone else this section
+    # function returns ``[]`` and gets stripped by the flattener.
+    # Insert between § 5c (pitfalls, index 6) and § 6 (PR feed, was
+    # index 7). Done as conditional insert (rather than always in the
+    # list) so the section number stays meaningful — non-steward
+    # specialists don't see a "## 5d." header at all.
+    snapshot_section = _section_session_snapshot(inp)
+    if snapshot_section:
+        user_sections.insert(7, snapshot_section)
     if inp.notes:
         user_sections.append([
             "## 10. NOTES FROM ORCHESTRATION",

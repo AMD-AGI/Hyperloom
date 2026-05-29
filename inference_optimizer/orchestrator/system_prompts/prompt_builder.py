@@ -44,8 +44,9 @@ from ..action_registry import (
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # analysis
-    "profile", "roofline", "deep_kernel_analysis",
+    # analysis — roofline is Coordinator-auto-enqueued (PRELUDE + watermark);
+    # not LLM-proposable. deep_kernel_analysis stays as a kernel-owned REQUEST.
+    "roofline", "deep_kernel_analysis",
     # explore
     #
     # v0.8 M3 + KB_gaps/Gap-10: the merged ``explore`` action is the
@@ -53,7 +54,7 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # ``validate_stack`` names have been removed — PolicyGate's
     # ``action_deprecated`` rule denies them at the intent boundary
     # with a structured replacement hint (KB_design §3.4 / §3.13 M3
-    # §PR7). The executor modules stay in the tree so v0.6 resume
+    # §PR7). The executor modules stay in the tree so legacy resume
     # paths still find their per-action audit fields (Inv-10.1).
     "explore",
     # PR-A1 (Arbor-into-Hyperloom): ``specialist`` is the LLM sub-agent
@@ -81,7 +82,7 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis", "baseline",
     # explore (no profile — it only feeds kernel-opt)
     #
-    # Legacy backends/params/validate_stack removed in v0.8 M3 /
+    # Legacy backends/params/validate_stack removed in the legacy release /
     # KB_gaps/Gap-10; merged into ``explore`` which carries an
     # inlined per-KEEP stack rebench.
     "explore",
@@ -114,10 +115,10 @@ GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
     "explore", "sweep",
 })
 
-# v0.8 M3 + KB_gaps/Dead-A — names PolicyGate's ``action_deprecated``
+# names PolicyGate's ``action_deprecated``
 # rule denies. Catalogue tag + denial hint share the same map. The
 # executors / yamls were physically deleted; the names persist only
-# in this denial surface so a v0.6 resume that emits one of these
+# in this denial surface so a legacy resume that emits one of these
 # gets a structured replacement hint instead of ``no_executor``.
 DEPRECATED_ACTIONS: dict[str, str] = {
     "backends":       "Use `explore` instead (v0.8 M3 merged it in).",
@@ -205,14 +206,15 @@ def _section_session_context(
         "in that phase, and budget cap. The `=== Phase-allowed actions ===`",
         "block lists the exact set of actions you may propose this tick;",
         "anything outside that set returns `policy_denied` with rule",
-        "`phase_incompatible`. The 5-phase chain is:",
-        "  PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE",
+        "`phase_incompatible`. The 6-phase chain is:",
+        "  PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE",
+        "(FRAMEWORK_PR is skipped under ``--no-framework``.)",
         "Transitions are Coordinator-owned (you cannot write phase).",
     ]
 
 
 # ---------------------------------------------------------------------------
-# v0.8 §3.3 — phase semantics injected into the static system prompt
+# phase semantics injected into the static system prompt
 # ---------------------------------------------------------------------------
 def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
     """Render the per-phase allowed-action contract.
@@ -231,7 +233,8 @@ def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
     lines: list[str] = [
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "",
-        "The Coordinator runs the optimization in a 5-phase linear pipeline.",
+        "The Coordinator runs the optimization in a 6-phase linear pipeline",
+        "(FRAMEWORK_PR collapses out with `--no-framework`, leaving 5).",
         "Each tick it injects a `=== Phase ===` block with the current",
         "phase. Per-phase action allowlists (PolicyGate R1 enforces these):",
         "",
@@ -408,8 +411,14 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "value — orchestration LLM authored the grid from one "
             "prompt window without any specialist research — is now "
             "DENIED by PolicyGate (rule "
-            "'explore_requires_specialist_provenance'). The executor "
-            "dedups against SharedState.explore_search by "
+            "'explore_requires_specialist_provenance'). **Per-round "
+            "cap:** at most ONE variant in the grid may carry "
+            "provenance='specialist:*' (rule "
+            "'explore_specialist_grid_max_one'); pick the strongest "
+            "specialist proposal each round and defer the runners-up "
+            "to a subsequent round. provenance='default_grid' is "
+            "uncapped — cold-start rounds may emit several. The "
+            "executor dedups against SharedState.explore_search by "
             "canonical_fingerprint, so a rename of an already-tested "
             "(args, envs) collapses to the same row."
         )
@@ -487,18 +496,19 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   PolicyGate (``rule='action_deprecated'``) — route every grid attempt",
         "   through ``delegate{action_name='explore', params={grid: [...] }}``.",
     ]
-    if kernel_enabled:
-        lines.extend([
-            "4. **Profile**: if `last_profile_trace == ''`, propose `profile`. If the",
-            "   profile is fresh (matches `last_profile_args`) reuse it; do not re-profile.",
-        ])
-    else:
-        lines.append(
-            "4. (No-kernel run.) Skip profile — the Kernel agent is disabled in this run.",
-        )
+    lines.append(
+        "4. **Analysis is auto-managed**. Roofline (or profile under "
+        "``--no-enable-roofline``) is enqueued by the Coordinator at "
+        "PRELUDE and at every +10% validated-gain watermark crossing. "
+        "Do not propose ``profile`` or ``roofline`` — PolicyGate denies "
+        "both with ``rule='analysis_action_not_llm_proposable'``. While "
+        "the analysis task is in flight, ``specialist`` / ``explore`` / "
+        "kernel-owned dispatches are deferred until ``analysis.md`` / "
+        "``last_profile_trace`` refreshes.",
+    )
     lines.extend([
-        "5. **Phase-aware action selection (KB_design §3.9 Inv-9.1)**. v0.8",
-        "   retired the v0.6 ``Action scores`` block. There is no system-side",
+        "5. **Phase-aware action selection**. v0.8",
+        "   retired the legacy ``Action scores`` block. There is no system-side",
         "   priority list. Pick the next action by reading FACTS in this order:",
         "",
         "   a. **Phase + allowed actions** (the `=== Phase ===` /",
@@ -518,8 +528,11 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "*qualitative* hints (what worked / what failed last time).",
         "   d. **specialist proposal_set** (M5+) — when an explore round just",
         "      finished, the proposal_set drives the next `explore` grid.",
-        "   e. **Mandatory MUST-FIRST rules**: baseline before anything else;",
-        "      profile before kernel_opt (when kernel_enabled).",
+        "   e. **Mandatory MUST-FIRST rules**: baseline before anything else.",
+        "      ``analysis.md`` / ``last_profile_trace`` arrive automatically",
+        "      from the Coordinator-owned analysis task at PRELUDE and at",
+        "      every +10% watermark crossing — do not gate ``kernel_opt`` on",
+        "      a manually-proposed profile.",
         "6. **Phase budget awareness**. The `=== Phase ===` block carries",
         "   ``phase_budget_remaining_pct``. As that number falls below 0.2,",
         "   prefer lower-cost / known-good actions (explore over kernel_opt).",
@@ -588,7 +601,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "* **RULE F4 — `policy_denial_streak` is a fact, not a lock.** When the",
         "  per-tick `Recent policy denials` block shows `streak≥2` for an",
         "  (action, rule) pair, the SAME params will keep colliding.",
-        "  v0.8 §3.9 retired the v0.6 ``locked_reason`` mirror, but the",
+        "  v0.8 §3.9 retired the legacy ``locked_reason`` mirror, but the",
         "  underlying anti-loop is unchanged: at streak≥5 the family is",
         "  auto-pruned; at streak≥10 the run stops with",
         "  ``stop_reason='policy_loop'``. Recover by omitting",
@@ -665,23 +678,23 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
 _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-The three kernel-owned actions (`select_kernels`, `kernel_opt`,
+The three kernel-owned actions (`trace_analyze`, `kernel_opt`,
 `integrate`) are picked by the LLM per the DECISION FRAMEWORK (phase
-allowed-set + gaps + KB priors); v0.8 §3.9 retired the v0.6
+allowed-set + gaps + KB priors); v0.8 §3.9 retired the legacy
 `Action scores` board, so there is no system-side priority ranking.
 The blocks below are only **payload templates** describing how to
 build the REQUEST once you have selected the action. The Coordinator
 still hard-gates the obvious prerequisites (TODO 3/4 fires after a
-`kernel_opt` KEEP forces `integrate`); `select_kernels` itself is
+`kernel_opt` KEEP forces `integrate`); `trace_analyze` itself is
 enforced only at the REQUEST layer for `run_optimization`, and explore
 actions are NEVER gated on it.
 
-### KERNEL-phase decision signals (KB_design §3.2 §5.3 / §3.9 §6)
+### KERNEL-phase decision signals
 
 Pick the next kernel-owned REQUEST by reading facts in this order
 (no priority ranking — v0.8 §3.9 Inv-9.1):
 
-1. **`state.gaps[]`** (KB_gaps/Gap-09) — pick a `layer='kernel'` gap
+1. **`state.gaps[]`** — pick a `layer='kernel'` gap
    whose `attempts` history still has room. Each gap row carries the
    canonical_id / symptom / severity + per-attempt outcomes; routes
    straight to the matching `kernel_id`.
@@ -693,22 +706,22 @@ Pick the next kernel-owned REQUEST by reading facts in this order
    `decision='REVERT'` → kernel is rejected immediately.
 3. **`rejected_kernel_ids` / `rejected_kernel_patches`** — skip every
    kernel_id present here when walking
-   `last_select_kernels.reusable_native_kernel_ids`.
+   `last_trace_analyze.reusable_native_kernel_ids`.
 4. **`last_action_failures`** — recent kernel_opt / integrate failures
    carry `error_class` + `error_excerpt`; recover before re-emitting.
 5. **`plateau_kernel`** — when 3 consecutive REVERTs across distinct
    `kernel_id`s land, the Coordinator auto-advances KERNEL → SWEEP;
    stop proposing kernel_opt and let the phase transition fire.
 
-### `select_kernels` — payload (Coordinator gates `run_optimization` until cache is fresh)
+### `trace_analyze` — payload (Coordinator gates `run_optimization` until cache is fresh)
 
-  request{target_agent: 'kernel', kind: 'select_kernels',
+  request{target_agent: 'kernel', kind: 'trace_analyze',
           params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
 
-  STRICT: if `last_select_kernels.trace_input` already equals
+  STRICT: if `last_trace_analyze.trace_input` already equals
   `last_profile_trace`, the candidate list is cached — do NOT re-emit.
-  `select_kernels` must precede every `run_optimization` request — the
-  Coordinator denies kernel_opt requests with `select_kernels must run
+  `trace_analyze` must precede every `run_optimization` request — the
+  Coordinator denies kernel_opt requests with `trace_analyze must run
   first` when the cache is stale, but `params` / `backends` / `sweep` /
   `report` are NEVER gated on it. Re-emit only after a fresh `profile`
   action invalidates the cache.  TODO 3/5 surfaces in
@@ -716,10 +729,13 @@ Pick the next kernel-owned REQUEST by reading facts in this order
   fresh but the cache is still stale — emit the REQUEST yourself
   before kernel_opt / integrate cycles.
 
+  NOTE: pre-M4 alias `select_kernels` was removed in this branch.
+  Use `kind='trace_analyze'` exclusively.
+
 ### `kernel_opt` — payload for `run_optimization`
 
 When the DECISION FRAMEWORK selects `kernel_opt`, pick the next reusable
-native kernel from `last_select_kernels.reusable_native_kernel_ids`,
+native kernel from `last_trace_analyze.reusable_native_kernel_ids`,
 in order, skipping any kernel_id already present in
 `last_kernel_opt.kernel_id`.
 
@@ -747,7 +763,7 @@ HARD RULES (applied at REQUEST build time, NOT at action-selection time):
   request{target_agent: 'kernel', kind: 'run_optimization',
           params: {kernel_id: <picked kernel_id>,
                    source_file: <hot_kernels[i].source_file>,
-                   candidates_path: <select_kernels_done.candidates_path>,
+                   candidates_path: <trace_analyze_done.candidates_path>,
                    budget_minutes: 60}}
 
   HARD RULE — backend selection: DO NOT add a `backends` field unless the
@@ -789,7 +805,7 @@ rejected — do NOT integrate. The Coordinator unlocks immediately; pick
 the next action via the DECISION FRAMEWORK like normal. A second
 `kernel_opt` round on the next reusable kernel_id is often the right
 move (when more reusable kernel_ids remain in
-`last_select_kernels.reusable_native_kernel_ids`), but is not required
+`last_trace_analyze.reusable_native_kernel_ids`), but is not required
 — the LLM decides.
 
 #### Multi-KEEP integrate queue (PR-B)
@@ -859,7 +875,7 @@ the same payload does not re-attempt retired kernels.
 
 ### KERNEL TARGETING (native vs torch.compile)
 
-`select_kernels` profiles the *final* serving mode (with or without
+`trace_analyze` profiles the *final* serving mode (with or without
 torch.compile / CUDAGraph), but kernel-opt may only rewrite reusable
 native sources that still appear in that trace. NEVER optimize
 `/tmp/torchinductor*`, Inductor cache, or `triton_poi_*` /
@@ -945,7 +961,7 @@ def build_orchestration_prompt(
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
-        # v0.8 §3.3 — phase contract sits between the legacy v0.6
+        # phase contract sits between the legacy
         # PIPELINE & TIME BUDGET (§3, action-runtime view) and the
         # ACTIONS catalogue (§4) so the LLM sees the *policy* layer
         # before the *catalogue*.

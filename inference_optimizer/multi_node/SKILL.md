@@ -56,7 +56,7 @@ Run `<subcommand> --help` for the full flag set. **Do not invent flags.**
   `RAY_JOB_ENTRYPOINT` — auto-injected).
 * **Defaults** (omit when prompt is silent): `--workspace`→`$SAFE_WORKSPACE`,
   `--gpus-per-node`→`8`, `--display-name`→`$DISPLAY_NAME` else
-  `multi_node_<unix-ts>`, `--owner-id`→`$WORKLOAD_ID`.
+  generated (see `DISPLAY_NAME` section below), `--owner-id`→`$WORKLOAD_ID`.
 
 ### Map the user Environment block → CLI (do not re-ask)
 
@@ -71,12 +71,35 @@ Typical prompt fields and where they land:
 | `TP=N`, `EP=…` | `restart-server --tp N`; `optimize --tp` / `--ep` |
 | `ISL` / `OSL` / `CONC` / `PRECISION` | `export` + `optimize --isl` / `--osl` / `--conc` / `--precision` |
 | `KERNEL_OPT_*` / `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX` | `export` before `install.sh` / `optimize` |
+| prompt `env:` block lines (e.g. `PATH_TO_AINIC_TAR_PACKAGE=…`, `PATH_TO_BNXT_TAR_PACKAGE=…`, `NCCL_DEBUG=INFO`) | `create-rayjob --extra-env K=V` (one per line, repeatable); `optimize --rayjob-extra-env K=V` (same shape). Skip `*_API_KEY` / `*_BASE_URL` (credential fanout auto-injects) and `RAY_JOB_ENTRYPOINT` (reserved). CLI owns no defaults — values come verbatim from the prompt. **Do NOT forward sandbox-side tool source fields** (`OOB_SRC` / `INFERENCEX_PATH` / `TRACELENS_ROOT`) here — they are sandbox-only; see `inference_optimizer/SKILL.md` "Tool source fields". |
 | MoE JIT cold-start (often omitted in prompt) | `export HYPERLOOM_MN_POLL_TIMEOUT_S=1800` and `HYPERLOOM_MN_HEALTH_WAIT_S=1800` — see below |
 
 If the prompt already contains the first rows, **do not** claim the
 “environment block is incomplete”; wire them into `setsid nohup optimize`
 and `multi_node` subcommands. Only add exports the prompt did not cover
 (chiefly `HYPERLOOM_MN_*` for 30 min polls on large MoE RayJobs).
+
+**DO NOT `--rayjob-extra-env` these (sandbox-only):**
+
+These are consumed by `install.sh` / `inference_optimizer optimize` /
+`_workload_envs.py` running inside the **sandbox**; nothing inside the
+RayJob pod reads them. Forwarding them pollutes the pod env and risks
+shadowing real values.
+
+- `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX`, `KERNEL_OPT_*`
+- `NODE_TLS_REJECT_UNAUTHORIZED`
+- `RANDOM_RANGE_RATIO`, `RUN_EVAL`
+- `MODEL_PATH`, `FRAMEWORK`, `TP`, `EP`, `ISL`, `OSL`, `CONC`, `PRECISION`,
+  `TARGET_GAIN`, `MAX_HOURS`, `GPU_TYPE`, `NODES` (already passed as
+  `optimize` CLI flags)
+- `HYPERLOOM_MN_POLL_TIMEOUT_S`, `HYPERLOOM_MN_HEALTH_WAIT_S` (sandbox
+  CLI poll budget, not a pod env)
+
+Forward to `--rayjob-extra-env` **only** the prompt `env:` block lines
+(`NCCL_DEBUG`, `PATH_TO_*` etc.). `OOB_SRC` / `INFERENCEX_PATH` /
+`TRACELENS_ROOT` are sandbox-only and **must NOT** be forwarded (the
+RayJob pod does not consume them — kernel-bench is NodeAffinity-pinned
+to the head pod and the head pod does not invoke OOB CLI).
 
 Example `optimize` tail (**example only** — map each flag from the user
 Environment block / `setup_env.sh`; do not treat literals below as defaults):
@@ -105,18 +128,19 @@ setsid nohup inference_optimizer --verbose optimize \
   --max-hours "${MAX_HOURS:?set from prompt}" \
   ${KERNEL_CLAUDE:+--kernel-claude} \
   ${CLAUDE_MODEL:+--claude-model "$CLAUDE_MODEL"} \
+  $(for kv in "${RAYJOB_EXTRA_ENV[@]:-}"; do [ -n "$kv" ] && printf -- '--rayjob-extra-env %q ' "$kv"; done) \
   > "$RUN_LOG" 2>&1 < /dev/null &
 ```
 
 ### `DISPLAY_NAME` (SaFE workload create only)
 
-Only `create-rayjob` sets the SaFE workload name (`displayName` /
-`--display-name` / `$DISPLAY_NAME`). Rules from the admission webhook:
+Only `create-rayjob` sets the SaFE workload name. Resolution order:
 
-* Length **1–36**, lowercase letters, digits, hyphens only (`[a-z0-9-]`).
-* Must **start with a letter**, **end with alphanumeric**.
-
-Good: `hl-run-$(date +%m%d%H%M)`. Bad: `hyperloom-sglang-2node-20260522_022937` (too long / underscores).
+1. If `$DISPLAY_NAME` is set, use it as-is — do **not** pass `--display-name`.
+2. Otherwise generate one that satisfies the SaFE admission webhook:
+   length **1–36**, lowercase letters / digits / hyphens only (`[a-z0-9-]`),
+   start with a letter, end with alphanumeric. Good: `hl-run-$(date +%m%d%H%M)`.
+   Bad: `hyperloom-sglang-2node-20260522_022937` (too long / underscores).
 
 ### SaFE workload `phase` (source of truth)
 
@@ -150,9 +174,8 @@ resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
    `head_pod_ip` / `service_url` once phase is `Running`.
 2. **`bootstrap`** — once. Submits `bootstrap.sh` via Ray Dashboard REST
    to install oob / claude / codex / tracelens on the head pod.
-3. **`verify`** — once. Confirms toolchain on PATH on the RayJob head pod.
-   Missing `oob` is common on minimal BYOI images: WARN for baseline-only
-   runs; kernel-opt needs OOB in the image or a fixed `bootstrap`.
+3. **`verify`** — once. Checks `ray` on PATH on the head pod.
+   On `MISSING:`, re-run `bootstrap --print-logs`.
 4. **`restart-server`** — every framework / model / TP / flag change.
    Kills the previous server via PID file (never `pkill -f`), relaunches
    under `nohup` so Ray pods do NOT restart and the aiter JIT cache
@@ -221,14 +244,13 @@ After step 4 route all benchmark / OOB / Magpie traffic to
 * **ADDENDUM-16** (robustness LocalProbe is sandbox-scoped): the
   `robustness-agent` backend's `LocalProbeSource` family probes
   sandbox-local resources only — `ray status`, the inference server
-  health URL (`http://127.0.0.1:8888`), the auth-proxy URL
-  (`http://127.0.0.1:4002`), GPU / FD / disk / shm metrics, the local
-  log-error scanner, etc. On `--nodes >= 2` every one of those
-  resources lives in a separate Kubernetes pod (head pod / worker
-  pod / RayJob submitter, on a different subnet from the sandbox in
-  some clusters), so each probe surfaces as a HIGH-severity false
-  positive (`ray_head_dead`, `local_server_unreachable`,
-  `auth_proxy_unhealthy`, `gpu_memory_leaked`, ...). The CLI
+  health URL (`http://127.0.0.1:8888`), GPU / FD / disk / shm metrics,
+  the local log-error scanner, etc. On `--nodes >= 2` every one of
+  those resources lives in a separate Kubernetes pod (head pod /
+  worker pod / RayJob submitter, on a different subnet from the
+  sandbox in some clusters), so each probe surfaces as a HIGH-severity
+  false positive (`ray_head_dead`, `local_server_unreachable`,
+  `gpu_memory_leaked`, ...). The CLI
   auto-downgrades `--robustness-agent` to `--robustness-mock`
   (heartbeat-only) when `args.nodes >= 2` and prints a WARNING.
   Operators who want to suppress the WARNING pass `--robustness-mock`

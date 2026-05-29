@@ -18,12 +18,10 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
 from inference_optimizer.orchestrator.action_executors.integrate_patch import (
-    DEFAULT_KEEP_THRESHOLD_PCT,
     IntegratePatchExecutor,
     _git_apply,
     _git_apply_reverse,

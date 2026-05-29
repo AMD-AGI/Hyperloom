@@ -43,9 +43,6 @@ from inference_optimizer.orchestrator.backends.mock_backend import (
 from inference_optimizer.orchestrator.intent_parser import (
     Intent, IntentType,
 )
-from inference_optimizer.orchestrator.specialist_runner import (
-    DEFAULT_SPECIALIST_TOOLS,
-)
 from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 
 
@@ -175,6 +172,9 @@ async def test_register_executors_registers_specialist_kind(tmp_path: Path):
 
     class _StubCoord:
         sub = _StubSub()
+        # RooflineExecutor refuses ``shared_state is None``; any truthy
+        # stand-in is enough since registration just stores the ref.
+        shared_state = object()
 
     coord = _StubCoord()
     args = _build_args(research_lane_capacity=1)
@@ -211,6 +211,9 @@ async def test_register_executors_omits_specialist_when_capacity_zero(
 
     class _StubCoord:
         sub = _StubSub()
+        # RooflineExecutor refuses ``shared_state is None``; any truthy
+        # stand-in is enough since registration just stores the ref.
+        shared_state = object()
 
     coord = _StubCoord()
     # Pass specialist_executor=None to simulate cli's gating when
@@ -245,6 +248,7 @@ async def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
     class _State:
         warm_start_recipe: dict = None
         warm_start_pitfalls: list = None
+        warm_start_lessons: list = None
         gpu_type: str = "MI300X"
     state = _State(
         warm_start_recipe={"backend": "sglang", "tp": 8},
@@ -289,6 +293,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
     class _State:
         warm_start_recipe: dict = None
         warm_start_pitfalls: list = None
+        warm_start_lessons: list = None
         gpu_type: str = ""
     coord.shared_state = _State()
 
@@ -312,6 +317,7 @@ async def test_warm_specialist_params_respects_explicit_pr_feed(tmp_path: Path):
     class _State:
         warm_start_recipe: dict = None
         warm_start_pitfalls: list = None
+        warm_start_lessons: list = None
         gpu_type: str = ""
     coord.shared_state = _State()
 
