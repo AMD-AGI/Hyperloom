@@ -267,6 +267,58 @@ verify_die() {
   if [ "$CHECK_ONLY" -eq 1 ]; then warn "$1"; else die "$1"; fi
 }
 
+# Preflight credential validation. The env+.env fallback loader above
+# (lines 89-105) only LOADS missing keys; it does not VALIDATE that they
+# were actually provided. Without this gate, a missing SAFE_API_KEY or
+# OPENAI_BASE_URL would slip past pip install / GEAK clone / aiter JIT
+# (~10-20 minutes of work) and only blow up at the final
+# generate_geak_litellm_config step (line ~670). Fail fast here so the
+# operator can fix .env / export before any expensive work happens.
+#
+# Strict mode by design: no bypass env var. The chained installer
+# steps (GEAK config, OOB CLI auth) all need real credentials, so an
+# install without them cannot finish anyway. The only downgrade path
+# is --check-only / --dry-run, which is for introspection only and
+# does not actually install.
+preflight_validate_credentials() {
+  local missing=()
+  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
+  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
+  if [ "${#missing[@]}" -eq 0 ]; then
+    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+    return 0
+  fi
+  local env_file_status
+  if [ -f "$REPO_ROOT/.env" ]; then
+    env_file_status="present"
+  else
+    env_file_status="not found"
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
+         "continuing because --check-only / --dry-run is active. GEAK " \
+         "config generation will still fail later unless these are set " \
+         "before a real install."
+    return 0
+  fi
+  cat >&2 <<EOF
+[kernel-agent ERROR] Missing required credential(s): ${missing[*]}
+
+Tried loading from:
+  - shell environment
+  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+
+Fix one of:
+  1. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
+  2. Export directly into the shell before re-running:
+       export SAFE_API_KEY=sk-xxxxx
+       export OPENAI_BASE_URL=https://gateway.example.com/v1
+EOF
+  exit 2
+}
+preflight_validate_credentials
+
 run() {
   log "$*"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
