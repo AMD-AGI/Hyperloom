@@ -89,6 +89,39 @@ def test_read_source_truncates_large_files(tmp_path: Path, monkeypatch):
     assert res["bytes_returned"] == MAX_READ_SOURCE_CHARS
 
 
+def test_read_source_honours_max_bytes(tmp_path: Path, monkeypatch):
+    f = tmp_path / "f.py"
+    f.write_text("b" * 5000, encoding="utf-8")
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", str(tmp_path),
+    )
+    res = read_source(str(f), 1000)
+    assert res["ok"] is True
+    assert res["truncated"] is True
+    assert res["bytes_returned"] == 1000
+
+
+def test_read_source_max_bytes_clamped_to_hard_cap(tmp_path: Path, monkeypatch):
+    f = tmp_path / "f.py"
+    f.write_text("c" * (MAX_READ_SOURCE_CHARS + 500), encoding="utf-8")
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", str(tmp_path),
+    )
+    # A caller asking for more than the ceiling is clamped down.
+    res = read_source(str(f), MAX_READ_SOURCE_CHARS * 10)
+    assert res["bytes_returned"] == MAX_READ_SOURCE_CHARS
+
+
+def test_read_source_max_bytes_none_uses_hard_cap(tmp_path: Path, monkeypatch):
+    f = tmp_path / "f.py"
+    f.write_text("d" * (MAX_READ_SOURCE_CHARS + 500), encoding="utf-8")
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", str(tmp_path),
+    )
+    res = read_source(str(f), None)
+    assert res["bytes_returned"] == MAX_READ_SOURCE_CHARS
+
+
 # ===========================================================================
 # read_session_artifact — whitelist + cross-dyn_id isolation
 # ===========================================================================
