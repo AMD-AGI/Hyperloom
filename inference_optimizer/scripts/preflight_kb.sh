@@ -12,7 +12,7 @@
 
 set -u
 
-: "${CORTEX_KB_URL:=http://kb-service.primus-cortex.svc.cluster.local}"
+: "${CORTEX_KB_URL:=}"
 : "${PR_MONITOR_URL:=http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/v1}"
 : "${USER_DATA_PATH:=/workspace/hyperloom}"
 : "${KB_SERVICE_TOKEN:=}"
@@ -84,7 +84,11 @@ probe_curl() {
     return 1
 }
 
-if [ -n "${SKIP_KB_PROBE}" ]; then
+# No URL configured (operator didn't pass --cortex-kb-url / export
+# CORTEX_KB_URL) → there is no remote KB to probe. Mark the branch
+# skipped so the cli stays local-only instead of soft-degrading on an
+# unreachable hard-coded default (which no longer exists).
+if [ -n "${SKIP_KB_PROBE}" ] || [ -z "${CORTEX_KB_URL}" ]; then
     kb_skipped="true"
 else
     probe_curl "${CORTEX_KB_URL%/}/health" 2 3 "kb" || true

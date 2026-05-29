@@ -753,7 +753,7 @@ async def trace_analyze_handler(
     #     correct steady-state window — without these the splitter falls
     #     back to in-trace heuristics that can yield 0 chunks
     #     (`trace_split_no_steady_state`) and collapse the whole
-    #     select_kernels / kernel_opt / integrate chain.
+    #     trace_analyze / kernel_opt / integrate chain.
     # (2) downstream below to enrich result.hot_kernels and the
     #     kernel_candidates artifact with the same runtime context.
     metadata = _load_materialized_workload_metadata(state.baseline_config_path)
@@ -786,9 +786,9 @@ async def trace_analyze_handler(
     # Without these, the splitter has historically had to guess the
     # mixed-window selection's PD ratio from heuristics; on workloads
     # where heuristics miss, all three steady-state windows come back
-    # empty and `select_kernels` returns
+    # empty and `trace_analyze` returns
     # ``status=failed error=trace_split_no_steady_state``, blocking the
-    # entire kernel-optimization chain (select_kernels -> kernel_opt ->
+    # entire kernel-optimization chain (trace_analyze -> kernel_opt ->
     # integrate -> operator_tuning -> deep_kernel_analysis).
     split_conc = payload.get("split_conc") or workload.get("conc")
     if split_conc not in (None, ""):
@@ -1819,23 +1819,16 @@ async def integrate_handler(
 
 
 # ---------------------------------------------------------------------------
-# F1-2 (roofline composite) + main M4 — back-compat alias.
+# Kernel-agent programmatic dispatch table.
 #
-# Hyperloom main renamed ``select_kernels_handler`` to
+# Main M4 renamed ``select_kernels_handler`` to
 # ``trace_analyze_handler`` (the function does TraceLens analysis +
 # kernel selection in a single pass, so the new name is more accurate).
-# The M4 merge adopts main's canonical ``trace_analyze_handler`` name;
-# the back-compat alias below keeps the ~30 legacy callsites that import
-# ``select_kernels_handler`` working unchanged.
-select_kernels_handler = trace_analyze_handler
-
+# This branch dropped the legacy ``select_kernels`` alias entirely; the
+# canonical kind is ``trace_analyze``. RooflineExecutor (F1-2) calls
+# the function directly; the dispatch entry below is for LLM-driven
+# requests routed via ``Coordinator._handle_request``.
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
-    "select_kernels":   trace_analyze_handler,
-    # ``trace_analyze`` dispatch routes to the same handler as
-    # ``select_kernels`` — RooflineExecutor (F1-2) calls the function
-    # directly, but explicit dispatch entries keep the action-table
-    # symmetric for future PolicyGate / audit code that keys on the
-    # request kind.
     "trace_analyze":    trace_analyze_handler,
     "run_optimization": run_optimization_handler,
     "integrate":        integrate_handler,
@@ -1858,6 +1851,5 @@ __all__ = [
     "has_handler",
     "integrate_handler",
     "run_optimization_handler",
-    "select_kernels_handler",
     "trace_analyze_handler",
 ]
