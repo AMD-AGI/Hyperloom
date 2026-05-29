@@ -11,7 +11,15 @@ Writes — local-only:
     methods at all). The local store is the authoritative place
     new rows land.
 
-Reads — remote-first, fall through to local on absence / failure:
+Reads — remote-first via the SINGLE ``/recipes/search`` route, fall
+through to local on absence / failure:
+    The remote half is reached ONLY through ``/recipes/search``.
+    ``get_recipe`` decodes the 5-tuple from the canonical_id into
+    ``label_match`` and issues ONE search — the server decides
+    exact-vs-relative fallback + ranking, the client takes the top
+    row. ``get_history`` / ``list_recent`` / ``list_attempts`` /
+    ``list_session_attempts`` are LOCAL-only (those routes are not
+    used). For the search-backed read:
     1. If ``remote`` is configured AND enabled → call the central
        kb-service first.
     2. If the remote answer carries a non-empty result, return it
@@ -57,11 +65,33 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from .canonical_id import InvalidCanonicalIdError, cid_to_path_components
 from .local_store import LocalRecipeStore
 from .remote_client import RemoteRecipeClient, RemoteRecipeClientError
 
 
 log = logging.getLogger(__name__)
+
+
+def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
+    """Decode a canonical_id into the 5-key ``label_match`` dict the
+    central ``/recipes/search`` route expects.
+
+    The five cid segments are already slug-clean (produced by
+    ``recipe_canonical_id``), so they map 1:1 to the label values the
+    server matches on. Raises :class:`InvalidCanonicalIdError` for a
+    malformed id — the caller falls back to a local read.
+    """
+    model, hardware, framework, framework_version, precision = (
+        cid_to_path_components(canonical_id)
+    )
+    return {
+        "model": model,
+        "hardware": hardware,
+        "framework": framework,
+        "framework_version": framework_version,
+        "precision": precision,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -76,9 +106,9 @@ log = logging.getLogger(__name__)
 #
 # Translation rules:
 #
-# * v2 ``findings``    → arbor ``what_worked`` (sub-shape preserved if
-#                       it already matches; otherwise wrapped to
-#                       ``{description, measured_impact}`` best-effort).
+# * v2 ``findings``    → arbor ``what_worked`` (list passed through
+#                       verbatim — the server returns the agreed
+#                       sub-shape; the client does not re-wrap items).
 # * v2 ``failures``    → arbor ``what_failed``    (same).
 # * v2 ``gaps``        → arbor ``remaining_gaps`` (same).
 # * v2 ``body.best_config`` / ``body.stack_fingerprint`` /
@@ -150,25 +180,6 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
     return arbor
 
 
-def _v2_history_entry_to_arbor(entry: dict[str, Any]) -> dict[str, Any]:
-    """Translate a single ``/history`` archive entry to arbor shape.
-
-    History entries wrap the recipe under a ``snapshot`` key plus
-    ``archived_at`` / ``replaced_by`` envelope fields. Only the
-    ``snapshot`` payload is translated; the envelope passes through.
-    """
-    if not isinstance(entry, dict):
-        return {}
-    snapshot = entry.get("snapshot")
-    return {
-        "canonical_id": entry.get("canonical_id", ""),
-        "version":      entry.get("version", 0),
-        "archived_at":  entry.get("archived_at", ""),
-        "replaced_by":  dict(entry.get("replaced_by") or {}),
-        "snapshot":     _v2_to_arbor(snapshot) if isinstance(snapshot, dict) else {},
-    }
-
-
 @dataclass
 class RecipeKB:
     """Local-write / remote-read-with-fallback dispatcher.
@@ -191,6 +202,22 @@ class RecipeKB:
     local: LocalRecipeStore
     remote: RemoteRecipeClient | None = None
     on_remote_failure: Any = None
+
+    # ------------------------------------------------------------------
+    # Capability flags
+    # ------------------------------------------------------------------
+    @property
+    def enabled(self) -> bool:
+        """Always ``True`` — the dispatcher is usable whenever it
+        exists, because the local store is always present (writes land
+        locally; reads fall back to local). Remote reachability is a
+        separate concern handled by :meth:`_remote_active`. Exposed so
+        call sites that historically probed ``client.enabled`` on the
+        v1 ``CortexKBClient`` keep working against the v2 dispatcher
+        (e.g. ``coordinator._ensure_cortex_t0_anchored``); a missing
+        attribute there would silently skip the SDK-fallback T0 anchor.
+        """
+        return True
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -321,34 +348,39 @@ class RecipeKB:
         canonical_id: str,
         version: int | None = None,
     ) -> dict[str, Any] | None:
-        """Read recipe row, remote-first with local fall-through.
+        """Read a recipe row.
 
-        Resolution order (matches the class-level docstring):
+        Remote uses the SINGLE ``/recipes/search`` route: the 5-tuple
+        decoded from ``canonical_id`` is passed as ``label_match`` and
+        the central kb-service decides exact-vs-relative match +
+        ranking — the client issues ONE search and takes the top
+        (server-ranked) row. We deliberately do NOT hit
+        ``GET /recipes/{cid}``; search is the only remote route.
 
-        1. Remote enabled → ``remote.get_recipe(...)``.
-           A non-None response is returned verbatim.
-        2. Remote returned ``None`` (server replied 404 → row
-           absent on central) → check the local store. The local
-           row may exist if this operator wrote it but the central
-           ingest hasn't caught up yet.
-        3. Remote raised → log + ``on_remote_failure`` callback,
-           then check the local store.
-        4. Remote disabled / not configured → local-only.
+        Local is an arbor-style exact read of the on-disk
+        ``recipe.json`` for this canonical_id. It serves:
 
-        Returns ``None`` only when both stores agree the row is
-        absent. ``version=N`` is forwarded to whichever store
-        ends up satisfying the call.
+        * ``version``-pinned reads (history archive — search only
+          returns live rows), and
+        * the fall-through when remote is absent / empty / errors.
+
+        Returns ``None`` only when neither store has the row.
         """
-        if self._remote_active():
+        if version is None and self._remote_active():
             try:
-                row = self.remote.get_recipe(  # type: ignore[union-attr]
-                    canonical_id=canonical_id, version=version,
+                labels = _labels_from_canonical_id(canonical_id)
+                rows = self.remote.search(  # type: ignore[union-attr]
+                    label_match=labels, limit=1,
                 )
-                if row is not None:
-                    return _v2_to_arbor(row)
+                if rows:
+                    return _v2_to_arbor(rows[0])
                 # remote miss — fall through to local.
             except RemoteRecipeClientError as exc:
                 self._note_failure("get_recipe", exc)
+            except InvalidCanonicalIdError as exc:
+                # Can't build label_match from a malformed cid; the
+                # local store applies the same parse, so just degrade.
+                log.warning("get_recipe: %s; local-only read", exc)
         return self.local.get_recipe(
             canonical_id=canonical_id, version=version,
         )
@@ -359,40 +391,21 @@ class RecipeKB:
         canonical_id: str,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Read history.
+        """Read version history — LOCAL only.
 
-        Remote returns an empty list for unknown cids (per spec, no
-        404), so we treat ``[]`` as "remote authoritative" only if
-        the remote answered without error. On a transport / business
-        failure we fall through to the local store; the caller still
-        sees the local archive even if the central one is missing.
+        The central kb-service is reached through the single
+        ``/recipes/search`` route only (see :meth:`get_recipe`);
+        ``/history`` is not used. The local archive is authoritative
+        for writes anyway, so the on-disk ``history/v{N}.json`` files
+        are the source of truth here.
         """
-        if self._remote_active():
-            try:
-                rows = self.remote.get_history(  # type: ignore[union-attr]
-                    canonical_id=canonical_id, limit=limit,
-                )
-                if rows:
-                    return [_v2_history_entry_to_arbor(r) for r in rows]
-                # Remote returned []; check the local store too —
-                # the dispatcher's invariant is "writes are local",
-                # so the local archive can be richer than central.
-            except RemoteRecipeClientError as exc:
-                self._note_failure("get_history", exc)
         return self.local.get_history(
             canonical_id=canonical_id, limit=limit,
         )
 
     def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        if self._remote_active():
-            try:
-                rows = self.remote.list_recent(  # type: ignore[union-attr]
-                    limit=limit,
-                )
-                if rows:
-                    return [_v2_to_arbor(r) for r in rows]
-            except RemoteRecipeClientError as exc:
-                self._note_failure("list_recent", exc)
+        """Recent recipes — LOCAL only (remote = ``/recipes/search``
+        route only; bare ``GET /recipes`` is not used)."""
         return self.local.list_recent(limit=limit)
 
     def search(
@@ -451,15 +464,8 @@ class RecipeKB:
         canonical_id: str,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        if self._remote_active():
-            try:
-                rows = self.remote.list_attempts(  # type: ignore[union-attr]
-                    canonical_id=canonical_id, limit=limit,
-                )
-                if rows:
-                    return rows
-            except RemoteRecipeClientError as exc:
-                self._note_failure("list_attempts", exc)
+        """Attempts for one recipe — LOCAL only (remote =
+        ``/recipes/search`` route only)."""
         return self.local.list_attempts(
             canonical_id=canonical_id, limit=limit,
         )
@@ -470,15 +476,8 @@ class RecipeKB:
         session_id: str,
         limit: int = 500,
     ) -> list[dict[str, Any]]:
-        if self._remote_active():
-            try:
-                rows = self.remote.list_session_attempts(  # type: ignore[union-attr]
-                    session_id=session_id, limit=limit,
-                )
-                if rows:
-                    return rows
-            except RemoteRecipeClientError as exc:
-                self._note_failure("list_session_attempts", exc)
+        """Session attempts — LOCAL only (remote = ``/recipes/search``
+        route only)."""
         return self.local.list_session_attempts(
             session_id=session_id, limit=limit,
         )

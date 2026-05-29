@@ -110,7 +110,7 @@ def _warm_recipe_t1(
     extra_envs: dict | None = None,
     expected_gain_pct: float = 25.0,
     confidence: float = 0.85,
-    tier: str = "T1_exact",
+    tier: str = "exact",
     sessions: list | None = None,
     what_failed: list | None = None,
 ) -> dict:
@@ -146,6 +146,37 @@ def _warm_recipe_t1(
             "canonical_id": "recipe:deepseek-r1:sglang:mi300x",
             "kind": "recipe",
             "attrs": attrs,
+        },
+    }
+
+
+def _warm_recipe_v2_arbor(
+    *,
+    extra_sglang_args: str = "--x",
+    extra_envs: dict | None = None,
+    expected_gain_pct: float = 25.0,
+    tier: str = "exact",
+    confidence: float = 1.0,
+) -> dict:
+    """v2 RecipeKB arbor shape: ``best_config`` / ``sessions`` live at
+    the TOP LEVEL of ``recipe`` (no ``attrs`` wrapper) — exactly what
+    ``RecipeKB.get_recipe`` returns post-cutover."""
+    return {
+        "tier": tier,
+        "confidence": confidence,
+        "recipe": {
+            "canonical_id": "inference:deepseek-r1:mi300x:sglang:0.4.5:fp8",
+            "model": "deepseek-r1",
+            "hardware": "mi300x",
+            "framework": "sglang",
+            "best_config": {
+                "extra_sglang_args": extra_sglang_args,
+                "extra_envs": dict(extra_envs or {}),
+            },
+            "sessions": [
+                {"session_id": "prior-A", "gain_pct": expected_gain_pct,
+                 "stack_len": 1},
+            ],
         },
     }
 
@@ -284,13 +315,34 @@ async def test_warm_replay_enqueues_with_warm_best_config_args_envs(tmp_path):
     assert params["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
     assert params["config_path"] == "/tmp/baseline.yaml"
     assert params["warm_expected_gain_pct"] == 25.0
-    assert params["warm_recipe_tier"] == "T1_exact"
+    assert params["warm_recipe_tier"] == "exact"
     assert params["warm_recipe_conf"] == 0.85
     assert params["baseline_tput_anchor"] == 600.0
     # ``warm_replay_attempted`` flipped True for resume safety.
     assert coord.shared_state.warm_replay_attempted is True
     assert coord.shared_state.warm_replay_outcome["status"] == "in_flight"
     assert coord.shared_state.warm_replay_outcome["replay_task_id"] == task.task_id
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_enqueues_with_v2_arbor_top_level_best_config(tmp_path):
+    """Regression (P0): post-RecipeKB-cutover, RecipeKB.get_recipe returns
+    the arbor shape with best_config / sessions at the TOP LEVEL of the
+    recipe (no ``attrs`` wrapper). warm-replay must read them there — not
+    under ``recipe['attrs']`` — else it silently skips with
+    ``best_config_empty`` and the warm config is never replayed."""
+    recipe = _warm_recipe_v2_arbor(
+        extra_sglang_args="--attention-backend AITER",
+        extra_envs={"VLLM_ROCM_USE_AITER": "1"},
+        expected_gain_pct=25.0,
+    )
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    assert task is not None, "v2 arbor top-level best_config not read (P0)"
+    params = coord.tasks.calls[0]["params"]
+    assert params["extra_sglang_args"] == "--attention-backend AITER"
+    assert params["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+    assert params["warm_expected_gain_pct"] == 25.0
 
 
 # ===========================================================================
@@ -305,7 +357,7 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
-        "warm_recipe_tier": "T1_exact",
+        "warm_recipe_tier": "exact",
         "warm_recipe_conf": 0.85,
         "expected_gain_pct": 25.0,
         "replay_task_id": "task-warm-replay-prelude",
@@ -346,7 +398,7 @@ def test_promote_warm_replay_drift_does_not_push_stack(tmp_path):
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
         "expected_gain_pct": 25.0,
-        "warm_recipe_tier": "T1_exact",
+        "warm_recipe_tier": "exact",
     }
     task = _StubTask(params={
         "extra_sglang_args": "--attention-backend AITER",
@@ -450,11 +502,37 @@ def test_inject_warm_recipe_history_adds_what_failed_rows(tmp_path):
         assert isinstance(row.get("fingerprint"), str) and len(row["fingerprint"]) == 16
         assert row["reason"] == "warm_recipe_what_failed"
         assert row["source"] == "warm_start_recipe"
-        assert row["source_tier"] == "T1_exact"
+        assert row["source_tier"] == "exact"
     # The marker fields preserve the original gain_pct / error_class.
     assert any(r["error_class"] == "regress" for r in rejected)
     assert any(r["error_class"] == "crash" for r in rejected)
     assert coord.shared_state.warm_history_injected is True
+
+
+def test_inject_warm_recipe_history_v2_arbor_top_level(tmp_path):
+    """Regression (P0-B): v2 RecipeKB returns ``what_failed`` at the TOP
+    LEVEL of the recipe (no ``attrs`` wrapper). The injector must read
+    it there — else negative-history injection silently does nothing."""
+    recipe = {
+        "tier": "exact",
+        "confidence": 1.0,
+        "recipe": {
+            "canonical_id": "inference:deepseek-r1:mi300x:sglang:0.4.5:fp8",
+            "model": "deepseek-r1",
+            "what_failed": [
+                {"name": "fp4_kv_cache",
+                 "extra_sglang_args": "--kv-cache-dtype fp4",
+                 "extra_envs": {}, "gain_pct": -8.0, "error_class": "regress"},
+            ],
+        },
+    }
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    coord.shared_state.explore_search = {}
+    added = coord._inject_warm_recipe_history_into_ledger()
+    assert added == 1, "v2 arbor top-level what_failed not read (P0-B)"
+    rejected = coord.shared_state.explore_search["rejected"]
+    assert len(rejected) == 1
+    assert rejected[0]["source"] == "warm_start_recipe"
 
 
 def test_inject_warm_recipe_history_is_idempotent(tmp_path):
@@ -564,7 +642,7 @@ async def test_warm_replay_falls_back_to_flat_gain_pct_for_arbor_seed(tmp_path):
     coord = _make_coord(tmp_path)
     # Manually build a recipe with the legacy flat ``gain_pct`` attr.
     coord.shared_state.warm_start_recipe = {
-        "tier": "T2_same_shape",
+        "tier": "relative",
         "confidence": 0.75,
         "recipe": {
             "attrs": {
@@ -590,7 +668,7 @@ def test_promote_warm_replay_cumulative_gain_uses_tput_ratio(tmp_path):
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
         "expected_gain_pct": 25.0,
-        "warm_recipe_tier": "T1_exact",
+        "warm_recipe_tier": "exact",
     }
     task = _StubTask(params={
         "extra_sglang_args": "--attention-backend AITER",
