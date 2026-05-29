@@ -1074,7 +1074,6 @@ Covers KB_design/3.12_observability/README.md acceptance criteria:
 
 
 import json
-import os
 from pathlib import Path
 
 import pytest

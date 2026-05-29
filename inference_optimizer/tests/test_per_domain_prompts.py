@@ -212,12 +212,10 @@ Covers KB_design §3.5 + §3.13 M5:
 
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.backends.base import BackendTurnResult
 from inference_optimizer.orchestrator.backends.mock_backend import (
     MockBackend,
     MockTurn,
@@ -234,7 +232,6 @@ from inference_optimizer.orchestrator.policy import (
     PolicyDenied,
     PolicyGate,
     SPECIALIST_ACTION_NAME,
-    SPECIALIST_DISPATCH_SOURCE_ALLOWLIST,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from inference_optimizer.orchestrator.resource_lock import (
@@ -242,7 +239,6 @@ from inference_optimizer.orchestrator.resource_lock import (
 )
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.specialist_domains import (
-    DEFAULT_SPECIALIST_MAX_TURNS,
     SPECIALIST_DOMAINS,
     SPECIALIST_DOMAINS_M5,
     SPECIALIST_DOMAIN_KEYS,
