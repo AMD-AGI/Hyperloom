@@ -3409,6 +3409,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
             if cur_phase in ("", "PRELUDE"):
                 state.framework_phase_enabled = False
+                # Persist immediately: the later conditional save only
+                # runs when there was a prior stop_reason / crash, so a
+                # clean resume would otherwise drop this toggle on the
+                # next disk reload.
+                state.save(session_dir)
                 print(
                     "  framework phase       : DISABLING for resume "
                     "(--no-framework + phase=PRELUDE)"
