@@ -14,11 +14,6 @@ from __future__ import annotations
 from typing import Final
 
 # ---------------------------------------------------------------------------
-# Default endpoint
-# ---------------------------------------------------------------------------
-DEFAULT_KB_URL: Final[str] = "http://kb-service.primus-cortex.svc.cluster.local"
-
-# ---------------------------------------------------------------------------
 # Endpoint paths (§1)
 # ---------------------------------------------------------------------------
 PATH_HEALTH:        Final[str] = "/health"
@@ -194,7 +189,6 @@ SMOKE_GENERATOR:           Final[str] = "hyperloom-smoke"
 
 
 __all__ = [
-    "DEFAULT_KB_URL",
     "PATH_HEALTH",
     "PATH_PROPOSE_POINT",
     "PATH_QUERY_POINT",
