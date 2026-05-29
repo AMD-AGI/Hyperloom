@@ -23,7 +23,6 @@ import respx
 
 from inference_optimizer.cortex_kb_client import (
     CortexKBClient,
-    CortexKBError,
     attempt_canonical_id,
     experiment_canonical_id,
     recipe_canonical_id,
