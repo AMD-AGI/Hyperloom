@@ -32,8 +32,7 @@ P2#7 documented:
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ..role.prompt_inputs import ReactorContext

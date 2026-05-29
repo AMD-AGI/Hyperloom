@@ -28,16 +28,13 @@ v0.6 changes vs v0.5:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .framework_paths import resolve_source_file_allowlist
 from .intent_parser import Intent, IntentType
-from .message_bus import TOPIC_ALLOWLIST
 from .phase_state import (
-    PHASE_ALLOWED_ACTIONS,
-    PHASE_EXPLORE,
     PHASE_NAMES,
     PHASE_SWEEP,
     allowed_actions_for,
