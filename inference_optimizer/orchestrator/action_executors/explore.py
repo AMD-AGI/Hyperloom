@@ -64,7 +64,6 @@ from ._canonical_fingerprint import canonical_fingerprint, workload_signature
 from ._explore_roofline_filter import filter_variants_by_roofline
 from ._grid_runner import (
     GridVariant,
-    VariantResult,
     _resolve_session_dir,
     run_grid,
     sanitize_result_dir,
