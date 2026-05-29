@@ -280,7 +280,7 @@ def _validate_trace_structure(
 PROFILE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
 )
-PROFILE_DEFAULT_TIMEOUT_SEC = 2400     # Magpie + sglang profile is heavier, 40 min wall cap
+PROFILE_DEFAULT_TIMEOUT_SEC = 14400    # 4 h wall cap; Qwen3-32B TP=1 profile needs ~3 h with steady-state window
 
 
 def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
