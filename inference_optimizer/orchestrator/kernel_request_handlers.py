@@ -36,6 +36,7 @@ can monkey-patch in tests.
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib.util
 import json
 import logging
@@ -121,17 +122,83 @@ _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
 # layer below: GEAK / OOB submitters register their work as
 # ``ray.remote(num_gpus=...)`` tasks, so Ray serializes any oversubscription
 # against the cluster's actual GPU resources (typical MI300X / MI355X node
-# = 8 GPU). This default mirrors that node size so a single
-# ``run_optimization`` request can fan out to one GEAK/OOB attempt per GPU
-# without the asyncio semaphore artificially capping below Ray's view.
-# Pre-PR-X default was 3, which throttled even small batches (e.g. A3B's
-# 3 kernel units were already at the cap, and larger TraceLens outputs
-# silently serialized behind sem). Override via
-# ``KERNEL_OPT_MAX_PARALLEL`` env (>=1) on nodes with fewer GPUs or when
-# the LLM API gateway becomes the new bottleneck.
+# = 8 GPU). 8 is the legacy MI300X-tuned cap and the fallback used when
+# ``torch.cuda.device_count()`` can't tell us the visible-GPU count
+# (CI / mocks / pre-driver init). For all other cases the active value
+# is computed by ``_default_kernel_batch_parallel()`` -- ``min(cap,
+# visible_gpus / per_task_gpus)`` -- so smaller pods (4-GPU labs,
+# partial-node CI shards) don't admit more siblings than Ray can
+# actually schedule. Operators can still pin via
+# ``KERNEL_OPT_MAX_PARALLEL`` env (>=1).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0
-_DEFAULT_GEAK_BUDGET_MINUTES = 90.0
+
+
+@functools.lru_cache(maxsize=1)
+def _default_geak_budget_minutes() -> float:
+    """Default per-GEAK-attempt budget tracking ``$GEAK_RUN_MODE``.
+
+    Mirrors the default in ``kernel-agent/tools/kernel_optimization.py``
+    and ``kernel-agent/tools/parallel_e2e_runner.py`` so the installer /
+    driver / orchestrator agree on one budget. The legacy hard-coded 90
+    silently clamped every GEAK attempt below the full-mode threshold
+    (130) even when ``install.sh`` had exported ``GEAK_RUN_MODE=full``,
+    forcing quick-mode timing on the orchestrator path while the
+    upstream tool ran in full mode (PR #301 fixed only the kernel-agent
+    side; this is the matching orchestrator-side fix).
+
+    Override via payload ``geak_budget_min`` or env
+    ``HYPERLOOM_GEAK_BUDGET_MIN``.
+
+    Cached: ``$GEAK_RUN_MODE`` is set by ``install.sh`` before the
+    optimizer process starts and does not change in-session. Tests that
+    monkeypatch the env must call ``cache_clear()``; the
+    ``inference_optimizer/tests/conftest.py`` autouse fixture handles
+    this for every test.
+    """
+    raw = (os.environ.get("GEAK_RUN_MODE") or "").strip().lower()
+    return 70.0 if raw == "quick" else 130.0
+
+
+@functools.lru_cache(maxsize=1)
+def _default_kernel_batch_parallel() -> int:
+    """Adaptive batch fanout: ``min(cap, visible_gpus // per_task_gpus)``.
+
+    The legacy hard-coded 8 assumed a full MI300X / MI355X node. On
+    smaller pods it lets the asyncio semaphore admit more concurrent
+    sibling attempts than Ray can schedule, so they stack against the
+    GPU lock and one fast kernel waits behind a stuck GEAK for many
+    minutes. We use ``torch.cuda.device_count()`` for the visible-GPU
+    count (works for both ROCm and CUDA backends) and
+    ``$KERNEL_AGENT_NUM_GPUS`` for the per-attempt GPU reservation
+    (set by the kernel-agent submitter). Falls back to the legacy
+    ``_DEFAULT_KERNEL_BATCH_PARALLEL`` when torch can't tell us
+    (CI / mocks / pre-driver init). Operators can still pin via
+    ``KERNEL_OPT_MAX_PARALLEL``.
+
+    Cached: visible GPU count and ``$KERNEL_AGENT_NUM_GPUS`` are fixed
+    at process start; ``torch.cuda.device_count()`` is a driver query
+    we don't want to re-issue on every batch dispatch. Tests that
+    monkeypatch torch / env must call ``cache_clear()``; the
+    ``inference_optimizer/tests/conftest.py`` autouse fixture handles
+    this for every test.
+    """
+    try:
+        import torch  # local import: torch driver init can be expensive
+        n_gpus = int(torch.cuda.device_count() or 0)
+    except Exception:  # noqa: BLE001 -- torch missing / driver init failure
+        return _DEFAULT_KERNEL_BATCH_PARALLEL
+    if n_gpus <= 0:
+        return _DEFAULT_KERNEL_BATCH_PARALLEL
+    try:
+        per_task = int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0") or 0)
+    except (TypeError, ValueError):
+        per_task = 0
+    if per_task <= 0:
+        per_task = 1
+    return max(1, min(_DEFAULT_KERNEL_BATCH_PARALLEL, n_gpus // per_task))
+
+
 _CANDIDATE_ENV_KEYS = {
     "CONC",
     "ISL",
@@ -872,7 +939,8 @@ async def run_optimization_handler(
 def _geak_budget_minutes(payload: dict) -> float:
     return float(
         payload.get("geak_budget_min")
-        or os.environ.get("HYPERLOOM_GEAK_BUDGET_MIN", _DEFAULT_GEAK_BUDGET_MINUTES)
+        or os.environ.get("HYPERLOOM_GEAK_BUDGET_MIN")
+        or _default_geak_budget_minutes()
     )
 
 
@@ -1273,7 +1341,8 @@ async def _run_optimization_batch(
     """
     max_parallel = int(
         payload.get("max_parallel")
-        or os.environ.get("KERNEL_OPT_MAX_PARALLEL", _DEFAULT_KERNEL_BATCH_PARALLEL)
+        or os.environ.get("KERNEL_OPT_MAX_PARALLEL")
+        or _default_kernel_batch_parallel()
     )
     max_parallel = max(1, max_parallel)
     sem = asyncio.Semaphore(max_parallel)
@@ -1374,7 +1443,8 @@ async def _run_optimization_single(
     Optional payload:
         backends:        comma-separated 'geak,claude,codex,cursor' (auto-pick if empty)
         budget_minutes:  default 60 (OOB backends)
-        geak_budget_min: default 90 (GEAK only; also ``HYPERLOOM_GEAK_BUDGET_MIN``)
+        geak_budget_min: tracks ``$GEAK_RUN_MODE`` (full -> 130, quick -> 70);
+                         override via payload or ``HYPERLOOM_GEAK_BUDGET_MIN``
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
         extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
