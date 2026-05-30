@@ -59,6 +59,8 @@ defaults:
   kernel_opt_workspace: ${KERNEL_OPT_WORKSPACE}
   min_kernels: 5
   inferencex_path: ${NFS_ROOT}/InferenceX
+  oob_path: ${NFS_ROOT}/OOB
+  tracelens_root: ${NFS_ROOT}/TraceLens-internal
   kernel_opt_backends: geak
   random_range_ratio: 0.8
 
