@@ -8643,6 +8643,84 @@ class Coordinator:
                     out[k] = v.strip()
         return out
 
+    def _build_kernel_optimizations_from_state(self) -> list[dict[str, Any]]:
+        """Collect KEEP'd kernel optimizations + their E2E verdict.
+
+        Joins two SharedState ledgers by ``kernel_id``:
+
+        * ``kernel_opt_attempts[kid]`` — the micro layer
+          (``last_decision`` / ``last_micro_speedup`` / ``last_artifact_path``
+          / ``source_file``), written by ``record_kernel_opt``.
+        * ``kernel_integrate_attempts[key]`` — the E2E integrate
+          verification (``best_gain_pct`` + the last attempt's ``new_tput``),
+          written by ``record_kernel_integrate_result``.
+
+        Only KEEP'd kernels are emitted. A KEEP'd kernel with no integrate
+        entry surfaces with ``integrated=False`` (micro-only, E2E unknown);
+        one that was integrated carries its real ``e2e_gain_pct`` / ``e2e_tput``
+        even when that gain is ~0 — that "tried, no E2E payoff" conclusion is
+        exactly the warm-start signal we previously dropped. Returns a list of
+        ``schema.KernelOptimization``-shaped dicts (the put_recipe extras
+        channel + ``Recipe.from_dict`` persist them as first-class rows).
+        """
+        ss = self.shared_state
+        opt_attempts = getattr(ss, "kernel_opt_attempts", {}) or {}
+        integ_attempts = getattr(ss, "kernel_integrate_attempts", {}) or {}
+        if not isinstance(opt_attempts, dict):
+            return []
+
+        # Index integrate results by kernel_id (last write wins; the entry
+        # already carries the rolled-up ``best_gain_pct`` across attempts).
+        integ_by_kid: dict[str, dict[str, Any]] = {}
+        if isinstance(integ_attempts, dict):
+            for entry in integ_attempts.values():
+                if not isinstance(entry, dict):
+                    continue
+                kid = str(entry.get("kernel_id") or "")
+                if kid:
+                    integ_by_kid[kid] = entry
+
+        out: list[dict[str, Any]] = []
+        for kid, e in opt_attempts.items():
+            if not isinstance(e, dict):
+                continue
+            if str(e.get("last_decision", "")).upper() != "KEEP":
+                continue
+            try:
+                micro = float(e.get("last_micro_speedup") or 0.0)
+            except (TypeError, ValueError):
+                micro = 0.0
+            integ = integ_by_kid.get(str(kid))
+            e2e_gain = 0.0
+            e2e_tput = 0.0
+            integrated = False
+            if isinstance(integ, dict):
+                integrated = True
+                try:
+                    e2e_gain = float(integ.get("best_gain_pct") or 0.0)
+                except (TypeError, ValueError):
+                    e2e_gain = 0.0
+                # Last attempt's measured throughput (the E2E re-bench number).
+                for att in reversed(list(integ.get("attempts") or [])):
+                    if isinstance(att, dict) and att.get("new_tput") is not None:
+                        try:
+                            e2e_tput = float(att.get("new_tput") or 0.0)
+                        except (TypeError, ValueError):
+                            e2e_tput = 0.0
+                        break
+            out.append({
+                "kernel_id":     str(kid),
+                "source_file":   str(e.get("source_file") or ""),
+                "artifact_path": str(e.get("last_artifact_path") or ""),
+                "micro_speedup": micro,
+                "decision":      "KEEP",
+                "e2e_gain_pct":  e2e_gain,
+                "e2e_tput":      e2e_tput,
+                "integrated":    integrated,
+                "ts":            str(e.get("last_ts") or e.get("ts") or ""),
+            })
+        return out
+
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
         """Materialise the recipe-shaped view of :class:`SharedState`.
 
@@ -8686,6 +8764,7 @@ class Coordinator:
                     "name":  str(failure.get("name") or failure.get("action") or ""),
                     "reason": str(failure.get("reason") or failure.get("error_class") or ""),
                 })
+        kernel_optimizations = self._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
         cumulative_total = float(getattr(ss, "cumulative_gain", 0.0) or 0.0)
         validated_stack_len = int(
@@ -8715,6 +8794,7 @@ class Coordinator:
                                   if isinstance(current_best, dict) else 0.0,
             "what_worked":       what_worked,
             "what_failed":       what_failed,
+            "kernel_optimizations": kernel_optimizations,
             "stack_fingerprint": {"sha": str(stack_fingerprint)} if stack_fingerprint else {},
             "last_profiled":     str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
             "workload":          workload_tags,
@@ -8829,12 +8909,34 @@ class Coordinator:
                         exc,
                     )
 
+            # KEEP'd kernel optimizations (incl. E2E-verified-but-no-gain)
+            # ride the extras channel: put_recipe splats extras into the
+            # payload and Recipe.from_dict parses ``kernel_optimizations``
+            # as a first-class field. Merge with any prior rows on the live
+            # recipe, de-duped by kernel_id (this session's entry wins).
+            kopts_new = list(attrs.get("kernel_optimizations") or [])
+            new_kids = {
+                str((k or {}).get("kernel_id") or "")
+                for k in kopts_new if isinstance(k, dict)
+            }
+            merged_kopts: list[dict[str, Any]] = list(kopts_new)
+            for prior in (existing_row.get("kernel_optimizations") or []):
+                if not isinstance(prior, dict):
+                    continue
+                if str(prior.get("kernel_id") or "") in new_kids:
+                    continue
+                merged_kopts.append(dict(prior))
+
+            extras_payload = dict(workload_tags or {})
+            if merged_kopts:
+                extras_payload["kernel_optimizations"] = merged_kopts
+
             overrides: dict[str, Any] = {
                 "what_worked":   attrs["what_worked"],
                 "what_failed":   attrs["what_failed"],
                 "last_profiled": attrs["last_profiled"],
                 "sessions":      merged_sessions,
-                "extras":        dict(workload_tags or {}),
+                "extras":        extras_payload,
             }
             # Only overwrite best_config / best_throughput when THIS
             # session is an actual improvement (or the row has none).
