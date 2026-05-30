@@ -73,10 +73,11 @@ def test_critic_md_is_rules_fragment():
     # introduces the action_verdict_policy lookup as the canonical
     # source of truth), then 65 → 75 to absorb F-phase v0.8 carve-out
     # bullets that overlap with N38's text, then 75 → 95 by issue #170
-    # (Web verification — when/why/how to use web_search / web_fetch and
-    # the mandatory source-citation rule). Future bumps require equivalent
-    # justification (new mechanism, not just adding more action names).
-    assert len(lines) <= 95, (
+    # (Web verification), then 95 → 160 by the cross-domain review
+    # block that fires when ``review_constraints.cross_domain=true``.
+    # Future bumps require equivalent justification (new mechanism,
+    # not just more action names).
+    assert len(lines) <= 160, (
         f"critic.md should be a concise fragment, got {len(lines)} non-empty lines"
     )
     assert "judge_bundle" in text
@@ -112,8 +113,8 @@ def test_build_full_prompt_contains_kernel_opt_pipeline(registry):
     # Section 6 payload-template markers (one per kernel-owned action).
     # These are the unique request shapes the builder emits in section 6;
     # the rules fragment uses a different surface form ("kind MUST be
-    # EXACTLY one of select_kernels / ...") so it won't false-positive.
-    assert "kind: 'select_kernels'" in text
+    # EXACTLY one of trace_analyze / ...") so it won't false-positive.
+    assert "kind: 'trace_analyze'" in text
     assert "kind: 'run_optimization'" in text
     assert "kind: 'integrate'" in text
     # Action catalogue includes the kernel-owned actions
@@ -143,7 +144,7 @@ def test_build_no_kernel_prompt_drops_kernel_pipeline_and_actions(registry):
     # Kernel-opt request-reference block must be absent (builder skipped
     # section 6 because no kernel-owned actions are enabled).
     assert "## 6. KERNEL-OPT REQUEST REFERENCE" not in text
-    assert "kind: 'select_kernels'" not in text
+    assert "kind: 'trace_analyze'" not in text
     assert "kind: 'run_optimization'" not in text
     # Kernel-owned action names must NOT appear as catalogue bullets
     # (the bare word may still appear inside the rules fragment, e.g.
@@ -218,4 +219,3 @@ def test_build_includes_explore_action_in_both_modes(registry):
         assert "### validate" not in text, (
             f"unexpected validate phase header (no_kernel={no_kernel})"
         )
-

@@ -5,6 +5,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 - Add repository governance docs (LICENSE, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md).
+- Add documentation guides under `docs/`: `ENV_AND_AUTH.md`, `KB_GUIDE.md`, `CONFIGURATION_REFERENCE.md`, `INTEGRATION_SESSION_BREAKDOWN.md`, `OPERATIONS.md`, `OPERATOR_SCRIPTS.md`, `TROUBLESHOOTING.md`, `UPGRADING.md`.
+- Refresh `docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md` and add `inference_optimizer/README.md` as a package-level entry point.
+- README now links to the new guides via a "Learn More" doc index and lists `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`, and `SECURITY.md` in the repo-tree.
+- **fix(orchestrator)**: drop pre-M4 `select_kernels` request alias and the
+  legacy `SharedState.last_select_kernels` / `record_select_kernels` mirror.
+  Only the canonical `trace_analyze` kind / `last_trace_analyze` cache
+  remain; readers had previously checked the removed mirror in
+  `_kernel_phase_todos` TODO 3/5, which caused the KERNEL-phase
+  `trace_analyze` request loop (RooflineExecutor populated only the
+  canonical cache, so the guard never saw a fresh entry and forever
+  instructed the LLM to re-emit the request). Resume of a stale
+  `state.json` carrying `last_select_kernels` silently drops the slot
+  via `_legacy_drop_fields`.
 
 ## [v0.3] - 2026-05-14
 ### Added

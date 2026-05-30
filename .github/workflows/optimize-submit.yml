@@ -189,9 +189,11 @@ jobs:
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
       # Schedule no longer excludes leaderboard-known models — that was for
-      # the discovery cron. We now WANT to re-run the production pool. We
-      # still exclude active workflows so cron does not double-submit a
-      # model that is already running in a previous batch.
+      # the discovery cron. We now WANT to re-run the production pool.
+      # Batch index for schedule is computed by generate_hf_matrix.py from the
+      # Beijing 00:00/12:00 half-day slot, not GITHUB_RUN_NUMBER, so manual
+      # dispatches do not perturb cron rotation. We still exclude active
+      # workflows so cron does not double-submit a model already running.
       INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
       INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
       GITHUB_TOKEN:          ${{ github.token }}
