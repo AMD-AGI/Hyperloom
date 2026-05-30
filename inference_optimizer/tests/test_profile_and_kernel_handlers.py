@@ -252,9 +252,16 @@ def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
 # yaml-hardcoded TP=1 and OOM-ed retry forever).
 # ===========================================================================
 def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
-    """TP env var must override yaml hardcode (was 1, becomes 8)."""
+    """TP env var must override yaml hardcode (was 1, becomes 8).
+
+    Bypass the visible-GPU clamp added in #zihao/qwen3-8b-e2e — that clamp
+    intentionally pulls TP back down to ``torch.cuda.device_count()`` when
+    the operator over-requests, but here we explicitly want to assert the
+    env-wins contract regardless of the host's GPU count.
+    """
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -276,9 +283,16 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
     tmp_path, monkeypatch,
 ):
     """When TP=8 is set via env but ROCR_VISIBLE_DEVICES isn't explicit,
-    expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices."""
+    expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices.
+
+    The TP clamp is bypassed here so the assertion holds on hosts with
+    fewer than 8 visible GPUs; the clamp's own behaviour is exercised by
+    ``test_materialize_config_with_envs_clamps_tp_to_visible_gpus`` in
+    ``test_baseline_param_overrides``.
+    """
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -306,9 +320,16 @@ def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
 ):
     """If explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires,
     `_workload_envs` auto-expands to 0..TP-1 and logs a warning, so SGLang
-    actually sees enough GPUs to start."""
+    actually sees enough GPUs to start.
+
+    The TP clamp is bypassed here because the assertion is specifically
+    about the *original* ROCR expansion logic that runs after TP is
+    resolved; on a 4-GPU CI box without the bypass the clamp would pull
+    TP down to 4 and ROCR would not need expansion at all.
+    """
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -1495,11 +1516,11 @@ async def test_trace_analyze_handler_missing_trace_input(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, monkeypatch):
+async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, monkeypatch):
     # N15 made HYPERLOOM_KERNEL_AGENT_ROOT a lazy env read; delenv is
     # the correct way to exercise the "not configured" branch.
     monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir)},
         session_dir=session_dir,
     )
@@ -1752,7 +1773,7 @@ def test_record_trace_analyze_defaults_task_groups_to_empty_list(session_dir):
     assert state.last_trace_analyze.get("task_groups") == []
 
 
-def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
+def test_record_trace_analyze_filters_invalid_warning_entries(session_dir):
     """Defensive: a buggy tool emitting non-dict entries or dicts
     missing the ``code`` field shouldn't poison ``last_trace_analyze``.
     We accept only well-formed dicts with at least a ``code`` key so
@@ -2367,10 +2388,10 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": cached_path,
     }
-    # On this branch ``_sequence_denial_for_request`` still consults
-    # ``last_select_kernels`` (the rename to ``trace_analyze`` is
-    # planned for M3); seed it with the same trace so the gate clears.
-    c.shared_state.last_select_kernels = {
+    # Seed ``last_trace_analyze`` so the request-prerequisite gate
+    # clears. (Pre-M4 ``last_select_kernels`` mirror was removed in
+    # this branch.)
+    c.shared_state.last_trace_analyze = {
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": cached_path,
     }
@@ -2739,9 +2760,11 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": "/wekafs/cached/candidates.json",
     }
-    # The sequence gate on this branch still consults
-    # ``last_select_kernels`` (M3 will rename it to ``trace_analyze``).
-    c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
+    # ``last_trace_analyze`` is the canonical request-prerequisite
+    # cache; just re-seed it here (the test sets only the prefix
+    # earlier — this assignment normalises that to a full dict so
+    # tests don't depend on a particular helper's seeding shape).
+    c.shared_state.last_trace_analyze = dict(c.shared_state.last_trace_analyze)
     c.shared_state.current_best = {
         "action": "integrate",
         "tput": 4500.0,
@@ -2792,7 +2815,7 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": "/wekafs/cached/candidates.json",
     }
-    c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
+    c.shared_state.last_trace_analyze = dict(c.shared_state.last_trace_analyze)
     c.shared_state.current_best = {"action": "backends", "tput": 4500.0}
 
     captured: dict = {}
