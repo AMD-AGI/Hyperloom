@@ -248,6 +248,7 @@ async def test_warm_specialist_params_fills_pr_feed_from_plane(tmp_path: Path):
     class _State:
         warm_start_recipe: dict = None
         warm_start_pitfalls: list = None
+        warm_start_lessons: list = None
         gpu_type: str = "MI300X"
     state = _State(
         warm_start_recipe={"backend": "sglang", "tp": 8},
@@ -292,6 +293,7 @@ async def test_warm_specialist_params_graceful_when_plane_is_none(tmp_path: Path
     class _State:
         warm_start_recipe: dict = None
         warm_start_pitfalls: list = None
+        warm_start_lessons: list = None
         gpu_type: str = ""
     coord.shared_state = _State()
 
@@ -315,6 +317,7 @@ async def test_warm_specialist_params_respects_explicit_pr_feed(tmp_path: Path):
     class _State:
         warm_start_recipe: dict = None
         warm_start_pitfalls: list = None
+        warm_start_lessons: list = None
         gpu_type: str = ""
     coord.shared_state = _State()
 
@@ -354,7 +357,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
                 "variant_name": "moe_expert_parallel",
                 "rationale": "expand expert parallelism per the merged PR",
                 "predicted_impact": "5-8% throughput uplift",
-                "extra_sglang_args": "--expert-parallel-size 8",
+                "extra_server_args": "--expert-parallel-size 8",
                 "extra_envs": {},
                 "kb_evidence": ["pr.sgl-project/sglang#1234"],
                 "review_notes": "verified by warm PR feed",

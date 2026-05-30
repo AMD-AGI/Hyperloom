@@ -27,7 +27,7 @@ fields:
     max_minutes         int   — wall-clock budget (0 = unlimited)
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
-                                `select_kernels` REQUEST `trace_input` param
+                                `trace_analyze` REQUEST `trace_input` param
 """
 
 from __future__ import annotations
@@ -143,6 +143,48 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 LATEST_STATE_SCHEMA_VERSION: int = 2
 
 
+# The payload-surface field was renamed from ``extra_sglang_args``
+# (sglang-era name) to ``extra_server_args`` (framework-neutral).
+# The on-disk state.json may carry the legacy key in any of several
+# deeply-nested ledgers, so a one-shot walk-and-rewrite on load is
+# the cleanest migration — the next save then emits canonical only
+# and a re-load is a no-op.
+_PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
+    "extra_sglang_args":           "extra_server_args",
+    "candidate_extra_sglang_args": "candidate_extra_server_args",
+}
+
+
+def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
+    """Recursively rewrite legacy ``extra_sglang_args`` field names in-place.
+
+    Walks every dict and list reachable from ``obj`` and renames keys
+    listed in :data:`_PHASE4_LEGACY_KEY_RENAMES` to their canonical
+    counterparts. When both names are present on the same dict the
+    canonical value is kept (writer migration is considered done as
+    soon as the new key appears); otherwise the legacy value is
+    copied over.
+
+    Returns the total number of keys rewritten so the caller can log
+    a single info-level migration event.
+    """
+    migrated = 0
+    if isinstance(obj, dict):
+        for legacy_key, canonical_key in _PHASE4_LEGACY_KEY_RENAMES.items():
+            if legacy_key in obj:
+                if canonical_key not in obj:
+                    obj[canonical_key] = obj.pop(legacy_key)
+                else:
+                    del obj[legacy_key]
+                migrated += 1
+        for v in obj.values():
+            migrated += _migrate_legacy_extra_sglang_args_keys(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            migrated += _migrate_legacy_extra_sglang_args_keys(item)
+    return migrated
+
+
 @dataclass
 class TraceAnalyzeSnapshot:
     """Reference shape for ``SharedState.last_trace_analyze``.
@@ -225,12 +267,38 @@ class SharedState:
     # PRECISION) so downstream executors see the same values the
     # original run used. Zero / empty means "unspecified".
     tp: int = 0
+    # Expert-parallel size for MoE inference. Mirror of the ``EP`` env
+    # var (cli writes both at boot). Stored on SharedState so resume in
+    # a fresh shell that hasn't ``export EP`` still recovers the
+    # original value — without this, KB warm-start queries would lose
+    # the EP filter on resume and the recipe anchor's ``ep`` tag would
+    # become unreliable. Multi-node lifecycle scripts still read the
+    # env var; this field is the resume-safe authority.
+    ep: int = 0
     precision: str = ""
+    # Recipe-snapshot v2 canonical id is a five-tuple
+    # ``model + hardware + framework + framework_version + precision``;
+    # ``framework_version`` is the only one not derivable from existing
+    # SharedState fields, so it lives here. Populated by ``cli`` from
+    # ``--framework-version`` (operator override) or, when omitted,
+    # auto-detected via :func:`recipe_snapshot_constants.detect_framework_version`
+    # (best-effort: imports the framework's top-level package and reads
+    # ``__version__``). Mirrored to env ``FRAMEWORK_VERSION`` on resume so
+    # downstream executors see the same value the original run used.
+    # Empty string means "unknown" — the recipe canonical_id falls back
+    # to ``unknown_version`` and KB lookups for this dimension lose
+    # specificity (rows still write under that slug).
+    framework_version: str = ""
     conc: int = 0
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
+    # When False (CLI ``--no-explore``) the EXPLORE phase is skipped:
+    # PRELUDE / FRAMEWORK_PR route straight to KERNEL (or SWEEP when
+    # kernel is also disabled). Mirrors the ``kernel_enabled`` /
+    # ``framework_phase_enabled`` opt-out pattern.
+    explore_enabled: bool = True
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
@@ -258,6 +326,65 @@ class SharedState:
     # downstream executors fall back to materializing the shipped YAML
     # against current process env when this is empty.
     baseline_config_path: str = ""
+    # GAP 5 (KB tag completeness): runtime component versions populated
+    # by cli at boot from manifest / stack_fingerprint. Mirror of the
+    # equivalent fields written to ``recipe.attrs`` by the T0 backfill,
+    # exposed here so ``_collect_workload_tags`` can stamp them onto
+    # every lesson / pitfall write WITHOUT having to re-parse manifest
+    # at fact-write time.
+    #
+    # Shape: ``{"sglang": "0.5.11", "vllm": "0.19.0", "rocm": "6.2.0",
+    #           "aiter": "abc123", "image_digest": "sha256:..."}``.
+    # All keys optional; empty / "unknown" values are stripped before
+    # writing onto the recipe so KB attrs stays compact. Resume-safe
+    # because the field is JSON-serialised into state.json.
+    stack_fingerprint_meta: dict = field(default_factory=dict)
+    # GAP 5: extra workload-shape fields parsed from the materialized
+    # baseline YAML — ``max_running_requests`` / ``max_num_seqs`` /
+    # ``chunked_prefill_enabled`` / ``enable_torch_compile`` /
+    # ``quant_scheme`` / ``workload_mode``. These are *not* in the
+    # canonical id (would explode the recipe space) but they are
+    # crucial filters for the warm-start ladder and the lesson reader
+    # so future sessions can pick a closer prior.
+    #
+    # Populated by ``BaselineExecutor._promote_to_shared_state`` after
+    # the baseline YAML is materialized. Empty dict before first
+    # baseline result; downstream consumers tolerate missing keys.
+    baseline_workload_extra: dict = field(default_factory=dict)
+    # GAP 1 (warm-recipe replay) — one-shot guard so the PRELUDE
+    # auto-enqueue path doesn't fire twice for the same session
+    # (resume safety). The Coordinator flips this to True at the
+    # moment a ``replay_warm_recipe`` task is created; the field
+    # survives resume via state.json so a robustness restart cannot
+    # accidentally double-spend the replay budget. ``False`` is the
+    # default for fresh sessions.
+    warm_replay_attempted: bool = False
+    # GAP 1 supporting field — one-shot guard for
+    # ``_inject_warm_recipe_history_into_ledger``. Decoupled from
+    # ``warm_replay_attempted`` because the history injection is
+    # independent of whether the operator enabled warm replay:
+    # ``--no-warm-replay`` users still benefit from "don't retry
+    # known-failed variants". Resume-safe: persists into state.json
+    # so a robustness restart cannot double-inject the same rows.
+    warm_history_injected: bool = False
+    # GAP 1 — structured outcome of the warm-replay attempt so the
+    # report / prompt can render "we tried the KB best_config and
+    # got +X% (vs the recipe's claim of +Y%)". Shape::
+    #
+    #   {
+    #     "status":            "reproduced" | "drift" | "failed" | "skipped",
+    #     "expected_gain_pct": 25.0,
+    #     "actual_gain_pct":   23.5,
+    #     "warm_recipe_tier":  "exact",
+    #     "warm_recipe_conf":  1.0,
+    #     "replay_task_id":    "task-uuid",
+    #     "reason":            "..."        # only on failed / skipped / drift
+    #   }
+    #
+    # Empty dict before the replay completes or when ``--no-warm-replay``
+    # is in effect. Persisted into state.json so resume + breakdown
+    # collectors see it.
+    warm_replay_outcome: dict = field(default_factory=dict)
     # Wall-clock seconds the baseline Magpie subprocess took to
     # finish (success path only). Populated by Coordinator from the
     # baseline executor's ``subprocess_runtime_sec`` and read by the
@@ -350,22 +477,26 @@ class SharedState:
     # Orchestration uses this to decide whether re-profiling would change the
     # hot-kernel distribution; identical args means the same trace.
     last_profile_args: str = ""
-    # Cached result of the most recent `select_kernels` request keyed by
-    # `trace_input`. Coordinator short-circuits subsequent identical requests
-    # so Orchestration does not waste budget re-analysing the same trace.
-    last_select_kernels: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
-    # roofline-v2 placeholder fields (PR #288 integration).
+    # Roofline-v2 trace-analyze cache (canonical, post-M4 rename).
     #
-    # ``last_trace_analyze`` mirrors the canonical 11-field dict main's
-    # ``record_trace_analyze`` writes (see ``TraceAnalyzeSnapshot.from_dict``
-    # for the reader-side schema). F1 ports the writer; until then these
-    # stay default-empty and no consumer reads them.
+    # ``last_trace_analyze`` is the canonical 11-field dict written by
+    # :meth:`record_trace_analyze` after a successful ``trace_analyze``
+    # sub-step (typically driven by ``RooflineExecutor``). Coordinator
+    # short-circuits subsequent identical ``trace_analyze`` requests off
+    # this cache so Orchestration does not waste budget re-analysing the
+    # same trace.
     #
     # ``roofline_snapshot_id`` mirrors ``last_trace_analyze['roofline_snapshot_id']``
     # at the top level for fast PolicyGate / Coordinator access (avoids the
     # nested-dict lookup on hot paths).
+    #
+    # Pre-M4 ``last_select_kernels`` field was removed in this branch
+    # (commit "drop select_kernels alias…") — all readers must use
+    # ``last_trace_analyze``. Resume of a stale state.json that still
+    # carries ``last_select_kernels`` will silently drop the extra key
+    # via :meth:`_apply_loaded_state`.
     # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
@@ -591,16 +722,16 @@ class SharedState:
     #   {
     #     "schema_version": 1,
     #     "tested": {
-    #       fingerprint: {name, extra_sglang_args, extra_envs, outcome,
+    #       fingerprint: {name, extra_server_args, extra_envs, outcome,
     #                     round_id, ts, gain_pct, tput, provenance,
     #                     workload_signature}
     #     },
     #     "accepted": [
-    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #       {fingerprint, name, extra_server_args, extra_envs,
     #        gain_pct, stack_index, accepted_at_round, ts}
     #     ],
     #     "rejected": [
-    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #       {fingerprint, name, extra_server_args, extra_envs,
     #        reason, gain_pct, tput, round_id, ts}
     #     ],
     #     "winners_history": [
@@ -641,7 +772,6 @@ class SharedState:
     #                                      # explore round finishes
     #     "proposals_rejected": int,
     #     "proposals_skipped": int,
-    #     "kb_edge_ids": [str, ...],       # M5 simplified; M6 per-variant
     #     "confidence_avg": float | None,
     #     "domain_breakdown": {domain_key: {...}},
     #     "notes": [str, ...],
@@ -752,7 +882,7 @@ class SharedState:
     discovered_flags: dict[str, Any] = field(default_factory=dict)
     # Rolling per-action winners log (cap 20) used by IR-26 idea
     # generation. Schema: ``{action, round_id, base_tput,
-    # winners: [{name, tput, gain_pct, extra_sglang_args, extra_envs}],
+    # winners: [{name, tput, gain_pct, extra_server_args, extra_envs}],
     # best: {...}, ts}``.
     backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
     # Synergy combo keys (``"name1+name2+..."``) already tested this
@@ -780,11 +910,6 @@ class SharedState:
     # ``Coordinator.run()`` / ``Coordinator.tick(n)`` iteration; kept
     # so plateau / phase budget math has a stable monotonic anchor.
     tick: int = 0
-    # Monotonic per-session experiment counter. Bumped once per
-    # ``propose_action`` (T2) so :func:`experiment_canonical_id`
-    # produces a stable ``exp:{sid}:{iter:04d}`` aligned with the KB
-    # ``experiment`` kind schema.
-    session_iter_index: int = 0
     # Remaining gain-pct target gap (0.0 means "no target"). Coordinator
     # refreshes this when the run objective is ``gain_pct=N``. Kept
     # because the prompt builder + breakdown rely on it for the
@@ -829,26 +954,19 @@ class SharedState:
     # (Inv-1 single writer). LLM consumers read them indirectly via
     # prompt injection.
     #
-    # ``cortex_session_id`` is the sid returned by the Cortex
-    # ``session begin`` call at T0. Empty string means either
-    # ``--degraded-kb`` was selected for this run or the session has not
-    # yet reached T0. Written **once** in PRELUDE; never overwritten.
+    # ``cortex_session_id`` is the hyperloom-local session identifier
+    # carried into KB fact-write attrs (``source_session_id``) for
+    # cross-session traceability. It is **not** a KB-side session id
+    # (the KB session begin/commit protocol was retired); it now
+    # defaults to ``session_dir.name`` when T0 mints it.
     cortex_session_id: str = ""
-    # T4 ``session commit`` payload snapshot: ``{"status": "committed",
-    # "promoted_edges": [...], "negation_edges": [...],
-    # "derived_summary_id": "..."}``. Empty dict until commit succeeds.
-    # Drives the ``breakdown.kb_provenance.commit`` section and the
-    # operator-visible "what survived this session" summary.
+    # Retired: the KB ``session commit`` protocol was removed alongside
+    # T2/T3. The field is kept (always ``{}``) for state.json resume
+    # back-compat — the next ``state.save`` writes an empty dict and
+    # the breakdown collector tolerates a missing summary. The
+    # ``breakdown.kb_provenance.commit`` section is now derived from
+    # ``drain_pending`` results instead.
     cortex_session_summary: dict[str, Any] = field(default_factory=dict)
-    # Tentative edge_ids created by T2 ``session hypothesize`` that have
-    # not yet been ``verify``-d by T3. Crash-recovery rule (KB_design
-    # §3.13 M1 §7 "resume"): on resume the Coordinator inspects this
-    # list and routes orphans through ``propose-edge + late_verified``
-    # rather than ``verify`` (avoids 404 from a stale edge that never
-    # made it past the NDJSON queue). Capped indirectly by the in-flight
-    # proposal count — proposals removed from ``pending_proposals`` also
-    # drop their edge_id here.
-    pending_kb_edges: list[dict[str, Any]] = field(default_factory=list)
     # T0 snapshot of ``find-recipe`` raw output (CLI ``--format text``,
     # one entry per recipe row). v0.8 M1 only **records** this — it is
     # not yet injected into the orchestration prompt; that happens in M5
@@ -856,9 +974,26 @@ class SharedState:
     # without re-parsing. Empty dict on first-ever session for a
     # (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    # T0 snapshot of ``traps`` output (known pitfalls list). Same
-    # injection-deferral story as ``warm_start_recipe``.
+    # T0 snapshot of ``pitfalls`` output (negative priors from prior
+    # REVERT / crash / OOM decisions on this (model, hardware),
+    # optionally filtered by framework). List of KB point dicts
+    # (each with ``{canonical_id, kind, attrs, confidence, ...}``),
+    # mirroring ``warm_start_lessons``. Consumed by the specialist
+    # prompt's "§ 5c. KNOWN PITFALLS" section.
+    #
+    # Schema change history: pre-fix this field held
+    # ``[{"raw": <json_string>}]`` because the broken
+    # ``traps(symptom=...)`` reader returned an opaque JSON blob.
+    # Resume from such a snapshot is tolerated (the prompt section
+    # filters out rows without ``attrs.description``).
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
+    # T0 snapshot of ``lessons`` output (positive priors from prior
+    # KEEPs on this (model, hardware), optionally filtered by
+    # framework). Symmetric with ``warm_start_pitfalls``; consumed
+    # by the specialist prompt's "§ 5b. RELATED LESSONS" section.
+    # Empty when Cortex was bypassed (``--degraded-kb``) or T0
+    # failed.
+    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
     # bypassed (``--degraded-kb``) or T0 failed.
     warm_start_ts: str = ""
@@ -931,6 +1066,21 @@ class SharedState:
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
         migration_events: list[str] = []
 
+        # Migrate the ``extra_sglang_args`` -> ``extra_server_args`` rename
+        # (same for ``candidate_extra_sglang_args``). The on-disk shape
+        # stays a plain dict, so the legacy key may appear in any of the
+        # many nested ledgers (winners, baseline_artifacts, action_attempts,
+        # explore_search, etc.). Walk the entire payload once at load time
+        # and rewrite the legacy keys in place — the next save will then
+        # emit canonical only and a future load of the same file is a no-op.
+        legacy_migrations = _migrate_legacy_extra_sglang_args_keys(raw)
+        if legacy_migrations:
+            migration_events.append(
+                f"extra_server_args rename: migrated {legacy_migrations} legacy "
+                f"extra_sglang_args / candidate_extra_sglang_args key(s) "
+                f"to extra_server_args / candidate_extra_server_args"
+            )
+
         # Filter to known fields so older / newer state.json shapes don't
         # crash. Unknown keys are dropped; missing keys fall back to defaults.
         known = {f for f in cls.__dataclass_fields__}
@@ -954,6 +1104,11 @@ class SharedState:
             "score_mult",
             "effective_score",
             "last_action_score_snapshot",
+            # Removed in this branch: M4 renamed select_kernels →
+            # trace_analyze; the legacy mirror field was dropped so all
+            # readers use ``last_trace_analyze``. Resume of an older
+            # state.json silently discards this slot.
+            "last_select_kernels",
         )
         legacy_seen: list[tuple[str, int]] = []
         for legacy in _legacy_drop_fields:
@@ -987,9 +1142,9 @@ class SharedState:
                     "v0.8 §3.9: dropped legacy scoreboard fields from "
                     "state.json (%s).", summary,
                 )
-        # Phase 7 of the dedup-by-fingerprint plan: migrate any v1
-        # ``params_search`` ledger (where ``tested`` was keyed by display
-        # name) to schema v2 (keyed by content fingerprint). Backends has
+        # Migrate any v1 ``params_search`` ledger (where ``tested`` was
+        # keyed by display name) to schema v2 (keyed by content
+        # fingerprint). Backends has
         # no pre-fingerprint persisted data so it only needs default-key
         # normalization. We do this here — at the load boundary — so the
         # executor and Coordinator paths can assume the v2 schema and
@@ -1108,7 +1263,7 @@ class SharedState:
         Idempotent: already-migrated ledgers are returned with only the
         defensive defaults filled in. A legacy v1 ledger whose ``tested``
         is keyed by variant name gets re-keyed by content fingerprint
-        re-computed from the stored ``extra_sglang_args`` / ``extra_envs``;
+        re-computed from the stored ``extra_server_args`` / ``extra_envs``;
         the original name is preserved inside each entry and surfaced
         through ``name_index`` so display lookups remain stable.
         """
@@ -1153,8 +1308,8 @@ class SharedState:
             # full ``result`` dict under ``result``; check both.
             nested = entry.get("result") if isinstance(entry.get("result"), dict) else {}
             args = str(
-                entry.get("extra_sglang_args")
-                or nested.get("extra_sglang_args") or ""
+                entry.get("extra_server_args")
+                or nested.get("extra_server_args") or ""
             )
             envs = dict(
                 entry.get("extra_envs")
@@ -1163,7 +1318,7 @@ class SharedState:
             fp = variant_fingerprint(args, envs)
             new_entry = dict(entry)
             new_entry.setdefault("name", str(key))
-            new_entry.setdefault("extra_sglang_args", args)
+            new_entry.setdefault("extra_server_args", args)
             new_entry.setdefault("extra_envs", envs)
             new_entry["fingerprint"] = fp
             migrated[fp] = new_entry
@@ -1180,7 +1335,7 @@ class SharedState:
                 v = dict(v)
                 if not v.get("fingerprint"):
                     v["fingerprint"] = variant_fingerprint(
-                        str(v.get("extra_sglang_args") or ""),
+                        str(v.get("extra_server_args") or ""),
                         dict(v.get("extra_envs") or {}),
                     )
                 rebuilt.append(v)
@@ -1299,7 +1454,7 @@ class SharedState:
                         and all(c in "0123456789abcdef" for c in fp_key))
                     else str(entry.get("fingerprint")
                              or _fp(
-                                 str(entry.get("extra_sglang_args") or ""),
+                                 str(entry.get("extra_server_args") or ""),
                                  dict(entry.get("extra_envs") or {}),
                              ))
                 )
@@ -1307,7 +1462,7 @@ class SharedState:
                 row = {
                     "fingerprint": fp,
                     "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_server_args": str(entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "note": str(entry.get("note") or ""),
                     "outcome": outcome,
@@ -1338,13 +1493,13 @@ class SharedState:
                 if not isinstance(entry, dict):
                     continue
                 fp = str(entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_sglang_args") or ""),
+                    str(entry.get("extra_server_args") or ""),
                     dict(entry.get("extra_envs") or {}),
                 ))
                 row = {
                     "fingerprint": fp,
                     "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_server_args": str(entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "note": str(entry.get("note") or ""),
                     "gain_pct": entry.get("gain_pct"),
@@ -1380,7 +1535,7 @@ class SharedState:
                 if not isinstance(entry, dict):
                     continue
                 fp = str(entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_sglang_args") or ""),
+                    str(entry.get("extra_server_args") or ""),
                     dict(entry.get("extra_envs") or {}),
                 ))
                 if fp in accepted_fps:
@@ -1388,7 +1543,7 @@ class SharedState:
                 row = {
                     "fingerprint": fp,
                     "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_server_args": str(entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "note": str(entry.get("note") or ""),
                     "reason": str(entry.get("reason") or "not_keep"),
@@ -1428,7 +1583,7 @@ class SharedState:
                 fp_val = entry.get("fingerprint")
                 if not fp_val:
                     fp_val = _fp(
-                        str(entry.get("extra_sglang_args") or ""),
+                        str(entry.get("extra_server_args") or ""),
                         dict(entry.get("extra_envs") or {}),
                     )
                 wh.append({
@@ -1438,7 +1593,7 @@ class SharedState:
                     "fingerprint": str(fp_val),
                     "gain_pct": entry.get("gain_pct"),
                     "extra_args": str(entry.get("extra_args")
-                                       or entry.get("extra_sglang_args") or ""),
+                                       or entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "provenance": str(entry.get("provenance")
                                        or f"legacy:{legacy_action}"),
@@ -1852,7 +2007,12 @@ class SharedState:
             or payload.get("source_file")
             or ""
         )
-        extra_args = str(payload.get("extra_sglang_args") or "").strip()
+        # ``payload`` is an external envelope (LLM intent or sub-agent
+        # kernel_opt result); route through the compat helper so a legacy
+        # ``extra_sglang_args`` key still resolves with a single
+        # DeprecationWarning logged via stacklevel=3.
+        from ..compat.payload_aliases import read_extra_server_args
+        extra_args = read_extra_server_args(payload).strip()
         return kernel_id, patch_path, target_file, extra_args
 
     def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
@@ -1916,7 +2076,7 @@ class SharedState:
             "kernel_id": kernel_id,
             "patch_path": patch_path,
             "target_file": target_file,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
             "attempts": attempts,
             "attempt_count": len(attempts),
             "best_gain_pct": best_gain,
@@ -1946,7 +2106,7 @@ class SharedState:
             "kernel_id": kernel_id,
             "patch_path": patch_path,
             "target_file": target_file,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
             "attempt_count": len(attempts),
             "best_gain_pct": best_gain,
             "keep_threshold_pct": keep_threshold_pct,
@@ -2596,10 +2756,11 @@ class SharedState:
         """write the canonical 11-field ``last_trace_analyze`` dict.
 
         Called by :class:`RooflineExecutor` (F1-2) after a successful
-        ``trace_analyze`` sub-step. Distinct from the legacy
-        :meth:`record_select_kernels` writer below, which writes a thinner
-        ``last_select_kernels`` schema for the ``select_kernels_handler``
-        path and stays in place for backward compatibility.
+        ``trace_analyze`` sub-step, and by the inline programmatic
+        handler path in :meth:`Coordinator._handle_request` when an LLM
+        emits a ``trace_analyze`` request directly. Single canonical
+        writer for this cache — the M4 legacy ``record_select_kernels``
+        twin was removed in this branch.
 
         On every successful call, ``roofline_snapshot_id`` is read from the
         previous ``last_trace_analyze`` and incremented by one — giving a
@@ -2612,10 +2773,6 @@ class SharedState:
         ``result['trace_report_path']``; OSErrors degrade silently to
         empty text (the ``analysis_md_path`` field still lets a future
         ``read_artifact`` intent re-fetch it on demand).
-
-        Cherry-picked from /wekafs/zgong/Hyperloom main @ c6f0a71
-        ``shared_state.py:1508`` ; verbatim except for the docstring tying
-        it to F1-1 / F1-2 of this branch's integration plan.
         """
         if not isinstance(result, dict):
             return
@@ -2701,121 +2858,6 @@ class SharedState:
         # Mirror the snapshot id at the top level so PolicyGate /
         # Coordinator can read it without the nested-dict lookup.
         self.roofline_snapshot_id = snapshot_id
-
-    def record_select_kernels(self, payload: dict[str, Any],
-                              result: dict[str, Any]) -> None:
-        """Cache the latest select_kernels output keyed by trace_input.
-
-        We persist a wider window than the prompt-visible top5 so that when
-        the very top GPU consumers are vendor-binary kernels (Tensile / CK)
-        Orchestration still sees lower-ranked but **reusable native** entries
-        (e.g. AITER RMSNorm) and can dispatch ``run_optimization`` against
-        them instead of looping on rejected ones.
-
-        We also persist ``trace_health_warnings`` so Orchestration's prompt
-        surfaces the structured routing signals produced by the TraceLens
-        analyzer (Hyperloom v0.4 finishing-touches T3 / T4):
-
-        * ``high_gpu_idle_pct`` — Executive Summary's ``Idle %`` exceeded
-          the gate threshold; per Report_Interfacing.docx §2 (idle-gate
-          sanity check) the LLM should pivot to parameter optimization
-          rather than kernel rewriting in this regime.
-        * ``tracelens_analysis_failed`` — the TraceLens subprocess crashed
-          permanently (perf-CLI missing, ``analysis.md`` not produced,
-          timeout, …); Coordinator already demoted this to ``status=ok``
-          + empty ``hot_kernels`` at the handler boundary, but the LLM
-          still needs to *see* the failure so it picks parameter
-          optimization explicitly instead of inferring "TraceLens is
-          still running" from the empty list.
-
-        Without this pass-through the warnings produced upstream are
-        dropped at the SharedState boundary and Orchestration cannot
-        ground its routing decisions on them.
-        """
-        if not isinstance(result, dict):
-            return
-        trace_input = (
-            (payload or {}).get("trace_input")
-            or (payload or {}).get("trace_dir")
-            or ""
-        )
-        candidates_path = result.get("candidates_path") or ""
-        if not candidates_path:
-            artifacts = result.get("artifact_paths") or {}
-            if isinstance(artifacts, dict):
-                candidates_path = artifacts.get("kernel_candidates", "") or ""
-        hot = result.get("hot_kernels") or []
-        summary: list[dict[str, Any]] = []
-        reusable_ids: list[str] = []
-        for entry in hot[:15] if isinstance(hot, list) else []:
-            if not isinstance(entry, dict):
-                continue
-            kid = entry.get("kernel_id")
-            reusable = bool(entry.get("reusable_native_kernel"))
-            summary.append({
-                "kernel_id": kid,
-                "name": entry.get("name"),
-                "gpu_pct": entry.get("gpu_pct"),
-                "bottleneck": entry.get("bottleneck"),
-                "arithmetic_intensity": entry.get("arithmetic_intensity"),
-                "source_file": entry.get("source_file"),
-                "reusable_native_kernel": reusable,
-                "recommended_backends": entry.get("recommended_backends") or [],
-                "recommended_actions": entry.get("recommended_actions") or [],
-            })
-            if reusable and kid:
-                reusable_ids.append(str(kid))
-
-        # T3 / T4: keep the structured warning list verbatim — handler
-        # already shaped each entry into the documented form (code,
-        # severity, message, plus code-specific extras like idle_pct or
-        # returncode). We filter to ``dict`` to be defensive against a
-        # buggy tool emitting non-dict junk, but otherwise pass through
-        # untouched so the LLM sees the full diagnostic.
-        raw_warnings = result.get("trace_health_warnings") or []
-        warnings_cleaned: list[dict[str, Any]] = []
-        if isinstance(raw_warnings, list):
-            for entry in raw_warnings:
-                if isinstance(entry, dict) and entry.get("code"):
-                    warnings_cleaned.append(dict(entry))
-
-        # 893bc6f: propagate ``task_groups`` from the handler result so
-        # the multi-KEEP integrate queue's source-of-truth lookups stay
-        # in sync with what ``_batch_kernel_candidates`` dispatched.
-        # Without this, ``untried_hot_reusable_kernels()`` and
-        # ``next_pending_keep_kernel_id()`` see ``task_groups=[]`` and
-        # fall through to per-kernel logic — e.g. for
-        # ``primary=k004 kids=[k003, k004]`` they treat k003 as an
-        # untried independent kernel even though dispatching k004
-        # already covered the same AST function.
-        task_groups = result.get("task_groups") or []
-        if not isinstance(task_groups, list):
-            task_groups = []
-        # F1-1: ``record_trace_analyze`` is the canonical writer for
-        # the 11-field ``last_trace_analyze`` (snapshot_id /
-        # analysis_md_text / baseline_gain_at_snapshot / …). This
-        # legacy ``record_select_kernels`` writer stays in place for
-        # backwards-compatible callers and only mirrors the slim
-        # ``last_select_kernels`` schema; task_groups is added so the
-        # downstream lookups behave identically regardless of which
-        # path populated SharedState.
-        cached = {
-            "trace_input": str(trace_input),
-            "candidates_path": str(candidates_path),
-            "hot_kernels_top15": summary,
-            "task_groups": task_groups,
-            "reusable_native_kernel_ids": reusable_ids,
-            "trace_health_warnings": warnings_cleaned,
-            "ts": _now_iso(),
-        }
-        self.last_select_kernels = cached
-        # Main M4 main merge: ``last_trace_analyze`` is the canonical
-        # post-rename name (RooflineExecutor / `record_trace_analyze`
-        # writes a richer schema there, but the legacy
-        # ``record_select_kernels`` writer must also mirror its slim
-        # schema into ``last_trace_analyze`` so the policy gate's cache
-        # lookup (which prefers the canonical field) finds the entry.
-        self.last_trace_analyze = dict(cached)
 
     def record_sweep(self, result: dict[str, Any]) -> None:
         if not isinstance(result, dict):
@@ -3372,15 +3414,15 @@ class SharedState:
             return
         from .action_executors._canonical_fingerprint import canonical_fingerprint
         args = str(
-            variant.get("candidate_extra_sglang_args")
-            or variant.get("extra_sglang_args") or ""
+            variant.get("candidate_extra_server_args")
+            or variant.get("extra_server_args") or ""
         )
         envs = dict(variant.get("extra_envs") or {})
         fp = str(variant.get("fingerprint") or canonical_fingerprint(args, envs))
         entry = {
             "fingerprint": fp,
             "name": str(variant.get("name") or ""),
-            "extra_sglang_args": args,
+            "extra_server_args": args,
             "extra_envs": envs,
             "note": str(variant.get("note") or ""),
             "tput": variant.get("output_throughput") or variant.get("tput"),
@@ -3478,15 +3520,15 @@ class SharedState:
 
         def _stamped(entry: dict[str, Any]) -> dict[str, Any]:
             args = str(
-                entry.get("candidate_extra_sglang_args")
-                or entry.get("extra_sglang_args") or ""
+                entry.get("candidate_extra_server_args")
+                or entry.get("extra_server_args") or ""
             )
             envs = dict(entry.get("extra_envs") or {})
             return {
                 "name": str(entry.get("name", "")),
                 "tput": entry.get("output_throughput") or entry.get("tput"),
                 "gain_pct": entry.get("gain_pct"),
-                "extra_sglang_args": args,
+                "extra_server_args": args,
                 "extra_envs": envs,
                 "note": str(entry.get("note") or ""),
                 "fingerprint": (
@@ -3532,11 +3574,6 @@ class SharedState:
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
-    def increment_session_iter_index(self) -> int:
-        """Bump the per-session experiment iter counter and return it."""
-        self.session_iter_index = int(self.session_iter_index or 0) + 1
-        return self.session_iter_index
-
     # Note: main commit 8e69732 also ports ``to_action_scores_summary``
     # — a render helper for the legacy ``Action scores`` prompt block.
     # KB_design §3.9 retired the scoreboard on this branch (see
@@ -3549,7 +3586,7 @@ class SharedState:
         action: str,
         variant_name: str | None,
         new_tput: float,
-        extra_sglang_args: str = "",
+        extra_server_args: str = "",
         ts: str | None = None,
     ) -> float | None:
         """N32b: Mirror an ``optimization_stack`` append into
@@ -3591,13 +3628,13 @@ class SharedState:
         if self.optimization_stack or not isinstance(self.current_best, dict):
             return
         variant = self.current_best.get("variant_name")
-        extra_args = self.current_best.get("extra_sglang_args")
+        extra_args = self.current_best.get("extra_server_args")
         if not variant and not extra_args:
             return
         self.optimization_stack = [{
             "action": self.current_best.get("action", "unknown"),
             "variant_name": variant or "legacy_current_best",
-            "extra_sglang_args": extra_args or "",
+            "extra_server_args": extra_args or "",
             "extra_envs": dict(self.current_best.get("extra_envs") or {}),
             "tput": self.current_best.get("tput"),
             "workspace": self.current_best.get("workspace"),
@@ -3611,7 +3648,7 @@ class SharedState:
             )
 
     # ------------------------------------------------------------------
-    # Time-budget helpers (Phase 2 — consumed by Coordinator._compose_prompt)
+    # Time-budget helpers (consumed by Coordinator._compose_prompt)
     # ------------------------------------------------------------------
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
         """Wall-clock minutes since ``start_ts``.
@@ -3996,12 +4033,8 @@ class SharedState:
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
-            f"last_select_kernels={self._format_last_select_kernels()}",
-            # Main M4 main merge: ``last_trace_analyze`` mirrors the
-            # canonical post-rename name; both keys carry the same
-            # slim cache schema, so we render both lines for backward
-            # compatibility with prompt-format-stable tests on either
-            # side (legacy regression_locks expects `last_trace_analyze=`).
+            # Canonical post-M4 cache key; legacy ``last_select_kernels``
+            # was removed in this branch (callers must use this field).
             f"last_trace_analyze={self._format_last_trace_analyze()}",
             # Full TraceLens ``analysis.md`` (snapshot id + gain in the
             # bookend header) so the orchestration LLM grounds
@@ -4174,7 +4207,7 @@ class SharedState:
             else ""
         )
         args = (
-            str(entry.get("extra_sglang_args") or "").strip()
+            str(entry.get("extra_server_args") or "").strip()
             or "(no-flag)"
         )
         envs = entry.get("extra_envs") or {}
@@ -4389,21 +4422,13 @@ class SharedState:
             f"=== End TraceLens Analysis ===\n"
         )
 
-    def _format_last_select_kernels(self) -> str:
-        return self._format_select_kernels_blob(self.last_select_kernels)
-
     def _format_last_trace_analyze(self) -> str:
-        # Main M4 renamed ``select_kernels`` → ``trace_analyze`` and the
-        # back-compat path ships the same dict shape under both keys; on
-        # this branch ``last_trace_analyze`` is populated alongside
-        # ``last_select_kernels`` for resume + v0.6 prompt-format parity.
-        # Prefer ``last_trace_analyze`` (canonical post-M4), fall back to
-        # ``last_select_kernels`` (legacy writer) so tests that seed only
-        # one of the two keys still render meaningfully.
-        blob = self.last_trace_analyze or self.last_select_kernels
-        return self._format_select_kernels_blob(blob)
+        # Canonical post-M4 cache key. Legacy ``last_select_kernels``
+        # field was removed in this branch — see SharedState dataclass
+        # docstring.
+        return self._format_trace_analyze_blob(self.last_trace_analyze)
 
-    def _format_select_kernels_blob(self, blob: dict[str, Any] | None) -> str:
+    def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
         if not blob:
             return "(none)"
         ids = [
