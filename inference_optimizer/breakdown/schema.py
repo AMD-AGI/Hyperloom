@@ -673,6 +673,51 @@ class SourceFiles(TypedDict, total=False):
     robustness_workdir: str | None
 
 
+# ---------------------------------------------------------------------------
+# Kernel Roofline — hot-kernel table for the dashboard
+# ---------------------------------------------------------------------------
+# Mirrors ``<session_dir>/reports/kernel_roofline.json`` produced by the
+# kernel-agent's tracelens roofline pipeline. The dashboard renders one row
+# per kernel (default sort = ``gpu_pct`` desc); each entry is self-contained
+# so the consumer doesn't need to read the original report file.
+class KernelRooflineEntry(TypedDict, total=False):
+    """One hot-kernel row in the dashboard's kernel roofline table.
+
+    Keys mirror the on-disk shape; collector passes them through
+    verbatim (with type coercion) to keep the schema loose-coupled to
+    the tracelens output format. Fields documented in
+    ``Dashboard-Roofline 对接清单.md`` §1.
+    """
+    kernel_id: str                 # ``k001``..``k010``
+    name: str                      # ``aiter::ck_moe_stage1`` etc
+    source_file: str               # absolute path; "" when unknown
+    kernel_category: str           # ``MoE`` / ``LayerNorm`` / ``unknown``
+    bound_type: str                # ``memory-bound`` / ``compute-bound``
+    arithmetic_intensity: float
+    flops_per_byte: float
+    efficiency_percent: float      # kernel-self efficiency 0..100
+    gpu_pct: float                 # share of overall GPU time 0..100
+    call_count: int
+    duration_us: float
+    reusable_native_kernel: bool   # True ⇒ GEAK can swap in a custom kernel
+
+
+class KernelRoofline(TypedDict, total=False):
+    """Top-level ``kernel_roofline`` section.
+
+    Loaded from ``<session_dir>/reports/kernel_roofline.json`` when
+    present; left empty (``{}``) on missing / malformed file (collector
+    appends a warning instead of raising).
+    """
+    schema_version: int                    # tracelens output schema (currently 1)
+    source: str                            # provenance label, e.g. ``tracelens_analysis``
+    analysis_md_path: str                  # absolute path to the human-readable analysis
+    kernel_candidates_path: str            # absolute path to kernel_candidates.json
+    trace_input: str                       # absolute path to the trace dir
+    trace_input_type: str                  # ``capture_dir`` / ``trace_file`` / ...
+    kernels: list[KernelRooflineEntry]
+
+
 class SessionBreakdown(TypedDict, total=False):
     schema_version: str
     exported_at_utc: str
@@ -707,6 +752,10 @@ class SessionBreakdown(TypedDict, total=False):
     kb_provenance: KBProvenance      # Cortex KB audit
     # specialist sub-agent dispatch records.
     specialist_runs: list[SpecialistRound]
+    # Hot-kernel table for the dashboard (Dashboard-Roofline 对接清单
+    # §1). Mirrors ``<sd>/reports/kernel_roofline.json`` so consumers
+    # don't have to walk the kernel-agent output tree themselves.
+    kernel_roofline: KernelRoofline
 
     warnings: list[str]
     source_files: SourceFiles
