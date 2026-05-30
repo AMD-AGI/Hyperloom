@@ -53,6 +53,7 @@ import shutil
 import sys
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import requests
@@ -1057,6 +1058,10 @@ class SubmissionRecord:
     # last_task.clawSessionId in wait_and_collect_one.
     claw_session_id: str | None = None
     display_name: str | None = None
+    model_path: str | None = None
+    safe_user_id: str | None = None
+    safe_started_at: str | None = None
+    safe_finished_at: str | None = None
     detected: dict | None = None
     overrides: dict = field(default_factory=dict)
     pool: dict = field(default_factory=dict)
@@ -1400,6 +1405,49 @@ def _path_has_session_hint(path: str, hints: set[str]) -> bool:
         return False
     norm_path = _norm_token(path)
     return any(_norm_token(hint) in norm_path for hint in hints)
+
+
+def _parse_safe_timestamp(value: str | None) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _parse_session_timestamp(value: str) -> datetime | None:
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw.upper(), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _session_timestamp_from_path(path: str) -> str:
+    matches = re.findall(r"\b\d{8}T\d{6}Z\b", path, flags=re.IGNORECASE)
+    return matches[-1].upper() if matches else ""
+
+
+def _timestamp_in_task_window(timestamp: str, rec: SubmissionRecord, margin_hours: int = 2) -> bool:
+    ts = _parse_session_timestamp(timestamp)
+    start = _parse_safe_timestamp(rec.safe_started_at)
+    end = _parse_safe_timestamp(rec.safe_finished_at)
+    if ts is None or start is None:
+        return False
+    if end is None:
+        end = start + timedelta(hours=24)
+    return (start - timedelta(hours=margin_hours)) <= ts <= (end + timedelta(hours=margin_hours))
+
+
+def _record_has_task_window(rec: SubmissionRecord) -> bool:
+    return _parse_safe_timestamp(rec.safe_started_at) is not None
 
 
 def _category_from_arch(arch: str | None) -> str:
@@ -1750,6 +1798,76 @@ def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
     return True
 
 
+def _candidate_model_dir_names(rec: SubmissionRecord) -> list[str]:
+    names: list[str] = []
+    for value in (
+        rec.model_path or "",
+        (rec.model or "").replace("/", "-"),
+        (rec.model or "").split("/")[-1],
+        rec.display_name or "",
+    ):
+        name = str(value or "").strip().rstrip("/\\").split("/")[-1]
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _json_positive_perf(data: dict) -> bool:
+    def positive(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+    baseline = data.get("baseline") if isinstance(data.get("baseline"), dict) else {}
+    final = data.get("final") if isinstance(data.get("final"), dict) else {}
+    best = data.get("best") if isinstance(data.get("best"), dict) else {}
+    base_values = (
+        data.get("baseline_tput"),
+        data.get("baseline_throughput"),
+        data.get("tok_per_gpu_baseline"),
+        baseline.get("throughput_tok_s_per_gpu"),
+        baseline.get("output_throughput"),
+    )
+    opt_values = (
+        data.get("best_tput"),
+        data.get("optimized_throughput"),
+        data.get("tok_per_gpu_optimized"),
+        final.get("throughput_tok_s_per_gpu"),
+        final.get("output_throughput"),
+        best.get("throughput_tok_s_per_gpu"),
+        best.get("output_throughput"),
+    )
+    return any(positive(v) for v in base_values) and any(positive(v) for v in opt_values)
+
+
+def _json_model_field(data: dict) -> str:
+    workload = data.get("workload") if isinstance(data.get("workload"), dict) else {}
+    session = data.get("session") if isinstance(data.get("session"), dict) else {}
+    meta = data.get("session_meta") if isinstance(data.get("session_meta"), dict) else {}
+    for value in (
+        data.get("model"),
+        data.get("model_name"),
+        workload.get("model_name"),
+        workload.get("model"),
+        session.get("model"),
+        meta.get("model"),
+    ):
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def _json_claw_session_id(data: dict) -> str:
+    session = data.get("session") if isinstance(data.get("session"), dict) else {}
+    meta = data.get("session_meta") if isinstance(data.get("session_meta"), dict) else {}
+    for value in (
+        data.get("claw_session_id"),
+        session.get("claw_session_id"),
+        meta.get("claw_session_id"),
+    ):
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
 def _env_truthy(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in {
         "1", "true", "yes", "y", "on",
@@ -1830,9 +1948,11 @@ def _nfs_fallback_collect(
 
     copied = 0
 
-    if not current_session_hints:
+    has_task_scoped_model_dir = bool(rec.safe_user_id and _record_has_task_window(rec))
+    if not current_session_hints and not has_task_scoped_model_dir:
         log.info("[task %s] NFS fallback skipped: no current-session "
-                 "timestamp hints from SaFE artifacts", rec.task_id)
+                 "timestamp hints from SaFE artifacts or task time window",
+                 rec.task_id)
         return copied
 
     # ── Stage A: legacy canonical dirs (matched by current timestamp) ───────
@@ -1897,27 +2017,76 @@ def _nfs_fallback_collect(
     if not os.path.isdir(users_root):
         return copied
 
-    # Primary match: exact equality via the JSON `model` field when the agent
-    # wrote it. Secondary match: conservative session-dir match. The secondary
-    # path is needed for HyperloomV2 runs that persist
-    # /wekafs/users/<uid>/<display-ish-dir>/ci_metrics.json without a `model`
+    # Primary match: exact equality via JSON model fields when the agent wrote
+    # them. Secondary match: conservative session-dir match. The secondary path
+    # is needed for HyperloomV2 runs that persist result JSON without a `model`
     # field in the JSON (observed in Run 25813519878).
     target = _norm_token(model_basename)
     if not target:
         return copied
 
     def _model_field_matches(model_field: str) -> bool:
-        return (
-            _norm_token(model_field) == target
-            or _norm_token(model_field.split("/")[-1]) == target
-        )
+        observed = _norm_token(model_field)
+        allowed = {
+            target,
+            _norm_token((rec.model or "").replace("/", "-")),
+            _norm_token((rec.model_path or "").rstrip("/\\").split("/")[-1]),
+        }
+        allowed.discard("")
+        return observed in allowed or _norm_token(model_field.split("/")[-1]) in allowed
 
-    # rglob with depth 4 is enough for the layouts we've seen:
+    def _consider_result_file(path: str, session_dir: str, score_base: int) -> None:
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+
+        model_field = _json_model_field(data)
+        if model_field:
+            if not _model_field_matches(model_field):
+                return
+            score = score_base + 100
+        else:
+            session_name = os.path.basename(session_dir.rstrip("/"))
+            parent_name = os.path.basename(os.path.dirname(session_dir.rstrip("/")))
+            if not (
+                _record_matches_session_dir(rec, session_name)
+                or _record_matches_session_dir(rec, parent_name)
+            ):
+                return
+            score = score_base + 60
+
+        claw = _json_claw_session_id(data)
+        if rec.claw_session_id and claw:
+            if rec.claw_session_id != claw:
+                return
+            score += 30
+        if _json_positive_perf(data):
+            score += 10
+        else:
+            log.info("[task %s] candidate %s matched but has no positive "
+                     "throughput (will use only if no better match)",
+                     rec.task_id, path)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return
+        candidates.append((score, mtime, path, session_dir))
+
+    # rglob with depth 4/5 is enough for the legacy layouts we've seen:
     #   /wekafs/users/<uid>/<session>/ci_metrics.json                (depth 4)
     #   /wekafs/users/<uid>/<session>/phase10_report/ci_metrics.json (depth 5)
     #   /wekafs/users/<uid>/<session>/results/ci_metrics.json        (depth 5)
-    candidates: list[tuple[int, float, str, str]] = []  # (score, mtime, ci_path, session_dir)
-    for uid_dir in os.listdir(users_root):
+    candidates: list[tuple[int, float, str, str]] = []  # (score, mtime, marker_path, session_dir)
+    uid_dirs = [rec.safe_user_id] if rec.safe_user_id else os.listdir(users_root)
+    for uid_dir in uid_dirs:
+        if not uid_dir:
+            continue
         uid_path = os.path.join(users_root, uid_dir)
         if not os.path.isdir(uid_path):
             continue
@@ -1930,37 +2099,58 @@ def _nfs_fallback_collect(
             for sub in ("", "phase10_report", "results"):
                 ci_path = os.path.join(sess_path, sub, "ci_metrics.json") \
                     if sub else os.path.join(sess_path, "ci_metrics.json")
-                if not os.path.isfile(ci_path):
+                _consider_result_file(ci_path, sess_path, 0)
+
+        # Current HyperloomV2 layout on core42:
+        #   /wekafs/users/<uid>/<model-path-basename>/<YYYYmmddTHHMMSSZ>/
+        #     session_breakdown.json
+        #     reports/final.md
+        #
+        # SaFE's artifact API may list only workspace source files for these
+        # runs, so there is no artifact-derived timestamp hint. In that case,
+        # accept timestamp directories only when they are under this exact
+        # SaFE user id + exact model dir and fall inside the task's
+        # startedAt/finishedAt window.
+        if rec.safe_user_id and uid_dir == rec.safe_user_id:
+            for model_dir_name in _candidate_model_dir_names(rec):
+                model_dir = os.path.join(uid_path, model_dir_name)
+                if not os.path.isdir(model_dir):
                     continue
                 try:
-                    with open(ci_path, encoding="utf-8") as f:
-                        data = json.load(f)
+                    ts_entries = sorted(os.listdir(model_dir), reverse=True)
                 except Exception:
                     continue
-                model_field = str(data.get("model") or "")
-                if model_field:
-                    if not _model_field_matches(model_field):
+                for ts_entry in ts_entries:
+                    session_dir = os.path.join(model_dir, ts_entry)
+                    if not os.path.isdir(session_dir):
                         continue
-                    score = 100
-                else:
-                    if not _record_matches_session_dir(rec, sess):
-                        continue
-                    score = 60
-                if _metrics_have_positive_throughput(ci_path):
-                    score += 10
-                else:
-                    log.info("[task %s] candidate %s matched but has no positive "
-                             "throughput (will use only if no better match)",
-                             rec.task_id, ci_path)
-                try:
-                    mtime = os.path.getmtime(ci_path)
-                except OSError:
-                    continue
-                candidates.append((score, mtime, ci_path, sess_path))
+                    ts = _session_timestamp_from_path(ts_entry)
+                    if current_session_hints:
+                        if not _path_has_session_hint(session_dir, current_session_hints):
+                            continue
+                        score_base = 40
+                    else:
+                        if not _timestamp_in_task_window(ts, rec):
+                            continue
+                        score_base = 30
+                    for sub, filename in (
+                        ("", "ci_metrics.json"),
+                        ("phase10_report", "ci_metrics.json"),
+                        ("results", "ci_metrics.json"),
+                        ("", "session_breakdown.json"),
+                        ("phase10_report", "session_breakdown.json"),
+                        ("v2_session", "session_breakdown.json"),
+                    ):
+                        result_path = os.path.join(session_dir, sub, filename) if sub \
+                            else os.path.join(session_dir, filename)
+                        _consider_result_file(result_path, session_dir, score_base)
 
     if not candidates:
-        log.info("[task %s] no /wekafs/users/<uid>/* ci_metrics.json matched "
-                 "model=%s", rec.task_id, model_basename)
+        log.info("[task %s] no /wekafs/users candidate matched model=%s "
+                 "(user_id=%s, hints=%s, task_window=%s)",
+                 rec.task_id, model_basename, rec.safe_user_id or "?",
+                 ",".join(sorted(current_session_hints)) or "-",
+                 "yes" if _record_has_task_window(rec) else "no")
         return copied
 
     # Pick highest-confidence, then freshest match — same model can be re-run
@@ -2058,6 +2248,10 @@ def wait_and_collect_one(
     rec.final_phase = last_task.get("currentPhase")
     rec.final_message = (last_task.get("message") or "")[:500] or None
     rec.claw_session_id = (last_task.get("clawSessionId") or "").strip() or None
+    rec.model_path = (last_task.get("modelPath") or "").strip() or rec.model_path
+    rec.safe_user_id = (last_task.get("userId") or "").strip() or rec.safe_user_id
+    rec.safe_started_at = (last_task.get("startedAt") or "").strip() or rec.safe_started_at
+    rec.safe_finished_at = (last_task.get("finishedAt") or "").strip() or rec.safe_finished_at
     rec.sandbox_duration_seconds = _sandbox_duration_seconds(last_task)
     if rec.claw_session_id:
         log.info("[task %s] clawSessionId=%s duration=%ss",
