@@ -31,18 +31,11 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # ─── TEMPORARILY DISABLED 2026-05-27 ─────────────────────────────────────
-  # 8h cron paused while the optimize-side hardware is offline (no point
-  # spending GHA time spinning up matrix jobs that will all FAIL at the
-  # SaFE submit step). Re-enable by un-commenting the `schedule:` block
-  # below once the runner pool is back; workflow_dispatch keeps working
-  # the whole time so manual smoke runs are unaffected.
-  #
-  # schedule:
-  #   # Keep the runner pool warm overnight. Cron uses the top2000 candidate
-  #   # file, excludes models already present in model-leaderboard, and also
-  #   # excludes models queued/running in other optimize-submit runs.
-  #   - cron: '0 */8 * * *'
+  schedule:
+    # Run every 12 hours at Beijing 12:00 and 00:00 (UTC 04:00 and 16:00).
+    # Cron uses the fixed production candidate pool and excludes models queued
+    # or running in other optimize-submit workflows.
+    - cron: '0 4,16 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
