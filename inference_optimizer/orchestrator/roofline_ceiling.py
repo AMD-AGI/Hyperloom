@@ -62,14 +62,41 @@ from typing import Any
 #: physically unreachable but a useful single anchor for baseline /
 #: optimized comparison).
 #:
+#: ``peak_tflops`` per chip is the **dense** matrix peak (no structured
+#: sparsity); LLM inference matmul is not 2:4 structured-sparse, so the
+#: sparse-doubled marketing figures must not be used here. Keys are the
+#: same precision aliases ``_DTYPE_BYTES`` accepts, so the resolver can
+#: share the precision-normalisation logic. Missing key ⇒ 0.0, which
+#: degrades T_cmp to "unknown" and lets the roofline fall back to the
+#: pure T_mem ceiling (see ``compute_compute_bound_ceiling_tok_per_sec``).
+#:
 #: Sources (vendor datasheets / official product briefs):
-#:   MI300X: 192 GB HBM3,  5.3 TB/s
-#:   MI325X: 256 GB HBM3e, 6.0 TB/s
-#:   MI355X: 288 GB HBM3e, 8.0 TB/s
-HW_SPECS: dict[str, dict[str, float]] = {
-    "mi300x": {"hbm_gb": 192.0, "hbm_bw_gbps": 5300.0},
-    "mi325x": {"hbm_gb": 256.0, "hbm_bw_gbps": 6000.0},
-    "mi355x": {"hbm_gb": 288.0, "hbm_bw_gbps": 8000.0},
+#:   MI300X: 192 GB HBM3,  5.3 TB/s; BF16/FP16 1307.4, FP8 2614.9 TFLOPS
+#:   MI325X: 256 GB HBM3e, 6.0 TB/s; same compute as MI300X (CDNA3, 304 CU)
+#:   MI355X: 288 GB HBM3e, 8.0 TB/s; CDNA4 ≈ 2× BF16/FP16, new MXFP4 path
+_MI300X_PEAK_TFLOPS: dict[str, float] = {
+    "bf16": 1307.4, "bfloat16": 1307.4, "fp16": 1307.4, "float16": 1307.4,
+    "fp8": 2614.9, "float8_e4m3fn": 2614.9, "float8_e5m2": 2614.9,
+    "fp32": 163.4, "float32": 163.4,
+}
+_MI355X_PEAK_TFLOPS: dict[str, float] = {
+    "bf16": 2516.6, "bfloat16": 2516.6, "fp16": 2516.6, "float16": 2516.6,
+    "fp8": 5033.2, "float8_e4m3fn": 5033.2, "float8_e5m2": 5033.2,
+    "mxfp4": 10066.4, "fp4": 10066.4, "float4": 10066.4,
+}
+HW_SPECS: dict[str, dict[str, Any]] = {
+    "mi300x": {
+        "hbm_gb": 192.0, "hbm_bw_gbps": 5300.0,
+        "peak_tflops": _MI300X_PEAK_TFLOPS,
+    },
+    "mi325x": {
+        "hbm_gb": 256.0, "hbm_bw_gbps": 6000.0,
+        "peak_tflops": _MI300X_PEAK_TFLOPS,
+    },
+    "mi355x": {
+        "hbm_gb": 288.0, "hbm_bw_gbps": 8000.0,
+        "peak_tflops": _MI355X_PEAK_TFLOPS,
+    },
 }
 
 
@@ -94,6 +121,23 @@ def _resolve_dtype_bytes(tag: str | None) -> float:
     if not tag:
         return 2.0
     return _DTYPE_BYTES.get(str(tag).strip().lower(), 2.0)
+
+
+def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
+    """``(gpu, precision)`` → vendor dense peak TFLOPS; 0.0 on miss.
+
+    Returning 0.0 is a deliberate safe-degrade signal: callers treat it
+    as "T_cmp unavailable" and fall back to the pure T_mem ceiling
+    (``bound_kind="memory"``), which keeps backward compatibility with
+    sessions whose precision/GPU pair is not in ``HW_SPECS`` yet.
+    """
+    spec = HW_SPECS.get((gpu_type or "").strip().lower())
+    if spec is None:
+        return 0.0
+    table = spec.get("peak_tflops")
+    if not isinstance(table, dict) or not precision_tag:
+        return 0.0
+    return float(table.get(str(precision_tag).strip().lower(), 0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +472,61 @@ def compute_theoretical_peak_output_tok_per_sec(
     return bw_total_bytes_per_sec / bytes_per_token_total
 
 
+def compute_compute_bound_ceiling_tok_per_sec(
+    *,
+    gpu_type: str,
+    num_gpus: int,
+    precision_tag: str,
+    active_weight_bytes: int,
+    weight_bytes: int,
+    weight_dtype_bytes: float,
+) -> float:
+    """Decode-only compute-bound ceiling for ``output_throughput``.
+
+    Implements the second half of the two-sided roofline:
+
+        T_cmp = (F_peak * G * dtype_bytes) / (2 * active_weight_bytes_B1)
+
+    Derivation: each generated token does ≈ 2 FLOP per active parameter
+    (one multiply + one add inside every MFMA), so per-token FLOPs =
+    2 * active_params = 2 * active_weight_bytes_B1 / dtype_bytes. Total
+    compute throughput = F_peak * G / FLOPs_per_token, which rearranges
+    to the formula above. Note the divisor uses ``active_weight_bytes``
+    at **B=1** (per-token active parameters) — NOT the batch-saturated
+    ``effective_weight`` used by T_mem. They look like the same symbol
+    in the textbook roofline but model different physical quantities:
+    T_mem amortises HBM weight reads across the batch (so MoE expert
+    union saturates with B), while T_cmp counts arithmetic per token
+    (every token still routes through only top-k experts, regardless
+    of batch). Mixing them up over-amortises compute at high batch and
+    under-estimates T_cmp by ~10x on MoE models.
+
+    Returns 0.0 when any of ``gpu_type`` / precision / active_weight_bytes
+    / dtype_bytes is missing or zero so the caller treats T_cmp as
+    "unavailable" and the roofline degrades to the pure T_mem ceiling.
+    """
+    peak_tflops = _resolve_peak_tflops(gpu_type, precision_tag)
+    if peak_tflops <= 0 or weight_dtype_bytes <= 0:
+        return 0.0
+    # ``active_weight_bytes`` is the B=1 per-token figure populated by
+    # ``load_model_meta`` (dense models: == weight_bytes; MoE: routed-k
+    # share of expert pool + non-expert blocks). Fall back to the dense
+    # weight_bytes only when active is missing/0 — never use a batch-
+    # saturated effective weight here (see docstring).
+    active_b1 = (
+        int(active_weight_bytes)
+        if active_weight_bytes and active_weight_bytes > 0
+        else int(weight_bytes)
+    )
+    if active_b1 <= 0:
+        return 0.0
+    peak_flops_total = peak_tflops * 1e12 * max(num_gpus, 1)
+    flops_per_token = 2.0 * active_b1 / float(weight_dtype_bytes)
+    if flops_per_token <= 0:
+        return 0.0
+    return peak_flops_total / flops_per_token
+
+
 def _read_baseline_yaml_conc(state: Any) -> int:
     """Read ``benchmark.envs.CONC`` from the materialized baseline yaml.
 
@@ -485,28 +584,56 @@ def _resolve_effective_concurrency(state: Any) -> int:
     return 1
 
 
-def compute_peak_from_state(state: Any) -> float:
-    """Convenience wrapper reading directly from a ``SharedState``-like object.
+@dataclass(frozen=True)
+class RooflineBreakdown:
+    """Two-sided decode roofline ceiling.
 
-    Returns ``0.0`` when ``model_path`` / ``gpu_type`` / any required
-    field is unset or unreadable. Never raises so the caller can stamp
-    the value into history entries unconditionally.
+    Captures the result of ``T_peak = min(T_mem, T_cmp)`` together with
+    the side that dominated so reports can label which bound is active.
 
-    Concurrency is resolved via :func:`_resolve_effective_concurrency`
-    (baseline yaml envs.CONC → state.conc → 1), so a SharedState default-8
-    does not under-count the divisor for a session whose actual benchmark
-    CONC was 64. MoE expert saturation is batch-aware via the expert
-    decomposition fields passed below.
+    ``bound_kind`` values:
+      * ``"memory"``  — T_mem ≤ T_cmp (or T_cmp unavailable/degenerate).
+      * ``"compute"`` — T_cmp < T_mem (compute-bound; rare in decode but
+        possible at very small B with large F_peak relative to BW).
+      * ``"unknown"`` — both ceilings degenerate (e.g. unsupported gpu,
+        missing model HF config); ``peak_tok_per_sec == 0``.
+    """
+    mem_tok_per_sec: float
+    cmp_tok_per_sec: float
+    peak_tok_per_sec: float
+    bound_kind: str
+
+
+_EMPTY_BREAKDOWN = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+
+
+def compute_roofline_breakdown_from_state(state: Any) -> RooflineBreakdown:
+    """Compute T_mem + T_cmp + min(T_mem, T_cmp) + bound_kind in one shot.
+
+    This is the primary entry point introduced by the two-sided roofline
+    formula change. ``compute_peak_from_state`` is kept as a thin scalar
+    wrapper for callers that only need ``T_peak``.
+
+    Safe degrade: never raises; returns ``_EMPTY_BREAKDOWN`` on any
+    missing-field path so the caller can stamp the result into history
+    snapshots unconditionally.
     """
     meta = load_model_meta(
         getattr(state, "model_path", ""),
         precision_hint=str(getattr(state, "precision", "") or ""),
     )
     if meta is None:
-        return 0.0
-    return compute_theoretical_peak_output_tok_per_sec(
-        gpu_type=str(getattr(state, "gpu_type", "") or ""),
-        num_gpus=int(getattr(state, "tp", 0) or 0),
+        return _EMPTY_BREAKDOWN
+    gpu_type = str(getattr(state, "gpu_type", "") or "")
+    num_gpus = int(getattr(state, "tp", 0) or 0)
+    concurrency = _resolve_effective_concurrency(state)
+    precision_tag = (
+        str(getattr(state, "precision", "") or "")
+        or "bf16"  # mirror _resolve_dtype_bytes default
+    )
+    mem = compute_theoretical_peak_output_tok_per_sec(
+        gpu_type=gpu_type,
+        num_gpus=num_gpus,
         weight_bytes=meta.weight_bytes,
         active_weight_bytes=meta.active_weight_bytes,
         num_experts=meta.num_experts,
@@ -518,5 +645,35 @@ def compute_peak_from_state(state: Any) -> float:
         kv_dtype_bytes=meta.weight_dtype_bytes,
         isl=int(getattr(state, "isl", 0) or 0),
         osl=int(getattr(state, "osl", 0) or 0),
-        concurrency=_resolve_effective_concurrency(state),
+        concurrency=concurrency,
     )
+    cmp = compute_compute_bound_ceiling_tok_per_sec(
+        gpu_type=gpu_type,
+        num_gpus=num_gpus,
+        precision_tag=precision_tag,
+        active_weight_bytes=meta.active_weight_bytes,
+        weight_bytes=meta.weight_bytes,
+        weight_dtype_bytes=meta.weight_dtype_bytes,
+    )
+    if mem <= 0 and cmp <= 0:
+        return _EMPTY_BREAKDOWN
+    if cmp <= 0:
+        # T_cmp unknown (precision not in HW_SPECS); degrade to T_mem
+        # ceiling and mark memory-bound (matches pre-PR behaviour).
+        return RooflineBreakdown(mem, 0.0, mem, "memory")
+    if mem <= 0:
+        return RooflineBreakdown(0.0, cmp, cmp, "compute")
+    if cmp < mem:
+        return RooflineBreakdown(mem, cmp, cmp, "compute")
+    return RooflineBreakdown(mem, cmp, mem, "memory")
+
+
+def compute_peak_from_state(state: Any) -> float:
+    """Convenience scalar wrapper for ``T_peak`` only.
+
+    Kept for backward compatibility (shared_state, tests, report
+    docstring references). New code should call
+    ``compute_roofline_breakdown_from_state`` directly to get T_mem /
+    T_cmp / bound_kind alongside the min.
+    """
+    return compute_roofline_breakdown_from_state(state).peak_tok_per_sec

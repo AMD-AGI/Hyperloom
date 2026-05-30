@@ -202,18 +202,25 @@ def build_roofline_snapshot(
     analysis_md_path: str,
     theoretical_peak_tok_per_sec: float = 0.0,
     achieved_tok_per_sec: float = 0.0,
+    mem_ceiling_tok_per_sec: float = 0.0,
+    cmp_ceiling_tok_per_sec: float = 0.0,
+    bound_kind: str = "unknown",
 ) -> dict[str, Any]:
     """Materialise one side (baseline or latest) of the comparison.
 
-    ``theoretical_peak_tok_per_sec`` is the hardware ceiling produced
-    by ``roofline_ceiling.compute_peak_from_state``; constant across
-    all snapshots in a session. ``achieved_tok_per_sec`` is the
-    benchmark ``output_throughput`` measured at the time the snapshot
-    was recorded (baseline_tput for snapshot #1, current_best.tput
-    afterwards). Both default to 0.0 so legacy callers that don't pass
-    them produce ``None`` in the derived ``within_roofline_pct`` /
-    ``gap_to_roofline_pct`` fields, preserving the existing
-    placeholder-friendly renderer contract.
+    ``theoretical_peak_tok_per_sec`` is the two-sided roofline ceiling
+    ``min(T_mem, T_cmp)`` produced by
+    ``roofline_ceiling.compute_roofline_breakdown_from_state``; constant
+    across all snapshots in a session. The decomposition is also
+    persisted via ``roofline_mem_ceiling_tok_per_sec`` /
+    ``roofline_cmp_ceiling_tok_per_sec`` / ``roofline_bound_kind`` so
+    reports can show which side dominated (``"memory"`` / ``"compute"``
+    / ``"unknown"``). ``achieved_tok_per_sec`` is the benchmark
+    ``output_throughput`` measured at the time the snapshot was recorded
+    (baseline_tput for snapshot #1, current_best.tput afterwards).
+    All five default to 0/"unknown" so legacy callers that don't pass
+    them produce ``None`` in the derived percentage fields, preserving
+    the existing placeholder-friendly renderer contract.
     """
     within, gap = _compute_within_and_gap(
         peak=theoretical_peak_tok_per_sec,
@@ -231,12 +238,26 @@ def build_roofline_snapshot(
         "comm_pct": None,
         "top_bottleneck": None,
         "top_kernel": None,
-        # Decode memory-roofline ceiling + measured throughput. Both
-        # ``None`` when ceiling is unknown (e.g. unsupported gpu_type
-        # or missing model HF config); see ``roofline_ceiling`` module.
+        # Two-sided roofline ceiling. ``theoretical_peak_tok_per_sec``
+        # stays as min(mem, cmp) for backward-compat with the existing
+        # dashboard renderer; the two new ``roofline_*_ceiling_*``
+        # fields and ``roofline_bound_kind`` surface T_mem / T_cmp /
+        # the dominant side independently. All ``None`` when ceiling
+        # is unavailable (see ``roofline_ceiling`` safe-degrade paths).
         "theoretical_peak_tok_per_sec": (
             float(theoretical_peak_tok_per_sec)
             if theoretical_peak_tok_per_sec > 0 else None
+        ),
+        "roofline_mem_ceiling_tok_per_sec": (
+            float(mem_ceiling_tok_per_sec)
+            if mem_ceiling_tok_per_sec > 0 else None
+        ),
+        "roofline_cmp_ceiling_tok_per_sec": (
+            float(cmp_ceiling_tok_per_sec)
+            if cmp_ceiling_tok_per_sec > 0 else None
+        ),
+        "roofline_bound_kind": (
+            str(bound_kind) if bound_kind else "unknown"
         ),
         "achieved_tok_per_sec": (
             float(achieved_tok_per_sec)

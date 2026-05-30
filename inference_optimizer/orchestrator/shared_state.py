@@ -2702,12 +2702,20 @@ class SharedState:
             # constant (hardware + model + isl/osl don't change),
             # achieved tput is current_best.tput if optimization has
             # produced a winner, else baseline_tput.
-            from .roofline_ceiling import compute_peak_from_state
-            peak_tput = 0.0
+            from .roofline_ceiling import (
+                RooflineBreakdown,
+                compute_roofline_breakdown_from_state,
+            )
+            # Two-sided roofline (T_mem + T_cmp + min) — see formula
+            # change in roofline_ceiling.py. ``peak_tput`` continues to
+            # equal ``min(mem, cmp)`` so the existing dashboard
+            # ``theoretical_peak_tok_per_sec`` field stays meaningful.
+            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
             try:
-                peak_tput = float(compute_peak_from_state(self) or 0.0)
+                breakdown = compute_roofline_breakdown_from_state(self)
             except Exception:  # noqa: BLE001 — ceiling is best-effort
-                peak_tput = 0.0
+                pass
+            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             achieved_tput = 0.0
             cb = self.current_best if isinstance(self.current_best, dict) else {}
             cb_tput = cb.get("tput")
@@ -2721,6 +2729,9 @@ class SharedState:
                 analysis_md_path=str(analysis_md_path),
                 theoretical_peak_tok_per_sec=peak_tput,
                 achieved_tok_per_sec=achieved_tput,
+                mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
+                cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
+                bound_kind=breakdown.bound_kind,
             )
             history_entry["trace_input"] = str(trace_input)
             history_entry["analysis_md_path"] = str(analysis_md_path)

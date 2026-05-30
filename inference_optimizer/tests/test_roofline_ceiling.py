@@ -23,9 +23,13 @@ import pytest
 from inference_optimizer.orchestrator.roofline_ceiling import (
     HW_SPECS,
     ModelMeta,
+    RooflineBreakdown,
     _resolve_dtype_bytes,
+    _resolve_peak_tflops,
+    compute_compute_bound_ceiling_tok_per_sec,
     compute_kv_bytes_per_token,
     compute_peak_from_state,
+    compute_roofline_breakdown_from_state,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,
 )
@@ -253,11 +257,15 @@ def _write_synthetic_model(
     num_attention_heads: int = 64,
     torch_dtype: str = "bfloat16",
     head_dim: int | None = None,
+    num_experts: int | None = None,
+    num_experts_per_tok: int | None = None,
+    moe_intermediate_size: int | None = None,
 ) -> None:
     """Lay down a minimal HF-shaped model dir.
 
-    Pass ``num_kv_heads=None`` to omit ``num_key_value_heads`` from
-    config.json (covers the MHA fallback branch).
+    Pass ``num_kv_heads=None`` to omit ``num_key_value_heads`` (MHA
+    branch). Pass ``num_experts`` / ``num_experts_per_tok`` /
+    ``moe_intermediate_size`` to emit an MoE config (Qwen3-A3B style).
     """
     model_dir.mkdir(parents=True, exist_ok=True)
     config: dict = {
@@ -270,6 +278,12 @@ def _write_synthetic_model(
         config["num_key_value_heads"] = num_kv_heads
     if head_dim is not None:
         config["head_dim"] = head_dim
+    if num_experts is not None:
+        config["num_experts"] = num_experts
+    if num_experts_per_tok is not None:
+        config["num_experts_per_tok"] = num_experts_per_tok
+    if moe_intermediate_size is not None:
+        config["moe_intermediate_size"] = moe_intermediate_size
     (model_dir / "config.json").write_text(json.dumps(config))
     (model_dir / "model.safetensors.index.json").write_text(
         json.dumps({"metadata": {"total_size": total_size}, "weight_map": {}})
@@ -774,3 +788,292 @@ class TestHWSpecsTable:
             < HW_SPECS["mi325x"]["hbm_bw_gbps"]
             < HW_SPECS["mi355x"]["hbm_bw_gbps"]
         )
+
+    def test_peak_tflops_present_for_supported_precisions(self):
+        # Every entry must carry a peak_tflops dict with at least bf16.
+        for key in ("mi300x", "mi325x", "mi355x"):
+            tbl = HW_SPECS[key].get("peak_tflops")
+            assert isinstance(tbl, dict)
+            assert tbl.get("bf16", 0) > 0
+            assert tbl.get("fp8", 0) > 0
+
+    def test_mi355x_doubles_mi300x_bf16(self):
+        # CDNA4 ≈ 2× CDNA3 matrix peak at the same precision.
+        m3 = HW_SPECS["mi300x"]["peak_tflops"]["bf16"]
+        m5 = HW_SPECS["mi355x"]["peak_tflops"]["bf16"]
+        assert 1.8 < m5 / m3 < 2.2
+
+    def test_mi325x_compute_equals_mi300x(self):
+        # MI325X reuses the CDNA3 die — same matrix peak, larger HBM only.
+        assert (
+            HW_SPECS["mi300x"]["peak_tflops"]["bf16"]
+            == HW_SPECS["mi325x"]["peak_tflops"]["bf16"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Two-sided roofline: T_cmp formula + RooflineBreakdown classification.
+# ---------------------------------------------------------------------------
+class TestResolvePeakTFLOPS:
+    """``_resolve_peak_tflops`` lookup with safe degrade on miss."""
+
+    def test_hits_known_mi355x_bf16(self):
+        assert _resolve_peak_tflops("mi355x", "bf16") == 2516.6
+
+    def test_alias_bfloat16_same_as_bf16(self):
+        assert (
+            _resolve_peak_tflops("mi355x", "bfloat16")
+            == _resolve_peak_tflops("mi355x", "bf16")
+        )
+
+    def test_mi300x_fp8_dense(self):
+        # Dense FP8 (not sparse-doubled).
+        assert _resolve_peak_tflops("mi300x", "fp8") == 2614.9
+
+    def test_unknown_gpu_zero(self):
+        assert _resolve_peak_tflops("nvidia_h100", "bf16") == 0.0
+
+    def test_unknown_precision_zero(self):
+        # MI300X does not support MXFP4 — table miss must degrade to 0.
+        assert _resolve_peak_tflops("mi300x", "mxfp4") == 0.0
+
+    def test_empty_inputs_zero(self):
+        assert _resolve_peak_tflops("", "bf16") == 0.0
+        assert _resolve_peak_tflops("mi355x", "") == 0.0
+
+
+class TestComputeBoundCeiling:
+    """T_cmp = (F_peak * G * dtype_bytes) / (2 * active_weight_bytes_B1).
+
+    The divisor is the **B=1 active** weight, not a batch-saturated value
+    — per-token compute is batch-invariant even when memory traffic is
+    not (see helper docstring for the physical justification).
+    """
+
+    def test_matches_hand_calculation_mi355x_bf16_a3b_like(self):
+        # 095726Z-style A3B: 2516.6 TFLOPS * 1 GPU * 2 bytes / (2 * 6.7 GB)
+        # = 5033.2e12 / 13.4e9 ≈ 375 600 tok/s.
+        cmp = compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            active_weight_bytes=6_700_000_000,
+            weight_bytes=61_000_000_000,
+            weight_dtype_bytes=2.0,
+        )
+        assert cmp == pytest.approx(375_611.94, rel=1e-3)
+
+    def test_scales_linearly_with_num_gpus(self):
+        common = dict(
+            gpu_type="mi355x", precision_tag="bf16",
+            active_weight_bytes=10_000_000_000,
+            weight_bytes=10_000_000_000, weight_dtype_bytes=2.0,
+        )
+        one = compute_compute_bound_ceiling_tok_per_sec(num_gpus=1, **common)
+        eight = compute_compute_bound_ceiling_tok_per_sec(num_gpus=8, **common)
+        assert eight == pytest.approx(8 * one, rel=1e-9)
+
+    def test_dense_uses_weight_bytes_when_active_missing(self):
+        # active_weight_bytes=0 must fall back to weight_bytes (dense).
+        cmp_zero = compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            active_weight_bytes=0,
+            weight_bytes=10_000_000_000, weight_dtype_bytes=2.0,
+        )
+        cmp_explicit = compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            active_weight_bytes=10_000_000_000,
+            weight_bytes=10_000_000_000, weight_dtype_bytes=2.0,
+        )
+        assert cmp_zero == pytest.approx(cmp_explicit, rel=1e-9)
+
+    def test_moe_uses_active_b1_not_batch_saturated(self):
+        # Anti-regression: if a future refactor reroutes T_cmp through a
+        # batch-saturated effective_weight, the divisor would jump ~10x
+        # on this MoE shape (active=6.7G vs weight=61G) and T_cmp would
+        # drop ~10x. Lock the helper to active_weight_bytes.
+        cmp_active = compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            active_weight_bytes=6_700_000_000,
+            weight_bytes=61_000_000_000, weight_dtype_bytes=2.0,
+        )
+        cmp_full = compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            active_weight_bytes=61_000_000_000,
+            weight_bytes=61_000_000_000, weight_dtype_bytes=2.0,
+        )
+        assert cmp_active > 8 * cmp_full
+
+    def test_zero_on_unknown_gpu(self):
+        assert compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="h100", num_gpus=1, precision_tag="bf16",
+            active_weight_bytes=10_000_000_000,
+            weight_bytes=10_000_000_000, weight_dtype_bytes=2.0,
+        ) == 0.0
+
+    def test_zero_on_unknown_precision(self):
+        # MXFP4 on MI300X — not in HW_SPECS, must degrade.
+        assert compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi300x", num_gpus=1, precision_tag="mxfp4",
+            active_weight_bytes=10_000_000_000,
+            weight_bytes=10_000_000_000, weight_dtype_bytes=0.5,
+        ) == 0.0
+
+    def test_zero_on_zero_dtype_bytes(self):
+        assert compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+            active_weight_bytes=10_000_000_000,
+            weight_bytes=10_000_000_000, weight_dtype_bytes=0.0,
+        ) == 0.0
+
+
+class TestRooflineBreakdownClassification:
+    """``compute_roofline_breakdown_from_state`` integration: routes the
+    correct ``bound_kind`` for every (mem, cmp) ordering and degrades
+    safely when one or both ceilings are unavailable."""
+
+    def _mock_state_and_helpers(self, monkeypatch, mem_val, cmp_val):
+        """Stub out ``load_model_meta`` + both ceilings so we control
+        the (mem, cmp) ordering directly without standing up a
+        synthetic HF model."""
+        from inference_optimizer.orchestrator import roofline_ceiling
+        meta = ModelMeta(
+            weight_bytes=10_000_000_000, num_layers=48, num_kv_heads=4,
+            head_dim=128, weight_dtype_bytes=2.0,
+            active_weight_bytes=5_000_000_000,
+        )
+        monkeypatch.setattr(
+            roofline_ceiling, "load_model_meta", lambda *a, **kw: meta
+        )
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_theoretical_peak_output_tok_per_sec",
+            lambda **kw: mem_val,
+        )
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_compute_bound_ceiling_tok_per_sec",
+            lambda **kw: cmp_val,
+        )
+        return SimpleNamespace(
+            model_path="/fake", gpu_type="mi355x", tp=1,
+            precision="bf16", conc=8, isl=256, osl=256,
+            last_baseline={},
+        )
+
+    def test_memory_bound_when_cmp_higher(self, monkeypatch):
+        state = self._mock_state_and_helpers(monkeypatch, 8000.0, 40_000.0)
+        br = compute_roofline_breakdown_from_state(state)
+        assert br.mem_tok_per_sec == 8000.0
+        assert br.cmp_tok_per_sec == 40_000.0
+        assert br.peak_tok_per_sec == 8000.0
+        assert br.bound_kind == "memory"
+
+    def test_compute_bound_when_cmp_lower(self, monkeypatch):
+        state = self._mock_state_and_helpers(monkeypatch, 8000.0, 2000.0)
+        br = compute_roofline_breakdown_from_state(state)
+        assert br.peak_tok_per_sec == 2000.0
+        assert br.bound_kind == "compute"
+
+    def test_unknown_when_both_zero(self, monkeypatch):
+        state = self._mock_state_and_helpers(monkeypatch, 0.0, 0.0)
+        br = compute_roofline_breakdown_from_state(state)
+        assert br.peak_tok_per_sec == 0.0
+        assert br.bound_kind == "unknown"
+
+    def test_degrades_to_memory_when_cmp_unavailable(self, monkeypatch):
+        # T_cmp == 0 typically means precision missing from HW_SPECS;
+        # the result must keep T_mem visible as the ceiling and label
+        # the side memory-bound (matches pre-PR behaviour).
+        state = self._mock_state_and_helpers(monkeypatch, 8000.0, 0.0)
+        br = compute_roofline_breakdown_from_state(state)
+        assert br.peak_tok_per_sec == 8000.0
+        assert br.cmp_tok_per_sec == 0.0
+        assert br.bound_kind == "memory"
+
+    def test_compute_only_when_mem_zero(self, monkeypatch):
+        state = self._mock_state_and_helpers(monkeypatch, 0.0, 2000.0)
+        br = compute_roofline_breakdown_from_state(state)
+        assert br.peak_tok_per_sec == 2000.0
+        assert br.bound_kind == "compute"
+
+    def test_backward_compat_compute_peak_from_state_returns_min(
+        self, monkeypatch,
+    ):
+        # Old API must keep returning a scalar float == breakdown.peak.
+        state = self._mock_state_and_helpers(monkeypatch, 8000.0, 2000.0)
+        assert compute_peak_from_state(state) == 2000.0
+
+    def test_returns_empty_breakdown_on_missing_model(self, monkeypatch):
+        from inference_optimizer.orchestrator import roofline_ceiling
+        monkeypatch.setattr(
+            roofline_ceiling, "load_model_meta", lambda *a, **kw: None
+        )
+        state = SimpleNamespace(model_path="", gpu_type="mi355x", tp=1)
+        br = compute_roofline_breakdown_from_state(state)
+        assert br.peak_tok_per_sec == 0.0
+        assert br.bound_kind == "unknown"
+
+
+class TestPhysicalInterpretation095726Z:
+    """End-to-end anchor for the formula change using real session
+    parameters from 20260528T095726Z (Qwen3-30B-A3B, MI355X, bf16,
+    yaml CONC=64, ISL=OSL=256, achieved output_throughput=6244.3 tok/s).
+
+    Pins the within% interpretation: decode-stage MoE at conc=64 stays
+    memory-bound, so adding T_cmp must NOT change T_peak — the within%
+    that PR-9749520 anchored at 77.4 % is preserved end-to-end."""
+
+    _A3B_META = dict(
+        gpu_type="mi355x", num_gpus=1, precision_tag="bf16",
+        weight_bytes=61_000_000_000,
+        active_weight_bytes=6_700_000_000,
+        weight_dtype_bytes=2.0,
+    )
+    _ACHIEVED_TOK_S = 6244.3
+
+    def test_t_cmp_is_far_above_t_mem_at_decode(self):
+        cmp = compute_compute_bound_ceiling_tok_per_sec(**self._A3B_META)
+        mem = compute_theoretical_peak_output_tok_per_sec(
+            gpu_type="mi355x", num_gpus=1,
+            weight_bytes=61_000_000_000,
+            active_weight_bytes=6_700_000_000,
+            num_experts=128, experts_per_tok=8,
+            expert_weight_bytes=58_000_000_000,
+            num_layers=48, num_kv_heads=4, head_dim=128,
+            kv_dtype_bytes=2.0, isl=256, osl=256, concurrency=64,
+        )
+        # T_cmp ≈ 375 612 ; T_mem ≈ 8 065 ; ratio ~ 46×.
+        assert cmp / mem > 10
+
+    def test_breakdown_stays_memory_bound_with_cmp_visible(self, tmp_path):
+        # Stand up a minimal HF-like model dir so load_model_meta works
+        # without monkeypatching, exercising the full code path.
+        _write_synthetic_model(
+            tmp_path / "a3b",
+            total_size=61_000_000_000,
+            num_layers=48, num_kv_heads=4,
+            hidden_size=2048, num_attention_heads=32,
+            torch_dtype="bfloat16",
+            num_experts=128, num_experts_per_tok=8,
+            moe_intermediate_size=768,
+        )
+        yaml_path = tmp_path / "bl.yaml"
+        yaml_path.write_text(
+            "benchmark:\n  envs:\n    CONC: 64\n", encoding="utf-8",
+        )
+        state = SimpleNamespace(
+            model_path=str(tmp_path / "a3b"),
+            gpu_type="mi355x", tp=1, precision="bf16",
+            conc=8,  # stale SharedState default; yaml CONC=64 wins (P0).
+            isl=256, osl=256,
+            last_baseline={"extras": {"materialized_config": str(yaml_path)}},
+        )
+        br = compute_roofline_breakdown_from_state(state)
+        # T_cmp must be present (formula change requirement) AND must
+        # NOT cap the ceiling at decode — bound stays memory.
+        assert br.cmp_tok_per_sec > br.mem_tok_per_sec
+        assert br.peak_tok_per_sec == br.mem_tok_per_sec
+        assert br.bound_kind == "memory"
+        # within% recomputed from achieved must still match the
+        # PR-9749520 anchor (~77 %, fixed by P0+P1 ceiling correctness).
+        within_pct = 100.0 * self._ACHIEVED_TOK_S / br.peak_tok_per_sec
+        assert 70.0 < within_pct < 85.0

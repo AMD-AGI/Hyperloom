@@ -694,13 +694,30 @@ class TestRecordTraceAnalyzeStampsCeiling:
     ``compute_peak_from_state`` and ``current_best.tput`` to stamp
     ceiling + achieved + within + gap onto every history snapshot."""
 
+    @staticmethod
+    def _mock_breakdown(monkeypatch, *, mem=0.0, cmp=0.0, peak=0.0, kind="unknown"):
+        """Patch ``compute_roofline_breakdown_from_state`` (the new entry
+        point ``shared_state.record_trace_analyze`` calls after the
+        two-sided roofline formula change). Returning a stub
+        ``RooflineBreakdown`` lets the test pin (mem, cmp, peak, kind)
+        without standing up a synthetic HF model."""
+        from inference_optimizer.orchestrator import roofline_ceiling
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            RooflineBreakdown,
+        )
+        br = RooflineBreakdown(mem, cmp, peak, kind)
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_roofline_breakdown_from_state",
+            lambda _state: br,
+        )
+
     def test_stamps_ceiling_and_achieved_into_history(
         self, tmp_path, monkeypatch
     ):
         from inference_optimizer.orchestrator.shared_state import SharedState
-        from inference_optimizer.orchestrator import roofline_ceiling
-        monkeypatch.setattr(
-            roofline_ceiling, "compute_peak_from_state", lambda _state: 1000.0
+        self._mock_breakdown(
+            monkeypatch, mem=1000.0, cmp=5000.0, peak=1000.0, kind="memory",
         )
         md = tmp_path / "analysis.md"
         md.write_text(
@@ -728,9 +745,8 @@ class TestRecordTraceAnalyzeStampsCeiling:
         self, tmp_path, monkeypatch
     ):
         from inference_optimizer.orchestrator.shared_state import SharedState
-        from inference_optimizer.orchestrator import roofline_ceiling
-        monkeypatch.setattr(
-            roofline_ceiling, "compute_peak_from_state", lambda _state: 1000.0
+        self._mock_breakdown(
+            monkeypatch, mem=1000.0, cmp=5000.0, peak=1000.0, kind="memory",
         )
         md = tmp_path / "analysis.md"
         md.write_text(
@@ -753,10 +769,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
 
     def test_zero_peak_keeps_within_gap_none(self, tmp_path, monkeypatch):
         from inference_optimizer.orchestrator.shared_state import SharedState
-        from inference_optimizer.orchestrator import roofline_ceiling
-        monkeypatch.setattr(
-            roofline_ceiling, "compute_peak_from_state", lambda _state: 0.0
-        )
+        self._mock_breakdown(monkeypatch)  # default all-zero / unknown
         md = tmp_path / "analysis.md"
         md.write_text(
             "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
@@ -775,3 +788,147 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["theoretical_peak_tok_per_sec"] is None
         assert snap["within_roofline_pct"] is None
         assert snap["gap_to_roofline_pct"] is None
+
+
+class TestBuildSnapshotTwoSidedRoofline:
+    """``build_roofline_snapshot`` carries T_mem / T_cmp / bound_kind
+    alongside the legacy ``theoretical_peak_tok_per_sec`` so dashboards
+    can show which side dominated (per the formula change)."""
+
+    def test_two_sided_fields_default_to_unknown_for_legacy_callers(self):
+        from inference_optimizer.orchestrator.roofline_snapshot import (
+            build_roofline_snapshot,
+        )
+        snap = build_roofline_snapshot(
+            snapshot_id=1, ts="2026-05-30T07:00:00Z",
+            analysis_md_path="",
+            theoretical_peak_tok_per_sec=1000.0,
+            achieved_tok_per_sec=500.0,
+            # mem/cmp/bound_kind omitted — legacy caller.
+        )
+        # Legacy field still works.
+        assert snap["theoretical_peak_tok_per_sec"] == 1000.0
+        # New fields default-degrade: mem/cmp None, kind "unknown".
+        assert snap["roofline_mem_ceiling_tok_per_sec"] is None
+        assert snap["roofline_cmp_ceiling_tok_per_sec"] is None
+        assert snap["roofline_bound_kind"] == "unknown"
+
+    def test_two_sided_fields_populated_when_provided(self):
+        from inference_optimizer.orchestrator.roofline_snapshot import (
+            build_roofline_snapshot,
+        )
+        snap = build_roofline_snapshot(
+            snapshot_id=1, ts="2026-05-30T07:00:00Z",
+            analysis_md_path="",
+            theoretical_peak_tok_per_sec=8000.0,
+            achieved_tok_per_sec=6244.0,
+            mem_ceiling_tok_per_sec=8000.0,
+            cmp_ceiling_tok_per_sec=40_000.0,
+            bound_kind="memory",
+        )
+        assert snap["roofline_mem_ceiling_tok_per_sec"] == 8000.0
+        assert snap["roofline_cmp_ceiling_tok_per_sec"] == 40_000.0
+        assert snap["roofline_bound_kind"] == "memory"
+        # Theoretical peak stays == min(mem, cmp).
+        assert snap["theoretical_peak_tok_per_sec"] == 8000.0
+
+    def test_zero_mem_cmp_serialize_as_none(self):
+        from inference_optimizer.orchestrator.roofline_snapshot import (
+            build_roofline_snapshot,
+        )
+        snap = build_roofline_snapshot(
+            snapshot_id=1, ts="t", analysis_md_path="",
+            theoretical_peak_tok_per_sec=0.0, achieved_tok_per_sec=0.0,
+            mem_ceiling_tok_per_sec=0.0, cmp_ceiling_tok_per_sec=0.0,
+            bound_kind="unknown",
+        )
+        assert snap["roofline_mem_ceiling_tok_per_sec"] is None
+        assert snap["roofline_cmp_ceiling_tok_per_sec"] is None
+        assert snap["roofline_bound_kind"] == "unknown"
+
+
+class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
+    """``SharedState.record_trace_analyze`` must propagate the four
+    breakdown fields (mem / cmp / peak / bound_kind) into the history
+    snapshot end-to-end."""
+
+    @staticmethod
+    def _mock_breakdown(monkeypatch, *, mem, cmp, peak, kind):
+        from inference_optimizer.orchestrator import roofline_ceiling
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            RooflineBreakdown,
+        )
+        br = RooflineBreakdown(mem, cmp, peak, kind)
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_roofline_breakdown_from_state",
+            lambda _state: br,
+        )
+
+    def _record(self, tmp_path, state):
+        md = tmp_path / "analysis.md"
+        md.write_text(
+            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
+        )
+        state.record_trace_analyze(
+            {"trace_input": "/tmp/trace.json"},
+            {
+                "hot_kernels": [],
+                "trace_report_path": str(md),
+                "candidates_path": "/tmp/kc.json",
+            },
+        )
+        return state.roofline_snapshots[0]
+
+    def test_memory_bound_breakdown_propagates_to_snapshot(
+        self, tmp_path, monkeypatch,
+    ):
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        # 095726Z-style: cmp >> mem, peak == mem, bound = memory.
+        self._mock_breakdown(
+            monkeypatch, mem=8065.0, cmp=375_612.0, peak=8065.0,
+            kind="memory",
+        )
+        state = SharedState()
+        state.baseline_tput = 6244.3
+        state.current_best = {}
+        snap = self._record(tmp_path, state)
+        assert snap["theoretical_peak_tok_per_sec"] == 8065.0
+        assert snap["roofline_mem_ceiling_tok_per_sec"] == 8065.0
+        assert snap["roofline_cmp_ceiling_tok_per_sec"] == 375_612.0
+        assert snap["roofline_bound_kind"] == "memory"
+        # within% matches PR-9749520 anchor.
+        assert snap["within_roofline_pct"] == pytest.approx(77.43, abs=0.05)
+
+    def test_compute_bound_breakdown_propagates_to_snapshot(
+        self, tmp_path, monkeypatch,
+    ):
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        self._mock_breakdown(
+            monkeypatch, mem=8000.0, cmp=2000.0, peak=2000.0,
+            kind="compute",
+        )
+        state = SharedState()
+        state.baseline_tput = 1500.0
+        state.current_best = {}
+        snap = self._record(tmp_path, state)
+        # Peak == cmp because cmp is the tighter side.
+        assert snap["theoretical_peak_tok_per_sec"] == 2000.0
+        assert snap["roofline_bound_kind"] == "compute"
+
+    def test_unknown_breakdown_keeps_all_ceiling_fields_none(
+        self, tmp_path, monkeypatch,
+    ):
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        self._mock_breakdown(
+            monkeypatch, mem=0.0, cmp=0.0, peak=0.0, kind="unknown",
+        )
+        state = SharedState()
+        state.baseline_tput = 1000.0
+        state.current_best = {}
+        snap = self._record(tmp_path, state)
+        assert snap["theoretical_peak_tok_per_sec"] is None
+        assert snap["roofline_mem_ceiling_tok_per_sec"] is None
+        assert snap["roofline_cmp_ceiling_tok_per_sec"] is None
+        assert snap["roofline_bound_kind"] == "unknown"
+        assert snap["within_roofline_pct"] is None
