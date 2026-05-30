@@ -93,6 +93,9 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "findings",
     "reports",
     "agents/orchestration",
+    # dynamic_action.MD P2 §3 — dispatch-time artefact root for every
+    # dyn_id. Per-<dyn_id> subdirs are mkdir-ed on-demand at dispatch.
+    "agents/orchestration/dynamic_actions",
     "agents/kernel",
     "agents/critic",
     "agents/robustness",

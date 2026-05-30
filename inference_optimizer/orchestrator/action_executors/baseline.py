@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ...compat.payload_aliases import read_extra_server_args
 from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
@@ -68,8 +69,8 @@ log = logging.getLogger(__name__)
 BASELINE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 )
-BASELINE_DEFAULT_TIMEOUT_SEC = 2400           # WARM-start cap, 40 min (aiter jit cache populated)
-BASELINE_COLD_START_TIMEOUT_SEC = 3600        # COLD-start cap, 60 min (aiter jit cache empty/sparse)
+BASELINE_DEFAULT_TIMEOUT_SEC = 7800           # WARM-start cap, 130 min (raised for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 ~82 min workload)
+BASELINE_COLD_START_TIMEOUT_SEC = 9000        # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
 COLD_START_KERNEL_THRESHOLD = 20              # < N .so files under aiter jit/build/ ⇒ COLD
 
 # Legacy fallback probe order for aiter's JIT cache dir. Used only when
@@ -361,12 +362,7 @@ class BaselineExecutor:
         config_path = materialize_config_with_envs(
             config_path,
             output_dir,
-            extra_sglang_args=str(params.get("extra_sglang_args") or ""),
-            extra_server_args=str(
-                params.get("extra_server_args")
-                or params.get("extra_vllm_args")
-                or ""
-            ),
+            extra_server_args=read_extra_server_args(params),
             extra_envs=dict(params.get("extra_envs") or {}),
             model_path=resolved_model,
             gpu_type=resolved_gpu,
@@ -453,7 +449,7 @@ class BaselineExecutor:
                 # this call site identical between colocated and
                 # disaggregated runs (the agent only changes CLI flags).
                 await restart_server_for_round(
-                    extra_sglang_args=str(params.get("extra_sglang_args") or ""),
+                    extra_server_args=read_extra_server_args(params),
                     framework=os.environ.get("FRAMEWORK") or None,
                     model_path=resolved_model or None,
                     tp=int(os.environ.get("TP") or 0) or None,

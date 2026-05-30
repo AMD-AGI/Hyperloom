@@ -56,7 +56,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from import_session_breakdown import (  # noqa: E402
-    parse_file,
     looks_like_session_breakdown,
     looks_like_v1_flat_schema,
     looks_like_universal_schema,
@@ -164,7 +163,7 @@ def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         return None, reason
 
     # Step 2: V2 backfill (baseline.extra_*, capability_summary.*.best_gain_pct,
-    # phase_timeline best_extra_sglang_args, detected[].geak/.oob)
+    # phase_timeline best_extra_server_args, detected[].geak/.oob)
     wrapped = transform(data)
     enriched = wrapped["data"]
 

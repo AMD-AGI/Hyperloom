@@ -1,0 +1,57 @@
+name: dynamic_action
+family: creative
+cost_minutes_p50: 10.0
+cost_minutes_p75: 15.0
+expected_gain_pct: [0.0, 0.0]
+accuracy_risk: 0.0
+crash_risk: 0.0
+prerequisites:
+  - baseline
+requires_lanes:
+  - research_lane
+allowed_tools:
+  - emit_intent
+side_effects:
+  - workspace_write
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 12
+lease_ttl_sec: 1800
+description: "Dispatch a multi-turn ReAct sub-agent for one cross-domain patch combination that no single specialist can cover. Supplementary EXPLORE channel; not the default path."
+pipeline_phase: explore
+typical_runtime_min: 10.0
+verdict_class: exploration
+applicable_when:
+  - "phase == 'EXPLORE'"
+# dynamic_action — supplementary EXPLORE channel for cross-domain
+# patch combinations specialists cannot cover. Payload schema is
+# closed; ``PolicyGate._validate_dynamic_action_dispatch`` enforces
+# the red-line checks at dispatch time.
+params_schema:
+  motivation_gap_text:
+    type: string
+    description: |
+      Required, non-empty. Free-form description of why specialist
+      single-domain prompts cannot cover this patch combination. Audit
+      record only — PolicyGate does not parse it semantically; empty
+      string is denied.
+  scope_domains:
+    type: list
+    description: |
+      Required. List of specialist domain keys (length >= 2). Each
+      value must be a registered SpecialistDomain key (see
+      ``orchestrator.specialist_domains.SPECIALIST_DOMAIN_KEYS``).
+      Captures the cross-domain reach of this dynamic action.
+  side_effects_declared:
+    type: list
+    description: |
+      Required. List of action categories the sub-agent expects to
+      touch (e.g. ``["framework_source"]``). PolicyGate rejects any
+      entry that names a kernel-owned action, metric/accuracy_gate,
+      or independent server lifecycle (the §1.2 red lines).
+  budget_hint:
+    type: string
+    description: |
+      Optional. One of {low, medium, high}; default medium. Hint to
+      the runner about expected workload; the runner — not the LLM —
+      decides the concrete turn / wall-clock cap.

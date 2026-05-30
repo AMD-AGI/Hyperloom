@@ -19,9 +19,9 @@ This file exercises the v0.8 upgrade across the four layers it touches:
   :meth:`_handle_verdict_map` — routes batch verdicts to the new
   per-variant dispatcher, pins the map on
   :class:`PendingProposal.verdict_map`, mirrors it back onto the bus,
-  filters the materialised grid down to the ``approve`` subset, and
-  fires :meth:`_cortex_t3_critic_rejected` for every ``reject`` so the
-  KB view captures critic-rejected edges before the executor runs.
+  and filters the materialised grid down to the ``approve`` subset.
+  (The legacy ``_cortex_t3_critic_rejected`` KB mirror was removed
+  alongside the T2/T3 hypothesize/verify protocol.)
 * :func:`build_critic_prompt` — the OUTPUT PROTOCOL section advertises
   the new ``verdict_map`` shape and explains the precedence rules.
 """
@@ -304,7 +304,6 @@ def _seed_explore_proposal(
     *,
     msg_id: str = "msg-1",
     variants: list[str] | None = None,
-    kb_edge_ids: dict[str, str] | None = None,
 ) -> PendingProposal:
     variants = variants or ["v_a", "v_b", "v_c", "v_d"]
     grid = [
@@ -316,7 +315,6 @@ def _seed_explore_proposal(
         action_name="explore",
         predicted_gain_pct=1.0,
         payload={"action_name": "explore", "params": {"grid": grid}},
-        kb_edge_ids=dict(kb_edge_ids or {}),
     )
     coord.state.pending_proposals[msg_id] = pending
     return pending
@@ -443,89 +441,11 @@ async def test_verdict_map_unknown_variant_is_dropped_and_logged(coord):
 
 
 # --- KB refute -------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_verdict_map_rejected_variants_fire_kb_refuted(coord):
-    pending = _seed_explore_proposal(coord, kb_edge_ids={
-        "v_a": "edge-a", "v_b": "edge-b", "v_c": "edge-c", "v_d": "edge-d",
-    })
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject", "rationale": "kb refuted"},
-                "v_c": {"verdict": "reject", "rationale": "duplicate"},
-                "v_d": {"verdict": "needs_review"},  # NOT refuted
-            },
-        },
-    )
-    await coord._handle_review_verdict("critic", intent)
-    refuted = coord.cortex_kb.verify_calls
-    # Two refute calls — one per rejected variant. needs_review is not a refute.
-    refuted_edges = sorted(r["edge_id"] for r in refuted)
-    assert refuted_edges == ["edge-b", "edge-c"]
-    for call in refuted:
-        assert call["outcome"] == "refuted"
-        # Idempotency key carries the variant name at the tail.
-        assert call["idempotency_key"].endswith(":v_b") or \
-               call["idempotency_key"].endswith(":v_c")
-        assert call["promote_authority"] is None
-
-
-@pytest.mark.asyncio
-async def test_verdict_map_skip_kb_refuted_when_no_edge_id(coord):
-    """No T2 edge (e.g. --degraded-kb run) → silently skip the refute
-    so the verdict_map path still works end-to-end."""
-    pending = _seed_explore_proposal(coord, kb_edge_ids={})
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject"},
-            },
-        },
-    )
-    await coord._handle_review_verdict("critic", intent)
-    assert coord.cortex_kb.verify_calls == []
-
-
-@pytest.mark.asyncio
-async def test_verdict_map_skip_kb_refuted_when_cortex_disabled(coord):
-    coord.cortex_kb = None  # type: ignore[assignment]
-    pending = _seed_explore_proposal(coord, kb_edge_ids={"v_b": "edge-b"})
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject"},
-            },
-        },
-    )
-    # Must not raise.
-    await coord._handle_review_verdict("critic", intent)
-
-
-@pytest.mark.asyncio
-async def test_verdict_map_skip_kb_refuted_when_no_session_id(coord):
-    coord.shared_state.cortex_session_id = ""
-    pending = _seed_explore_proposal(coord, kb_edge_ids={"v_b": "edge-b"})
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject"},
-            },
-        },
-    )
-    await coord._handle_review_verdict("critic", intent)
-    assert coord.cortex_kb.verify_calls == []
+# The legacy ``_cortex_t3_critic_rejected`` path that fired a KB ``refuted``
+# verify for every critic-rejected variant was removed alongside the
+# T2/T3 hypothesize/verify protocol. Rejection is still captured in the
+# verdict event + breakdown collector; the previously-tested KB-mirror
+# behaviour no longer exists.
 
 
 # --- bus mirror ------------------------------------------------------------
@@ -678,10 +598,6 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     pending = _seed_explore_proposal(
         coord,
         variants=["v_a", "v_b", "v_c", "v_d"],
-        kb_edge_ids={
-            "v_a": "edge-a", "v_b": "edge-b",
-            "v_c": "edge-c", "v_d": "edge-d",
-        },
     )
     # Make sure shared_state has the minimum surface
     # ``_materialize_approved_proposal`` needs.
@@ -701,9 +617,6 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     grid = create_calls[0]["params"]["grid"]
     names = [v["name"] for v in grid]
     assert names == ["v_a", "v_c"]
-    # KB edge stamping still works under the filter.
-    assert grid[0].get("kb_edge_id") == "edge-a"
-    assert grid[1].get("kb_edge_id") == "edge-c"
     # critic_filtered_count records 4 - 2 = 2 dropped.
     assert create_calls[0]["params"]["critic_filtered_count"] == 2
 
@@ -737,7 +650,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
 
     coord.tasks = _StubTaskRegistry()
     pending = _seed_explore_proposal(
-        coord, variants=["v_a", "v_b", "v_c"], kb_edge_ids={},
+        coord, variants=["v_a", "v_b", "v_c"],
     )
 
     @dataclass
@@ -779,9 +692,10 @@ def _delegate_coord(tmp_path: Path):
     """Coordinator double exposing just the surface ``_handle_delegate``
     needs to reach (and stop at) the explore re-route branch.
 
-    Stubs out ``is_pruned`` / ``_sequence_denial_for_action`` /
-    ``_cortex_t2_hook`` so we never reach the per-test-irrelevant
-    pruned + sequence + cortex sub-systems.
+    Stubs out ``is_pruned`` / ``_sequence_denial_for_action`` so we
+    never reach the per-test-irrelevant pruned + sequence
+    sub-systems. (The legacy ``_cortex_t2_hook`` stub is gone — the
+    method itself was removed alongside the T2/T3 protocol.)
     """
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
@@ -802,7 +716,6 @@ def _delegate_coord(tmp_path: Path):
     c._record_observation = AsyncMock()  # type: ignore[method-assign]
     c._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
     c._sequence_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
-    c._cortex_t2_hook = AsyncMock()  # type: ignore[method-assign]
     # _handle_delegate's deprecation guard reads from policy directly.
     # We bypass it by short-circuiting the guard at the source.
     c.policy = None
@@ -845,9 +758,6 @@ async def test_delegate_explore_with_grid_routes_to_pending_proposals(tmp_path: 
     assert pending.action_name == "explore"
     assert pending.from_agent == "orchestration"
     assert pending.payload["params"]["grid"] == grid
-    # T2 hook fires on the proposal path so KB edge ids land on the
-    # PendingProposal before Critic review.
-    coord._cortex_t2_hook.assert_awaited_once()
 
 
 @pytest.mark.asyncio
