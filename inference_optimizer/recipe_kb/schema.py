@@ -138,6 +138,64 @@ class StackFingerprint:
 
 
 @dataclass
+class KernelOptimization:
+    """One KEEP'd kernel-optimization outcome — micro result + E2E verdict.
+
+    Hyperloom superset (arbor has no kernel-level concept). Captures a
+    kernel the GEAK/kernel agent produced and KEEP'd at the micro layer,
+    together with the end-to-end integrate verification result when the
+    optimizer actually integrated + re-benchmarked it. The point is that a
+    kernel can be a genuine micro win (``micro_speedup`` > 1) yet show no
+    end-to-end gain (``e2e_gain_pct`` ~ 0) because its share of total GPU
+    time is tiny — that whole conclusion is valuable warm-start signal
+    ("tried k006 rmsnorm: 1.32x micro, but E2E flat — skip it"), and used
+    to be dropped on the floor because ``what_worked`` only records
+    E2E-validated stack entries.
+
+    ``e2e_gain_pct`` / ``e2e_tput`` default to 0.0 and ``integrated``
+    to False for a kernel that was KEEP'd at the micro layer but never
+    integrated (so warm-start can tell "micro-only, E2E unknown" apart
+    from "E2E-verified, no gain").
+    """
+    kernel_id: str = ""
+    source_file: str = ""
+    artifact_path: str = ""
+    micro_speedup: float = 0.0
+    decision: str = ""
+    e2e_gain_pct: float = 0.0
+    e2e_tput: float = 0.0
+    integrated: bool = False
+    ts: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kernel_id":     str(self.kernel_id),
+            "source_file":   str(self.source_file),
+            "artifact_path": str(self.artifact_path),
+            "micro_speedup": float(self.micro_speedup),
+            "decision":      str(self.decision),
+            "e2e_gain_pct":  float(self.e2e_gain_pct),
+            "e2e_tput":      float(self.e2e_tput),
+            "integrated":    bool(self.integrated),
+            "ts":            str(self.ts),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> KernelOptimization:
+        return cls(
+            kernel_id=str(d.get("kernel_id") or ""),
+            source_file=str(d.get("source_file") or ""),
+            artifact_path=str(d.get("artifact_path") or ""),
+            micro_speedup=float(d.get("micro_speedup") or 0.0),
+            decision=str(d.get("decision") or ""),
+            e2e_gain_pct=float(d.get("e2e_gain_pct") or 0.0),
+            e2e_tput=float(d.get("e2e_tput") or 0.0),
+            integrated=bool(d.get("integrated") or False),
+            ts=str(d.get("ts") or ""),
+        )
+
+
+@dataclass
 class SessionSummary:
     """One optimisation-session entry — one row per CLOSE.
 
@@ -198,6 +256,13 @@ class Recipe:
     last_profiled: str = ""
     stack_fingerprint: StackFingerprint = field(default_factory=StackFingerprint)
     sessions: list[SessionSummary] = field(default_factory=list)
+
+    # ----- hyperloom superset: KEEP'd kernel optimizations -----
+    # Records kernel-level wins (micro_speedup) + their end-to-end
+    # verification outcome. arbor consumers ignore the extra top-level
+    # key (same as framework_version / lessons). Warm-start reads it to
+    # skip re-optimizing kernels already proven to have no E2E payoff.
+    kernel_optimizations: list[KernelOptimization] = field(default_factory=list)
 
     # ----- v2 audit / wire-compat fields (kept so dispatcher can
     # round-trip to the central server) -----
@@ -263,6 +328,9 @@ class Recipe:
                  "stack_len": int(s.stack_len)}
                 for s in self.sessions
             ],
+            "kernel_optimizations": [
+                k.to_dict() for k in self.kernel_optimizations
+            ],
             "authority":     str(self.authority),
             "confidence":    float(self.confidence),
             "evidence_refs": list(self.evidence_refs),
@@ -290,6 +358,7 @@ class Recipe:
             "what_worked", "what_failed", "remaining_gaps",
             "prs_tested", "pitfalls", "lessons",
             "last_profiled", "stack_fingerprint", "sessions",
+            "kernel_optimizations",
             "authority", "confidence", "evidence_refs", "provenance",
         }
         extras = {k: v for k, v in d.items() if k not in well_known}
@@ -372,6 +441,11 @@ class Recipe:
                 for s in (d.get("sessions") or [])
                 if isinstance(s, dict)
             ],
+            kernel_optimizations=[
+                KernelOptimization.from_dict(k)
+                for k in (d.get("kernel_optimizations") or [])
+                if isinstance(k, dict)
+            ],
             authority=str(d.get("authority") or "EXPERIENTIAL"),
             confidence=float(d.get("confidence") or 0.85),
             evidence_refs=list(d.get("evidence_refs") or []),
@@ -441,6 +515,7 @@ __all__ = [
     "Failure",
     "Finding",
     "Gap",
+    "KernelOptimization",
     "Lesson",
     "Pitfall",
     "PRResult",
