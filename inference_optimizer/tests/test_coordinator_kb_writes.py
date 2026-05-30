@@ -228,3 +228,76 @@ def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
     assert row["best_config"].get("name") == "good"
     # T0-written fingerprint version survives the CLOSE fingerprint merge.
     assert row["stack_fingerprint"].get("vllm_version") == "0.6.0"
+
+
+# ===========================================================================
+# R-7: KEEP'd kernel optimizations (incl. E2E-verified-but-no-gain) must be
+# persisted into the recipe row. Repro for overnight session 20260529T132829Z
+# where k006 (micro 1.32x, KEEP, E2E gain -0.094%) vanished from recipe.json
+# entirely — because ``what_worked`` is built only from optimization_stack,
+# which a no-E2E-gain kernel never enters.
+# ===========================================================================
+def _seed_kept_kernel(coord: Coordinator) -> None:
+    """Populate SharedState the way a KEEP'd + E2E-integrated kernel leaves
+    it, mirroring the real shapes:
+
+    * ``kernel_opt_attempts[kid]`` — micro result (record_kernel_opt)
+    * ``kernel_integrate_attempts[key]`` — E2E verification outcome
+      (record_kernel_integrate_result), joined back by ``kernel_id``.
+    """
+    ss = coord.shared_state
+    ss.kernel_opt_attempts = {
+        "k006": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 1.3202,
+            "last_artifact_path": "/x/optimized_versions/v1_n128_launch_tuning.cu",
+            "source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        },
+    }
+    ss.kernel_integrate_attempts = {
+        "k006|/x/optimized_versions/v1_n128_launch_tuning.cu|": {
+            "kernel_id": "k006",
+            "patch_path": "/x/optimized_versions/v1_n128_launch_tuning.cu",
+            "best_gain_pct": -0.094,
+            "last_decision": "NEEDS_REVIEW",
+            "attempts": [
+                {"decision": "NEEDS_REVIEW", "new_tput": 2477.82,
+                 "gain_pct": -0.094},
+            ],
+        },
+    }
+
+
+def test_build_recipe_attrs_surfaces_kept_kernel(tmp_path: Path) -> None:
+    """``_build_recipe_attrs_from_state`` must emit a ``kernel_optimizations``
+    entry for the KEEP'd kernel, carrying BOTH micro_speedup and the E2E
+    verification outcome. Before the fix this dict has no such key."""
+    coord = _make_coordinator(tmp_path)
+    _seed_kept_kernel(coord)
+    attrs = coord._build_recipe_attrs_from_state()
+    kopts = attrs.get("kernel_optimizations") or []
+    assert kopts, "KEEP'd kernel k006 missing from recipe attrs"
+    k = next((x for x in kopts if x.get("kernel_id") == "k006"), None)
+    assert k is not None, f"k006 not in {kopts}"
+    assert k["micro_speedup"] == 1.3202
+    assert k["decision"] == "KEEP"
+    # E2E verification outcome must be carried, not dropped.
+    assert k["e2e_gain_pct"] == -0.094
+    assert k["e2e_tput"] == 2477.82
+    assert k["integrated"] is True
+
+
+def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
+    """End-to-end: after CLOSE finalize, recipe.json must carry the KEEP'd
+    kernel under ``kernel_optimizations`` so warm-start can reuse it."""
+    coord = _make_coordinator(tmp_path)
+    _seed_kept_kernel(coord)
+    coord.cortex_finalize_recipe_and_journal()
+    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    assert row is not None
+    kopts = row.get("kernel_optimizations") or []
+    ids = [k.get("kernel_id") for k in kopts]
+    assert "k006" in ids, f"k006 not persisted to KB: {row.get('kernel_optimizations')}"
+    k006 = next(k for k in kopts if k.get("kernel_id") == "k006")
+    assert k006["micro_speedup"] == 1.3202
+    assert k006["e2e_gain_pct"] == -0.094
