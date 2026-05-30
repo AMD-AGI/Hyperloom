@@ -687,14 +687,14 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
 _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-The three kernel-owned actions (`select_kernels`, `kernel_opt`,
+The three kernel-owned actions (`trace_analyze`, `kernel_opt`,
 `integrate`) are picked by the LLM per the DECISION FRAMEWORK (phase
 allowed-set + gaps + KB priors); v0.8 §3.9 retired the legacy
 `Action scores` board, so there is no system-side priority ranking.
 The blocks below are only **payload templates** describing how to
 build the REQUEST once you have selected the action. The Coordinator
 still hard-gates the obvious prerequisites (TODO 3/4 fires after a
-`kernel_opt` KEEP forces `integrate`); `select_kernels` itself is
+`kernel_opt` KEEP forces `integrate`); `trace_analyze` itself is
 enforced only at the REQUEST layer for `run_optimization`, and explore
 actions are NEVER gated on it.
 
@@ -715,22 +715,22 @@ Pick the next kernel-owned REQUEST by reading facts in this order
    `decision='REVERT'` → kernel is rejected immediately.
 3. **`rejected_kernel_ids` / `rejected_kernel_patches`** — skip every
    kernel_id present here when walking
-   `last_select_kernels.reusable_native_kernel_ids`.
+   `last_trace_analyze.reusable_native_kernel_ids`.
 4. **`last_action_failures`** — recent kernel_opt / integrate failures
    carry `error_class` + `error_excerpt`; recover before re-emitting.
 5. **`plateau_kernel`** — when 3 consecutive REVERTs across distinct
    `kernel_id`s land, the Coordinator auto-advances KERNEL → SWEEP;
    stop proposing kernel_opt and let the phase transition fire.
 
-### `select_kernels` — payload (Coordinator gates `run_optimization` until cache is fresh)
+### `trace_analyze` — payload (Coordinator gates `run_optimization` until cache is fresh)
 
-  request{target_agent: 'kernel', kind: 'select_kernels',
+  request{target_agent: 'kernel', kind: 'trace_analyze',
           params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
 
-  STRICT: if `last_select_kernels.trace_input` already equals
+  STRICT: if `last_trace_analyze.trace_input` already equals
   `last_profile_trace`, the candidate list is cached — do NOT re-emit.
-  `select_kernels` must precede every `run_optimization` request — the
-  Coordinator denies kernel_opt requests with `select_kernels must run
+  `trace_analyze` must precede every `run_optimization` request — the
+  Coordinator denies kernel_opt requests with `trace_analyze must run
   first` when the cache is stale, but `params` / `backends` / `sweep` /
   `report` are NEVER gated on it. Re-emit only after a fresh `profile`
   action invalidates the cache.  TODO 3/5 surfaces in
@@ -738,10 +738,13 @@ Pick the next kernel-owned REQUEST by reading facts in this order
   fresh but the cache is still stale — emit the REQUEST yourself
   before kernel_opt / integrate cycles.
 
+  NOTE: pre-M4 alias `select_kernels` was removed in this branch.
+  Use `kind='trace_analyze'` exclusively.
+
 ### `kernel_opt` — payload for `run_optimization`
 
 When the DECISION FRAMEWORK selects `kernel_opt`, pick the next reusable
-native kernel from `last_select_kernels.reusable_native_kernel_ids`,
+native kernel from `last_trace_analyze.reusable_native_kernel_ids`,
 in order, skipping any kernel_id already present in
 `last_kernel_opt.kernel_id`.
 
@@ -769,7 +772,7 @@ HARD RULES (applied at REQUEST build time, NOT at action-selection time):
   request{target_agent: 'kernel', kind: 'run_optimization',
           params: {kernel_id: <picked kernel_id>,
                    source_file: <hot_kernels[i].source_file>,
-                   candidates_path: <select_kernels_done.candidates_path>,
+                   candidates_path: <trace_analyze_done.candidates_path>,
                    budget_minutes: 60}}
 
   HARD RULE — backend selection: DO NOT add a `backends` field unless the
@@ -811,7 +814,7 @@ rejected — do NOT integrate. The Coordinator unlocks immediately; pick
 the next action via the DECISION FRAMEWORK like normal. A second
 `kernel_opt` round on the next reusable kernel_id is often the right
 move (when more reusable kernel_ids remain in
-`last_select_kernels.reusable_native_kernel_ids`), but is not required
+`last_trace_analyze.reusable_native_kernel_ids`), but is not required
 — the LLM decides.
 
 #### Multi-KEEP integrate queue (PR-B)
@@ -881,7 +884,7 @@ the same payload does not re-attempt retired kernels.
 
 ### KERNEL TARGETING (native vs torch.compile)
 
-`select_kernels` profiles the *final* serving mode (with or without
+`trace_analyze` profiles the *final* serving mode (with or without
 torch.compile / CUDAGraph), but kernel-opt may only rewrite reusable
 native sources that still appear in that trace. NEVER optimize
 `/tmp/torchinductor*`, Inductor cache, or `triton_poi_*` /
