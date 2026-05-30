@@ -322,6 +322,11 @@ jobs:
           if [ -n "${INPUT_KERNEL_OPT_BACKENDS:-}" ]; then
             ARGS+=(--kernel-opt-backends "${INPUT_KERNEL_OPT_BACKENDS}")
           fi
+          # Code-level contract: do not rely on natural-language prompt text
+          # for these two critical values. SaFE consumes them and renders the
+          # generated prompt tail consistently with the CI prefix.
+          ARGS+=(--max-hours 12)
+          ARGS+=(--results-path '$RESULT_DIR')
           # Hard guarantee: SaFE promptPrefix MUST be non-empty. Workflow
           # input is only populated on workflow_dispatch — for schedule
           # trigger we fall back to ci/prompt_prefix.txt (single source of
@@ -466,6 +471,23 @@ jobs:
           if [ -z "$BD" ] || [ ! -f "$BD" ]; then
             echo "no session_breakdown*.json found under task-artifacts/; skipping perf-leaderboard publish"
             exit 0
+          fi
+          # Consistency guard — root-cause fix for the cross-run mixup where a
+          # stale session_breakdown left in the PERSISTENT RESULT_DIR (reused per
+          # uid) got published under the wrong model. ci_metrics.json is written
+          # fresh by THIS run's agent, so its claw_session_id is ground truth.
+          # If the chosen breakdown's claw_session_id disagrees, it's residue
+          # from a previous run — skip rather than pollute the leaderboard.
+          # (No history is deleted; we just refuse to publish mismatched data.)
+          CIM=$(find task-artifacts -name ci_metrics.json 2>/dev/null | head -1)
+          if [ -n "$CIM" ]; then
+            CS_CIM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('claw_session_id') or '')" "$CIM" 2>/dev/null || echo '')
+            CS_BD=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); s=d.get('session') or {}; print(s.get('claw_session_id') or d.get('claw_session_id') or '')" "$BD" 2>/dev/null || echo '')
+            if [ -n "$CS_CIM" ] && [ "$CS_BD" != "$CS_CIM" ]; then
+              echo "::warning::session_breakdown claw_session_id ('$CS_BD') != ci_metrics claw_session_id ('$CS_CIM') — stale cross-run residue in persistent RESULT_DIR; skipping perf-leaderboard publish to avoid polluting the dashboard"
+              echo "SKIP claw-mismatch" > "$(dirname "$BD")/perf_publish_marker.txt" 2>/dev/null || true
+              exit 0
+            fi
           fi
           BD_SIZE=$(stat -c %s "$BD")
           # Only override script's DEFAULT_ENDPOINT / DEFAULT_TOKEN when the
