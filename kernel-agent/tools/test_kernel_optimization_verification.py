@@ -59,13 +59,20 @@ def test_benchmark_available_alone_does_not_pass_correctness(tmp_path):
 
 
 def test_report_correctness_passes_when_explicit(tmp_path):
+    """Report-scan correctness must light up on its own — without relying
+    on the CLI `accuracy_passed` flag — so the report's own "Correctness
+    passed" prose is recognised as evidence. We deliberately do NOT pass
+    `accuracy_passed=True` here: that would short-circuit to
+    `accuracy_override` (which is the higher-precedence path tested
+    separately in `test_cli_correctness_override`) and mask whether the
+    report scanner itself is wired up."""
     report = tmp_path / "optimization_report.md"
     report.write_text(
         "Correctness passed\nSpeedup: 1.32x\n",
         encoding="utf-8",
     )
     verification = ko.build_verification(
-        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        _args(e2e_gain_pct=1.0),
         [_attempt(report)],
         benchmark_available=True,
     )
@@ -82,7 +89,7 @@ def test_report_correctness_passes_with_machine_marker(tmp_path):
         encoding="utf-8",
     )
     verification = ko.build_verification(
-        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        _args(e2e_gain_pct=1.0),
         [_attempt(report)],
         benchmark_available=True,
     )
@@ -194,7 +201,7 @@ def test_report_correctness_passes_with_reference_language(tmp_path):
         encoding="utf-8",
     )
     verification = ko.build_verification(
-        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        _args(e2e_gain_pct=1.0),
         [_attempt(report)],
         benchmark_available=True,
     )
@@ -245,13 +252,18 @@ def test_complete_kernel_artifact_can_integrate_without_e2e_yet(tmp_path):
 
 
 def test_report_correctness_failure_blocks_keep(tmp_path):
+    """Explicit "Correctness failed" in the report must block KEEP. We
+    intentionally omit `accuracy_passed=True` here — that flag forces
+    `correctness_source=accuracy_override` and would mask the
+    report-level failure (a real safety regression). The CLI override
+    path is exercised separately in `test_cli_correctness_override`."""
     report = tmp_path / "optimization_report.md"
     report.write_text(
         "Correctness failed: assert_close failed\nSpeedup: 2.0x\n",
         encoding="utf-8",
     )
     verification = ko.build_verification(
-        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        _args(e2e_gain_pct=1.0),
         [_attempt(report)],
         benchmark_available=True,
     )
@@ -586,6 +598,242 @@ def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     assert ko.has_benchmark(args, {"benchmark_files": [str(bench)]}) is True
 
 
+# ---------------------------------------------------------------------------
+# Regression: backend stdout must never be promoted to `source_file` artifact.
+#
+# Before the fix, `run_attempt` wrote the raw subprocess stdout to a
+# `<attempt_id>_optimized<source_suffix>` file (e.g. `.cu` / `.py`). The
+# mini-swe-agent / OOB log emitted by GEAK / claude / codex routinely
+# contains generic English words like "void ", "int ", "float ", or
+# fragments of the optimization-trajectory transcript that include patch
+# excerpts. `_source_text_looks_complete` only checks for the presence of
+# those markers (it does not parse C++), so it false-positive matched the
+# log as a real CUDA source file. The verification block then reported
+# `artifact_source: source_file` and pointed `best_artifact_path` at a
+# transcript log — observed on Qwen3-8B k007 rmsnorm_quant (2026-05-20),
+# where `geak-b9e23625_optimized.cu` was a 55-line minisweagent log with
+# 3 generic-marker hits, but was still reported as a valid source artifact.
+#
+# After the fix, stdout is written to `<attempt_id>_stdout.log` instead.
+# The `.log` suffix routes the file through the fenced-code-block
+# extraction path in `_select_source_artifact` (where it belongs — Claude
+# / Codex sometimes emit the full optimized CU inside a fenced block),
+# but never lets a raw log impersonate a real source artifact.
+# ---------------------------------------------------------------------------
+
+
+def test_geak_stdout_log_must_not_false_positive_as_source_file(tmp_path):
+    """If the only artifact a backend produced is its own stdout log
+    (no patch_*.patch, no optimized_versions/*.cu, no extractable code
+    fence), verification must report ``artifact_source == "missing"``
+    — NOT pretend the log is the optimized source. This is the exact
+    failure mode observed on Qwen3-8B k007 (2026-05-20)."""
+    log_path = tmp_path / "geak-deadbeef_stdout.log"
+    log_path.write_text(
+        "minisweagent.agents.parallel_agent: INFO: [running 12.0min] Sub-agents working\n"
+        "2 total patches (task_0: 2)\n"
+        # The next line embeds words like "void", "int", "float" that the
+        # pre-fix `_source_text_looks_complete` heuristic would happily
+        # accept as a complete CUDA source.
+        "Trajectory note: convert the int loop, drop the void wrapper, use float.\n"
+        "Best patch: patch_1 (agent 0)\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak-deadbeef",
+        "backend": "geak",
+        "optimized_path": str(log_path),
+        "backend_paths": {},
+    }
+
+    artifact_path, source, error = ko._select_source_artifact(
+        attempt,
+        target_file="/tmp/source.cu",
+        run_dir=tmp_path,
+    )
+
+    assert artifact_path == ""
+    assert source == "missing"
+    assert ".cu source artifact found" in error
+
+
+def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
+    """If the backend stdout *does* embed the full optimized CU inside a
+    fenced code block (the Claude / Codex happy path), the `.log` route
+    must still surface it — labelled ``extracted_code_block``, not
+    ``source_file`` (so consumers know it came from a transcript, not a
+    first-class artifact)."""
+    log_path = tmp_path / "claude-c0ffee_stdout.log"
+    log_path.write_text(
+        "Here is the final optimized kernel:\n"
+        "```cuda\n"
+        "#include <hip/hip_runtime.h>\n"
+        "extern \"C\" __global__ void optimized_kernel(float* out, const float* in) {\n"
+        "  int idx = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        "  out[idx] = in[idx] * 2.0f;\n"
+        "}\n"
+        "```\n"
+        "Done.\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed",
+        "attempt_id": "claude-c0ffee",
+        "backend": "claude",
+        "optimized_path": str(log_path),
+        "backend_paths": {},
+    }
+
+    artifact_path, source, error = ko._select_source_artifact(
+        attempt,
+        target_file="/tmp/source.cu",
+        run_dir=tmp_path,
+    )
+
+    assert error == ""
+    assert source == "extracted_code_block"
+    assert artifact_path.endswith("_extracted.cu")
+    body = Path(artifact_path).read_text(encoding="utf-8")
+    assert "extern \"C\" __global__ void optimized_kernel" in body
+    # The extraction must drop the surrounding prose / fence markers.
+    assert "```" not in body
+    assert "Here is the final" not in body
+
+
+def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
+    """When both a real GEAK patch AND a stdout log are present, the
+    patch wins. The log is only a fallback for the all-else-failed
+    case. The patch itself isn't a `.cu`, so it goes through fenced
+    extraction — but that fails (a unified diff has no fenced code
+    blocks), so we correctly return `missing` rather than promoting
+    the stdout log. Documents the precedence order in
+    `_candidate_artifact_paths`."""
+    patch_path = tmp_path / "patch_1.patch"
+    patch_path.write_text(
+        "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "geak-cafebabe_stdout.log"
+    log_path.write_text(
+        "void int float extern __global__ #include\n",  # marker-rich noise
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak-cafebabe",
+        "backend": "geak",
+        "optimized_path": str(log_path),
+        "backend_paths": {
+            "geak_per_task_best_patch": str(patch_path),
+            "geak_latest_patch": str(patch_path),
+        },
+    }
+
+    artifact_path, source, error = ko._select_source_artifact(
+        attempt,
+        target_file="/tmp/source.cu",
+        run_dir=tmp_path,
+    )
+
+    # Neither path yields a complete CU: patch is a diff (no fenced
+    # block), log is just marker-noise (no fenced block either). The
+    # crucial assertion is that the log is NOT silently promoted to
+    # `source_file` — that was the pre-fix bug.
+    assert source == "missing"
+    assert artifact_path == ""
+
+
+# ---------------------------------------------------------------------------
+# Downstream-consumer contract for the optimized/ directory naming.
+#
+# `run_attempt` writes one file per attempt under `runs/<sid>/optimized/`:
+#   * real backend runs:  `<attempt_id>_stdout.log`
+#   * dry-run smoke tests: `<attempt_id>_optimized<source_suffix>`
+#
+# The breakdown collector (`inference_optimizer/breakdown/collectors.py`)
+# discovers these via `glob(f"{attempt_id}*")`, which by design picks up
+# BOTH the legacy name (older sessions on disk) and the new name. The
+# regression below pins that contract so anyone tightening the glob to
+# a fixed suffix breaks the test (and re-introduces the historical
+# `geak-b9e23625_optimized.cu == 55-line minisweagent log` false-positive
+# documented in `test_geak_stdout_log_must_not_false_positive_as_source_file`
+# above — see also `kernel-agent/SKILL.md` § *Per-attempt stdout file naming*).
+# ---------------------------------------------------------------------------
+
+
+def test_optimized_dir_glob_picks_up_both_legacy_and_new_attempt_files(tmp_path):
+    """Lock the `glob("{attempt_id}*")` contract that the breakdown
+    collector relies on. Both names must surface for the same attempt id
+    so downstream consumers transparently work across old + new sessions.
+    """
+    opt_dir = tmp_path / "optimized"
+    opt_dir.mkdir()
+
+    legacy = opt_dir / "geak-deadbeef_optimized.cu"
+    legacy.write_text("// historical dry-run / pre-2026-05 layout\n", encoding="utf-8")
+
+    new = opt_dir / "geak-deadbeef_stdout.log"
+    new.write_text("real backend stdout transcript\n", encoding="utf-8")
+
+    unrelated = opt_dir / "geak-cafebabe_stdout.log"
+    unrelated.write_text("different attempt; must not leak in\n", encoding="utf-8")
+
+    matched = sorted(opt_dir.glob("geak-deadbeef*"))
+
+    assert {p.name for p in matched} == {
+        "geak-deadbeef_optimized.cu",
+        "geak-deadbeef_stdout.log",
+    }, (
+        "breakdown/collectors.py uses `glob(f\"{attempt_id}*\")` to discover "
+        "per-attempt artefacts — both the legacy `_optimized.<suffix>` and "
+        "the post-2026-05 `_stdout.log` names must remain discoverable so "
+        "older session dirs and new ones render identically in the breakdown."
+    )
+
+
+def test_run_attempt_dry_run_emits_optimized_suffix_file(tmp_path):
+    """Dry-run mode is a public smoke-test surface: it must keep the
+    historical `<attempt_id>_optimized<source_suffix>` filename so existing
+    smoke scripts and dry-run CI shards keep working unchanged. (Real
+    backend runs deliberately diverged to `_stdout.log` — see the comment
+    block above.)"""
+    import argparse
+
+    run_dir = tmp_path / "runs" / "sess001"
+    args = argparse.Namespace(
+        dry_run=True,
+        source_file="/tmp/k.cu",
+        session_id="sess001",
+        geak_budget_min=120,
+        budget_minutes=60,
+        disable_rag=False,
+        disable_xs_memory=False,
+        num_gpus=1,
+        target_platform="",
+        test_command="",
+        kernel_id="k001",
+    )
+    log_path = tmp_path / "run.log"
+    log_path.write_text("", encoding="utf-8")
+
+    result = ko.run_attempt(
+        "claude",
+        args=args,
+        candidate={"kernel_id": "k001", "name": "k", "source_file": "/tmp/k.cu"},
+        run_dir=run_dir,
+        log_path=log_path,
+    )
+
+    optimized_path = Path(result["optimized_path"])
+    assert optimized_path.exists(), "dry-run must materialise the placeholder"
+    assert optimized_path.name.endswith("_optimized.cu"), (
+        "dry-run filename must remain `<attempt_id>_optimized<source_suffix>` "
+        "for smoke-test back-compat; got " + optimized_path.name
+    )
+    assert optimized_path.parent.name == "optimized"
+
+
 def _metadata_from_prompt(prompt: str) -> dict:
     marker = "Kernel runtime metadata"
     start = prompt.index("```json", prompt.index(marker)) + len("```json")
@@ -695,6 +943,43 @@ def test_build_prompt_includes_geak_runtime_metadata():
     assert metadata["kernel_params"]["KV_DTYPE"] == "fp8"
     assert metadata["kernel_params"]["BLOCK_SIZE"] == 16
     assert metadata["kernel_params"]["HEAD_SIZE"] == 128
+
+
+def test_build_prompt_includes_budget_protocol_warning():
+    args = _args(source_file="")
+    args.kernel_id = "budget_kernel"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+
+    prompt = ko.build_prompt(
+        {"name": "budget_kernel", "source_type": "hip"},
+        args,
+    )
+
+    assert "BUDGET PROTOCOL" in prompt
+    assert "--cost-limit 0.0" in prompt
+    assert "TELEMETRY" in prompt
+    assert prompt.index("BUDGET PROTOCOL") < prompt.index("kernel_name:")
+
+
+def test_build_prompt_budget_protocol_precedes_source_attribution():
+    args = _args(source_file="/tmp/device.cu")
+    args.kernel_id = "promoted_kernel"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+    candidate = {
+        "name": "promoted_kernel",
+        "source_file": "/tmp/device.cu",
+        "source_type": "hip",
+        "source_promoted_from_launcher": True,
+        "launcher_source_file": "/tmp/wrapper.py",
+    }
+
+    prompt = ko.build_prompt(candidate, args)
+
+    assert "BUDGET PROTOCOL" in prompt
+    assert "SOURCE ATTRIBUTION NOTE" in prompt
+    assert prompt.index("BUDGET PROTOCOL") < prompt.index("SOURCE ATTRIBUTION NOTE")
 
 
 def test_build_prompt_metadata_is_backward_compatible():
