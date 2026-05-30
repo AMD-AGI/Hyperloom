@@ -12,14 +12,12 @@ Combines four previously separate modules:
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -37,6 +35,7 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     apply_runtime_benchmark_overrides,
     apply_single_node_invalid_variants,
     apply_user_skip_list,
+    coerce_extra_envs,
     resolve_skip_spec,
     run_grid,
 )
@@ -156,7 +155,7 @@ def test_grid_runner_emits_expected_error_class_labels():
 def test_variant_result_carries_error_class_field():
     vr = _grid_runner.VariantResult(
         name="x",
-        extra_sglang_args="--foo",
+        extra_server_args="--foo",
         extra_envs={},
         status="failed",
         error="boom",
@@ -167,7 +166,7 @@ def test_variant_result_carries_error_class_field():
     assert d["status"] == "failed"
 
     vr_ok = _grid_runner.VariantResult(
-        name="ok", extra_sglang_args="", extra_envs={}, status="succeeded",
+        name="ok", extra_server_args="", extra_envs={}, status="succeeded",
     )
     assert vr_ok.to_dict()["error_class"] == ""
 
@@ -208,7 +207,7 @@ class TestParseSkipSpec:
 class TestMultiNodeInvalidFilter:
     def test_short_circuits_in_single_node(self, monkeypatch):
         grid = [
-            GridVariant(name="a", extra_sglang_args="--cuda-graph-max-bs 8"),
+            GridVariant(name="a", extra_server_args="--cuda-graph-max-bs 8"),
         ]
         kept, dropped = apply_multi_node_invalid_variants(grid)
         assert kept == grid
@@ -223,8 +222,8 @@ class TestMultiNodeInvalidFilter:
         monkeypatch.setattr(mne, "is_multi_node", lambda: True)
         monkeypatch.setenv("CONC", "64")
         grid = [
-            GridVariant(name="bad", extra_sglang_args="--cuda-graph-max-bs 8"),
-            GridVariant(name="ok",  extra_sglang_args="--max-num-seqs 128"),
+            GridVariant(name="bad", extra_server_args="--cuda-graph-max-bs 8"),
+            GridVariant(name="ok",  extra_server_args="--max-num-seqs 128"),
         ]
         kept, dropped = apply_multi_node_invalid_variants(grid)
         assert [k.name for k in kept] == ["ok"]
@@ -235,10 +234,10 @@ class TestMultiNodeInvalidFilter:
 class TestSingleNodeInvalidFilter:
     def test_drops_multi_node_only_in_single_node(self):
         grid = [
-            GridVariant(name="legacy", extra_sglang_args="--foo 1"),
+            GridVariant(name="legacy", extra_server_args="--foo 1"),
             GridVariant(
                 name="mn_only",
-                extra_sglang_args="--enable-deepep-moe",
+                extra_server_args="--enable-deepep-moe",
                 note="multi_node_only_moe",
             ),
         ]
@@ -255,7 +254,7 @@ class TestSingleNodeInvalidFilter:
         grid = [
             GridVariant(
                 name="mn_only",
-                extra_sglang_args="--enable-deepep-moe",
+                extra_server_args="--enable-deepep-moe",
                 note="multi_node_only_moe",
             ),
         ]
@@ -293,7 +292,7 @@ class TestApplyUserSkipList:
 class TestVariantResultToDict:
     def test_succeeded_default_shape(self):
         vr = VariantResult(
-            name="v", extra_sglang_args="--foo 1", extra_envs={"A": "1"},
+            name="v", extra_server_args="--foo 1", extra_envs={"A": "1"},
             status="succeeded",
         )
         out = vr.to_dict()
@@ -302,7 +301,7 @@ class TestVariantResultToDict:
 
     def test_failed_round_trip_carries_error_class(self):
         vr = VariantResult(
-            name="v", extra_sglang_args="", extra_envs={},
+            name="v", extra_server_args="", extra_envs={},
             status="failed", error="boom", error_class="benchmark_report_missing",
         )
         out = vr.to_dict()
@@ -350,6 +349,87 @@ class TestSanitizeResultDir:
     def test_rejects_unsafe(self, raw):
         with pytest.raises(ValueError):
             gr.sanitize_result_dir(raw)
+
+
+class TestCoerceExtraEnvs:
+    """Lock the boundary contract for LLM-supplied grid env overrides."""
+
+    def test_dict_is_passthrough(self):
+        assert coerce_extra_envs({"FOO": "1", "BAR": "two"}) == {
+            "FOO": "1", "BAR": "two",
+        }
+
+    def test_dict_coerces_values_to_str(self):
+        assert coerce_extra_envs({"USE_AITER": 1, "DEBUG": True}) == {
+            "USE_AITER": "1", "DEBUG": "True",
+        }
+
+    def test_space_delimited_string(self):
+        assert coerce_extra_envs(
+            "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1"
+        ) == {"SGLANG_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "1"}
+
+    def test_newline_delimited_string(self):
+        assert coerce_extra_envs(
+            "FOO=1\nBAR=two\n\nBAZ=3"
+        ) == {"FOO": "1", "BAR": "two", "BAZ": "3"}
+
+    def test_semicolon_delimited_string(self):
+        assert coerce_extra_envs("A=1;B=2;C=3") == {
+            "A": "1", "B": "2", "C": "3",
+        }
+
+    def test_string_preserves_url_in_value(self):
+        assert coerce_extra_envs(
+            "HF_ENDPOINT=https://hf.example.com/api"
+        ) == {"HF_ENDPOINT": "https://hf.example.com/api"}
+
+    def test_string_drops_tokens_without_equals(self):
+        assert coerce_extra_envs("FOO=1 garbage BAR=2") == {
+            "FOO": "1", "BAR": "2",
+        }
+
+    def test_list_of_kv_tokens(self):
+        assert coerce_extra_envs(["FOO=1", "BAR=2"]) == {
+            "FOO": "1", "BAR": "2",
+        }
+
+    def test_list_of_dicts(self):
+        assert coerce_extra_envs([{"FOO": "1"}, {"BAR": "2"}]) == {
+            "FOO": "1", "BAR": "2",
+        }
+
+    def test_list_later_entries_win(self):
+        assert coerce_extra_envs([{"FOO": "first"}, {"FOO": "last"}]) == {
+            "FOO": "last",
+        }
+
+    def test_none_returns_empty(self):
+        assert coerce_extra_envs(None) == {}
+
+    def test_unknown_type_returns_empty(self):
+        assert coerce_extra_envs(42) == {}
+        assert coerce_extra_envs(object()) == {}
+
+    def test_used_by_backends_grid_override(self):
+        llm_entry = {
+            "name": "aiter_mla_off",
+            "extra_sglang_args": "--attention-backend aiter --disable-mla",
+            "extra_envs": "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0",
+            "note": "aiter attn without MLA fast path",
+        }
+        v = GridVariant(
+            name=llm_entry["name"],
+            extra_sglang_args=llm_entry["extra_sglang_args"],
+            extra_envs=coerce_extra_envs(llm_entry["extra_envs"]),
+            note=llm_entry["note"],
+        )
+
+        assert dict(v.extra_envs.items()) == {
+            "SGLANG_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+        }
+        assert isinstance(v.fingerprint, str) and len(v.fingerprint) > 0
 
 
 # ==============================================================================
@@ -716,3 +796,190 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
     for slot_path, result_dir in captured_envs:
         assert slot_path == result_dir
     assert len({rd for _, rd in captured_envs}) == 2
+
+
+# ==============================================================================
+# Framework-aware help-text probe (atom + multi-framework cache)
+# ==============================================================================
+
+
+@pytest.fixture(autouse=False)
+def _reset_help_cache():
+    """Clear the framework-keyed help-text cache before/after each test
+    so per-test mocks don't leak across the class."""
+    _grid_runner._HELP_TEXT_CACHE.clear()
+    yield
+    _grid_runner._HELP_TEXT_CACHE.clear()
+
+
+def test_probe_server_help_text_atom_returns_help_when_importable(
+    _reset_help_cache, monkeypatch,
+):
+    """The atom branch invokes
+    ``atom.model_engine.arg_utils:EngineArgs.add_cli_args``. We mock
+    subprocess.run to return a synthetic atom-help payload; the probe
+    must return it verbatim and cache it for the second call."""
+    call_count = {"n": 0}
+    synthetic_help = (
+        "usage: atom-engine [-h] [--tensor-parallel-size INT] "
+        "[--torch-profiler-dir DIR] ..."
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        call_count["n"] += 1
+        return subprocess.CompletedProcess(cmd, 0, synthetic_help, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    out = _grid_runner._probe_server_help_text("atom")
+    assert "--tensor-parallel-size" in out
+    assert "--torch-profiler-dir" in out
+    # Second call must hit the cache, not the subprocess.
+    out2 = _grid_runner._probe_server_help_text("atom")
+    assert out2 == out
+    assert call_count["n"] == 1, (
+        "_probe_server_help_text must cache atom's result; subprocess "
+        f"called {call_count['n']} times"
+    )
+
+
+def test_probe_server_help_text_atom_returns_empty_on_failure(
+    _reset_help_cache, monkeypatch,
+):
+    """Subprocess failures must surface as ``""`` and NOT be cached —
+    a transient failure (e.g. unrelated test-time mock) must not
+    poison the slot for the rest of the session."""
+    raised = {"n": 0}
+
+    def fake_run(*args, **kwargs):
+        raised["n"] += 1
+        raise RuntimeError("subprocess refused to run")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _grid_runner._probe_server_help_text("atom") == ""
+    # Re-probe — must invoke subprocess again rather than serving an
+    # empty cached value (so transient failures recover automatically).
+    assert _grid_runner._probe_server_help_text("atom") == ""
+    assert raised["n"] == 2
+
+
+def test_probe_server_help_text_cache_keyed_by_framework(
+    _reset_help_cache, monkeypatch,
+):
+    """Cache slots must be per-framework so a sglang-default test box
+    doesn't leak its help text into the vllm or atom slot."""
+    payload_map = {
+        "sglang": "USAGE_SGLANG --enable-flashinfer-mla",
+        "atom": "USAGE_ATOM --torch-profiler-dir",
+    }
+
+    def fake_run(cmd, *args, **kwargs):
+        # Identify the framework from the inline source code in cmd[-1].
+        src = cmd[-1] if cmd else ""
+        if "sglang.launch_server" in src:
+            payload = payload_map["sglang"]
+        elif "atom.model_engine" in src:
+            payload = payload_map["atom"]
+        else:
+            payload = ""
+        return subprocess.CompletedProcess(cmd, 0, payload, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sgl = _grid_runner._probe_server_help_text("sglang")
+    atom = _grid_runner._probe_server_help_text("atom")
+    assert "--enable-flashinfer-mla" in sgl
+    assert "--torch-profiler-dir" in atom
+    # No cross-contamination — atom slot did NOT inherit sglang's text.
+    assert "--enable-flashinfer-mla" not in atom
+    assert "--torch-profiler-dir" not in sgl
+
+
+def test_probe_server_help_text_supports_all_three_frameworks(
+    _reset_help_cache, monkeypatch,
+):
+    """Cross-cutting guard: every first-class framework must have a
+    registered probe command and the helper must return a ``str`` for
+    each (success or failure path, doesn't matter)."""
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(
+            cmd, 0, f"help for {cmd[-1]!r}", "",
+        ),
+    )
+    for fw in ("sglang", "vllm", "atom"):
+        out = _grid_runner._probe_server_help_text(fw)
+        assert isinstance(out, str)
+        assert out, (
+            f"_probe_server_help_text({fw!r}) returned an empty string; "
+            f"command registration likely missing"
+        )
+
+
+def test_probe_server_help_text_unknown_framework_returns_empty(
+    _reset_help_cache,
+):
+    """Unregistered framework names short-circuit to ``""`` without
+    invoking subprocess. Same conservative shape as the existing
+    failure path."""
+    assert _grid_runner._probe_server_help_text("tensorrt") == ""
+    assert _grid_runner._probe_server_help_text("") == ""
+
+
+def test_probe_sglang_help_text_back_compat_shim(
+    _reset_help_cache, monkeypatch,
+):
+    """The legacy ``_probe_sglang_help_text`` name is preserved as a
+    thin wrapper around the framework-keyed probe. Pre-existing test
+    fixtures that monkey-patch this exact name must keep working."""
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(
+            cmd, 0, "USAGE_SGLANG_LEGACY", "",
+        ),
+    )
+    out = _grid_runner._probe_sglang_help_text()
+    assert "USAGE_SGLANG_LEGACY" in out
+    # The shim populates the framework-keyed cache under the sglang key.
+    assert "USAGE_SGLANG_LEGACY" in _grid_runner._HELP_TEXT_CACHE.get("sglang", "")
+
+
+def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
+    _reset_help_cache, monkeypatch,
+):
+    """When ``$FRAMEWORK=atom`` the compatibility filter must validate
+    variant flag literals against the atom --help output, not sglang's. We mock the probe so atom's
+    help advertises one flag but not another and confirm the variant
+    with the unrecognised flag is dropped with a reason mentioning
+    ``atom --help``."""
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    # MoE keyword so the model-class predicate doesn't drop the variant
+    # before the help-text check runs.
+    monkeypatch.setenv("MODEL_PATH", "/wekafs/models/DeepSeek-R1-0528")
+
+    # Pre-populate the cache so the test doesn't have to mock subprocess
+    # for the underlying probe — the predicate reads from the cache when
+    # populated.
+    _grid_runner._HELP_TEXT_CACHE["atom"] = (
+        "usage: atom-engine [--tensor-parallel-size INT] "
+        "[--enable-deepep-moe]"
+    )
+
+    # Two variants: one whose flag IS in the atom help (kept), one that
+    # references a sglang-only flag (dropped).
+    kept_variant = GridVariant(
+        name="atom_compatible",
+        extra_server_args="--enable-deepep-moe",
+    )
+    dropped_variant = GridVariant(
+        name="sglang_only",
+        extra_server_args="--enable-flashinfer-mla",
+    )
+    kept, dropped = _grid_runner.apply_compatibility_filter(
+        [kept_variant, dropped_variant],
+    )
+    assert [v.name for v in kept] == ["atom_compatible"]
+    assert len(dropped) == 1
+    assert dropped[0]["name"] == "sglang_only"
+    assert "atom --help" in dropped[0]["reason"], (
+        f"reason must mention `atom --help` so log readers can tell "
+        f"which framework rejected the variant: {dropped[0]['reason']!r}"
+    )

@@ -74,7 +74,10 @@ def _llm_extract_changes(report_content: str, api_key: str) -> dict:
             json={"model": "openai/gpt-4.1-mini",
                   "messages": [{"role": "user", "content": prompt}],
                   "temperature": 0, "max_tokens": 500},
-            timeout=30, verify=False,
+            timeout=30,
+            verify=os.environ.get(
+                "SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True)
+            ),
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
@@ -114,6 +117,29 @@ def _parse_flags_string(s: str) -> dict[str, str]:
     return flags
 
 
+_LAUNCH_CMD_RE = re.compile(
+    r"(?:python3?\s+-m\s+\S+\.launch_server|vllm\s+serve)\b",
+)
+
+
+def _extract_fenced_bash_blocks(report: str) -> list[str]:
+    """Return bodies of ``` / ```bash fenced blocks (linear-time scan)."""
+    blocks: list[str] = []
+    opener = re.compile(r"```(?:bash)?\s*\n", re.IGNORECASE)
+    pos = 0
+    while True:
+        m = opener.search(report, pos)
+        if not m:
+            break
+        start = m.end()
+        end = report.find("\n```", start)
+        if end == -1:
+            break
+        blocks.append(report[start:end])
+        pos = end + 4
+    return blocks
+
+
 def _extract_optimized_flags(report: str) -> dict[str, str]:
     """Extract the final/optimized flag set from the report.
 
@@ -134,14 +160,11 @@ def _extract_optimized_flags(report: str) -> dict[str, str]:
         log.debug("Extracted flags from EXTRA_VLLM_ARGS YAML")
         return _parse_flags_string(args_text)
 
-    cmd_re = re.compile(
-        r"```(?:bash)?\s*\n((?:export\s+\S+=\S+\n)*"
-        r"(?:python3?\s+-m\s+\S+\.launch_server|vllm\s+serve)\b.*?)\n```",
-        re.DOTALL,
-    )
-    blocks = cmd_re.findall(report)
-    if blocks:
-        block = blocks[-1].replace("\\\n", " ")
+    launch_blocks = [
+        b for b in _extract_fenced_bash_blocks(report) if _LAUNCH_CMD_RE.search(b)
+    ]
+    if launch_blocks:
+        block = launch_blocks[-1].replace("\\\n", " ")
         log.debug("Extracted flags from bash launch command")
         return _parse_flags_string(block)
 
