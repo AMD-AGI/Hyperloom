@@ -743,6 +743,227 @@ def test_attribution_framework_pr_phase_fallback_when_no_phase_history(
 
 
 # ---------------------------------------------------------------------------
+# A1.0b: phase_breakdown.explore.by_domain key normalization
+# ---------------------------------------------------------------------------
+# Pre-PR-B the orchestrator's raw ``provenance`` strings landed in
+# ``by_domain`` verbatim — keys looked like ``"specialist:serving_specialist"``
+# / ``"legacy:backends"`` / ``"default_grid"``. Consumers had to splice
+# the prefix every time they iterated. The collector now strips
+# ``specialist:`` and folds ``legacy:*`` into ``legacy_*``; this section
+# pins that contract.
+def test_phase_breakdown_explore_by_domain_strips_specialist_prefix(
+    tmp_path: Path,
+) -> None:
+    """``provenance = 'specialist:serving_specialist'`` surfaces under
+    the bare ``serving_specialist`` key — the dashboard never sees the
+    raw prefix. Multiple specialist provenances go to distinct buckets
+    and sum independently."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 12.0,
+        "phase_history": [
+            {"to_phase": "EXPLORE", "ts_unix": 1000.0},
+        ],
+        "explore_search": {
+            "winners_history": [
+                {"fingerprint": "fp_serving",
+                 "provenance": "specialist:serving_specialist"},
+                {"fingerprint": "fp_kernel_switch",
+                 "provenance": "specialist:kernel_switch_specialist"},
+            ],
+        },
+        "optimization_stack": [
+            {"action": "explore", "variant_name": "v_a", "fingerprint": "fp_serving"},
+            {"action": "explore", "variant_name": "v_b", "fingerprint": "fp_kernel_switch"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "explore", "variant_name": "v_a",
+             "fingerprint": "fp_serving",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 7.0,
+             "delta_pct": 7.0, "ts_unix": 1100.0},
+            {"action": "explore", "variant_name": "v_b",
+             "fingerprint": "fp_kernel_switch",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 7.0, "cum_gain_after": 12.0,
+             "delta_pct": 5.0, "ts_unix": 1200.0},
+        ],
+    })
+    pb = build(sd)["attribution"]["phase_breakdown"]
+    by_domain = pb["explore"]["by_domain"]
+    assert by_domain["serving_specialist"] == pytest.approx(7.0)
+    assert by_domain["kernel_switch_specialist"] == pytest.approx(5.0)
+    # Raw prefix must not leak.
+    assert "specialist:serving_specialist" not in by_domain
+    assert "specialist:kernel_switch_specialist" not in by_domain
+
+
+def test_phase_breakdown_legacy_provenance_folded_to_legacy_prefix(
+    tmp_path: Path,
+) -> None:
+    """``provenance = 'legacy:backends'`` (resume of a pre-v0.8 session)
+    becomes ``legacy_backends`` so it sits next to specialist keys
+    without masquerading as one — the dashboard can group / hide
+    legacy buckets explicitly."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 5.0,
+        "phase_history": [
+            {"to_phase": "EXPLORE", "ts_unix": 1000.0},
+        ],
+        "explore_search": {
+            "winners_history": [
+                {"fingerprint": "fp_legacy", "provenance": "legacy:backends"},
+            ],
+        },
+        "optimization_stack": [
+            {"action": "explore", "variant_name": "v_legacy", "fingerprint": "fp_legacy"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "explore", "variant_name": "v_legacy",
+             "fingerprint": "fp_legacy",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 5.0,
+             "delta_pct": 5.0, "ts_unix": 1100.0},
+        ],
+    })
+    by_domain = build(sd)["attribution"]["phase_breakdown"]["explore"]["by_domain"]
+    assert by_domain["legacy_backends"] == pytest.approx(5.0)
+    # Raw colon-form must not surface.
+    assert "legacy:backends" not in by_domain
+    # And it must NOT collide with the specialist namespace.
+    assert "backends" not in by_domain
+
+
+def test_phase_breakdown_default_grid_and_llm_direct_pass_through(
+    tmp_path: Path,
+) -> None:
+    """Non-specialist provenance (``default_grid`` / ``llm_direct``)
+    passes through verbatim — they're already valid stable keys."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 4.0,
+        "phase_history": [
+            {"to_phase": "EXPLORE", "ts_unix": 1000.0},
+        ],
+        "explore_search": {
+            "winners_history": [
+                {"fingerprint": "fp_grid", "provenance": "default_grid"},
+                {"fingerprint": "fp_direct", "provenance": "llm_direct"},
+            ],
+        },
+        "optimization_stack": [
+            {"action": "explore", "variant_name": "v_grid",   "fingerprint": "fp_grid"},
+            {"action": "explore", "variant_name": "v_direct", "fingerprint": "fp_direct"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "explore", "variant_name": "v_grid",
+             "fingerprint": "fp_grid",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 1.0,
+             "delta_pct": 1.0, "ts_unix": 1100.0},
+            {"action": "explore", "variant_name": "v_direct",
+             "fingerprint": "fp_direct",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 1.0, "cum_gain_after": 4.0,
+             "delta_pct": 3.0, "ts_unix": 1200.0},
+        ],
+    })
+    by_domain = build(sd)["attribution"]["phase_breakdown"]["explore"]["by_domain"]
+    assert by_domain["default_grid"] == pytest.approx(1.0)
+    assert by_domain["llm_direct"] == pytest.approx(3.0)
+
+
+# ---------------------------------------------------------------------------
+# A1.0c: capability_summary.specialist.by_specialist per-domain split
+# ---------------------------------------------------------------------------
+def test_capability_summary_specialist_by_specialist_from_domain_breakdown(
+    tmp_path: Path,
+) -> None:
+    """``domain_breakdown`` is the authoritative source. Each round's
+    per-domain dict is folded into the headline ``by_specialist``
+    counters; status is derived per-domain."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    _write_state(sd, _basic_state(specialist_rounds=[
+        _specialist_round(
+            round_id=1,
+            domains=["serving_specialist"],
+            proposals_total=3, proposals_kept=2,
+            domain_breakdown={
+                "serving_specialist": {
+                    "dispatched": 1, "proposals_total": 3,
+                    "proposals_kept": 2, "proposals_rejected": 1,
+                },
+            },
+        ),
+        _specialist_round(
+            round_id=2,
+            domains=["kernel_switch_specialist", "comm_specialist"],
+            proposals_total=5, proposals_kept=0,
+            domain_breakdown={
+                "kernel_switch_specialist": {
+                    "dispatched": 1, "proposals_total": 3,
+                    "proposals_kept": 0, "proposals_rejected": 3,
+                },
+                "comm_specialist": {
+                    "dispatched": 1, "proposals_total": 2,
+                    "proposals_kept": 0, "proposals_rejected": 2,
+                },
+            },
+        ),
+    ]))
+    spec = build(sd)["capability_summary"]["specialist"]
+    bs = spec["by_specialist"]
+    # serving_specialist: dispatched once, 2 keeps → kept.
+    assert bs["serving_specialist"]["status"] == "kept"
+    assert bs["serving_specialist"]["attempts"] == 1
+    assert bs["serving_specialist"]["tested"] == 3
+    assert bs["serving_specialist"]["keeps"] == 2
+    # kernel_switch_specialist: tested but no keep → tried.
+    assert bs["kernel_switch_specialist"]["status"] == "tried"
+    assert bs["kernel_switch_specialist"]["tested"] == 3
+    # Untouched domains remain not_attempted.
+    for d in (
+        "compiler_specialist", "system_specialist",
+        "pr_intel_specialist", "session_steward_specialist",
+    ):
+        assert bs[d]["status"] == "not_attempted"
+        assert bs[d]["attempts"] == 0
+    # Headline row still aggregates everything.
+    assert spec["attempts"] == 2
+    assert spec["tested"] == 8
+    assert spec["keeps"] == 2
+
+
+def test_capability_summary_specialist_by_specialist_falls_back_to_domains_list(
+    tmp_path: Path,
+) -> None:
+    """Legacy round predates ``domain_breakdown``: collector imputes
+    even share across the listed ``domains`` so the per-domain
+    counters add up to the parent row."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    _write_state(sd, _basic_state(specialist_rounds=[
+        # No domain_breakdown — the helper-built fixture sets one by
+        # default, so override it explicitly to {}.
+        _specialist_round(
+            round_id=1,
+            domains=["serving_specialist", "compiler_specialist"],
+            proposals_total=4, proposals_kept=2,
+            domain_breakdown={},
+        ),
+    ]))
+    spec = build(sd)["capability_summary"]["specialist"]
+    bs = spec["by_specialist"]
+    # 4 tested split evenly = 2 each; 2 kept split evenly = 1 each.
+    assert bs["serving_specialist"]["attempts"] == 1
+    assert bs["serving_specialist"]["tested"] == 2
+    assert bs["serving_specialist"]["keeps"] == 1
+    assert bs["serving_specialist"]["status"] == "kept"
+    assert bs["compiler_specialist"]["attempts"] == 1
+    assert bs["compiler_specialist"]["tested"] == 2
+    assert bs["compiler_specialist"]["keeps"] == 1
+
+
+# ---------------------------------------------------------------------------
 # A1.1: kernel_roofline (Dashboard-Roofline 对接清单 §1)
 # ---------------------------------------------------------------------------
 # The collector mirrors ``<sd>/reports/kernel_roofline.json`` so the
@@ -1780,12 +2001,22 @@ def test_capability_summary_specialist_row_when_no_rounds(tmp_path):
     _write_state(sd, _basic_state())
     b = build(sd)
     spec = b["capability_summary"]["specialist"]
-    assert spec == {
-        "status":   "not_attempted",
-        "attempts": 0,
-        "keeps":    0,
-        "tested":   0,
-    }
+    # Headline counters
+    assert spec["status"] == "not_attempted"
+    assert spec["attempts"] == 0
+    assert spec["keeps"] == 0
+    assert spec["tested"] == 0
+    # Stable shape: every catalogue specialist seeded at zero so the
+    # dashboard can iterate without presence checks.
+    for d in (
+        "serving_specialist", "kernel_switch_specialist",
+        "comm_specialist", "compiler_specialist", "system_specialist",
+        "pr_intel_specialist", "session_steward_specialist",
+    ):
+        assert spec["by_specialist"][d] == {
+            "status": "not_attempted",
+            "attempts": 0, "keeps": 0, "tested": 0,
+        }
 
 
 def test_capability_summary_specialist_agrees_with_specialist_runs(tmp_path):
