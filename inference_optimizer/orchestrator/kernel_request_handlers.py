@@ -575,6 +575,46 @@ def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
     return ""
 
 
+def _fill_integrate_defaults_from_state(
+    payload: dict, *, session_dir: Path,
+) -> dict:
+    """Pull ``base_tput`` / ``config_path`` / ``extra_sglang_args`` defaults from SharedState.
+
+    Sibling of ``_resolve_integrate_payload`` but runs *before* the
+    ``base_tput > 0`` hard-check at the top of ``integrate_handler``.
+    ``_resolve_integrate_payload`` already handles ``patch_path`` /
+    ``source_file`` defaulting; the three fields filled here are the
+    other Magpie re-baseline inputs that Orchestration tends to omit
+    when it sends a bare ``{"kernel_id": ...}`` payload.
+
+    Always returns a (shallow) copy of ``payload`` so the caller can
+    treat it as a fresh dict; never raises on a missing SharedState
+    snapshot (returns the input dict unchanged in that case).
+    """
+    from .shared_state import SharedState
+
+    resolved = dict(payload)
+    state = SharedState.load_or_init(session_dir)
+
+    if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
+        bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        if bt > 0:
+            resolved["base_tput"] = bt
+
+    if not resolved.get("config_path"):
+        cfg = getattr(state, "baseline_config_path", "") or ""
+        if cfg:
+            resolved["config_path"] = cfg
+
+    current_best = getattr(state, "current_best", None) or {}
+    if not resolved.get("extra_sglang_args") and isinstance(current_best, dict):
+        cb_args = current_best.get("extra_sglang_args") or ""
+        if cb_args:
+            resolved["extra_sglang_args"] = cb_args
+
+    return resolved
+
+
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
     """Fill integrate inputs from SharedState when Orchestration sends only kernel_id.
 
@@ -1666,8 +1706,17 @@ async def integrate_handler(
     """
     from .action_executors.baseline import BaselineExecutor
     from .action_executors.benchmark_result import is_valid_measurement
+    from .shared_state import SharedState
     from .sub_agent_runner import RunnerContext
     from .task_registry import Task
+
+    # Orchestration often calls integrate with just {kernel_id} — the
+    # already-materialised baseline / current-best config lives in
+    # SharedState. Fill it in before the hard ``base_tput > 0`` check so
+    # a well-prepared session_dir is self-sufficient and we don't fail
+    # the integrate task with a phantom "missing base_tput" when the
+    # number is right there on disk.
+    payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
     base_tput = float(payload.get("base_tput", 0.0))
     if base_tput <= 0:
