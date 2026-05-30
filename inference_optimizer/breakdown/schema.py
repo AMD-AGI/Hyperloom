@@ -440,6 +440,12 @@ class SourceBreakdown(TypedDict, total=False):
     oob_pct_of_total: float
     # primary explore family bucket.
     explore_pct_of_total: float
+    # FRAMEWORK_PR phase contribution (PRELUDE → FRAMEWORK_PR →
+    # EXPLORE). Tracks gain from upstream-PR bake-ins as a separate
+    # row so the dashboard's per-source totals reconcile against
+    # ``validated_total_pct``; previously these KEEPs fell into
+    # ``other`` and silently disappeared.
+    framework_pr_pct_of_total: float
     backends_pct_of_total: float
     params_pct_of_total: float
     sweep_pct_of_total: float
@@ -462,9 +468,19 @@ class PhaseBreakdownKernel(TypedDict, total=False):
     by_kernel_id: dict[str, float]
 
 
+class PhaseBreakdownFrameworkPr(TypedDict, total=False):
+    """FRAMEWORK_PR phase gain split by adopted PR
+    reference. ``by_pr`` keys are the entry's ``variant_name`` (PR
+    label, typically ``PR:<repo>#<num>`` or ``PR:<num>``); empty
+    string falls back to ``"?"``."""
+    total_gain_pct: float
+    by_pr: dict[str, float]
+
+
 class PhaseBreakdown(TypedDict, total=False):
     """v0.8 M7 per-phase gain attribution (KB_design §3.13 M7 §6)."""
     prelude: PhaseBreakdownExplore         # always 0 by definition
+    framework_pr: PhaseBreakdownFrameworkPr  # PRELUDE → FRAMEWORK_PR → EXPLORE
     explore: PhaseBreakdownExplore
     kernel:  PhaseBreakdownKernel
     sweep:   PhaseBreakdownExplore         # usually 0 (sweep is measurement)
