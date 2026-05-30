@@ -1047,6 +1047,9 @@ def _seed_shared_state(
         # EXPLORE). ``--no-framework`` skips it; default on. Mirrors
         # the ``--no-kernel`` / ``kernel_enabled`` pattern.
         framework_phase_enabled=not bool(getattr(args, "no_framework", False)),
+        # ``--no-explore`` skips the EXPLORE phase entirely (PRELUDE /
+        # FRAMEWORK_PR → KERNEL, or → SWEEP when kernel is also off).
+        explore_enabled=not bool(getattr(args, "no_explore", False)),
         gain_driven_kernel_opt=bool(
             getattr(args, "gain_driven_kernel_opt", False),
         ),
@@ -3784,6 +3787,27 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     f"session is already in phase={cur_phase!r} "
                     f"(cannot retroactively skip)"
                 )
+        # Same persistence contract for the EXPLORE phase toggle.
+        if not bool(getattr(state, "explore_enabled", True)):
+            args.no_explore = True
+            print("  explore phase         : DISABLED (persisted from original run)")
+        elif bool(getattr(args, "no_explore", False)):
+            # Operator passed --no-explore on resume of an explore-enabled
+            # session. Only honour it before EXPLORE has been entered —
+            # retroactively skipping a phase we are in/past is incoherent.
+            cur_phase = (getattr(state, "phase", "") or "").strip().upper()
+            if cur_phase in ("", "PRELUDE", "FRAMEWORK_PR"):
+                state.explore_enabled = False
+                print(
+                    "  explore phase         : DISABLING for resume "
+                    f"(--no-explore + phase={cur_phase or 'PRELUDE'})"
+                )
+            else:
+                print(
+                    f"  explore phase         : WARN --no-explore ignored; "
+                    f"session is already in phase={cur_phase!r} "
+                    f"(cannot retroactively skip)"
+                )
 
         # CRITICAL: a leftover stop_reason from the prior run (most often
         # "time_exhausted") fools Orchestration into thinking the work is
@@ -4075,6 +4099,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     })
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     no_kernel = getattr(args, "no_kernel", False)
+    no_explore = getattr(args, "no_explore", False)
+    if no_explore and no_kernel:
+        print(
+            "WARNING: --no-explore and --no-kernel are both set; the run "
+            "collapses to baseline -> SWEEP over an empty optimization_stack "
+            "(no EXPLORE param search, no KERNEL rewrites). SWEEP only "
+            "re-validates the baseline recipe. Continuing as requested.",
+            file=sys.stderr,
+        )
+    elif no_explore:
+        print("Explore phase   : DISABLED (--no-explore); "
+              f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}")
 
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
@@ -4737,6 +4773,13 @@ def _build_parser() -> argparse.ArgumentParser:
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
+    opt.add_argument("--no-explore", action="store_true", default=False,
+                      help="Skip the EXPLORE phase entirely. PRELUDE (and "
+                           "FRAMEWORK_PR, if enabled) route straight to KERNEL "
+                           "— or to SWEEP when --no-kernel is also set. Useful "
+                           "for a baseline -> kernel-only run, or to validate "
+                           "the current recipe via SWEEP without a serving-"
+                           "param search. Default: explore enabled.")
     opt.add_argument(
         "--launch-info-file", type=str, default=None,
         help="Write a JSON file with the launched session's pid, "
