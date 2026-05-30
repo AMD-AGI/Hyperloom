@@ -26,7 +26,7 @@ from typing import Any
 
 import httpx
 
-from .base import Source, SourceData, SourceUnavailable
+from .base import SourceData, SourceUnavailable
 from .cluster_decoder import decode_gpu_snapshot, merge_gpu_snapshots
 
 

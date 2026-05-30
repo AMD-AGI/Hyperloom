@@ -23,7 +23,7 @@ Schema v3 (dependencies added)::
       "image":             "<registry>/<repo>:<tag>" or null,
       "model_path":        "...",
       "model_name":        "...",
-      "framework":         "sglang|vllm",
+      "framework":         "sglang|vllm|atom",
       "gpu_type":          "mi300x|mi325x|mi355x|''",
       "tp":                N or null,
       "workload":          {"isl":..., "osl":..., "max_model_len":...,
@@ -380,6 +380,23 @@ def build_manifest(
         ),
         "pr_degraded_reason": (
             getattr(args, "pr_degraded_reason", None) if args is not None else None
+        ),
+        # GAP 1 — Warm-recipe replay flags. Persisted into manifest so
+        # robustness_monitor.sh resume / cross-machine resume picks up
+        # the same gate thresholds rather than reverting to defaults.
+        # The ``warm_replay_enabled`` field is the inverted form of
+        # ``--no-warm-replay`` so the YAML reads more naturally.
+        "warm_replay_enabled": (
+            not bool(getattr(args, "no_warm_replay", False))
+            if args is not None else True
+        ),
+        "warm_replay_min_confidence": (
+            float(getattr(args, "warm_replay_min_confidence", 0.7) or 0.7)
+            if args is not None else 0.7
+        ),
+        "warm_replay_min_reproduce_pct": (
+            float(getattr(args, "warm_replay_min_reproduce_pct", 0.8) or 0.8)
+            if args is not None else 0.8
         ),
     }
 

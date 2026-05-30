@@ -70,18 +70,18 @@ def _build_fixture(sd: Path) -> None:
         "baseline_failure_streak": 0,
         "baseline_config_path": "runs/baseline/t1/baseline_config.with_envs.yaml",
         "current_best":   {"tput": 776.4, "action": "validate_stack",
-                            "extra_sglang_args": "--enable-X --nccl-Y",
+                            "extra_server_args": "--enable-X --nccl-Y",
                             "extra_envs": {"NCCL_DEBUG": "INFO"},
                             "ttft_mean_ms": 110.2, "e2el_mean_ms": 1200.4},
         "optimization_stack": [
             {"action": "backends",     "variant_name": "flag_X", "gain_pct": 23.4,
-             "extra_sglang_args": "--enable-X",
+             "extra_server_args": "--enable-X",
              "ts": "2026-05-14T07:15:00+00:00"},
             {"action": "params",       "variant_name": "nccl_Y", "gain_pct":  7.8,
-             "extra_sglang_args": "--nccl-Y",
+             "extra_server_args": "--nccl-Y",
              "ts": "2026-05-14T07:30:00+00:00"},
             {"action": "kernel_opt:k001", "variant_name": "",  "gain_pct": 45.6,
-             "extra_sglang_args": "",
+             "extra_server_args": "",
              "ts": "2026-05-14T08:00:00+00:00"},
         ],
         "cumulative_gain": 91.5,
@@ -119,7 +119,7 @@ def _build_fixture(sd: Path) -> None:
             {"ts": "2026-05-14T08:30:00+00:00", "task_id": "v1",
              "status": "succeeded", "decision": "promoted", "key_metric": 84.2},
         ],
-        "last_select_kernels": {"hot_kernels_top15": [
+        "last_trace_analyze": {"hot_kernels_top15": [
             {"kernel_id": "k001", "name": "fused_rmsnorm", "gpu_pct": 18.2,
              "bottleneck": "memory", "arithmetic_intensity": 4.0,
              "source_file": "/path/to/rmsnorm.py", "reusable_native_kernel": True,
@@ -153,7 +153,7 @@ def _build_fixture(sd: Path) -> None:
         "kernel_integrate_attempts": {"k001|patches/k001/0001.patch|": {
             "key": "k001|patches/k001/0001.patch|",
             "kernel_id": "k001", "patch_path": "patches/k001/0001.patch",
-            "target_file": "/path/to/rmsnorm.py", "extra_sglang_args": "",
+            "target_file": "/path/to/rmsnorm.py", "extra_server_args": "",
             "attempts": [
                 {"decision": "KEEP", "status": "succeeded",
                  "new_tput": 776.4, "gain_pct": 45.6,
@@ -168,7 +168,7 @@ def _build_fixture(sd: Path) -> None:
         "params_search": {
             "schema_version": 2,
             "accepted": [{"name": "nccl_Y", "fingerprint": "f1",
-                           "extra_sglang_args": "--nccl-Y", "extra_envs": {},
+                           "extra_server_args": "--nccl-Y", "extra_envs": {},
                            "output_throughput": 454.3, "gain_pct": 7.8,
                            "ts": "2026-05-14T07:30:00+00:00"}],
             "rejected": [{"name": "bad_x", "fingerprint": "f2", "gain_pct": -2.5}],
@@ -1074,7 +1074,6 @@ Covers KB_design/3.12_observability/README.md acceptance criteria:
 
 
 import json
-import os
 from pathlib import Path
 
 import pytest

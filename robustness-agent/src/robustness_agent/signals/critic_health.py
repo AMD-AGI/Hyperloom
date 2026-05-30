@@ -38,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..role.prompt_inputs import InboxItem, ReactorContext
+from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 

@@ -135,7 +135,7 @@ def test_baseline_family_uses_dedicated_projection():
         "params": {
             "benchmark_script": "sglang_mi300x.sh",
             "result_dir": "/workspace/hyperloom",
-            "extra_sglang_args": ["--tp", "8"],
+            "extra_server_args": ["--tp", "8"],
             "extra_envs": {"CONC": "8"},
             "model_path": "/wekafs/models/dsr1",
             "gpu_type": "mi300x",
@@ -212,6 +212,88 @@ def test_inbox_and_coordinator_events_combined():
     data = SourceData(coordinator_events=coord_events)
     out = evaluate_repeated_payload_signals(
         ctx, data, config=RepeatedPayloadConfig(streak_threshold=3),
+    )
+    sym = next(s for s in out if s.name == "same_payload_loop")
+    assert sym.evidence["count"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Legacy ``extra_sglang_args`` envelopes still fingerprint to the same
+# hash as canonical envelopes.
+# ---------------------------------------------------------------------------
+def _integrate_event(*, task_id: str, args_value: str, legacy: bool) -> dict:
+    """Build an ``integrate`` family envelope. When ``legacy=True`` the
+    payload carries the legacy ``extra_sglang_args`` key; otherwise the
+    canonical ``extra_server_args`` key. Both rows are otherwise
+    identical so the projection should fingerprint them to the same
+    hash.
+    """
+    key = "extra_sglang_args" if legacy else "extra_server_args"
+    return {
+        "topic": "delegated_result",
+        "agent": "coordinator",
+        "payload": {
+            "kind": "integrate",
+            "family": "integrate",
+            "state": "failed",
+            "task_id": task_id,
+            "error_class": "ApplyFailed",
+            "params": {
+                "kernel_id": "k1",
+                "patch_path": "/tmp/p1.patch",
+                key: args_value,
+                "extra_envs": {"CONC": "8"},
+            },
+            "idempotency_key": f"integrate-{task_id}",
+        },
+    }
+
+
+def test_legacy_extra_sglang_args_envelope_hashes_identically(recwarn):
+    """G3 regression: a legacy ``extra_sglang_args`` envelope must
+    fingerprint to the same hash as a canonical ``extra_server_args``
+    envelope so the same_payload_loop signal still fires across a
+    mixed-key burst (e.g. an in-flight rollout where some workers
+    still emit the legacy key).
+    """
+    events = [
+        _integrate_event(task_id="t1", args_value="--tp 4", legacy=True),
+        _integrate_event(task_id="t2", args_value="--tp 4", legacy=False),
+        _integrate_event(task_id="t3", args_value="--tp 4", legacy=True),
+    ]
+    data = SourceData(coordinator_events=events)
+    out = evaluate_repeated_payload_signals(
+        _ctx(), data, config=RepeatedPayloadConfig(streak_threshold=3),
+    )
+    sym = next(s for s in out if s.name == "same_payload_loop")
+    assert sym.evidence["family"] == "integrate"
+    assert sym.evidence["count"] == 3, (
+        "legacy + canonical envelopes did not collapse to the same hash"
+    )
+    # At least one DeprecationWarning fired (one per legacy envelope
+    # touched by ``_hash_for`` — exact count is implementation-detail
+    # but >= 1 must hold for the audit channel).
+    legacy_warnings = [
+        w for w in recwarn.list
+        if issubclass(w.category, DeprecationWarning)
+        and "extra_sglang_args" in str(w.message)
+    ]
+    assert legacy_warnings, "no DeprecationWarning fired on legacy envelope"
+
+
+def test_legacy_envelope_alone_still_fingerprints():
+    """If every envelope in a streak uses the legacy key, the signal
+    must still fire — the shim must normalise the key before the
+    projection, not just on mixed-key bursts.
+    """
+    events = [
+        _integrate_event(task_id="t1", args_value="--tp 4", legacy=True),
+        _integrate_event(task_id="t2", args_value="--tp 4", legacy=True),
+        _integrate_event(task_id="t3", args_value="--tp 4", legacy=True),
+    ]
+    data = SourceData(coordinator_events=events)
+    out = evaluate_repeated_payload_signals(
+        _ctx(), data, config=RepeatedPayloadConfig(streak_threshold=3),
     )
     sym = next(s for s in out if s.name == "same_payload_loop")
     assert sym.evidence["count"] == 3
