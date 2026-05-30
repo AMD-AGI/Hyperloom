@@ -134,12 +134,11 @@ class _RetiredFlag(argparse.Action):
 def _orchestration_rules_fragment_path() -> Path:
     """Path to the rules-only fragment consumed by ``prompt_builder``.
 
-    Phase 1 collapsed ``orchestration.md`` to a small "rules + output protocol"
-    fragment; the full system prompt is composed at runtime from
+    ``orchestration.md`` is a small "rules + output protocol" fragment;
+    the full system prompt is composed at runtime from
     :class:`ActionMetadata` and run-level parameters by
-    :func:`build_orchestration_prompt`. The legacy
-    ``orchestration.no_kernel.md`` was deleted — kernel-vs-no-kernel is now
-    a builder parameter, not a separate file.
+    :func:`build_orchestration_prompt`. Kernel-vs-no-kernel is a builder
+    parameter, not a separate file.
     """
     return asset_system_prompts_dir() / "orchestration.md"
 
@@ -389,42 +388,42 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """B3: tighten incompatible CLI knobs when --framework atom is selected.
+    """IR-8: validate atom-specific CLI knob compatibility.
 
-    atom in Magpie v1 has neither a torch_profiler integration (so
-    roofline cannot produce a trace) nor a source-patcher for the
-    framework-agent's PR loop (the kernel-agent / framework-agent assume
-    sglang/vllm source layouts). Auto-disabling kernel-agent +
-    framework-agent + roofline phases keeps the rest of the run sensible
-    without forcing the operator to remember three extra flags. Explicit
-    user opt-in for any of these is preserved (we only flip a value when
-    it is still at its enabled default).
+    The function's only responsibility is the multi-node fail-fast
+    guard. The forward-looking alias :data:`_assert_atom_single_node`
+    (defined below) resolves to this same callable — new call sites
+    are encouraged to prefer the clearer name.
 
-    atom multi-node is also unsupported (Magpie wrapper / atom server
-    have no multi-node TP wiring) — fail-fast on ``--nodes >= 2`` so
-    operators don't burn a ~6-min cold start on a doomed run.
+    What works on atom today (NO auto-tightening applied):
 
-    Returns the list of flag names auto-disabled (for callers that want
-    to log / assert). Calls ``sys.exit(2)`` on the multi-node guard
-    failure.
+    * kernel-agent — atom source roots are wired into PolicyGate's
+      allowlist, ``_REUSABLE_SOURCE_ROOTS``, and the server-flag
+      pre-flight probe; ``--no-kernel`` is preserved at its False
+      default.
+    * framework-agent — atom's repo URL
+      (https://github.com/ROCm/ATOM.git) is in
+      ``framework_agent.repo_map``; ``--no-framework`` is preserved
+      at its False default, so the FRAMEWORK_PR phase runs.
+    * profile / roofline / TraceLens — atom's OpenAI-compatible
+      server exposes /start_profile and /stop_profile HTTP endpoints,
+      the atom engine takes a ``--torch-profiler-dir`` CLI flag, and
+      Magpie's ``atom_mi*x.sh`` bridges ``PROFILE=1`` to that flag.
+      atom writes standard ``*.pt.trace.json.gz`` chrome traces which
+      TraceLens consumes unchanged.
+
+    What still fails fast on atom:
+
+    * ``--nodes >= 2`` — atom multi-node TP wiring is not yet
+      implemented in either the Magpie wrapper or the atom server.
+      ``sys.exit(2)`` so operators don't burn a ~6-min cold start on
+      a doomed run.
+
+    Returns the list of flag names auto-disabled — always empty since
+    no defaults are flipped. The return type is preserved so callers
+    that append to / log the list keep working unchanged.
     """
     auto_disabled: list[str] = []
-    if not getattr(args, "no_kernel", False):
-        args.no_kernel = True
-        auto_disabled.append("--no-kernel")
-    if not getattr(args, "no_framework", False):
-        args.no_framework = True
-        auto_disabled.append("--no-framework")
-    if getattr(args, "enable_roofline", True):
-        args.enable_roofline = False
-        auto_disabled.append("--no-enable-roofline")
-    if auto_disabled:
-        print(
-            f"  framework=atom: auto-disabling "
-            f"{', '.join(auto_disabled)} (atom has no profiler / "
-            "sglang/vllm-specific source patcher; see "
-            "atom_boost_tutorials.md §6)"
-        )
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
             "ERROR: --framework atom does not support multi-node "
@@ -433,7 +432,20 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
             file=sys.stderr,
         )
         sys.exit(2)
+    print(
+        "  framework=atom: no auto-disable applied (kernel-agent + "
+        "framework-agent + profile / roofline / TraceLens all wired "
+        "for atom); --nodes>=2 guard active — see SKILL.md IR-8"
+    )
     return auto_disabled
+
+
+# Forward-looking alias. The name ``_apply_atom_auto_tighten`` is kept
+# because tests / SKILL references still cite it. New call sites that
+# want the clearer name can use this alias; the body is the same
+# function — both names point at the same callable object so
+# monkeypatching either still works.
+_assert_atom_single_node = _apply_atom_auto_tighten
 
 
 def _resolve_gpu_type(
@@ -4500,9 +4512,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Inference framework to benchmark / optimize. Resolution order: "
              "--framework > $FRAMEWORK env > sglang (default). Selection is "
              "session-wide; mixing frameworks in a single session is not "
-             "supported. NOTE: --framework atom is single-node-only and has "
-             "no profiler / framework-source-patcher integration; B3 "
-             "auto-tightens incompatible phases off when atom is selected.",
+             "supported. NOTE: --framework atom is single-node-only "
+             "(``--nodes>=2`` fails fast); profile / roofline, "
+             "kernel-agent, and framework-agent are all enabled on atom. "
+             "The auto-tighten guard only enforces ``--nodes 1``.",
     )
     opt.add_argument(
         "--nodes", type=int,

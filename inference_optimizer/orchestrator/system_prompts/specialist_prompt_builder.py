@@ -68,7 +68,50 @@ from inference_optimizer.orchestrator.policy import (
 # ---------------------------------------------------------------------------
 
 
+def _is_atom(inp: SpecialistPromptInputs) -> bool:
+    """True when ``_focus_*`` blocks should use atom-flavoured hints.
+
+    ``framework`` may be empty on legacy / test dispatches where the
+    Coordinator did not plumb it; treat that as "use the canonical
+    sglang/vllm hint block" so existing tests keep their semantics.
+    """
+    return (inp.framework or "").strip().lower() == "atom"
+
+
 def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    if _is_atom(inp):
+        return [
+            "You target **atom scheduler / cuda_graph / kv_cache** code.",
+            "",
+            "**What to read first**",
+            "- `atom/entrypoints/openai_server.py` (HTTP request routing, "
+            "`/start_profile`, `/stop_profile`).",
+            "- `atom/model_engine/engine_core.py` (engine main loop, "
+            "`start_profiler` call sites).",
+            "- `atom/model_engine/llm_engine.py` (engine API surface).",
+            "- `atom/model_engine/model_runner.py` (per-rank forward, "
+            "profiler hooks, cudagraph capture).",
+            "- `atom/model_engine/arg_utils.py` (CLI flag inventory; "
+            "ground-truth for `--level`, `--enable_prefix_caching`, "
+            "`--cudagraph-capture-sizes`, `--kv_cache_dtype`, etc.).",
+            "- `atom/config.py` (engine config shape).",
+            "- KB anchor `framework.*` (cuda_graph / batching / kv_cache).",
+            "",
+            "**Winning techniques to consider**",
+            "- `--level {2,3}` (atom's torch.compile / cudagraph bracket).",
+            "- `--enable_prefix_caching` for shared-prefix workloads.",
+            "- `--cudagraph-capture-sizes` bracketed around the live CONC.",
+            "- `--kv_cache_dtype fp8` on FP8-shipped models (gate accuracy).",
+            "- `--max-num-seqs` / `--max-num-batched-tokens` at concurrency "
+            "boundaries (same scheduler-side tuning as sglang/vllm).",
+            "",
+            "**Pitfalls (historical REVERTs / atom-specific)**",
+            "- Atom is single-node only. Multi-node distributed proposals "
+            "are non-actionable — pivot to rank-local optimisations.",
+            "- `--enforce-eager` is a debug fallback; almost never a perf win.",
+            "- Cudagraph capture size lists that don't bracket the live "
+            "CONC trigger silent recapture on every batch boundary.",
+        ]
     return [
         "You target **vLLM / SGLang scheduler / cuda_graph / kv_cache** code.",
         "",
@@ -92,6 +135,35 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    if _is_atom(inp):
+        return [
+            "You target **aiter / atom kernels / triton** code (attention,",
+            "MoE, GEMM, fused-attention paths).",
+            "",
+            "**What to read first**",
+            "- `aiter/csrc/` and `aiter/aiter/ops/` (CK / hipBLASLt "
+            "wrappers — **shared with sglang and vllm**, so aiter "
+            "patches apply transparently across all three).",
+            "- `atom/model_ops/` (atom-specific kernel call sites).",
+            "- `atom/quantization/` (atom's FP8 / weight-quant paths).",
+            "- `atom/models/` (built-in model implementations; cross-",
+            "reference for which kernels each model touches).",
+            "- KB anchor `kernel.*` (CDNA3 tiling / MoE / attention / GEMM).",
+            "",
+            "**Winning techniques to consider**",
+            "- aiter env switches (`VLLM_ROCM_USE_AITER=1` umbrella + "
+            "per-op overrides) — the shared aiter surface means the "
+            "same env knobs that work on sglang/vllm carry over to atom.",
+            "- Tile-size / occupancy tuning for short-OSL decode.",
+            "- Fused-attention enable flags for prefill chunks.",
+            "",
+            "**Pitfalls**",
+            "- Searching `sglang/python/sglang/srt/layers/attention/` on "
+            "an atom box: those paths are empty / absent. Use "
+            "`atom/model_ops/` + shared `aiter/` instead.",
+            "- Mixing aiter overrides with `--enforce-eager` invalidates "
+            "atom's cudagraph captures silently.",
+        ]
     return [
         "You target **aiter / SGLang kernels / triton** code (attention,",
         "MoE, GEMM, fused-attention paths).",
@@ -118,6 +190,43 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    if _is_atom(inp):
+        return [
+            "You target **intra-node RCCL / NCCL / QuickReduce / "
+            "AllReduce** tuning on atom.",
+            "",
+            "**Atom is single-node only.** Multi-node tensor / data / "
+            "pipeline parallelism is NOT available on atom. Cross-node "
+            "collectives proposals are non-actionable — focus on "
+            "intra-node concerns (rank-local optimisations, "
+            "intra-node NCCL/RCCL config, allreduce algorithm choice "
+            "for the on-box TP group).",
+            "",
+            "**What to read first**",
+            "- `atom/utils/distributed/utils.py` (single-node "
+            "`torch.distributed` helper — NOT a multi-node TP "
+            "orchestration layer).",
+            "- `aiter/csrc/quick_reduce/` and RCCL plugin paths "
+            "(shared with sglang/vllm; intra-node only on atom).",
+            "- KB anchor `communication.*` (allreduce / QuickReduce / "
+            "topology).",
+            "",
+            "**Winning techniques to consider (single-node)**",
+            "- `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` when "
+            "intra-node TP allreduce message size > 1MiB.",
+            "- `NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS` tuning for "
+            "the on-box XGMI topology.",
+            "- `--enable-dp-attention` (MLA models) — DP-attention "
+            "shifts work onto a TP-free per-rank path, reducing the "
+            "allreduce footprint.",
+            "",
+            "**Pitfalls**",
+            "- Proposing multi-node TP / PP topologies — atom rejects "
+            "them at startup. The Coordinator collapses `--nodes>1` to "
+            "single-node mode on atom (IR-8).",
+            "- INT4 QuickReduce at TP=2 — overhead dominates the "
+            "bandwidth savings on small message sizes.",
+        ]
     return [
         "You target **RCCL / NCCL / QuickReduce / AllReduce** code and tuning.",
         "",
@@ -366,6 +475,16 @@ class SpecialistPromptInputs:
     # specialise on it where useful; the legacy ``framework_pr_scout``
     # branch was retired with the FRAMEWORK_PR phase migration.
     sub_kind: str = ""
+
+    # Active server framework name (``sglang`` / ``vllm`` / ``atom``).
+    # Mirrored from ``SharedState.framework`` by
+    # ``Coordinator._warm_specialist_params``. Empty string means the
+    # Coordinator didn't plumb it (legacy / test path); per-domain
+    # focus helpers must treat an empty string as "fall back to the
+    # canonical sglang/vllm hint blocks". Used to switch the
+    # "what to read first" bullets to atom-equivalent source paths
+    # when ``framework == 'atom'``.
+    framework: str = ""
 
     # Local source navigation hint (§3.5 §6 part 7)
     framework_source_roots: tuple[str, ...] = ()

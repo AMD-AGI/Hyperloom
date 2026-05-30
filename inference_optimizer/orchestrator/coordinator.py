@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from ..compat.payload_aliases import read_extra_server_args
 from ..recipe_kb import RecipeKB, recipe_canonical_id
 from ..recipe_snapshot_constants import detect_framework_version
 
@@ -102,7 +103,7 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 #
 # Orchestration can recover from a baseline failure by proposing a fresh
 # baseline with overrides (``params.benchmark_script`` /
-# ``params.result_dir`` / different ``extra_sglang_args`` / etc. — see
+# ``params.result_dir`` / different ``extra_server_args`` / etc. — see
 # SKILL.md "Magpie leak-path salvage"). What it MUST NOT do is propose
 # the *same* params after the same failure mode has fired N times in a
 # row — the PolicyGate stop-loss below promotes that into a
@@ -120,7 +121,7 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "benchmark_script",
     "result_dir",
-    "extra_sglang_args",
+    "extra_server_args",
     "extra_envs",
     "model_path",
     "gpu_type",
@@ -228,7 +229,7 @@ def _summarize_failed_variants(
     """Project the ``status=='failed'`` rows of a grid_runner result list.
 
     Returns a compact ``[{name, error_class, error_excerpt,
-    extra_sglang_args}, ...]`` so the audit-trail extras can carry
+    extra_server_args}, ...]`` so the audit-trail extras can carry
     per-variant failure context without ballooning the prompt context.
 
     Why this exists: explore / sweep executors run a multi-variant grid
@@ -258,7 +259,7 @@ def _summarize_failed_variants(
             "name": str(row.get("name") or ""),
             "error_class": str(row.get("error_class") or "") or None,
             "error_excerpt": err[:400] if err else None,
-            "extra_sglang_args": str(row.get("extra_sglang_args") or ""),
+            "extra_server_args": str(row.get("extra_server_args") or ""),
         })
         if len(failed) >= max_entries:
             break
@@ -387,14 +388,14 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
     return out
 
 
-def _dedupe_extra_sglang_args(args_str: str) -> str:
+def _dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string.
 
     SGLang / vLLM argparse uses ``action="store"`` for almost every
     knob, so if ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128
     --cuda-graph-max-bs 256`` end up on the same command line, only the
     last value is honored. The original cmdline still works, but
-    ``final.extra_sglang_args`` exists for dashboard / replay use and
+    ``final.extra_server_args`` exists for dashboard / replay use and
     looking at it with the same flag repeated 3-15 times is misleading
     (it reads as "this run actually used N values" when really only the
     last won).
@@ -2549,7 +2550,7 @@ class Coordinator:
         }
         cb = state.current_best or {}
         if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_sglang_args") or "")
+            cb_args = str(cb.get("extra_server_args") or "")
             if cb_args:
                 params["base_extra_args"] = cb_args
         last_bl = state.last_baseline or {}
@@ -2804,7 +2805,7 @@ class Coordinator:
             params["config_path"] = state.baseline_config_path
         cb = state.current_best or {}
         if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_sglang_args") or "")
+            cb_args = str(cb.get("extra_server_args") or "")
             if cb_args:
                 params["base_extra_args"] = cb_args
         # Mirror the last-baseline benchmark_script when present so a
@@ -4479,7 +4480,7 @@ class Coordinator:
 
         The Orchestration prompt's FAILURE RECOVERY section instructs the
         LLM to introduce a new ``benchmark_script`` / ``result_dir`` /
-        ``extra_sglang_args`` override after a baseline failure. This
+        ``extra_server_args`` override after a baseline failure. This
         method is the PolicyGate stop-loss that fires when the LLM
         ignores that instruction.
 
@@ -4537,7 +4538,7 @@ class Coordinator:
             "e.g. \"sglang_mi300x.sh\" to bypass dsr1_fp8_mi300x.sh's "
             "hardcoded --result-dir), params.result_dir (sanitized path; "
             "Coordinator already defaults RESULT_DIR=<workspace>), or "
-            "extra_sglang_args / extra_envs."
+            "extra_server_args / extra_envs."
         )
         return PolicyDenied(
             "action='baseline' denied: same-fingerprint failure streak",
@@ -4643,8 +4644,8 @@ class Coordinator:
     ) -> PolicyDenied | None:
         """Reject orchestration action/delegate attempts that skip required steps.
 
-        Phase 2 addition: once optimization_stack has unvalidated KEEPs,
-        the next ``explore`` round must carry the inlined stack rebench
+        Once optimization_stack has unvalidated KEEPs, the next
+        ``explore`` round must carry the inlined stack rebench
         (PolicyGate rule ``stack_rebench_required``). The legacy
         ``validate_stack`` standalone action was retired in the legacy release; this
         function now only enforces the cross-action ordering (target_analysis
@@ -5702,7 +5703,7 @@ class Coordinator:
                 )
         cb = self.shared_state.current_best or {}
         cb_args = (
-            str(cb.get("extra_sglang_args") or "")
+            str(cb.get("extra_server_args") or "")
             if isinstance(cb, dict) else ""
         )
         if pending.action_name == "profile":
@@ -6163,6 +6164,12 @@ class Coordinator:
         # so serving / system / kernel-switch specialists reason against the
         # real benchmark workload rather than the dataclass defaults.
         params.setdefault("gpu_type", state.gpu_type or "")
+        # Active server framework name — used to switch the per-domain
+        # "what to read first" hint blocks to atom paths when
+        # SharedState.framework == "atom". sglang / vllm sessions fall
+        # through to the canonical hint blocks.
+        if getattr(state, "framework", "") or "":
+            params.setdefault("framework", str(state.framework))
         if int(getattr(state, "tp", 0) or 0) > 0:
             params.setdefault("tp", int(state.tp))
         if getattr(state, "precision", "") or "":
@@ -7031,7 +7038,7 @@ class Coordinator:
                             "kernel_id": rejected.get("kernel_id"),
                             "patch_path": rejected.get("patch_path"),
                             "target_file": rejected.get("target_file"),
-                            "extra_sglang_args": rejected.get("extra_sglang_args", ""),
+                            "extra_server_args": rejected.get("extra_server_args", ""),
                             "attempt_count": rejected.get("attempt_count"),
                             "best_gain_pct": rejected.get("best_gain_pct"),
                             "reason": rejected.get("reason"),
@@ -7452,10 +7459,19 @@ class Coordinator:
             self.shared_state.seed_stack_from_current_best()
 
         cb = self.shared_state.current_best or {}
-        extra_args = str(
-            result.get("extra_sglang_args")
-            or (cb.get("extra_sglang_args") if isinstance(cb, dict) else "")
-            or ""
+        # ``result`` is a sub-agent envelope (kernel_opt → integrate_patch
+        # executor result); route the read through the compat helper so a
+        # legacy ``extra_sglang_args`` envelope still resolves while
+        # logging a single deprecation warning. ``cb`` is Coordinator-
+        # internal state and is migrated at load time by
+        # ``_migrate_legacy_extra_sglang_args_keys``, so a direct .get
+        # is safe.
+        extra_args = (
+            read_extra_server_args(result)
+            or (
+                str(cb.get("extra_server_args") or "")
+                if isinstance(cb, dict) else ""
+            )
         ).strip()
         apply_result = result.get("apply_result") or {}
         entry = {
@@ -7490,7 +7506,7 @@ class Coordinator:
                 action="integrate",
                 variant_name=entry.get("kernel_id"),
                 new_tput=new_tput,
-                extra_sglang_args=extra_args,
+                extra_server_args=extra_args,
                 ts=entry["ts"],
             )
 
@@ -7498,7 +7514,7 @@ class Coordinator:
             "action": "integrate",
             "tput": float(new_tput),
             "kernel_id": result.get("kernel_id"),
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": result.get("ttft_mean_ms"),
             "e2el_mean_ms": result.get("e2el_mean_ms"),
@@ -8930,17 +8946,17 @@ class Coordinator:
 
         base_args = ""
         if isinstance(previous, dict):
-            base_args = str(previous.get("extra_sglang_args") or "").strip()
+            base_args = str(previous.get("extra_server_args") or "").strip()
         candidate_args = ""
         if isinstance(bv, dict):
             candidate_args = str(
-                bv.get("candidate_extra_sglang_args")
-                or bv.get("extra_sglang_args")
+                bv.get("candidate_extra_server_args")
+                or bv.get("extra_server_args")
                 or ""
             ).strip()
         full_args = ""
         if isinstance(bv, dict):
-            full_args = str(bv.get("extra_sglang_args") or "").strip()
+            full_args = str(bv.get("extra_server_args") or "").strip()
         if base_args and candidate_args and full_args == candidate_args:
             full_args = " ".join((base_args, candidate_args))
         elif not full_args:
@@ -8948,14 +8964,14 @@ class Coordinator:
                 part for part in (base_args, candidate_args) if part
             )
         # Dedupe repeated ``--flag value`` pairs so the cumulative
-        # extra_sglang_args reflects what argparse will actually honor
+        # extra_server_args reflects what argparse will actually honor
         # (last value wins). Without this, every promote that re-applies
         # a multi-value combo candidate (e.g.
         # ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128 --cuda-graph-max-bs 256``)
         # leaves multiple copies of the same flag in the final args
         # string, which breaks reproduce-launch dashboards and the
-        # final.extra_sglang_args field surfaced by session_breakdown.
-        full_args = _dedupe_extra_sglang_args(full_args)
+        # final.extra_server_args field surfaced by session_breakdown.
+        full_args = _dedupe_extra_server_args(full_args)
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
@@ -8969,7 +8985,7 @@ class Coordinator:
                 self.shared_state.optimization_stack.append({
                     "action": task_kind,
                     "variant_name": variant_name,
-                    "candidate_extra_sglang_args": candidate_args,
+                    "candidate_extra_server_args": candidate_args,
                     "extra_envs": (
                         dict(bv.get("extra_envs") or {})
                         if isinstance(bv, dict) else {}
@@ -8987,14 +9003,14 @@ class Coordinator:
                     action=task_kind,
                     variant_name=variant_name,
                     new_tput=best_tput,
-                    extra_sglang_args=full_args,
+                    extra_server_args=full_args,
                 )
 
         self.shared_state.current_best = {
             "action": task_kind,
             "tput": float(best_tput),
             "variant_name": variant_name,
-            "extra_sglang_args": full_args,
+            "extra_server_args": full_args,
             "extra_envs": (
                 dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
             ),
@@ -9177,12 +9193,19 @@ class Coordinator:
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("warm-replay promote failed")
         elif task_kind == "profile":
-            # B2 (atom): profile_executor short-circuits to
-            # status="skipped" with error_class="atom_no_profiler" when
-            # FRAMEWORK=atom. Audit the no-op as "skipped" so the action
-            # ledger doesn't claim a fake promotion, and don't write any
-            # trace / profile_status fields. Still drop the pending gate
-            # for THIS task id so downstream proposals are not stuck.
+            # IR-8 fallback: profile_executor used to short-circuit on
+            # FRAMEWORK=atom with status="skipped" + error_class=
+            # "atom_no_profiler". That short-circuit was removed once
+            # Magpie's atom_mi*x.sh learned to bridge PROFILE=1 to
+            # atom's --torch-profiler-dir (atom natively supports torch
+            # profiler via /start_profile + /stop_profile). This
+            # ``skipped`` arm is now a *defensive* path: it still runs
+            # cleanly if an out-of-date Magpie clone is in play (the
+            # only realistic skipped producer left), or if a future
+            # executor returns skipped for a different reason. Audit
+            # the no-op as "skipped" so the action ledger doesn't claim
+            # a fake promotion, and drop the pending gate for THIS task
+            # id so downstream proposals are not stuck.
             if str(result.get("status") or "") == "skipped":
                 audit_decision = "skipped"
                 audit_extras = {
@@ -9302,14 +9325,17 @@ class Coordinator:
             # save() path persists the executor's mutations to disk.
             status = str(result.get("status") or "")
             if status == "skipped":
-                # B2 (atom): the roofline composite short-circuits to
-                # status="skipped" with error_class="atom_no_profiler"
-                # when FRAMEWORK=atom (no torch_profiler in Magpie v1).
-                # This is a structured no-op, not a failure: do NOT bump
+                # IR-8 fallback: the roofline composite used to short-
+                # circuit on FRAMEWORK=atom with status="skipped"
+                # because profile was a hard dependency and atom had
+                # no profiler wiring. That short-circuit was removed
+                # once Magpie's atom_mi*x.sh learned to bridge PROFILE=1
+                # to atom's --torch-profiler-dir. This arm is now the
+                # *defensive* path: an out-of-date Magpie clone (or a
+                # future skipped-emitting executor) still gets a clean
+                # no-op rather than a spurious "discarded". Do NOT bump
                 # ``roofline_failure_streak`` and do NOT touch the
-                # watermark / trace_analyze snapshot. Audit as skipped so
-                # the action ledger reflects the no-op rather than a
-                # spurious "discarded" decision.
+                # watermark / trace_analyze snapshot.
                 audit_decision = "skipped"
                 audit_extras = {
                     "error_class": result.get("error_class"),
@@ -9602,7 +9628,7 @@ class Coordinator:
                 lift = {
                     "name":              f"framework-pr:{cand_id}",
                     "variant_name":      cand_id,
-                    "candidate_extra_sglang_args": "",
+                    "candidate_extra_server_args": "",
                     "extra_envs":        {},
                     "workspace":         result.get("workspace"),
                 }

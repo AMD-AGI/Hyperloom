@@ -935,7 +935,7 @@ def _coerce_cli_value(value: str | bool) -> Any:
         return text
 
 
-def parse_extra_sglang_args(extra_args: str) -> dict[str, Any]:
+def parse_extra_server_args(extra_args: str) -> dict[str, Any]:
     """Parse selected SGLang flags from an EXTRA_SGLANG_ARGS-style string."""
     if not extra_args.strip():
         return {}
@@ -995,12 +995,21 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         runtime_flags.update(candidate["runtime_flags"])
     runtime_flags.setdefault("is_multigpu", bool(candidate.get("is_multigpu")))
     runtime_flags.setdefault("num_gpus_recommended", candidate.get("num_gpus_recommended"))
-    extra_sglang_args = (
-        getattr(args, "extra_sglang_args", "")
-        or candidate.get("extra_sglang_args", "")
+    # The canonical payload key is ``extra_server_args`` (renamed from
+    # the legacy ``extra_sglang_args``); the local shim accepts both
+    # shapes on read so envelopes still carrying the legacy key work.
+    # The kernel-agent ``tools/`` directory is added to sys.path (not
+    # used as a package), so import the shim by bare module name.
+    from _payload_aliases import (  # type: ignore[import-not-found]
+        read_extra_server_args as _read_eserver,
+    )
+    extra_server_args = (
+        getattr(args, "extra_server_args", "")
+        or _read_eserver(candidate)
+        or candidate.get("candidate_extra_server_args", "")
         or candidate.get("candidate_extra_sglang_args", "")
     )
-    parsed_sglang_args = parse_extra_sglang_args(str(extra_sglang_args))
+    parsed_sglang_args = parse_extra_server_args(str(extra_server_args))
     for key in (
         "attention_backend",
         "decode_attention_backend",
@@ -1016,7 +1025,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     runtime_args = candidate.get("runtime_args") if isinstance(candidate.get("runtime_args"), dict) else {}
     runtime_args = dict(runtime_args)
     if parsed_sglang_args:
-        runtime_args.setdefault("extra_sglang_args", parsed_sglang_args.get("raw", str(extra_sglang_args)))
+        runtime_args.setdefault("extra_server_args", parsed_sglang_args.get("raw", str(extra_server_args)))
     for key in (
         "kv_cache_dtype",
         "page_size",
