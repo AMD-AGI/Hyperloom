@@ -66,11 +66,14 @@ from .kernel_request_handlers import get_handler
 from .message_bus import Message, MessageBus
 from .objective import Objective, TimeOnlyObjective
 from .policy import (
+    DYNAMIC_ACTION_NAME,
     PolicyDenied,
     PolicyGate,
+    RESEARCH_LANE_NAME,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from .resource_lock import (
+    KNOWN_LANES,
     ResourceLockManager,
     SqliteLeaseBackend,
     _expand_lanes,
@@ -1339,7 +1342,16 @@ class Coordinator:
         10% watermark over ``last_roofline_tput`` — see
         :meth:`_needs_roofline_for_watermark`. EXPLORE entry no
         longer enqueues roofline.
+
+        Resets the per-round ``dynamic_action`` cap counter so a fresh
+        EXPLORE entry restores the ``MAX_DYNAMIC_PER_ROUND`` budget.
         """
+        try:
+            self.shared_state.reset_dynamic_action_round_count()
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "EXPLORE entry: reset_dynamic_action_round_count failed",
+            )
         plane = self.knowledge_plane
         if plane is None:
             return
@@ -2026,6 +2038,29 @@ class Coordinator:
             getattr(self.shared_state, "enable_roofline", True),
         ) else "profile"
 
+    def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
+        """Resolve ``(requires_lanes, lease_ttl_sec)`` for a task kind
+        from the ActionRegistry so manually-created tasks inherit the
+        same resource isolation + lease budget the dispatcher applies.
+
+        ``requires_lanes`` is filtered to :data:`KNOWN_LANES` — the
+        registry list also carries capability tags (e.g. ``emit_intent``)
+        that are not dispatcher lanes and would otherwise wedge the task
+        in ``_expand_lanes``. Returns ``([], 0)`` for an unknown action
+        or when the registry is unavailable.
+        """
+        reg = getattr(self, "action_registry", None)
+        if reg is None:
+            return [], 0
+        meta = reg.get(kind)
+        if meta is None:
+            return [], 0
+        lanes = [
+            lane for lane in (getattr(meta, "requires_lanes", ()) or ())
+            if lane in KNOWN_LANES
+        ]
+        return lanes, int(getattr(meta, "lease_ttl_sec", 0) or 0)
+
     def _inject_warm_recipe_history_into_ledger(self) -> int:
         """GAP 1 supporting helper — pre-fill ``explore_search.rejected``
         with the warm-start recipe's historical ``what_failed`` rows.
@@ -2566,10 +2601,13 @@ class Coordinator:
         # written by commits before this PR enqueue at most one extra
         # analysis task on the first resume tick (no compat shim,
         # acceptable per operator decision; see pr.md Migration notes).
+        lanes, ttl = self._registry_lanes_ttl(kind)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=kind,
             params=params,
             idempotency_key=f"internal-analysis-{reason}",
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
         )
         if was_existing:
             log.info(
@@ -3420,6 +3458,10 @@ class Coordinator:
             # any that are still blocked.
             if self._proposals_awaiting_roofline:
                 await self._drain_proposals_awaiting_roofline()
+            # Sweep non-terminal dynamic_action dispatches: walk the
+            # artefact dir + SharedState summary, transition each to
+            # ABANDONED, and clean up the orphan worktree + git branch.
+            self._resume_abandon_dynamic_actions()
         for _ in range(n):
             self.shared_state.increment_tick()
             for name in self._tick_roles:
@@ -3506,6 +3548,9 @@ class Coordinator:
             # queued would never re-dispatch them.
             if self._proposals_awaiting_roofline:
                 await self._drain_proposals_awaiting_roofline()
+            # Symmetric dynamic_action resume sweep for the long-run
+            # entry point.
+            self._resume_abandon_dynamic_actions()
 
         tick_n = 0
         stop_reason = ""
@@ -4134,6 +4179,12 @@ class Coordinator:
             denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
             if denial_summary:
                 sections.append(denial_summary)
+            # Compact projection of the most recent ``dynamic_action``
+            # summaries so orchestration sees its own dispatch outcomes
+            # without paying the token cost of the full ledger.
+            dyn_section = self.shared_state.to_dynamic_actions_prompt_section()
+            if dyn_section:
+                sections.append(dyn_section)
             required_step = self._required_next_step()
             if required_step:
                 sections.append("=== Execution checklist (Coordinator-enforced) ===")
@@ -5391,6 +5442,19 @@ class Coordinator:
                     "PR-A7: failed to mirror critic verdict for "
                     "specialist task=%s", sid_candidate,
                 )
+        # When the verdict targets a dyn_id (routed via the synthesised
+        # ``dyn-<id>`` specialist_task_id), persist the
+        # ``critic_verdict.json`` envelope and flip the dyn_id lifecycle
+        # status so reject/revise short-circuits the integrate dispatch.
+        try:
+            self._mirror_critic_verdict_to_dynamic_action(
+                pending=pending, verdict=verdict, reasoning=reasoning,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: critic-verdict mirror failed for "
+                "proposal_msg_id=%s", pending.proposal_msg_id,
+            )
         if verdict == "approve":
             await self._materialize_approved_proposal(pending)
 
@@ -5736,10 +5800,13 @@ class Coordinator:
                 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
+        lanes, ttl = self._registry_lanes_ttl(pending.action_name)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
             params=params,
             idempotency_key=f"approved-{pending.proposal_msg_id}",
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
         )
         if was_existing:
             # Defensive path — `approved-{proposal_msg_id}` is unique per
@@ -5913,6 +5980,23 @@ class Coordinator:
         # supply values; we only fill the gaps.
         if action_name == "specialist":
             await self._warm_specialist_params(params)
+        # For dynamic_action: generate the dyn_id, mkdir the artefact
+        # dir, and write spec.json + seed_kit.json before the task is
+        # enqueued. PolicyGate has already validated payload + cap;
+        # on seed-kit assembly failure the dispatch is rolled back
+        # (no task, no round-cap bump). The shared-state record is
+        # written only after the task is successfully queued.
+        dynamic_action_dispatch_meta: dict[str, Any] | None = None
+        if action_name == DYNAMIC_ACTION_NAME:
+            try:
+                dynamic_action_dispatch_meta = (
+                    self._prepare_dynamic_action_dispatch(params)
+                )
+            except PolicyDenied as denied:
+                await self._record_policy_denied(
+                    source, intent, denied, action_name=action_name,
+                )
+                return
         # Idempotency-key resolution chain (most-explicit first):
         #   1. ``intent.payload.idempotency_key`` — schema-correct top-level
         #      placement.
@@ -5948,10 +6032,13 @@ class Coordinator:
             idempotency_key = (
                 str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
             )
+            lanes, ttl = self._registry_lanes_ttl(action_name)
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind=action_name,
                 params=params,
                 idempotency_key=idempotency_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
             )
             if not was_existing:
                 break
@@ -6001,10 +6088,1049 @@ class Coordinator:
             )
             return
         self.shared_state.reset_policy_denial_streak(action_name)
+        if (
+            action_name == DYNAMIC_ACTION_NAME
+            and dynamic_action_dispatch_meta is not None
+        ):
+            try:
+                self._finalize_dynamic_action_dispatch(
+                    task_id=task.task_id,
+                    meta=dynamic_action_dispatch_meta,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: finalize hook failed for task=%s",
+                    task.task_id,
+                )
         await self.bus.append_and_seq(Message.new(
             "coordinator", "*", "event",
             {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
         ))
+
+    # ------------------------------------------------------------------
+    # dynamic_action dispatch hooks
+    # ------------------------------------------------------------------
+    def _prepare_dynamic_action_dispatch(
+        self, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the dispatch-time artefact bundle for one dispatch.
+
+        Steps:
+
+        1. Generate ``dyn-<round>-<seq>`` and fail-fast on collision.
+        2. Mkdir the artefact dir.
+        3. Assemble the seed kit; a :class:`SeedKitAssemblyError` is
+           re-raised as :class:`PolicyDenied` so the round cap is not
+           consumed.
+        4. Write ``spec.json`` + ``seed_kit.json``.
+        5. Inject ``dyn_id`` / ``artifact_path`` / ``spec_path`` /
+           ``seed_kit_path`` into ``params`` so the executor can
+           locate the artefacts without traversal.
+
+        Returns the meta dict consumed by
+        :meth:`_finalize_dynamic_action_dispatch` once the task lands.
+        Any failure removes the partial artefact dir and raises a
+        structured :class:`PolicyDenied`.
+        """
+        from .dynamic_action_seed_kit import (
+            SeedKitAssemblyError,
+            assemble_seed_kit,
+        )
+        from ..session_paths import (
+            dynamic_action_artifact_dir,
+            dynamic_action_seed_kit_path,
+            dynamic_action_spec_path,
+        )
+
+        state = self.shared_state
+        round_id = self._dynamic_action_round_id()
+        seq = int(
+            getattr(state, "dynamic_action_round_count", 0) or 0
+        ) + 1
+        dyn_id = f"dyn-{round_id}-{seq}"
+        if dyn_id in (getattr(state, "dynamic_actions", None) or {}):
+            raise PolicyDenied(
+                f"dynamic_action: dyn_id={dyn_id!r} already exists in "
+                f"SharedState.dynamic_actions (fail-fast on collision; "
+                f"likely a stale round-cap reset or resume race).",
+                rule="dynamic_dyn_id_collision",
+                hint=(
+                    "Coordinator should advance ``explore_search.cursor`` "
+                    "before re-dispatching; if this fires post-resume, the "
+                    "ABANDONED sweep in P8 should run first."
+                ),
+            )
+        dispatched_at = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds",
+        )
+        payload_snapshot = {
+            "motivation_gap_text": str(
+                params.get("motivation_gap_text") or "",
+            ),
+            "scope_domains": list(params.get("scope_domains") or ()),
+            "side_effects_declared": list(
+                params.get("side_effects_declared") or (),
+            ),
+            "budget_hint": str(params.get("budget_hint") or "medium"),
+        }
+        policy_gate_decision = {
+            "rules_evaluated": [
+                "dynamic_phase_violation",
+                "dynamic_source_violation",
+                "dynamic_payload_schema",
+                "dynamic_scope_too_narrow",
+                "dynamic_scope_unknown_domain",
+                "dynamic_side_effects_red_line",
+                "dynamic_kernel_only_disallowed",
+                "dynamic_round_cap_exhausted",
+            ],
+            "verdict": "approve",
+        }
+        artifact_dir = (
+            dynamic_action_artifact_dir(self.session_dir, dyn_id)
+            if self.session_dir is not None else None
+        )
+        seed_kit_result = None
+        try:
+            seed_kit_result = assemble_seed_kit(state, payload_snapshot)
+            if seed_kit_result.degraded:
+                log.info(
+                    "dynamic_action: seed kit DEGRADED for dyn_id=%s "
+                    "(missing one or more of roofline / profile / "
+                    "kept_patches / kb_pitfalls — see "
+                    "dynamic_action_seed_kit.assemble_seed_kit for the "
+                    "fallback rules). Sub-agent will still run.",
+                    dyn_id,
+                )
+        except SeedKitAssemblyError as exc:
+            raise PolicyDenied(
+                f"dynamic_action: seed kit assembly failed for "
+                f"dyn_id={dyn_id!r}: {exc}",
+                rule="dynamic_seed_kit_assembly_failed",
+                hint=(
+                    "Seed kit invariants (closed schema + ≤8K token cap) "
+                    "were violated; the dispatch is rolled back. Reduce "
+                    "the scope or wait for state to drain before retrying."
+                ),
+            ) from exc
+
+        spec = {
+            "dyn_id": dyn_id,
+            "dispatched_at": dispatched_at,
+            "round_index": round_id,
+            "payload": payload_snapshot,
+            "policy_gate_decision": policy_gate_decision,
+            "resource_lane": RESEARCH_LANE_NAME,
+            "degraded_dispatch": bool(seed_kit_result.degraded),
+            "seed_kit_tokens": int(seed_kit_result.total_tokens),
+        }
+        if artifact_dir is not None:
+            try:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                dynamic_action_spec_path(self.session_dir, dyn_id).write_text(
+                    json.dumps(spec, sort_keys=True, indent=2),
+                    encoding="utf-8",
+                )
+                dynamic_action_seed_kit_path(
+                    self.session_dir, dyn_id,
+                ).write_text(
+                    json.dumps(
+                        seed_kit_result.payload, sort_keys=True, indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                self._cleanup_dynamic_action_artifact_dir(dyn_id)
+                raise PolicyDenied(
+                    f"dynamic_action: failed to persist artefacts for "
+                    f"dyn_id={dyn_id!r}: {exc!r}",
+                    rule="dynamic_artifact_write_failed",
+                    hint=(
+                        "Coordinator could not write spec.json / "
+                        "seed_kit.json to the session dir; check disk "
+                        "/ permissions and retry."
+                    ),
+                ) from exc
+
+        params["dyn_id"] = dyn_id
+        if artifact_dir is not None:
+            params["artifact_path"] = str(artifact_dir)
+            params["spec_path"] = str(
+                dynamic_action_spec_path(self.session_dir, dyn_id),
+            )
+            params["seed_kit_path"] = str(
+                dynamic_action_seed_kit_path(self.session_dir, dyn_id),
+            )
+
+        # Append the ``DISPATCHED`` row to dispatch_history.jsonl.
+        from .dynamic_action_history import (
+            DispatchHistoryEvent,
+            append_dispatch_history_row,
+        )
+        if self.session_dir is not None:
+            try:
+                append_dispatch_history_row(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    event=DispatchHistoryEvent.DISPATCHED,
+                    payload={
+                        "round_index": round_id,
+                        "scope_domains": list(payload_snapshot["scope_domains"]),
+                        "side_effects_declared": list(
+                            payload_snapshot["side_effects_declared"],
+                        ),
+                        "budget_hint": payload_snapshot["budget_hint"],
+                        "degraded_dispatch": bool(spec["degraded_dispatch"]),
+                        "seed_kit_tokens": int(spec["seed_kit_tokens"]),
+                    },
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: dispatch_history DISPATCHED write "
+                    "failed for dyn_id=%s", dyn_id,
+                )
+
+        # Populate the closed prompt-projection fields at dispatch
+        # time; anything beyond ``SUMMARY_PROMPT_FIELDS`` is private
+        # audit metadata that lives on disk only.
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            LAST_OUTCOME_BY_STATUS,
+            MOTIVATION_GAP_SHORT_MAX_CHARS,
+        )
+        motivation_short = payload_snapshot["motivation_gap_text"].strip()
+        if len(motivation_short) > MOTIVATION_GAP_SHORT_MAX_CHARS:
+            motivation_short = (
+                motivation_short[: MOTIVATION_GAP_SHORT_MAX_CHARS - 3].rstrip()
+                + "..."
+            )
+        summary = {
+            "dyn_id": dyn_id,
+            "round_index": round_id,
+            "status": DynamicActionStatus.DISPATCHED.value,
+            "last_outcome": LAST_OUTCOME_BY_STATUS[DynamicActionStatus.DISPATCHED],
+            "dispatched_at": dispatched_at,
+            "scope_domains": payload_snapshot["scope_domains"],
+            "motivation_gap_short": motivation_short,
+            "verdict": None,
+            "cumulative_gain": None,
+            "artifact_path": str(artifact_dir) if artifact_dir else "",
+            "side_effects_declared": payload_snapshot["side_effects_declared"],
+            "budget_hint": payload_snapshot["budget_hint"],
+            "degraded_dispatch": spec["degraded_dispatch"],
+            "seed_kit_tokens": spec["seed_kit_tokens"],
+        }
+        return {"dyn_id": dyn_id, "summary": summary}
+
+    def _cleanup_dynamic_action_artifact_dir(self, dyn_id: str) -> None:
+        """Remove the partial ``agents/orchestration/dynamic_actions/<dyn_id>/``
+        on a dispatch-time failure so the round cap stays clean and the
+        next attempt starts from a fresh filesystem state."""
+        if self.session_dir is None:
+            return
+        from ..session_paths import dynamic_action_artifact_dir
+        target = dynamic_action_artifact_dir(self.session_dir, dyn_id)
+        try:
+            if target.exists():
+                import shutil
+                shutil.rmtree(target, ignore_errors=True)
+        except OSError:
+            log.exception(
+                "dynamic_action: artefact dir cleanup failed for dyn_id=%s",
+                dyn_id,
+            )
+
+    def _finalize_dynamic_action_dispatch(
+        self, *, task_id: str, meta: dict[str, Any],
+    ) -> None:
+        """Atomically register the dispatch on SharedState (round cap
+        +1) + log the task_id into the summary."""
+        summary = dict(meta.get("summary") or {})
+        summary["task_id"] = task_id
+        dyn_id = str(meta.get("dyn_id") or "")
+        self.shared_state.record_dynamic_action_dispatch(dyn_id, summary)
+
+    def _dynamic_action_round_id(self) -> int:
+        """Stable round id used in the ``dyn-<round>-<seq>`` template.
+
+        Mirrors the round derivation used by the IR-7 assess_remaining_gaps
+        wrapper: ``explore_search.cursor`` is the canonical EXPLORE-round
+        cursor, falling back to 0 when the ledger is empty.
+        """
+        cursor = (self.shared_state.explore_search or {}).get("cursor")
+        try:
+            return int(cursor or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    # ------------------------------------------------------------------
+    # Resume-time abandoned sweep wrapper
+    # ------------------------------------------------------------------
+    def _resume_abandon_dynamic_actions(self) -> None:
+        """Consolidate every non-terminal dyn_id into ABANDONED at
+        resume time. Side-effects (worktree cleanup, dispatch_history
+        append, summary writes) live in
+        :mod:`dynamic_action_resume`; this wrapper only threads the
+        coordinator-side context (session_dir, shared_state,
+        framework_source_roots) and forwards a single boot-log line."""
+        from .dynamic_action_resume import resume_abandon_dynamic_actions
+        from .framework_paths import resolve_source_file_allowlist
+
+        if self.session_dir is None:
+            return
+        try:
+            result = resume_abandon_dynamic_actions(
+                session_dir=self.session_dir,
+                shared_state=self.shared_state,
+                coordinator_session_id=str(
+                    getattr(self.shared_state, "session_id", "") or "",
+                ),
+                framework_source_roots=tuple(
+                    resolve_source_file_allowlist(),
+                ),
+            )
+        except Exception:  # noqa: BLE001 — defensive: never block boot
+            log.exception(
+                "dynamic_action resume sweep failed; resume continues",
+            )
+            return
+        if (
+            result.abandoned or result.artifact_missing
+            or result.summary_missing
+        ):
+            log.info(result.to_log_line())
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action resume sweep: save after sweep failed",
+                )
+
+    # ------------------------------------------------------------------
+    # dynamic_action runner / critic / integrate lifecycle hooks
+    # ------------------------------------------------------------------
+    def _ensure_dynamic_action_dispatched_row(
+        self,
+        *,
+        dyn_id: str,
+        params: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Ensure ``dynamic_actions[dyn_id]`` carries a ``DISPATCHED``
+        row before downstream lifecycle hooks run.
+
+        The dispatch hook normally creates this row; this helper is a
+        defensive fallback for paths where it is missing (runner
+        crash before dispatch finalise, resume with no summary, test
+        setups). When ``params`` / ``extra`` carry them, the seeded
+        row is also enriched with the prompt-projection fields
+        (motivation_gap_short / scope_domains / artifact_path).
+        """
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            MOTIVATION_GAP_SHORT_MAX_CHARS,
+        )
+        if dyn_id in (self.shared_state.dynamic_actions or {}):
+            return
+        params = params or {}
+        extra = extra or {}
+        scope_from_spec: list[str] = []
+        motivation = ""
+        artifact_path = str(params.get("artifact_path") or "")
+        spec_path = params.get("spec_path")
+        if spec_path:
+            try:
+                spec_dict = json.loads(
+                    Path(str(spec_path)).read_text(encoding="utf-8"),
+                )
+                payload_dict = spec_dict.get("payload") or {}
+                scope_from_spec = list(payload_dict.get("scope_domains") or ())
+                motivation = str(payload_dict.get("motivation_gap_text") or "")
+            except (OSError, json.JSONDecodeError):
+                pass
+        if len(motivation) > MOTIVATION_GAP_SHORT_MAX_CHARS:
+            motivation = (
+                motivation[: MOTIVATION_GAP_SHORT_MAX_CHARS - 3].rstrip()
+                + "..."
+            )
+        seed_extra: dict[str, Any] = {
+            "dyn_id": dyn_id,
+            "scope_domains": scope_from_spec,
+            "motivation_gap_short": motivation,
+            "artifact_path": artifact_path,
+            "verdict": None,
+            "cumulative_gain": None,
+            "synthesised_row": True,
+        }
+        seed_extra.update(extra)
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id,
+            status=DynamicActionStatus.DISPATCHED.value,
+            extra=seed_extra,
+        )
+
+    def _walk_dynamic_action_to_state(
+        self,
+        dyn_id: str,
+        *,
+        target_status: "DynamicActionStatus",
+    ) -> None:
+        """Step the dyn_id summary along the canonical happy path
+        until ``status == target_status``.
+
+        Each step uses the strict writer so illegal transitions still
+        log warnings; the helper is a *recovery* primitive that
+        catches hook skips without bypassing the state machine.
+        Terminal source states stop the walk (a terminal can't be
+        advanced).
+        """
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            TERMINAL_LIFECYCLE_STATUSES,
+        )
+
+        canonical_path = (
+            DynamicActionStatus.DISPATCHED,
+            DynamicActionStatus.SUB_AGENT_RUNNING,
+            DynamicActionStatus.SUB_AGENT_DONE,
+            DynamicActionStatus.AWAITING_CRITIC,
+            DynamicActionStatus.INTEGRATING,
+        )
+        if target_status not in canonical_path:
+            return
+        self._ensure_dynamic_action_dispatched_row(dyn_id=dyn_id)
+        target_index = canonical_path.index(target_status)
+        for _ in range(len(canonical_path)):
+            current_row = (
+                self.shared_state.dynamic_actions.get(dyn_id) or {}
+            )
+            current_raw = str(current_row.get("status") or "")
+            try:
+                current = DynamicActionStatus(current_raw)
+            except ValueError:
+                return
+            if current == target_status:
+                return
+            if current in TERMINAL_LIFECYCLE_STATUSES:
+                return
+            try:
+                current_index = canonical_path.index(current)
+            except ValueError:
+                return
+            if current_index >= target_index:
+                return
+            next_status = canonical_path[current_index + 1]
+            self.shared_state.record_dynamic_action_outcome(
+                dyn_id, status=next_status.value,
+            )
+
+    async def _handle_dynamic_action_runner_result(
+        self,
+        *,
+        task: Task,
+        result: SubAgentResult,
+    ) -> None:
+        """Advance the dyn_id lifecycle after the runner returns.
+
+        Three branches:
+
+        * Non-COMPLETED terminal state → write the status (TIMED_OUT
+          / FAILED / COMPLETED_EMPTY / ABANDONED) onto the summary,
+          done. No critic, no integrate, no proposal_set materialisation.
+        * COMPLETED but mechanical floor (P4) says reject/revise →
+          write the critic verdict envelope to
+          ``critic_verdict.json``, mark status CRITIC_REJECTED, done.
+        * COMPLETED + mechanical floor passes → materialise the
+          patch into a specialist-shaped workspace, synthesise an
+          integrate_patch proposal, push it through the standard
+          PendingProposal pipeline so the Critic + integrate_patch
+          executor handle it without any main-chain change.
+        """
+        from .dynamic_action_pipeline import (
+            DYNAMIC_SPECIALIST_TASK_ID_PREFIX,
+            build_integrate_patch_proposal_payload,
+            compose_critic_verdict_envelope,
+            materialize_dynamic_patch_workspace,
+            read_runner_proposal_set,
+            runner_status_to_lifecycle,
+        )
+        from .dynamic_action_critic import write_critic_verdict
+        from .dynamic_action_history import (
+            DispatchHistoryEvent,
+            append_dispatch_history_row,
+            write_dynamic_action_telemetry,
+        )
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            DynamicRunnerTerminalState,
+        )
+        from ..session_paths import dynamic_action_spec_path
+
+        params = task.params or {}
+        dyn_id = str(params.get("dyn_id") or "").strip()
+        if not dyn_id:
+            log.warning(
+                "dynamic_action runner result without dyn_id; task=%s",
+                task.task_id,
+            )
+            return
+        result_dict = result.result if isinstance(result.result, dict) else {}
+        terminal_state_raw = str(
+            result_dict.get("terminal_state") or "",
+        ).strip()
+        try:
+            terminal_state = DynamicRunnerTerminalState(terminal_state_raw)
+        except ValueError:
+            terminal_state = DynamicRunnerTerminalState.FAILED
+        reason = str(result_dict.get("reason") or "")
+        turns_used = int(result_dict.get("turns_used") or 0)
+        lifecycle = runner_status_to_lifecycle(terminal_state)
+
+        extra = {
+            "runner_terminal_state": terminal_state.value,
+            "runner_reason": reason,
+            "turns_used": turns_used,
+            "journal_path": str(result_dict.get("journal_path") or ""),
+        }
+        # Walk the state machine deliberately so the audit trail
+        # captures DISPATCHED → SUB_AGENT_RUNNING transitions even when
+        # the runner finished in one tick. Seed the DISPATCHED row
+        # first if missing so the writer's transition validator passes.
+        self._ensure_dynamic_action_dispatched_row(
+            dyn_id=dyn_id,
+            params=params,
+            extra=extra,
+        )
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id, status=DynamicActionStatus.SUB_AGENT_RUNNING.value,
+        )
+        # Non-COMPLETED terminal states emit ``SUB_AGENT_TERMINATED``;
+        # ``SUB_AGENT_DONE`` lands later after the proposal_set count
+        # is known.
+        if terminal_state != DynamicRunnerTerminalState.COMPLETED:
+            try:
+                append_dispatch_history_row(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    event=DispatchHistoryEvent.SUB_AGENT_TERMINATED,
+                    payload={
+                        "terminal_state": terminal_state.value,
+                        "reason": reason,
+                        "turns_used": turns_used,
+                        "journal_path": str(
+                            result_dict.get("journal_path") or "",
+                        ),
+                        "proposal_count": 0,
+                    },
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: history SUB_AGENT_TERMINATED write "
+                    "failed for dyn_id=%s", dyn_id,
+                )
+            self.shared_state.record_dynamic_action_outcome(
+                dyn_id,
+                status=lifecycle.value,
+                last_outcome=reason or None,
+                extra=extra,
+            )
+            try:
+                write_dynamic_action_telemetry(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    lifecycle=lifecycle,
+                    round_index=self._dynamic_action_round_id(),
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: telemetry write failed for dyn_id=%s "
+                    "(non-completed terminal)", dyn_id,
+                )
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: save after non-completed runner "
+                    "result failed for dyn_id=%s", dyn_id,
+                )
+            return
+
+        # COMPLETED — load the proposal_set the runner wrote.
+        runner_payload = read_runner_proposal_set(self.session_dir, dyn_id)
+        proposal_set: list[dict[str, Any]] = []
+        if isinstance(runner_payload, dict):
+            raw = runner_payload.get("proposal_set") or []
+            if isinstance(raw, list):
+                proposal_set = [p for p in raw if isinstance(p, dict)]
+        # The runner already breaks on the first emit_proposal; this
+        # is a defensive truncate in case a schema drift produces
+        # extras (downstream materialise only reads [0]).
+        from .dynamic_action_proposal import MAX_PROPOSAL_SET_LEN
+        if len(proposal_set) > MAX_PROPOSAL_SET_LEN:
+            log.warning(
+                "dynamic_action: proposal_set len=%d > cap=%d for "
+                "dyn_id=%s; truncating to first %d entries",
+                len(proposal_set), MAX_PROPOSAL_SET_LEN, dyn_id,
+                MAX_PROPOSAL_SET_LEN,
+            )
+            proposal_set = proposal_set[:MAX_PROPOSAL_SET_LEN]
+        # ``SUB_AGENT_DONE`` row carries the post-load proposal_count
+        # (0 collapses to COMPLETED_EMPTY downstream; 1 proceeds to
+        # the critic).
+        try:
+            append_dispatch_history_row(
+                session_dir=self.session_dir,
+                dyn_id=dyn_id,
+                event=DispatchHistoryEvent.SUB_AGENT_DONE,
+                payload={
+                    "terminal_state": terminal_state.value,
+                    "reason": reason,
+                    "turns_used": turns_used,
+                    "journal_path": str(
+                        result_dict.get("journal_path") or "",
+                    ),
+                    "proposal_count": len(proposal_set),
+                },
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: history SUB_AGENT_DONE write failed "
+                "for dyn_id=%s", dyn_id,
+            )
+        if not proposal_set:
+            # COMPLETED but empty proposal_set (runner contract
+            # mismatch); collapse to COMPLETED_EMPTY for the
+            # lifecycle so downstream consumers see the canonical
+            # empty signal. Walk through SUB_AGENT_RUNNING already
+            # done above; the terminal write is legal.
+            self.shared_state.record_dynamic_action_outcome(
+                dyn_id,
+                status=DynamicActionStatus.COMPLETED_EMPTY.value,
+                last_outcome="emit_empty",
+                extra=extra,
+            )
+            try:
+                write_dynamic_action_telemetry(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    lifecycle=DynamicActionStatus.COMPLETED_EMPTY,
+                    round_index=self._dynamic_action_round_id(),
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: telemetry write failed for dyn_id=%s "
+                    "(COMPLETED_EMPTY)", dyn_id,
+                )
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: save after empty proposal_set "
+                    "failed for dyn_id=%s", dyn_id,
+                )
+            return
+        proposal = proposal_set[0]
+        # Step through SUB_AGENT_RUNNING → SUB_AGENT_DONE before
+        # AWAITING_CRITIC so the state-machine audit trail captures
+        # the runner-done event distinctly from the critic dispatch.
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id, status=DynamicActionStatus.SUB_AGENT_DONE.value,
+        )
+
+        # Load spec.json for scope_domains (mechanical-check truth set).
+        spec_path = dynamic_action_spec_path(self.session_dir, dyn_id)
+        spec_payload: dict[str, Any] = {}
+        try:
+            spec_dict = json.loads(spec_path.read_text(encoding="utf-8"))
+            spec_payload = spec_dict.get("payload") or {}
+        except (OSError, json.JSONDecodeError):
+            log.warning(
+                "dynamic_action: could not read spec.json for "
+                "dyn_id=%s; mechanical scope check falls back to "
+                "the proposal's own scope_domains",
+                dyn_id,
+            )
+            spec_payload = {
+                "scope_domains": list(proposal.get("scope_domains") or ()),
+            }
+
+        # Mechanical-floor verdict: if it blocks, skip the LLM critic
+        # — write the envelope and flip the status here.
+        envelope, lifecycle_after_mech = compose_critic_verdict_envelope(
+            dyn_id=dyn_id,
+            proposal=proposal,
+            spec_scope_domains=list(spec_payload.get("scope_domains") or ()),
+            llm_verdict=None,
+        )
+        if envelope["verdict"] != "approve":
+            write_critic_verdict(self.session_dir, dyn_id, envelope)
+            try:
+                append_dispatch_history_row(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    event=DispatchHistoryEvent.CRITIC_VERDICT,
+                    payload={
+                        "verdict": envelope["verdict"],
+                        "reason_codes": list(envelope["reason_codes"]),
+                        "applied_rules": list(envelope["applied_rules"]),
+                        "cross_domain_flag": bool(
+                            envelope["cross_domain_flag"],
+                        ),
+                        "mechanical_floor_blocked": True,
+                    },
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: history CRITIC_VERDICT (mechanical) "
+                    "write failed for dyn_id=%s", dyn_id,
+                )
+            self.shared_state.record_dynamic_action_outcome(
+                dyn_id,
+                status=DynamicActionStatus.CRITIC_REJECTED.value,
+                last_outcome=envelope["reason_codes"][0]
+                    if envelope["reason_codes"] else "critic_rejected",
+                extra={
+                    **extra,
+                    "critic_verdict": envelope["verdict"],
+                    "critic_reason_codes": list(envelope["reason_codes"]),
+                    "critic_path": str(
+                        self.session_dir
+                        / "agents/orchestration/dynamic_actions"
+                        / dyn_id / "critic_verdict.json",
+                    ),
+                },
+            )
+            try:
+                write_dynamic_action_telemetry(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    lifecycle=DynamicActionStatus.CRITIC_REJECTED,
+                    round_index=self._dynamic_action_round_id(),
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: telemetry write failed for dyn_id=%s "
+                    "(mechanical CRITIC_REJECTED)", dyn_id,
+                )
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: save after mechanical critic "
+                    "block failed for dyn_id=%s", dyn_id,
+                )
+            return
+
+        # Mechanical floor passed — materialise the specialist-shaped
+        # workspace + push the proposal onto the bus for the Critic
+        # to score. The PR-A7 mirror on _handle_single_verdict will
+        # write the verdict into specialist_patch_verdicts so the
+        # PolicyGate gate on the eventual integrate_patch delegate
+        # passes.
+        specialist_task_id, _patches = materialize_dynamic_patch_workspace(
+            session_dir=self.session_dir,
+            dyn_id=dyn_id,
+            proposal=proposal,
+        )
+        propose_payload = build_integrate_patch_proposal_payload(
+            dyn_id=dyn_id,
+            specialist_task_id=specialist_task_id,
+            proposal=proposal,
+            spec_payload=spec_payload,
+        )
+        # Push a synthetic ``proposal`` event so the Critic agent's
+        # reactor pulls it and emits a review_verdict on the next
+        # tick. Bypassing PolicyGate is safe here — the message is
+        # coordinator-internal and never re-enters the validate_intent
+        # path.
+        msg = Message.new(
+            "coordinator", "*", "proposal",
+            {**propose_payload, "needs_review": True},
+            priority=1,
+        )
+        await self.bus.append_and_seq(msg)
+        pending = PendingProposal(
+            proposal_msg_id=msg.msg_id,
+            from_agent="coordinator",
+            action_name="integrate_patch",
+            predicted_gain_pct=0.0,
+            payload=dict(propose_payload),
+        )
+        self.state.pending_proposals[msg.msg_id] = pending
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id,
+            status=DynamicActionStatus.AWAITING_CRITIC.value,
+            extra={
+                **extra,
+                "specialist_task_id": specialist_task_id,
+                "proposal_msg_id": msg.msg_id,
+                "specialist_task_id_prefix": (
+                    DYNAMIC_SPECIALIST_TASK_ID_PREFIX
+                ),
+            },
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: save after critic dispatch failed "
+                "for dyn_id=%s", dyn_id,
+            )
+
+    def _mirror_critic_verdict_to_dynamic_action(
+        self,
+        *,
+        pending: "PendingProposal",
+        verdict: str,
+        reasoning: str,
+    ) -> None:
+        """Compose + persist the critic_verdict.json envelope when a
+        single-verdict review targets a dyn_id-shaped proposal.
+
+        Detection key: ``payload.params.specialist_task_id`` starts
+        with the synthesised ``dyn-`` prefix. When that's not the
+        case (i.e. legacy specialist patches), the helper is a no-op
+        and the existing PR-A7 mirror path runs unchanged.
+
+        For approve verdicts the dyn_id status stays DISPATCHED — the
+        integrate_patch completion hook flips it to KEPT / REVERTED
+        / INTEGRATE_FAILED. For reject / revise the helper flips the
+        status to CRITIC_REJECTED so the dispatch never reaches the
+        integrate executor.
+        """
+        from .dynamic_action_pipeline import (
+            compose_critic_verdict_envelope,
+            is_dynamic_specialist_task_id,
+        )
+        from .dynamic_action_critic import write_critic_verdict
+        from .dynamic_action_history import (
+            DispatchHistoryEvent,
+            append_dispatch_history_row,
+            write_dynamic_action_telemetry,
+        )
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            TERMINAL_LIFECYCLE_STATUSES,
+        )
+        from ..session_paths import dynamic_action_spec_path
+
+        params = pending.payload.get("params") or {}
+        sid = str(params.get("specialist_task_id") or "").strip()
+        if not is_dynamic_specialist_task_id(sid):
+            return
+        dyn_id = str(params.get("dyn_id") or sid).strip()
+        if not dyn_id:
+            return
+        # Re-load the on-disk proposal_set + spec so the envelope is
+        # composed against the same data the dispatcher hook used.
+        from .dynamic_action_pipeline import read_runner_proposal_set
+        runner_payload = read_runner_proposal_set(self.session_dir, dyn_id)
+        proposal: dict[str, Any] = {}
+        if isinstance(runner_payload, dict):
+            raw = runner_payload.get("proposal_set") or []
+            if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+                proposal = raw[0]
+        spec_payload: dict[str, Any] = {}
+        try:
+            spec_dict = json.loads(
+                dynamic_action_spec_path(self.session_dir, dyn_id).read_text(
+                    encoding="utf-8",
+                ),
+            )
+            spec_payload = spec_dict.get("payload") or {}
+        except (OSError, json.JSONDecodeError):
+            spec_payload = {
+                "scope_domains": list(proposal.get("scope_domains") or ()),
+            }
+        envelope, lifecycle = compose_critic_verdict_envelope(
+            dyn_id=dyn_id,
+            proposal=proposal,
+            spec_scope_domains=list(spec_payload.get("scope_domains") or ()),
+            llm_verdict=verdict,
+            llm_reason=reasoning,
+        )
+        write_critic_verdict(self.session_dir, dyn_id, envelope)
+        try:
+            append_dispatch_history_row(
+                session_dir=self.session_dir,
+                dyn_id=dyn_id,
+                event=DispatchHistoryEvent.CRITIC_VERDICT,
+                payload={
+                    "verdict": envelope["verdict"],
+                    "reason_codes": list(envelope["reason_codes"]),
+                    "applied_rules": list(envelope["applied_rules"]),
+                    "cross_domain_flag": bool(envelope["cross_domain_flag"]),
+                    "mechanical_floor_blocked": False,
+                },
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: history CRITIC_VERDICT (llm) write "
+                "failed for dyn_id=%s", dyn_id,
+            )
+        new_status = lifecycle.value
+        last_outcome = (
+            envelope["reason_codes"][0]
+            if envelope["reason_codes"]
+            else (verdict or "").lower()
+        )
+        extra = {
+            "critic_verdict": envelope["verdict"],
+            "critic_reason_codes": list(envelope["reason_codes"]),
+            "critic_proposal_msg_id": pending.proposal_msg_id,
+            "verdict": envelope["verdict"],
+        }
+        # Ensure the state machine reaches AWAITING_CRITIC before the
+        # verdict transition (covers replays where the runner-done
+        # hook never advanced the state).
+        self._walk_dynamic_action_to_state(
+            dyn_id, target_status=DynamicActionStatus.AWAITING_CRITIC,
+        )
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id, status=new_status,
+            last_outcome=last_outcome, extra=extra,
+        )
+        try:
+            new_status_enum = DynamicActionStatus(new_status)
+            if new_status_enum in TERMINAL_LIFECYCLE_STATUSES:
+                write_dynamic_action_telemetry(
+                    session_dir=self.session_dir,
+                    dyn_id=dyn_id,
+                    lifecycle=new_status_enum,
+                    round_index=self._dynamic_action_round_id(),
+                )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: telemetry write failed for dyn_id=%s "
+                "(critic verdict mirror)", dyn_id,
+            )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: save after critic verdict mirror "
+                "failed for dyn_id=%s", dyn_id,
+            )
+
+    def _maybe_update_dynamic_action_after_integrate(
+        self,
+        *,
+        task: Task,
+        result: SubAgentResult,
+    ) -> None:
+        """Translate an ``integrate_patch`` result to the dyn_id
+        summary when the task targets a synthesised dynamic workspace.
+
+        Routing key is ``params.specialist_task_id`` — when it starts
+        with ``dyn-`` (set by
+        :func:`materialize_dynamic_patch_workspace`) we own the
+        translation; otherwise the legacy PR-A7 path keeps running.
+        """
+        from .dynamic_action_pipeline import (
+            integrate_status_to_lifecycle,
+            is_dynamic_specialist_task_id,
+        )
+        from .dynamic_action_history import (
+            DispatchHistoryEvent,
+            append_dispatch_history_row,
+            write_dynamic_action_telemetry,
+        )
+        from .dynamic_action_proposal import DynamicActionStatus
+
+        params = task.params or {}
+        sid = str(params.get("specialist_task_id") or "").strip()
+        if not is_dynamic_specialist_task_id(sid):
+            return
+        dyn_id = str(params.get("dyn_id") or sid).strip()
+        result_dict = result.result if isinstance(result.result, dict) else {}
+        integrate_status = str(result_dict.get("status") or "").strip()
+        lifecycle = integrate_status_to_lifecycle(integrate_status)
+        delta_pct = result_dict.get("delta_pct")
+        extra = {
+            "integrate_task_id": task.task_id,
+            "integrate_status": integrate_status,
+            "patches_applied": list(result_dict.get("patches_applied") or ()),
+            "patches_reverted": list(result_dict.get("patches_reverted") or ()),
+            "output_throughput": result_dict.get("output_throughput"),
+            "accuracy_pass": result_dict.get("accuracy_pass"),
+        }
+        gain_value: float | None = None
+        if isinstance(delta_pct, (int, float)):
+            gain_value = float(delta_pct)
+        # The integrate completion is the INTEGRATING →
+        # {KEPT, REVERTED, INTEGRATE_FAILED} step. Walk the canonical
+        # path so the audit trail captures every intermediate
+        # transition even when upstream hooks skipped a state.
+        self._walk_dynamic_action_to_state(
+            dyn_id,
+            target_status=DynamicActionStatus.INTEGRATING,
+        )
+        self.shared_state.record_dynamic_action_outcome(
+            dyn_id,
+            status=lifecycle.value,
+            last_outcome=integrate_status or None,
+            cumulative_gain=gain_value,
+            extra=extra,
+        )
+        try:
+            append_dispatch_history_row(
+                session_dir=self.session_dir,
+                dyn_id=dyn_id,
+                event=DispatchHistoryEvent.INTEGRATE_RESULT,
+                payload={
+                    "integrate_status": integrate_status,
+                    "lifecycle": lifecycle.value,
+                    "delta_pct": gain_value,
+                    "task_id": str(task.task_id or ""),
+                    "patches_applied": list(
+                        result_dict.get("patches_applied") or (),
+                    ),
+                    "patches_reverted": list(
+                        result_dict.get("patches_reverted") or (),
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: history INTEGRATE_RESULT write failed "
+                "for dyn_id=%s", dyn_id,
+            )
+        try:
+            write_dynamic_action_telemetry(
+                session_dir=self.session_dir,
+                dyn_id=dyn_id,
+                lifecycle=lifecycle,
+                gain_pct=gain_value,
+                round_index=self._dynamic_action_round_id(),
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: telemetry write failed for dyn_id=%s "
+                "(integrate completion)", dyn_id,
+            )
+        # Tag the intervention ledger with a dynamic-specific action
+        # name so analytics can split KEEP rate by source without
+        # scraping logs.
+        if lifecycle == DynamicActionStatus.KEPT:
+            try:
+                self.shared_state.record_intervention(
+                    change_type="code_patch",
+                    action="dynamic_action_integrate",
+                    task_id=task.task_id,
+                    delta_pct=gain_value,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dynamic_action: record_intervention failed for "
+                    "dyn_id=%s", dyn_id,
+                )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "dynamic_action: save after integrate completion "
+                "failed for dyn_id=%s", dyn_id,
+            )
 
     # ------------------------------------------------------------------
     # v0.8 §3.5 + specialist pre-dispatch warmup
@@ -7819,6 +8945,20 @@ class Coordinator:
                     self.shared_state.bump_specialist_dispatched()
                 except Exception:  # noqa: BLE001
                     log.exception("PR-A8: bump_specialist_dispatched failed")
+            # When the dynamic_action runner returns: write the runner
+            # status onto the dyn_id summary and on COMPLETED either
+            # reject via the mechanical floor or push a critic-bound
+            # proposal through the existing single-verdict path.
+            if task.kind == DYNAMIC_ACTION_NAME:
+                try:
+                    await self._handle_dynamic_action_runner_result(
+                        task=task, result=result,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "dynamic_action lifecycle hook failed for task=%s",
+                        task.task_id,
+                    )
             # PR-A8 — intervention-mix ledger: when an explore or
             # integrate_patch task succeeds with a kept variant, log
             # the change_type so Robustness can see config-only
@@ -7830,6 +8970,20 @@ class Coordinator:
                 except Exception:  # noqa: BLE001
                     log.exception(
                         "PR-A8: intervention ledger update failed for task=%s",
+                        task.task_id,
+                    )
+            # When an integrate_patch task completes with a dyn-<id>
+            # specialist_task_id, update the dyn_id summary with the
+            # final KEPT / REVERTED / INTEGRATE_FAILED status.
+            if task.kind == "integrate_patch":
+                try:
+                    self._maybe_update_dynamic_action_after_integrate(
+                        task=task, result=result,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "dynamic_action integrate-completion hook "
+                        "failed for task=%s",
                         task.task_id,
                     )
             # Auto-promote certain succeeded results into SharedState core
