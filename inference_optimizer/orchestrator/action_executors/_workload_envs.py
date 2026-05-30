@@ -19,8 +19,8 @@ with the user's actual workload contract":
 
 * :func:`materialize_config_with_envs` — write a per-run YAML file
   honoring process env (and optional caller overrides).
-* :func:`default_baseline_config` — pick the shipped sglang/vllm YAML
-  based on ``$FRAMEWORK``.
+* :func:`default_baseline_config` — pick the shipped sglang / vllm /
+  atom YAML based on ``$FRAMEWORK``.
 
 Callers:
 
@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +59,63 @@ log = logging.getLogger(__name__)
 # the warning is for first-time awareness, not per-variant noise. Emit it
 # once per process to keep the log readable.
 _RUN_EVAL_DEFAULT_WARN_EMITTED = False
+
+
+def _visible_gpu_count() -> int:
+    """Return how many GPUs are visible to this pod (0 = none / unknown).
+
+    Prefers ``torch.cuda.device_count`` because that's the count sglang /
+    vllm actually see (and it doesn't shell out, which keeps the
+    BaselineExecutor unit tests that mock ``subprocess.run`` happy). Falls
+    back to ``rocm-smi --showid`` (matches ``cli._check_gpu_visibility``)
+    when torch is missing or its driver probe hits a fluke. Returns 0 on
+    every failure path so callers can skip the clamp and let downstream
+    surface the real "no GPU" error instead of inventing a wrong TP.
+
+    Override (escape hatch for hosts where torch + rocm-smi disagree, or
+    for unit tests that exercise the clamp without GPU hardware):
+    ``$INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT=N``.
+    """
+    override = os.environ.get("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "").strip()
+    if override:
+        try:
+            return max(0, int(override))
+        except ValueError:
+            log.warning(
+                "INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT=%r is not an int; "
+                "ignoring override.", override,
+            )
+    try:
+        import torch  # type: ignore[import-not-found]
+        count = int(torch.cuda.device_count() or 0)
+        if count > 0:
+            return count
+    except Exception:
+        pass
+    if shutil.which("rocm-smi"):
+        try:
+            proc = subprocess.run(
+                ["rocm-smi", "--showid"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, PermissionError, OSError):
+            return 0
+        if proc.returncode == 0:
+            # ``rocm-smi --showid`` emits 6+ lines per device
+            # (``GPU[N] : Device Name``, ``GPU[N] : Device ID``, etc.).
+            # Counting raw lines that start with ``GPU[`` over-counts by 6x
+            # (a 4-GPU pod reports 24 "visible" GPUs and the clamp never
+            # fires). Deduplicate by GPU index so 4 distinct ``GPU[0..3]``
+            # prefixes return 4.
+            indices: set[str] = set()
+            for line in (proc.stdout or "").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("GPU["):
+                    idx, _, _ = stripped[4:].partition("]")
+                    if idx:
+                        indices.add(idx)
+            return len(indices)
+    return 0
 
 
 def _tracelens_patch_enabled() -> bool:
@@ -86,7 +145,12 @@ def default_baseline_config() -> Path:
     sglang-default tests keep passing.
     """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    name = "baseline_vllm.yaml" if fw == "vllm" else "baseline_sglang.yaml"
+    if fw == "atom":
+        name = "baseline_atom.yaml"
+    elif fw == "vllm":
+        name = "baseline_vllm.yaml"
+    else:
+        name = "baseline_sglang.yaml"
     return asset_root() / "scripts" / "configs" / name
 
 
@@ -94,7 +158,6 @@ def materialize_config_with_envs(
     config_path: Path,
     output_dir: Path,
     *,
-    extra_sglang_args: str = "",
     extra_server_args: str = "",
     extra_envs: dict[str, Any] | None = None,
     model_path: str | None = None,
@@ -132,15 +195,18 @@ def materialize_config_with_envs(
     * ``NUM_PROMPTS`` and ``NUM_WARMUPS`` are computed adaptively from
       ``CONC`` and ``ISL+OSL`` (longer sequences → fewer prompts to keep
       each variant under ~3-5 min wall time).
-    * ``extra_sglang_args`` / ``extra_server_args`` (the latter wins) are
-      written to ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS`` based on the
-      configured framework.
+    * ``extra_server_args`` is the framework-neutral payload-surface
+      slot (the legacy name was ``extra_sglang_args``). The
+      materializer routes its value into the framework-specific env
+      name (``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS`` /
+      ``EXTRA_ATOM_ARGS``) based on the framework declared in the
+      YAML's ``benchmark.framework``.
     * ``extra_envs`` overrides any of the above.
 
     Returns the path to the materialized YAML written under ``output_dir``.
     Reuses the file name across calls so callers can locate it predictably.
     """
-    server_args = (extra_server_args or extra_sglang_args).strip()
+    server_args = (extra_server_args or "").strip()
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
@@ -196,6 +262,23 @@ def materialize_config_with_envs(
         envs["TP"] = resolved_tp
     else:
         resolved_tp = int(tp_from_yaml or 1)
+    # Auto-clamp TP to the pod's visible GPU count. The shipped YAML defaults
+    # to TP=8 (full DGX-style node), so a 4-GPU sandbox would otherwise launch
+    # sglang/vllm with `--tensor-parallel-size=8` and crash with `HIP error:
+    # invalid device ordinal`. Override via
+    # $INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1.
+    if os.environ.get("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "").strip() != "1":
+        visible = _visible_gpu_count()
+        if visible and resolved_tp > visible:
+            log.warning(
+                "TP=%d but only %d GPU(s) visible to this pod; clamping "
+                "TP=%d so sglang/vllm can actually load weights. Export "
+                "INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1 to opt out (the "
+                "subprocess will then fail at server launch).",
+                resolved_tp, visible, visible,
+            )
+            resolved_tp = visible
+    envs["TP"] = resolved_tp
     if not rocr_yaml or len(rocr_devices) < resolved_tp:
         derived = ",".join(str(i) for i in range(resolved_tp))
         if rocr_yaml and rocr_yaml != derived:
@@ -259,19 +342,56 @@ def materialize_config_with_envs(
         )
         profile_num_prompts = max(safe_conc, iters_to_prompts * 2)
         fw = str(bench.get("framework") or "").lower()
+        # atom check must precede vllm/sglang branches: atom doesn't
+        # contain a vllm/sglang substring today but the explicit
+        # ordering keeps a future framework name (e.g. "atom-vllm") from
+        # accidentally falling into the wrong branch. atom's HTTP
+        # start_profile/stop_profile path is driven by the InferenceX
+        # bench client's --profile flag (added by benchmark_lib.sh when
+        # PROFILE=1), and the trace directory is wired via
+        # atom_mi*x.sh's --torch-profiler-dir, so this Python layer has
+        # no profiler envs to set for atom — and must NOT inject
+        # --profiler-config.* style flags (atom argparse rejects them).
+        is_atom = "atom" in fw
         # Issue #194 §4 / §5: TraceLens-required profiler flags exist
         # only in patched vLLM / SGLang builds. Try to apply the
         # TraceLens patch set to the in-container install; on success
         # we inject the extra flags below, on failure we silently fall
         # back to today's safe set so vanilla images keep working.
-        # Default-on, disable via HYPERLOOM_ENABLE_PATCH=0.
+        # Default-on, disable via HYPERLOOM_ENABLE_PATCH=0. atom has no
+        # TraceLens patch set (atom's torch_profiler integration is
+        # native), so we skip the patcher entirely for atom — calling
+        # the sglang patcher would no-op but spam install warnings.
         tracelens_patch_ok = False
-        if _tracelens_patch_enabled():
+        if _tracelens_patch_enabled() and not is_atom:
             if "vllm" in fw:
                 tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
             else:
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
-        if "vllm" in fw:
+        if is_atom:
+            # atom writes trace files to
+            # <torch_profiler_dir>/rank_<N>/*.pt.trace.json.gz which our
+            # _candidate_trace_dirs probe matches unchanged.
+            #
+            # atom's profiler is HTTP-driven (POST /start_profile at server-up,
+            # /stop_profile at run end) and — unlike sglang's start_step/num_steps
+            # or vLLM's delay_iterations/max_iterations — has NO internal capture
+            # window: it records the ENTIRE bench-client run. The only lever that
+            # bounds atom's profiled decode-iteration count is the *workload
+            # length* (OSL) + prompt count, and OSL can only be clamped at the
+            # Magpie client layer (`--output-len`), never from this Python layer.
+            #
+            # Therefore the atom profile window lives in ONE place — Magpie's
+            # atom_mi*x.sh, which clamps OSL + NUM_PROMPTS when PROFILE=1 (see
+            # ATOM_PROFILE_OSL / ATOM_PROFILE_NUM_PROMPTS). We must NOT also force
+            # the sglang/vllm steady-state NUM_PROMPTS here: at OSL=1024 that
+            # ~780-prompt window is ~4096 decode iters, which starves aiter's
+            # shared-memory broadcast ring ("No available shared memory broadcast
+            # block found in 60s") until a tiny BROADCAST collective trips the
+            # 600s NCCL watchdog and aborts the run *before* /stop_profile flushes
+            # — leaving rank_*/ empty. Defer to Magpie (single source of truth).
+            profile_num_prompts = None
+        elif "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
             profiler_args_parts = [
                 f"--profiler-config.delay_iterations {delay_iters}",

@@ -42,7 +42,10 @@ def _extract_metrics_via_llm(report_content: str) -> dict:
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
             json={"model": "openai/gpt-4.1-mini", "messages": [{"role": "user", "content": prompt}],
                   "temperature": 0, "max_tokens": 200},
-            timeout=30, verify=False,
+            timeout=30,
+            verify=os.environ.get(
+                "SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True)
+            ),
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()

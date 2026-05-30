@@ -23,7 +23,6 @@ messages` prefix per Anthropic docs. N6's contribution is purely
 
 from __future__ import annotations
 
-from typing import Any
 
 import pytest
 

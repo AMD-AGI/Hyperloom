@@ -115,7 +115,7 @@ async def _arm(
 
     return {
         "arm": name,
-        "extra_sglang_args": extra_sglang.strip(),
+        "extra_server_args": extra_sglang.strip(),
         "returncode": rc,
         "workspace": str(workspace) if workspace else None,
         "report_path": str(workspace / "benchmark_report.json")
