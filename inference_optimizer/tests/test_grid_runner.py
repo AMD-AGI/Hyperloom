@@ -35,6 +35,7 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     apply_runtime_benchmark_overrides,
     apply_single_node_invalid_variants,
     apply_user_skip_list,
+    coerce_extra_envs,
     resolve_skip_spec,
     run_grid,
 )
@@ -348,6 +349,87 @@ class TestSanitizeResultDir:
     def test_rejects_unsafe(self, raw):
         with pytest.raises(ValueError):
             gr.sanitize_result_dir(raw)
+
+
+class TestCoerceExtraEnvs:
+    """Lock the boundary contract for LLM-supplied grid env overrides."""
+
+    def test_dict_is_passthrough(self):
+        assert coerce_extra_envs({"FOO": "1", "BAR": "two"}) == {
+            "FOO": "1", "BAR": "two",
+        }
+
+    def test_dict_coerces_values_to_str(self):
+        assert coerce_extra_envs({"USE_AITER": 1, "DEBUG": True}) == {
+            "USE_AITER": "1", "DEBUG": "True",
+        }
+
+    def test_space_delimited_string(self):
+        assert coerce_extra_envs(
+            "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1"
+        ) == {"SGLANG_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "1"}
+
+    def test_newline_delimited_string(self):
+        assert coerce_extra_envs(
+            "FOO=1\nBAR=two\n\nBAZ=3"
+        ) == {"FOO": "1", "BAR": "two", "BAZ": "3"}
+
+    def test_semicolon_delimited_string(self):
+        assert coerce_extra_envs("A=1;B=2;C=3") == {
+            "A": "1", "B": "2", "C": "3",
+        }
+
+    def test_string_preserves_url_in_value(self):
+        assert coerce_extra_envs(
+            "HF_ENDPOINT=https://hf.example.com/api"
+        ) == {"HF_ENDPOINT": "https://hf.example.com/api"}
+
+    def test_string_drops_tokens_without_equals(self):
+        assert coerce_extra_envs("FOO=1 garbage BAR=2") == {
+            "FOO": "1", "BAR": "2",
+        }
+
+    def test_list_of_kv_tokens(self):
+        assert coerce_extra_envs(["FOO=1", "BAR=2"]) == {
+            "FOO": "1", "BAR": "2",
+        }
+
+    def test_list_of_dicts(self):
+        assert coerce_extra_envs([{"FOO": "1"}, {"BAR": "2"}]) == {
+            "FOO": "1", "BAR": "2",
+        }
+
+    def test_list_later_entries_win(self):
+        assert coerce_extra_envs([{"FOO": "first"}, {"FOO": "last"}]) == {
+            "FOO": "last",
+        }
+
+    def test_none_returns_empty(self):
+        assert coerce_extra_envs(None) == {}
+
+    def test_unknown_type_returns_empty(self):
+        assert coerce_extra_envs(42) == {}
+        assert coerce_extra_envs(object()) == {}
+
+    def test_used_by_backends_grid_override(self):
+        llm_entry = {
+            "name": "aiter_mla_off",
+            "extra_sglang_args": "--attention-backend aiter --disable-mla",
+            "extra_envs": "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0",
+            "note": "aiter attn without MLA fast path",
+        }
+        v = GridVariant(
+            name=llm_entry["name"],
+            extra_sglang_args=llm_entry["extra_sglang_args"],
+            extra_envs=coerce_extra_envs(llm_entry["extra_envs"]),
+            note=llm_entry["note"],
+        )
+
+        assert dict(v.extra_envs.items()) == {
+            "SGLANG_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+        }
+        assert isinstance(v.fingerprint, str) and len(v.fingerprint) > 0
 
 
 # ==============================================================================
