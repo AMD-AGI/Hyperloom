@@ -72,6 +72,11 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # only fallback ``support`` entry.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline",
+    # GAP 1 — Coordinator-internal warm-recipe replay. Same workspace
+    # shape as ``baseline`` (under ``runs/replay_warm_recipe/<task_id>/``);
+    # included so the registry-loader-failure path still pre-mkdirs the
+    # workspace for the replay task that the PRELUDE hook will enqueue.
+    "replay_warm_recipe",
     # Coordinator-internal analysis actions. Which one runs is chosen
     # by ``shared_state.enable_roofline`` (``--enable-roofline`` /
     # ``--no-enable-roofline``, default on): ``roofline`` is the
@@ -446,6 +451,40 @@ def cortex_audit_jsonl(session_dir: Path) -> Path:
     truth for ``breakdown.kb_provenance``.
     """
     return cortex_dir(session_dir) / ".kb_audit.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# recipe-snapshot v2 — per-session bookkeeping.
+#
+# Lives under a separate ``runtime/recipe_snapshot/`` subtree (NOT
+# ``runtime/cortex/``) so the v2 dispatcher can stay decoupled from
+# the legacy ``/v1/points`` client during the gradual cutover.
+#
+# History: under the original Phase 1 design this directory also held
+# ``.pending.ndjson`` / ``.flushed.ndjson`` / ``.dead_letter.ndjson``
+# queues for failed central-server writes. Those have been retired —
+# under the local-write design (commit "feat(recipe_kb): local-only
+# recipe-snapshot store with history archival") writes never go to
+# the central server, so the failed-write fan-out has nothing to
+# queue. Only the read-side audit log (``.audit.jsonl``) and the
+# directory itself survive; both are kept for the dispatcher's
+# remote-failure logging path.
+# ---------------------------------------------------------------------------
+def recipe_snapshot_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/`` — dispatcher / remote-client
+    per-session bookkeeping root.
+    """
+    return Path(session_dir) / "runtime" / "recipe_snapshot"
+
+
+def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only
+    synchronous audit of every recipe-snapshot remote READ call
+    (success or failure) the dispatcher made directly. Writes are
+    local-only and don't traverse this audit (the local store has
+    its own atomic write contract).
+    """
+    return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
 
 
 def pr_monitor_status_json(session_dir: Path) -> Path:
