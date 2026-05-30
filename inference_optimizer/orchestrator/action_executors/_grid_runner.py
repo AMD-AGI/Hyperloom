@@ -669,6 +669,72 @@ class GridVariant:
         return variant_fingerprint(self.extra_server_args, self.extra_envs)
 
 
+def coerce_extra_envs(value: Any) -> dict[str, str]:
+    """Normalize Orchestration-supplied ``extra_envs`` to ``dict[str,str]``.
+
+    The Orchestration LLM tends to emit ``extra_envs`` in three shapes
+    even though only the dict form is contractually correct:
+
+    1. ``{"FOO": "1", "BAR": "2"}`` — canonical.
+    2. ``"FOO=1 BAR=2"`` or ``"FOO=1\nBAR=2"`` — shell-style string; the
+       LLM cribs this from `export FOO=1 BAR=2` examples in prompts.
+    3. ``["FOO=1", "BAR=2"]`` — list of ``KEY=VAL`` tokens; sometimes
+       emitted alongside ``synergy_groups`` lists.
+
+    Previously the grid-construction sites accepted only shape #1 and
+    silently propagated #2/#3 into :class:`GridVariant.extra_envs`, where
+    :func:`_run_magpie` and :func:`variant_fingerprint` call ``.items()``
+    and crash with ``AttributeError("'str' object has no attribute
+    'items'")`` — taking the entire ``backends`` / ``params`` round
+    down. This helper keeps the contract narrow at the boundary so the
+    downstream pipeline only ever sees a clean dict.
+
+    Unknown shapes (anything that isn't dict/str/list/None) are coerced
+    to an empty dict; the action ledger records the round but no envs
+    are exported. Caller logging surfaces the variant name so the LLM
+    can self-correct on the next round.
+    """
+    if isinstance(value, dict):
+        return {str(k): str(v) for k, v in value.items() if k is not None}
+    if isinstance(value, str):
+        out: dict[str, str] = {}
+        # Accept newline, semicolon, or whitespace separation; values
+        # never contain ``=`` in practice but we split on the first ``=``
+        # only to preserve URL-style assignments like ``HF_ENDPOINT=https://...``.
+        tokens = re.split(r"[\s;]+", value.strip())
+        for tok in tokens:
+            if not tok:
+                continue
+            if "=" not in tok:
+                continue
+            k, v = tok.split("=", 1)
+            k = k.strip()
+            if not k:
+                continue
+            out[k] = v.strip()
+        return out
+    if isinstance(value, (list, tuple)):
+        out_l: dict[str, str] = {}
+        for item in value:
+            if isinstance(item, dict):
+                # ``[{"FOO": "1"}, {"BAR": "2"}]`` — merge in order so
+                # later entries win, mirroring shell ``export`` semantics.
+                for k, v in item.items():
+                    if k is None:
+                        continue
+                    out_l[str(k)] = str(v)
+                continue
+            if not isinstance(item, str) or "=" not in item:
+                continue
+            k, v = item.split("=", 1)
+            k = k.strip()
+            if not k:
+                continue
+            out_l[k] = v.strip()
+        return out_l
+    return {}
+
+
 @dataclass
 class VariantResult:
     """One bench run's parsed result."""
