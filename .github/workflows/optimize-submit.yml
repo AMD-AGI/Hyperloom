@@ -452,49 +452,310 @@ jobs:
       # `continue-on-error` so a flaky upstream never blocks the rest of
       # the per-model contract (artifact upload, prewarm log, etc).
       - name: Publish session breakdown to perf-leaderboard
-        if: always() && github.event.inputs.dry_run != 'true'
+        if: success() && github.event.inputs.dry_run != 'true'
         continue-on-error: true
+        env:
+          EXPECTED_MODEL: ${{ matrix.model }}
         run: |
           set -euo pipefail
-          # Consistency guard — root-cause fix for the cross-run mixup where a
-          # stale session_breakdown left in the PERSISTENT RESULT_DIR (reused per
-          # uid) got published under the wrong model. ci_metrics.json is written
-          # fresh by THIS run's agent, so its claw_session_id is ground truth.
-          #
-          # Do NOT pick "largest then validate": a stale full breakdown can be
-          # larger than this run's compact one. Instead, scan every candidate
-          # (largest first only as a preference) and choose the first breakdown
-          # whose claw_session_id matches this run.
-          CIM=$(find task-artifacts -name ci_metrics.json 2>/dev/null | head -1)
-          if [ -z "$CIM" ]; then
-            echo "::warning::no ci_metrics.json found under task-artifacts/; cannot identify this run's claw_session_id; skipping sbd-ingester publish"
-            echo "SKIP no-ci-metrics" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
-            exit 0
-          fi
-          CS_CIM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('claw_session_id') or '')" "$CIM" 2>/dev/null || echo '')
-          if [ -z "$CS_CIM" ]; then
-            echo "::warning::ci_metrics.json has no claw_session_id; cannot safely select session_breakdown; skipping sbd-ingester publish"
-            echo "SKIP no-claw-session" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
-            exit 0
-          fi
-          BD=""
-          while IFS= read -r candidate; do
-            [ -n "$candidate" ] && [ -f "$candidate" ] || continue
-            CS_BD=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); s=d.get('session') or {}; print(s.get('claw_session_id') or d.get('claw_session_id') or '')" "$candidate" 2>/dev/null || echo '')
-            if [ "$CS_BD" = "$CS_CIM" ]; then
-              BD="$candidate"
-              break
+          mkdir -p task-artifacts
+          if [ -f submit-output/submission_manifest.json ]; then
+            READY=$(python3 - <<'PY'
+          import json
+          with open("submit-output/submission_manifest.json", encoding="utf-8") as f:
+              data = json.load(f)
+          records = data.get("records") if isinstance(data.get("records"), list) else []
+          ok = any((r.get("final_status") == "Succeeded") for r in records if isinstance(r, dict))
+          print("yes" if ok else "no")
+          PY
+            )
+            if [ "$READY" != "yes" ]; then
+              echo "::warning::no Succeeded task in submission_manifest.json; skipping sbd-ingester publish"
+              echo "SKIP non-succeeded-task" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
+              exit 0
             fi
-            echo "[sbd-ingester] skip stale breakdown: $candidate (claw_session_id='$CS_BD', expected='$CS_CIM')"
-          done < <(find task-artifacts -name 'session_breakdown*.json' 2>/dev/null \
-               | xargs -r -I{} stat -c '%s %n' {} 2>/dev/null \
-               | sort -nr | awk '{$1=""; print $0}' | sed 's/^ //')
+          fi
+          # Select only within this matrix job's collected task directory. The
+          # flat task-artifacts/<task_id>/ci_metrics.json is backfilled by
+          # optimize_submit.py with current task/model metadata; nested
+          # session/ci_metrics.json files may be raw sandbox copies and can be
+          # missing claw_session_id. Model equality is the primary guard; when
+          # both sides have claw_session_id, it must match as an extra guard.
+          python3 <<'PY' > task-artifacts/sbd_publish_selection.json
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path("task-artifacts")
+          expected_model = os.environ.get("EXPECTED_MODEL", "")
+
+          def load_json(path):
+              try:
+                  with open(path, encoding="utf-8") as f:
+                      data = json.load(f)
+                  return data if isinstance(data, dict) else {}
+              except Exception as exc:
+                  return {"_error": f"{type(exc).__name__}: {exc}"}
+
+          def norm_token(value):
+              return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+          def norm_model(value):
+              raw = str(value or "").strip().rstrip("/\\")
+              if not raw:
+                  return ""
+              base = re.split(r"[\\/]", raw)[-1]
+              return norm_token(base)
+
+          def model_matches(expected, observed):
+              """Accept repo basename/org+basename plus known config suffixes.
+
+              Examples accepted:
+                openai/gpt-oss-20b == openai-gpt-oss-20b
+                deepseek-ai/DeepSeek-V3.2 == deepseek-v3.2-fp8-sglang-mi300x
+
+              Examples rejected:
+                Qwen/Qwen3-32B != squaredcuber-Cybus-Qwen3-32B-v2-agentic
+                nvidia/Nemotron... != trohrbaugh-NVIDIA-Nemotron...-heretic-v2
+              """
+              exp_base = norm_model(expected)
+              exp_full = norm_token(str(expected or "").replace("/", "-"))
+              obs = norm_token(observed)
+              if not exp_base or not obs:
+                  return True
+              for prefix in (exp_base, exp_full):
+                  if not prefix:
+                      continue
+                  if obs == prefix:
+                      return True
+                  if obs.startswith(prefix):
+                      suffix = obs[len(prefix):]
+                      # Only allow our runtime/config suffixes after the model
+                      # identity. This prevents accepting third-party variants
+                      # with arbitrary prefixes/suffixes as the same model.
+                      if suffix.startswith((
+                          "fp8", "fp4", "bf16", "fp16", "int8", "int4",
+                          "sglang", "vllm", "mi300x", "mi325x", "mi355x",
+                          "tp", "ep",
+                      )):
+                          return True
+              return False
+
+          def positive_number(value):
+              return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+          def has_positive_perf(data):
+              baseline = data.get("baseline") if isinstance(data.get("baseline"), dict) else {}
+              final = data.get("final") if isinstance(data.get("final"), dict) else {}
+              best = data.get("best") if isinstance(data.get("best"), dict) else {}
+              base_values = (
+                  data.get("baseline_tput"),
+                  data.get("baseline_throughput"),
+                  data.get("tok_per_gpu_baseline"),
+                  baseline.get("throughput_tok_s_per_gpu"),
+                  baseline.get("output_throughput"),
+              )
+              opt_values = (
+                  data.get("best_tput"),
+                  data.get("optimized_throughput"),
+                  data.get("tok_per_gpu_optimized"),
+                  final.get("throughput_tok_s_per_gpu"),
+                  final.get("output_throughput"),
+                  best.get("throughput_tok_s_per_gpu"),
+                  best.get("output_throughput"),
+              )
+              return any(positive_number(v) for v in base_values) and any(positive_number(v) for v in opt_values)
+
+          def first(*values):
+              for value in values:
+                  if value not in (None, ""):
+                      return str(value)
+              return ""
+
+          def breakdown_fields(data):
+              workload = data.get("workload") if isinstance(data.get("workload"), dict) else {}
+              session = data.get("session") if isinstance(data.get("session"), dict) else {}
+              meta = data.get("session_meta") if isinstance(data.get("session_meta"), dict) else {}
+              return {
+                  "model": first(
+                      workload.get("model_name"),
+                      workload.get("model"),
+                      data.get("model_name"),
+                      data.get("model"),
+                      session.get("model"),
+                      meta.get("model"),
+                  ),
+                  "claw_session_id": first(
+                      session.get("claw_session_id"),
+                      meta.get("claw_session_id"),
+                      data.get("claw_session_id"),
+                  ),
+                  "session_id": first(session.get("session_id"), meta.get("session_id")),
+                  "schema_version": first(data.get("schema_version")),
+              }
+
+          def ci_fields(task_dir):
+              ci_path = task_dir / "ci_metrics.json"
+              ci = load_json(ci_path) if ci_path.is_file() else {}
+              return ci_path, ci, first(ci.get("model"), ci.get("model_name")), first(ci.get("claw_session_id")), first(ci.get("image"))
+
+          def source_local_path(entry):
+              raw = str(entry.get("local_path") or "")
+              if not raw:
+                  return None
+              p = Path(raw)
+              if p.is_file():
+                  return p
+              # Older manifests may store paths relative to the task dir.
+              alt = root / raw
+              return alt if alt.is_file() else None
+
+          expected_norm = norm_model(expected_model)
+          for meta_path in sorted(root.glob("*/artifact_sources.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+              meta = load_json(meta_path)
+              task_dir = meta_path.parent
+              ci_path, ci, ci_model, ci_claw, ci_image = ci_fields(task_dir)
+              ci_norm = norm_model(ci_model)
+              if expected_norm and ci_norm and ci_norm != expected_norm:
+                  continue
+              files = meta.get("files") if isinstance(meta.get("files"), list) else []
+              candidates = []
+              for entry in files:
+                  if not isinstance(entry, dict):
+                      continue
+                  p = source_local_path(entry)
+                  if p and p.name.startswith("session_breakdown") and p.suffix == ".json":
+                      candidates.append((0, p, entry))
+              for p in sorted(task_dir.glob("**/session_breakdown*.json")):
+                  if p.is_file() and all(p != c[1] for c in candidates):
+                      candidates.append((1, p, {"source_type": "task_dir_scan"}))
+
+              for nesting, bd_path, source in candidates:
+                  bd = load_json(bd_path)
+                  if "_error" in bd:
+                      notes = [f"skip {bd_path}: {bd['_error']}"]
+                      continue
+                  bf = breakdown_fields(bd)
+                  if not has_positive_perf(bd):
+                      notes = [f"skip {bd_path}: missing positive baseline/best throughput"]
+                      continue
+                  if ci_claw and bf["claw_session_id"] and ci_claw != bf["claw_session_id"]:
+                      notes = [f"skip {bd_path}: claw_session_id={bf['claw_session_id']!r} expected={ci_claw!r}"]
+                      continue
+                  print(json.dumps({
+                      "bd": str(bd_path),
+                      "ci": str(ci_path) if ci_path.is_file() else "",
+                      "task_dir": str(task_dir),
+                      "task_id": first(meta.get("task_id"), ci.get("task_id"), task_dir.name),
+                      "ci_model": ci_model,
+                      "expected_model": expected_model,
+                      "ci_claw_session_id": first(meta.get("claw_session_id"), ci_claw),
+                      "ci_image": ci_image,
+                      "source_type": source.get("source_type", ""),
+                      "source_path": source.get("source_path", ""),
+                      "remote_path": source.get("remote_path", ""),
+                      **bf,
+                      "score": 200 - nesting,
+                      "notes": [],
+                  }, indent=2))
+                  raise SystemExit(0)
+
+          ci_paths = sorted(
+              [p for p in root.glob("*/ci_metrics.json") if p.is_file()],
+              key=lambda p: p.stat().st_mtime,
+              reverse=True,
+          )
+          notes = []
+          best = None
+
+          for ci_path in ci_paths:
+              ci = load_json(ci_path)
+              ci_model = first(ci.get("model"), ci.get("model_name"))
+              ci_norm = norm_model(ci_model)
+              if expected_norm and ci_norm and ci_norm != expected_norm:
+                  notes.append(f"skip ci {ci_path}: model={ci_model!r} expected={expected_model!r}")
+                  continue
+
+              task_dir = ci_path.parent
+              task_id = first(ci.get("task_id"), task_dir.name)
+              ci_claw = first(ci.get("claw_session_id"))
+              ci_image = first(ci.get("image"))
+              candidates = []
+              for name in ("session_breakdown.json", "session_breakdown_v2.json"):
+                  p = task_dir / name
+                  if p.is_file():
+                      candidates.append((0, p))
+              for p in sorted(task_dir.glob("*/session_breakdown*.json")):
+                  if p.is_file():
+                      candidates.append((1, p))
+
+              if not candidates:
+                  notes.append(f"skip task {task_dir}: no session_breakdown*.json")
+                  continue
+
+              for nesting, bd_path in candidates:
+                  bd = load_json(bd_path)
+                  if "_error" in bd:
+                      notes.append(f"skip {bd_path}: {bd['_error']}")
+                      continue
+                  bf = breakdown_fields(bd)
+                  # If the breakdown names a model, require identity match with
+                  # only known runtime suffixes allowed.
+                  if bf["model"] and ci_model and not model_matches(ci_model, bf["model"]):
+                      notes.append(
+                          f"skip {bd_path}: model={bf['model']!r} expected={ci_model!r}"
+                      )
+                      continue
+                  if not has_positive_perf(bd):
+                      notes.append(f"skip {bd_path}: missing positive baseline/best throughput")
+                      continue
+                  if ci_claw and bf["claw_session_id"] and ci_claw != bf["claw_session_id"]:
+                      notes.append(
+                          f"skip {bd_path}: claw_session_id={bf['claw_session_id']!r} "
+                          f"expected={ci_claw!r}"
+                      )
+                      continue
+                  score = 100 - nesting
+                  if bf["claw_session_id"] and ci_claw == bf["claw_session_id"]:
+                      score += 20
+                  if bf["model"] and ci_model and model_matches(ci_model, bf["model"]):
+                      score += 10
+                  row = {
+                      "bd": str(bd_path),
+                      "ci": str(ci_path),
+                      "task_dir": str(task_dir),
+                      "task_id": task_id,
+                      "ci_model": ci_model,
+                      "expected_model": expected_model,
+                      "ci_claw_session_id": ci_claw,
+                      "ci_image": ci_image,
+                      **bf,
+                      "score": score,
+                      "notes": notes[-20:],
+                  }
+                  if best is None or row["score"] > best["score"]:
+                      best = row
+
+          if best is None:
+              best = {
+                  "bd": "",
+                  "reason": "no matching session_breakdown for current task/model",
+                  "expected_model": expected_model,
+                  "notes": notes[-50:],
+              }
+          print(json.dumps(best, indent=2))
+          PY
+          cat task-artifacts/sbd_publish_selection.json
+          BD=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('bd') or '')" task-artifacts/sbd_publish_selection.json)
           if [ -z "$BD" ] || [ ! -f "$BD" ]; then
-            echo "::warning::no session_breakdown*.json matched ci_metrics claw_session_id '$CS_CIM'; skipping sbd-ingester publish to avoid polluting the dashboard"
-            echo "SKIP claw-mismatch" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
+            REASON=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('reason') or 'no matching session_breakdown')" task-artifacts/sbd_publish_selection.json)
+            echo "::warning::$REASON; skipping sbd-ingester publish"
+            echo "SKIP $REASON" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
             exit 0
           fi
-          echo "[sbd-ingester] selected session_breakdown: $BD (claw_session_id='$CS_CIM')"
+          CS_CIM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('ci_claw_session_id') or '')" task-artifacts/sbd_publish_selection.json)
+          echo "[sbd-ingester] selected session_breakdown: $BD (ci_claw_session_id='${CS_CIM:-}')"
           BD_SIZE=$(stat -c %s "$BD")
           # Publish to sbd-ingester instead of posting straight to perf_runs_dev.
           # The ingester cleans fields, upserts into the dev table, and reports
@@ -505,7 +766,55 @@ jobs:
           SBD_SEND="${BD%.json}.sbd.json"
           PERF_DIR=$(dirname "$BD")
           set +e
-          python3 -c "import json,sys; d=json.load(open(sys.argv[1])); d['schema_version']='hyperloom.session_breakdown.v1.1'; json.dump(d,open(sys.argv[2],'w'))" "$BD" "$SBD_SEND"
+          python3 - "$BD" "$SBD_SEND" task-artifacts/sbd_publish_selection.json <<'PY'
+          import json
+          import sys
+
+          src, dst, selection_path = sys.argv[1:4]
+          with open(src, encoding="utf-8") as f:
+              data = json.load(f)
+          with open(selection_path, encoding="utf-8") as f:
+              selection = json.load(f)
+
+          sys.path.insert(0, "ci")
+          try:
+              import import_session_breakdown as isb
+          except Exception:
+              isb = None
+
+          if isb is not None:
+              if isb.looks_like_v1_flat_schema(data):
+                  data = isb.migrate_v1_to_v2(data)
+              elif isb.looks_like_universal_schema(data) and not (
+                  isinstance(data.get("workload"), dict)
+                  and isinstance(data.get("baseline"), dict)
+                  and isinstance(data.get("final"), dict)
+              ):
+                  migrated = isb.migrate_universal_to_v2(data)
+                  if migrated:
+                      data = migrated
+
+          data["schema_version"] = "hyperloom.session_breakdown.v1.1"
+          task_id = selection.get("task_id") or ""
+          claw_session_id = selection.get("ci_claw_session_id") or ""
+          image = selection.get("ci_image") or ""
+
+          session_meta = data.setdefault("session_meta", {})
+          session = data.setdefault("session", {})
+          for obj in (data, session_meta, session):
+              if task_id:
+                  obj.setdefault("task_id", task_id)
+              if claw_session_id:
+                  obj.setdefault("claw_session_id", claw_session_id)
+              if image:
+                  obj.setdefault("image", image)
+          if claw_session_id:
+              session.setdefault("session_id", claw_session_id)
+              session_meta.setdefault("session_id", claw_session_id)
+
+          with open(dst, "w", encoding="utf-8") as f:
+              json.dump(data, f)
+          PY
           RELABEL_RC=$?
           set -e
           if [ "$RELABEL_RC" -ne 0 ] || [ ! -s "$SBD_SEND" ]; then
