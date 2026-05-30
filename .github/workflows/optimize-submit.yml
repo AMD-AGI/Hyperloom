@@ -15,8 +15,8 @@ name: SaFE Optimize Submit
 #                                    register, so download is overlapped
 #                                    with the rest of the batch (no serial
 #                                    prewarm stage that blocks optimize).
-#                                    max-parallel capped by `max_parallel`
-#                                    input (sandbox has 128 GPU available).
+#                                    default max_parallel=60 so the whole
+#                                    scheduled batch can dispatch at once.
 #   3. summarize  (hyperloom-4hhzn) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
 #                                    Gain% desc, with medals), publish the
@@ -74,9 +74,9 @@ on:
         required: false
         default: '7'
       max_parallel:
-        description: 'Max parallel optimize jobs (sandbox has 128 GPU; safe ceiling is ~128)'
+        description: 'Max parallel optimize jobs (default 60 = scheduled batch size)'
         required: false
-        default: '20'
+        default: '60'
       submit_workspaces:
         # Comma-separated round-robin pool. Empty = use single
         # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret (current behavior =
@@ -218,7 +218,7 @@ jobs:
     timeout-minutes: 780
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(github.event.inputs.max_parallel || '20') }}
+      max-parallel: ${{ fromJson(github.event.inputs.max_parallel || '60') }}
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
