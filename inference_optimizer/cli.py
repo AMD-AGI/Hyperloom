@@ -1797,10 +1797,19 @@ def _check_gpu_visibility() -> None:
         return
     if proc.returncode != 0:
         return
-    visible = sum(
-        1 for line in (proc.stdout or "").splitlines()
-        if line.strip().startswith("GPU[")
-    )
+    # ``rocm-smi --showid`` emits multiple lines per GPU (Device Name,
+    # Device ID, Device Rev, Subsystem ID, GUID, ...). Counting raw lines
+    # that start with ``GPU[`` overcounts by ~6x — a 4-GPU pod looked like
+    # it had 24 visible GPUs and this WARN never fired. Deduplicate by
+    # GPU index instead.
+    visible_indices: set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("GPU["):
+            idx, _, _ = stripped[4:].partition("]")
+            if idx:
+                visible_indices.add(idx)
+    visible = len(visible_indices)
     try:
         wanted = int(os.environ.get("TP", "1") or "1")
     except ValueError:
