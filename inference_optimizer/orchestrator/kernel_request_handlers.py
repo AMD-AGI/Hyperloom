@@ -135,6 +135,17 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/atom/",
 )
 _APPLY_TOOL_MODULE: Any | None = None
+# GEAK is FIRST per SKILL.md "high-priority handoff" contract: every kernel
+# Claude/Codex can rewrite, GEAK can rewrite too, and GEAK's GPU-only
+# benchmark loop typically converges faster than the dialogue-based
+# Claude/Codex backends. Keeping claude/codex first (the historical order)
+# meant that batch dispatch via :func:`_run_kernel_backend_sequence` always
+# burned the first attempt slots on Claude before GEAK could see the
+# kernel — which silently violated the contract surfaced in SKILL.md
+# §"choose_backends" / "Default ladder" and made user requests like
+# "run GEAK on this kernel" inert when the LLM stopped at a Claude KEEP.
+# Cursor stays last because :func:`_backend_order` drops it from the
+# auto-derived ladder when ``CURSOR_API_KEY`` is unset.
 _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
 # Soft upper bound on concurrent ``_run_kernel_backend_sequence`` coroutines
 # inside ``_run_optimization_batch``. The real GPU scheduling happens one
@@ -589,6 +600,46 @@ def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
     return ""
 
 
+def _fill_integrate_defaults_from_state(
+    payload: dict, *, session_dir: Path,
+) -> dict:
+    """Pull ``base_tput`` / ``config_path`` / ``extra_sglang_args`` defaults from SharedState.
+
+    Sibling of ``_resolve_integrate_payload`` but runs *before* the
+    ``base_tput > 0`` hard-check at the top of ``integrate_handler``.
+    ``_resolve_integrate_payload`` already handles ``patch_path`` /
+    ``source_file`` defaulting; the three fields filled here are the
+    other Magpie re-baseline inputs that Orchestration tends to omit
+    when it sends a bare ``{"kernel_id": ...}`` payload.
+
+    Always returns a (shallow) copy of ``payload`` so the caller can
+    treat it as a fresh dict; never raises on a missing SharedState
+    snapshot (returns the input dict unchanged in that case).
+    """
+    from .shared_state import SharedState
+
+    resolved = dict(payload)
+    state = SharedState.load_or_init(session_dir)
+
+    if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
+        bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        if bt > 0:
+            resolved["base_tput"] = bt
+
+    if not resolved.get("config_path"):
+        cfg = getattr(state, "baseline_config_path", "") or ""
+        if cfg:
+            resolved["config_path"] = cfg
+
+    current_best = getattr(state, "current_best", None) or {}
+    if not resolved.get("extra_sglang_args") and isinstance(current_best, dict):
+        cb_args = current_best.get("extra_sglang_args") or ""
+        if cb_args:
+            resolved["extra_sglang_args"] = cb_args
+
+    return resolved
+
+
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
     """Fill integrate inputs from SharedState when Orchestration sends only kernel_id.
 
@@ -778,7 +829,7 @@ async def trace_analyze_handler(
     #     correct steady-state window — without these the splitter falls
     #     back to in-trace heuristics that can yield 0 chunks
     #     (`trace_split_no_steady_state`) and collapse the whole
-    #     select_kernels / kernel_opt / integrate chain.
+    #     trace_analyze / kernel_opt / integrate chain.
     # (2) downstream below to enrich result.hot_kernels and the
     #     kernel_candidates artifact with the same runtime context.
     metadata = _load_materialized_workload_metadata(state.baseline_config_path)
@@ -811,9 +862,9 @@ async def trace_analyze_handler(
     # Without these, the splitter has historically had to guess the
     # mixed-window selection's PD ratio from heuristics; on workloads
     # where heuristics miss, all three steady-state windows come back
-    # empty and `select_kernels` returns
+    # empty and `trace_analyze` returns
     # ``status=failed error=trace_split_no_steady_state``, blocking the
-    # entire kernel-optimization chain (select_kernels -> kernel_opt ->
+    # entire kernel-optimization chain (trace_analyze -> kernel_opt ->
     # integrate -> operator_tuning -> deep_kernel_analysis).
     split_conc = payload.get("split_conc") or workload.get("conc")
     if split_conc not in (None, ""):
@@ -1475,6 +1526,7 @@ async def _run_optimization_single(
         extra_server_args: SGLang runtime flags for GEAK metadata (optional)
         enable_rag:      default True; false disables GEAK RAG tools
         enable_xs_memory: default True; false disables GEAK cross-session memory
+        test_command:     test command from unittest skill (passed to GEAK --test-command)
         dry_run:         default False (testing)
 
     Returns the tool's JSON output verbatim under ``result``.
@@ -1546,6 +1598,8 @@ async def _run_optimization_single(
         cmd += ["--disable-rag"]
     if payload.get("enable_xs_memory") is False:
         cmd += ["--disable-xs-memory"]
+    if payload.get("test_command"):
+        cmd += ["--test-command", str(payload["test_command"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     geak_budget_min = _geak_budget_minutes(payload)
@@ -1677,8 +1731,17 @@ async def integrate_handler(
     """
     from .action_executors.baseline import BaselineExecutor
     from .action_executors.benchmark_result import is_valid_measurement
+    from .shared_state import SharedState
     from .sub_agent_runner import RunnerContext
     from .task_registry import Task
+
+    # Orchestration often calls integrate with just {kernel_id} — the
+    # already-materialised baseline / current-best config lives in
+    # SharedState. Fill it in before the hard ``base_tput > 0`` check so
+    # a well-prepared session_dir is self-sufficient and we don't fail
+    # the integrate task with a phantom "missing base_tput" when the
+    # number is right there on disk.
+    payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
     base_tput = float(payload.get("base_tput", 0.0))
     if base_tput <= 0:
@@ -1849,23 +1912,16 @@ async def integrate_handler(
 
 
 # ---------------------------------------------------------------------------
-# F1-2 (roofline composite) + main M4 — back-compat alias.
+# Kernel-agent programmatic dispatch table.
 #
-# Hyperloom main renamed ``select_kernels_handler`` to
+# Main M4 renamed ``select_kernels_handler`` to
 # ``trace_analyze_handler`` (the function does TraceLens analysis +
 # kernel selection in a single pass, so the new name is more accurate).
-# The M4 merge adopts main's canonical ``trace_analyze_handler`` name;
-# the back-compat alias below keeps the ~30 legacy callsites that import
-# ``select_kernels_handler`` working unchanged.
-select_kernels_handler = trace_analyze_handler
-
+# This branch dropped the legacy ``select_kernels`` alias entirely; the
+# canonical kind is ``trace_analyze``. RooflineExecutor (F1-2) calls
+# the function directly; the dispatch entry below is for LLM-driven
+# requests routed via ``Coordinator._handle_request``.
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
-    "select_kernels":   trace_analyze_handler,
-    # ``trace_analyze`` dispatch routes to the same handler as
-    # ``select_kernels`` — RooflineExecutor (F1-2) calls the function
-    # directly, but explicit dispatch entries keep the action-table
-    # symmetric for future PolicyGate / audit code that keys on the
-    # request kind.
     "trace_analyze":    trace_analyze_handler,
     "run_optimization": run_optimization_handler,
     "integrate":        integrate_handler,
@@ -1888,6 +1944,5 @@ __all__ = [
     "has_handler",
     "integrate_handler",
     "run_optimization_handler",
-    "select_kernels_handler",
     "trace_analyze_handler",
 ]
