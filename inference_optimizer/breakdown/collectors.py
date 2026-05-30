@@ -1329,6 +1329,12 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
     Single source of truth per Inv-12.2: the row never diverges from
     the ``specialist_runs`` section because both read the same
     SharedState ledger.
+
+    The headline counts (``status`` / ``attempts`` / ``keeps`` /
+    ``tested``) aggregate across every domain. ``by_specialist``
+    breaks them out per SpecialistDomain.key so the dashboard can
+    render six (or seven, including session_steward) per-specialist
+    cards without re-aggregating client-side.
     """
     rounds = state.get("specialist_rounds") or []
     if not isinstance(rounds, list) or not rounds:
@@ -1337,16 +1343,60 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
             "attempts":  0,
             "keeps":     0,
             "tested":    0,
+            "by_specialist": _empty_by_specialist_capability(),
         }
+
     attempts = 0
     proposals_total = 0
     proposals_kept = 0
+    # Per-domain counters. Seeded with the catalogue so consumers
+    # iterate every known specialist without presence checks; unknown
+    # domain strings still in state survive (forward compat with new
+    # SpecialistDomain entries).
+    by_specialist_raw: dict[str, dict[str, int]] = {
+        d: {"attempts": 0, "keeps": 0, "tested": 0, "rejected": 0}
+        for d in _SPECIALIST_DOMAIN_KEYS
+    }
+
     for r in rounds:
         if not isinstance(r, dict):
             continue
         attempts += 1
         proposals_total += int(r.get("proposals_total") or 0)
         proposals_kept += int(r.get("proposals_kept") or 0)
+
+        # Per-domain tallies. Trust ``domain_breakdown`` when the
+        # Coordinator wrote it (most accurate, especially for parallel
+        # multi-domain rounds); otherwise fall back to ``domains[]``
+        # split evenly across the round's totals.
+        round_breakdown = r.get("domain_breakdown")
+        if isinstance(round_breakdown, dict) and round_breakdown:
+            for dom, payload in round_breakdown.items():
+                if not isinstance(payload, dict):
+                    continue
+                bucket = by_specialist_raw.setdefault(str(dom), {
+                    "attempts": 0, "keeps": 0, "tested": 0, "rejected": 0,
+                })
+                bucket["attempts"] += int(payload.get("dispatched") or 0)
+                bucket["keeps"] += int(payload.get("proposals_kept") or 0)
+                bucket["tested"] += int(payload.get("proposals_total") or 0)
+                bucket["rejected"] += int(payload.get("proposals_rejected") or 0)
+        else:
+            # Round predates ``domain_breakdown``; impute equal share
+            # across the listed domains so the per-domain numbers add
+            # up to the parent row even on legacy rounds.
+            domains = r.get("domains") or []
+            if isinstance(domains, list) and domains:
+                share_total = int(r.get("proposals_total") or 0) // len(domains)
+                share_kept = int(r.get("proposals_kept") or 0) // len(domains)
+                for dom in domains:
+                    bucket = by_specialist_raw.setdefault(str(dom), {
+                        "attempts": 0, "keeps": 0, "tested": 0, "rejected": 0,
+                    })
+                    bucket["attempts"] += 1
+                    bucket["tested"] += share_total
+                    bucket["keeps"] += share_kept
+
     if attempts == 0:
         status = "not_attempted"
     elif proposals_kept > 0:
@@ -1355,11 +1405,44 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
         status = "tried"
     else:
         status = "attempted"
+
+    # Materialize the by_specialist dict with status derived per-domain.
+    by_specialist: dict[str, dict[str, Any]] = {}
+    for dom, raw in by_specialist_raw.items():
+        if raw["attempts"] == 0:
+            dom_status = "not_attempted"
+        elif raw["keeps"] > 0:
+            dom_status = "kept"
+        elif raw["tested"] > 0:
+            dom_status = "tried"
+        else:
+            dom_status = "attempted"
+        by_specialist[dom] = {
+            "status":   dom_status,
+            "attempts": raw["attempts"],
+            "keeps":    raw["keeps"],
+            "tested":   raw["tested"],
+        }
+
     return {
-        "status":   status,
-        "attempts": attempts,
-        "keeps":    proposals_kept,
-        "tested":   proposals_total,
+        "status":         status,
+        "attempts":       attempts,
+        "keeps":          proposals_kept,
+        "tested":         proposals_total,
+        "by_specialist":  by_specialist,
+    }
+
+
+def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
+    """Seed every catalogue domain with a not_attempted CapabilityEntry.
+
+    Stable-shape contract: the dashboard never has to ``KeyError``-
+    guard when iterating ``capability_summary.specialist.by_specialist``
+    on a session that didn't dispatch every domain.
+    """
+    return {
+        d: {"status": "not_attempted", "attempts": 0, "keeps": 0, "tested": 0}
+        for d in _SPECIALIST_DOMAIN_KEYS
     }
 
 
@@ -2611,6 +2694,56 @@ def collect_telemetry(
 # ---------------------------------------------------------------------------
 # §14 Attribution
 # ---------------------------------------------------------------------------
+# Catalogue of the 7 SpecialistDomain.key strings
+# (specialist_domains.SPECIALIST_DOMAIN_KEYS). Kept inline rather than
+# imported so the breakdown package stays free of orchestrator deps —
+# the breakdown module is meant to be readable by tools running
+# offline against a session_dir tarball.
+_SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
+    "serving_specialist",
+    "kernel_switch_specialist",
+    "comm_specialist",
+    "compiler_specialist",
+    "system_specialist",
+    "pr_intel_specialist",
+    "session_steward_specialist",
+)
+
+
+def _normalize_specialist_key(provenance: str) -> str:
+    """Map a raw ``provenance`` string to a stable specialist key.
+
+    The orchestrator stamps four shapes of provenance on explore
+    winners:
+
+    * ``"specialist:<domain>"`` — the canonical case for v0.8+ runs.
+      Strip the prefix so the consumer iterates one bare key per
+      catalogue entry instead of having to special-case the prefix.
+    * ``"default_grid"`` — cold-start grid run when no specialist has
+      produced a proposal_set yet.
+    * ``"llm_direct"`` — orchestration LLM authored the variant
+      directly (legacy path; PR-A9 retired this).
+    * ``"legacy:<action>"`` — resume of a pre-v0.8 session whose
+      promoted actions predate the specialist split. Folded under
+      ``"legacy_<action>"`` so it doesn't pollute the specialist
+      catalogue while still being inspectable.
+
+    Empty / unknown values become ``"unknown"`` so the by_domain dict
+    is never keyed by ``""``.
+    """
+    s = (provenance or "").strip()
+    if not s:
+        return "unknown"
+    if s.startswith("specialist:"):
+        # Trust the orchestrator's domain string verbatim — adding a new
+        # SpecialistDomain in specialist_domains.py shouldn't require a
+        # parallel update here.
+        return s[len("specialist:"):] or "unknown"
+    if s.startswith("legacy:"):
+        return f"legacy_{s[len('legacy:'):]}"
+    return s
+
+
 def _action_family(action: str) -> str:
     """Map an action label to a family for source_breakdown bucketing."""
     s = (action or "").lower()
@@ -2962,13 +3095,19 @@ def _collect_phase_breakdown(
         if phase == "explore":
             by_domain = bucket.setdefault("by_domain", {})
             fp = str(e.get("fingerprint") or e.get("variant_fingerprint") or "")
-            prov = (
+            raw_prov = (
                 provenance_by_fp.get(fp)
                 or str(e.get("provenance") or "")
                 or "default_grid"
             )
-            by_domain[prov] = round(
-                float(by_domain.get(prov, 0.0)) + float(delta), 2,
+            # Normalize to a bare specialist key (strip ``specialist:``
+            # prefix; fold ``legacy:*`` into ``legacy_*``). Without this
+            # the dashboard had to manually splice the prefix every time
+            # it iterated by_domain — error-prone and easy to miss when
+            # the orchestrator adds a new SpecialistDomain.
+            domain = _normalize_specialist_key(raw_prov)
+            by_domain[domain] = round(
+                float(by_domain.get(domain, 0.0)) + float(delta), 2,
             )
         elif phase == "kernel":
             by_kid = bucket.setdefault("by_kernel_id", {})
