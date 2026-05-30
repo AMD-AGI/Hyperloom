@@ -971,7 +971,7 @@ def collect_final(
         "validated_at_stack_len":            val_stack_len,
         "validated_ts":                      str(state.get("cumulative_gain_validated_ts") or ""),
         "stack_changed_after_validation":    stack_len > val_stack_len > 0,
-        "extra_sglang_args":                 str(cb.get("extra_sglang_args") or ""),
+        "extra_server_args":                 str(cb.get("extra_server_args") or ""),
         "extra_envs":                        dict(cb.get("extra_envs") or {}),
         "action_path":                       action_path,
         "ttft_mean_ms":                      ttft,
@@ -1648,7 +1648,7 @@ def _read_kernel_candidates(
     kernel agent uses to decide what to optimize.
 
     Resolves the file via:
-      1. ``state.last_select_kernels.candidates_path`` — orchestrator-recorded path
+      1. ``state.last_trace_analyze.candidates_path`` — orchestrator-recorded path
       2. ``session_dir / kernel-agent / runs / <session_id> / kernel_candidates.json``
          (new layout after the all-artefacts-under-USER_DATA_PATH migration)
       3. ``session_dir / kernel-agent / **/kernel_candidates.json`` glob fallback (new)
@@ -1656,8 +1656,13 @@ def _read_kernel_candidates(
          kernel_candidates.json`` (legacy double-nested layout from pre-migration
          sessions, kept for breakdown replay of historical runs)
       5. ``session_dir / kernel-agent-workspace / **/kernel_candidates.json`` glob fallback
+
+    Legacy ``state.last_select_kernels`` field (pre-M4) was removed
+    in this branch; historical state.json that still carries it is
+    silently ignored — the on-disk glob fallbacks above keep
+    breakdown replay working on old sessions.
     """
-    sk = state.get("last_select_kernels") or {}
+    sk = state.get("last_trace_analyze") or {}
     raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
     candidate_paths: list[Path] = []
     if raw_path:
@@ -1698,7 +1703,7 @@ def _read_kernel_candidates(
             hk = data.get("hot_kernels")
             if isinstance(hk, list):
                 return hk
-    # Final fallback: state.last_select_kernels.hot_kernels_top15.
+    # Final fallback: state.last_trace_analyze.hot_kernels_top15.
     # This is what the orchestrator actually copied out of
     # kernel_candidates.json — usually the same shape, just truncated to
     # 15. Used when the on-disk file is missing (e.g. test fixtures or
@@ -1883,7 +1888,7 @@ def _collect_detected_kernels(
     # 3) lifecycle stamps (selected / geak / oob / adopted_by / final_decision)
     selected_ids = {
         str(e.get("kernel_id") or "")
-        for e in ((state.get("last_select_kernels") or {}).get("hot_kernels_top15") or [])
+        for e in ((state.get("last_trace_analyze") or {}).get("hot_kernels_top15") or [])
         if isinstance(e, dict)
     }
     geak_idx = _index_invocations_by_kernel(geak)
@@ -1956,7 +1961,7 @@ def _collect_detected_kernels(
 
 
 def _collect_recommended_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
-    sk = state.get("last_select_kernels") or {}
+    sk = state.get("last_trace_analyze") or {}
     if not isinstance(sk, dict):
         return []
     out: list[dict[str, Any]] = []
@@ -2051,7 +2056,7 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "kernel_id":         str(ent.get("kernel_id") or ""),
                 "patch_path":        str(ent.get("patch_path") or ""),
                 "target_file":       str(ent.get("target_file") or ""),
-                "extra_sglang_args": str(ent.get("extra_sglang_args") or ""),
+                "extra_server_args": str(ent.get("extra_server_args") or ""),
                 "e2e_gain_pct":      _to_float(ent.get("best_gain_pct")),
                 "validated":         True,
                 "last_status":       str(ent.get("last_status") or ""),
@@ -2131,7 +2136,7 @@ def _shape_ledger(
         return {
             "name":              str(e.get("name") or ""),
             "fingerprint":       str(e.get("fingerprint") or ""),
-            "extra_sglang_args": str(e.get("extra_sglang_args") or ""),
+            "extra_server_args": str(e.get("extra_server_args") or ""),
             "extra_envs":        dict(e.get("extra_envs") or {}),
             "output_throughput": _to_float(e.get("output_throughput") or e.get("tput")),
             "gain_pct":          _to_float(e.get("gain_pct")),
@@ -2636,7 +2641,7 @@ def _promote_legacy_gain_entries(
     State written by older Coordinator versions stored per-entry
     ``cum_gain_after`` floats only. Cross-reference the parallel
     ``state.optimization_stack`` to recover action / variant_name / ts /
-    extra_sglang_args, and compute ``delta_pct`` as the diff against the
+    extra_server_args, and compute ``delta_pct`` as the diff against the
     prior entry's ``cum_gain_after``. Entries the legacy ledger left as
     ``None`` (seeded / resumed sessions) become objects with
     ``cum_gain_after = delta_pct = None`` so index-alignment with
@@ -2662,9 +2667,9 @@ def _promote_legacy_gain_entries(
             "cum_gain_before": prev_cum,
             "cum_gain_after": cum_after,
             "delta_pct": delta,
-            "extra_sglang_args": str(
-                se.get("extra_sglang_args")
-                or se.get("candidate_extra_sglang_args")
+            "extra_server_args": str(
+                se.get("extra_server_args")
+                or se.get("candidate_extra_server_args")
                 or ""
             ),
         })
@@ -2989,7 +2994,7 @@ def _reconstruct_gain_ledger(
             "cum_gain_before":   round(cum_before, 4),
             "cum_gain_after":    round(cum_after, 4),
             "delta_pct":         delta,
-            "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+            "extra_server_args": str(entry.get("extra_server_args") or ""),
         })
         cum_before = cum_after
     return out
@@ -3139,20 +3144,21 @@ def collect_kb_provenance(
 
     Three sources merged into one section:
 
-    1. SharedState (``state.json``) — ``cortex_session_id``,
-       ``cortex_session_summary`` (T4 result), ``warm_start_*``
-       snapshots, ``pending_kb_edges`` (T2 hypothesize edges not yet
-       verified).
+    1. SharedState (``state.json``) — ``cortex_session_id`` (hyperloom-
+       local id, NOT a KB sid) + ``warm_start_*`` snapshots.
     2. NDJSON queues (``runtime/cortex/.kb_*.ndjson``) — counts of
        drained / dead-letter rows. The flusher daemon writes one
        ``drain_bookmark`` per round; we just sum the deltas.
     3. Synchronous audit log (``runtime/cortex/.kb_audit.jsonl``) — per
-       Cortex CLI call status. Useful for diagnosing T0 / T4 sync
-       failures from the breakdown JSON alone.
+       Cortex CLI call status. Useful for diagnosing T0 sync failures
+       from the breakdown JSON alone.
 
     Returns a stable shape (always the same keys, even on a `--degraded-kb`
     session) so downstream readers (claw-stats-service) don't have to
-    branch.
+    branch. ``commit_summary`` / ``pending_edges`` / ``edges_promoted``
+    / ``edges_negated`` keys are kept (always empty) for back-compat
+    with claw-stats-service consumers that pre-date the T2/T3 protocol
+    retirement; remove in a future schema bump.
     """
     from ..session_paths import (
         cortex_audit_jsonl as _audit_path,
@@ -3161,7 +3167,6 @@ def collect_kb_provenance(
         cortex_flusher_pid as _flusher_pid_path,
         cortex_flusher_status_json as _flusher_status_path,
         cortex_pending_ndjson as _pending_path,
-        cortex_sid_file as _sid_path,
         pr_monitor_status_json as _pr_status_path,
     )
 
@@ -3220,7 +3225,6 @@ def collect_kb_provenance(
     flushed_path = _flushed_path(session_dir)
     dl_path = _dl_path(session_dir)
     audit_path = _audit_path(session_dir)
-    sid_path = _sid_path(session_dir)
 
     audit_tail = _read_last_n_audit(audit_path, n=50)
     # Status counts aggregated across the audit tail.
@@ -3229,38 +3233,11 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
-    # ``points_created[]`` aggregation (KB_design §3.12 §4.4 +
-    # §3.13 M4 §4). We walk the *full* audit log (not just the tail) so
+    # ``points_created[]`` aggregation: walk the *full* audit log so
     # one entry per (canonical_id, kind) is exposed even on long
-    # sessions; ``set`` dedups in case the same point was re-proposed
-    # mid-session. Only rows with op='propose_point' and a non-empty
-    # canonical_id qualify; we surface kind/authority/source so the
-    # ``pr_node`` rows (M4) are distinguishable from
-    # ``optimization_node`` / ``workload_node`` / ``issue_node``.
-    #
-    # same walk also aggregates verify outcomes into
-    # ``edges_promoted`` / ``edges_negated`` lists so the breakdown
-    # reader can answer "which edges did this session promote /
-    # refute?" without re-parsing NDJSON. We look for both async
-    # (``op=enqueue, envelope_op=verify``) and sync
-    # (``op=cli, args=['session','verify',...]``) rows; dedup by edge_id
-    # so a flushed enqueue + its later sync replay don't double-count.
+    # sessions; ``set`` dedups re-proposed rows.
     points_created: list[dict[str, Any]] = []
     points_by_kind: dict[str, int] = {}
-    edges_promoted: list[str] = []
-    edges_negated: list[str] = []
-    _seen_verify_edges: set[str] = set()
-
-    def _record_verify(edge_id: str, outcome: str) -> None:
-        if not edge_id or edge_id in _seen_verify_edges:
-            return
-        outcome_l = (outcome or "").strip().lower()
-        if outcome_l == "confirmed":
-            edges_promoted.append(edge_id)
-            _seen_verify_edges.add(edge_id)
-        elif outcome_l == "refuted":
-            edges_negated.append(edge_id)
-            _seen_verify_edges.add(edge_id)
 
     try:
         if audit_path.exists():
@@ -3276,84 +3253,60 @@ def collect_kb_provenance(
                         continue
                     if not isinstance(row, dict):
                         continue
-                    op_name = str(row.get("op") or "")
-                    if op_name == "propose_point":
-                        canonical = str(row.get("canonical_id") or "").strip()
-                        kind = str(row.get("kind") or "").strip()
-                        if not canonical or not kind:
-                            continue
-                        key = (canonical, kind)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        points_created.append({
-                            "canonical_id": canonical,
-                            "kind":         kind,
-                            "authority":    str(row.get("authority") or ""),
-                            "source":       str(row.get("source") or ""),
-                            "status":       str(row.get("status") or ""),
-                            "ts":           str(row.get("ts") or ""),
-                        })
-                        points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
-                    elif (
-                        op_name == "enqueue"
-                        and str(row.get("envelope_op") or "") == "verify"
-                    ):
-                        _record_verify(
-                            str(row.get("payload_edge") or ""),
-                            str(row.get("payload_outcome") or ""),
-                        )
-                    elif op_name == "cli":
-                        args = row.get("args") or []
-                        if (
-                            isinstance(args, list)
-                            and len(args) >= 4
-                            and args[0] == "session"
-                            and args[1] == "verify"
-                        ):
-                            edge_id = ""
-                            outcome = ""
-                            i = 2
-                            while i < len(args) - 1:
-                                if args[i] == "--edge":
-                                    edge_id = str(args[i + 1] or "")
-                                    i += 2
-                                elif args[i] == "--outcome":
-                                    outcome = str(args[i + 1] or "")
-                                    i += 2
-                                else:
-                                    i += 1
-                            _record_verify(edge_id, outcome)
+                    if str(row.get("op") or "") != "propose_point":
+                        continue
+                    canonical = str(row.get("canonical_id") or "").strip()
+                    kind = str(row.get("kind") or "").strip()
+                    if not canonical or not kind:
+                        continue
+                    key = (canonical, kind)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    points_created.append({
+                        "canonical_id": canonical,
+                        "kind":         kind,
+                        "authority":    str(row.get("authority") or ""),
+                        "source":       str(row.get("source") or ""),
+                        "status":       str(row.get("status") or ""),
+                        "ts":           str(row.get("ts") or ""),
+                    })
+                    points_by_kind[kind] = points_by_kind.get(kind, 0) + 1
     except OSError as exc:
         warnings.append(f"kb_provenance: failed to scan {audit_path}: {exc!r}")
 
     cortex_sid = (state.get("cortex_session_id") or "").strip()
-    if not cortex_sid and sid_path.exists():
-        try:
-            cortex_sid = sid_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            cortex_sid = ""
-
-    commit_summary = state.get("cortex_session_summary") or {}
-    pending_edges = state.get("pending_kb_edges") or []
     warm = state.get("warm_start_recipe") or {}
     pitfalls = state.get("warm_start_pitfalls") or []
+    lessons = state.get("warm_start_lessons") or []
+    # GAP 1 — warm-recipe replay outcome (one-shot reproduce of the KB
+    # best_config at PRELUDE). Empty dict before the replay completes /
+    # when ``--no-warm-replay`` was set; otherwise carries:
+    #   {status, expected_gain_pct, actual_gain_pct,
+    #    warm_recipe_tier, warm_recipe_conf, replay_task_id, reason}
+    warm_replay_outcome = state.get("warm_replay_outcome") or {}
 
     out: dict[str, Any] = {
         "cortex_session_id":      cortex_sid,
         "warm_start_ts":          state.get("warm_start_ts") or "",
         "warm_start_recipe_seen": bool(warm and warm.get("raw")),
+        "warm_start_recipe_tier": str(warm.get("tier") or "") if isinstance(warm, dict) else "",
         "warm_start_pitfall_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
+        "warm_start_lesson_count": len(lessons) if isinstance(lessons, list) else 0,
+        # GAP 1 — operator-visible replay summary. The outcome dict is
+        # passed through verbatim so dashboards can render status
+        # transitions over time.
+        "warm_replay": dict(warm_replay_outcome) if isinstance(warm_replay_outcome, dict) else {},
+        "warm_replay_attempted":   bool(state.get("warm_replay_attempted")),
+        "warm_history_injected":   bool(state.get("warm_history_injected")),
         "stack_fingerprint":      manifest.get("stack_fingerprint") or {},
-        "pending_edges": [
-            {
-                "proposal_msg_id": row.get("proposal_msg_id", ""),
-                "edge_id":         row.get("edge_id", ""),
-                "action":          row.get("action", ""),
-                "ts":              row.get("ts", ""),
-            }
-            for row in pending_edges if isinstance(row, dict)
-        ],
+        # Always-empty back-compat lists (T2 hypothesize protocol retired).
+        # Consumers that diff session_breakdown.json for "pending edges"
+        # / "edges_promoted" must stop relying on these in a follow-up
+        # schema bump.
+        "pending_edges":          [],
+        "edges_promoted":         [],
+        "edges_negated":          [],
         "queue": {
             "pending_lines":     _count_lines(pending_path),
             "flushed_bookmarks": _count_lines(flushed_path),
@@ -3361,23 +3314,15 @@ def collect_kb_provenance(
         },
         "audit_tail_count":     len(audit_tail),
         "audit_status_counts":  status_counts,
-        # full session points-created roll-up (KB_design §3.12
-        # §4.4). Sorted by canonical_id for stable diffing.
         "points_created":        sorted(
             points_created, key=lambda r: r.get("canonical_id", ""),
         ),
         "points_by_kind":        points_by_kind,
-        # KB_gaps/Gap-08 / per-edge T3
-        # verify roll-up. Sorted for stable diffing.
-        "edges_promoted":        sorted(edges_promoted),
-        "edges_negated":         sorted(edges_negated),
+        # Empty placeholder kept for back-compat with claw-stats-service.
         "commit_summary": {
-            "status":             str(commit_summary.get("status") or "")
-                if isinstance(commit_summary, dict) else "",
-            "promoted_edges":     list(commit_summary.get("promoted_edges") or [])
-                if isinstance(commit_summary, dict) else [],
-            "derived_summary_id": str(commit_summary.get("derived_summary_id") or "")
-                if isinstance(commit_summary, dict) else "",
+            "status":             "",
+            "promoted_edges":     [],
+            "derived_summary_id": "",
         },
         "flusher_status": _collect_flusher_status(
             session_dir,

@@ -32,7 +32,7 @@ class TestMigrateSearchLedger:
             "tested": {
                 fp: {
                     "name": "variant_a",
-                    "extra_sglang_args": "--max-num-seqs 128",
+                    "extra_server_args": "--max-num-seqs 128",
                     "extra_envs": {},
                 },
             },
@@ -51,7 +51,7 @@ class TestMigrateSearchLedger:
         ledger = {
             "tested": {
                 "max_num_seqs_128": {
-                    "extra_sglang_args": "--max-num-seqs 128",
+                    "extra_server_args": "--max-num-seqs 128",
                     "extra_envs": {"FOO": "bar"},
                 },
             },
@@ -71,9 +71,9 @@ class TestMigrateSearchLedger:
     def test_non_dict_tested_entries_dropped(self):
         ledger = {
             "tested": {
-                "good": {"extra_sglang_args": "--a 1", "extra_envs": {}},
+                "good": {"extra_server_args": "--a 1", "extra_envs": {}},
                 "bad": "not-a-dict",
-                42: {"extra_sglang_args": "--b 2"},
+                42: {"extra_server_args": "--b 2"},
             },
         }
         out = SharedState._migrate_search_ledger(ledger, schema_target=1)
@@ -197,7 +197,7 @@ class TestKernelPatchIdentity:
             "kernel_id": "k1",
             "patch_path": "/tmp/k1.py",
             "target_file": "/srv/k1.py",
-            "extra_sglang_args": " --foo 1 ",
+            "extra_server_args": " --foo 1 ",
         })
         assert (kid, patch, target, args) == (
             "k1", "/tmp/k1.py", "/srv/k1.py", "--foo 1",
@@ -224,7 +224,7 @@ class TestKernelPatchIdentity:
         key = s.kernel_patch_key({
             "kernel_id": "k1",
             "patch_path": "/srv/k1.py",
-            "extra_sglang_args": "--a 1",
+            "extra_server_args": "--a 1",
         })
         assert key == "k1|/srv/k1.py|--a 1"
 
@@ -237,7 +237,7 @@ class TestKernelPatchIdentity:
         hit = s.find_rejected_kernel_patch({
             "kernel_id": "k1",
             "patch_path": "/srv/k1.py",
-            "extra_sglang_args": "--a 1",
+            "extra_server_args": "--a 1",
         })
         assert hit and hit["reason"] == "no_e2e_gain"
 

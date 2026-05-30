@@ -65,6 +65,10 @@ pythonpath = [".", "robustness-agent/src", "critic-agent"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
+    "expects_legacy_alias_warning: tests that intentionally exercise the ``extra_sglang_args`` -> ``extra_server_args`` deprecation alias and assert on the resulting DeprecationWarning. Listed by the static guard in test_no_legacy_writer_sites.py so the allowlist stays narrow.",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:inference_optimizer.compat.payload_aliases",
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
