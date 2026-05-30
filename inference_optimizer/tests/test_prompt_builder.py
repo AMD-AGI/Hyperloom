@@ -192,6 +192,11 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         # The v0.8 ``explore`` action covers the same surface
         # internally; no per-action grid catalogue is rendered.
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
+        # Supplementary EXPLORE channel
+        # declaration sits between the kernel-opt reference and the
+        # rules fragment so the LLM internalises the default
+        # decision flow before reading the §3 supplementary framing.
+        "## 6b. DYNAMIC ACTION (supplementary EXPLORE channel)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
     actual_top = [h for h in headers if h.startswith("## ")]
