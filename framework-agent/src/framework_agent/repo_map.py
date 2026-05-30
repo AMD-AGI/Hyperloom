@@ -7,11 +7,13 @@ breaking the "framework-agent is a standalone package" invariant
 called out in the project SKILL: inference_optimizer subprocess-invokes
 ``fa``, never the other way around.
 
-The mapping is intentionally tiny (sglang, vllm); add new frameworks
-here as inference_optimizer grows its supported backend list. IO has
-its own in-process copy in ``framework_agent_client.repo_url_for_framework``
-which falls back to importing this module when available; the two
-should never drift.
+The mapping covers the three supported frameworks (sglang, vllm, atom);
+add new frameworks here as inference_optimizer grows its supported
+backend list. IO has its own in-process copy in
+``framework_agent_client.repo_url_for_framework`` which falls back to
+importing this module when available; the two should never drift — a
+sync test in ``framework-agent/tests/test_repo_map.py`` enforces
+byte-for-byte equality between the canonical dict and the IO fallback.
 """
 
 from __future__ import annotations
@@ -19,7 +21,15 @@ from __future__ import annotations
 _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
     "sglang": "https://github.com/sgl-project/sglang.git",
     "vllm":   "https://github.com/ROCm/vllm.git",
+    "atom":   "https://github.com/ROCm/ATOM.git",
 }
+
+
+# Single source of truth for "which framework names does framework-agent
+# know about" — opt-in import from any module that previously hardcoded
+# the ``{"sglang", "vllm"}`` literal. Derived from the URL dict so a
+# new entry above automatically expands the set.
+KNOWN_FRAMEWORKS: frozenset[str] = frozenset(_FRAMEWORK_TO_REPO_URL.keys())
 
 
 def repo_url_for_framework(framework: str) -> str:
@@ -31,4 +41,4 @@ def repo_url_for_framework(framework: str) -> str:
     return _FRAMEWORK_TO_REPO_URL.get((framework or "").strip().lower(), "")
 
 
-__all__ = ["repo_url_for_framework"]
+__all__ = ["KNOWN_FRAMEWORKS", "repo_url_for_framework"]
