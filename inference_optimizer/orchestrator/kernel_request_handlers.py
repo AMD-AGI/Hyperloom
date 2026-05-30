@@ -103,6 +103,9 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/opt/venv/lib/python3.12/site-packages/aiter/",
+    "/opt/venv/lib/python3.12/site-packages/sglang/",
+    "/opt/venv/lib/python3.12/site-packages/vllm/",
     # Production vLLM wheel install layout (system dist-packages). Keep
     # this in sync with ``kernel-agent/tools/tracelens_analysis.py`` so
     # both the kernel-agent classifier and the orchestrator-side gate
@@ -114,6 +117,22 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
+    # atom layout. The editable install lives under ``/app/ATOM/atom/`` on disk but
+    # ``_is_runtime_generated_kernel`` and ``run_optimization_handler``
+    # lower-case their inputs before the ``startswith`` / substring
+    # check, so the prefix below is stored lower-case for the match
+    # to fire. ``framework_paths._DEFAULT_SOURCE_ROOTS`` carries the
+    # canonical-case ``/app/ATOM/atom/`` because PolicyGate's
+    # ``_path_in_allowlist`` is case-sensitive against the real
+    # filesystem path. Keep this block in sync with
+    # ``kernel-agent/tools/tracelens_analysis.py``
+    # ``_REUSABLE_SOURCE_ROOTS`` (cross-cutting guard
+    # ``test_atom_present_in_tracelens_reusable_roots``).
+    "/app/atom/atom/",
+    "/opt/venv/lib/python3.10/site-packages/atom/",
+    "/opt/venv/lib/python3.12/site-packages/atom/",
+    "/usr/local/lib/python3.12/dist-packages/atom/",
+    "/usr/local/lib/python3.10/dist-packages/atom/",
 )
 _APPLY_TOOL_MODULE: Any | None = None
 # GEAK is FIRST per SKILL.md "high-priority handoff" contract: every kernel
@@ -336,7 +355,13 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     framework = str(bench.get("framework") or "").strip().lower()
-    server_key = "EXTRA_VLLM_ARGS" if framework == "vllm" else "EXTRA_SGLANG_ARGS"
+    # Route through the single source of truth for the per-framework
+    # env name so an atom session reads ``EXTRA_ATOM_ARGS`` (rather
+    # than defaulting to ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS``,
+    # which would drop atom-side flags and surface an empty
+    # ``server_args`` context to TraceLens / GEAK / Cursor).
+    from .action_executors._grid_runner import server_args_env_name
+    server_key = server_args_env_name(framework)
     server_args = str(envs.get(server_key) or "").strip()
     workload = {
         out_key: _coerce_runtime_value(envs[src_key])
@@ -1498,7 +1523,7 @@ async def _run_optimization_single(
                          override via payload or ``HYPERLOOM_GEAK_BUDGET_MIN``
         source_file:     path to original kernel source (for context)
         candidates_path: path to JSON describing candidates (optional)
-        extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
+        extra_server_args: SGLang runtime flags for GEAK metadata (optional)
         enable_rag:      default True; false disables GEAK RAG tools
         enable_xs_memory: default True; false disables GEAK cross-session memory
         test_command:     test command from unittest skill (passed to GEAK --test-command)
@@ -1547,8 +1572,8 @@ async def _run_optimization_single(
         cmd += ["--source-file", str(payload["source_file"])]
     if target_platform:
         cmd += ["--target-platform", str(target_platform)]
-    if payload.get("extra_sglang_args"):
-        cmd += ["--extra-sglang-args", str(payload["extra_sglang_args"])]
+    if payload.get("extra_server_args"):
+        cmd += ["--extra-sglang-args", str(payload["extra_server_args"])]
     if payload.get("candidates_path"):
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
@@ -1686,7 +1711,7 @@ async def integrate_handler(
         target_file:       inductor cache file to patch (informational)
         kernel_id:         label used in result + bus events
         config_path:       Magpie YAML for the re-baseline run
-        extra_sglang_args: extra flags layered onto the Magpie envs
+        extra_server_args: extra flags layered onto the Magpie envs
         keep_threshold_pct: KEEP if gain > X% (default 1.0)
         budget_minutes:    re-baseline timeout (default 20)
 
@@ -1759,10 +1784,15 @@ async def integrate_handler(
         }
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
-    extra_args = str(payload.get("extra_sglang_args", "") or "").strip()
+    # ``payload`` arrives via the integrate_patch sub-agent envelope;
+    # route the read through the compat helper so a legacy
+    # ``extra_sglang_args`` envelope still resolves (with a single
+    # DeprecationWarning logged via stacklevel=3).
+    from ..compat.payload_aliases import read_extra_server_args
+    extra_args = read_extra_server_args(payload).strip()
 
     # Build a Task wrapper around BaselineExecutor (which expects an
-    # RunnerContext with a Task in it). The "extra_sglang_args" hand-
+    # RunnerContext with a Task in it). The "extra_server_args" hand-
     # off goes via the task params even though baseline_executor doesn't
     # use them yet — kept for forward compat (P3 will inject EXTRA_SGLANG_ARGS).
     from ..session_paths import runs_dir
@@ -1777,7 +1807,7 @@ async def integrate_handler(
             "config_path": payload.get("config_path"),
             "output_dir":  str(workspace),
             "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )
@@ -1800,7 +1830,7 @@ async def integrate_handler(
         )
         try:
             await restart_server_for_round(
-                extra_sglang_args=extra_args,
+                extra_server_args=extra_args,
                 framework=os.environ.get("FRAMEWORK") or None,
                 model_path=(
                     str(payload.get("model_path") or "").strip()
@@ -1875,7 +1905,7 @@ async def integrate_handler(
         "gain_pct":    gain_pct,
         "report_path": bench_result.get("report_path"),
         "workspace":   bench_result.get("workspace"),
-        "extra_sglang_args": extra_args,
+        "extra_server_args": extra_args,
         "apply_result": apply_result,
         "revert_result": revert_result,
     }
