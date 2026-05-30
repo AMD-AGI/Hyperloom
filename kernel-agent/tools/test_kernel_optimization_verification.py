@@ -945,6 +945,43 @@ def test_build_prompt_includes_geak_runtime_metadata():
     assert metadata["kernel_params"]["HEAD_SIZE"] == 128
 
 
+def test_build_prompt_includes_budget_protocol_warning():
+    args = _args(source_file="")
+    args.kernel_id = "budget_kernel"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+
+    prompt = ko.build_prompt(
+        {"name": "budget_kernel", "source_type": "hip"},
+        args,
+    )
+
+    assert "BUDGET PROTOCOL" in prompt
+    assert "--cost-limit 0.0" in prompt
+    assert "TELEMETRY" in prompt
+    assert prompt.index("BUDGET PROTOCOL") < prompt.index("kernel_name:")
+
+
+def test_build_prompt_budget_protocol_precedes_source_attribution():
+    args = _args(source_file="/tmp/device.cu")
+    args.kernel_id = "promoted_kernel"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+    candidate = {
+        "name": "promoted_kernel",
+        "source_file": "/tmp/device.cu",
+        "source_type": "hip",
+        "source_promoted_from_launcher": True,
+        "launcher_source_file": "/tmp/wrapper.py",
+    }
+
+    prompt = ko.build_prompt(candidate, args)
+
+    assert "BUDGET PROTOCOL" in prompt
+    assert "SOURCE ATTRIBUTION NOTE" in prompt
+    assert prompt.index("BUDGET PROTOCOL") < prompt.index("SOURCE ATTRIBUTION NOTE")
+
+
 def test_build_prompt_metadata_is_backward_compatible():
     args = _args(source_file="")
     args.kernel_id = "legacy"
