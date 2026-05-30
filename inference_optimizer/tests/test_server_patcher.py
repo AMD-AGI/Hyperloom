@@ -1424,4 +1424,3 @@ def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
         assert "sglang_0_5_11" in p.parts, (
             f"versioned layout should be selected, got patch path {p}"
         )
-

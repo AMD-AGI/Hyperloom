@@ -9,10 +9,23 @@ miss. We target those here so the helper contracts stay locked.
 from __future__ import annotations
 
 import json
+import sys
+import types
 
 import pytest
 
 from inference_optimizer.orchestrator import kernel_request_handlers as krh
+
+
+def _ensure_torch_module(monkeypatch):
+    try:
+        import torch
+    except ModuleNotFoundError:
+        torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(device_count=lambda: 0),
+        )
+        monkeypatch.setitem(sys.modules, "torch", torch)
+    return torch
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +440,7 @@ class TestDefaultKernelBatchParallel:
     def patch_torch(self, monkeypatch):
         """Returns a setter that overrides ``torch.cuda.device_count`` and
         ``$KERNEL_AGENT_NUM_GPUS`` for the helper under test."""
-        import torch
+        torch = _ensure_torch_module(monkeypatch)
 
         def _set(n_gpus, per_task=None):
             monkeypatch.setattr(torch.cuda, "device_count", lambda: n_gpus)
@@ -478,7 +491,7 @@ class TestDefaultKernelBatchParallel:
         )
 
     def test_torch_failure_returns_legacy_fallback(self, monkeypatch):
-        import torch
+        torch = _ensure_torch_module(monkeypatch)
 
         def _boom():
             raise RuntimeError("driver init failed")

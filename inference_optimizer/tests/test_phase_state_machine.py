@@ -421,8 +421,10 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     # Budget dict populated.
     # EXPLORE budget yielded 0.03 to PRELUDE (0.05 → 0.08) when the
     # initial roofline became a PRELUDE step instead of an EXPLORE
-    # auto-enqueue. Sum across phases remains 1.0.
-    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.57
+    # auto-enqueue, then a further 0.10 to KERNEL (0.25 → 0.35) so
+    # GEAK quick-mode kernel-opt can finish a full cycle. Sum across
+    # phases remains 1.0.
+    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.47
     assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.08
 
 

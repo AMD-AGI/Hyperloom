@@ -23,7 +23,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `profile`, `backends`, `params`, `sweep`, Kernel requests, `report`).
-- Kernel: responder path for `select_kernels`, `run_optimization`, `integrate`.
+- Kernel: responder path for `trace_analyze`, `run_optimization`, `integrate`.
 - Critic: proposal review (default: `--critic-agent` — drives the
   `critic-agent/` skill runtime with KB priors / session memory /
   `review_constraints`-gated verdicts). `--critic-mock` for offline /
@@ -168,7 +168,7 @@ source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
 in the **same shell** that will spawn `inference_optimizer optimize`.
 Skipping install strikes silently *after* `baseline` succeeds: missing
-TraceLens/GEAK/OOB CLI → `select_kernels` / `kernel_opt` fail; no live
+TraceLens/GEAK/OOB CLI → `trace_analyze` / `kernel_opt` fail; no live
 Ray head → `kernel_opt` tasks hang; missing `kernel-agent.env.sh` →
 first claude/codex call returns `401`. `install.sh --check-only` is a
 *diagnostic*, never a substitute.
@@ -545,7 +545,7 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 
 Quirks: with `set -u`, assign dependent vars on separate lines (chained
 `export A=... B=$A` can fail with `unbound variable`). The installer
-leaves a live Ray head; `ray status` must succeed because `select_kernels`
+leaves a live Ray head; `ray status` must succeed because `trace_analyze`
 submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 
 `_preflight()` runs every launch as the in-loop counterpart of IR-2.
@@ -1055,7 +1055,7 @@ python3 - <<'PY'
 import json, os, pathlib
 s = json.loads((pathlib.Path(os.environ["SESSION"]) / "state.json").read_text())
 for k in ("stop_reason", "baseline_tput", "cumulative_gain", "current_best",
-          "last_kernel_opt", "last_select_kernels", "last_sweep"):
+          "last_kernel_opt", "last_trace_analyze", "last_sweep"):
     print(f"{k}: {s.get(k)}")
 print("params_search_last_round:", s.get("params_search", {}).get("last_round"))
 print("backends_search_last_round:", s.get("backends_search", {}).get("last_round"))
@@ -1086,8 +1086,8 @@ The optimizer should:
   / `deep_kernel_analysis` / `operator_tuning` / `vendor_kernel_config`
   dispatches are blocked by PolicyGate
   (`rule='wait_for_auto_roofline'`) until it lands.
-3. Run `select_kernels` once per trace/config and cache the result in
-  `last_select_kernels`.
+3. Run `trace_analyze` once per trace/config and cache the result in
+  `last_trace_analyze`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
 5. Require compile + correctness + microbench/E2E evidence before KEEP.
 6. Use `explore_search` to test parameters incrementally and remember
@@ -1146,6 +1146,31 @@ explicit / not located); grep `optimizer_runs/run_*.log` to verify. Resolved
 cache state also lands in the boot `Preflight diagnostics:` block. If
 COLD_START repeats across retries, JIT was killed mid-`hipcc`; bump
 `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=5400` instead of relaunching.
+
+## Pre-GEAK Unittest Harness (unittest skill)
+
+Before `backend=geak` attempts, the main agent generates a GEAK-compatible
+test harness by following `kernel-agent/skills/unittest/SKILL.md`. The skill
+searches for existing tests, collects shapes/dtypes from TraceLens and
+profiling data, and generates a 4-mode harness (`--correctness` / `--profile`
+/ `--benchmark` / `--full-benchmark`) that matches GEAK's evaluation contract.
+
+The resulting `test_command` is passed via `--test-command` to
+`kernel_optimization.py`, which forwards it to GEAK. If the skill fails to
+produce a valid harness (after up to 3 retries), `--test-command` is omitted
+and GEAK falls back to its own test discovery cascade.
+
+Validation uses `kernel-agent/skills/unittest/validate_harness.py` for both
+static checks (argparse + 4 flags + GEAK output markers) and runtime
+verification (run correctness + benchmark with reduced iterations).
+
+The Coordinator does NOT need to drive this step — the main agent executes
+the unittest skill before calling `kernel_optimization.py`. Observability
+shows up as `test_command` in `optimization_attempts.jsonl[].backend_paths`.
+
+The GEAK outer-timeout is managed by `_ensure_yaml_env_timeout()` in
+`kernel_optimization.py`, which sets a fallback of 3600s so GEAK's
+`LocalEnvironment.timeout` never silently inherits the 30s default.
 
 ## Kernel Apply Safety
 
@@ -1217,7 +1242,7 @@ direct Codex). See `## Critic Backend Selection`.
 ### Run-time signals
 
 - `No accelerator` (Magpie): subprocess `PATH` must lead with `$(dirname "$PYTHON")` (or set `MAGPIE_PYTHON`); use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
-- Repeated `select_kernels` with unchanged trace/config: bug — reuse `last_select_kernels`.
+- Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
 - `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied` events for the same action/rule pair; all top actions may be locked or pruned. Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials` block. To recover: manually edit `state.json` to remove the action from `pruned_families`, clear `policy_denial_streak` / `stop_reason`, and re-propose with fresh `params.grid` content (omit stale `idempotency_key`).
