@@ -180,6 +180,15 @@ def build(
                                         ),
                                         warnings,
                                         default={})
+    # Optimization-progress curve (Dashboard §2). Stack ledger +
+    # ceiling/target reference lines, derived from state.json so the
+    # dashboard reads sbd alone.
+    roofline           = _safe_collect("roofline",
+                                        lambda: collectors.collect_roofline(
+                                            sd, state, manifest, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
 
     source_files = collectors.collect_source_files(
         sd,
@@ -234,6 +243,11 @@ def build(
         # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
         # absent — the dashboard hides the table on empty.
         "kernel_roofline":     kernel_roofline,
+        # Optimization-progress curve (Dashboard-Roofline 对接清单 §2).
+        # Always populated when baseline ran; ``ceiling_available`` is
+        # False on sessions that never ran the watermark roofline
+        # pipeline (dashboard hides the reference lines).
+        "roofline":            roofline,
 
         "warnings":            warnings,
         "source_files":        source_files,
