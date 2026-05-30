@@ -354,33 +354,56 @@ class ClaudeBackend:
         result_chunks: list[str] = []
         tool_block_count = 0
         last_usage: dict[str, Any] = {}
-        async for message in self.sdk_query_factory(prompt=prompt, options=options):
-            for block in self._iter_blocks(message):
-                if self._is_tool_use_for_emit_intent(block):
-                    tool_block_count += 1
-                    intent = self._parse_tool_use_block(block)
-                    if intent is not None:
-                        intents.append(intent)
+        try:
+            async for message in self.sdk_query_factory(prompt=prompt, options=options):
+                for block in self._iter_blocks(message):
+                    if self._is_tool_use_for_emit_intent(block):
+                        tool_block_count += 1
+                        intent = self._parse_tool_use_block(block)
+                        if intent is not None:
+                            intents.append(intent)
+                    else:
+                        txt = self._extract_text(block)
+                        if txt:
+                            text_chunks.append(txt)
+                # ResultMessage.result is the consolidated final assistant
+                # text — the SAME content already streamed as TextBlocks.
+                # Keep it separate so we don't double-count: the joined
+                # stream and the result would otherwise concatenate into a
+                # duplicated payload (breaks raw_completion JSON parsing).
+                result_text = getattr(message, "result", None)
+                if isinstance(result_text, str) and result_text:
+                    result_chunks.append(result_text)
+                # N6: ResultMessage carries .usage on terminal messages
+                # (Anthropic Messages API response schema). The SDK
+                # propagates this dict verbatim. We overwrite (not
+                # accumulate) because the last message of a multi-turn
+                # session reports the cumulative session usage.
+                msg_usage = getattr(message, "usage", None)
+                if isinstance(msg_usage, dict) and msg_usage:
+                    last_usage = dict(msg_usage)
+        except Exception as exc:
+            # SDK ≥ 0.2.82 / CLI ≥ 2.1.123 may raise "Claude Code returned
+            # an error result: success" when the CLI exits after emitting a
+            # valid result with is_error=True + subtype='success' (max-turns
+            # reached). If we already collected intents, return them rather
+            # than losing the entire turn.
+            err_str = str(exc)
+            if "error result: success" in err_str:
+                if intents:
+                    log.warning(
+                        "claude SDK raised '%s' but %d intents already collected; "
+                        "returning partial results",
+                        err_str, len(intents),
+                    )
                 else:
-                    txt = self._extract_text(block)
-                    if txt:
-                        text_chunks.append(txt)
-            # ResultMessage.result is the consolidated final assistant
-            # text — the SAME content already streamed as TextBlocks.
-            # Keep it separate so we don't double-count: the joined
-            # stream and the result would otherwise concatenate into a
-            # duplicated payload (breaks raw_completion JSON parsing).
-            result_text = getattr(message, "result", None)
-            if isinstance(result_text, str) and result_text:
-                result_chunks.append(result_text)
-            # N6: ResultMessage carries .usage on terminal messages
-            # (Anthropic Messages API response schema). The SDK
-            # propagates this dict verbatim. We overwrite (not
-            # accumulate) because the last message of a multi-turn
-            # session reports the cumulative session usage.
-            msg_usage = getattr(message, "usage", None)
-            if isinstance(msg_usage, dict) and msg_usage:
-                last_usage = dict(msg_usage)
+                    log.warning(
+                        "claude SDK raised '%s' with no intents collected; "
+                        "treating as no-intent turn (will retry next tick)",
+                        err_str,
+                    )
+            else:
+                raise
         # Prefer the consolidated ResultMessage text; fall back to the
         # streamed TextBlocks only when no result was emitted.
         raw_text = "".join(result_chunks) or "".join(text_chunks)

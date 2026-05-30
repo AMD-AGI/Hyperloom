@@ -743,6 +743,54 @@ def test_ir3_both_flags_short_circuit(marker_path):
 
 
 # ---------------------------------------------------------------------------
+# 8. No --cortex-kb-url / no $CORTEX_KB_URL → KB probe skipped, stays
+#    local-only WITHOUT soft-degrading. The probe script is handed no
+#    CORTEX_KB_URL (the old hard-coded default was retired).
+# ---------------------------------------------------------------------------
+def test_ir3_no_kb_url_skips_probe_local_only(marker_path, monkeypatch):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    args = _ns()  # no cortex_kb_url attribute → treated as unset
+    seen_env: dict = {}
+
+    def _runner(cmd, env=None, check=False, timeout=None):
+        seen_env.update(env or {})
+        # Mirror preflight_kb.sh's empty-URL behaviour: KB branch skipped.
+        _write_marker(
+            marker_path, kb_reachable=False, pr_reachable=True, kb_skipped=True,
+        )
+        return subprocess.CompletedProcess(cmd, 0)
+
+    with patch.object(cli_module.subprocess, "run", side_effect=_runner):
+        cli_module._run_ir3_preflight(args)
+    # No URL was injected into the probe environment.
+    assert "CORTEX_KB_URL" not in seen_env
+    # Skipped (not unreachable) → no soft-degrade.
+    assert args.cortex_enabled is True
+    assert args.kb_degraded_reason is None
+
+
+# ---------------------------------------------------------------------------
+# 9. Explicit --cortex-kb-url → injected into the probe environment so
+#    only the operator-configured URL is probed.
+# ---------------------------------------------------------------------------
+def test_ir3_explicit_kb_url_injected_into_probe_env(marker_path, monkeypatch):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    args = _ns(cortex_kb_url="http://my-kb.example")
+    seen_env: dict = {}
+
+    def _runner(cmd, env=None, check=False, timeout=None):
+        seen_env.update(env or {})
+        _write_marker(marker_path, kb_reachable=True, pr_reachable=True)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    with patch.object(cli_module.subprocess, "run", side_effect=_runner):
+        cli_module._run_ir3_preflight(args)
+    assert seen_env.get("CORTEX_KB_URL") == "http://my-kb.example"
+    assert args.cortex_enabled is True
+    assert args.kb_degraded_reason is None
+
+
+# ---------------------------------------------------------------------------
 # Bonus: CLI flag plumbing
 # ---------------------------------------------------------------------------
 def test_cli_parser_exposes_degraded_flags():
