@@ -68,7 +68,50 @@ from inference_optimizer.orchestrator.policy import (
 # ---------------------------------------------------------------------------
 
 
+def _is_atom(inp: SpecialistPromptInputs) -> bool:
+    """True when ``_focus_*`` blocks should use atom-flavoured hints.
+
+    ``framework`` may be empty on legacy / test dispatches where the
+    Coordinator did not plumb it; treat that as "use the canonical
+    sglang/vllm hint block" so existing tests keep their semantics.
+    """
+    return (inp.framework or "").strip().lower() == "atom"
+
+
 def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    if _is_atom(inp):
+        return [
+            "You target **atom scheduler / cuda_graph / kv_cache** code.",
+            "",
+            "**What to read first**",
+            "- `atom/entrypoints/openai_server.py` (HTTP request routing, "
+            "`/start_profile`, `/stop_profile`).",
+            "- `atom/model_engine/engine_core.py` (engine main loop, "
+            "`start_profiler` call sites).",
+            "- `atom/model_engine/llm_engine.py` (engine API surface).",
+            "- `atom/model_engine/model_runner.py` (per-rank forward, "
+            "profiler hooks, cudagraph capture).",
+            "- `atom/model_engine/arg_utils.py` (CLI flag inventory; "
+            "ground-truth for `--level`, `--enable_prefix_caching`, "
+            "`--cudagraph-capture-sizes`, `--kv_cache_dtype`, etc.).",
+            "- `atom/config.py` (engine config shape).",
+            "- KB anchor `framework.*` (cuda_graph / batching / kv_cache).",
+            "",
+            "**Winning techniques to consider**",
+            "- `--level {2,3}` (atom's torch.compile / cudagraph bracket).",
+            "- `--enable_prefix_caching` for shared-prefix workloads.",
+            "- `--cudagraph-capture-sizes` bracketed around the live CONC.",
+            "- `--kv_cache_dtype fp8` on FP8-shipped models (gate accuracy).",
+            "- `--max-num-seqs` / `--max-num-batched-tokens` at concurrency "
+            "boundaries (same scheduler-side tuning as sglang/vllm).",
+            "",
+            "**Pitfalls (historical REVERTs / atom-specific)**",
+            "- Atom is single-node only. Multi-node distributed proposals "
+            "are non-actionable — pivot to rank-local optimisations.",
+            "- `--enforce-eager` is a debug fallback; almost never a perf win.",
+            "- Cudagraph capture size lists that don't bracket the live "
+            "CONC trigger silent recapture on every batch boundary.",
+        ]
     return [
         "You target **vLLM / SGLang scheduler / cuda_graph / kv_cache** code.",
         "",
@@ -92,6 +135,35 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    if _is_atom(inp):
+        return [
+            "You target **aiter / atom kernels / triton** code (attention,",
+            "MoE, GEMM, fused-attention paths).",
+            "",
+            "**What to read first**",
+            "- `aiter/csrc/` and `aiter/aiter/ops/` (CK / hipBLASLt "
+            "wrappers — **shared with sglang and vllm**, so aiter "
+            "patches apply transparently across all three).",
+            "- `atom/model_ops/` (atom-specific kernel call sites).",
+            "- `atom/quantization/` (atom's FP8 / weight-quant paths).",
+            "- `atom/models/` (built-in model implementations; cross-",
+            "reference for which kernels each model touches).",
+            "- KB anchor `kernel.*` (CDNA3 tiling / MoE / attention / GEMM).",
+            "",
+            "**Winning techniques to consider**",
+            "- aiter env switches (`VLLM_ROCM_USE_AITER=1` umbrella + "
+            "per-op overrides) — the shared aiter surface means the "
+            "same env knobs that work on sglang/vllm carry over to atom.",
+            "- Tile-size / occupancy tuning for short-OSL decode.",
+            "- Fused-attention enable flags for prefill chunks.",
+            "",
+            "**Pitfalls**",
+            "- Searching `sglang/python/sglang/srt/layers/attention/` on "
+            "an atom box: those paths are empty / absent. Use "
+            "`atom/model_ops/` + shared `aiter/` instead.",
+            "- Mixing aiter overrides with `--enforce-eager` invalidates "
+            "atom's cudagraph captures silently.",
+        ]
     return [
         "You target **aiter / SGLang kernels / triton** code (attention,",
         "MoE, GEMM, fused-attention paths).",
@@ -118,6 +190,43 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    if _is_atom(inp):
+        return [
+            "You target **intra-node RCCL / NCCL / QuickReduce / "
+            "AllReduce** tuning on atom.",
+            "",
+            "**Atom is single-node only.** Multi-node tensor / data / "
+            "pipeline parallelism is NOT available on atom. Cross-node "
+            "collectives proposals are non-actionable — focus on "
+            "intra-node concerns (rank-local optimisations, "
+            "intra-node NCCL/RCCL config, allreduce algorithm choice "
+            "for the on-box TP group).",
+            "",
+            "**What to read first**",
+            "- `atom/utils/distributed/utils.py` (single-node "
+            "`torch.distributed` helper — NOT a multi-node TP "
+            "orchestration layer).",
+            "- `aiter/csrc/quick_reduce/` and RCCL plugin paths "
+            "(shared with sglang/vllm; intra-node only on atom).",
+            "- KB anchor `communication.*` (allreduce / QuickReduce / "
+            "topology).",
+            "",
+            "**Winning techniques to consider (single-node)**",
+            "- `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` when "
+            "intra-node TP allreduce message size > 1MiB.",
+            "- `NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS` tuning for "
+            "the on-box XGMI topology.",
+            "- `--enable-dp-attention` (MLA models) — DP-attention "
+            "shifts work onto a TP-free per-rank path, reducing the "
+            "allreduce footprint.",
+            "",
+            "**Pitfalls**",
+            "- Proposing multi-node TP / PP topologies — atom rejects "
+            "them at startup. The Coordinator collapses `--nodes>1` to "
+            "single-node mode on atom (IR-8).",
+            "- INT4 QuickReduce at TP=2 — overhead dominates the "
+            "bandwidth savings on small message sizes.",
+        ]
     return [
         "You target **RCCL / NCCL / QuickReduce / AllReduce** code and tuning.",
         "",
@@ -217,22 +326,29 @@ def _focus_session_steward_specialist(
         "one of three exits: continue exploring, advance to kernel phase, or",
         "stop the session. You are NOT proposing knobs or patches.",
         "",
-        "**What to read first** (no Bash needed — everything is in",
-        "$SESSION_DIR/state.json which the Coordinator pre-warms below):",
-        "- ``optimization_stack`` — what's been KEEP'd. Count entries +",
-        "  inspect ``gain_per_stack_entry`` for diminishing returns.",
-        "- ``explore_search.rejected`` — REVERT reasons grouped by",
-        "  ``stack_unstable`` / ``gain_below_threshold``. A long tail of",
-        "  one kind is a signal.",
-        "- ``specialist_rounds`` — empty_streak counters per domain. Three",
-        "  consecutive ``empty=True`` rounds across the active domains is a",
-        "  hard plateau signal.",
-        "- ``gaps[]`` — open gaps the Coordinator believes still exist.",
-        "  If non-empty and the recommended specialist domain has not been",
-        "  exhausted, ``continue_explore`` may be justified.",
-        "- ``policy_denial_history`` (tail) — when the LLM has been",
+        "**What to read first** — the Coordinator inlines a panoramic",
+        "state digest into **§ 5d. SESSION SNAPSHOT** below. Use that as",
+        "your primary evidence; you may use ``Bash`` to ``cat",
+        "$SESSION_DIR/state.json`` only if § 5d is empty (KB-degraded",
+        "boot) or you need a field that isn't included. Key signals:",
+        "- ``optimization_stack_len`` + ``gain_per_stack_entry_tail`` —",
+        "  diminishing returns over the last 5 KEEPs.",
+        "- ``rejected_counts`` — REVERT reasons aggregated from",
+        "  ``explore_search.rejected``. A long tail of one kind",
+        "  (``stack_unstable`` / ``gain_below_threshold``) is a signal.",
+        "- ``specialist_empty_streak`` — per-domain empty-round counter.",
+        "  Three consecutive ``empty=True`` rounds across the active",
+        "  domains is a hard plateau signal.",
+        "- ``gaps_count`` + ``gaps_top5_canonical_ids`` — open gaps the",
+        "  Coordinator believes still exist. If non-empty and the",
+        "  recommended specialist domain has not been exhausted,",
+        "  ``continue_explore`` may be justified.",
+        "- ``policy_denial_history_tail`` — when the LLM has been",
         "  thrashing against the same rule, this is evidence that further",
         "  exploration is unlikely to land KEEPs.",
+        "- ``steward_continuation_used`` — IR-7 antiloop flag; if True",
+        "  you've already burned your one continuation and must NOT",
+        "  recommend ``continue_explore`` again.",
         "",
         "**Output protocol** (your single ``specialist_done`` payload must",
         "carry these extra fields beyond the standard schema):",
@@ -307,6 +423,15 @@ class SpecialistPromptInputs:
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
+    # GAP 5 / GAP 8 — runtime fingerprint surfaced into prompts so the
+    # specialist can judge "is this lesson from an old framework still
+    # applicable?". ``framework`` is the active backend (sglang / vllm);
+    # ``framework_version`` is the precise install version (e.g. "0.5.11").
+    # Both empty when SharedState doesn't carry them (legacy SDK
+    # callers / pre-PR sessions); the prompt renderer treats absent
+    # values as "no version annotation".
+    framework: str = ""
+    framework_version: str = ""
 
     # Gap statement (§3.5 §6 part 3)
     gap_canonical_id: str = ""
@@ -329,6 +454,17 @@ class SpecialistPromptInputs:
     # Recipe summary from T0 ``find-recipe`` (§3.5 §6 part 5)
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
+    # T0 ``lessons`` query result — positive priors from prior KEEPs
+    # on (model, hardware), sorted by KB-side confidence. Rendered as
+    # § 5b for the specialist (separate from § 5 recipe so the LLM can
+    # reason about each independently).
+    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
+    # IR-7 — session_steward_specialist panoramic state digest. Only
+    # populated when the dispatcher is dispatching a session_steward
+    # task (other specialists get an empty dict and the section is
+    # skipped entirely). See ``Coordinator._build_session_snapshot``
+    # for the field shape. Rendered as § 5d.
+    session_snapshot: dict[str, Any] = field(default_factory=dict)
 
     # PR feed (§3.5 §6 part 6)
     pr_feed: list[dict[str, Any]] = field(default_factory=list)
@@ -339,6 +475,16 @@ class SpecialistPromptInputs:
     # specialise on it where useful; the legacy ``framework_pr_scout``
     # branch was retired with the FRAMEWORK_PR phase migration.
     sub_kind: str = ""
+
+    # Active server framework name (``sglang`` / ``vllm`` / ``atom``).
+    # Mirrored from ``SharedState.framework`` by
+    # ``Coordinator._warm_specialist_params``. Empty string means the
+    # Coordinator didn't plumb it (legacy / test path); per-domain
+    # focus helpers must treat an empty string as "fall back to the
+    # canonical sglang/vllm hint blocks". Used to switch the
+    # "what to read first" bullets to atom-equivalent source paths
+    # when ``framework == 'atom'``.
+    framework: str = ""
 
     # Local source navigation hint (§3.5 §6 part 7)
     framework_source_roots: tuple[str, ...] = ()
@@ -477,6 +623,7 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     return (
         not inp.kb_subgraph
         and not inp.warm_start_recipe
+        and not inp.warm_start_lessons
         and not inp.warm_start_pitfalls
         and not inp.pr_feed
     )
@@ -647,21 +794,214 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
 # ---------------------------------------------------------------------------
 def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 5. WARM-START RECIPE SUMMARY", ""]
-    has_recipe = bool(inp.warm_start_recipe)
-    has_pitfalls = bool(inp.warm_start_pitfalls)
-    if not has_recipe and not has_pitfalls:
+    if not inp.warm_start_recipe:
         rows.append(_NONE_PLACEHOLDER)
         return rows
-    if has_recipe:
-        rows.append("**find-recipe result:**")
-        rows.append("```json")
-        rows.append(json.dumps(inp.warm_start_recipe, sort_keys=True, indent=2))
-        rows.append("```")
-    if has_pitfalls:
-        rows.append("")
-        rows.append("**Known pitfalls (do NOT repeat):**")
-        for p in inp.warm_start_pitfalls:
-            rows.append(f"- {json.dumps(p, sort_keys=True)}")
+    rows.append("**find-recipe result:**")
+    rows.append("```json")
+    rows.append(json.dumps(inp.warm_start_recipe, sort_keys=True, indent=2))
+    rows.append("```")
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Section 5b — Related lessons (positive priors from prior KEEPs)
+# ---------------------------------------------------------------------------
+def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
+    """Render KB ``kind=lesson`` points that previous KEEP decisions
+    on this (model, hardware) wrote — the positive counterpart of
+    the § 5 pitfalls block.
+
+    Each lesson is shown compactly: the ``statement`` line (one
+    actionable claim) + the ``measured_impact`` string (the numeric
+    delta from the prior session), with ``applicable_models`` /
+    ``applicable_hardware`` collapsed into a single header so the
+    specialist can scan a dozen lessons at a glance instead of
+    reading JSON dumps.
+    """
+    rows = ["## 5b. RELATED LESSONS (prior KEEPs on this model+hw)", ""]
+    if not inp.warm_start_lessons:
+        rows.append(_NONE_PLACEHOLDER)
+        return rows
+    for point in inp.warm_start_lessons:
+        attrs = (point or {}).get("attrs") or {}
+        statement = str(attrs.get("statement") or "").strip()
+        if not statement:
+            continue
+        impact_str = _render_measured_impact(attrs.get("measured_impact"))
+        # Optional: confidence + source session hint + validator count
+        # for "how transferable is this lesson?".
+        conf = point.get("confidence")
+        meta_bits: list[str] = []
+        if isinstance(conf, (int, float)) and conf > 0:
+            meta_bits.append(f"conf={float(conf):.2f}")
+        # GAP 4 — surface the validated_count first because "5 sessions
+        # confirmed this" is the strongest cross-session signal. Fall
+        # back to the singular ``source_session_id`` for legacy rows.
+        vc = attrs.get("validated_count")
+        if isinstance(vc, int) and vc > 1:
+            meta_bits.append(f"validated={vc}")
+        recent_ids = attrs.get("source_session_ids")
+        if isinstance(recent_ids, list) and recent_ids:
+            meta_bits.append(f"recent={recent_ids[-1]}")
+        else:
+            src_sid = str(attrs.get("source_session_id") or "").strip()
+            if src_sid:
+                meta_bits.append(f"src={src_sid}")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        # GAP 8 — version mismatch annotation. Surface this AFTER the
+        # statement so the LLM sees ``- **X works on sglang** [from
+        # sglang@0.4.5, you're on 0.5.11]`` and can decide if the
+        # lesson still applies. Client-side ranking already downweighted
+        # the lesson, but the LLM gets the final call.
+        version_note = _format_version_note(inp, attrs)
+        rows.append(f"- **{statement}**{meta}{version_note}")
+        if impact_str:
+            rows.append(f"    impact: {impact_str}")
+    if len(rows) == 2:  # only the header + blank line, all lessons filtered out
+        rows.append(_NONE_PLACEHOLDER)
+    return rows
+
+
+def _format_version_note(
+    inp: SpecialistPromptInputs, lesson_attrs: dict[str, Any],
+) -> str:
+    """GAP 8 — render a ``[from sglang@X.Y, you're on A.B]`` annotation
+    when the lesson's framework_version differs from the current session.
+
+    Returns an empty string when:
+
+    * The lesson didn't carry a framework_version (legacy / pre-PR row).
+    * The current session doesn't know its own framework_version
+      (legacy SDK caller without manifest stack_fingerprint).
+    * The versions match exactly.
+
+    Format is intentionally compact (single bracket pair) so it
+    doesn't dominate the bullet line; the meaningful action is "LLM
+    still gets to decide".
+    """
+    lesson_fv = str(lesson_attrs.get("framework_version") or "").strip()
+    current_fv = (inp.framework_version or "").strip()
+    if not lesson_fv or not current_fv:
+        return ""
+    if lesson_fv == current_fv:
+        return ""
+    framework_label = (inp.framework or "framework").strip() or "framework"
+    return f" [from {framework_label}@{lesson_fv}, you're on {current_fv}]"
+
+
+def _render_measured_impact(raw: Any) -> str:
+    """Back-compat renderer for ``attrs.measured_impact``.
+
+    Two shapes accepted:
+
+    * Dict (GAP 3 — new shape): formatted as
+      ``+12.3% (tput=678.0, depth=3, 2026-05-26)``.
+    * String (legacy): returned verbatim.
+    * Anything else (None / numbers): returned as ``str(raw)`` or "".
+    """
+    if isinstance(raw, dict):
+        parts: list[str] = []
+        gain = raw.get("gain_pct")
+        if isinstance(gain, (int, float)):
+            parts.append(f"+{float(gain):.2f}%")
+        tput = raw.get("throughput_after")
+        if isinstance(tput, (int, float)):
+            parts.append(f"tput={float(tput):.1f}")
+        depth = raw.get("stack_depth_at_apply")
+        if isinstance(depth, int):
+            parts.append(f"depth={depth}")
+        when = str(raw.get("measured_at") or "").strip()
+        if when:
+            parts.append(when[:10])  # keep yyyy-mm-dd for compactness
+        return ", ".join(parts)
+    if isinstance(raw, str):
+        return raw.strip()
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+# ---------------------------------------------------------------------------
+# Section 5d — Session snapshot (session_steward specialist only)
+# ---------------------------------------------------------------------------
+def _section_session_snapshot(inp: SpecialistPromptInputs) -> list[str]:
+    """Inline the panoramic SharedState digest the session_steward
+    specialist consumes to decide ``continue_explore`` /
+    ``advance_to_kernel`` / ``stop_session``.
+
+    Returns an empty list (section omitted entirely) when
+    ``session_snapshot`` is empty, so non-steward specialists never
+    see this section. The dispatcher populates this dict only for
+    ``session_steward_specialist`` tasks (see
+    :meth:`Coordinator._warm_specialist_params`).
+
+    Renders as a single fenced JSON block — small enough that the LLM
+    parses it in one pass, structured enough that the field-name
+    references in the focus block resolve to concrete values.
+    """
+    snap = inp.session_snapshot or {}
+    if not snap:
+        return []
+    rows = [
+        "## 5d. SESSION SNAPSHOT (panoramic state for steward decision)",
+        "",
+        "```json",
+        json.dumps(snap, sort_keys=True, indent=2),
+        "```",
+    ]
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Section 5c — Known pitfalls (anti-priors from prior REVERTs)
+# ---------------------------------------------------------------------------
+def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
+    """Render KB ``kind=pitfall`` points that previous REVERT / crash /
+    OOM decisions on this (model, hardware) wrote — the negative
+    counterpart of § 5b lessons.
+
+    Same compact rendering as lessons: ``description`` (one actionable
+    anti-pattern) + ``severity`` tag, with optional ``conf`` / ``src``
+    metadata. The "do NOT repeat" framing is critical — the specialist
+    must understand these are *forbidden* paths, not suggestions.
+
+    Replaces the legacy ``raw`` JSON-dump rendering that the old
+    ``traps(symptom=...)`` reader produced (which the LLM couldn't
+    reliably parse).
+    """
+    rows = ["## 5c. KNOWN PITFALLS (do NOT repeat — prior REVERTs)", ""]
+    if not inp.warm_start_pitfalls:
+        rows.append(_NONE_PLACEHOLDER)
+        return rows
+    for point in inp.warm_start_pitfalls:
+        attrs = (point or {}).get("attrs") or {}
+        description = str(attrs.get("description") or "").strip()
+        if not description:
+            continue
+        severity = str(attrs.get("severity") or "").strip()
+        conf = point.get("confidence")
+        meta_bits: list[str] = []
+        if severity:
+            meta_bits.append(f"severity={severity}")
+        if isinstance(conf, (int, float)) and conf > 0:
+            meta_bits.append(f"conf={float(conf):.2f}")
+        # GAP 4 — repeat observations strengthen the "don't try this" signal.
+        vc = attrs.get("validated_count")
+        if isinstance(vc, int) and vc > 1:
+            meta_bits.append(f"observed={vc}")
+        recent_ids = attrs.get("source_session_ids")
+        if isinstance(recent_ids, list) and recent_ids:
+            meta_bits.append(f"recent={recent_ids[-1]}")
+        else:
+            src_sid = str(attrs.get("source_session_id") or "").strip()
+            if src_sid:
+                meta_bits.append(f"src={src_sid}")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        version_note = _format_version_note(inp, attrs)
+        rows.append(f"- **{description}**{meta}{version_note}")
+    if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
+        rows.append(_NONE_PLACEHOLDER)
     return rows
 
 
@@ -780,8 +1120,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         (
             "- The Critic reviews each surviving variant against the KB "
             "before benchmarking, so a marginal-quality proposal costs you "
-            "a reject (and a refuted KB edge that will follow you on "
-            "future rounds)."
+            "a reject (and a pitfall fact that will warn future sessions "
+            "off the same dead-end)."
         ),
         "- ``patches_written`` (PR-A2) lists paths (relative to your",
         "  workspace or worktree) of any unified-diff patch files you",
@@ -790,8 +1130,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "- ``empty=true`` is legitimate when you have no actionable proposals;",
         "  in that case ``proposal_set=[]`` and you must put the reason in",
         "  ``summary``.",
-        "- ``new_findings`` becomes HYPOTHESIZED KB edges at T4 commit even",
-        "  when not KEEP'd this round — surface anything you learned.",
+        "- ``new_findings`` is your free-form summary of anything you",
+        "  learned this round — Coordinator funnels it into the KB",
+        "  fact-write pipeline (lesson on KEEP, pitfall on REVERT).",
         "- ``residual_questions`` carries to the next specialist round.",
         "",
         "**Heartbeat (Channel B only):** When running in subprocess mode,",
@@ -834,7 +1175,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "   the throughput + accuracy gate. (PR-A2, Arbor-into-Hyperloom:",
         "   Inv-5.1 updated.)",
         "3. **NEVER** call ``cortex-kb`` write endpoints (propose-point /",
-        "   propose-edge / hypothesize / ingest-attempt / verify / commit)",
+        "   propose-edge / propose-lesson / propose-pitfall / update-recipe)",
         "   directly. The Coordinator owns KB writes (PolicyGate R4). KB",
         "   read context is pre-warmed into Section 4 of this prompt; the",
         "   specialist subprocess has no live KB connection.",
@@ -869,14 +1210,26 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_iron_rules(inp),
     ]
     user_sections = [
-        _section_hardware(inp),
-        _section_gap(inp),
-        _section_kb_subgraph(inp),
-        _section_roofline_evidence(inp),
-        _section_recipe(inp),
-        _section_pr_feed(inp),
-        _section_source_hint(inp),
+        _section_hardware(inp),           # 0: § 1
+        _section_gap(inp),                # 1: § 2-3
+        _section_kb_subgraph(inp),        # 2: § 4
+        _section_roofline_evidence(inp),  # 3: § 4a
+        _section_recipe(inp),             # 4: § 5
+        _section_lessons(inp),            # 5: § 5b
+        _section_pitfalls(inp),           # 6: § 5c
+        _section_pr_feed(inp),            # 7: § 6
+        _section_source_hint(inp),        # 8: § 7
     ]
+    # § 5d session snapshot — only the session_steward specialist
+    # populates ``session_snapshot``; for everyone else this section
+    # function returns ``[]`` and gets stripped by the flattener.
+    # Insert between § 5c (pitfalls, index 6) and § 6 (PR feed, was
+    # index 7). Done as conditional insert (rather than always in the
+    # list) so the section number stays meaningful — non-steward
+    # specialists don't see a "## 5d." header at all.
+    snapshot_section = _section_session_snapshot(inp)
+    if snapshot_section:
+        user_sections.insert(7, snapshot_section)
     if inp.notes:
         user_sections.append([
             "## 10. NOTES FROM ORCHESTRATION",
