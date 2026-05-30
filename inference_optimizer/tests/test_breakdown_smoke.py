@@ -606,6 +606,143 @@ def test_attribution_method_missing(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A1.0a: framework_pr surfaces in source_breakdown + phase_breakdown
+# ---------------------------------------------------------------------------
+# FRAMEWORK_PR is a phase between PRELUDE and
+# EXPLORE that bakes in upstream PRs. Before this PR landed,
+# framework_pr KEEPs fell into the legacy ``other`` family bucket and
+# silently disappeared from ``source_breakdown`` — manifesting as
+# leaderboard rows where Params + Backends + Kernel summed to far
+# below ``validated_total_pct``. These tests pin the new behaviour.
+def test_attribution_framework_pr_surfaces_in_source_breakdown(
+    tmp_path: Path,
+) -> None:
+    """A KEEP with ``action == "framework_pr"`` contributes to the new
+    ``framework_pr_pct_of_total`` field instead of being lost."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 22.85,
+        "optimization_stack": [
+            {"action": "params",       "variant_name": "torch_compile_on", "gain_pct": 0.53},
+            {"action": "framework_pr", "variant_name": "PR:26311",         "gain_pct": 22.43},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "params",       "variant_name": "torch_compile_on",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 0.53,
+             "delta_pct": 0.53,
+             "ts": "2026-05-29T11:00:00+00:00"},
+            {"action": "framework_pr", "variant_name": "PR:26311",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 0.53, "cum_gain_after": 22.85,
+             "delta_pct": 22.32,
+             "ts": "2026-05-29T11:30:00+00:00"},
+        ],
+    })
+    sb = build(sd)["attribution"]["source_breakdown"]
+    assert sb["framework_pr_pct_of_total"] == pytest.approx(22.32)
+    assert sb["params_pct_of_total"] == pytest.approx(0.53)
+    # Reconciliation: kernel + backends + params + sweep + framework_pr
+    # ≈ validated_total. The legacy "other" bucket no longer eats
+    # framework_pr gain.
+    summed = (
+        sb["geak_pct_of_total"]
+        + sb["oob_pct_of_total"]
+        + sb["backends_pct_of_total"]
+        + sb["params_pct_of_total"]
+        + sb["sweep_pct_of_total"]
+        + sb["framework_pr_pct_of_total"]
+    )
+    assert summed == pytest.approx(sb["validated_total_pct"], abs=0.05)
+
+
+def test_attribution_framework_pr_pct_emitted_even_when_zero(
+    tmp_path: Path,
+) -> None:
+    """``framework_pr_pct_of_total`` is always emitted (defaults to 0.0)
+    so the dashboard can iterate the catalogue without hasattr checks."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 5.0,
+        "optimization_stack": [
+            {"action": "params", "variant_name": "p1", "gain_pct": 5.0},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "params", "variant_name": "p1",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 5.0,
+             "delta_pct": 5.0,
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+    })
+    sb = build(sd)["attribution"]["source_breakdown"]
+    assert "framework_pr_pct_of_total" in sb
+    assert sb["framework_pr_pct_of_total"] == 0.0
+
+
+def test_attribution_phase_breakdown_framework_pr_by_pr(
+    tmp_path: Path,
+) -> None:
+    """``phase_breakdown.framework_pr.by_pr`` aggregates per-PR gain.
+    Each entry's ``variant_name`` is the PR label (``PR:<num>`` or
+    ``PR:<repo>#<num>``); the bucket key is the variant_name verbatim."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 30.0,
+        "phase_history": [
+            {"to_phase": "PRELUDE",      "ts_unix": 1000.0},
+            {"to_phase": "FRAMEWORK_PR", "ts_unix": 1100.0},
+            {"to_phase": "EXPLORE",      "ts_unix": 2000.0},
+        ],
+        "optimization_stack": [
+            {"action": "framework_pr", "variant_name": "PR:26311"},
+            {"action": "framework_pr", "variant_name": "PR:sgl#9912"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "framework_pr", "variant_name": "PR:26311",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 18.0,
+             "delta_pct": 18.0,
+             "ts_unix": 1200.0},
+            {"action": "framework_pr", "variant_name": "PR:sgl#9912",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 18.0, "cum_gain_after": 30.0,
+             "delta_pct": 12.0,
+             "ts_unix": 1500.0},
+        ],
+    })
+    pb = build(sd)["attribution"]["phase_breakdown"]
+    assert "framework_pr" in pb
+    assert pb["framework_pr"]["total_gain_pct"] == pytest.approx(30.0)
+    assert pb["framework_pr"]["by_pr"]["PR:26311"] == pytest.approx(18.0)
+    assert pb["framework_pr"]["by_pr"]["PR:sgl#9912"] == pytest.approx(12.0)
+
+
+def test_attribution_framework_pr_phase_fallback_when_no_phase_history(
+    tmp_path: Path,
+) -> None:
+    """Without ``phase_history`` the collector falls back to action
+    family. ``framework_pr`` actions land in the framework_pr phase
+    bucket (not ``unattributed``) so the gain is still surfaced."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 10.0,
+        "optimization_stack": [
+            {"action": "framework_pr", "variant_name": "PR:42",
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "framework_pr", "variant_name": "PR:42",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 10.0,
+             "delta_pct": 10.0,
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+    })
+    pb = build(sd)["attribution"]["phase_breakdown"]
+    assert pb["framework_pr"]["total_gain_pct"] == pytest.approx(10.0)
+    assert pb["framework_pr"]["by_pr"]["PR:42"] == pytest.approx(10.0)
+    # Nothing should leak into ``unattributed``.
+    assert "unattributed" not in pb or pb["unattributed"]["total_gain_pct"] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # A1.1: kernel_roofline (Dashboard-Roofline 对接清单 §1)
 # ---------------------------------------------------------------------------
 # The collector mirrors ``<sd>/reports/kernel_roofline.json`` so the
