@@ -1,0 +1,198 @@
+[
+  {
+    "id": "draft_valid_kernel_optimization_entry",
+    "description": "Extract a reusable kernel optimization lesson from a controlled final report.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "kb_draft",
+      "metadata": {
+        "model_family": "qwen",
+        "model": "Qwen3-14B",
+        "gpu": "MI355X",
+        "framework": "SGLang",
+        "validated_date": "2026-04-29"
+      },
+      "final_report": {
+        "summary": "The final kept patch routes Qwen3-14B attention to fused_attention_gfx950 and updates the shape-specific best_config.",
+        "baseline_tput_per_gpu": 1200.0,
+        "final_tput_per_gpu": 1250.4,
+        "gain_pct": 4.2,
+        "benchmark_methodology": "Controlled same-session A/B with matched launch parameters, concurrency, ISL/OSL, warmup, sample count, and duration.",
+        "accuracy_gate": "pass",
+        "kept_patches": [
+          {
+            "id": "patch-attn-gfx950",
+            "status": "KEEP",
+            "files": [
+              "python/sglang/srt/layers/attention/flashinfer_backend.py",
+              "sgl-kernel/src/attention/fused_attention_gfx950.cu",
+              "sgl-kernel/configs/qwen3_14b_mi355x.best_config"
+            ],
+            "lesson": "The attention kernel rewrite produced E2E gain only when dispatch and shape-specific tuning config were updated together."
+          }
+        ],
+        "reverted_patches": []
+      },
+      "existing_kb": []
+    },
+    "expected": {
+      "kind": "kb_draft",
+      "min_kb_drafts": 1,
+      "categories_include": [
+        "kernel_optimization"
+      ],
+      "drafts_must_include_fields": [
+        "category",
+        "action",
+        "lesson",
+        "model_family",
+        "model",
+        "gpu",
+        "framework",
+        "result",
+        "confidence",
+        "source",
+        "context"
+      ],
+      "result_status_any_of": [
+        "KEEP"
+      ],
+      "min_confidence": 0.75
+    }
+  },
+  {
+    "id": "draft_benchmark_methodology_pitfall",
+    "description": "Create a pitfall or benchmark methodology entry from a reverted misleading benchmark.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "kb_draft",
+      "metadata": {
+        "model_family": "qwen",
+        "model": "Qwen3-14B",
+        "gpu": "MI355X",
+        "framework": "SGLang",
+        "validated_date": "2026-04-29"
+      },
+      "final_report": {
+        "summary": "A scheduler patch appeared to improve throughput but was reverted after Critic found the after-run used max_concurrency=256 while baseline used max_concurrency=128.",
+        "baseline_tput_per_gpu": 1200.0,
+        "final_tput_per_gpu": 1201.0,
+        "gain_pct": 0.1,
+        "accuracy_gate": "pass",
+        "reverted_patches": [
+          {
+            "id": "patch-scheduler-queue-depth",
+            "status": "REVERT",
+            "failure_type": "benchmark_invalid",
+            "lesson": "Changing max_concurrency between baseline and after runs can create a false throughput win."
+          }
+        ]
+      },
+      "existing_kb": []
+    },
+    "expected": {
+      "kind": "kb_draft",
+      "min_kb_drafts": 1,
+      "categories_include_any_of": [
+        "benchmark_methodology",
+        "pitfall"
+      ],
+      "result_status_any_of": [
+        "REVERT"
+      ],
+      "min_confidence": 0.6
+    }
+  },
+  {
+    "id": "reject_speculative_report_candidate",
+    "description": "Reject a report section that proposes an idea but has no completed test or controlled evidence.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "kb_draft",
+      "metadata": {
+        "model_family": "qwen",
+        "model": "Qwen3-14B",
+        "gpu": "MI355X",
+        "framework": "SGLang"
+      },
+      "final_report": {
+        "summary": "Future work: try a custom paged attention variant with larger tile size.",
+        "ideas": [
+          {
+            "name": "larger_paged_attention_tile",
+            "status": "not_tested",
+            "hypothesis": "A larger tile may improve memory coalescing."
+          }
+        ],
+        "benchmark_methodology": null,
+        "accuracy_gate": null
+      },
+      "existing_kb": []
+    },
+    "expected": {
+      "kind": "kb_draft",
+      "max_kb_drafts": 0,
+      "min_rejected_candidates": 1,
+      "rejection_reason_contains_any_of": [
+        "speculative",
+        "No controlled benchmark",
+        "not tested",
+        "without a completed test"
+      ]
+    }
+  },
+  {
+    "id": "reject_duplicate_existing_kb",
+    "description": "Reject or supersede duplicate entries rather than creating an unqualified duplicate.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "kb_draft",
+      "metadata": {
+        "model_family": "qwen",
+        "model": "Qwen3-14B",
+        "gpu": "MI355X",
+        "framework": "SGLang",
+        "validated_date": "2026-04-29"
+      },
+      "final_report": {
+        "summary": "The run confirms the existing lesson that dispatch and best_config must be updated together for the gfx950 fused attention path.",
+        "baseline_tput_per_gpu": 1200.0,
+        "final_tput_per_gpu": 1250.4,
+        "gain_pct": 4.2,
+        "accuracy_gate": "pass",
+        "kept_patches": [
+          {
+            "id": "patch-attn-gfx950-repeat",
+            "status": "KEEP",
+            "lesson": "Dispatch and best_config updates must be kept together for this attention path."
+          }
+        ]
+      },
+      "existing_kb": [
+        {
+          "id": "kb-existing-attn-gfx950",
+          "model": "Qwen3-14B",
+          "gpu": "MI355X",
+          "framework": "SGLang",
+          "category": "kernel_optimization",
+          "action": "Update fused attention dispatch and best_config for Qwen3-14B on MI355X.",
+          "lesson": "The fused attention path gains E2E throughput only when dispatch and shape-specific best_config are updated together.",
+          "result": {
+            "status": "KEEP",
+            "gain_pct": 4.1
+          },
+          "confidence": 0.9,
+          "context": "Controlled A/B with matched params."
+        }
+      ]
+    },
+    "expected": {
+      "kind": "kb_draft",
+      "duplicate_handling_any_of": [
+        "reject_candidate",
+        "supersedes_existing"
+      ],
+      "must_not_create_unqualified_duplicate": true
+    }
+  }
+]

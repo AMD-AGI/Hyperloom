@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Launch script for MiniMax-M2.5 on MI300X (vLLM).
+#
+# Hyperloom passes these env vars:
+#   MODEL_PATH  — path to model weights
+#   PORT        — serving port
+#   TP          — tensor parallelism degree
+#   GPUS        — comma-separated GPU IDs
+#
+# Usage:
+#   hyperloom optimize \
+#     --model /wekafs/models/MiniMaxAI-MiniMax-M2.5 \
+#     --launch-script examples/launch_minimax_m25.sh \
+#     --framework vllm --tp 2 --gpus 0,1
+
+set -euo pipefail
+
+MODEL="${MODEL_PATH:?MODEL_PATH is required}"
+PORT="${PORT:-8000}"
+TP="${TP:-2}"
+GPUS="${GPUS:-0,1}"
+
+# --- GPU visibility ---
+# On ROCm builds, PyTorch respects CUDA_VISIBLE_DEVICES (mapped internally
+# to HIP). ROCR_VISIBLE_DEVICES can break torch._C._cuda_init() in some
+# container images, so we use CUDA_VISIBLE_DEVICES universally.
+export CUDA_VISIBLE_DEVICES="$GPUS"
+unset ROCR_VISIBLE_DEVICES 2>/dev/null || true
+unset HIP_VISIBLE_DEVICES 2>/dev/null || true
+
+# --- Container-specific workarounds ---
+# These address ABI mismatches in the current container image where
+# compiled extensions (aiter, flash_attn, mori) were built against
+# an older PyTorch that used c10::hip namespace (now c10::cuda in 2.12+).
+# Remove these once the container is rebuilt with matching dependencies.
+if [ -f /usr/local/lib/libhip_compat_shim.so ]; then
+    TORCH_LIB="/usr/local/lib/python3.12/dist-packages/torch/lib"
+    export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}/usr/local/lib/libhip_compat_shim.so:${TORCH_LIB}/libtorch_hip.so"
+    export LD_LIBRARY_PATH="${TORCH_LIB}:${LD_LIBRARY_PATH:-}"
+fi
+
+# CU_NUM and GPU_ARCHS are injected by Hyperloom based on detected GPU.
+# aiter's rocminfo probe fails under ROCR_VISIBLE_DEVICES; these bypass it.
+export CU_NUM="${CU_NUM:?CU_NUM not set — run via hyperloom or set manually}"
+export GPU_ARCHS="${GPU_ARCHS:?GPU_ARCHS not set — run via hyperloom or set manually}"
+export VLLM_ROCM_USE_AITER=1
+
+# --- Serve ---
+exec vllm serve "$MODEL" \
+    --port "$PORT" \
+    --tensor-parallel-size "$TP" \
+    --gpu-memory-utilization 0.95 \
+    --max-model-len 4096 \
+    --trust-remote-code \
+    --compilation-config '{"use_inductor_graph_partition":true,"fast_moe_cold_start":true}' \
+    "$@"

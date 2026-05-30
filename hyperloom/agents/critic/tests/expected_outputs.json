@@ -1,0 +1,426 @@
+{
+  "approve_controlled_kernel_proposal": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_attn_keep_001",
+    "verdict": "approve",
+    "source": "critic",
+    "confidence": "high",
+    "reasoning": "Controlled A/B evidence shows a 4.2% tok/s/GPU gain with passing accuracy, active-path proof, cache handling, and clear rollback.",
+    "predicted_gain_pct": 4.2,
+    "kb_evidence": [
+      "kb:qwen/qwen3-14b/attn-dispatch-best-config"
+    ],
+    "packet_evidence": [
+      "benchmark.after.gain_pct",
+      "accuracy_gate.status",
+      "dispatch_evidence.active_path_proven",
+      "rollback.available"
+    ],
+    "risks": [],
+    "required_evidence": [],
+    "alternative_action": null,
+    "advice_text": "",
+    "notes": [
+      "Kernel response can be kept."
+    ]
+  },
+  "reject_mismatched_benchmark": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_sched_002",
+    "verdict": "reject",
+    "source": "critic",
+    "confidence": "high",
+    "reasoning": "The after benchmark changed max_concurrency, so the reported throughput gain is not comparable.",
+    "predicted_gain_pct": null,
+    "kb_evidence": [
+      "kb:policy/benchmark-methodology/matched-concurrency"
+    ],
+    "packet_evidence": [
+      "benchmark.baseline.max_concurrency",
+      "benchmark.after.max_concurrency"
+    ],
+    "risks": [
+      {
+        "type": "benchmark_invalid",
+        "severity": "blocker",
+        "reason": "Baseline used max_concurrency=128 while the after run used max_concurrency=256.",
+        "required_fix": "Rerun before and after benchmarks with matched concurrency, ISL/OSL, sample count, and launch parameters.",
+        "evidence_ref": "benchmark.after.max_concurrency"
+      }
+    ],
+    "required_evidence": [
+      "matched_benchmark"
+    ],
+    "alternative_action": null,
+    "advice_text": "",
+    "notes": []
+  },
+  "needs_review_missing_accuracy_gate": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_compile_flag_003",
+    "verdict": "needs_review",
+    "source": "critic",
+    "confidence": "high",
+    "reasoning": "The proposal is high risk and has no accuracy gate result or waiver.",
+    "predicted_gain_pct": null,
+    "kb_evidence": [],
+    "packet_evidence": [
+      "accuracy_gate"
+    ],
+    "risks": [
+      {
+        "type": "accuracy_missing",
+        "severity": "blocker",
+        "reason": "Accuracy evidence is required before a high-risk compiler change can dispatch.",
+        "required_fix": "Run the configured accuracy gate or provide an explicit Conductor waiver.",
+        "evidence_ref": "accuracy_gate"
+      }
+    ],
+    "required_evidence": [
+      "accuracy_gate"
+    ],
+    "alternative_action": null,
+    "advice_text": "",
+    "notes": []
+  },
+  "redirect_known_bad_backend": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_backend_004",
+    "verdict": "redirect",
+    "source": "critic",
+    "confidence": "high",
+    "reasoning": "KB evidence says flashinfer is known to OOM for this model and context, while a same-owner triton backend alternative is registered.",
+    "predicted_gain_pct": 1.5,
+    "kb_evidence": [
+      "kb:qwen/qwen3-14b/flashinfer-oom-long-context"
+    ],
+    "packet_evidence": [
+      "registered_alternatives[0]"
+    ],
+    "risks": [
+      {
+        "type": "regression_risk",
+        "severity": "major",
+        "reason": "The proposed backend is known-bad for this model family at long context.",
+        "required_fix": "Use the registered triton backend alternative instead.",
+        "evidence_ref": "kb_evidence[0]"
+      }
+    ],
+    "required_evidence": [],
+    "alternative_action": {
+      "name": "backend_exploration",
+      "owner": "orchestration",
+      "params": {
+        "attention_backend": "triton"
+      }
+    },
+    "advice_text": "",
+    "notes": []
+  },
+  "advise_low_risk_followup": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_params_005",
+    "verdict": "advise",
+    "source": "critic",
+    "confidence": "medium",
+    "reasoning": "The params proposal is low risk and can proceed, but prior KB says gains are often near noise.",
+    "predicted_gain_pct": null,
+    "kb_evidence": [
+      "kb:qwen/qwen3-14b/params-gain-noise"
+    ],
+    "packet_evidence": [
+      "action_metadata.accuracy_risk"
+    ],
+    "risks": [
+      {
+        "type": "regression_risk",
+        "severity": "minor",
+        "reason": "Prior runs show this parameter family often produces marginal gains.",
+        "required_fix": "If gain is below 3%, do not keep deepening this branch.",
+        "evidence_ref": "kb_evidence[0]"
+      }
+    ],
+    "required_evidence": [],
+    "alternative_action": null,
+    "advice_text": "Proceed, but require a matched benchmark and stop deepening this branch if gain is below 3%.",
+    "notes": []
+  },
+  "reject_robustness_conflict": {
+    "kind": "review_verdict",
+    "target_proposal_msg_id": "msg_comm_006",
+    "verdict": "reject",
+    "source": "critic",
+    "confidence": "high",
+    "reasoning": "A high-confidence Robustness finding reports a related systemic stale-data risk that the packet does not address.",
+    "predicted_gain_pct": null,
+    "kb_evidence": [
+      "kb:qwen/qwen3-14b/rccl-stale-data-tp8"
+    ],
+    "packet_evidence": [
+      "robustness_findings[0]"
+    ],
+    "risks": [
+      {
+        "type": "robustness_conflict",
+        "severity": "blocker",
+        "reason": "Robustness reports that the same RCCL algorithm can return stale data under TP=8.",
+        "required_fix": "Resolve or explicitly mitigate the Robustness finding before dispatching this communication change.",
+        "evidence_ref": "robustness_findings[0]"
+      }
+    ],
+    "required_evidence": [
+      "robustness_resolution"
+    ],
+    "alternative_action": null,
+    "advice_text": "",
+    "notes": []
+  },
+  "draft_valid_kernel_optimization_entry": {
+    "kind": "kb_draft",
+    "kb_drafts": [
+      {
+        "model_family": "qwen",
+        "category": "kernel_optimization",
+        "action": "Route Qwen3-14B attention to fused_attention_gfx950 and update the shape-specific best_config.",
+        "lesson": "The attention kernel rewrite produced E2E gain only when dispatch and shape-specific tuning config were updated together.",
+        "model": "Qwen3-14B",
+        "gpu": "MI355X",
+        "framework": "SGLang",
+        "tags": [
+          "attention",
+          "dispatch",
+          "best_config",
+          "gfx950"
+        ],
+        "result": {
+          "status": "KEEP",
+          "gain_pct": 4.2,
+          "baseline_tput_per_gpu": 1200.0,
+          "final_tput_per_gpu": 1250.4,
+          "accuracy": "pass"
+        },
+        "confidence": 0.9,
+        "source": "final_report",
+        "context": "Controlled same-session A/B with matched launch parameters and passing accuracy gate.",
+        "supersedes": null,
+        "validated_date": "2026-04-29",
+        "strategy_tested": [
+          "kernel_rewrite",
+          "dispatch_update",
+          "shape_config_update"
+        ]
+      }
+    ],
+    "rejected_candidates": [],
+    "notes": []
+  },
+  "draft_benchmark_methodology_pitfall": {
+    "kind": "kb_draft",
+    "kb_drafts": [
+      {
+        "model_family": "qwen",
+        "category": "benchmark_methodology",
+        "action": "Compared scheduler throughput with different max_concurrency values between baseline and after runs.",
+        "lesson": "Changing max_concurrency between baseline and after runs can create a false throughput win.",
+        "model": "Qwen3-14B",
+        "gpu": "MI355X",
+        "framework": "SGLang",
+        "tags": [
+          "benchmark",
+          "concurrency",
+          "pitfall"
+        ],
+        "result": {
+          "status": "REVERT",
+          "failure_type": "benchmark_invalid"
+        },
+        "confidence": 0.85,
+        "source": "final_report",
+        "context": "The scheduler patch was reverted after Critic found max_concurrency mismatch.",
+        "supersedes": null,
+        "validated_date": "2026-04-29",
+        "strategy_tested": [
+          "scheduler_queue_depth"
+        ]
+      }
+    ],
+    "rejected_candidates": [],
+    "notes": []
+  },
+  "reject_speculative_report_candidate": {
+    "kind": "kb_draft",
+    "kb_drafts": [],
+    "rejected_candidates": [
+      {
+        "source_section": "Future work",
+        "reason": "The candidate is speculative and not tested; no controlled benchmark or accuracy evidence was provided."
+      }
+    ],
+    "notes": []
+  },
+  "reject_duplicate_existing_kb": {
+    "kind": "kb_draft",
+    "kb_drafts": [],
+    "rejected_candidates": [
+      {
+        "source_section": "kept_patches[0]",
+        "reason": "Duplicate of existing KB entry kb-existing-attn-gfx950 without new scope, evidence, or supersession."
+      }
+    ],
+    "notes": []
+  },
+  "decision-001-adopt-with-session-evidence": {
+    "kind": "critic_decision_review",
+    "session_id": "sess-decision-001",
+    "decision_id": "dec-001",
+    "verdict": "adopt",
+    "confidence": "high",
+    "reason": "Patch X reproducer benchmark shows +4.2% tput at the active dispatch path, accuracy gate is green, and rollback is documented.",
+    "recommendation": "Proceed; clear compiled cache before final benchmark.",
+    "basis": "session",
+    "kb_evidence": [],
+    "session_evidence": [
+      "benchmark.after.gain_pct",
+      "accuracy_gate.status",
+      "dispatch_evidence.active_path_proven"
+    ],
+    "required_context": [],
+    "notes": []
+  },
+  "decision-002-needs-info-when-context-missing": {
+    "kind": "critic_decision_review",
+    "session_id": "sess-decision-002",
+    "decision_id": "dec-002",
+    "verdict": "needs_info",
+    "confidence": "low",
+    "reason": "Cannot decide: critical context (model, framework) is missing from the request and session memory.",
+    "recommendation": "Resend the decision with model and framework populated.",
+    "basis": "insufficient_context",
+    "kb_evidence": [],
+    "session_evidence": [],
+    "required_context": ["model", "framework"],
+    "notes": [
+      "needs_info follows the hard rule: do not invent missing context."
+    ]
+  },
+  "decision-003-revise-when-kb-flags-side-effect": {
+    "kind": "critic_decision_review",
+    "session_id": "sess-decision-003",
+    "decision_id": "dec-003",
+    "verdict": "revise",
+    "confidence": "medium",
+    "reason": "KB pitfall warns about cache clear after dispatch path changes, and the benchmark has not been rerun.",
+    "recommendation": "Rerun the benchmark after cache clear before adopting.",
+    "basis": "mixed",
+    "kb_evidence": [
+      {
+        "id": "kb_xxx",
+        "kind": "pitfall",
+        "slug": "cache-clear-required-after-dispatch-change"
+      }
+    ],
+    "session_evidence": [],
+    "required_context": [],
+    "notes": []
+  },
+  "inbox-001-two-proposals-mixed-verdicts": {
+    "kind": "intent_envelope",
+    "intents": [
+      {
+        "intent_type": "review_verdict",
+        "payload": {
+          "target_proposal_msg_id": "aaa1",
+          "verdict": "approve",
+          "source": "critic",
+          "reasoning": "Baseline carries comparable tput and rollback; approve.",
+          "predicted_gain_pct": 0,
+          "confidence": "high",
+          "kb_evidence": [],
+          "packet_evidence": [
+            "benchmark.after.gain_pct",
+            "accuracy_gate.status",
+            "rollback.available"
+          ],
+          "risks": [],
+          "required_evidence": [],
+          "alternative_action": null,
+          "advice_text": "",
+          "notes": []
+        }
+      },
+      {
+        "intent_type": "review_verdict",
+        "payload": {
+          "target_proposal_msg_id": "bbb2",
+          "verdict": "reject",
+          "source": "critic",
+          "reasoning": "Active dispatch path is unproven for the kernel rewrite; require dispatch evidence before retry.",
+          "predicted_gain_pct": null,
+          "confidence": "high",
+          "kb_evidence": [
+            "kb:qwen/qwen3-14b/active-path-unproven-pitfall"
+          ],
+          "packet_evidence": [],
+          "risks": [
+            {
+              "type": "active_path_unproven",
+              "severity": "blocker",
+              "reason": "No proof that the kernel rewrite is on the active dispatch path.",
+              "required_fix": "Provide dispatch_evidence.active_path_proven=true",
+              "evidence_ref": "dispatch_evidence"
+            }
+          ],
+          "required_evidence": [
+            "dispatch_evidence.active_path_proven"
+          ],
+          "alternative_action": null,
+          "advice_text": "",
+          "notes": []
+        }
+      }
+    ]
+  },
+  "inbox-002-empty-inbox-emits-heartbeat": {
+    "kind": "intent_envelope",
+    "intents": [
+      {
+        "intent_type": "send_message",
+        "payload": {
+          "topic": "heartbeat",
+          "body_md": "ok (critic)"
+        }
+      }
+    ]
+  },
+  "inbox-003-needs-review-when-context-missing": {
+    "kind": "intent_envelope",
+    "intents": [
+      {
+        "intent_type": "review_verdict",
+        "payload": {
+          "target_proposal_msg_id": "ccc3",
+          "verdict": "needs_review",
+          "source": "critic_unavailable",
+          "reasoning": "Model and framework missing from shared session state and session memory; cannot review.",
+          "predicted_gain_pct": null,
+          "confidence": "low",
+          "kb_evidence": [],
+          "packet_evidence": [],
+          "risks": [
+            {
+              "type": "insufficient_context",
+              "severity": "blocker",
+              "reason": "model and framework are required to evaluate the proposal.",
+              "required_fix": "Resend with shared session state populated.",
+              "evidence_ref": "shared_session_state"
+            }
+          ],
+          "required_evidence": ["shared_session_state.model", "shared_session_state.framework"],
+          "alternative_action": null,
+          "advice_text": "",
+          "notes": []
+        }
+      }
+    ]
+  }
+}

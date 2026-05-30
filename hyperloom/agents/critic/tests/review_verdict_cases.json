@@ -1,0 +1,359 @@
+[
+  {
+    "id": "approve_controlled_kernel_proposal",
+    "description": "Approve a scoped Kernel keep proposal with controlled E2E evidence, passing accuracy, active-path proof, and rollback.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "review_verdict",
+      "target_proposal_msg_id": "msg_attn_keep_001",
+      "trigger": {
+        "source_agent": "kernel",
+        "kind": "integrate",
+        "status": "keep_proposed"
+      },
+      "action_metadata": {
+        "name": "integrate",
+        "family": "deep_kernel",
+        "owner": "kernel",
+        "accuracy_risk": 1
+      },
+      "optimization_goal": "Improve tok/s/GPU by replacing the active fused attention kernel for Qwen3-14B on MI355X.",
+      "patch": {
+        "files": [
+          "python/sglang/srt/layers/attention/flashinfer_backend.py",
+          "sgl-kernel/src/attention/fused_attention_gfx950.cu",
+          "sgl-kernel/configs/qwen3_14b_mi355x.best_config"
+        ],
+        "summary": "Route Qwen3-14B attention to a gfx950-specialized fused kernel and update shape-specific tuning config.",
+        "unrelated_changes": false
+      },
+      "benchmark": {
+        "baseline": {
+          "tput_per_gpu": 1200.0,
+          "model": "Qwen3-14B",
+          "gpu": "MI355X",
+          "gpu_count": 8,
+          "framework": "SGLang",
+          "framework_commit": "abc1234",
+          "rocm": "6.4.1",
+          "tp": 8,
+          "pp": 1,
+          "max_concurrency": 128,
+          "isl": 2048,
+          "osl": 512,
+          "warmup": 3,
+          "sample_count": 200,
+          "duration_s": 600
+        },
+        "after": {
+          "tput_per_gpu": 1250.4,
+          "gain_pct": 4.2,
+          "model": "Qwen3-14B",
+          "gpu": "MI355X",
+          "gpu_count": 8,
+          "framework": "SGLang",
+          "framework_commit": "abc1234",
+          "rocm": "6.4.1",
+          "tp": 8,
+          "pp": 1,
+          "max_concurrency": 128,
+          "isl": 2048,
+          "osl": 512,
+          "warmup": 3,
+          "sample_count": 200,
+          "duration_s": 600
+        },
+        "methodology": "Controlled same-session A/B with matched launch parameters."
+      },
+      "accuracy_gate": {
+        "status": "pass",
+        "suite": "gsm8k",
+        "baseline_score": 0.742,
+        "after_score": 0.743,
+        "tolerance": 0.005
+      },
+      "dispatch_evidence": {
+        "active_path_proven": true,
+        "profile_kernel_name": "fused_attention_gfx950_qwen3"
+      },
+      "build_and_cache": {
+        "rebuilt": true,
+        "server_restarted": true,
+        "compiled_cache_cleared": true
+      },
+      "rollback": {
+        "available": true,
+        "plan": "Revert the three touched files and restart the server."
+      },
+      "kb_evidence": [
+        "kb:qwen/qwen3-14b/attn-dispatch-best-config"
+      ],
+      "robustness_findings": []
+    },
+    "expected": {
+      "kind": "review_verdict",
+      "verdict": "approve",
+      "target_proposal_msg_id": "msg_attn_keep_001",
+      "source": "critic",
+      "min_predicted_gain_pct": 0.1,
+      "risk_types": [],
+      "required_evidence_absent": true,
+      "confidence_any_of": [
+        "high",
+        "medium"
+      ]
+    }
+  },
+  {
+    "id": "reject_mismatched_benchmark",
+    "description": "Reject when the after benchmark changes concurrency and is not comparable with baseline.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "review_verdict",
+      "target_proposal_msg_id": "msg_sched_002",
+      "trigger": {
+        "source_agent": "orchestration",
+        "kind": "propose_action"
+      },
+      "action_metadata": {
+        "name": "server_params",
+        "family": "shallow",
+        "owner": "orchestration",
+        "accuracy_risk": 1
+      },
+      "optimization_goal": "Improve serving throughput by changing scheduler limits.",
+      "benchmark": {
+        "baseline": {
+          "tput_per_gpu": 1200.0,
+          "max_concurrency": 128,
+          "isl": 2048,
+          "osl": 512,
+          "sample_count": 200
+        },
+        "after": {
+          "tput_per_gpu": 1290.0,
+          "gain_pct": 7.5,
+          "max_concurrency": 256,
+          "isl": 2048,
+          "osl": 512,
+          "sample_count": 200
+        }
+      },
+      "accuracy_gate": {
+        "status": "pass"
+      },
+      "rollback": {
+        "available": true
+      },
+      "kb_evidence": [
+        "kb:policy/benchmark-methodology/matched-concurrency"
+      ]
+    },
+    "expected": {
+      "kind": "review_verdict",
+      "verdict": "reject",
+      "target_proposal_msg_id": "msg_sched_002",
+      "source": "critic",
+      "risk_types_any_of": [
+        "benchmark_invalid"
+      ],
+      "required_evidence_includes": [
+        "matched_benchmark"
+      ],
+      "min_blocker_count": 1,
+      "min_kb_evidence": 1
+    }
+  },
+  {
+    "id": "needs_review_missing_accuracy_gate",
+    "description": "Return needs_review for a high-risk proposal with comparable benchmark data but no accuracy gate or waiver.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "review_verdict",
+      "target_proposal_msg_id": "msg_compile_flag_003",
+      "trigger": {
+        "source_agent": "orchestration",
+        "kind": "propose_action"
+      },
+      "action_metadata": {
+        "name": "compiler_config",
+        "family": "long",
+        "owner": "orchestration",
+        "accuracy_risk": 1
+      },
+      "optimization_goal": "Enable a compiler flag that improves decode throughput.",
+      "benchmark": {
+        "baseline": {
+          "tput_per_gpu": 1200.0,
+          "max_concurrency": 128,
+          "isl": 2048,
+          "osl": 512,
+          "sample_count": 200
+        },
+        "after": {
+          "tput_per_gpu": 1236.0,
+          "gain_pct": 3.0,
+          "max_concurrency": 128,
+          "isl": 2048,
+          "osl": 512,
+          "sample_count": 200
+        }
+      },
+      "accuracy_gate": null,
+      "kb_evidence": []
+    },
+    "expected": {
+      "kind": "review_verdict",
+      "verdict": "needs_review",
+      "target_proposal_msg_id": "msg_compile_flag_003",
+      "risk_types_any_of": [
+        "accuracy_missing"
+      ],
+      "required_evidence_includes": [
+        "accuracy_gate"
+      ],
+      "min_blocker_count": 1
+    }
+  },
+  {
+    "id": "redirect_known_bad_backend",
+    "description": "Redirect when KB evidence says the proposed backend is known-bad and a same-owner alternative action is available.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "review_verdict",
+      "target_proposal_msg_id": "msg_backend_004",
+      "trigger": {
+        "source_agent": "orchestration",
+        "kind": "propose_action"
+      },
+      "action_metadata": {
+        "name": "backend_exploration",
+        "family": "shallow",
+        "owner": "orchestration",
+        "accuracy_risk": 0
+      },
+      "proposal": {
+        "action": "backend_exploration",
+        "params": {
+          "attention_backend": "flashinfer"
+        }
+      },
+      "kb_evidence": [
+        "kb:qwen/qwen3-14b/flashinfer-oom-long-context"
+      ],
+      "registered_alternatives": [
+        {
+          "name": "backend_exploration",
+          "owner": "orchestration",
+          "params": {
+            "attention_backend": "triton"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "kind": "review_verdict",
+      "verdict": "redirect",
+      "target_proposal_msg_id": "msg_backend_004",
+      "min_kb_evidence": 1,
+      "alternative_action_required": true
+    }
+  },
+  {
+    "id": "advise_low_risk_followup",
+    "description": "Advise, without blocking, when a low-risk proposal should carry a follow-up sweep reminder.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "review_verdict",
+      "target_proposal_msg_id": "msg_params_005",
+      "trigger": {
+        "source_agent": "orchestration",
+        "kind": "propose_action"
+      },
+      "action_metadata": {
+        "name": "params",
+        "family": "shallow",
+        "owner": "orchestration",
+        "accuracy_risk": 0
+      },
+      "proposal": {
+        "params": {
+          "max_running_requests": 128
+        }
+      },
+      "kb_evidence": [
+        "kb:qwen/qwen3-14b/params-gain-noise"
+      ]
+    },
+    "expected": {
+      "kind": "review_verdict",
+      "verdict": "advise",
+      "target_proposal_msg_id": "msg_params_005",
+      "advice_text_required": true
+    }
+  },
+  {
+    "id": "reject_robustness_conflict",
+    "description": "Reject when Robustness reports a related systemic accuracy failure not addressed by the packet.",
+    "skill_entrypoint": "../SKILL.md",
+    "input_packet": {
+      "request_type": "review_verdict",
+      "target_proposal_msg_id": "msg_comm_006",
+      "trigger": {
+        "source_agent": "orchestration",
+        "kind": "propose_action"
+      },
+      "action_metadata": {
+        "name": "comm_optimization",
+        "family": "long",
+        "owner": "orchestration",
+        "accuracy_risk": 1
+      },
+      "benchmark": {
+        "baseline": {
+          "tput_per_gpu": 1200.0,
+          "tp": 8,
+          "max_concurrency": 128,
+          "sample_count": 200
+        },
+        "after": {
+          "tput_per_gpu": 1260.0,
+          "gain_pct": 5.0,
+          "tp": 8,
+          "max_concurrency": 128,
+          "sample_count": 200
+        }
+      },
+      "accuracy_gate": {
+        "status": "pass"
+      },
+      "rollback": {
+        "available": true
+      },
+      "kb_evidence": [
+        "kb:qwen/qwen3-14b/rccl-stale-data-tp8"
+      ],
+      "robustness_findings": [
+        {
+          "event_id": "evt_comm_accuracy_017",
+          "classification": "software",
+          "root_cause": "The same RCCL algorithm intermittently returns stale data under TP=8.",
+          "confidence": "high",
+          "systemic": true,
+          "addressed_by_packet": false
+        }
+      ]
+    },
+    "expected": {
+      "kind": "review_verdict",
+      "verdict": "reject",
+      "target_proposal_msg_id": "msg_comm_006",
+      "risk_types_any_of": [
+        "robustness_conflict",
+        "cross_layer_conflict"
+      ],
+      "min_blocker_count": 1,
+      "min_kb_evidence": 1
+    }
+  }
+]

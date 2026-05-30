@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Launch script for MiniMax-M2.5 on MI300X (vLLM).
+# Patched v1: AITER MoE/RMSNorm/Linear + EP + chunked prefill + fp8 KV.
+
+set -euo pipefail
+
+MODEL="${MODEL_PATH:?MODEL_PATH is required}"
+PORT="${PORT:-8000}"
+TP="${TP:-2}"
+GPUS="${GPUS:-0,1}"
+
+# --- GPU visibility ---
+export CUDA_VISIBLE_DEVICES="$GPUS"
+unset ROCR_VISIBLE_DEVICES 2>/dev/null || true
+unset HIP_VISIBLE_DEVICES 2>/dev/null || true
+
+# --- Container-specific workarounds ---
+if [ -f /usr/local/lib/libhip_compat_shim.so ]; then
+    TORCH_LIB="/usr/local/lib/python3.12/dist-packages/torch/lib"
+    export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}/usr/local/lib/libhip_compat_shim.so:${TORCH_LIB}/libtorch_hip.so"
+    export LD_LIBRARY_PATH="${TORCH_LIB}:${LD_LIBRARY_PATH:-}"
+fi
+
+export CU_NUM="${CU_NUM:?CU_NUM not set — run via hyperloom or set manually}"
+export GPU_ARCHS="${GPU_ARCHS:?GPU_ARCHS not set — run via hyperloom or set manually}"
+
+# --- AITER ROCm kernel toggles ---
+export VLLM_ROCM_USE_AITER=1
+export VLLM_ROCM_USE_AITER_MOE=1
+export VLLM_ROCM_USE_AITER_RMSNORM=1
+export VLLM_ROCM_USE_AITER_LINEAR=1
+export VLLM_FUSED_MOE_CHUNK_SIZE=32768
+
+# --- Serve ---
+exec vllm serve "$MODEL" \
+    --port "$PORT" \
+    --tensor-parallel-size "$TP" \
+    --enable-expert-parallel \
+    --gpu-memory-utilization 0.95 \
+    --max-model-len 4096 \
+    --max-num-seqs 128 \
+    --max-num-batched-tokens 8192 \
+    --enable-chunked-prefill \
+    --kv-cache-dtype fp8 \
+    --trust-remote-code \
+    --compilation-config '{"use_inductor_graph_partition":true,"fast_moe_cold_start":true}' \
+    "$@"

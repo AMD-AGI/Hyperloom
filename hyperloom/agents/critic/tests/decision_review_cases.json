@@ -1,0 +1,84 @@
+[
+  {
+    "id": "decision-001-adopt-with-session-evidence",
+    "description": "Decision to adopt patch X is supported by full context, fresh benchmark and an existing KB technique. Critic should adopt with a clear session evidence trail.",
+    "input_packet": {
+      "request_type": "critic_decision_request",
+      "session_id": "sess-decision-001",
+      "decision_id": "dec-001",
+      "messages": [
+        {"role": "coordinator", "content": "Plan: adopt patch X (kernel rewrite for fused attention)."},
+        {"role": "kernel-agent", "content": "Patch X requires cache clear; reproducer benchmark shows +4.2% tput, accuracy gate ok."}
+      ],
+      "context": {
+        "model": "deepseek-r1-0528-fp8",
+        "framework": "sglang",
+        "model_family": "deepseek",
+        "workload": "decode",
+        "precision": "fp8",
+        "scale": "8xMI300",
+        "objective": "throughput"
+      },
+      "decision": {
+        "summary": "Adopt patch X (fused attention rewrite)",
+        "owner": "kernel-agent",
+        "topic": "fused-attention-rewrite-deepseek-r1"
+      }
+    },
+    "expected": {
+      "kind": "critic_decision_review",
+      "verdict": "adopt",
+      "basis": "session"
+    }
+  },
+  {
+    "id": "decision-002-needs-info-when-context-missing",
+    "description": "Coordinator forwards a decision request without the model + framework keys. Critic must respond with needs_info and list missing context, never invent it.",
+    "input_packet": {
+      "request_type": "critic_decision_request",
+      "session_id": "sess-decision-002",
+      "decision_id": "dec-002",
+      "messages": [
+        {"role": "coordinator", "content": "Adopt patch Y?"}
+      ],
+      "context": {},
+      "decision": {
+        "summary": "Adopt patch Y"
+      }
+    },
+    "expected": {
+      "kind": "critic_decision_review",
+      "verdict": "needs_info",
+      "basis": "insufficient_context"
+    }
+  },
+  {
+    "id": "decision-003-revise-when-kb-flags-side-effect",
+    "description": "Decision is plausible but a KB pitfall warns about a missing cache clear; Critic should revise rather than adopt or reject.",
+    "input_packet": {
+      "request_type": "critic_decision_request",
+      "session_id": "sess-decision-003",
+      "decision_id": "dec-003",
+      "messages": [
+        {"role": "coordinator", "content": "Adopt patch Z (dispatch path change)."},
+        {"role": "kernel-agent", "content": "Benchmark not yet rerun after the change."}
+      ],
+      "context": {
+        "model": "qwen3-14b",
+        "framework": "sglang",
+        "model_family": "qwen",
+        "workload": "decode",
+        "precision": "fp8"
+      },
+      "decision": {
+        "summary": "Adopt patch Z (dispatch path optimization)",
+        "topic": "dispatch-path-change-qwen3-14b"
+      }
+    },
+    "expected": {
+      "kind": "critic_decision_review",
+      "verdict": "revise",
+      "basis": "mixed"
+    }
+  }
+]

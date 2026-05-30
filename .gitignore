@@ -68,4 +68,5 @@ inference_optimizer/remain_robustness_todo.md
 
 # claude files
 *.claude
-CLAUDE.md
+CLAUDE.mdsessions/
+STOP

@@ -1,216 +1,69 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hyperloom-inference_optimizer"
-version = "0.6.0"
-description = "Inference Optimizer v0.6 — single-mode 4-agent (Orchestration/Kernel/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms."
+name = "hyperloom"
+version = "1.0.0"
+description = "Hyperloom — modular LLM inference optimization framework for AMD GPUs"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = {text = "Apache-2.0"}
 dependencies = [
-    "claude-agent-sdk>=0.1.65",
-    "openai>=1.50",
-    "httpx>=0.27",
-    "PyYAML>=6.0",
-    # Optional critic-agent web tools (web_search / web_fetch). Kept in the
-    # base dependency set because the critic backend imports them at module
-    # load time even when CRITIC_WEB_TOOLS_ENABLED=false.
-    "markdownify>=0.11",
-    "cachetools>=5.3",
+    "click>=8.1",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "requests>=2.28",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+]
+cluster = [
+    "ray>=2.0",
+]
+agents = [
+    "httpx>=0.24",
+    "cachetools>=5.0",
+    "markdownify>=0.11",
+]
+full = [
+    "claude-agent-sdk>=0.1.65",
+    "ray>=2.0",
+    "httpx>=0.24",
+    "cachetools>=5.0",
+    "markdownify>=0.11",
+]
+
+[project.scripts]
+hyperloom = "hyperloom.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/AMD-AGI/Hyperloom"
 Source = "https://github.com/AMD-AGI/Hyperloom"
 Issues = "https://github.com/AMD-AGI/Hyperloom/issues"
-Changelog = "https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md"
-Security = "https://github.com/AMD-AGI/Hyperloom/security/policy"
 
-[project.optional-dependencies]
-test = [
-    "pytest>=8.0",
-    "pytest-asyncio>=1.0",
-    "respx>=0.21",
-]
-
-[project.scripts]
-inference_optimizer = "inference_optimizer.cli:main"
-
-# Packages are provided by setup.py so editable installs use the same package
-# discovery as local source runs.
+[tool.setuptools.packages.find]
+include = ["hyperloom", "hyperloom.*"]
 
 [tool.setuptools.package-data]
-inference_optimizer = [
-    "SKILL.md",
-    "README.md",
-    "actions/*.md",
-    "actions/_meta/*.yaml",
-    "agents/*/agent_card.yaml",
-    "agents/*/system_prompt.md",
+hyperloom = [
+    "skills/*.md",
+    "kb/**/*.md",
     "agents/*/SKILL.md",
-    "agents/*/scripts/*",
-    "kernel_opt/*.md",
-    "orchestrator/system_prompts/*.md",
-    "scripts/*",
+    "agents/*/AGENTS.md",
+    "agents/*/actions/*.md",
+    "agents/*/actions/**/*.yaml",
 ]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["inference_optimizer/tests", "robustness-agent/tests", "critic-agent/runtime/tests"]
-pythonpath = [".", "robustness-agent/src", "critic-agent"]
-markers = [
-    "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
-    "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
-]
+testpaths = ["hyperloom/tests", "hyperloom/agents"]
 
-# Coverage configuration: limit coverage measurement to first-party
-# source so test files / examples / __init__.py do not dilute the
-# headline number. Run with ``pytest --cov`` to use these defaults.
-#
-# omit patterns exclude:
-#   * tests / examples / __init__.py / __main__.py — non-source
-#   * CLI driver scripts whose body is subprocess plumbing (hard to
-#     unit-test without re-implementing the subprocess; covered by
-#     end-to-end flows instead)
-#   * subprocess wrappers (`run_with_session_kill`, GEAK/OOB submit,
-#     Ray dashboard polling) — same reasoning
-#   * legacy / deprecated runtime entrypoints superseded by the role
-#     reactor (`robustness_agent/agent.py`, `main.py`, `rca.py`)
-#   * standalone kernel-agent tools (kernel_optimization, tracelens_*,
-#     apply_kernel_patch, geak_prompt_patcher) — these are CLI tools
-#     consumed by the runtime, not import-level libraries
-[tool.coverage.run]
-branch = false
-source = [
-    "inference_optimizer",
-    "robustness_agent",
-    "kernel-agent/tools",
-]
-omit = [
-    "*/tests/*",
-    "*/examples/*",
-    "*/__init__.py",
-    "*/__main__.py",
-    "setup.py",
-    # CLI driver scripts (subprocess plumbing dominated).
-    "inference_optimizer/cli.py",
-    "inference_optimizer/multi_node/cli.py",
-    "inference_optimizer/multi_node/scripts/*",
-    "inference_optimizer/multi_node/_internal/*",
-    # Subprocess wrappers + multi-node server lifecycle.
-    "inference_optimizer/orchestrator/action_executors/_subprocess_kill.py",
-    "inference_optimizer/orchestrator/action_executors/_multi_node_server_lifecycle.py",
-    "inference_optimizer/orchestrator/action_executors/_multi_node_env.py",
-    # External backend submission shells.
-    "inference_optimizer/orchestrator/backends/oob_submit.py",
-    "inference_optimizer/orchestrator/backends/geak_submit.py",
-    "inference_optimizer/orchestrator/backends/ray_runtime.py",
-    # Breakdown LLM HTTP client.
-    "inference_optimizer/breakdown/reporters/llm_client.py",
-    # Legacy robustness-agent runtime (replaced by role reactor / CLI).
-    "robustness-agent/src/robustness_agent/agent.py",
-    "robustness-agent/src/robustness_agent/main.py",
-    "robustness-agent/src/robustness_agent/rca.py",
-    # Stand-alone kernel-agent CLI tools.
-    "kernel-agent/tools/kernel_optimization.py",
-    "kernel-agent/tools/tracelens_analysis.py",
-    "kernel-agent/tools/tracelens_skill_runner.py",
-    "kernel-agent/tools/parallel_e2e_runner.py",
-    "kernel-agent/tools/apply_kernel_patch.py",
-    "kernel-agent/tools/geak_prompt_patcher.py",
-    # Backends within kernel-agent tools (subprocess submit).
-    "kernel-agent/tools/backends/*",
-    # Stand-alone in-tree CLI test scripts (live next to the tool they
-    # exercise; treated as test files for coverage purposes).
-    "kernel-agent/tools/test_*.py",
-    "kernel-agent/tools/_collective_names.py",
-    # PMC roofline integration module — pure-Python helpers are covered
-    # by ``test_roofline_integration_units``; the rest of the file is a
-    # rocprofv3 + sglang subprocess driver that is exercised by GPU-bound
-    # integration tests on real hardware.
-    "inference_optimizer/orchestrator/roofline_integration.py",
-    # Local-host metrics probes — wrap ``rocm-smi`` / ``nvidia-smi`` /
-    # ``ps`` / ``df`` / ``ray status``. Each shell-out has a unit test
-    # through the provider/factory layers; the local_probe glue itself
-    # is integration-only.
-    "robustness-agent/src/robustness_agent/sources/local_probe.py",
-    # InferenceX shell-script patcher — fcntl-based file locking and
-    # benchmark_lib.sh rewriting that already has dedicated integration
-    # coverage; the per-call IO error branches are not unit-testable
-    # without monkeypatching open()/fcntl wholesale.
-    "inference_optimizer/orchestrator/action_executors/_inferencex_patcher.py",
-    # TraceLens server patcher — large subprocess pipeline (`git apply`
-    # / `patch --fuzz=2` fallback) covered by integration tests.
-    "inference_optimizer/orchestrator/action_executors/_server_patcher.py",
-    # breakdown/collectors.py is a 6k-line data-collection module
-    # exercised end-to-end by the breakdown reporter tests. Direct
-    # unit-testing every leaf path doubles the test surface for
-    # marginal value.
-    "inference_optimizer/breakdown/collectors.py",
-    # Verification scripts — operator scripts, not library code.
-    "inference_optimizer/scripts/*",
-    # Subprocess transport for the robustness-agent runtime CLI; the
-    # in-process role contract is covered by the role/runtime/cli tests
-    # plus the e2e harness in inference_optimizer/tests/test_p2_robustness_agent_e2e.
-    "inference_optimizer/orchestrator/backends/robustness_agent.py",
-    # Legacy conductor SQLite bridge superseded by the M1 reactor / CLI
-    # transport. Kept for backwards compat; not unit-tested.
-    "robustness-agent/src/robustness_agent/conductor.py",
-    # framework_pr_discover is dominated by `fa` + `git` subprocess
-    # plumbing; the testable helpers have direct unit tests, the rest
-    # is integration coverage only.
-    "inference_optimizer/orchestrator/framework_pr_discover.py",
-    # Critic agent backend talks to the critic-agent runtime via a real
-    # subprocess transport; exercised end-to-end by the critic_agent_e2e
-    # marker tests.
-    "inference_optimizer/orchestrator/backends/critic_agent.py",
-    # Profile / baseline executors are subprocess-heavy benchmark drivers
-    # covered by the dedicated profile/baseline parametric test suites.
-    "inference_optimizer/orchestrator/action_executors/profile.py",
-    "inference_optimizer/orchestrator/action_executors/baseline.py",
-    # Legacy robustness-agent monitors superseded by the M1 reactor;
-    # provider-side tests exercise the GPU/disk/server probes today.
-    "robustness-agent/src/robustness_agent/monitors/server_health.py",
-    "robustness-agent/src/robustness_agent/monitors/log_tailer.py",
-    "robustness-agent/src/robustness_agent/providers/hybrid.py",
-    "robustness-agent/src/robustness_agent/providers/robust.py",
-    "robustness-agent/src/robustness_agent/providers/local.py",
-]
-
-[tool.coverage.report]
-exclude_also = [
-    "raise NotImplementedError",
-    "if __name__ == .__main__.:",
-    "if TYPE_CHECKING:",
-    "@overload",
-]
-skip_empty = true
-precision = 2
-
-# Ruff configuration. Pins the rule set that the BRAIN audit ran with
-# (default ``E`` + ``F``, plus ``W`` for explicitness) so future
-# ``ruff check`` invocations are stable, and codifies the per-file
-# ignores that match Hyperloom's structure. See
-# ``Hyperloom_Ruff_Remediation.md`` in the 2026-05-27 audit run for the
-# rationale behind each ignore.
 [tool.ruff]
 target-version = "py310"
 line-length = 100
-extend-exclude = ["slides", "_audit_artifacts"]
 
 [tool.ruff.lint]
-# Default Ruff selection (what the audit ran with) -- pin it explicitly.
 select = ["E", "F", "W"]
-
-# Future-proofing -- uncomment once the current findings are at zero.
-# extend-select = ["B", "I", "UP", "SIM", "RUF"]
-
-[tool.ruff.lint.per-file-ignores]
-# matplotlib backend must be set before pyplot import
-"slides/*.py" = ["E402"]
-# Tests routinely re-import inside function bodies and use single-char loop vars
-"**/tests/**/*.py" = ["F811", "E741"]
-# CLI dispatchers use string forward-refs to keep startup cheap
-"inference_optimizer/cli.py" = ["F821"]  # remove after fixing the 5 real ones first
