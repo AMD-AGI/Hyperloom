@@ -256,60 +256,82 @@ def test_validator_warns_when_capture_file_has_no_cpu_op(tmp_path, caplog):
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("no cpu_op events" in m for m in msgs), msgs
+    # Wording softened: zero literal ``cpu_op`` events on ROCm/SGLang is
+    # often just an event-naming difference, not a capture regression.
+    assert any("no literal 'cpu_op' events" in m for m in msgs), msgs
 
 
 # ---------------------------------------------------------------------------
 # Check [3] (Deval) main trace has user_annotation + execute_*
 # ---------------------------------------------------------------------------
-def test_validator_warns_when_main_trace_lacks_user_annotation(
+def test_validator_no_warning_when_execute_star_present_without_user_annotation(
     tmp_path, caplog,
 ):
-    """Main trace with no ``user_annotation`` events → InferenceX
-    per-step annotations didn't fire. Separate failure mode from
-    [5] kernel_shape_profiler absence — a partially-patched run can
-    have one without the other."""
+    """Regression guard for the profiler-version false positive: some
+    torch / SGLang builds (e.g. sglang 0.5.11 on ROCm) emit the
+    ``execute_*`` per-step annotation labels WITHOUT wrapping them in a
+    literal ``"name": "user_annotation"`` event. That trace is healthy —
+    the splitter and roofline analysis key on ``execute_*`` — so Check
+    [3] MUST NOT warn just because the ``user_annotation`` wrapper is
+    absent."""
     trace_dir = _build_healthy_layout(tmp_path)
     main = next(trace_dir.glob("*.trace.json.gz"))
     main.unlink()
-    _write_minimal_sglang_trace(
-        main,
-        with_kernel_shape_profiler=True,
-        with_user_annotation=False,  # the smoking-gun for check [3]
-    )
+    # execute_* label present, but emitted under a non-user_annotation
+    # event name (mimics the ROCm/SGLang 0.5.11 profiler shape).
+    payload = {
+        "schemaVersion": 1,
+        "traceEvents": [
+            {"name": "cpu_op", "ph": "X", "ts": 0, "dur": 1},
+            {
+                "name": "kernel",
+                "ph": "X",
+                "args": {
+                    "label": "execute_16384_context_16(sq16384sk16384)"
+                },
+            },
+            {"name": "python_function", "ph": "i",
+             "args": {"frame": "kernel_shape_profiler"}},
+        ],
+    }
+    with gzip.open(main, "wt", encoding="utf-8") as fh:
+        json.dump(payload, fh)
 
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("no user_annotation events" in m for m in msgs), msgs
-    assert any("PROFILE_EXTRA_BODY" in m for m in msgs), (
-        "should point operators at the #210 fix path"
+    assert not any("[3]" in m for m in msgs), (
+        "execute_* present → Check [3] must not warn even without the "
+        f"user_annotation wrapper; got: {msgs}"
     )
 
 
-def test_validator_warns_when_main_trace_lacks_execute_star_annotations(
+def test_validator_warns_when_main_trace_lacks_all_annotations(
     tmp_path, caplog,
 ):
-    """user_annotation events present but no ``execute_*`` labels →
-    the per-step instrumentation labels are missing; InferenceX is
-    annotating something else. Hints at version mismatch between
-    Magpie's bundled InferenceX and the patcher's expectations."""
+    """Genuine absence: neither ``execute_*`` labels NOR
+    ``user_annotation`` events anywhere in the trace → InferenceX
+    per-step annotations really didn't fire. This is the only case
+    Check [3] should warn on."""
     trace_dir = _build_healthy_layout(tmp_path)
     main = next(trace_dir.glob("*.trace.json.gz"))
     main.unlink()
     _write_minimal_sglang_trace(
         main,
         with_kernel_shape_profiler=True,
-        with_user_annotation=True,
-        with_execute_star=False,  # smoking-gun: annotations without execute_*
+        with_user_annotation=False,   # no user_annotation wrapper
+        with_execute_star=False,      # and no execute_* labels at all
     )
 
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any(
-        "no execute_* annotations" in m and "Magpie" in m for m in msgs
+        "[3]" in m and "per-step annotations didn't fire" in m for m in msgs
     ), msgs
+    assert any("PROFILE_EXTRA_BODY" in m for m in msgs), (
+        "should point operators at the #210 fix path"
+    )
 
 
 # ---------------------------------------------------------------------------
