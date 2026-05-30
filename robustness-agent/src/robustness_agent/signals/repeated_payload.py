@@ -20,7 +20,7 @@ Hash dimensions per action family:
 
 * ``validate_stack`` — ``optimization_stack`` content + ``config_path``
 * ``backends`` / ``params`` — sorted ``grid`` + ``extra_envs``
-* ``integrate`` — ``kernel_id`` + ``patch_path`` + ``extra_sglang_args``
+* ``integrate`` — ``kernel_id`` + ``patch_path`` + ``extra_server_args``
 * ``baseline`` — falls back to ``_BASELINE_FINGERPRINT_KEYS`` so we
   stay aligned with the upstream policy denial fingerprint.
 
@@ -33,9 +33,14 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
+from .._payload_aliases import (
+    CANONICAL_KEY as _EXTRA_SERVER_ARGS_CANONICAL,
+    LEGACY_KEY as _EXTRA_SERVER_ARGS_LEGACY,
+    read_extra_server_args as _read_extra_server_args,
+)
 from ..role.prompt_inputs import InboxItem, ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
@@ -70,13 +75,13 @@ _FAMILY_PROJECTIONS: dict[str, tuple[str, ...]] = {
     "integrate": (
         "params.kernel_id",
         "params.patch_path",
-        "params.extra_sglang_args",
+        "params.extra_server_args",
         "params.extra_envs",
     ),
     "baseline": (
         "params.benchmark_script",
         "params.result_dir",
-        "params.extra_sglang_args",
+        "params.extra_server_args",
         "params.extra_envs",
         "params.model_path",
         "params.gpu_type",
@@ -261,6 +266,13 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
     payload = event.get("payload") or {}
     if not isinstance(payload, dict):
         return None
+    # Legacy ``params.extra_sglang_args`` envelopes would otherwise walk
+    # to ``None`` for ``params.extra_server_args`` and the
+    # same-fingerprint loop guard would silently miss a legacy-keyed
+    # retry burst. Normalise the canonical key in a
+    # payload-local copy before projection so both legacy and
+    # canonical envelopes produce identical fingerprints.
+    payload = _normalise_extra_server_args_key(payload)
     projection = _FAMILY_PROJECTIONS.get(family, _GENERIC_PROJECTION)
     subset: dict[str, Any] = {}
     for path in projection:
@@ -268,6 +280,31 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
         subset[path] = _strip_blacklisted(value)
     canonical = json.dumps(subset, sort_keys=True, default=str)
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+
+
+def _normalise_extra_server_args_key(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of ``payload`` whose ``params`` dict carries
+    ``extra_server_args`` set from the canonical-or-legacy compat
+    helper. Originals are NOT mutated — the caller's view is preserved.
+
+    No-op when the params dict has no extra-args keys at all OR when
+    the canonical key is already present. The single
+    ``DeprecationWarning`` (stacklevel=3 from the shim) is the audit
+    channel for legacy envelopes — leaving it on so the live operator
+    sees one warning per legacy envelope class.
+    """
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return payload
+    if _EXTRA_SERVER_ARGS_CANONICAL in params:
+        return payload
+    if _EXTRA_SERVER_ARGS_LEGACY not in params:
+        return payload
+    new_params = dict(params)
+    new_params[_EXTRA_SERVER_ARGS_CANONICAL] = _read_extra_server_args(params)
+    new_payload = dict(payload)
+    new_payload["params"] = new_params
+    return new_payload
 
 
 def _walk_path(payload: dict[str, Any], path: str) -> Any:

@@ -438,7 +438,7 @@ class ActionLadder:
                     reason="wekafs_degraded",
                     next_action_hint=(
                         f"WekaFS mount degraded ({evidence.get('env_name')}); "
-                        f"select_kernels / OOB CLI / benchmark scripts "
+                        f"trace_analyze / OOB CLI / benchmark scripts "
                         f"will hang or time out until the mount recovers"
                     ),
                     severity="high",

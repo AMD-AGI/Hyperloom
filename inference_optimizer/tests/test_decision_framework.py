@@ -18,7 +18,6 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
@@ -70,7 +69,7 @@ async def test_run_optimization_response_records_to_shared_state(
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
             "reusable_native_kernel_ids": ["k006"],
         }
@@ -116,10 +115,10 @@ async def test_run_optimization_response_records_to_shared_state(
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_does_not_record_kernel_opt(
+async def test_trace_analyze_does_not_record_kernel_opt(
     session_dir, monkeypatch,
 ):
-    """Only run_optimization (not select_kernels) writes to last_kernel_opt."""
+    """Only run_optimization (not trace_analyze) writes to last_kernel_opt."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator import kernel_request_handlers
@@ -127,11 +126,11 @@ async def test_select_kernels_does_not_record_kernel_opt(
             return {"status": "ok", "hot_kernels": [{"kernel_id": "k001"}]}
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "select_kernels", fake,
+            "trace_analyze", fake,
         )
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "select_kernels",
+            payload={"target_agent": "kernel", "kind": "trace_analyze",
                      "params": {"trace_input": "/tmp/t.json"}},
         )
         await c._handle_intent("orchestration", intent)
@@ -278,6 +277,8 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     # gate via the documented env knob to keep the test focused on
     # batch dispatch / backend ladder semantics.
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0")
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
     candidates = tmp_path / "kernel_candidates.json"
     candidates.write_text(
         """
@@ -341,6 +342,9 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 
     assert result["batch_mode"] is True
     assert result["batch_kernel_ids"] == ["k003", "k006"]
+    # GEAK is FIRST in the auto-derived ladder (SKILL.md "high-priority
+    # handoff" contract). Cursor is dropped when CURSOR_API_KEY is unset
+    # (this test runs without one), so the visible ladder is geak/claude/codex.
     assert result["backend_order"] == ["geak", "claude", "codex"]
     assert result["kernel_id"] == "k006"
     assert result["proposal"]["decision"] == "KEEP"
@@ -349,8 +353,61 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     by_kernel: dict[str, list[str]] = {}
     for kernel_id, backend in calls:
         by_kernel.setdefault(kernel_id, []).append(backend)
+    # k003 never KEEPs ⇒ tries every backend in order: geak → claude → codex
     assert by_kernel["k003"] == ["geak", "claude", "codex"]
+    # k006 KEEPs on the second backend (claude) ⇒ short-circuits after that;
+    # the fallback loop never reaches codex.
     assert by_kernel["k006"] == ["geak", "claude"]
+
+
+# ===========================================================================
+# D2 — _DEFAULT_KERNEL_BACKEND_ORDER contract:
+#      GEAK FIRST per SKILL.md "high-priority handoff"
+#      Regression for "GEAK is requested but Hyperloom dispatches to Claude"
+# ===========================================================================
+def test_default_kernel_backend_order_puts_geak_first():
+    """Lock the SKILL.md contract: GEAK is the first auto-derived backend.
+
+    Prior to this fix the constant was
+    ``("claude", "codex", "cursor", "geak")`` which meant every kernel was
+    sent to Claude first; GEAK only fired as a 4th-attempt fallback (or
+    never, if Claude returned KEEP). That silently violated the
+    SKILL.md §"choose_backends" / §"Default ladder" guarantee and made
+    end-to-end optimization runs ignore GEAK in practice.
+    """
+    from inference_optimizer.orchestrator import kernel_request_handlers as krh
+
+    assert krh._DEFAULT_KERNEL_BACKEND_ORDER[0] == "geak", (
+        "GEAK must lead the auto-derived ladder. See SKILL.md "
+        "§'choose_backends': 'GEAK is FIRST (high-priority handoff)'."
+    )
+    # Whole tuple lock so reorderings of the tail are caught explicitly.
+    assert krh._DEFAULT_KERNEL_BACKEND_ORDER == (
+        "geak", "claude", "codex", "cursor",
+    )
+
+
+def test_backend_order_drops_cursor_when_key_absent(monkeypatch):
+    """When ``CURSOR_API_KEY`` is unset, the auto-derived ladder drops
+    cursor — keeps the user's intent honoured (explicit ``cursor`` still
+    runs) while avoiding wasted 401 attempts."""
+    from inference_optimizer.orchestrator import kernel_request_handlers as krh
+
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    assert krh._backend_order({}) == ["geak", "claude", "codex"]
+
+
+def test_backend_order_explicit_payload_overrides_default(monkeypatch):
+    """Operator-specified ``backend_order`` (or ``KERNEL_OPT_BACKEND_ORDER``)
+    bypasses the cursor-drop heuristic — explicit intent always wins."""
+    from inference_optimizer.orchestrator import kernel_request_handlers as krh
+
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    assert krh._backend_order({"backend_order": "claude,cursor,geak"}) == [
+        "claude", "cursor", "geak",
+    ]
 
 
 # ===========================================================================

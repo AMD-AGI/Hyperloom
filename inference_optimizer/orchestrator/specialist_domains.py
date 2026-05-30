@@ -37,7 +37,7 @@ Field reference:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -48,15 +48,13 @@ class SpecialistDomain:
     pr_repos: tuple[str, ...] = ()
     available_in: str = "M6"
     description: str = ""
-    # F2-2 (Roofline-v2 / framework-agent): optional per-domain
-    # sub_kind catalogue. When empty (default) the dispatch path
-    # accepts only ``params.sub_kind`` ∈ {None, ""}; non-empty values
-    # are denied with a structured PolicyGate error. ``serving_specialist``
-    # currently lists ``framework_pr_scout`` so the orchestration LLM
-    # can spawn a PR-discovery sub-task without inventing a new
-    # top-level action (Iron-rule §4: specialist-first). Adding more
-    # sub_kinds is a one-line tuple append plus a prompt-template
-    # entry in specialist_prompt_builder.
+    # Optional per-domain sub_kind catalogue. When empty (default) the
+    # dispatch path accepts only ``params.sub_kind`` ∈ {None, ""}; non-
+    # empty values are denied with a structured PolicyGate error.
+    # Adding a new sub_kind is a one-line tuple append plus a prompt-
+    # template entry in specialist_prompt_builder. (The former
+    # ``framework_pr_scout`` sub_kind was removed when framework-agent
+    # was promoted to the FRAMEWORK_PR phase.)
     sub_kinds: tuple[str, ...] = ()
 
 
@@ -74,12 +72,11 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "Reads sglang/vllm source, focuses on scheduler, cuda graph, "
             "kv cache, batching, chunked prefill, max-num-seqs."
         ),
-        # ``framework_pr_scout`` lets the specialist invoke
-        # ``fa candidates`` + ``git fetch refs/pull/<N>/head`` to
-        # discover an upstream sglang/vllm PR addressing a known gap.
-        # Gated end-to-end on ``SharedState.framework_agent_enabled``;
-        # PolicyGate denies the dispatch when the toggle is off.
-        sub_kinds=("framework_pr_scout",),
+        # Upstream PR discovery for sglang/vllm gaps is no longer a
+        # per-domain sub_kind — it runs as the standalone FRAMEWORK_PR
+        # phase (PRELUDE → FRAMEWORK_PR → EXPLORE) driven by the
+        # Coordinator, gated by ``SharedState.framework_phase_enabled``
+        # (``--no-framework`` to skip).
     ),
     SpecialistDomain(
         key="kernel_switch_specialist",
@@ -134,8 +131,11 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
                   "triton-lang/triton", "ROCm/rccl"),
         available_in="M6",
         description=(
-            "Surveys PRs across all known repos; provides PR refs to "
-            "other specialists. Dispatch sparingly (one every K rounds)."
+            "EXPLORE-phase per-gap PR top-up. Surveys PRs across known "
+            "repos and feeds refs to other specialists. The bulk pre-scan "
+            "runs in the dedicated FRAMEWORK_PR phase; this domain is for "
+            "narrow follow-ups discovered mid-EXPLORE. Dispatch sparingly "
+            "(one every K rounds)."
         ),
     ),
     SpecialistDomain(
@@ -178,14 +178,6 @@ def get_domain(key: str) -> SpecialistDomain | None:
         if d.key == key:
             return d
     return None
-
-
-# F2-2: sub_kinds that require ``SharedState.framework_agent_enabled=True``.
-# Centralised here (not per-rule) so PolicyGate / SpecialistRunner can
-# share the membership test without duplicating string literals.
-FRAMEWORK_AGENT_GATED_SUB_KINDS: frozenset[str] = frozenset({
-    "framework_pr_scout",
-})
 
 
 # Maximum number of LLM turns a specialist may run. KB_design §3.5 §9
