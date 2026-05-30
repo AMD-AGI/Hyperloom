@@ -112,8 +112,8 @@ def test_build_full_prompt_contains_kernel_opt_pipeline(registry):
     # Section 6 payload-template markers (one per kernel-owned action).
     # These are the unique request shapes the builder emits in section 6;
     # the rules fragment uses a different surface form ("kind MUST be
-    # EXACTLY one of select_kernels / ...") so it won't false-positive.
-    assert "kind: 'select_kernels'" in text
+    # EXACTLY one of trace_analyze / ...") so it won't false-positive.
+    assert "kind: 'trace_analyze'" in text
     assert "kind: 'run_optimization'" in text
     assert "kind: 'integrate'" in text
     # Action catalogue includes the kernel-owned actions
@@ -143,7 +143,7 @@ def test_build_no_kernel_prompt_drops_kernel_pipeline_and_actions(registry):
     # Kernel-opt request-reference block must be absent (builder skipped
     # section 6 because no kernel-owned actions are enabled).
     assert "## 6. KERNEL-OPT REQUEST REFERENCE" not in text
-    assert "kind: 'select_kernels'" not in text
+    assert "kind: 'trace_analyze'" not in text
     assert "kind: 'run_optimization'" not in text
     # Kernel-owned action names must NOT appear as catalogue bullets
     # (the bare word may still appear inside the rules fragment, e.g.
@@ -218,4 +218,3 @@ def test_build_includes_explore_action_in_both_modes(registry):
         assert "### validate" not in text, (
             f"unexpected validate phase header (no_kernel={no_kernel})"
         )
-
