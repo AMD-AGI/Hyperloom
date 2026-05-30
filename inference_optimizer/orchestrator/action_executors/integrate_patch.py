@@ -715,7 +715,7 @@ class IntegratePatchExecutor:
         # as the variant's extra_envs.
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}",
-            extra_sglang_args=str(params.get("base_extra_args") or "").strip(),
+            extra_server_args=str(params.get("base_extra_args") or "").strip(),
             extra_envs=dict(config_changes_applied),
             note=f"integrate_patch:{specialist_task_id}",
         )

@@ -573,7 +573,7 @@ class CriticAgentBackend:
 
         env = self._build_runtime_env()
 
-        # Phase 1 — prepare-review (off-thread because subprocess.run blocks).
+        # Stage 1 — prepare-review (off-thread because subprocess.run blocks).
         await asyncio.to_thread(
             self._runtime_caller,
             RuntimeCall(
@@ -608,7 +608,7 @@ class CriticAgentBackend:
                 judge_bundle["review_constraints"] = rc
             rc["action_verdict_policy"] = dict(self.action_verdict_policy)
 
-        # Phase 2 — Codex reasoning. Note we still call the LLM even when
+        # Stage 2 — Codex reasoning. Note we still call the LLM even when
         # `judge_bundle.proposals` is empty (the runtime returns an empty
         # list and commit-review will emit a heartbeat) — but we
         # short-circuit to skip a wasted LLM call.
@@ -628,7 +628,7 @@ class CriticAgentBackend:
             encoding="utf-8",
         )
 
-        # Phase 3 — commit-review.
+        # Stage 3 — commit-review.
         await asyncio.to_thread(
             self._runtime_caller,
             RuntimeCall(
