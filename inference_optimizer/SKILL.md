@@ -23,7 +23,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `profile`, `backends`, `params`, `sweep`, Kernel requests, `report`).
-- Kernel: responder path for `select_kernels`, `run_optimization`, `integrate`.
+- Kernel: responder path for `trace_analyze`, `run_optimization`, `integrate`.
 - Critic: proposal review (default: `--critic-agent` — drives the
   `critic-agent/` skill runtime with KB priors / session memory /
   `review_constraints`-gated verdicts). `--critic-mock` for offline /
@@ -168,7 +168,7 @@ source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
 in the **same shell** that will spawn `inference_optimizer optimize`.
 Skipping install strikes silently *after* `baseline` succeeds: missing
-TraceLens/GEAK/OOB CLI → `select_kernels` / `kernel_opt` fail; no live
+TraceLens/GEAK/OOB CLI → `trace_analyze` / `kernel_opt` fail; no live
 Ray head → `kernel_opt` tasks hang; missing `kernel-agent.env.sh` →
 first claude/codex call returns `401`. `install.sh --check-only` is a
 *diagnostic*, never a substitute.
@@ -341,6 +341,55 @@ Resume: same shape as EXPLORE — completed candidates skip via the
 task registry idempotency key (`framework_pr:<batch_id>:<cand_id>`),
 in-flight ones are dropped + redone.
 
+### IR-8 — `--framework atom` is single-node only
+
+`--framework atom` runs the Magpie atom wrapper
+(`atom_mi*x.sh`) against `atom.entrypoints.openai_server`. The single
+remaining behavioural difference vs `--framework sglang` /
+`--framework vllm` is the multi-node guard. The CLI enforces it at launch time via
+`_apply_atom_auto_tighten` (alias `_assert_atom_single_node`) in
+`cli.py`:
+
+* **Multi-node is rejected.** `--nodes >= 2` + `--framework atom`
+  fails fast with `SystemExit(2)`. atom upstream has no
+  multi-node TP wiring; a 6-min cold start to discover this at
+  runtime is wasted budget. No other flag is auto-flipped.
+
+What runs on atom (parity with sglang/vllm except multi-node):
+
+* **Baseline** — `baseline_atom.yaml` is the shipped default config.
+* **Profile / roofline / TraceLens** — Magpie `atom_mi*x.sh` bridges
+  `PROFILE=1` to atom's `--torch-profiler-dir`. atom writes standard
+  `*.pt.trace.json.gz` chrome traces under
+  `<workspace>/torch_trace/rank_<N>/`; TraceLens consumes them
+  unchanged. `profile_atom.yaml` is the shipped profile config.
+  `--enable-roofline` stays at its default (on) for atom;
+  ProfileExecutor / RooflineExecutor do not short-circuit on
+  `FRAMEWORK=atom`.
+* **EXPLORE** — `_default_grid_for_framework("atom", ...)` makes an
+  atom session with empty `params.grid` (cold start) fall through to a
+  curated seed grid (`atom_level_{2,3}`, `atom_prefix_cache`,
+  `atom_kv_fp8` on FP8 models, `atom_ep` / `atom_dp_attn` /
+  `atom_mtp_{1,3}` gated on model class, `atom_cudagraph_bracket`
+  bracketing the live CONC). Sglang / vllm still rely on LLM-emitted
+  variants and fail with `error_class="empty_grid"` if cold-started
+  without LLM input.
+* **Kernel-agent** — atom source roots (`/app/ATOM/atom/`) are in
+  PolicyGate's allowlist, `_REUSABLE_SOURCE_ROOTS` (orchestrator +
+  kernel-agent), and the server-flag pre-flight probe.
+* **Framework-agent** — atom repo URL
+  `https://github.com/ROCm/ATOM.git` in `framework_agent.repo_map` +
+  IO-side fallback.
+* **Specialist hints (serving / kernels / dist)** — atom-flavoured
+  "what to read first" bullets when `framework=='atom'`.
+* **Sub-agent payload compat** — every external-envelope reader funnels
+  through `read_extra_server_args` (canonical `extra_server_args` +
+  read-only legacy `extra_sglang_args` alias with DeprecationWarning).
+
+`_apply_atom_auto_tighten` does not flip `--no-kernel` /
+`--no-framework` / `--no-enable-roofline`; kernel-agent reads atom
+source the same way it reads sglang/vllm source.
+
 ## Retired modules and rules (do not re-introduce)
 
 These orchestrator modules were intentionally removed; the
@@ -457,7 +506,7 @@ already handle the read-only-source case.
 ```bash
 inference_optimizer optimize \
   --model "$MODEL_PATH" \
-  --framework vllm \           # or sglang (default)
+  --framework vllm \           # sglang (default) / vllm / atom (atom: single-node only, IR-8)
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; biases per-action curated priors
   --max-hours 2 \
@@ -471,7 +520,7 @@ supply session metadata directly via CLI flags / env vars:
 | Surface | CLI flag | Env var | Notes |
 |---|---|---|---|
 | Model path | `--model` | — | required |
-| Framework | `--framework` | `FRAMEWORK` | `vllm` / `sglang` |
+| Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` — atom triggers the IR-8 multi-node guard only (kernel-agent / framework-agent / profile / roofline all run on atom) |
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | `MODEL_CLASS` | drives `orchestrator/scoring.MODEL_CLASS_ACTION_PRIORS`; defaults to `moe_mla` when unset |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
@@ -496,7 +545,7 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 
 Quirks: with `set -u`, assign dependent vars on separate lines (chained
 `export A=... B=$A` can fail with `unbound variable`). The installer
-leaves a live Ray head; `ray status` must succeed because `select_kernels`
+leaves a live Ray head; `ray status` must succeed because `trace_analyze`
 submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 
 `_preflight()` runs every launch as the in-loop counterpart of IR-2.
@@ -707,7 +756,7 @@ Orchestration can route per-task via two `task.params` knobs
   known leak destination already on `$INFERENCE_OPTIMIZER_RESCUE_PATHS`.
 
 Coordinator stamps the canonical `_baseline_params_fingerprint` (a
-projection over `benchmark_script` / `result_dir` / `extra_sglang_args` /
+projection over `benchmark_script` / `result_dir` / `extra_server_args` /
 `extra_envs` / `model_path` / `gpu_type` / `config_path` /
 `disable_run_eval`) on every baseline audit entry (success path in
 `_promote_to_shared_state`, failure path in `_handle_unpromotable_result`).
@@ -789,29 +838,49 @@ on every tick to avoid unbounded growth.
 
 ## Framework Selection
 
-A session is single-framework. Pick `sglang` (default) or `vllm` via
-`--framework` or `$FRAMEWORK`:
+A session is single-framework. Pick `sglang` (default), `vllm`, or
+`atom` via `--framework` or `$FRAMEWORK`:
 
 ```bash
 inference_optimizer optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
 FRAMEWORK=vllm inference_optimizer optimize --model "$MODEL_PATH" --max-hours 2
+inference_optimizer optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
 ```
 
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
-- Which Magpie YAML the executors default to
-  (`baseline_sglang.yaml` / `baseline_vllm.yaml`,
-  `profile_sglang.yaml` / `profile_vllm.yaml`)
+- Which Magpie YAML the executors default to —
+  `baseline_{sglang,vllm,atom}.yaml` and
+  `profile_{sglang,vllm,atom}.yaml`. The per-framework resolver
+  `_default_profile_config()` in `action_executors/profile.py` picks
+  the right file from `$FRAMEWORK`.
 - Which framework-specific seed grid the `explore` action falls
-  back to when no `params.grid` is supplied
+  back to when no `params.grid` is supplied. atom is the only
+  framework with a programmatic seed today
+  (`_default_grid_for_framework("atom", ...)` in
+  `action_executors/explore.py`, populated by
+  `_atom_default_grid()`); sglang and vllm continue to rely on
+  the orchestration LLM emitting `provenance='default_grid'`
+  variants and will fail with `error_class="empty_grid"` on a
+  cold-start with no LLM input.
 - Which extra-args env name `_grid_runner` writes
-  (`EXTRA_VLLM_ARGS` vs `EXTRA_SGLANG_ARGS`)
+  (`EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS`)
 - Which Marathon KB partition orchestration reads for hints
 
-Mixing sglang and vllm in a single session is not supported; the CLI
+Mixing frameworks in a single session is not supported; the CLI
 locks `$FRAMEWORK` for the run. Resume re-reads `$FRAMEWORK` from the
-shell — set it when you resume a vLLM session.
+shell — set it when you resume a non-default session.
+
+**`--framework atom` specifics (IR-8):** single-node only
+(`--nodes>=2` fails fast). kernel-agent, framework-agent, profile /
+roofline / TraceLens all run on atom; the only remaining auto-tighten
+is the multi-node guard. atom ships `--torch-profiler-dir` + HTTP
+`/start_profile` `/stop_profile`, the Magpie atom wrapper bridges
+`PROFILE=1` to them, and TraceLens consumes the resulting
+`*.pt.trace.json.gz` unchanged. EXPLORE cold-start uses
+`_atom_default_grid` as the programmatic seed when no LLM
+variants arrive. See the IR-8 entry above.
 
 ## GPU Runner Type
 
@@ -986,7 +1055,7 @@ python3 - <<'PY'
 import json, os, pathlib
 s = json.loads((pathlib.Path(os.environ["SESSION"]) / "state.json").read_text())
 for k in ("stop_reason", "baseline_tput", "cumulative_gain", "current_best",
-          "last_kernel_opt", "last_select_kernels", "last_sweep"):
+          "last_kernel_opt", "last_trace_analyze", "last_sweep"):
     print(f"{k}: {s.get(k)}")
 print("params_search_last_round:", s.get("params_search", {}).get("last_round"))
 print("backends_search_last_round:", s.get("backends_search", {}).get("last_round"))
@@ -1017,13 +1086,13 @@ The optimizer should:
   / `deep_kernel_analysis` / `operator_tuning` / `vendor_kernel_config`
   dispatches are blocked by PolicyGate
   (`rule='wait_for_auto_roofline'`) until it lands.
-3. Run `select_kernels` once per trace/config and cache the result in
-  `last_select_kernels`.
+3. Run `trace_analyze` once per trace/config and cache the result in
+  `last_trace_analyze`.
 4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
 5. Require compile + correctness + microbench/E2E evidence before KEEP.
 6. Use `explore_search` to test parameters incrementally and remember
   rejected candidates across resume. The ledger keys entries by
-  **content fingerprint** (a sha1 hash of sorted `extra_sglang_args` +
+  **content fingerprint** (a sha1 hash of sorted `extra_server_args` +
   sorted `extra_envs`), so renaming an already-tested variant does not
   bypass dedup — LLM-supplied `params.grid` is filtered through the same
   ledger as the default seed grid.
@@ -1077,6 +1146,31 @@ explicit / not located); grep `optimizer_runs/run_*.log` to verify. Resolved
 cache state also lands in the boot `Preflight diagnostics:` block. If
 COLD_START repeats across retries, JIT was killed mid-`hipcc`; bump
 `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=5400` instead of relaunching.
+
+## Pre-GEAK Unittest Harness (unittest skill)
+
+Before `backend=geak` attempts, the main agent generates a GEAK-compatible
+test harness by following `kernel-agent/skills/unittest/SKILL.md`. The skill
+searches for existing tests, collects shapes/dtypes from TraceLens and
+profiling data, and generates a 4-mode harness (`--correctness` / `--profile`
+/ `--benchmark` / `--full-benchmark`) that matches GEAK's evaluation contract.
+
+The resulting `test_command` is passed via `--test-command` to
+`kernel_optimization.py`, which forwards it to GEAK. If the skill fails to
+produce a valid harness (after up to 3 retries), `--test-command` is omitted
+and GEAK falls back to its own test discovery cascade.
+
+Validation uses `kernel-agent/skills/unittest/validate_harness.py` for both
+static checks (argparse + 4 flags + GEAK output markers) and runtime
+verification (run correctness + benchmark with reduced iterations).
+
+The Coordinator does NOT need to drive this step — the main agent executes
+the unittest skill before calling `kernel_optimization.py`. Observability
+shows up as `test_command` in `optimization_attempts.jsonl[].backend_paths`.
+
+The GEAK outer-timeout is managed by `_ensure_yaml_env_timeout()` in
+`kernel_optimization.py`, which sets a fallback of 3600s so GEAK's
+`LocalEnvironment.timeout` never silently inherits the 30s default.
 
 ## Kernel Apply Safety
 
@@ -1148,7 +1242,7 @@ direct Codex). See `## Critic Backend Selection`.
 ### Run-time signals
 
 - `No accelerator` (Magpie): subprocess `PATH` must lead with `$(dirname "$PYTHON")` (or set `MAGPIE_PYTHON`); use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
-- Repeated `select_kernels` with unchanged trace/config: bug — reuse `last_select_kernels`.
+- Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
 - `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied` events for the same action/rule pair; all top actions may be locked or pruned. Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials` block. To recover: manually edit `state.json` to remove the action from `pruned_families`, clear `policy_denial_streak` / `stop_reason`, and re-propose with fresh `params.grid` content (omit stale `idempotency_key`).

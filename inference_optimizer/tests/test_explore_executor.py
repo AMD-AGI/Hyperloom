@@ -33,7 +33,12 @@ from inference_optimizer.orchestrator.action_executors._canonical_fingerprint im
     canonical_fingerprint,
 )
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
+    apply_compatibility_filter,
     variant_fingerprint,
+)
+from inference_optimizer.orchestrator.action_executors.explore import (
+    _atom_default_grid,
+    _default_grid_for_framework,
 )
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.resource_lock import (
@@ -150,7 +155,7 @@ def test_explore_search_migration_unions_legacy_ledgers():
             "tested": {
                 fp_attn: {
                     "name": "attn_aiter",
-                    "extra_sglang_args": "--attention-backend aiter",
+                    "extra_server_args": "--attention-backend aiter",
                     "extra_envs": {},
                     "status": "succeeded",
                     "tput": 1500.0, "gain_pct": 5.0,
@@ -158,7 +163,7 @@ def test_explore_search_migration_unions_legacy_ledgers():
                 },
                 fp_triton: {
                     "name": "decode_triton",
-                    "extra_sglang_args": "--decode-attention-backend triton",
+                    "extra_server_args": "--decode-attention-backend triton",
                     "extra_envs": {},
                     "status": "succeeded",
                     "tput": 750.0, "gain_pct": -25.0,
@@ -167,14 +172,14 @@ def test_explore_search_migration_unions_legacy_ledgers():
             },
             "accepted": [{
                 "name": "attn_aiter",
-                "extra_sglang_args": "--attention-backend aiter",
+                "extra_server_args": "--attention-backend aiter",
                 "extra_envs": {},
                 "fingerprint": fp_attn,
                 "gain_pct": 5.0,
             }],
             "rejected": [{
                 "name": "decode_triton",
-                "extra_sglang_args": "--decode-attention-backend triton",
+                "extra_server_args": "--decode-attention-backend triton",
                 "extra_envs": {},
                 "fingerprint": fp_triton,
                 "reason": "not_keep", "gain_pct": -25.0,
@@ -186,7 +191,7 @@ def test_explore_search_migration_unions_legacy_ledgers():
             "tested": {
                 fp_max_seqs: {
                     "name": "max_seqs_512",
-                    "extra_sglang_args": "--max-num-seqs 512",
+                    "extra_server_args": "--max-num-seqs 512",
                     "extra_envs": {},
                     "gain_pct": 2.5,
                     "round_id": "params-001",
@@ -194,7 +199,7 @@ def test_explore_search_migration_unions_legacy_ledgers():
             },
             "accepted": [{
                 "name": "max_seqs_512",
-                "extra_sglang_args": "--max-num-seqs 512",
+                "extra_server_args": "--max-num-seqs 512",
                 "extra_envs": {},
                 "fingerprint": fp_max_seqs,
                 "gain_pct": 2.5,
@@ -205,7 +210,7 @@ def test_explore_search_migration_unions_legacy_ledgers():
             "round_id": "backends-001",
             "variant_name": "attn_aiter",
             "gain_pct": 5.0,
-            "extra_sglang_args": "--attention-backend aiter",
+            "extra_server_args": "--attention-backend aiter",
             "extra_envs": {},
             "ts": "2026-05-01T00:00:30",
         }],
@@ -248,7 +253,7 @@ def test_explore_search_migration_is_idempotent():
             "schema_version": 1,
             "tested": {fp_attn: {
                 "name": "attn_aiter",
-                "extra_sglang_args": "--attention-backend aiter",
+                "extra_server_args": "--attention-backend aiter",
                 "extra_envs": {},
                 "status": "succeeded",
                 "tput": 1500.0, "gain_pct": 5.0,
@@ -272,7 +277,7 @@ def test_record_explore_accepted_dedup_by_fingerprint():
     state = SharedState()
     variant = {
         "name": "vllm_kv_fp8",
-        "extra_sglang_args": "--kv-cache-dtype fp8",
+        "extra_server_args": "--kv-cache-dtype fp8",
         "extra_envs": {},
         "output_throughput": 1500.0,
         "gain_pct": 4.0,
@@ -289,7 +294,7 @@ def test_apply_explore_search_update_preserves_accepted():
     state = SharedState()
     state.record_explore_accepted({
         "name": "a",
-        "extra_sglang_args": "--flag-a",
+        "extra_server_args": "--flag-a",
         "fingerprint": "aa" * 8,
         "gain_pct": 3.0,
     })
@@ -298,7 +303,7 @@ def test_apply_explore_search_update_preserves_accepted():
     state.apply_explore_search_update({
         "schema_version": 1,
         "tested": {"bb" * 8: {
-            "name": "b", "extra_sglang_args": "--flag-b",
+            "name": "b", "extra_server_args": "--flag-b",
             "extra_envs": {}, "outcome": "REVERT",
         }},
         "rejected": [{
@@ -847,7 +852,7 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
                 "tested": {fp_dup: {
                     "fingerprint": fp_dup,
                     "name": "previous_run_name",
-                    "extra_sglang_args": "--dup-flag",
+                    "extra_server_args": "--dup-flag",
                     "extra_envs": {},
                     "outcome": "REVERT",
                 }},
@@ -1179,3 +1184,282 @@ def test_capability_summary_has_explore_row_with_legacy_aliases():
     assert "backends" in cap
     assert "params" in cap
     assert "validate_stack" in cap
+
+
+# ===========================================================================
+# _atom_default_grid + framework dispatch
+# ===========================================================================
+def _names(variants):
+    return [v.name for v in variants]
+
+
+def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
+    """MoE + MLA + MTP-capable model class (e.g. ``moe_mla``) unlocks
+    the full atom seed grid. Acceptance gate: >= 5 variants; each
+    gated branch present.
+    """
+    grid = _atom_default_grid(
+        model_class="moe_mla", conc=64, isl=1024, osl=1024,
+    )
+    names = _names(grid)
+    assert len(grid) >= 5, f"too few variants: {names}"
+    # Base coverage.
+    assert "atom_level_2" in names
+    # ``atom_level_3`` not emitted: atom_mi*x.sh injects ``--level 3``
+    # as the bare baseline, so adding a level-3 variant here would A/B
+    # against itself.
+    assert "atom_level_3" not in names
+    assert "atom_prefix_cache" in names
+    # Model-class-gated branches.
+    assert "atom_ep" in names, "MoE branch missing for moe_mla"
+    assert "atom_dp_attn" in names, "MLA branch missing for moe_mla"
+    assert "atom_mtp_3" in names, "MTP branch missing for moe_mla"
+    assert "atom_mtp_1" in names
+    # CONC bracket variant emitted because conc > 0.
+    assert "atom_cudagraph_bracket" in names
+
+
+def test_atom_default_grid_dense_model_omits_moe_mla_mtp():
+    """Dense model class must NOT emit MoE / MLA / MTP variants —
+    those flags would either fail flag-compat or crash atom on
+    startup.
+    """
+    grid = _atom_default_grid(
+        model_class="dense", conc=8, isl=512, osl=512,
+    )
+    names = _names(grid)
+    assert "atom_ep" not in names
+    assert "atom_dp_attn" not in names
+    assert "atom_mtp_3" not in names
+    assert "atom_mtp_1" not in names
+    # Basic variants still present.
+    assert "atom_level_2" in names
+    # ``atom_level_3`` not emitted; see the rationale comment in the
+    # default-grid test above.
+    assert "atom_level_3" not in names
+    assert "atom_prefix_cache" in names
+
+
+def test_atom_default_grid_fp8_model_emits_kv_fp8():
+    grid = _atom_default_grid(
+        model_class="moe_fp8", conc=16, isl=512, osl=512,
+    )
+    names = _names(grid)
+    assert "atom_kv_fp8" in names
+    # FP8 + MoE gate the EP variant on too.
+    assert "atom_ep" in names
+
+
+def test_atom_default_grid_non_fp8_omits_kv_fp8():
+    grid = _atom_default_grid(model_class="dense", conc=8)
+    names = _names(grid)
+    assert "atom_kv_fp8" not in names
+
+
+def test_atom_default_grid_variants_have_unique_names():
+    """Round-trip every supported model class through the grid and
+    assert names are unique within each grid (the EXPLORE ledger keys
+    by name within a single round).
+    """
+    for mc in ("dense", "moe", "moe_mla", "moe_mla_nsa", "moe_fp8", ""):
+        grid = _atom_default_grid(model_class=mc, conc=32)
+        names = _names(grid)
+        assert len(names) == len(set(names)), (
+            f"duplicate names in atom grid for model_class={mc!r}: {names}"
+        )
+
+
+def test_atom_default_grid_names_use_atom_prefix():
+    grid = _atom_default_grid(model_class="moe_mla", conc=64)
+    for v in grid:
+        assert v.name.startswith("atom_"), (
+            f"variant name does not start with 'atom_': {v.name!r}"
+        )
+
+
+def test_atom_default_grid_variants_carry_default_grid_provenance():
+    grid = _atom_default_grid(model_class="moe_mla", conc=64)
+    for v in grid:
+        # ``provenance`` is stashed onto the dataclass instance.
+        assert getattr(v, "provenance", None) == "default_grid", (
+            f"variant {v.name!r} provenance not set to default_grid"
+        )
+
+
+def test_atom_default_grid_conc_zero_omits_cudagraph_bracket():
+    """When the Coordinator can't supply CONC, the bracket variant is
+    skipped (would otherwise emit an empty / nonsensical list).
+    """
+    grid = _atom_default_grid(model_class="dense", conc=0)
+    assert "atom_cudagraph_bracket" not in _names(grid)
+
+
+def test_default_grid_for_framework_atom_returns_seeded_grid():
+    grid = _default_grid_for_framework(
+        "atom", model_class="moe_mla", conc=64, isl=1024, osl=1024,
+    )
+    assert grid, "atom framework should produce a non-empty default grid"
+    assert any(v.name == "atom_level_2" for v in grid)
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm", "", "unknown"])
+def test_default_grid_for_framework_non_atom_returns_empty(framework):
+    """Sglang / vllm rely on LLM-emitted variants (no programmatic
+    seed exists today). Unknown frameworks must also return ``[]``
+    rather than crash.
+    """
+    grid = _default_grid_for_framework(
+        framework, model_class="moe_mla", conc=64,
+    )
+    assert grid == []
+
+
+def _write_atom_baseline_yaml(path: Path) -> None:
+    """Atom-flavoured base YAML for gap-G1 cold-start wiring tests."""
+    cfg = {
+        "benchmark": {
+            "framework": "atom",
+            "model": "/wekafs/models/Qwen-Qwen3-32B",
+            "precision": "fp8",
+            "run_mode": "local",
+            "envs": {"TP": 4, "CONC": 64, "ISL": 1024, "OSL": 1024},
+            "benchmark_script": "atom_mi355x.sh",
+            "timeout_seconds": 600,
+            "profiler": {
+                "torch_profiler": {"enabled": False},
+                "system_profiler": {"enabled": False},
+                "tracelens": {"enabled": False},
+            },
+            "gpu_selection": {"auto": False},
+        },
+    }
+    with path.open("w") as f:
+        yaml.safe_dump(cfg, f)
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_atom_empty_grid_seeds_default_grid(
+    sub_agent_runner, tmp_path, monkeypatch,
+):
+    """When the orchestration LLM emits an empty grid on an atom
+    session, ExploreExecutor must NOT return
+    ``error_class='empty_grid'`` — it must fall through to
+    ``_default_grid_for_framework('atom', ...)`` and run those
+    variants.
+
+    Bench is mocked so the test asserts *only* the wiring (empty grid
+    → seed grid loaded, executor proceeds to grid runner), not the
+    seed's per-variant outcome which is gated by the Magpie / atom
+    server.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base_atom.yaml"
+    _write_atom_baseline_yaml(base)
+
+    # Sandbox MODEL_PATH so compatibility_filter doesn't auto-drop
+    # MoE/MLA variants.
+    monkeypatch.setenv("MODEL_PATH", "/wekafs/models/Qwen-Qwen3-32B")
+    monkeypatch.setenv("FRAMEWORK", "atom")
+
+    received_grid: list[list[str]] = []
+
+    # Monkeypatch the ``run_grid`` symbol bound INSIDE the explore
+    # module (the executor imports it at module-load time, so
+    # patching ``_grid_runner.run_grid`` would miss the call site).
+    from inference_optimizer.orchestrator.action_executors import (
+        explore as explore_mod,
+    )
+
+    async def _capture_run_grid(**kwargs):
+        received_grid.append([v.name for v in (kwargs.get("grid") or [])])
+        return []
+
+    monkeypatch.setattr(explore_mod, "run_grid", _capture_run_grid)
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "base_tput":   800.0,
+            "grid":        [],
+            "model_class": "moe_mla",
+        },
+        idempotency_key="ex-atom-empty-seeded",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+
+    await sub.run_task(task)
+
+    # ``run_grid`` is called once per variant (variants stream one at
+    # a time through the executor). Each invocation should carry
+    # exactly one atom_ seed variant.
+    assert received_grid, "run_grid was not invoked by the seed path"
+    flat_names = [n for sub in received_grid for n in sub]
+    assert all(n.startswith("atom_") for n in flat_names), (
+        f"non-atom variants reached run_grid via the seed: {flat_names!r}"
+    )
+    # The full seed for moe_mla + CONC>0 has at least 5 variants; the
+    # executor may have stopped earlier (every per-variant call
+    # returned []), so we assert lower-bound coverage.
+    assert "atom_level_2" in flat_names
+    assert "atom_ep" in flat_names
+    assert "atom_dp_attn" in flat_names
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
+    sub_agent_runner, tmp_path,
+):
+    """Inverse of the atom test: sglang / vllm have NO programmatic
+    seed today (intentional — see ``_default_grid_for_framework``);
+    an empty grid on those frameworks must continue to return
+    ``error_class='empty_grid'`` so the orchestration LLM is forced
+    to emit variants. Regression guard against accidentally seeding
+    sglang from the atom branch.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base_sglang.yaml"
+    _write_baseline_yaml(base)
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "base_tput":   800.0,
+            "grid":        [],
+        },
+        idempotency_key="ex-sglang-empty-still-fails",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    res = await sub.run_task(task)
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == "empty_grid"
+
+
+def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
+    monkeypatch,
+):
+    """When the atom help-text probe is unavailable (e.g. test sandbox
+    with no atom installed), ``apply_compatibility_filter`` MUST NOT
+    drop any atom seed variant — it treats absent help text as
+    "defer to graceful runtime failure".
+
+    Guarantees the seed grid is never silently emptied by the
+    compatibility filter on test boxes.
+    """
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    # Force the help-text probe to return empty (simulates atom not
+    # importable). The filter must not drop any of the seed variants.
+    from inference_optimizer.orchestrator.action_executors import (
+        _grid_runner,
+    )
+    monkeypatch.setattr(
+        _grid_runner, "_probe_server_help_text", lambda fw: "",
+    )
+
+    grid = _atom_default_grid(model_class="moe_mla", conc=64)
+    kept, dropped = apply_compatibility_filter(grid)
+    assert kept == grid, (
+        f"compatibility filter dropped seed variants when help-text "
+        f"probe is empty; dropped={dropped}"
+    )
