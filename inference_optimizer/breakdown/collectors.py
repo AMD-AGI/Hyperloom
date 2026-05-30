@@ -3003,6 +3003,85 @@ def _reconstruct_gain_ledger(
 # ---------------------------------------------------------------------------
 # source_files map
 # ---------------------------------------------------------------------------
+_KERNEL_ROOFLINE_REL_PATH = "reports/kernel_roofline.json"
+
+
+def collect_kernel_roofline(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Mirror ``<session_dir>/reports/kernel_roofline.json`` into the
+    breakdown's ``kernel_roofline`` section.
+
+    The kernel-agent watermark roofline pipeline writes this file once
+    per successful trace analysis (minute-cadence on a live session,
+    once at end-of-session post-mortem). The dashboard renders one row
+    per kernel for the "Kernel Roofline 表格" panel
+    (Dashboard-Roofline 对接清单 §1).
+
+    File missing → empty dict + warning. Malformed JSON → empty dict +
+    warning (``_load_json_safe`` already records the parse error).
+    Non-list ``kernels`` field is replaced with ``[]`` so the consumer
+    can iterate unconditionally.
+
+    Each kernel entry's fields are coerced through the standard helpers
+    so an upstream type change (e.g. ``call_count`` arriving as a JSON
+    float) doesn't break the dashboard's downstream parsers.
+    """
+    path = session_dir / _KERNEL_ROOFLINE_REL_PATH
+    if not path.exists():
+        # Quiet on absence — most sessions never run the roofline
+        # pipeline and a warning would clutter every breakdown.
+        return {}
+    blob = _load_json_safe(path, warnings)
+    if not isinstance(blob, dict):
+        warnings.append(
+            f"kernel_roofline: {_KERNEL_ROOFLINE_REL_PATH} is not a JSON object"
+        )
+        return {}
+
+    raw_kernels = blob.get("kernels")
+    if raw_kernels is None:
+        kernels: list[dict[str, Any]] = []
+    elif not isinstance(raw_kernels, list):
+        warnings.append(
+            "kernel_roofline.kernels is not a list; dropping entries"
+        )
+        kernels = []
+    else:
+        kernels = [_normalize_kernel_roofline_entry(k) for k in raw_kernels
+                   if isinstance(k, dict)]
+
+    out: dict[str, Any] = {
+        "schema_version":         _to_int(blob.get("schema_version")) or 1,
+        "source":                 str(blob.get("source") or ""),
+        "analysis_md_path":       str(blob.get("analysis_md_path") or ""),
+        "kernel_candidates_path": str(blob.get("kernel_candidates_path") or ""),
+        "trace_input":            str(blob.get("trace_input") or ""),
+        "trace_input_type":       str(blob.get("trace_input_type") or ""),
+        "kernels":                kernels,
+    }
+    return out
+
+
+def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
+    """Coerce one kernel entry to the schema shape with stable types."""
+    return {
+        "kernel_id":             str(raw.get("kernel_id") or ""),
+        "name":                  str(raw.get("name") or ""),
+        "source_file":           str(raw.get("source_file") or ""),
+        "kernel_category":       str(raw.get("kernel_category") or ""),
+        "bound_type":            str(raw.get("bound_type") or ""),
+        "arithmetic_intensity":  _to_float(raw.get("arithmetic_intensity")) or 0.0,
+        "flops_per_byte":        _to_float(raw.get("flops_per_byte")) or 0.0,
+        "efficiency_percent":    _to_float(raw.get("efficiency_percent")) or 0.0,
+        "gpu_pct":               _to_float(raw.get("gpu_pct")) or 0.0,
+        "call_count":            _to_int(raw.get("call_count")) or 0,
+        "duration_us":           _to_float(raw.get("duration_us")) or 0.0,
+        "reusable_native_kernel": bool(raw.get("reusable_native_kernel")),
+    }
+
+
 def collect_source_files(
     session_dir: Path,
     baseline_path: str | None,
