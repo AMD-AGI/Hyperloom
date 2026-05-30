@@ -30,8 +30,11 @@ from inference_optimizer.orchestrator.phase_state import (
     ESCALATE_HINT_BUDGET_BUMP_DELTA,
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
+    ESCALATE_HINT_SKIP_TO_SWEEP,
     ESCALATE_HINT_VOCAB,
     PHASE_CLOSE,
+    PHASE_KERNEL,
+    PHASE_SWEEP,
     STOP_REASON_VOCAB,
     apply_escalate_budget_bump,
     compute_next_phase,
@@ -51,7 +54,7 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 # ===========================================================================
 def test_escalate_hint_vocab_closed():
     assert ESCALATE_HINT_VOCAB == frozenset({
-        "skip_to_kernel", "skip_to_close",
+        "skip_to_kernel", "skip_to_sweep", "skip_to_close",
         "extend_explore_budget", "extend_kernel_budget",
     })
 
@@ -456,6 +459,53 @@ def test_compute_next_phase_skip_to_close_routes_to_close():
     assert reason == "robustness_escalated"
     assert evidence.get("terminal") is True
     assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_CLOSE
+
+
+def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        phase=phase,
+        phase_started_unix=0.0,
+        max_minutes=0,
+        phase_budget_pct={},
+        explore_search={},
+        specialist_rounds=[],
+        params_no_promote_streak=0,
+        backends_search={},
+        rejected_kernel_ids=[],
+        optimization_stack=[],
+        pending_escalate_hint=ESCALATE_HINT_SKIP_TO_SWEEP,
+        stop_reason="",
+        plateau_overrides={},
+    )
+
+
+def test_exit_normal_explore_skip_to_sweep_is_non_terminal():
+    # skip_to_sweep (steward stop_session / safety net) is the new
+    # non-terminal "no more leverage" signal.
+    out = exit_normal_explore(_skip_to_sweep_state("EXPLORE"))
+    assert out is not None
+    reason, evidence = out
+    assert reason == "no_more_leverage"
+    assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_SWEEP
+
+
+def test_compute_next_phase_skip_to_sweep_from_explore_skips_kernel():
+    # Even with kernel enabled, no_more_leverage routes EXPLORE -> SWEEP
+    # (no KERNEL hop) and is NOT terminal.
+    out = compute_next_phase(_skip_to_sweep_state("EXPLORE"), kernel_enabled=True)
+    assert out is not None
+    target, reason, evidence = out
+    assert target == PHASE_SWEEP
+    assert reason == "no_more_leverage"
+    assert evidence.get("terminal") is not True
+
+
+def test_compute_next_phase_skip_to_sweep_from_kernel_routes_to_sweep():
+    out = compute_next_phase(_skip_to_sweep_state("KERNEL"), kernel_enabled=True)
+    assert out is not None
+    target, reason, _ = out
+    assert target == PHASE_SWEEP
+    assert reason == "no_more_leverage"
 
 
 # ===========================================================================
