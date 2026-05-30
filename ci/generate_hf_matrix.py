@@ -25,7 +25,7 @@ import os
 import re
 import sys
 import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Reuse HuggingFaceClient from the existing script — single source of truth
@@ -338,17 +338,17 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
 
 
 def _cron_batch_index(pool_size: int, batch_size: int) -> int:
-    """Deterministic production-pool rotation for Beijing 00:00/12:00 cron.
+    """Deterministic production-pool rotation for UTC 00:00/12:00 cron.
 
     Manual workflow dispatches increment GitHub's run number, so using
     ``GITHUB_RUN_NUMBER`` for schedule rotation makes the next cron batch depend
-    on ad-hoc smoke runs. Instead, schedule uses the Beijing half-day slot:
+    on ad-hoc smoke runs. Instead, schedule uses the UTC half-day slot:
     00:00-11:59 => slot 0, 12:00-23:59 => slot 1. The epoch is pinned to the
     production pool date so every operator can predict the slice before cron
     fires.
     """
     batches = max((pool_size + batch_size - 1) // batch_size, 1)
-    epoch = datetime(2026, 5, 25, tzinfo=timezone(timedelta(hours=8)))
+    epoch = datetime(2026, 5, 25, tzinfo=timezone.utc)
     now_raw = (os.environ.get("INPUT_CRON_NOW") or "").strip()
     if now_raw:
         try:
@@ -357,14 +357,14 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
             now_utc = datetime.now(timezone.utc)
     else:
         now_utc = datetime.now(timezone.utc)
-    now_bj = now_utc.astimezone(epoch.tzinfo)
-    days = (now_bj.date() - epoch.date()).days
-    half_day_slot = 0 if now_bj.hour < 12 else 1
+    now_utc = now_utc.astimezone(timezone.utc)
+    days = (now_utc.date() - epoch.date()).days
+    half_day_slot = 0 if now_utc.hour < 12 else 1
     slot = max(days, 0) * 2 + half_day_slot
     batch_index = slot % batches
     print(
         "cron rotation: "
-        f"beijing_time={now_bj.isoformat()} epoch={epoch.date().isoformat()} "
+        f"utc_time={now_utc.isoformat()} epoch={epoch.date().isoformat()} "
         f"slot={slot} batches={batches} batch_index={batch_index}",
         file=sys.stderr,
     )
