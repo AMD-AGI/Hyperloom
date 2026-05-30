@@ -832,6 +832,17 @@ class SharedState:
     # storm detector fires when this crosses the configured cap
     # without a single non-empty proposal_set in the same window.
     explore_specialist_dispatched_count: int = 0
+    # Aggregate view of dynamic_action dispatches keyed by ``dyn_id``;
+    # Coordinator-only writer (``CORE_STATE_FIELDS`` blocks LLM
+    # ``UPDATE_STATE``). Each value is the lifecycle summary dict
+    # (status / last_outcome / cumulative_gain / …).
+    dynamic_actions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per-EXPLORE-round counter of *successful* dynamic_action
+    # dispatches (PolicyGate denials do not increment). Reset on
+    # every fresh EXPLORE entry; read by
+    # ``PolicyGate._validate_dynamic_action_dispatch`` for the
+    # ``MAX_DYNAMIC_PER_ROUND`` cap; Coordinator is the sole writer.
+    dynamic_action_round_count: int = 0
     # research_lane capacity locked at session start
     #. M5 default is 1 (single-specialist series);
     # M6 raises to 6 (concurrent). PolicyGate denies mid-session
@@ -3109,6 +3120,191 @@ class SharedState:
         EXPLORE entry.
         """
         self.explore_specialist_dispatched_count = 0
+
+    def record_dynamic_action_dispatch(
+        self, dyn_id: str, summary: dict[str, Any],
+    ) -> int:
+        """Register a freshly-dispatched ``dynamic_action`` + bump the
+        per-round counter atomically.
+
+        Coordinator-only writer (CORE_STATE_FIELDS protects it from
+        LLM ``UPDATE_STATE``). Idempotent on ``dyn_id``: a re-record
+        overwrites the summary but does not double-bump the counter.
+        Returns the post-increment round counter value.
+        """
+        key = str(dyn_id or "").strip()
+        if not key:
+            return self.dynamic_action_round_count
+        was_new = key not in self.dynamic_actions
+        self.dynamic_actions[key] = dict(summary or {})
+        if was_new:
+            self.dynamic_action_round_count = int(
+                self.dynamic_action_round_count or 0
+            ) + 1
+        return self.dynamic_action_round_count
+
+    def reset_dynamic_action_round_count(self) -> None:
+        """Clear the per-EXPLORE round cap counter; the cumulative
+        ``dynamic_actions`` ledger is preserved across rounds."""
+        self.dynamic_action_round_count = 0
+
+    def record_dynamic_action_outcome(
+        self,
+        dyn_id: str,
+        *,
+        status: str,
+        last_outcome: str | None = None,
+        cumulative_gain: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Transition-validated update of the summary row keyed by
+        ``dyn_id``.
+
+        Coordinator-only writer (``CORE_STATE_FIELDS`` guards it from
+        LLM ``UPDATE_STATE``). Only keys passed in are touched;
+        ``last_outcome`` defaults to the prompt-friendly label for
+        ``status``; ``last_updated_at`` is always refreshed. Illegal
+        transitions are logged and skipped so a buggy hook cannot
+        corrupt the audit trail.
+        """
+        # Local import avoids the cycle with
+        # :mod:`dynamic_action_proposal`.
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            LAST_OUTCOME_BY_STATUS,
+            can_transition,
+        )
+
+        key = str(dyn_id or "").strip()
+        if not key:
+            return
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        try:
+            target_status = DynamicActionStatus(
+                str(status or "").strip(),
+            )
+        except ValueError:
+            _log.warning(
+                "record_dynamic_action_outcome: unknown status=%r for "
+                "dyn_id=%s; dropping write",
+                status, key,
+            )
+            return
+        existing = dict(self.dynamic_actions.get(key) or {})
+        current_status_raw = existing.get("status")
+        current_status: DynamicActionStatus | None
+        if current_status_raw:
+            try:
+                current_status = DynamicActionStatus(str(current_status_raw))
+            except ValueError:
+                current_status = None
+        else:
+            current_status = None
+        if not can_transition(current_status, target_status):
+            _log.warning(
+                "record_dynamic_action_outcome: illegal transition "
+                "%s → %s for dyn_id=%s; preserving prior state",
+                current_status_raw or "(none)", target_status.value, key,
+            )
+            return
+        existing.setdefault("dyn_id", key)
+        existing["status"] = target_status.value
+        existing["last_outcome"] = str(
+            last_outcome
+            if last_outcome is not None
+            else LAST_OUTCOME_BY_STATUS.get(target_status, target_status.value.lower()),
+        )
+        if cumulative_gain is not None:
+            existing["cumulative_gain"] = float(cumulative_gain)
+        if extra:
+            for k, v in extra.items():
+                existing[k] = v
+        existing["last_updated_at"] = _now_iso()
+        self.dynamic_actions[key] = existing
+
+    def to_dynamic_actions_prompt_section(
+        self,
+        *,
+        max_entries: int = 5,
+        title: str = "Dynamic Action History",
+    ) -> str:
+        """Compact ``=== <title> ===`` block for orchestration prompt
+        injection.
+
+        Renders the most recent ``max_entries`` summaries sorted by
+        ``last_updated_at`` descending (stable tiebreak on
+        ``dyn_id``). Older rows are collapsed into an elision marker
+        pointing at the on-disk artefact dir. Returns the empty
+        string when no rows exist so callers can skip the section.
+        """
+        summaries = self.dynamic_actions or {}
+        if not summaries:
+            return ""
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            LAST_OUTCOME_BY_STATUS,
+        )
+
+        ordered = sorted(
+            summaries.items(),
+            key=lambda kv: (
+                str(kv[1].get("last_updated_at") or ""),
+                str(kv[0]),
+            ),
+            reverse=True,
+        )
+        recent = ordered[: max(0, int(max_entries))]
+        older = ordered[max(0, int(max_entries)):]
+        lines: list[str] = [f"=== {title} ==="]
+        for _dyn_id, summary in recent:
+            lines.append(self._format_dynamic_action_summary_row(
+                summary,
+                _last_outcome_lookup=LAST_OUTCOME_BY_STATUS,
+                _status_enum=DynamicActionStatus,
+            ))
+        if older:
+            lines.append(
+                f"... ({len(older)} more older entries; full list in "
+                f"$SESSION_DIR/agents/orchestration/dynamic_actions/)"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_dynamic_action_summary_row(
+        summary: dict[str, Any],
+        *,
+        _last_outcome_lookup: dict | None = None,
+        _status_enum: Any | None = None,
+    ) -> str:
+        """Render one compact summary row (~50 tokens):
+
+            - <dyn_id> [<STATUS>, gain=<delta>%] scope=[d1,d2]
+              motivation: "<motivation_gap_short>"
+              artifact: <artifact_path>
+        """
+        dyn_id = str(summary.get("dyn_id") or "(unknown)")
+        status = str(summary.get("status") or "(unknown)")
+        scope = list(summary.get("scope_domains") or ())
+        motivation = str(summary.get("motivation_gap_short") or "").strip()
+        if not motivation:
+            motivation = "(no motivation summary)"
+        gain = summary.get("cumulative_gain")
+        gain_text = (
+            f"gain={gain:+.2f}%" if isinstance(gain, (int, float)) else "gain=n/a"
+        )
+        artifact = str(summary.get("artifact_path") or "(missing)")
+        last_outcome = str(summary.get("last_outcome") or "")
+        last_outcome_suffix = (
+            f" outcome={last_outcome}" if last_outcome else ""
+        )
+        head = (
+            f"- {dyn_id} [{status}, {gain_text}{last_outcome_suffix}] "
+            f"scope={scope!r}"
+        )
+        body = f'  motivation: "{motivation}"'
+        tail = f"  artifact: {artifact}"
+        return "\n".join((head, body, tail))
 
     def record_specialist_patch_verdict(
         self, specialist_task_id: str, verdict: str,

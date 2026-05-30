@@ -55,6 +55,10 @@ class _ResumeStateStub:
     def __init__(self, *, framework_phase_enabled: bool, phase: str) -> None:
         self.framework_phase_enabled = framework_phase_enabled
         self.phase = phase
+        self.save_calls = 0
+
+    def save(self, _session_dir) -> None:
+        self.save_calls += 1
 
 
 class _ArgsStub:
@@ -76,6 +80,9 @@ def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
         cur_phase = (getattr(state, "phase", "") or "").strip().upper()
         if cur_phase in ("", "PRELUDE"):
             state.framework_phase_enabled = False
+            # P2-g: persist immediately, not via the later conditional
+            # save, so a clean resume keeps the toggle on disk.
+            state.save("session_dir")
             msg = "DISABLING_RESUME"
         else:
             msg = "WARN_IGNORED"
@@ -88,6 +95,8 @@ def test_resume_writeback_disables_state_when_prelude_and_flag_passed():
     msg = _apply_resume_writeback(state, args)
     assert msg == "DISABLING_RESUME"
     assert state.framework_phase_enabled is False
+    # The toggle is persisted unconditionally on the prelude path.
+    assert state.save_calls == 1
 
 
 def test_resume_writeback_warns_when_past_prelude_and_flag_passed():
@@ -95,8 +104,9 @@ def test_resume_writeback_warns_when_past_prelude_and_flag_passed():
     args = _ArgsStub(no_framework=True)
     msg = _apply_resume_writeback(state, args)
     assert msg == "WARN_IGNORED"
-    # State must not be retroactively flipped.
+    # State must not be retroactively flipped or persisted.
     assert state.framework_phase_enabled is True
+    assert state.save_calls == 0
 
 
 def test_resume_writeback_honours_persisted_disable_over_flag_absent():
