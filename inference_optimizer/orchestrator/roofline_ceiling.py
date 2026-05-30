@@ -112,7 +112,8 @@ _DTYPE_BYTES: dict[str, float] = {
     "bfloat16": 2.0, "bf16": 2.0,
     "float16": 2.0, "fp16": 2.0,
     "float8_e4m3fn": 1.0, "float8_e5m2": 1.0, "fp8": 1.0,
-    "float4": 0.5, "fp4": 0.5,
+    # mxfp4 / OCP-FP4 are 4-bit (block-scaled); align with HW_SPECS keys.
+    "float4": 0.5, "fp4": 0.5, "mxfp4": 0.5,
 }
 
 
@@ -288,8 +289,21 @@ def _compute_expert_decomposition(
     Safe degrade (dense / unknown geometry): returns
     ``(weight_bytes, 0, 0, 0)`` so callers fall back to the dense
     ``weight_bytes`` divisor and skip expert saturation.
+
+    HF config key aliases handled here so the MoE detection stays
+    architecture-agnostic:
+      * ``num_experts`` (Qwen3 MoE, Mixtral, …)
+      * ``n_routed_experts`` (DeepSeek V3 / GigaChat — V3-derived models).
+    Shared experts (``n_shared_experts``) are intentionally not folded
+    in: they are always-active and already counted in the non-expert
+    bytes via the safetensors total. Adding them to the routed count
+    would double-count and slightly inflate the divisor.
     """
-    num_experts = int(cfg.get("num_experts") or 0)
+    num_experts = int(
+        cfg.get("num_experts")
+        or cfg.get("n_routed_experts")  # DeepSeek V3 alias
+        or 0
+    )
     experts_per_tok = int(cfg.get("num_experts_per_tok") or 0)
     if num_experts <= 0 or experts_per_tok <= 0:
         return int(weight_bytes), 0, 0, 0
@@ -334,6 +348,19 @@ def load_model_meta(
     ``precision_hint`` is the operator-declared precision (passed via
     ``state.precision``); consulted only when ``config.json`` omits
     ``torch_dtype``.
+
+    Weight-dtype resolution (priority, first non-empty wins):
+      1. ``quantization_config.quant_method`` — fp8 / fp4 / mxfp4
+         block-scaled weights (DeepSeek V3, GigaChat, etc.). The HF
+         ``torch_dtype`` / ``dtype`` fields under these configs refer
+         to *activation* dtype (typically bf16) and would over-count
+         the per-param byte size by 2× if used naively.
+      2. ``torch_dtype`` — HF-standard.
+      3. ``dtype`` — DeepSeek-style alias used by some V3-derived
+         configs (still activation dtype, but a closer hint than
+         the operator-supplied fallback when ``torch_dtype`` is
+         omitted).
+      4. ``precision_hint`` from the CLI.
     """
     if not model_path:
         return None
@@ -346,8 +373,15 @@ def load_model_meta(
     weight_bytes = _read_total_size(p)
     if not weight_bytes:
         return None
+    quant_tag = ""
+    quant_cfg = cfg.get("quantization_config")
+    if isinstance(quant_cfg, dict):
+        quant_tag = str(quant_cfg.get("quant_method", "")).strip().lower()
     dtype_bytes = _resolve_dtype_bytes(
-        cfg.get("torch_dtype") or precision_hint
+        quant_tag
+        or cfg.get("torch_dtype")
+        or cfg.get("dtype")
+        or precision_hint
     )
     active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok = (
         _compute_expert_decomposition(

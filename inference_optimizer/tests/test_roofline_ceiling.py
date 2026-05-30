@@ -260,12 +260,20 @@ def _write_synthetic_model(
     num_experts: int | None = None,
     num_experts_per_tok: int | None = None,
     moe_intermediate_size: int | None = None,
+    n_routed_experts: int | None = None,
+    quant_method: str | None = None,
+    dtype: str | None = None,
 ) -> None:
     """Lay down a minimal HF-shaped model dir.
 
     Pass ``num_kv_heads=None`` to omit ``num_key_value_heads`` (MHA
     branch). Pass ``num_experts`` / ``num_experts_per_tok`` /
     ``moe_intermediate_size`` to emit an MoE config (Qwen3-A3B style).
+    Pass ``n_routed_experts`` to emit a DeepSeek-V3-style alias instead
+    of ``num_experts``. Pass ``quant_method`` (e.g. ``"fp8"``) to emit
+    a ``quantization_config`` block. Pass ``dtype`` to write the
+    DeepSeek-style activation-dtype field alongside / instead of the
+    standard ``torch_dtype``.
     """
     model_dir.mkdir(parents=True, exist_ok=True)
     config: dict = {
@@ -284,6 +292,16 @@ def _write_synthetic_model(
         config["num_experts_per_tok"] = num_experts_per_tok
     if moe_intermediate_size is not None:
         config["moe_intermediate_size"] = moe_intermediate_size
+    if n_routed_experts is not None:
+        config["n_routed_experts"] = n_routed_experts
+    if quant_method is not None:
+        config["quantization_config"] = {
+            "quant_method": quant_method,
+            "weight_block_size": [128, 128],
+            "activation_scheme": "dynamic",
+        }
+    if dtype is not None:
+        config["dtype"] = dtype
     (model_dir / "config.json").write_text(json.dumps(config))
     (model_dir / "model.safetensors.index.json").write_text(
         json.dumps({"metadata": {"total_size": total_size}, "weight_map": {}})
@@ -1077,3 +1095,118 @@ class TestPhysicalInterpretation095726Z:
         # PR-9749520 anchor (~77 %, fixed by P0+P1 ceiling correctness).
         within_pct = 100.0 * self._ACHIEVED_TOK_S / br.peak_tok_per_sec
         assert 70.0 < within_pct < 85.0
+
+
+class TestDeepSeekV3ConfigAliases:
+    """DeepSeek-V3-derived models (DeepSeek V3 / GigaChat3.1-A1.8B …)
+    use HF config aliases the original Qwen-A3B path didn't cover:
+
+      * ``n_routed_experts`` instead of ``num_experts``
+      * ``quantization_config.quant_method = "fp8"`` with bf16
+        activation dtype recorded in the legacy ``dtype`` field.
+
+    Without the aliases the helper treats these models as dense and
+    keeps the un-shrunken ``weight_bytes`` divisor (over-counts active
+    params ~10x at decode), AND mis-reads the activation dtype as the
+    weight dtype (over-counts byte size ~2x). This test pins both
+    routes so DeepSeek-V3 family ceilings stay accurate."""
+
+    def test_n_routed_experts_alias_equivalent_to_num_experts(self, tmp_path):
+        # Two model dirs, identical geometry, differ only in the field
+        # name used for the routed-expert count. The breakdown must be
+        # identical — anti-regression for the alias resolver.
+        # ``total_size`` is the bf16-equivalent (~26 GB so the expert
+        # pool ~19.6 GB fits inside; real GigaChat ships as fp8 ≈12.3 GB
+        # but this test isolates the alias logic from the dtype path).
+        common = dict(
+            total_size=26_000_000_000,
+            num_layers=26, num_kv_heads=32,
+            hidden_size=1536, num_attention_heads=32,
+            torch_dtype="bfloat16",
+            num_experts_per_tok=4,
+            moe_intermediate_size=1280,
+        )
+        _write_synthetic_model(
+            tmp_path / "qwen_alias", num_experts=64, **common
+        )
+        _write_synthetic_model(
+            tmp_path / "ds_alias", n_routed_experts=64, **common
+        )
+        qwen = load_model_meta(str(tmp_path / "qwen_alias"))
+        ds = load_model_meta(str(tmp_path / "ds_alias"))
+        assert qwen is not None and ds is not None
+        # Identical MoE decomposition for both alias variants.
+        assert qwen.num_experts == ds.num_experts == 64
+        assert qwen.experts_per_tok == ds.experts_per_tok == 4
+        assert qwen.expert_weight_bytes == ds.expert_weight_bytes
+        assert qwen.active_weight_bytes == ds.active_weight_bytes
+
+    def test_fp8_quantization_config_drives_weight_dtype(self, tmp_path):
+        # GigaChat3.1-A1.8B fingerprint: quant_method=fp8 + dtype=bfloat16
+        # (the bf16 is the *activation* dtype, weights are block fp8).
+        # Without the quant_method short-circuit ``load_model_meta``
+        # picks up the bf16 dtype and over-counts weight bytes 2x.
+        _write_synthetic_model(
+            tmp_path / "gigachat",
+            total_size=12_000_000_000,
+            num_layers=26, num_kv_heads=32,
+            hidden_size=1536, num_attention_heads=32,
+            torch_dtype="bfloat16",  # HF-standard activation dtype
+            dtype="bfloat16",  # DeepSeek-V3 redundancy
+            quant_method="fp8",  # block-fp8 weight quant
+            n_routed_experts=64,
+            num_experts_per_tok=4,
+            moe_intermediate_size=1280,
+        )
+        meta = load_model_meta(str(tmp_path / "gigachat"))
+        assert meta is not None
+        # fp8 -> 1 byte per param (not 2 from the bf16 activation dtype).
+        assert meta.weight_dtype_bytes == 1.0
+        # MoE decomposition still fires via n_routed_experts.
+        assert meta.num_experts == 64
+        assert meta.experts_per_tok == 4
+        assert meta.expert_weight_bytes > 0
+
+    def test_quant_method_overrides_torch_dtype(self, tmp_path):
+        # quant_method must win even when torch_dtype is set to
+        # something inconsistent — the safetensors data is fp8 once
+        # the quant config says so.
+        _write_synthetic_model(
+            tmp_path / "fp8_model",
+            total_size=12_000_000_000,
+            num_layers=4, num_kv_heads=8,
+            hidden_size=1024, num_attention_heads=16,
+            torch_dtype="bfloat16",  # would yield 2.0 if read directly
+            quant_method="fp8",
+        )
+        meta = load_model_meta(str(tmp_path / "fp8_model"))
+        assert meta is not None
+        assert meta.weight_dtype_bytes == 1.0  # fp8 wins
+
+    def test_dtype_field_fallback_when_torch_dtype_missing(self, tmp_path):
+        # No torch_dtype, no quant_method — the DeepSeek-style ``dtype``
+        # field should still be consulted before the precision_hint.
+        _write_synthetic_model(
+            tmp_path / "ds_no_qd",
+            total_size=4_000_000_000,
+            num_layers=4, num_kv_heads=4,
+            hidden_size=512, num_attention_heads=8,
+            torch_dtype="bfloat16",
+        )
+        # Strip torch_dtype manually so we exercise the dtype fallback.
+        import json as _json
+        cfg_path = tmp_path / "ds_no_qd" / "config.json"
+        cfg = _json.loads(cfg_path.read_text())
+        cfg.pop("torch_dtype", None)
+        cfg["dtype"] = "float16"
+        cfg_path.write_text(_json.dumps(cfg))
+        meta = load_model_meta(str(tmp_path / "ds_no_qd"))
+        assert meta is not None
+        assert meta.weight_dtype_bytes == 2.0  # fp16
+
+    def test_mxfp4_alias_in_dtype_table(self):
+        # HW_SPECS uses ``mxfp4`` as a key for MI355X; the byte-size
+        # table must agree (0.5 byte/param), otherwise the active-
+        # params arithmetic in compute_compute_bound_ceiling_tok_per_sec
+        # would silently fall back to bf16.
+        assert _resolve_dtype_bytes("mxfp4") == 0.5
