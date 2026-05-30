@@ -674,6 +674,108 @@ class SourceFiles(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
+# Roofline — optimization-progress curve for the dashboard
+# ---------------------------------------------------------------------------
+# Drives the "优化进度曲线" panel (Dashboard-Roofline 对接清单 §2): a
+# stepped line from baseline through every KEEP, plotted against two
+# horizontal reference lines (ceiling = vendor peak, target = ceiling
+# × 0.70). All inputs derived from ``state.json`` so the dashboard
+# only needs to read ``session_breakdown.json``.
+class RooflineTrajectoryPoint(TypedDict, total=False):
+    """One x/y/tooltip on the optimization-progress curve.
+
+    ``x`` is an iso UTC timestamp; the dashboard may convert to a step
+    index for the horizontal axis. The first point is always
+    ``label = "baseline"`` (taken from ``manifest.created_at_utc`` +
+    ``state.baseline_tput``); subsequent points come from
+    ``state.optimization_stack[]`` in promotion order.
+    """
+    ts: str                          # iso UTC, x value
+    tput: float                      # tok/s, y value
+    label: str                       # "baseline" / variant_name
+    action: str                      # "baseline" / "explore" / "kernel_opt" / ...
+    gain_pct: float                  # cumulative gain vs baseline at this point
+    flags: str                       # candidate_extra_sglang_args
+    extra_envs: dict[str, str]       # KEY=value pairs the variant set
+
+
+class RooflineSnapshot(TypedDict, total=False):
+    """One ``state.roofline_snapshots[]`` entry mirrored verbatim.
+
+    Kept as a list (the dashboard reads ``snapshots[0]`` for the
+    headline ceiling but downstream tooling may want the full
+    history). Field shape mirrors the on-disk record so a future
+    snapshot field addition flows through transparently.
+    """
+    snapshot_id: int
+    ts: str
+    achieved_tok_per_sec: float
+    theoretical_peak_tok_per_sec: float       # ceiling, vendor peak (unreachable)
+    within_roofline_pct: float                # achieved / peak * 100
+    gap_to_roofline_pct: float
+    compute_pct: float
+    idle_pct: float
+    comm_pct: float
+    top_bottleneck: str                       # "MoE_unfused" etc
+    top_kernel: dict[str, Any]                # {name, bound_type, efficiency_pct, gpu_pct}
+    analysis_md_path: str
+    kernel_roofline_path: str
+    trace_input: str
+
+
+class Roofline(TypedDict, total=False):
+    """Top-level ``roofline`` section.
+
+    Two products in one structure:
+
+    1. **Reference lines** (``ceiling_tok_per_sec`` / ``target_tok_per_sec``):
+       horizontal dashed lines on the chart. ``ceiling`` is the
+       vendor's theoretical peak (from the latest snapshot);
+       ``target = ceiling × ceiling_ratio_target`` (default 0.70 — see
+       Dashboard 对接清单 §2.1 for why we don't aim at 100%).
+
+    2. **Trajectory** (``trajectory[]``): the stepped line itself —
+       baseline + every KEEP, sorted by ts.
+
+    ``snapshots[]`` carries the raw ``state.roofline_snapshots[]``
+    entries verbatim for tooltips / drill-downs; consumers that just
+    want to render the chart can ignore it.
+
+    Edge cases (Dashboard-Roofline 对接清单 §5):
+    * No snapshot ever taken → ``ceiling_available = False``,
+      ``ceiling_tok_per_sec / target_tok_per_sec`` absent. Dashboard
+      hides the reference lines.
+    * No KEEP yet → ``trajectory`` has the single baseline point only.
+      ``current_best_tput == baseline_tput`` and
+      ``cumulative_gain_pct == 0.0``.
+    """
+    # Reference lines (only set when snapshots[] is non-empty)
+    ceiling_tok_per_sec: float | None
+    target_tok_per_sec: float | None
+    ceiling_ratio_target: float                # default 0.70
+    ceiling_available: bool
+    snapshot_top_bottleneck: str               # tooltip on the ceiling line
+    snapshot_within_roofline_pct: float
+    snapshot_gap_to_roofline_pct: float
+
+    # Trajectory
+    trajectory: list[RooflineTrajectoryPoint]
+
+    # Headline numbers (also derivable from trajectory[-1] /
+    # state.cumulative_gain — surfaced here so the dashboard's "current"
+    # callout doesn't need to compute them).
+    baseline_tput: float
+    current_best_tput: float
+    cumulative_gain_pct: float
+    current_best_pct_of_ceiling: float | None  # tput/ceiling*100, None when no ceiling
+    current_best_pct_of_target: float | None   # tput/target*100, None when no ceiling
+
+    # Audit / staleness
+    roofline_failure_streak: int               # consecutive watermark roofline failures
+    snapshots: list[RooflineSnapshot]
+
+
+# ---------------------------------------------------------------------------
 # Kernel Roofline — hot-kernel table for the dashboard
 # ---------------------------------------------------------------------------
 # Mirrors ``<session_dir>/reports/kernel_roofline.json`` produced by the
@@ -756,6 +858,11 @@ class SessionBreakdown(TypedDict, total=False):
     # §1). Mirrors ``<sd>/reports/kernel_roofline.json`` so consumers
     # don't have to walk the kernel-agent output tree themselves.
     kernel_roofline: KernelRoofline
+    # Optimization-progress curve for the dashboard
+    # (Dashboard-Roofline 对接清单 §2). Carries the trajectory
+    # (baseline + KEEP points), the ceiling/target reference lines,
+    # and the headline current-best numbers.
+    roofline: Roofline
 
     warnings: list[str]
     source_files: SourceFiles
