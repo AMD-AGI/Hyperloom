@@ -2629,6 +2629,15 @@ def _action_family(action: str) -> str:
     # single row that subsumes the legacy backends + params buckets.
     if s == "explore":
         return "explore"
+    # FRAMEWORK_PR (PRELUDE → FRAMEWORK_PR → EXPLORE).
+    # Surfaces upstream PR-driven KEEPs as their own headline row in
+    # ``source_breakdown`` so the dashboard's per-source totals reconcile
+    # against ``validated_total_pct``. Without this, framework_pr KEEPs
+    # fell through to ``"other"`` and silently disappeared from the
+    # leaderboard's per-source columns (manifest of: Params=0% +
+    # Backends=1.74% + Kernel=0% summing to ≪ Validated=22.85%).
+    if s == "framework_pr":
+        return "framework_pr"
     return "other"
 
 
@@ -2736,6 +2745,11 @@ def collect_attribution(
         # explore family (subsumes backends+params on v0.8
         # sessions; legacy buckets stay populated on legacy resume).
         "explore": 0.0,
+        # FRAMEWORK_PR family. Stays separate from the
+        # legacy ``other`` bucket so the dashboard can surface a
+        # dedicated ``framework_pr_pct_of_total`` row that reconciles
+        # against ``validated_total_pct``.
+        "framework_pr": 0.0,
     }
     for e in entries:
         if not isinstance(e, dict):
@@ -2793,6 +2807,12 @@ def collect_attribution(
             "oob_pct_of_total":      round(oob_total, 2),
             # primary row.
             "explore_pct_of_total":  round(family_totals.get("explore", 0.0), 2),
+            # FRAMEWORK_PR phase row. Tracks gain
+            # attributable to upstream PR adoption (between PRELUDE
+            # and EXPLORE). Always emitted (0.0 when the phase is
+            # disabled or contributed nothing) so the dashboard can
+            # iterate the catalogue without presence checks.
+            "framework_pr_pct_of_total": round(family_totals.get("framework_pr", 0.0), 2),
             # Legacy bucket aliases — preserved for legacy resume reports.
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total":   round(family_totals.get("params", 0.0), 2),
@@ -2886,6 +2906,10 @@ def _collect_phase_breakdown(
 
     phase_buckets: dict[str, dict[str, Any]] = {
         "prelude": {"total_gain_pct": 0.0},
+        # FRAMEWORK_PR is the dedicated upstream-PR bake-in
+        # phase between PRELUDE and EXPLORE. KEEPs here come from
+        # framework_pr action entries (one ts/gain per adopted PR).
+        "framework_pr": {"total_gain_pct": 0.0, "by_pr": {}},
         "explore": {"total_gain_pct": 0.0, "by_domain": {}},
         "kernel":  {"total_gain_pct": 0.0, "by_kernel_id": {}},
         "sweep":   {"total_gain_pct": 0.0},
@@ -2927,6 +2951,8 @@ def _collect_phase_breakdown(
                 phase = "kernel"
             elif fam == "sweep":
                 phase = "sweep"
+            elif fam == "framework_pr":
+                phase = "framework_pr"
             else:
                 phase = "unattributed"
         bucket = phase_buckets[phase]
@@ -2949,6 +2975,20 @@ def _collect_phase_breakdown(
             kid = str(e.get("kernel_id") or e.get("action_kernel_id") or "?")
             by_kid[kid] = round(
                 float(by_kid.get(kid, 0.0)) + float(delta), 2,
+            )
+        elif phase == "framework_pr":
+            # variant_name on framework_pr entries is the PR ref
+            # (``PR:<repo>#<num>`` / ``PR:<num>``); fall back to the
+            # entry's ``ref`` field when present, else ``?`` so the
+            # bucket key is always a string.
+            by_pr = bucket.setdefault("by_pr", {})
+            pr_key = (
+                str(e.get("variant_name") or "").strip()
+                or str(e.get("ref") or "").strip()
+                or "?"
+            )
+            by_pr[pr_key] = round(
+                float(by_pr.get(pr_key, 0.0)) + float(delta), 2,
             )
 
     # Drop the empty-by-default unattributed bucket when nothing
