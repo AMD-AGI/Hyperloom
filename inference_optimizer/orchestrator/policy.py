@@ -339,6 +339,14 @@ DEPRECATED_ACTION_REPLACEMENTS: dict[str, str] = {
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset({
     "roofline",
     "profile",
+    # GAP 1 — ``replay_warm_recipe`` is enqueued exclusively by the
+    # Coordinator at PRELUDE (after baseline lands) when the T0
+    # warm-start ladder returned a high-confidence prior. Letting the
+    # LLM propose it would (a) race the one-shot guard, (b) let a
+    # specialist hand-craft a "warm replay" with adversarial args
+    # that ought to go through ``explore`` instead. Same gate as
+    # roofline / profile.
+    "replay_warm_recipe",
 })
 
 # FRAMEWORK_PR phase: ``framework_pr`` is Coordinator-internal too
@@ -368,6 +376,14 @@ FRAMEWORK_PR_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset({
 #: request.kind collision.
 KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset({
     "mcp__cortex_kb__propose_point",
+    # The methods these tool names map to (propose_edge / hypothesize /
+    # ingest_attempt / verify / commit) have been retired from the
+    # client, but the tool names stay on the denylist because the
+    # safety contract — KB writes are Coordinator-owned, not
+    # specialist-callable — is independent of which methods currently
+    # exist. Specialists that attempt to invoke any of these get an
+    # immediate ``kb_write_unauthorized`` denial rather than a confusing
+    # "tool not found" downstream.
     "mcp__cortex_kb__propose_edge",
     "mcp__cortex_kb__hypothesize",
     "mcp__cortex_kb__ingest_attempt",
@@ -613,10 +629,21 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # §3.13 M1). Coordinator-only writes; LLM agents reading is fine.
     "cortex_session_id",
     "cortex_session_summary",
-    "pending_kb_edges",
     "warm_start_recipe",
     "warm_start_pitfalls",
+    "warm_start_lessons",
     "warm_start_ts",
+    # GAP 5 KB tag completeness — populated by Coordinator from
+    # manifest + baseline materialized config. LLM agents can read
+    # them via prompt sections, but only Coordinator writes.
+    "stack_fingerprint_meta",
+    "baseline_workload_extra",
+    # GAP 1 warm-recipe replay — one-shot guard + outcome record.
+    # Coordinator-only writes; LLM cannot edit them via update_state
+    # (would let a misbehaving LLM bypass the replay budget).
+    "warm_replay_attempted",
+    "warm_replay_outcome",
+    "warm_history_injected",
     # phase state machine fields (KB_design §3.2, §3.10,
     # §3.13 M2). All managed by ``Coordinator._advance_phase_if_needed``;
     # LLM update_state never reaches these.
@@ -669,12 +696,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # against an arbitrary update_state that would inject fake gaps
     # to bias specialist domain selection (Inv-1 / Inv-10.2).
     "gaps",
-    # monotonic experiment counter feeding
-    # ``experiment_canonical_id(sid, iter)``. Coordinator's T2 hook is
-    # the sole writer (via ``SharedState.increment_session_iter_index``);
-    # LLM update_state must not rewrite the index or duplicate KB
-    # ``exp:{sid}:{iter:04d}`` anchors would collide.
-    "session_iter_index",
     # Coordinator-only writes on the dynamic_action aggregate view +
     # round counter so the LLM cannot self-narrate its dispatch
     # outcomes via UPDATE_STATE.
@@ -1238,7 +1259,7 @@ class PolicyGate:
             raise PolicyDenied("request missing kind", rule="payload")
         # v0.8 M3 / ``action_deprecated`` covers the
         # REQUEST channel too (defense in depth). None of the legacy
-        # request kinds (select_kernels / kernel_opt / integrate /
+        # request kinds (trace_analyze / kernel_opt / integrate /
         # ...) collide with the deprecated set today, but an operator
         # extension that re-uses one of the legacy names via
         # ``request.kind`` would still be caught here.
@@ -1425,15 +1446,29 @@ class PolicyGate:
             f"must not propose it ({intent_kind})",
             rule="analysis_action_not_llm_proposable",
             hint=(
-                "roofline / profile are auto-enqueued at PRELUDE and on "
-                "every +10% gain crossing. Selection is controlled by "
-                "``--enable-roofline`` / ``--no-enable-roofline`` (default "
-                "on → roofline; off → profile). Propose ``specialist`` "
-                "or ``explore`` instead — the analysis snapshot will be "
-                "refreshed automatically the next time the watermark "
-                "trips."
+                "roofline / profile / replay_warm_recipe are auto-enqueued "
+                "by the Coordinator (PRELUDE bootstrap + +10% watermark "
+                "crossings + warm-recipe replay). Selection is controlled "
+                "by ``--enable-roofline`` / ``--no-enable-roofline`` / "
+                "``--no-warm-replay``. Propose ``specialist`` or "
+                "``explore`` instead — these analysis snapshots will "
+                "refresh automatically when their gate fires."
             ),
         )
+
+    # ------------------------------------------------------------------
+    # NOTE: no ``framework_atom_action_unsupported`` rule exists. atom
+    # has no action that needs framework-specific denial at the
+    # PolicyGate layer — multi-node is guarded at the CLI level, and
+    # ``framework_pr`` is still caught for all frameworks by the
+    # earlier ``framework_pr_action_not_llm_proposable`` rule (LLMs
+    # cannot propose ``framework_pr`` regardless of framework; the
+    # Coordinator drives it directly).
+    #
+    # Anti-regression guards live in
+    # ``inference_optimizer/tests/test_policy_atom_invariants.py``
+    # (asserts the constant + helper symbols stay absent) so a future
+    # reintroduction has to be intentional.
 
     # ------------------------------------------------------------------
     # R1 phase_incompatible
