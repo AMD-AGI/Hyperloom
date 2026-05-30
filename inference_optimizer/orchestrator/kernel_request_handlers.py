@@ -116,6 +116,17 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/vllm/",
 )
 _APPLY_TOOL_MODULE: Any | None = None
+# GEAK is FIRST per SKILL.md "high-priority handoff" contract: every kernel
+# Claude/Codex can rewrite, GEAK can rewrite too, and GEAK's GPU-only
+# benchmark loop typically converges faster than the dialogue-based
+# Claude/Codex backends. Keeping claude/codex first (the historical order)
+# meant that batch dispatch via :func:`_run_kernel_backend_sequence` always
+# burned the first attempt slots on Claude before GEAK could see the
+# kernel — which silently violated the contract surfaced in SKILL.md
+# §"choose_backends" / "Default ladder" and made user requests like
+# "run GEAK on this kernel" inert when the LLM stopped at a Claude KEEP.
+# Cursor stays last because :func:`_backend_order` drops it from the
+# auto-derived ladder when ``CURSOR_API_KEY`` is unset.
 _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
 # Soft upper bound on concurrent ``_run_kernel_backend_sequence`` coroutines
 # inside ``_run_optimization_batch``. The real GPU scheduling happens one
@@ -1450,6 +1461,7 @@ async def _run_optimization_single(
         extra_sglang_args: SGLang runtime flags for GEAK metadata (optional)
         enable_rag:      default True; false disables GEAK RAG tools
         enable_xs_memory: default True; false disables GEAK cross-session memory
+        test_command:     test command from unittest skill (passed to GEAK --test-command)
         dry_run:         default False (testing)
 
     Returns the tool's JSON output verbatim under ``result``.
@@ -1521,6 +1533,8 @@ async def _run_optimization_single(
         cmd += ["--disable-rag"]
     if payload.get("enable_xs_memory") is False:
         cmd += ["--disable-xs-memory"]
+    if payload.get("test_command"):
+        cmd += ["--test-command", str(payload["test_command"])]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     geak_budget_min = _geak_budget_minutes(payload)
