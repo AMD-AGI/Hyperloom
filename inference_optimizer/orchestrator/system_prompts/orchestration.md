@@ -144,7 +144,17 @@ on the next tick.
   `optimization_stack`; `cumulative_gain_validated` advances as a
   side effect. The Coordinator surfaces a TODO in the per-tick
   checklist when the stack still has unvalidated KEEPs — propose
-  `explore` to clear it.
+  `explore` (NOT the deprecated `validate_stack`) to clear it. The
+  legacy `validate_stack` / `backends` / `params` names are denied
+  by PolicyGate with `rule='action_deprecated'`.
+* **Do not settle for config-only.** Config tuning has a low ceiling.
+  When the `=== Intervention mix (config vs code_patch) ===` block shows
+  an `ESCALATION` line (`consecutive_config_only_rounds >= 2`, or many
+  config keeps with zero code_patch keeps), your NEXT EXPLORE dispatch
+  MUST be a `delegate{action_name='specialist', params={domain='serving_specialist'}}`
+  tasked to author a framework SOURCE patch (scheduler / kv_cache /
+  chunked-prefill), to be promoted via `integrate_patch` — NOT another
+  config-only `explore` round. A `code_patch` KEEP resets the counter.
 * **You CANNOT** delegate kernel-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
   `kill_task` / `force_dispatch` / `prune_branch` /

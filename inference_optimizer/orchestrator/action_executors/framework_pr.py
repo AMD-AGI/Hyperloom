@@ -39,7 +39,8 @@ Inputs (``ctx.task.params``):
     patches (list[str], optional) — explicit patch paths. When omitted,
         the executor curls ``candidate.diff_url`` into the per-task
         workspace and applies that.
-    keep_threshold_pct (float, optional) — default 0.2.
+    keep_threshold_pct (float, optional) — default DEFAULT_KEEP_THRESHOLD_PCT
+        (1.0 after D1 alignment; imported from integrate_patch).
     base_tput (float, optional) — baseline throughput; falls back to
         ``SharedState.baseline_tput``.
     accuracy_baseline (float, optional) — forwarded to the accuracy gate.
@@ -88,6 +89,11 @@ from .integrate_patch import (
     DEFAULT_VARIANT_TIMEOUT_SEC,
     _git_apply,
     _resolve_framework_root,
+)
+from ..kb_writeback import (
+    OUTCOME_INTEGRATED,
+    OUTCOME_REVERTED_SMOKE_FAIL,
+    write_framework_pr_record,
 )
 
 
@@ -667,6 +673,13 @@ class FrameworkPrExecutor:
                 )
             if accuracy_pass is False:
                 reasons.append("accuracy regression detected")
+            await self._write_kb_record(
+                candidate=candidate,
+                outcome=OUTCOME_REVERTED_SMOKE_FAIL,
+                tps_delta_pct=float(delta_pct or 0.0),
+                patch_path=str(applied[0]) if applied else "",
+                extra=extra,
+            )
             return {
                 "status": "reverted",
                 "candidate": candidate,
@@ -714,6 +727,13 @@ class FrameworkPrExecutor:
                 "workspace": str(output_root),
             }
 
+        await self._write_kb_record(
+            candidate=candidate,
+            outcome=OUTCOME_INTEGRATED,
+            tps_delta_pct=float(delta_pct or 0.0),
+            patch_path=str(applied[0]) if applied else "",
+            extra=extra,
+        )
         return {
             "status": "kept",
             "candidate": candidate,
@@ -734,6 +754,54 @@ class FrameworkPrExecutor:
             "bench_result": bench_result,
             "workspace": str(output_root),
         }
+
+    # ------------------------------------------------------------------
+    # KB writeback (D2, Arbor-into-Hyperloom)
+    # ------------------------------------------------------------------
+    async def _write_kb_record(
+        self, *,
+        candidate: dict[str, Any],
+        outcome: str,
+        tps_delta_pct: float,
+        patch_path: str,
+        extra: dict[str, Any],
+    ) -> None:
+        """Append a FRAMEWORK_PR outcome to
+        ``framework-agent/kb/framework_optimization/lessons.jsonl`` so the
+        next ``fa phase-discover`` can dedup already-integrated PRs.
+
+        Best-effort: a candidate lacking both ``pr_url`` and ``head_sha``
+        is skipped (no dedup key), and any write error is logged + swallowed
+        so a flaky KB filesystem never fails an otherwise-good KEEP/REVERT.
+        """
+        pr_url = str(candidate.get("pr_url") or "").strip()
+        pr_sha = str(candidate.get("head_sha") or "").strip()
+        if not pr_url and not pr_sha:
+            log.warning(
+                "framework_pr: candidate lacks pr_url/head_sha; "
+                "KB writeback skipped",
+            )
+            return
+        session_id = ""
+        ss = extra.get("shared_state") or extra.get("state")
+        if ss is not None:
+            session_id = str(getattr(ss, "cortex_session_id", "") or "")
+        try:
+            written = await write_framework_pr_record(
+                pr_url=pr_url,
+                pr_sha=pr_sha,
+                patch_path=patch_path,
+                outcome=outcome,
+                tps_delta_pct=float(tps_delta_pct),
+                session_id=session_id,
+            )
+            log.info(
+                "framework_pr: wrote KB record to %s (outcome=%s "
+                "pr_url=%s tps_delta=%+.2f%%)",
+                written, outcome, pr_url, float(tps_delta_pct),
+            )
+        except Exception as exc:  # noqa: BLE001 — KB write is best-effort
+            log.warning("framework_pr: KB writeback failed: %r", exc)
 
     # ------------------------------------------------------------------
     # Helpers
