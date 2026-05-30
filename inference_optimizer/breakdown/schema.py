@@ -172,6 +172,14 @@ class CapabilityEntry(TypedDict, total=False):
     # v0.8 M3 explore-specific:
     keep_unstable_count: int      # KEEP'd variants evicted by inlined stack rebench
     winners_history: int          # cumulative explore_search.winners_history length
+    # specialist-row only — per-domain split. Keys are
+    # SpecialistDomain.key strings (``serving_specialist`` /
+    # ``kernel_switch_specialist`` / ``comm_specialist`` /
+    # ``compiler_specialist`` / ``system_specialist`` /
+    # ``pr_intel_specialist`` / ``session_steward_specialist``). Every
+    # catalogue domain is seeded with a not_attempted entry so the
+    # dashboard can iterate without presence checks.
+    by_specialist: dict[str, "CapabilityEntry"]
 
 
 class CapabilitySummary(TypedDict, total=False):
@@ -454,9 +462,17 @@ class SourceBreakdown(TypedDict, total=False):
 
 class PhaseBreakdownExplore(TypedDict, total=False):
     """v0.8 M7 (KB_design §3.12 §4.6) — explore-phase gain split by
-    specialist domain. ``by_domain`` keys are SpecialistDomain.key
-    strings (``serving_specialist`` / …) plus ``default_grid`` /
-    ``llm_direct`` for non-specialist provenance."""
+    specialist domain.
+
+    ``by_domain`` keys are normalized — the collector strips
+    ``specialist:`` prefixes before bucketing, so consumers see the
+    bare SpecialistDomain.key (``serving_specialist`` /
+    ``kernel_switch_specialist`` / …). Non-specialist provenance
+    appears as ``default_grid`` / ``llm_direct``; resumed-from-v1
+    sessions appear as ``legacy_<action>`` (e.g. ``legacy_backends``)
+    so they don't masquerade as a real specialist domain. Empty
+    provenance falls back to ``unknown``.
+    """
     total_gain_pct: float
     by_domain: dict[str, float]
 
