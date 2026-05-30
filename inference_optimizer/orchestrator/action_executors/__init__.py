@@ -18,12 +18,14 @@ from .baseline import (
     BaselineExecutor,
     baseline_executor,
 )
+from .dynamic_action import dynamic_action_executor
 from .explore import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_STACK_STABLE_PCT,
     ExploreExecutor,
     explore_executor,
 )
+from .framework_pr import FrameworkPrExecutor, framework_pr_executor
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .sweep import (
@@ -43,13 +45,16 @@ __all__ = [
     "DEFAULT_KEEP_THRESHOLD_PCT",
     "DEFAULT_STACK_STABLE_PCT",
     "ExploreExecutor",
+    "FrameworkPrExecutor",
     "RecoverExecutor",
     "ReportExecutor",
     "SessionBreakdownExecutor",
     "SweepExecutor",
     "TargetAnalysisExecutor",
     "baseline_executor",
+    "dynamic_action_executor",
     "explore_executor",
+    "framework_pr_executor",
     "recover_executor",
     "report_executor",
     "session_breakdown_executor",

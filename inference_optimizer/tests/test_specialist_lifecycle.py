@@ -152,7 +152,7 @@ def _done_payload(
         proposals = [] if empty else [
             {
                 "variant_name": "max_seqs_512",
-                "extra_sglang_args": "--max-num-seqs 512",
+                "extra_server_args": "--max-num-seqs 512",
                 "rationale": "moderate concurrency bump",
             },
         ]
@@ -477,7 +477,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         proposals=[
             {
                 "variant_name": "moe_exp_par",
-                "extra_sglang_args": "--expert-parallel-size 8",
+                "extra_server_args": "--expert-parallel-size 8",
                 "extra_envs": {},
             },
         ],
