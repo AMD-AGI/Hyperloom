@@ -606,6 +606,148 @@ def test_attribution_method_missing(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A1.1: kernel_roofline (Dashboard-Roofline 对接清单 §1)
+# ---------------------------------------------------------------------------
+# The collector mirrors ``<sd>/reports/kernel_roofline.json`` so the
+# dashboard's hot-kernel table is fed directly from sbd. The on-disk
+# file is produced by the kernel-agent's tracelens roofline pipeline;
+# every field is optional from the breakdown's POV — collectors must
+# not raise when the file is missing or malformed.
+def _kernel_roofline_fixture(tmp_path: Path, payload: dict | None) -> Path:
+    """Build a session_dir with optional reports/kernel_roofline.json."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "kr"})
+    _write_json(sd / "state.json", {"session_id": "kr"})
+    if payload is not None:
+        _write_json(sd / "reports" / "kernel_roofline.json", payload)
+    return sd
+
+
+def test_kernel_roofline_missing_file_returns_empty_dict(tmp_path: Path) -> None:
+    """No ``reports/kernel_roofline.json`` → empty dict, no warning.
+    Most sessions never run the roofline pipeline; a warning would
+    spam every breakdown."""
+    sd = _kernel_roofline_fixture(tmp_path, payload=None)
+    bd = build(sd)
+    assert bd["kernel_roofline"] == {}
+    assert not any("kernel_roofline" in w for w in bd["warnings"])
+
+
+def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
+    """Happy path: every field arrives as documented in
+    Dashboard-Roofline 对接清单 §1, types are preserved, and the
+    kernels list keeps its on-disk order (dashboard sorts client-side)."""
+    payload = {
+        "schema_version": 1,
+        "source": "tracelens_analysis",
+        "analysis_md_path": "/abs/analysis.md",
+        "kernel_candidates_path": "/abs/kernel_candidates.json",
+        "trace_input": "/abs/torch_trace",
+        "trace_input_type": "capture_dir",
+        "kernels": [
+            {
+                "kernel_id": "k001",
+                "name": "aiter::ck_moe_stage2",
+                "source_file": "/sgl-workspace/aiter/csrc/foo.cu",
+                "kernel_category": "MoE",
+                "bound_type": "memory-bound",
+                "arithmetic_intensity": 104.39,
+                "flops_per_byte": 104.39,
+                "efficiency_percent": 37.77,
+                "gpu_pct": 29.002,
+                "call_count": 48,
+                "duration_us": 6874.0,
+                "reusable_native_kernel": True,
+            },
+            {
+                "kernel_id": "k002",
+                "name": "aten::mm",
+                "source_file": "",
+                "kernel_category": "unknown",
+                "bound_type": "compute-bound",
+                "arithmetic_intensity": 215.58,
+                "flops_per_byte": 215.58,
+                "efficiency_percent": 14.82,
+                "gpu_pct": 3.485,
+                "call_count": 48,
+                "duration_us": 826.0,
+                "reusable_native_kernel": False,
+            },
+        ],
+    }
+    sd = _kernel_roofline_fixture(tmp_path, payload=payload)
+    kr = build(sd)["kernel_roofline"]
+
+    # Envelope
+    assert kr["schema_version"] == 1
+    assert kr["source"] == "tracelens_analysis"
+    assert kr["analysis_md_path"] == "/abs/analysis.md"
+    assert kr["trace_input_type"] == "capture_dir"
+
+    # Order preserved (dashboard sorts client-side; we don't pre-sort).
+    assert [k["kernel_id"] for k in kr["kernels"]] == ["k001", "k002"]
+
+    # Field-by-field type fidelity on the first kernel.
+    k1 = kr["kernels"][0]
+    assert k1["kernel_category"] == "MoE"
+    assert k1["bound_type"] == "memory-bound"
+    assert k1["efficiency_percent"] == pytest.approx(37.77)
+    assert k1["gpu_pct"] == pytest.approx(29.002)
+    assert k1["call_count"] == 48
+    assert k1["duration_us"] == pytest.approx(6874.0)
+    assert k1["reusable_native_kernel"] is True
+    # Compute-bound entry preserves False explicitly.
+    assert kr["kernels"][1]["reusable_native_kernel"] is False
+
+
+def test_kernel_roofline_malformed_kernels_drops_to_empty_list(tmp_path: Path) -> None:
+    """``kernels`` arriving as something other than a list (e.g. a
+    pre-aggregation dict) is replaced with ``[]`` and a warning is
+    emitted; envelope fields still round-trip."""
+    payload = {
+        "schema_version": 1,
+        "source": "tracelens_analysis",
+        "kernels": {"k001": {"name": "broken"}},  # wrong shape
+    }
+    sd = _kernel_roofline_fixture(tmp_path, payload=payload)
+    bd = build(sd)
+    kr = bd["kernel_roofline"]
+    assert kr["schema_version"] == 1
+    assert kr["source"] == "tracelens_analysis"
+    assert kr["kernels"] == []
+    assert any("kernel_roofline.kernels is not a list" in w for w in bd["warnings"])
+
+
+def test_kernel_roofline_non_dict_blob_returns_empty(tmp_path: Path) -> None:
+    """Top-level JSON value is not an object (e.g. a stray array
+    written by an older tool) → empty dict + warning, never raise."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "kr"})
+    _write_json(sd / "state.json", {"session_id": "kr"})
+    (sd / "reports").mkdir(parents=True, exist_ok=True)
+    (sd / "reports" / "kernel_roofline.json").write_text(
+        json.dumps([{"kernel_id": "k001"}]), encoding="utf-8",
+    )
+    bd = build(sd)
+    assert bd["kernel_roofline"] == {}
+    assert any("not a JSON object" in w for w in bd["warnings"])
+
+
+def test_kernel_roofline_empty_kernels_list_is_valid(tmp_path: Path) -> None:
+    """``kernels: []`` is a legitimate state (pipeline ran but found no
+    hot kernels above threshold). Envelope passes through; no warning."""
+    payload = {
+        "schema_version": 1,
+        "source": "tracelens_analysis",
+        "kernels": [],
+    }
+    sd = _kernel_roofline_fixture(tmp_path, payload=payload)
+    bd = build(sd)
+    assert bd["kernel_roofline"]["kernels"] == []
+    assert not any("kernel_roofline" in w for w in bd["warnings"])
+
+
+# ---------------------------------------------------------------------------
 # A2: final.ttft_mean_ms reconstruction
 # ---------------------------------------------------------------------------
 def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:

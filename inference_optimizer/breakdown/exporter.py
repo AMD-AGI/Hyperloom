@@ -171,6 +171,15 @@ def build(
                                         ),
                                         warnings,
                                         default=[])
+    # Hot-kernel roofline table (Dashboard §1). Pulls
+    # ``<sd>/reports/kernel_roofline.json`` so dashboards consume sbd
+    # exclusively and never have to walk the kernel-agent tree.
+    kernel_roofline    = _safe_collect("kernel_roofline",
+                                        lambda: collectors.collect_kernel_roofline(
+                                            sd, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
 
     source_files = collectors.collect_source_files(
         sd,
@@ -221,6 +230,10 @@ def build(
         "kb_provenance":       kb_provenance,
         # specialist sub-agent dispatch records.
         "specialist_runs":     specialist_runs,
+        # Hot-kernel roofline table (Dashboard-Roofline 对接清单 §1).
+        # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
+        # absent — the dashboard hides the table on empty.
+        "kernel_roofline":     kernel_roofline,
 
         "warnings":            warnings,
         "source_files":        source_files,
