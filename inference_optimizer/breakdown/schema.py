@@ -147,7 +147,7 @@ class Final(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 class PhaseEvent(TypedDict, total=False):
     ts: str
-    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / select_kernels / integrate
+    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
     task_id: str
     kernel_id: str | None         # only for kernel-owned actions
     status: str                   # succeeded / failed
@@ -554,11 +554,33 @@ class KBFlusherStatus(TypedDict, total=False):
     pid_path: str                  # absolute path to .kb_flusher.pid
 
 
+class WarmReplayOutcome(TypedDict, total=False):
+    """GAP 1 — warm-recipe replay result. Empty {} when the replay
+    never fired (``--no-warm-replay`` / low confidence / no recipe);
+    otherwise one of ``in_flight`` / ``reproduced`` / ``drift`` /
+    ``failed`` / ``skipped`` with the per-status fields populated."""
+    status: str
+    expected_gain_pct: float
+    actual_gain_pct: float
+    throughput_after: float
+    warm_recipe_tier: str
+    warm_recipe_conf: float
+    replay_task_id: str
+    error_class: str
+    reason: str
+
+
 class KBProvenance(TypedDict, total=False):
     cortex_session_id: str
     warm_start_ts: str
     warm_start_recipe_seen: bool
+    warm_start_recipe_tier: str
     warm_start_pitfall_count: int
+    warm_start_lesson_count: int
+    # GAP 1 — operator-visible warm-replay summary.
+    warm_replay: WarmReplayOutcome
+    warm_replay_attempted: bool
+    warm_history_injected: bool
     stack_fingerprint: dict[str, str]
     pending_edges: list[KBPendingEdge]
     queue: KBQueueStats
@@ -617,6 +639,9 @@ class SpecialistRound(TypedDict, total=False):
     proposals_kept: int
     proposals_rejected: int
     proposals_skipped: int
+    # Retired field — was populated by the T2 hypothesize hook (now
+    # gone). Kept on the schema so claw-stats-service readers that
+    # destructure specialist_runs[] don't break; always empty.
     kb_edge_ids: list[str]
     confidence_avg: float | None
     domain_breakdown: dict[str, SpecialistDomainBreakdown]
