@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +59,63 @@ log = logging.getLogger(__name__)
 # the warning is for first-time awareness, not per-variant noise. Emit it
 # once per process to keep the log readable.
 _RUN_EVAL_DEFAULT_WARN_EMITTED = False
+
+
+def _visible_gpu_count() -> int:
+    """Return how many GPUs are visible to this pod (0 = none / unknown).
+
+    Prefers ``torch.cuda.device_count`` because that's the count sglang /
+    vllm actually see (and it doesn't shell out, which keeps the
+    BaselineExecutor unit tests that mock ``subprocess.run`` happy). Falls
+    back to ``rocm-smi --showid`` (matches ``cli._check_gpu_visibility``)
+    when torch is missing or its driver probe hits a fluke. Returns 0 on
+    every failure path so callers can skip the clamp and let downstream
+    surface the real "no GPU" error instead of inventing a wrong TP.
+
+    Override (escape hatch for hosts where torch + rocm-smi disagree, or
+    for unit tests that exercise the clamp without GPU hardware):
+    ``$INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT=N``.
+    """
+    override = os.environ.get("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "").strip()
+    if override:
+        try:
+            return max(0, int(override))
+        except ValueError:
+            log.warning(
+                "INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT=%r is not an int; "
+                "ignoring override.", override,
+            )
+    try:
+        import torch  # type: ignore[import-not-found]
+        count = int(torch.cuda.device_count() or 0)
+        if count > 0:
+            return count
+    except Exception:
+        pass
+    if shutil.which("rocm-smi"):
+        try:
+            proc = subprocess.run(
+                ["rocm-smi", "--showid"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, PermissionError, OSError):
+            return 0
+        if proc.returncode == 0:
+            # ``rocm-smi --showid`` emits 6+ lines per device
+            # (``GPU[N] : Device Name``, ``GPU[N] : Device ID``, etc.).
+            # Counting raw lines that start with ``GPU[`` over-counts by 6x
+            # (a 4-GPU pod reports 24 "visible" GPUs and the clamp never
+            # fires). Deduplicate by GPU index so 4 distinct ``GPU[0..3]``
+            # prefixes return 4.
+            indices: set[str] = set()
+            for line in (proc.stdout or "").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("GPU["):
+                    idx, _, _ = stripped[4:].partition("]")
+                    if idx:
+                        indices.add(idx)
+            return len(indices)
+    return 0
 
 
 def _tracelens_patch_enabled() -> bool:
@@ -203,6 +262,23 @@ def materialize_config_with_envs(
         envs["TP"] = resolved_tp
     else:
         resolved_tp = int(tp_from_yaml or 1)
+    # Auto-clamp TP to the pod's visible GPU count. The shipped YAML defaults
+    # to TP=8 (full DGX-style node), so a 4-GPU sandbox would otherwise launch
+    # sglang/vllm with `--tensor-parallel-size=8` and crash with `HIP error:
+    # invalid device ordinal`. Override via
+    # $INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1.
+    if os.environ.get("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "").strip() != "1":
+        visible = _visible_gpu_count()
+        if visible and resolved_tp > visible:
+            log.warning(
+                "TP=%d but only %d GPU(s) visible to this pod; clamping "
+                "TP=%d so sglang/vllm can actually load weights. Export "
+                "INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1 to opt out (the "
+                "subprocess will then fail at server launch).",
+                resolved_tp, visible, visible,
+            )
+            resolved_tp = visible
+    envs["TP"] = resolved_tp
     if not rocr_yaml or len(rocr_devices) < resolved_tp:
         derived = ",".join(str(i) for i in range(resolved_tp))
         if rocr_yaml and rocr_yaml != derived:
