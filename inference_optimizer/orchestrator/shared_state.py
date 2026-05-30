@@ -143,6 +143,48 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 LATEST_STATE_SCHEMA_VERSION: int = 2
 
 
+# The payload-surface field was renamed from ``extra_sglang_args``
+# (sglang-era name) to ``extra_server_args`` (framework-neutral).
+# The on-disk state.json may carry the legacy key in any of several
+# deeply-nested ledgers, so a one-shot walk-and-rewrite on load is
+# the cleanest migration — the next save then emits canonical only
+# and a re-load is a no-op.
+_PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
+    "extra_sglang_args":           "extra_server_args",
+    "candidate_extra_sglang_args": "candidate_extra_server_args",
+}
+
+
+def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
+    """Recursively rewrite legacy ``extra_sglang_args`` field names in-place.
+
+    Walks every dict and list reachable from ``obj`` and renames keys
+    listed in :data:`_PHASE4_LEGACY_KEY_RENAMES` to their canonical
+    counterparts. When both names are present on the same dict the
+    canonical value is kept (writer migration is considered done as
+    soon as the new key appears); otherwise the legacy value is
+    copied over.
+
+    Returns the total number of keys rewritten so the caller can log
+    a single info-level migration event.
+    """
+    migrated = 0
+    if isinstance(obj, dict):
+        for legacy_key, canonical_key in _PHASE4_LEGACY_KEY_RENAMES.items():
+            if legacy_key in obj:
+                if canonical_key not in obj:
+                    obj[canonical_key] = obj.pop(legacy_key)
+                else:
+                    del obj[legacy_key]
+                migrated += 1
+        for v in obj.values():
+            migrated += _migrate_legacy_extra_sglang_args_keys(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            migrated += _migrate_legacy_extra_sglang_args_keys(item)
+    return migrated
+
+
 @dataclass
 class TraceAnalyzeSnapshot:
     """Reference shape for ``SharedState.last_trace_analyze``.
@@ -680,16 +722,16 @@ class SharedState:
     #   {
     #     "schema_version": 1,
     #     "tested": {
-    #       fingerprint: {name, extra_sglang_args, extra_envs, outcome,
+    #       fingerprint: {name, extra_server_args, extra_envs, outcome,
     #                     round_id, ts, gain_pct, tput, provenance,
     #                     workload_signature}
     #     },
     #     "accepted": [
-    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #       {fingerprint, name, extra_server_args, extra_envs,
     #        gain_pct, stack_index, accepted_at_round, ts}
     #     ],
     #     "rejected": [
-    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #       {fingerprint, name, extra_server_args, extra_envs,
     #        reason, gain_pct, tput, round_id, ts}
     #     ],
     #     "winners_history": [
@@ -829,7 +871,7 @@ class SharedState:
     discovered_flags: dict[str, Any] = field(default_factory=dict)
     # Rolling per-action winners log (cap 20) used by IR-26 idea
     # generation. Schema: ``{action, round_id, base_tput,
-    # winners: [{name, tput, gain_pct, extra_sglang_args, extra_envs}],
+    # winners: [{name, tput, gain_pct, extra_server_args, extra_envs}],
     # best: {...}, ts}``.
     backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
     # Synergy combo keys (``"name1+name2+..."``) already tested this
@@ -1013,6 +1055,21 @@ class SharedState:
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
         migration_events: list[str] = []
 
+        # Migrate the ``extra_sglang_args`` -> ``extra_server_args`` rename
+        # (same for ``candidate_extra_sglang_args``). The on-disk shape
+        # stays a plain dict, so the legacy key may appear in any of the
+        # many nested ledgers (winners, baseline_artifacts, action_attempts,
+        # explore_search, etc.). Walk the entire payload once at load time
+        # and rewrite the legacy keys in place — the next save will then
+        # emit canonical only and a future load of the same file is a no-op.
+        legacy_migrations = _migrate_legacy_extra_sglang_args_keys(raw)
+        if legacy_migrations:
+            migration_events.append(
+                f"extra_server_args rename: migrated {legacy_migrations} legacy "
+                f"extra_sglang_args / candidate_extra_sglang_args key(s) "
+                f"to extra_server_args / candidate_extra_server_args"
+            )
+
         # Filter to known fields so older / newer state.json shapes don't
         # crash. Unknown keys are dropped; missing keys fall back to defaults.
         known = {f for f in cls.__dataclass_fields__}
@@ -1074,9 +1131,9 @@ class SharedState:
                     "v0.8 §3.9: dropped legacy scoreboard fields from "
                     "state.json (%s).", summary,
                 )
-        # Phase 7 of the dedup-by-fingerprint plan: migrate any v1
-        # ``params_search`` ledger (where ``tested`` was keyed by display
-        # name) to schema v2 (keyed by content fingerprint). Backends has
+        # Migrate any v1 ``params_search`` ledger (where ``tested`` was
+        # keyed by display name) to schema v2 (keyed by content
+        # fingerprint). Backends has
         # no pre-fingerprint persisted data so it only needs default-key
         # normalization. We do this here — at the load boundary — so the
         # executor and Coordinator paths can assume the v2 schema and
@@ -1195,7 +1252,7 @@ class SharedState:
         Idempotent: already-migrated ledgers are returned with only the
         defensive defaults filled in. A legacy v1 ledger whose ``tested``
         is keyed by variant name gets re-keyed by content fingerprint
-        re-computed from the stored ``extra_sglang_args`` / ``extra_envs``;
+        re-computed from the stored ``extra_server_args`` / ``extra_envs``;
         the original name is preserved inside each entry and surfaced
         through ``name_index`` so display lookups remain stable.
         """
@@ -1240,8 +1297,8 @@ class SharedState:
             # full ``result`` dict under ``result``; check both.
             nested = entry.get("result") if isinstance(entry.get("result"), dict) else {}
             args = str(
-                entry.get("extra_sglang_args")
-                or nested.get("extra_sglang_args") or ""
+                entry.get("extra_server_args")
+                or nested.get("extra_server_args") or ""
             )
             envs = dict(
                 entry.get("extra_envs")
@@ -1250,7 +1307,7 @@ class SharedState:
             fp = variant_fingerprint(args, envs)
             new_entry = dict(entry)
             new_entry.setdefault("name", str(key))
-            new_entry.setdefault("extra_sglang_args", args)
+            new_entry.setdefault("extra_server_args", args)
             new_entry.setdefault("extra_envs", envs)
             new_entry["fingerprint"] = fp
             migrated[fp] = new_entry
@@ -1267,7 +1324,7 @@ class SharedState:
                 v = dict(v)
                 if not v.get("fingerprint"):
                     v["fingerprint"] = variant_fingerprint(
-                        str(v.get("extra_sglang_args") or ""),
+                        str(v.get("extra_server_args") or ""),
                         dict(v.get("extra_envs") or {}),
                     )
                 rebuilt.append(v)
@@ -1386,7 +1443,7 @@ class SharedState:
                         and all(c in "0123456789abcdef" for c in fp_key))
                     else str(entry.get("fingerprint")
                              or _fp(
-                                 str(entry.get("extra_sglang_args") or ""),
+                                 str(entry.get("extra_server_args") or ""),
                                  dict(entry.get("extra_envs") or {}),
                              ))
                 )
@@ -1394,7 +1451,7 @@ class SharedState:
                 row = {
                     "fingerprint": fp,
                     "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_server_args": str(entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "note": str(entry.get("note") or ""),
                     "outcome": outcome,
@@ -1425,13 +1482,13 @@ class SharedState:
                 if not isinstance(entry, dict):
                     continue
                 fp = str(entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_sglang_args") or ""),
+                    str(entry.get("extra_server_args") or ""),
                     dict(entry.get("extra_envs") or {}),
                 ))
                 row = {
                     "fingerprint": fp,
                     "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_server_args": str(entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "note": str(entry.get("note") or ""),
                     "gain_pct": entry.get("gain_pct"),
@@ -1467,7 +1524,7 @@ class SharedState:
                 if not isinstance(entry, dict):
                     continue
                 fp = str(entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_sglang_args") or ""),
+                    str(entry.get("extra_server_args") or ""),
                     dict(entry.get("extra_envs") or {}),
                 ))
                 if fp in accepted_fps:
@@ -1475,7 +1532,7 @@ class SharedState:
                 row = {
                     "fingerprint": fp,
                     "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_server_args": str(entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "note": str(entry.get("note") or ""),
                     "reason": str(entry.get("reason") or "not_keep"),
@@ -1515,7 +1572,7 @@ class SharedState:
                 fp_val = entry.get("fingerprint")
                 if not fp_val:
                     fp_val = _fp(
-                        str(entry.get("extra_sglang_args") or ""),
+                        str(entry.get("extra_server_args") or ""),
                         dict(entry.get("extra_envs") or {}),
                     )
                 wh.append({
@@ -1525,7 +1582,7 @@ class SharedState:
                     "fingerprint": str(fp_val),
                     "gain_pct": entry.get("gain_pct"),
                     "extra_args": str(entry.get("extra_args")
-                                       or entry.get("extra_sglang_args") or ""),
+                                       or entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "provenance": str(entry.get("provenance")
                                        or f"legacy:{legacy_action}"),
@@ -1939,7 +1996,12 @@ class SharedState:
             or payload.get("source_file")
             or ""
         )
-        extra_args = str(payload.get("extra_sglang_args") or "").strip()
+        # ``payload`` is an external envelope (LLM intent or sub-agent
+        # kernel_opt result); route through the compat helper so a legacy
+        # ``extra_sglang_args`` key still resolves with a single
+        # DeprecationWarning logged via stacklevel=3.
+        from ..compat.payload_aliases import read_extra_server_args
+        extra_args = read_extra_server_args(payload).strip()
         return kernel_id, patch_path, target_file, extra_args
 
     def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
@@ -2003,7 +2065,7 @@ class SharedState:
             "kernel_id": kernel_id,
             "patch_path": patch_path,
             "target_file": target_file,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
             "attempts": attempts,
             "attempt_count": len(attempts),
             "best_gain_pct": best_gain,
@@ -2033,7 +2095,7 @@ class SharedState:
             "kernel_id": kernel_id,
             "patch_path": patch_path,
             "target_file": target_file,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
             "attempt_count": len(attempts),
             "best_gain_pct": best_gain,
             "keep_threshold_pct": keep_threshold_pct,
@@ -3156,15 +3218,15 @@ class SharedState:
             return
         from .action_executors._canonical_fingerprint import canonical_fingerprint
         args = str(
-            variant.get("candidate_extra_sglang_args")
-            or variant.get("extra_sglang_args") or ""
+            variant.get("candidate_extra_server_args")
+            or variant.get("extra_server_args") or ""
         )
         envs = dict(variant.get("extra_envs") or {})
         fp = str(variant.get("fingerprint") or canonical_fingerprint(args, envs))
         entry = {
             "fingerprint": fp,
             "name": str(variant.get("name") or ""),
-            "extra_sglang_args": args,
+            "extra_server_args": args,
             "extra_envs": envs,
             "note": str(variant.get("note") or ""),
             "tput": variant.get("output_throughput") or variant.get("tput"),
@@ -3262,15 +3324,15 @@ class SharedState:
 
         def _stamped(entry: dict[str, Any]) -> dict[str, Any]:
             args = str(
-                entry.get("candidate_extra_sglang_args")
-                or entry.get("extra_sglang_args") or ""
+                entry.get("candidate_extra_server_args")
+                or entry.get("extra_server_args") or ""
             )
             envs = dict(entry.get("extra_envs") or {})
             return {
                 "name": str(entry.get("name", "")),
                 "tput": entry.get("output_throughput") or entry.get("tput"),
                 "gain_pct": entry.get("gain_pct"),
-                "extra_sglang_args": args,
+                "extra_server_args": args,
                 "extra_envs": envs,
                 "note": str(entry.get("note") or ""),
                 "fingerprint": (
@@ -3328,7 +3390,7 @@ class SharedState:
         action: str,
         variant_name: str | None,
         new_tput: float,
-        extra_sglang_args: str = "",
+        extra_server_args: str = "",
         ts: str | None = None,
     ) -> float | None:
         """N32b: Mirror an ``optimization_stack`` append into
@@ -3370,13 +3432,13 @@ class SharedState:
         if self.optimization_stack or not isinstance(self.current_best, dict):
             return
         variant = self.current_best.get("variant_name")
-        extra_args = self.current_best.get("extra_sglang_args")
+        extra_args = self.current_best.get("extra_server_args")
         if not variant and not extra_args:
             return
         self.optimization_stack = [{
             "action": self.current_best.get("action", "unknown"),
             "variant_name": variant or "legacy_current_best",
-            "extra_sglang_args": extra_args or "",
+            "extra_server_args": extra_args or "",
             "extra_envs": dict(self.current_best.get("extra_envs") or {}),
             "tput": self.current_best.get("tput"),
             "workspace": self.current_best.get("workspace"),
@@ -3390,7 +3452,7 @@ class SharedState:
             )
 
     # ------------------------------------------------------------------
-    # Time-budget helpers (Phase 2 — consumed by Coordinator._compose_prompt)
+    # Time-budget helpers (consumed by Coordinator._compose_prompt)
     # ------------------------------------------------------------------
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
         """Wall-clock minutes since ``start_ts``.
@@ -3949,7 +4011,7 @@ class SharedState:
             else ""
         )
         args = (
-            str(entry.get("extra_sglang_args") or "").strip()
+            str(entry.get("extra_server_args") or "").strip()
             or "(no-flag)"
         )
         envs = entry.get("extra_envs") or {}

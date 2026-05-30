@@ -130,7 +130,7 @@ class Final(TypedDict, total=False):
     validated_at_stack_len: int
     validated_ts: str
     stack_changed_after_validation: bool
-    extra_sglang_args: str
+    extra_server_args: str
     extra_envs: dict[str, Any]
     action_path: list[str]        # ordered list of action:variant labels from optimization_stack
     ttft_mean_ms: float | None
@@ -267,7 +267,7 @@ class AdoptedKernel(TypedDict, total=False):
     kernel_id: str
     patch_path: str
     target_file: str
-    extra_sglang_args: str
+    extra_server_args: str
     e2e_gain_pct: float | None
     validated: bool
     last_status: str
@@ -300,7 +300,7 @@ class ParamSearchEntry(TypedDict, total=False):
     """One row from params_search.{tested,accepted,rejected}."""
     name: str
     fingerprint: str
-    extra_sglang_args: str
+    extra_server_args: str
     extra_envs: dict[str, Any]
     output_throughput: float | None
     gain_pct: float | None
@@ -432,7 +432,7 @@ class StackGainEntry(TypedDict, total=False):
     cum_gain_before: float
     cum_gain_after: float
     delta_pct: float | None       # None when validate_stack re-baselined
-    extra_sglang_args: str
+    extra_server_args: str
 
 
 class SourceBreakdown(TypedDict, total=False):

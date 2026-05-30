@@ -692,6 +692,9 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/opt/venv/lib/python3.12/site-packages/aiter/",
+    "/opt/venv/lib/python3.12/site-packages/sglang/",
+    "/opt/venv/lib/python3.12/site-packages/vllm/",
     # Production vLLM wheel install layout (system dist-packages).
     # Required since vLLM in the current image ships under
     # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
@@ -704,6 +707,17 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
+    # atom layout. The filesystem path is ``/app/ATOM/atom/`` but
+    # ``is_runtime_generated_kernel`` lowercases inputs before substring
+    # matching, so the prefix below is stored lowercase to match. Keep
+    # in sync with ``inference_optimizer/orchestrator/
+    # kernel_request_handlers.py`` ``_REUSABLE_SOURCE_ROOTS`` — both
+    # lists feed the same reusable-kernel classifier.
+    "/app/atom/atom/",
+    "/opt/venv/lib/python3.10/site-packages/atom/",
+    "/opt/venv/lib/python3.12/site-packages/atom/",
+    "/usr/local/lib/python3.12/dist-packages/atom/",
+    "/usr/local/lib/python3.10/dist-packages/atom/",
     # aiter ships its device sources (.cu/.cuh) in the sibling ``aiter_meta``
     # package (``<...>/aiter_meta/csrc/``), NOT under ``aiter/`` — so the
     # ``aiter/`` entries above never match a resolved device source.
