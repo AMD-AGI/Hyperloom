@@ -171,6 +171,24 @@ def build(
                                         ),
                                         warnings,
                                         default=[])
+    # Hot-kernel roofline table (Dashboard §1). Pulls
+    # ``<sd>/reports/kernel_roofline.json`` so dashboards consume sbd
+    # exclusively and never have to walk the kernel-agent tree.
+    kernel_roofline    = _safe_collect("kernel_roofline",
+                                        lambda: collectors.collect_kernel_roofline(
+                                            sd, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
+    # Optimization-progress curve (Dashboard §2). Stack ledger +
+    # ceiling/target reference lines, derived from state.json so the
+    # dashboard reads sbd alone.
+    roofline           = _safe_collect("roofline",
+                                        lambda: collectors.collect_roofline(
+                                            sd, state, manifest, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
 
     source_files = collectors.collect_source_files(
         sd,
@@ -221,6 +239,15 @@ def build(
         "kb_provenance":       kb_provenance,
         # specialist sub-agent dispatch records.
         "specialist_runs":     specialist_runs,
+        # Hot-kernel roofline table (Dashboard-Roofline 对接清单 §1).
+        # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
+        # absent — the dashboard hides the table on empty.
+        "kernel_roofline":     kernel_roofline,
+        # Optimization-progress curve (Dashboard-Roofline 对接清单 §2).
+        # Always populated when baseline ran; ``ceiling_available`` is
+        # False on sessions that never ran the watermark roofline
+        # pipeline (dashboard hides the reference lines).
+        "roofline":            roofline,
 
         "warnings":            warnings,
         "source_files":        source_files,
