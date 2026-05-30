@@ -1078,6 +1078,31 @@ cache state also lands in the boot `Preflight diagnostics:` block. If
 COLD_START repeats across retries, JIT was killed mid-`hipcc`; bump
 `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=5400` instead of relaunching.
 
+## Pre-GEAK Unittest Harness (unittest skill)
+
+Before `backend=geak` attempts, the main agent generates a GEAK-compatible
+test harness by following `kernel-agent/skills/unittest/SKILL.md`. The skill
+searches for existing tests, collects shapes/dtypes from TraceLens and
+profiling data, and generates a 4-mode harness (`--correctness` / `--profile`
+/ `--benchmark` / `--full-benchmark`) that matches GEAK's evaluation contract.
+
+The resulting `test_command` is passed via `--test-command` to
+`kernel_optimization.py`, which forwards it to GEAK. If the skill fails to
+produce a valid harness (after up to 3 retries), `--test-command` is omitted
+and GEAK falls back to its own test discovery cascade.
+
+Validation uses `kernel-agent/skills/unittest/validate_harness.py` for both
+static checks (argparse + 4 flags + GEAK output markers) and runtime
+verification (run correctness + benchmark with reduced iterations).
+
+The Coordinator does NOT need to drive this step — the main agent executes
+the unittest skill before calling `kernel_optimization.py`. Observability
+shows up as `test_command` in `optimization_attempts.jsonl[].backend_paths`.
+
+The GEAK outer-timeout is managed by `_ensure_yaml_env_timeout()` in
+`kernel_optimization.py`, which sets a fallback of 3600s so GEAK's
+`LocalEnvironment.timeout` never silently inherits the 30s default.
+
 ## Kernel Apply Safety
 
 Kernel optimization may modify `/sgl-workspace/aiter`, `/sgl-workspace/sglang`,
