@@ -1,344 +1,362 @@
-"""v0.8 KB_design §3.2 §5.1 + KB_gaps/Gap-12 — Cortex T0 anchor tests.
+"""Tests for ``run_t0_anchor`` after the RecipeKB cutover.
 
-Covers the v0.8 contract for the T0 ritual after the cli /
-Coordinator dual-entry refactor (KB_gaps/Gap-12):
-
-* :func:`orchestrator.cortex_t0.run_t0_anchor` is the single source
-  of truth for the four T0 steps (session_begin / propose_point
-  recipe / find_recipe / traps) and the SharedState writes
-  that go with them.
-* cli is the **canonical** entry point — fail-fast on Cortex
-  failure (``sys.exit(2)``), stdout banner the operator expects.
-* :meth:`Coordinator._ensure_cortex_t0_anchored` is a **defensive
-  fallback** for SDK / integration-test callers that construct a
-  :class:`Coordinator` without going through the cli plumbing —
-  fail-soft on Cortex failure, INFO-log banner instead of stdout.
-* The fallback no-ops when ``cortex_kb`` is None, disabled, or a
-  prior anchor already wrote ``shared_state.cortex_session_id``.
-
-HTTP calls are mocked via ``respx``.
+The anchor is now a thin read-modify-write against the local
+recipe-snapshot store + a single ``kb.get_recipe`` warm-start
+lookup (no fallback ladder). These tests use a real
+:class:`LocalRecipeStore` against a tmp dir so we exercise the
+on-disk format end-to-end; the remote half is wired to ``None``
+so no network call ever happens.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from unittest.mock import patch
+from typing import Any
 
-import httpx
 import pytest
-import respx
 
-from inference_optimizer.cortex_kb_client import (
-    CortexKBClient,
-    CortexKBError,
-)
 from inference_optimizer.orchestrator.cortex_t0 import (
     T0Result,
     run_t0_anchor,
 )
-from inference_optimizer.orchestrator.shared_state import SharedState
-from inference_optimizer.paths import make_session_dir
-from inference_optimizer.session_paths import (
-    cortex_pitfalls_json,
-    cortex_sid_file,
-    cortex_warm_json,
+from inference_optimizer.recipe_kb import (
+    LocalRecipeStore,
+    RecipeKB,
+    recipe_canonical_id,
 )
 
 
-KB_URL = "http://kb-test.local"
+# ===========================================================================
+# Fake SharedState — only the fields the anchor reads
+# ===========================================================================
+@dataclass
+class _FakeSharedState:
+    cortex_session_id: str = ""
+    warm_start_ts: str = ""
+    warm_start_recipe: dict[str, Any] = field(default_factory=dict)
+    warm_start_pitfalls: list[Any] = field(default_factory=list)
+    warm_start_lessons: list[Any] = field(default_factory=list)
+    framework: str = "sglang"
+    framework_version: str = "0.4.5"
+    precision: str = "fp8"
+    tp: int = 8
+    ep: int = 0
+    conc: int = 0
+    isl: int = 0
+    osl: int = 0
+    max_model_len: int = 0
+    model_class: str = ""
+
+    def save(self, _path: Path) -> None:  # noqa: D401
+        """No-op save — tests don't care about disk persistence here."""
 
 
-# ===========================================================================
-# fixtures
-# ===========================================================================
 @pytest.fixture
-def session_dir(tmp_path, monkeypatch) -> Path:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv("CORTEX_KB_URL", KB_URL)
-    monkeypatch.delenv("KB_SERVICE_TOKEN", raising=False)
-    monkeypatch.delenv("CORTEX_KB_SMOKE", raising=False)
-    return make_session_dir()
+def session_dir(tmp_path: Path) -> Path:
+    sd = tmp_path / "session"
+    sd.mkdir()
+    return sd
 
 
-def _state_for_session(session_dir: Path) -> SharedState:
-    s = SharedState()
-    s.session_id = "sid-test"
-    s.model_name = "Qwen-Qwen3-8B"
-    s.gpu_type = "mi300x"
-    s.framework = "sglang"
-    s.save(session_dir)
-    return SharedState.load_or_init(session_dir)
-
-
-def _wire_t0_happy_path(router: respx.MockRouter, sid: int = 99) -> None:
-    """Wire the four T0 HTTP calls with happy-path responses."""
-    router.post("/v1/sessions/begin").mock(
-        return_value=httpx.Response(200, json={
-            "session_id": sid, "thinking_style": "recommendation", "lens_schedule": [],
-        }),
+@pytest.fixture
+def kb(tmp_path: Path) -> RecipeKB:
+    """Local-only dispatcher (no remote)."""
+    return RecipeKB(
+        local=LocalRecipeStore(root=tmp_path / "kb"),
+        remote=None,
     )
-    router.post("/v1/points/propose").mock(
-        return_value=httpx.Response(200, json={
-            "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
-        }),
-    )
-    router.post("/v1/points/query").mock(
-        return_value=httpx.Response(200, json={"points": []}),
+
+
+def _expected_cid(state: _FakeSharedState, workload: str, hw: str) -> str:
+    return recipe_canonical_id(
+        model=workload,
+        hardware=hw,
+        framework=state.framework,
+        framework_version=state.framework_version,
+        precision=state.precision,
     )
 
 
 # ===========================================================================
-# 1. run_t0_anchor — short-circuit branches
+# happy path
 # ===========================================================================
-def test_t0_disabled_client_emits_banner_and_skips_state_writes(session_dir):
-    client = CortexKBClient(session_dir=session_dir, enabled=False, kb_url=KB_URL)
-    state = _state_for_session(session_dir)
-    lines: list[str] = []
+def test_t0_anchor_writes_recipe_row_with_arbor_schema(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    """First T0 anchor writes a recipe row whose on-disk JSON
+    matches the arbor schema (top-level identity + extras-splatted
+    operator-tracing tags)."""
+    state = _FakeSharedState()
     result = run_t0_anchor(
-        client, state,
-        workload="Qwen-Qwen3-8B", hw="mi300x",
-        on_status=lines.append,
+        kb, state,
+        workload="DeepSeek-R1",
+        hw="MI300X",
+        image_digest="img-sha-abc",
+        stack_fingerprint={"vllm": "0.6.0", "rocm": "7.2", "aiter": "abc1234"},
+        extra_attrs={
+            "framework": "sglang",
+            "model_class": "moe",
+            "marathon_dispatch_id": "marathon-42",
+        },
+        session_dir=session_dir,
     )
     assert isinstance(result, T0Result)
-    assert result.status == "skipped_disabled"
-    assert any("DISABLED" in line for line in lines)
-    assert state.cortex_session_id == ""
-    assert state.warm_start_recipe == {}
-    assert state.warm_start_pitfalls == []
+    assert result.workload == "DeepSeek-R1"
+    cid = _expected_cid(state, "DeepSeek-R1", "MI300X")
+    row = kb.get_recipe(canonical_id=cid)
+    assert row is not None
+    # arbor-shape top-level identity
+    assert row["model"]    == "DeepSeek-R1"
+    assert row["hardware"] == "MI300X"
+    # extras splatted at the top level (arbor convention)
+    assert row.get("model_class")          == "moe"
+    assert row.get("image_digest")         == "img-sha-abc"
+    assert row.get("marathon_dispatch_id") == "marathon-42"
+    assert row.get("tp")                   == 8
 
 
-def test_t0_already_anchored_session_id_does_not_re_begin(session_dir):
-    """When ``cortex_session_id`` is already non-empty (e.g. cli already
-    ran T0), the helper MUST NOT call ``session begin`` again. It still
-    refreshes find_recipe / traps so a long-running session that
-    survives Cortex outages picks up newer KB rows."""
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    state = _state_for_session(session_dir)
-    state.cortex_session_id = "prior-sid"
-    sentinel: list[str] = []
-
-    def _boom(**kwargs):
-        sentinel.append("session_begin")
-        return "SHOULD-NOT-FIRE"
-
-    with respx.mock(base_url=KB_URL) as router:
-        router.post("/v1/points/propose").mock(
-            return_value=httpx.Response(200, json={
-                "proposal_id": 1, "status": "auto_accepted", "point_id": 1,
-            }),
-        )
-        router.post("/v1/points/query").mock(
-            return_value=httpx.Response(200, json={"points": []}),
-        )
-        with patch.object(client, "session_begin", side_effect=_boom):
-            result = run_t0_anchor(
-                client, state,
-                workload="w", hw="mi300x",
-                on_status=lambda _l: None,
-            )
-    assert sentinel == []
-    assert result.session_id == "prior-sid"
-    assert state.cortex_session_id == "prior-sid"
-
-
-def test_t0_fail_soft_returns_failed_session_begin_on_cortex_error(session_dir):
-    """fail_fast=False (Coordinator fallback) absorbs the error and
-    returns a failed result; warm_start fields stay empty."""
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    state = _state_for_session(session_dir)
-    with patch.object(
-        client, "session_begin",
-        side_effect=CortexKBError("synthetic outage"),
-    ):
-        result = run_t0_anchor(
-            client, state,
-            workload="w", hw="mi300x",
-            fail_fast=False,
-            on_status=lambda _l: None,
-        )
-    assert result.status == "failed_session_begin"
-    assert "synthetic outage" in result.error
-    assert state.cortex_session_id == ""
-    assert state.warm_start_recipe == {}
-
-
-def test_t0_fail_fast_propagates_cortex_error(session_dir):
-    """fail_fast=True (cli path) re-raises so cli can sys.exit(2)."""
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    state = _state_for_session(session_dir)
-    with patch.object(
-        client, "session_begin",
-        side_effect=CortexKBError("synthetic outage"),
-    ):
-        with pytest.raises(CortexKBError):
-            run_t0_anchor(
-                client, state,
-                workload="w", hw="mi300x",
-                fail_fast=True,
-                on_status=lambda _l: None,
-            )
-
-
-# ===========================================================================
-# 2. run_t0_anchor — happy path with HTTP mocks
-# ===========================================================================
-def test_t0_happy_path_writes_sid_warm_and_pitfalls(session_dir):
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    state = _state_for_session(session_dir)
-    banner: list[str] = []
-    with respx.mock(base_url=KB_URL) as router:
-        _wire_t0_happy_path(router, sid=12345)
-        result = run_t0_anchor(
-            client, state,
-            workload="Qwen-Qwen3-8B", hw="mi300x",
-            image_digest="sha256:demo",
-            stack_fingerprint={"rocm": "7.2.0"},
-            extra_attrs={"framework": "sglang"},
-            on_status=banner.append,
-            session_dir=session_dir,
-            save_state=True,
-        )
-    assert result.status == "ok"
-    assert result.session_id == "12345"
-    assert state.cortex_session_id == "12345"
-    assert state.warm_start_recipe["workload"] == "Qwen-Qwen3-8B"
-    assert state.warm_start_recipe["hw"] == "mi300x"
-    assert cortex_sid_file(session_dir).read_text(encoding="utf-8").strip() == "12345"
-    assert cortex_warm_json(session_dir).exists()
-    assert cortex_pitfalls_json(session_dir).exists()
-    assert any("session_id=12345" in line for line in banner)
-
-
-def test_t0_skipped_already_when_sid_present_via_anchor(session_dir):
-    """Two consecutive ``run_t0_anchor`` calls: the second sees a
-    sid and reports ``skipped_already`` — no re-begin."""
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    state = _state_for_session(session_dir)
-    with respx.mock(base_url=KB_URL) as router:
-        _wire_t0_happy_path(router, sid=12345)
-        run_t0_anchor(
-            client, state,
-            workload="w", hw="mi300x",
-            on_status=lambda _l: None,
-        )
-        sid_after_first = state.cortex_session_id
-        assert sid_after_first == "12345"
-        boom_calls: list[str] = []
-        with patch.object(
-            client, "session_begin",
-            side_effect=lambda **kw: boom_calls.append("hit") or "WRONG",
-        ):
-            result = run_t0_anchor(
-                client, state,
-                workload="w", hw="mi300x",
-                on_status=lambda _l: None,
-            )
-    assert result.status == "skipped_already"
-    assert boom_calls == []
-    assert state.cortex_session_id == sid_after_first
-
-
-# ===========================================================================
-# 3. Coordinator._ensure_cortex_t0_anchored — defensive SDK fallback
-# ===========================================================================
-def _bare_coord(session_dir: Path, *, client, state):
-    from inference_optimizer.orchestrator.coordinator import Coordinator
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = session_dir
-    c.shared_state = state
-    c.cortex_kb = client
-    return c
-
-
-def test_coordinator_fallback_noop_when_cortex_disabled(session_dir):
-    state = _state_for_session(session_dir)
-    client = CortexKBClient(session_dir=session_dir, enabled=False, kb_url=KB_URL)
-    coord = _bare_coord(session_dir, client=client, state=state)
-    coord._ensure_cortex_t0_anchored()
-    assert state.cortex_session_id == ""
-    assert state.warm_start_recipe == {}
-
-
-def test_coordinator_fallback_noop_when_client_is_none(session_dir):
-    state = _state_for_session(session_dir)
-    coord = _bare_coord(session_dir, client=None, state=state)
-    coord._ensure_cortex_t0_anchored()
-    assert state.warm_start_recipe == {}
-
-
-def test_coordinator_fallback_noop_when_session_id_already_set(session_dir):
-    state = _state_for_session(session_dir)
-    state.cortex_session_id = "from-cli"
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    coord = _bare_coord(session_dir, client=client, state=state)
-    boom_calls: list[str] = []
-    with patch.object(
-        client, "session_begin",
-        side_effect=lambda **kw: boom_calls.append("hit") or "WRONG",
-    ):
-        coord._ensure_cortex_t0_anchored()
-    assert boom_calls == []
-    assert state.cortex_session_id == "from-cli"
-
-
-def test_coordinator_fallback_runs_t0_when_sid_missing(session_dir):
-    """SDK / integration-test path: ``Coordinator(...)`` constructed
-    without cli plumbing. cortex_session_id is empty → fallback
-    fires and writes warm_start to SharedState."""
-    state = _state_for_session(session_dir)
-    assert state.cortex_session_id == ""
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    coord = _bare_coord(session_dir, client=client, state=state)
-    with respx.mock(base_url=KB_URL) as router:
-        _wire_t0_happy_path(router, sid=98765)
-        coord._ensure_cortex_t0_anchored()
-    assert state.cortex_session_id == "98765"
-    assert state.warm_start_recipe
-    reloaded = SharedState.load_or_init(session_dir)
-    assert reloaded.cortex_session_id == "98765"
-    assert reloaded.warm_start_recipe
-
-
-def test_coordinator_fallback_absorbs_cortex_error(session_dir):
-    """Cortex outage during fallback → reactor boots cleanly with
-    empty warm_start, no raise."""
-    state = _state_for_session(session_dir)
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    coord = _bare_coord(session_dir, client=client, state=state)
-    with patch.object(
-        client, "session_begin",
-        side_effect=CortexKBError("outage"),
-    ):
-        coord._ensure_cortex_t0_anchored()
-    assert state.cortex_session_id == ""
-    assert state.warm_start_recipe == {}
-
-
-def test_coordinator_fallback_uses_state_workload_hw(session_dir):
-    """Workload / hw flow from SharedState, not from a manifest dict
-    (SDK callers don't have a manifest)."""
-    state = _state_for_session(session_dir)
-    state.model_name = "Llama-3.1-70B"
-    state.gpu_type = "mi325x"
-    client = CortexKBClient(session_dir=session_dir, kb_url=KB_URL)
-    coord = _bare_coord(session_dir, client=client, state=state)
-    with respx.mock(base_url=KB_URL) as router:
-        _wire_t0_happy_path(router, sid=11111)
-        coord._ensure_cortex_t0_anchored()
-    assert state.warm_start_recipe["workload"] == "Llama-3.1-70B"
-    assert state.warm_start_recipe["hw"] == "mi325x"
-
-
-# ===========================================================================
-# 4. Re-export sanity — run_t0_anchor is importable from cli too
-# ===========================================================================
-def test_cli_imports_run_t0_anchor():
-    """cli must import the helper so the refactored
-    ``_bootstrap_cortex_kb`` keeps working without re-implementing
-    the ritual locally."""
-    from inference_optimizer import cli  # noqa: F401
-    assert hasattr(cli, "run_t0_anchor")
-    from inference_optimizer.orchestrator.cortex_t0 import (
-        run_t0_anchor as canonical,
+def test_t0_anchor_writes_warm_start_snapshot_to_disk(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    """``warm_start_recipe`` snapshot lands at
+    ``runtime/cortex/.kb_warm.json`` with the expected envelope."""
+    state = _FakeSharedState()
+    run_t0_anchor(
+        kb, state,
+        workload="m", hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
     )
-    assert cli.run_t0_anchor is canonical
+    warm_path = session_dir / "runtime" / "cortex" / ".kb_warm.json"
+    assert warm_path.is_file()
+    import json
+    payload = json.loads(warm_path.read_text())
+    # Empty warm on first put — recipe just got created, but the
+    # warm_start lookup happens AFTER the put_recipe so the row IS
+    # present and tier == "exact".
+    assert payload["tier"] == "exact"
+    assert payload["confidence"] == 1.0
+
+
+# ===========================================================================
+# warm-start surfacing pitfalls / lessons embedded in the recipe row
+# ===========================================================================
+def test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    """Pre-seeded recipe with embedded pitfalls / lessons must
+    surface on shared_state.warm_start_pitfalls / lessons."""
+    state = _FakeSharedState()
+    cid = _expected_cid(state, "M", "MI300X")
+    # Pre-seed a recipe with embedded pitfalls + lessons.
+    kb.put_recipe(
+        canonical_id=cid,
+        model="M", hardware="MI300X",
+        framework="sglang", framework_version="0.4.5", precision="fp8",
+        pitfalls=[{"description": "watch for X"}],
+        lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
+        provenance={"source": "seed", "generator": "ut"},
+    )
+    run_t0_anchor(
+        kb, state,
+        workload="M", hw="MI300X",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
+    )
+    assert len(state.warm_start_pitfalls) == 1
+    assert state.warm_start_pitfalls[0]["description"] == "watch for X"
+    assert len(state.warm_start_lessons) == 1
+    assert state.warm_start_lessons[0]["statement"] == "Y is the answer"
+    assert state.warm_start_recipe["tier"] == "exact"
+    assert state.warm_start_recipe["confidence"] == 1.0
+
+
+def test_t0_anchor_no_prior_recipe_means_warm_miss(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    """The anchor itself writes a row (so warm becomes 'exact' on
+    the second pass); but the warm_start lookup happens AFTER the
+    put, so we always see at least our own row.
+
+    To test 'true miss' we'd have to inspect the state BEFORE the
+    anchor runs. Here we just confirm pitfalls / lessons stay empty
+    when the row had none."""
+    state = _FakeSharedState()
+    run_t0_anchor(
+        kb, state,
+        workload="cold-model", hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
+    )
+    assert state.warm_start_pitfalls == []
+    assert state.warm_start_lessons  == []
+
+
+# ===========================================================================
+# Resume short-circuits
+# ===========================================================================
+def test_t0_anchor_short_circuits_when_already_anchored(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    """``cortex_session_id`` AND ``warm_start_ts`` both set, no
+    resume → anchor must short-circuit without re-running the
+    read-modify-write."""
+    state = _FakeSharedState(
+        cortex_session_id="prior-sid",
+        warm_start_ts="2026-05-28T00:00:00Z",
+    )
+    result = run_t0_anchor(
+        kb, state,
+        workload="m", hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
+        resume=False,
+    )
+    assert result.status == "skipped_already"
+    # No row was written — the anchor short-circuited.
+    cid = _expected_cid(state, "m", "mi300x")
+    assert kb.get_recipe(canonical_id=cid) is None
+
+
+def test_t0_anchor_resume_does_not_short_circuit(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    """``resume=True`` bypasses the skipped-already short-circuit
+    so warm-start gets refreshed (the local store may have grown
+    new recipes since the original run)."""
+    state = _FakeSharedState(
+        cortex_session_id="prior-sid",
+        warm_start_ts="2026-05-28T00:00:00Z",
+    )
+    result = run_t0_anchor(
+        kb, state,
+        workload="m", hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
+        resume=True,
+    )
+    assert result.status in ("ok", "resumed")
+    cid = _expected_cid(state, "m", "mi300x")
+    assert kb.get_recipe(canonical_id=cid) is not None
+
+
+def test_t0_anchor_uses_existing_cortex_session_id_when_present(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    """A pre-existing ``cortex_session_id`` survives the anchor —
+    we don't fabricate a new one."""
+    state = _FakeSharedState(cortex_session_id="prior-sid-from-resume")
+    run_t0_anchor(
+        kb, state,
+        workload="m", hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
+    )
+    assert state.cortex_session_id == "prior-sid-from-resume"
+
+
+def test_t0_anchor_falls_back_to_session_dir_basename_for_sid(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    """When SharedState has no cortex_session_id, the anchor uses
+    the session_dir basename as the local sid (mirrors the prior
+    cortex_kb behaviour now that the central session protocol is
+    retired)."""
+    state = _FakeSharedState()
+    run_t0_anchor(
+        kb, state,
+        workload="m", hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
+    )
+    assert state.cortex_session_id == session_dir.name
+
+
+# ===========================================================================
+# Read-modify-write correctness
+# ===========================================================================
+def test_t0_anchor_preserves_existing_best_config_on_metadata_stamp(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    """T0 only stamps metadata — best_config / best_throughput /
+    sessions written by a prior CLOSE must survive the anchor."""
+    state = _FakeSharedState()
+    cid = _expected_cid(state, "m", "mi300x")
+    # Seed a row with a populated best_config.
+    kb.put_recipe(
+        canonical_id=cid,
+        model="m", hardware="mi300x",
+        framework="sglang", framework_version="0.4.5", precision="fp8",
+        best_config={"tp": "16", "ep": "8"},
+        best_throughput=12345.6,
+        sessions=[
+            {"date": "2026-05-25", "throughput_before": 1.0,
+             "throughput_after": 12345.6, "actions_taken": ["tp+ep"]}
+        ],
+        provenance={"source": "seed", "generator": "ut"},
+    )
+    # T0 anchor adds new metadata extras.
+    run_t0_anchor(
+        kb, state,
+        workload="m", hw="mi300x",
+        image_digest="new-img-digest",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
+    )
+    # best_config / best_throughput / sessions all preserved.
+    after = kb.get_recipe(canonical_id=cid)
+    assert after is not None
+    assert after["best_config"]     == {"tp": "16", "ep": "8"}
+    assert after["best_throughput"] == 12345.6
+    assert len(after["sessions"])    == 1
+    assert after["sessions"][0]["actions_taken"] == ["tp+ep"]
+    # New metadata stamped.
+    assert after.get("image_digest") == "new-img-digest"
+
+
+def test_t0_anchor_increments_version_on_existing_row(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    state = _FakeSharedState()
+    cid = _expected_cid(state, "m", "mi300x")
+    kb.put_recipe(
+        canonical_id=cid,
+        model="m", hardware="mi300x",
+        framework="sglang", framework_version="0.4.5", precision="fp8",
+        provenance={"source": "seed", "generator": "ut"},
+    )
+    assert kb.get_recipe(canonical_id=cid)["version"] == 1  # type: ignore[index]
+    run_t0_anchor(
+        kb, state,
+        workload="m", hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=session_dir,
+    )
+    after = kb.get_recipe(canonical_id=cid)
+    assert after is not None
+    assert after["version"] == 2
+
+
+# ===========================================================================
+# Defensive: anchor never raises on missing optional inputs
+# ===========================================================================
+def test_t0_anchor_tolerates_missing_extra_attrs(
+    kb: RecipeKB, session_dir: Path,
+) -> None:
+    state = _FakeSharedState()
+    # No extra_attrs / stack_fingerprint / image_digest at all.
+    result = run_t0_anchor(
+        kb, state,
+        workload="m", hw="mi300x",
+        session_dir=session_dir,
+    )
+    assert result.status in ("ok", "resumed")
+
+
+def test_t0_anchor_requires_explicit_session_dir(
+    kb: RecipeKB,
+) -> None:
+    state = _FakeSharedState()
+    with pytest.raises(ValueError):
+        run_t0_anchor(kb, state, workload="m", hw="mi300x")
