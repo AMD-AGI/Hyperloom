@@ -17,6 +17,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
 
 from inference_optimizer.orchestrator.backends.critic_mock import (
     MockCriticBackend,
