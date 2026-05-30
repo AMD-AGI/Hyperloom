@@ -748,6 +748,238 @@ def test_kernel_roofline_empty_kernels_list_is_valid(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A1.2: roofline (Dashboard-Roofline 对接清单 §2)
+# ---------------------------------------------------------------------------
+# The optimization-progress chart consumer. Inputs are entirely
+# in-memory state + manifest; collector never re-runs benchmarks.
+def _roofline_fixture(
+    tmp_path: Path,
+    *,
+    state: dict,
+    manifest: dict | None = None,
+) -> Path:
+    """Session fixture for ``collect_roofline``; ``manifest`` defaults
+    to a minimal stub with ``created_at_utc``."""
+    sd = tmp_path / "session"
+    _write_json(
+        sd / "manifest.json",
+        manifest or {
+            "schema_version": 1,
+            "session_id": "rl",
+            "created_at_utc": "2026-05-29T10:40:50+00:00",
+        },
+    )
+    base_state: dict = {"session_id": "rl"}
+    base_state.update(state)
+    _write_json(sd / "state.json", base_state)
+    return sd
+
+
+def test_roofline_full_payload_baseline_plus_one_keep(tmp_path: Path) -> None:
+    """Real-shape payload from the live ``Qwen3-30B-A3B-Base`` session
+    used as the dashboard reference fixture — baseline + 1 KEEP +
+    1 snapshot. Verifies trajectory ordering, gain math, ceiling /
+    target derivation, and the percent-of-* convenience numbers."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 1300.34,
+        "cumulative_gain": 1.0146,
+        "current_best": {
+            "action": "explore",
+            "tput": 1313.5356953711394,
+        },
+        "optimization_stack": [
+            {
+                "action": "explore",
+                "candidate_extra_sglang_args": "--num-continuous-decode-steps 4 --scheduler-recv-interval 4",
+                "extra_envs": {},
+                "tput": 1313.5356953711394,
+                "ts": "2026-05-29T11:18:24.339975+00:00",
+                "variant_name": "continuous_decode_steps_4",
+            },
+        ],
+        "roofline_snapshots": [
+            {
+                "snapshot_id": 1,
+                "ts": "2026-05-29T11:06:03.891380+00:00",
+                "achieved_tok_per_sec": 1300.34,
+                "theoretical_peak_tok_per_sec": 1976.8214052878614,
+                "within_roofline_pct": 65.78,
+                "gap_to_roofline_pct": 34.22,
+                "compute_pct": 29.95,
+                "idle_pct": 70.02,
+                "comm_pct": 0.0,
+                "top_bottleneck": "MoE_unfused",
+                "top_kernel": {
+                    "name": "aiter::ck_moe_stage1",
+                    "bound_type": "memory",
+                    "efficiency_pct": 48.35,
+                    "gpu_pct": 9.17,
+                },
+            },
+        ],
+    })
+    rl = build(sd)["roofline"]
+
+    # Trajectory: baseline + 1 KEEP, both have ts.
+    assert len(rl["trajectory"]) == 2
+    assert rl["trajectory"][0]["label"] == "baseline"
+    assert rl["trajectory"][0]["action"] == "baseline"
+    assert rl["trajectory"][0]["ts"] == "2026-05-29T10:40:50+00:00"
+    assert rl["trajectory"][0]["tput"] == pytest.approx(1300.34)
+    assert rl["trajectory"][0]["gain_pct"] == 0.0
+    assert rl["trajectory"][1]["label"] == "continuous_decode_steps_4"
+    assert rl["trajectory"][1]["tput"] == pytest.approx(1313.5356953711394)
+    assert rl["trajectory"][1]["flags"] == "--num-continuous-decode-steps 4 --scheduler-recv-interval 4"
+    # gain at point 1 = (1313.54 - 1300.34) / 1300.34 * 100 ≈ 1.015%
+    assert rl["trajectory"][1]["gain_pct"] == pytest.approx(1.015, abs=0.01)
+
+    # Reference lines (target = ceiling × 0.70).
+    assert rl["ceiling_available"] is True
+    assert rl["ceiling_tok_per_sec"] == pytest.approx(1976.82, abs=0.01)
+    assert rl["target_tok_per_sec"] == pytest.approx(1976.82 * 0.70, abs=0.01)
+    assert rl["ceiling_ratio_target"] == pytest.approx(0.70)
+
+    # Headline numbers.
+    assert rl["baseline_tput"] == pytest.approx(1300.34)
+    assert rl["current_best_tput"] == pytest.approx(1313.5356953711394)
+    # 1313.54 / 1976.82 ≈ 66.45%
+    assert rl["current_best_pct_of_ceiling"] == pytest.approx(66.45, abs=0.05)
+    # 1313.54 / (1976.82 * 0.70) ≈ 94.93%
+    assert rl["current_best_pct_of_target"] == pytest.approx(94.93, abs=0.05)
+
+    # Tooltip carryover.
+    assert rl["snapshot_top_bottleneck"] == "MoE_unfused"
+    assert rl["snapshot_within_roofline_pct"] == pytest.approx(65.78)
+
+    # Snapshots list passthrough.
+    assert len(rl["snapshots"]) == 1
+    assert rl["snapshots"][0]["theoretical_peak_tok_per_sec"] == pytest.approx(
+        1976.8214052878614,
+    )
+
+
+def test_roofline_no_snapshot_means_no_ceiling(tmp_path: Path) -> None:
+    """Sessions that never ran the watermark roofline pipeline have
+    no ``roofline_snapshots``. The trajectory is still drawn (baseline
+    + KEEPs), but ceiling/target/percent-of-* are explicitly None and
+    ``ceiling_available`` is False so the dashboard hides the
+    reference lines."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 100.0,
+        "cumulative_gain": 5.0,
+        "current_best": {"tput": 105.0},
+        "optimization_stack": [
+            {"action": "explore", "tput": 105.0, "variant_name": "v1",
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+    })
+    rl = build(sd)["roofline"]
+
+    assert rl["ceiling_available"] is False
+    assert rl["ceiling_tok_per_sec"] is None
+    assert rl["target_tok_per_sec"] is None
+    assert rl["current_best_pct_of_ceiling"] is None
+    assert rl["current_best_pct_of_target"] is None
+    # Trajectory still present.
+    assert len(rl["trajectory"]) == 2
+    assert rl["snapshots"] == []
+
+
+def test_roofline_no_keep_yet_baseline_only(tmp_path: Path) -> None:
+    """Mid-session before any KEEP: trajectory holds only the baseline
+    point; current_best == baseline; cumulative_gain == 0."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 200.0,
+        "cumulative_gain": 0.0,
+        "current_best": {"tput": 200.0},
+        "optimization_stack": [],
+    })
+    rl = build(sd)["roofline"]
+
+    assert len(rl["trajectory"]) == 1
+    assert rl["trajectory"][0]["label"] == "baseline"
+    assert rl["current_best_tput"] == pytest.approx(200.0)
+    assert rl["cumulative_gain_pct"] == 0.0
+
+
+def test_roofline_baseline_failed_empty_trajectory(tmp_path: Path) -> None:
+    """When ``baseline_tput`` is 0 (baseline never finished), the
+    trajectory is empty — the dashboard surfaces "no data" instead
+    of plotting against zero."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 0.0,
+        "cumulative_gain": 0.0,
+        "optimization_stack": [],
+    })
+    rl = build(sd)["roofline"]
+
+    assert rl["trajectory"] == []
+    assert rl["baseline_tput"] == 0.0
+    assert rl["current_best_tput"] == 0.0
+
+
+def test_roofline_uses_latest_snapshot_for_ceiling(tmp_path: Path) -> None:
+    """Multiple ``roofline_snapshots`` exist (the watermark pipeline
+    refines the peak across reruns). The ceiling is read from the
+    LATEST snapshot, not snapshots[0]."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 1000.0,
+        "cumulative_gain": 0.0,
+        "current_best": {"tput": 1000.0},
+        "optimization_stack": [],
+        "roofline_snapshots": [
+            {"snapshot_id": 1, "theoretical_peak_tok_per_sec": 1500.0,
+             "ts": "2026-05-29T10:00:00+00:00"},
+            {"snapshot_id": 2, "theoretical_peak_tok_per_sec": 1700.0,
+             "ts": "2026-05-29T11:00:00+00:00",
+             "top_bottleneck": "kv_cache"},
+        ],
+    })
+    rl = build(sd)["roofline"]
+    # Ceiling pulled from snapshot[-1] not [0].
+    assert rl["ceiling_tok_per_sec"] == pytest.approx(1700.0)
+    assert rl["snapshot_top_bottleneck"] == "kv_cache"
+    assert len(rl["snapshots"]) == 2
+
+
+def test_roofline_trajectory_diverges_from_current_best_emits_warning(
+    tmp_path: Path,
+) -> None:
+    """If the trajectory tail's tput doesn't agree with
+    ``state.current_best.tput`` (resume mid-promotion bug), the
+    collector surfaces the divergence as a warning instead of hiding
+    it."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 100.0,
+        "cumulative_gain": 5.0,
+        "current_best": {"tput": 110.0},      # mismatched
+        "optimization_stack": [
+            {"action": "explore", "tput": 105.0, "variant_name": "v1",
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+    })
+    bd = build(sd)
+    assert any(
+        "roofline.current_best_tput" in w and "current_best.tput" in w
+        for w in bd["warnings"]
+    )
+
+
+def test_roofline_failure_streak_passes_through(tmp_path: Path) -> None:
+    """``roofline_failure_streak`` is consumed by the dashboard to
+    show a "stale" badge on the ceiling reference line when the
+    watermark pipeline has failed repeatedly."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 100.0,
+        "current_best": {"tput": 100.0},
+        "roofline_failure_streak": 3,
+        "optimization_stack": [],
+    })
+    rl = build(sd)["roofline"]
+    assert rl["roofline_failure_streak"] == 3
+
+
+# ---------------------------------------------------------------------------
 # A2: final.ttft_mean_ms reconstruction
 # ---------------------------------------------------------------------------
 def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:
