@@ -32,10 +32,10 @@ name: SaFE Optimize Submit
 
 on:
   schedule:
-    # Run every 12 hours at Beijing 12:00 and 00:00 (UTC 04:00 and 16:00).
+    # Run every 12 hours at UTC 00:00 and 12:00.
     # Cron uses the fixed production candidate pool and excludes models queued
     # or running in other optimize-submit workflows.
-    - cron: '0 4,16 * * *'
+    - cron: '0 0,12 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
@@ -191,7 +191,7 @@ jobs:
       # Schedule no longer excludes leaderboard-known models — that was for
       # the discovery cron. We now WANT to re-run the production pool.
       # Batch index for schedule is computed by generate_hf_matrix.py from the
-      # Beijing 00:00/12:00 half-day slot, not GITHUB_RUN_NUMBER, so manual
+      # UTC 00:00/12:00 half-day slot, not GITHUB_RUN_NUMBER, so manual
       # dispatches do not perturb cron rotation. We still exclude active
       # workflows so cron does not double-submit a model already running.
       INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
