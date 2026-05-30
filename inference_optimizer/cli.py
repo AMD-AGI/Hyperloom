@@ -3330,6 +3330,20 @@ def _build_recipe_kb_dispatcher(
         # of CORTEX_KB_URL value.
         return RecipeKB(local=local_store, remote=None)
 
+    # gbrain read-side remote (opt-in). Selected with
+    # ``RECIPE_KB_REMOTE=gbrain`` + ``GBRAIN_BASE_URL`` / ``GBRAIN_TOKEN``.
+    # Writes still go local-only; gbrain only serves the read side, so
+    # this slots into the same dispatcher contract as the cortex remote.
+    if os.environ.get("RECIPE_KB_REMOTE", "").strip().lower() == "gbrain":
+        from .recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
+
+        gbrain_remote = build_gbrain_remote_from_env()
+        if gbrain_remote is not None and gbrain_remote.enabled:
+            return RecipeKB(local=local_store, remote=gbrain_remote)
+        # Selected but not configured: stay local-only rather than
+        # silently falling back to the cortex kb-service.
+        return RecipeKB(local=local_store, remote=None)
+
     cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
     if not cortex_url:
         cortex_url = (os.environ.get("CORTEX_KB_URL", "") or "").strip()
