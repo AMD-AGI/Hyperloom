@@ -971,7 +971,7 @@ def collect_final(
         "validated_at_stack_len":            val_stack_len,
         "validated_ts":                      str(state.get("cumulative_gain_validated_ts") or ""),
         "stack_changed_after_validation":    stack_len > val_stack_len > 0,
-        "extra_sglang_args":                 str(cb.get("extra_sglang_args") or ""),
+        "extra_server_args":                 str(cb.get("extra_server_args") or ""),
         "extra_envs":                        dict(cb.get("extra_envs") or {}),
         "action_path":                       action_path,
         "ttft_mean_ms":                      ttft,
@@ -2056,7 +2056,7 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "kernel_id":         str(ent.get("kernel_id") or ""),
                 "patch_path":        str(ent.get("patch_path") or ""),
                 "target_file":       str(ent.get("target_file") or ""),
-                "extra_sglang_args": str(ent.get("extra_sglang_args") or ""),
+                "extra_server_args": str(ent.get("extra_server_args") or ""),
                 "e2e_gain_pct":      _to_float(ent.get("best_gain_pct")),
                 "validated":         True,
                 "last_status":       str(ent.get("last_status") or ""),
@@ -2136,7 +2136,7 @@ def _shape_ledger(
         return {
             "name":              str(e.get("name") or ""),
             "fingerprint":       str(e.get("fingerprint") or ""),
-            "extra_sglang_args": str(e.get("extra_sglang_args") or ""),
+            "extra_server_args": str(e.get("extra_server_args") or ""),
             "extra_envs":        dict(e.get("extra_envs") or {}),
             "output_throughput": _to_float(e.get("output_throughput") or e.get("tput")),
             "gain_pct":          _to_float(e.get("gain_pct")),
@@ -2641,7 +2641,7 @@ def _promote_legacy_gain_entries(
     State written by older Coordinator versions stored per-entry
     ``cum_gain_after`` floats only. Cross-reference the parallel
     ``state.optimization_stack`` to recover action / variant_name / ts /
-    extra_sglang_args, and compute ``delta_pct`` as the diff against the
+    extra_server_args, and compute ``delta_pct`` as the diff against the
     prior entry's ``cum_gain_after``. Entries the legacy ledger left as
     ``None`` (seeded / resumed sessions) become objects with
     ``cum_gain_after = delta_pct = None`` so index-alignment with
@@ -2667,9 +2667,9 @@ def _promote_legacy_gain_entries(
             "cum_gain_before": prev_cum,
             "cum_gain_after": cum_after,
             "delta_pct": delta,
-            "extra_sglang_args": str(
-                se.get("extra_sglang_args")
-                or se.get("candidate_extra_sglang_args")
+            "extra_server_args": str(
+                se.get("extra_server_args")
+                or se.get("candidate_extra_server_args")
                 or ""
             ),
         })
@@ -2994,7 +2994,7 @@ def _reconstruct_gain_ledger(
             "cum_gain_before":   round(cum_before, 4),
             "cum_gain_after":    round(cum_after, 4),
             "delta_pct":         delta,
-            "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+            "extra_server_args": str(entry.get("extra_server_args") or ""),
         })
         cum_before = cum_after
     return out
