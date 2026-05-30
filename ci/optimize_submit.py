@@ -48,6 +48,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -1071,6 +1072,7 @@ class SubmissionRecord:
     artifacts_dir: str | None = None   # local dir where artifacts landed
     artifact_count: int = 0
     artifact_files: list[str] = field(default_factory=list)
+    artifact_sources: list[dict] = field(default_factory=list)
 
 
 # ── Per-model flow ──────────────────────────────────────────────────────────────
@@ -1281,6 +1283,46 @@ def _safe_local_path(artifacts_dir: Path, task_id: str, remote_path: str) -> Pat
     return artifacts_dir / task_id / Path(*parts) if parts else artifacts_dir / task_id / "artifact.bin"
 
 
+def _record_artifact_source(
+    rec: SubmissionRecord,
+    local_path: Path,
+    source_type: str,
+    *,
+    remote_path: str | None = None,
+    source_path: str | None = None,
+    session_dir: str | None = None,
+) -> None:
+    entry = {
+        "source_type": source_type,
+        "local_path": str(local_path).replace("\\", "/"),
+        "file_name": local_path.name,
+    }
+    if remote_path:
+        entry["remote_path"] = remote_path
+    if source_path:
+        entry["source_path"] = source_path
+    if session_dir:
+        entry["session_dir"] = session_dir
+    rec.artifact_sources.append(entry)
+
+
+def _write_artifact_sources(task_dir: Path, rec: SubmissionRecord) -> None:
+    if not rec.artifact_sources:
+        return
+    payload = {
+        "task_id": rec.task_id,
+        "model": rec.model,
+        "claw_session_id": rec.claw_session_id,
+        "artifact_dir": str(task_dir).replace("\\", "/"),
+        "files": rec.artifact_sources,
+    }
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "artifact_sources.json").write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+
 # Files that MUST be present in the task directory for the run to count as
 # "delivered". session_breakdown.json was promoted from optional/audit to a
 # key result in 2026-05 because claw-stats-service / the V2 dashboard prefer
@@ -1325,6 +1367,39 @@ def _metrics_have_positive_throughput(path: str) -> bool:
         return float(baseline) > 0 and float(optimized) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _timestamp_hint_variants(value: str) -> set[str]:
+    """Return path-matchable variants for skill session timestamps."""
+    raw = value.strip()
+    if not raw:
+        return set()
+    compact = raw.replace("T", "").replace("t", "").replace("Z", "").replace("z", "")
+    variants = {raw, raw.lower()}
+    if compact and compact != raw:
+        variants.update({compact, compact.lower()})
+    return variants
+
+
+def _session_hints_from_artifact_items(items: list[dict]) -> set[str]:
+    hints: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        text = " ".join(
+            str(item.get(key) or "")
+            for key in ("path", "downloadPath", "name")
+        )
+        for match in re.findall(r"\b\d{8}T\d{6}Z\b", text, flags=re.IGNORECASE):
+            hints.update(_timestamp_hint_variants(match))
+    return hints
+
+
+def _path_has_session_hint(path: str, hints: set[str]) -> bool:
+    if not hints:
+        return False
+    norm_path = _norm_token(path)
+    return any(_norm_token(hint) in norm_path for hint in hints)
 
 
 def _category_from_arch(arch: str | None) -> str:
@@ -1716,6 +1791,7 @@ def _nfs_fallback_collect(
     rec: SubmissionRecord,
     artifacts_dir: Path,
     copy_full_session: bool = False,
+    current_session_hints: set[str] | None = None,
 ) -> int:
     """Scan NFS result directories for files matching this model.
 
@@ -1742,6 +1818,7 @@ def _nfs_fallback_collect(
 
     Returns count of files copied.
     """
+    current_session_hints = set(current_session_hints or set())
     nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
     model_basename = (rec.model or "").split("/")[-1]
     model_short = model_basename.lower().replace("-", "").replace("_", "").replace(".", "")
@@ -1753,7 +1830,12 @@ def _nfs_fallback_collect(
 
     copied = 0
 
-    # ── Stage A: legacy canonical dirs (matched by entry name) ──────────────
+    if not current_session_hints:
+        log.info("[task %s] NFS fallback skipped: no current-session "
+                 "timestamp hints from SaFE artifacts", rec.task_id)
+        return copied
+
+    # ── Stage A: legacy canonical dirs (matched by current timestamp) ───────
     legacy_scan_dirs = [
         f"{nfs_root}/hyperloom-results",
         f"{nfs_root}/results/ci",
@@ -1767,6 +1849,8 @@ def _nfs_fallback_collect(
         except Exception:
             continue
         for entry in entries:
+            if not _path_has_session_hint(entry, current_session_hints):
+                continue
             entry_clean = entry.lower().replace("-", "").replace("_", "").replace(".", "")
             if model_short not in entry_clean:
                 continue
@@ -1785,6 +1869,13 @@ def _nfs_fallback_collect(
                         try:
                             shutil.copy2(src, dst)
                             _backfill_ci_metrics_file(dst, rec)
+                            _record_artifact_source(
+                                rec,
+                                dst,
+                                "nfs_legacy",
+                                source_path=src,
+                                session_dir=candidate,
+                            )
                         except Exception as e:
                             log.warning("[task %s] NFS legacy copy %s -> %s failed: %s",
                                         rec.task_id, src, dst, e)
@@ -1801,7 +1892,7 @@ def _nfs_fallback_collect(
     if copied:
         return copied
 
-    # ── Stage B: /wekafs/users/<uid>/<session>/...  matched by model field ──
+    # ── Stage B: /wekafs/users/<uid>/<session>/...  matched by timestamp ────
     users_root = f"{nfs_root}/users"
     if not os.path.isdir(users_root):
         return copied
@@ -1816,7 +1907,10 @@ def _nfs_fallback_collect(
         return copied
 
     def _model_field_matches(model_field: str) -> bool:
-        return _norm_token(model_field) == target
+        return (
+            _norm_token(model_field) == target
+            or _norm_token(model_field.split("/")[-1]) == target
+        )
 
     # rglob with depth 4 is enough for the layouts we've seen:
     #   /wekafs/users/<uid>/<session>/ci_metrics.json                (depth 4)
@@ -1830,6 +1924,8 @@ def _nfs_fallback_collect(
         for sess in os.listdir(uid_path):
             sess_path = os.path.join(uid_path, sess)
             if not os.path.isdir(sess_path):
+                continue
+            if not _path_has_session_hint(sess_path, current_session_hints):
                 continue
             for sub in ("", "phase10_report", "results"):
                 ci_path = os.path.join(sess_path, sub, "ci_metrics.json") \
@@ -1904,6 +2000,13 @@ def _nfs_fallback_collect(
         try:
             shutil.copy2(src, dst)
             _backfill_ci_metrics_file(dst, rec)
+            _record_artifact_source(
+                rec,
+                dst,
+                "nfs_user_session",
+                source_path=src,
+                session_dir=best_sess,
+            )
         except Exception as e:
             log.warning("[task %s] NFS user-session copy %s -> %s failed: %s",
                         rec.task_id, src, dst, e)
@@ -1992,6 +2095,10 @@ def wait_and_collect_one(
             time.sleep(15)
     log.info("[task %s] safe artifacts: %d total, %d to download",
              rec.task_id, len(items), len(wanted))
+    current_session_hints = _session_hints_from_artifact_items(items)
+    if current_session_hints:
+        log.info("[task %s] current session timestamp hints from artifacts: %s",
+                 rec.task_id, ", ".join(sorted(current_session_hints)))
 
     task_dir = artifacts_dir / rec.task_id
     rec.artifacts_dir = str(task_dir)
@@ -2003,6 +2110,12 @@ def wait_and_collect_one(
         try:
             n = safe.download_artifact_to(rec.task_id, it, str(local))
             _backfill_ci_metrics_file(local, rec)
+            _record_artifact_source(
+                rec,
+                local,
+                "safe_artifact_api",
+                remote_path=path,
+            )
             rec.artifact_files.append(str(local))
             rec.artifact_count += 1
             log.info("[task %s] saved %s (%d bytes)", rec.task_id, path, n)
@@ -2017,7 +2130,10 @@ def wait_and_collect_one(
                  rec.task_id, has_metrics, has_report)
         copy_full_session = all_artifacts or _env_truthy("SAFE_OPTIMIZE_COPY_FULL_SESSION")
         n_added = _nfs_fallback_collect(
-            rec, artifacts_dir, copy_full_session=copy_full_session,
+            rec,
+            artifacts_dir,
+            copy_full_session=copy_full_session,
+            current_session_hints=current_session_hints,
         )
         if n_added:
             log.info("[task %s] NFS fallback added %d files", rec.task_id, n_added)
@@ -2028,14 +2144,23 @@ def wait_and_collect_one(
     # SOURCE files so operators ssh-ing into /wekafs/users/<uid>/<sess>/
     # see image/hyperloom_commit/category/sandbox_duration_seconds without
     # downloading the GHA artifact zip. No-op when wekafs isn't mounted.
+    if rec.final_status == "Succeeded":
+        try:
+            n_wkfs = _backfill_wekafs_in_place(rec)
+            if n_wkfs:
+                log.info("[task %s] wekafs in-place backfill updated %d file(s)",
+                         rec.task_id, n_wkfs)
+        except Exception as e:
+            log.warning("[task %s] wekafs in-place backfill skipped due to %s: %s",
+                        rec.task_id, type(e).__name__, e)
+    else:
+        log.info("[task %s] wekafs in-place backfill skipped for final_status=%s",
+                 rec.task_id, rec.final_status or "?")
     try:
-        n_wkfs = _backfill_wekafs_in_place(rec)
-        if n_wkfs:
-            log.info("[task %s] wekafs in-place backfill updated %d file(s)",
-                     rec.task_id, n_wkfs)
+        _write_artifact_sources(task_dir, rec)
     except Exception as e:
-        log.warning("[task %s] wekafs in-place backfill skipped due to %s: %s",
-                    rec.task_id, type(e).__name__, e)
+        log.warning("[task %s] artifact source metadata write skipped: %s",
+                    rec.task_id, e)
     return rec
 
 
@@ -2483,6 +2608,9 @@ def main() -> int:
         log.info("=" * 60)
         log.info("Final task statuses: %s",
                  ", ".join(f"{k}={v}" for k, v in sorted(final_counts.items())))
+        non_success = [r for r in records if r.task_id and r.final_status != "Succeeded"]
+    else:
+        non_success = []
 
     # Manifest is written *after* wait/collect so it captures final_status etc.
     if args.output_dir:
@@ -2491,8 +2619,10 @@ def main() -> int:
 
     if args.dry_run:
         return 0
-    # Non-zero only when nothing was submitted at all (per user request:
-    # "完成就算成功" — partial task failures don't fail the workflow).
+    if non_success:
+        log.error("Non-success terminal statuses: %s",
+                  ", ".join(f"{r.model}:{r.final_status or 'Pending'}" for r in non_success))
+        return 2
     return 0 if submitted > 0 else 1
 
 
