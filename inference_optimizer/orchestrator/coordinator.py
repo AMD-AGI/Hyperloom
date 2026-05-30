@@ -4649,6 +4649,20 @@ class Coordinator:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
 
+            # PR-A8 / D3 (Arbor-into-Hyperloom): surface the intervention-mix
+            # ledger so Orchestration escalates to a code-patch specialist
+            # when it has been config-only for too long (Arbor's "do not
+            # settle for config-only" rule). ``record_intervention`` maintains
+            # the ledger + counter; this block is its consumer.
+            try:
+                mix_block = self.shared_state.to_intervention_mix_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: intervention_mix_summary failed")
+                mix_block = ""
+            if mix_block:
+                sections.append("=== Intervention mix (config vs code_patch) ===")
+                sections.append(mix_block)
+
         # Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
         # alerts described in the role prompt.
