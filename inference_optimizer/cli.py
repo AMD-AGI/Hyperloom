@@ -1348,6 +1348,64 @@ def _build_specialist_executor(
     return _executor
 
 
+def _build_dynamic_action_executor(
+    args: argparse.Namespace,
+) -> "Callable[[Any], Awaitable[dict]]":
+    """Build a SubAgentRunner-compatible executor backed by
+    :class:`DynamicActionRunner`.
+
+    Production uses a real Claude backend; tests register a
+    :class:`MockBackend` through the same path. Falls back to the
+    stub executor when no ``claude`` binary is on PATH.
+    """
+    import shutil
+
+    from .orchestrator.dynamic_action_runner import (
+        DEFAULT_TURN_CAP,
+        DEFAULT_WALL_CLOCK_BUDGET_SEC,
+        DynamicActionRunner,
+    )
+    from .orchestrator.action_executors.dynamic_action import (
+        dynamic_action_executor as _stub_executor,
+    )
+    from .orchestrator.framework_paths import resolve_source_file_allowlist
+
+    claude_bin = shutil.which("claude") or ""
+    if not claude_bin:
+        log.warning(
+            "dynamic_action: `claude` binary not on PATH; falling "
+            "back to the stub executor (empty proposal_set).",
+        )
+        return _stub_executor
+
+    model = (
+        getattr(args, "dynamic_action_model", None)
+        or getattr(args, "claude_model", "")
+    ).strip()
+    turn_cap_raw = getattr(args, "dynamic_action_turn_cap", None)
+    turn_cap = int(turn_cap_raw) if turn_cap_raw else DEFAULT_TURN_CAP
+    wall_clock_raw = getattr(args, "dynamic_action_wall_clock_sec", None)
+    wall_clock = (
+        float(wall_clock_raw) if wall_clock_raw
+        else DEFAULT_WALL_CLOCK_BUDGET_SEC
+    )
+    backend = ClaudeBackend(
+        model=model, max_turns_default=1, raw_completion=True,
+    )
+    runner = DynamicActionRunner(
+        backend,
+        wall_clock_budget_sec=wall_clock,
+        turn_cap=turn_cap,
+        framework_source_roots=tuple(resolve_source_file_allowlist()),
+    )
+
+    async def _executor(ctx: Any) -> dict:
+        result = await runner.run(ctx)
+        return result.to_dict()
+
+    return _executor
+
+
 def _register_executors(
     coordinator: Coordinator,
     *,
@@ -1355,6 +1413,7 @@ def _register_executors(
     compare_against_gpu: str | None = None,
     session_dir: Path | None = None,
     specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
+    dynamic_action_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
 ) -> None:
     """Wire all currently-available action executors.
 
@@ -1399,6 +1458,20 @@ def _register_executors(
     # (cli only passes a non-None executor when capacity > 0).
     if specialist_executor is not None:
         coordinator.sub.register_executor("specialist", specialist_executor)
+
+    # Register the runner-driven dynamic_action executor when
+    # available; otherwise fall back to the stub.
+    if dynamic_action_executor is not None:
+        coordinator.sub.register_executor(
+            "dynamic_action", dynamic_action_executor,
+        )
+    else:
+        from .orchestrator.action_executors.dynamic_action import (
+            dynamic_action_executor as _stub_dynamic_action_executor,
+        )
+        coordinator.sub.register_executor(
+            "dynamic_action", _stub_dynamic_action_executor,
+        )
 
     # PR-A4 (Arbor-into-Hyperloom): wire the real IntegratePatchExecutor.
     # The executor reads the specialist's worktree patches, applies them
@@ -3789,6 +3862,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
             if cur_phase in ("", "PRELUDE"):
                 state.framework_phase_enabled = False
+                # Persist immediately: the later conditional save only
+                # runs when there was a prior stop_reason / crash, so a
+                # clean resume would otherwise drop this toggle on the
+                # next disk reload.
+                state.save(session_dir)
                 print(
                     "  framework phase       : DISABLING for resume "
                     "(--no-framework + phase=PRELUDE)"
@@ -4359,12 +4437,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             session_dir=session_dir,
             knowledge_plane=knowledge_plane,
         )
+    dynamic_action_executor: "Any" = _build_dynamic_action_executor(args)
     _register_executors(
         coordinator,
         no_kernel=no_kernel,
         compare_against_gpu=getattr(args, "compare_against_gpu", None),
         session_dir=session_dir,
         specialist_executor=specialist_executor,
+        dynamic_action_executor=dynamic_action_executor,
     )
     # Persist effective system prompts for resume / drift inspection.
     _snapshot_system_prompts(session_dir, prompts=prompts)
@@ -5158,6 +5238,41 @@ def _build_parser() -> argparse.ArgumentParser:
         or None,
         help="Claude model used for specialist sub-agents (defaults to "
              "the orchestration --claude-model). KB_design §3.5 §6.",
+    )
+    opt.add_argument(
+        "--dynamic-action-model",
+        dest="dynamic_action_model",
+        type=str,
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_DYNAMIC_ACTION_MODEL", "",
+        ) or None,
+        help="Claude model used for dynamic_action sub-agents (defaults "
+             "to --claude-model).",
+    )
+    opt.add_argument(
+        "--dynamic-action-turn-cap",
+        dest="dynamic_action_turn_cap",
+        type=int,
+        default=int(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DYNAMIC_ACTION_TURN_CAP", "0",
+            ) or "0",
+        ) or None,
+        help="Hard cap on ReAct turns per dynamic_action dispatch "
+             "(default 12). Per dynamic_action_runner.DEFAULT_TURN_CAP.",
+    )
+    opt.add_argument(
+        "--dynamic-action-wall-clock-sec",
+        dest="dynamic_action_wall_clock_sec",
+        type=float,
+        default=float(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DYNAMIC_ACTION_WALL_CLOCK_SEC", "0",
+            ) or "0",
+        ) or None,
+        help="Wall-clock budget per dynamic_action dispatch (default "
+             "900s = 15 min). Per "
+             "dynamic_action_runner.DEFAULT_WALL_CLOCK_BUDGET_SEC.",
     )
     opt.add_argument(
         "--specialist-max-turns",
