@@ -290,10 +290,19 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         "duration_us": 100.0,
         "call_count": 2,
         "gpu_pct": 10.0,
-        "source_file": "/tmp/paged_attention.py",
+        "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
         "is_multigpu": False,
         "num_gpus_recommended": 1,
+        # Per AMD-AGI/Hyperloom#314, ``kernel_candidates.json::hot_kernels``
+        # now only carries candidates that ``classify_patchability`` marked
+        # routable. In production this field is set by
+        # ``_finalize_candidates`` before ``write_reports`` runs; this
+        # unit test bypasses ``_finalize_candidates`` and passes a raw
+        # candidate straight into ``write_reports``, so set the routing
+        # marker explicitly to mirror the production fixture and keep
+        # the downstream assertions on ``hot_kernels[0]`` valid.
+        "reusable_native_kernel": True,
     }
     args = Namespace(
         trace_input=str(trace),
@@ -422,8 +431,10 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         "duration_us": 100.0,
         "call_count": 2,
         "gpu_pct": 10.0,
-        "source_file": "/tmp/paged_attention.py",
+        "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
+        # Per AMD-AGI/Hyperloom#314, see twin fixture above.
+        "reusable_native_kernel": True,
     }
     args = Namespace(
         trace_input=str(trace),
@@ -1487,6 +1498,188 @@ def test_parse_analysis_md_attaches_prose_from_fixture():
     assert any(
         "wave-occupancy" in c["resolution"] for c in p1_rows
     ), "P1 resolution should mention wave-occupancy tuning (from fixture)"
+
+
+# ===========================================================================
+# parse_analysis_md — TraceLens v0.3 spec § Operations Table Schema
+# tolerance for trailing category-specific extra columns.
+#
+# The spec at TraceLens-internal/.../utils/templates/sub_agent_spec.md
+# (Operations Table Schema, compute tier) explicitly allows sub-agents to
+# "append extra columns at the end when needed (e.g. Sub-Category in the
+# generic-op analyzer)" as long as the first 9 canonical columns are
+# present in order. Real TraceLens runs on attention-bound models append
+# 3 extras (Dominant Kernel / Workload / Attention Pattern) for the
+# inferenceattention category; generic-op-analyzer appends 1 extra
+# (Sub-Category). The parser must accept those rows verbatim, not skip
+# them silently.
+# ===========================================================================
+_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD = (
+    Path(__file__).resolve().parents[1]
+    / "tests"
+    / "fixtures"
+    / "tracelens_v03_qwen3_moe_attention_analysis.md"
+)
+
+
+def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
+    """Real-world reproducer: Qwen3-30B MoE inferenceattention P-item.
+
+    TraceLens emitted a 12-column ``**Data:**`` table for the attention
+    category (canonical 9 + ``Dominant Kernel`` + ``Workload`` +
+    ``Attention Pattern``). The previous strict-equality header check
+    skipped the block entirely, returning ``hot_kernels=[]`` and
+    starving a 1.5h KERNEL phase of any candidate to optimize. Per
+    ``sub_agent_spec.md`` (Operations Table Schema, compute tier),
+    appending extra columns at the end is spec-compliant, so the parser
+    must consume the row using only the first 9 cells.
+    """
+    cands = tlr.parse_analysis_md(_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD, top_k=10)
+    assert len(cands) == 1, (
+        f"expected 1 attention candidate from the 12-column fixture; got "
+        f"{len(cands)}"
+    )
+    c = cands[0]
+    assert c["name"] == "vllm::unified_attention_with_output"
+    assert c["tracelens_category"] == "inferenceattention"
+    assert c["tracelens_pitem_rank"] == 1
+    assert c["bound_type"] == "memory-bound"
+    # Time (ms) -> duration_us; row is 45.862 ms.
+    assert abs(c["duration_us"] - 45862.0) < 1.0
+    assert c["call_count"] == 48
+    assert abs(c["percent_of_total"] - 2.61) < 0.001
+    assert abs(c["efficiency_percent"] - 3.69) < 0.001
+    assert c["efficiency_peak_value"] == 8.0
+    assert "TB/s" in c["efficiency_peak_unit"]
+    # impact_score is the mid value carried by the p_item marker.
+    assert c["impact_score"] == 2.2
+    # Kernel Path is a real launcher string (not "—"), so source_file
+    # must round-trip the relative path (resolution happens downstream).
+    assert "qwen3_moe.py" in c["source_file"]
+    # The three trailing extra cells (Dominant Kernel / Workload /
+    # Attention Pattern) are SPEC-allowed extras (sub_agent_spec.md
+    # § Operations Table Schema: "Agents may append extra columns at
+    # the end when needed"). The parser preserves them verbatim under
+    # ``tracelens_extra_columns`` so downstream consumers (GEAK / OOB)
+    # have programmatic access to category-specific metadata without
+    # re-parsing analysis.md.
+    extras = c.get("tracelens_extra_columns")
+    assert extras is not None, "tracelens_extra_columns missing for 12-col row"
+    assert extras.get("dominant kernel") == "`_fwd_kernel` (93.61%)"
+    assert extras.get("workload") == "unknown"
+    assert extras.get("attention pattern") == "GQA (8:1)"
+    # Canonical fields must NOT leak into extras (they belong on the
+    # candidate top-level as typed fields).
+    for canonical_key in (
+        "operation", "args", "kernel path", "time (ms)", "%e2e",
+        "count", "flops/byte", "efficiency", "bound",
+    ):
+        assert canonical_key not in extras
+
+
+def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_path):
+    """The generic-op analyzer appends a ``Sub-Category`` column for
+    uncategorized ops (`other` category). The parser must accept the
+    row using only the first 9 cells, dropping the Sub-Category cell
+    as expected.
+    """
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "<!-- impact-begin kind=p_item category=other mid=4.0 low=2.0 high=8.0 -->\n"
+        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### 🔴 P1: Generic op cluster (Triton)\n\n"
+        "**Identification:** stub identification\n"
+        "**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Efficiency | Bound | Sub-Category |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| custom_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "40% of 708 TFLOPS | compute-bound | scatter_gather |\n"
+        "**Reasoning for Slowdown:** stub reasoning\n"
+        "**Resolution:** stub resolution\n",
+        encoding="utf-8",
+    )
+    cands = tlr.parse_analysis_md(md, top_k=10)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["name"] == "custom_op"
+    assert c["tracelens_category"] == "other"
+    assert c["bound_type"] == "compute-bound"
+    assert c["call_count"] == 10
+    # ``Sub-Category`` is preserved verbatim for downstream GEAK / OOB
+    # access; it never leaks into the candidate top-level.
+    extras = c.get("tracelens_extra_columns")
+    assert extras is not None
+    assert extras.get("sub-category") == "scatter_gather"
+    assert "sub-category" not in c
+
+
+def test_parse_analysis_md_canonical_9_column_table_has_no_extras_key():
+    """Regression guard: candidates parsed from a canonical 9-column
+    table (the Llama70B fixture) must NOT carry the
+    ``tracelens_extra_columns`` field. Adding the key with an empty
+    dict would force downstream consumers to special-case "extras
+    present but empty" vs "extras absent".
+    """
+    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
+    assert cands, "Llama70B fixture must produce candidates"
+    for c in cands:
+        assert "tracelens_extra_columns" not in c, (
+            f"canonical 9-col candidate {c.get('name')!r} unexpectedly "
+            f"carries tracelens_extra_columns={c.get('tracelens_extra_columns')!r}"
+        )
+
+
+def test_parse_analysis_md_rejects_fewer_than_canonical_columns(tmp_path):
+    """Regression guard: a table missing any of the 9 canonical columns
+    must still be skipped — silent wrong-mapping would be worse than a
+    missed candidate. Here ``Bound`` is dropped (8 columns total).
+    """
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
+        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### 🔴 P1: Missing column (Tensile)\n\n"
+        "**Identification:** stub identification\n"
+        "**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Efficiency |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "40% of 708 TFLOPS |\n"
+        "**Reasoning for Slowdown:** stub reasoning\n"
+        "**Resolution:** stub resolution\n",
+        encoding="utf-8",
+    )
+    assert tlr.parse_analysis_md(md, top_k=10) == []
+
+
+def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
+    """Regression guard: spec requires the 9 canonical columns ``in this
+    order``. Swapping any two breaks the row→field mapping silently, so
+    the parser must skip the block instead of producing rows whose
+    ``efficiency`` / ``bound`` are misread.
+    """
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
+        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### 🔴 P1: Reordered columns (Tensile)\n\n"
+        "**Identification:** stub identification\n"
+        "**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Bound | Efficiency |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "compute-bound | 40% of 708 TFLOPS |\n"
+        "**Reasoning for Slowdown:** stub reasoning\n"
+        "**Resolution:** stub resolution\n",
+        encoding="utf-8",
+    )
+    assert tlr.parse_analysis_md(md, top_k=10) == []
 
 
 # ===========================================================================
@@ -2603,3 +2796,93 @@ def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
         task_groups=[],
     )
     assert summary["trace_health_warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# atom maps to ``inference`` analysis mode
+# ---------------------------------------------------------------------------
+def test_infer_analysis_mode_atom_returns_inference():
+    """atom traces share the inference-mode kernel grouping with
+    sglang/vllm; without this they would fall through to ``default``
+    and get generic torch grouping.
+    """
+    assert tlr.infer_analysis_mode("atom", "") == "inference"
+    assert tlr.infer_analysis_mode("ATOM", "default") == "inference"
+    assert tlr.infer_analysis_mode("  atom  ", "default") == "inference"
+
+
+def test_infer_analysis_mode_sglang_vllm_unchanged():
+    """Regression guard: sglang / vllm remain ``inference``.
+    """
+    assert tlr.infer_analysis_mode("sglang", "") == "inference"
+    assert tlr.infer_analysis_mode("vllm", "default") == "inference"
+
+
+def test_infer_analysis_mode_explicit_request_wins():
+    """Caller-supplied non-default mode bypasses the framework default
+    for every framework (atom included)."""
+    assert tlr.infer_analysis_mode("atom", "training") == "training"
+    assert tlr.infer_analysis_mode("sglang", "training") == "training"
+    assert tlr.infer_analysis_mode("unknown", "training") == "training"
+
+
+def test_infer_analysis_mode_unknown_framework_stays_default():
+    """Frameworks outside the canonical set fall back to ``default``;
+    they don't get the inference-mode upgrade automatically.
+    """
+    assert tlr.infer_analysis_mode("trtllm", "") == "default"
+    assert tlr.infer_analysis_mode("", "") == "default"
+
+
+# ---------------------------------------------------------------------------
+# atom entries present in _FRAMEWORK_PKG_FALLBACK_ROOTS
+# ---------------------------------------------------------------------------
+def test_framework_pkg_fallback_roots_has_atom_entry():
+    """The offline source resolver must accept atom kernel sources; the
+    atom entry must include at least the editable-install parent
+    ``/app/ATOM`` so a relative ``atom/model_engine/...`` path in a
+    TraceLens CSV can be joined against it.
+    """
+    table = tlr._FRAMEWORK_PKG_FALLBACK_ROOTS
+    assert "atom" in table, (
+        "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS"
+    )
+    roots = table["atom"]
+    assert "/app/ATOM" in roots
+    # Site-packages variants for production wheels.
+    assert any("site-packages" in r or "dist-packages" in r for r in roots), (
+        f"atom fallback roots lack a site-packages entry: {roots!r}"
+    )
+
+
+def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
+    """End-to-end: when ``import atom`` doesn't fire (CSV-only
+    static-analysis path), the resolver still resolves a relative
+    ``atom/model_engine/model_runner.py`` against the synthetic atom
+    fallback root and returns the absolute path.
+    """
+    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
+    _seed_pkg(
+        tmp_path,
+        "atom",
+        "model_engine/model_runner.py",
+        funcs=("forward",),
+    )
+    monkeypatch.setattr(
+        tlr,
+        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
+        {"atom": (str(tmp_path),)},
+    )
+    # Force find_spec to miss so the test exercises the fallback path.
+    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "atom/model_engine/model_runner.py(125): forward",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(
+        tmp_path / "atom" / "model_engine" / "model_runner.py"
+    )
+    assert line == 125
+    assert func == "forward"

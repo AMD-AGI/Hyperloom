@@ -9,7 +9,10 @@ local validation without requiring TraceLens to be installed.
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
+import functools
+import glob
 import gzip
 import json
 import os
@@ -17,7 +20,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -690,6 +692,9 @@ _REUSABLE_SOURCE_ROOTS = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/opt/venv/lib/python3.12/site-packages/aiter/",
+    "/opt/venv/lib/python3.12/site-packages/sglang/",
+    "/opt/venv/lib/python3.12/site-packages/vllm/",
     # Production vLLM wheel install layout (system dist-packages).
     # Required since vLLM in the current image ships under
     # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
@@ -702,7 +707,48 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
+    # atom layout. The filesystem path is ``/app/ATOM/atom/`` but
+    # ``is_runtime_generated_kernel`` lowercases inputs before substring
+    # matching, so the prefix below is stored lowercase to match. Keep
+    # in sync with ``inference_optimizer/orchestrator/
+    # kernel_request_handlers.py`` ``_REUSABLE_SOURCE_ROOTS`` — both
+    # lists feed the same reusable-kernel classifier.
+    "/app/atom/atom/",
+    "/opt/venv/lib/python3.10/site-packages/atom/",
+    "/opt/venv/lib/python3.12/site-packages/atom/",
+    "/usr/local/lib/python3.12/dist-packages/atom/",
+    "/usr/local/lib/python3.10/dist-packages/atom/",
+    # aiter ships its device sources (.cu/.cuh) in the sibling ``aiter_meta``
+    # package (``<...>/aiter_meta/csrc/``), NOT under ``aiter/`` — so the
+    # ``aiter/`` entries above never match a resolved device source.
+    # ``_reusable_roots()`` also adds aiter's own ``AITER_CSRC_DIR`` at
+    # runtime; this static substring covers the common wheel layout when
+    # aiter cannot be imported for the dynamic probe.
+    "/aiter_meta/csrc/",
 )
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_csrc_root() -> str:
+    """aiter's own device-source root (e.g. ``.../aiter_meta/csrc/``),
+    resolved from the installed package. Empty when aiter is not importable.
+    Cached once per process."""
+    try:
+        import aiter.jit.core as _jc  # type: ignore
+    except Exception:
+        return ""
+    raw = (getattr(_jc, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
+    return (raw.rstrip("/") + "/") if raw else ""
+
+
+def _reusable_roots() -> tuple[str, ...]:
+    """Static reusable roots plus aiter's own (dynamic) csrc root, so a device
+    source resolved via aiter's build registry counts as reusable regardless
+    of where the wheel placed ``aiter_meta``."""
+    csrc = _aiter_csrc_root()
+    if csrc and csrc not in _REUSABLE_SOURCE_ROOTS:
+        return _REUSABLE_SOURCE_ROOTS + (csrc,)
+    return _REUSABLE_SOURCE_ROOTS
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
 # raw memcpy/copy ops, and PyTorch native copy. Folded from the feature
@@ -738,7 +784,7 @@ def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
         # A stable in-repo SGLang/vLLM Triton source can still be reusable.
-        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+        return not any(root in lower_file for root in _reusable_roots())
     return False
 
 
@@ -787,7 +833,7 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"runtime-generated (torch.compile / Inductor cache): {source_file}"
         )
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+    if not any(root in lower_file for root in _reusable_roots()):
         return False, (
             f"source not under a reusable framework root: {source_file}"
         )
@@ -1226,6 +1272,82 @@ _AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
 _AITER_FALLBACK_REPO = "/sgl-workspace/aiter"
 
 
+@functools.lru_cache(maxsize=1)
+def _aiter_compile_ops_index() -> dict[str, str]:
+    """Map ``{op_function_name: @compile_ops module name}`` by scanning the
+    installed aiter package's ``@compile_ops("module_...")`` decorators.
+
+    This is the table-free replacement for :data:`_AITER_COMPILE_OPS_PROMOTIONS`:
+    aiter itself is the source of truth for which kernel maps to which JIT
+    module, and ``optCompilerConfig.json`` (read via ``get_args_of_build``)
+    maps that module to its device ``.cu`` sources. Cached once per process;
+    empty when aiter is unavailable."""
+    try:
+        import aiter.jit.core as _jc  # type: ignore
+    except Exception:
+        return {}
+    try:
+        aiter_root = os.path.dirname(os.path.dirname(_jc.__file__))
+    except Exception:
+        return {}
+    index: dict[str, str] = {}
+    for path in glob.glob(os.path.join(aiter_root, "**", "*.py"), recursive=True):
+        try:
+            tree = ast.parse(open(path, encoding="utf-8", errors="replace").read())
+        except Exception:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for dec in node.decorator_list:
+                if (isinstance(dec, ast.Call)
+                        and getattr(dec.func, "id", None) == "compile_ops"
+                        and dec.args
+                        and isinstance(dec.args[0], ast.Constant)
+                        and isinstance(dec.args[0].value, str)):
+                    index.setdefault(node.name, dec.args[0].value)
+    return index
+
+
+def resolve_aiter_source_from_name(kernel_name: str) -> str:
+    """Resolve an aiter kernel op name to its device ``.cu`` via aiter's OWN
+    build registry — no hardcoded per-kernel table.
+
+    Pipeline: ``op name`` → ``@compile_ops`` module (decorator scan, cached) →
+    ``aiter.jit.core.get_args_of_build(module)['srcs']`` (aiter resolves the
+    ``{AITER_CSRC_DIR}/...`` paths itself) → first existing non-pybind device
+    source. Returns ``""`` when the op is not an aiter ``@compile_ops`` kernel
+    or aiter cannot resolve it (callers then keep their existing signal).
+
+    Unlike :func:`upgrade_aiter_compile_ops_launcher`, this resolves purely
+    from the op NAME, so it also works when the trace carried no
+    ``source_file`` at all (e.g. HIP-graph-captured decode kernels)."""
+    if not kernel_name:
+        return ""
+    op = kernel_name.split("(")[0].split("<")[0].strip()
+    if "::" in op:
+        op = op.split("::")[-1]
+    module = _aiter_compile_ops_index().get(op)
+    if not module:
+        return ""
+    try:
+        import aiter.jit.core as _jc  # type: ignore
+        srcs = _jc.get_args_of_build(module).get("srcs") or []
+    except Exception:
+        return ""
+    device_exts = (".cu", ".cuh", ".hip", ".cpp", ".cc")
+    # Prefer the real device translation unit (skip the pybind glue TU).
+    for src in srcs:
+        if (isinstance(src, str) and "/pybind/" not in src.replace(os.sep, "/")
+                and src.endswith(device_exts) and os.path.isfile(src)):
+            return src
+    # Fall back to any existing listed source so the caller still gets a signal.
+    for src in srcs:
+        if isinstance(src, str) and os.path.isfile(src):
+            return src
+    return ""
+
+
 def upgrade_aiter_compile_ops_launcher(
     source_file: str, kernel_name: str, kernel_repo: str,
 ) -> str:
@@ -1512,12 +1634,23 @@ def _finalize_candidates(
         # set elsewhere in tracelens_skill_runner._row_to_candidate and
         # is preserved through this pass for AST-grouping consumers.
         wrapper_before_promotion = item.get("source_file", "")
-        item["source_file"] = upgrade_aiter_compile_ops_launcher(
-            wrapper_before_promotion, item["name"], item.get("kernel_repo", "")
-        )
-        if item["source_file"] != wrapper_before_promotion:
-            item["launcher_source_file"] = wrapper_before_promotion
-            item["source_promoted_from_launcher"] = True
+        # PRIMARY: resolve the device .cu straight from the op name via aiter's
+        # OWN build registry (@compile_ops module -> optCompilerConfig srcs).
+        # Table-free, covers any kernel the installed wheel ships (incl. ones
+        # the static table predates, e.g. moe_cktile2stages), and works even
+        # when the trace carried no source_file (HIP-graph capture).
+        promoted_source = resolve_aiter_source_from_name(item["name"])
+        # FALLBACK: the legacy static promotion table, for environments where
+        # aiter cannot be imported or the op is absent from its registry.
+        if not promoted_source:
+            promoted_source = upgrade_aiter_compile_ops_launcher(
+                wrapper_before_promotion, item["name"], item.get("kernel_repo", "")
+            )
+        if promoted_source and promoted_source != wrapper_before_promotion:
+            item["source_file"] = promoted_source
+            if wrapper_before_promotion:
+                item["launcher_source_file"] = wrapper_before_promotion
+                item["source_promoted_from_launcher"] = True
         # Re-resolve repo in case the upgraded path lives in a different repo
         # (rare, but defensive).
         item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
@@ -1985,9 +2118,33 @@ def write_reports(
     }
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
+    # Per AMD-AGI/Hyperloom#314: ``kernel_candidates.json::hot_kernels``
+    # is the dispatch payload consumed by the kernel-opt path
+    # (``kernel_optimization.load_candidates``, ``parallel_e2e_runner``,
+    # ``kernel_request_handlers``). Filter it down to candidates that
+    # ``classify_patchability`` actually marked routable so downstream
+    # batch dispatchers no longer have to re-apply the same filter and
+    # so ``num_hot_kernels`` accounting reflects what we will really
+    # send to a backend. The full unfiltered list stays available in
+    # ``tracelens/tracelens_report.json`` for audit, and the routable
+    # vs. skipped split is also surfaced in ``tracelens/summary.json``
+    # (``tasks[]`` / ``skipped[]``). ``skipped_kernels[]`` carries the
+    # FULL candidate dicts (not just an audit projection) so direct
+    # lookup paths (``kernel_optimization.load_candidates``, the CLI's
+    # ``find_candidate``) can still resolve a non-routable kernel by
+    # id; the dispatcher's ``_validate_reusable_native_kernel`` guard
+    # is what blocks them from reaching a backend.
+    routable_candidates = [
+        c for c in candidates
+        if isinstance(c, dict) and c.get("reusable_native_kernel") is True
+    ]
+    skipped_kernels = [
+        c for c in candidates
+        if isinstance(c, dict) and c.get("reusable_native_kernel") is not True
+    ]
     atomic_write_json(
         run_dir / "kernel_candidates.json",
-        {"hot_kernels": candidates, "task_groups": task_groups, **report},
+        {**report, "hot_kernels": routable_candidates, "skipped_kernels": skipped_kernels},
     )
 
     # PR-A §3: per-run audit sidecar listing which TraceLens hot kernels

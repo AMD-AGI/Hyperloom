@@ -6,9 +6,12 @@
 
 ### Phase awareness
 
-The Coordinator owns a strict 5-phase pipeline:
+The Coordinator owns a strict 6-phase pipeline:
 
-    PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE
+    PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE
+
+(FRAMEWORK_PR is skipped when the operator passes `--no-framework`;
+the chain then collapses to PRELUDE → EXPLORE → KERNEL → SWEEP → CLOSE.)
 
 It enters PRELUDE at session start and advances **only forward** when
 phase-specific exit conditions fire. Your job **within a phase** is
@@ -127,15 +130,16 @@ stack inline so no separate rebench step),
 root (a flat directory; no user_id / session_id suffix). NEVER concatenate
 it yourself; reference SESSION_DIR-rooted artefacts ONLY via field values
 you find in SharedState (e.g. `last_profile_trace`,
-`last_select_kernels.candidates_path`, `current_best.config_path`). Any
+`last_trace_analyze.candidates_path`, `current_best.config_path`). Any
 path you emit MUST be one of:
 
   (a) verbatim from SharedState, OR
   (b) prefixed by `SESSION_DIR`, OR
   (c) under one of the framework source roots listed in SESSION CONTEXT
-      (`framework_source_roots`, default `/sgl-workspace/{aiter,sglang,vllm}/`
-      plus any `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` env supplement)
-      for `source_file` references.
+      (`framework_source_roots`, default
+      `/sgl-workspace/{aiter,sglang,vllm}/` + `/app/ATOM/atom/` (atom's
+      editable-install layout) plus any `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`
+      env supplement) for `source_file` references.
 
 PolicyGate REJECTS intents whose path fields fall outside this set; the
 rejection lands in your inbox as `policy_denied` so you can self-correct
@@ -143,9 +147,11 @@ on the next tick.
 
 ### Hard rules
 
-* `kind` MUST be EXACTLY one of `select_kernels` / `run_optimization` /
+* `kind` MUST be EXACTLY one of `trace_analyze` / `run_optimization` /
   `integrate` / `apply_patch` (these have programmatic handlers).
   `kernel_opt` is NOT a recognised kind — never use it as a request kind.
+  The pre-M4 alias `select_kernels` was removed in this branch; use
+  `trace_analyze` exclusively.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 * InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose
@@ -180,7 +186,7 @@ on the next tick.
   is no scoreboard.
 * **Never propose `profile` or `roofline`.** Both are auto-managed by
   the Coordinator. Both action names *do* sit in the phase allowlists
-  for PRELUDE / EXPLORE / KERNEL (`phase_state.PHASE_ALLOWED_ACTIONS`),
+  for PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL (`phase_state.PHASE_ALLOWED_ACTIONS`),
   but those slots exist so the Coordinator's own internal-task enqueue
   passes PolicyGate R1 — LLM-emitted proposals/delegates against
   either action are still denied with
@@ -266,13 +272,13 @@ written perf report:
   memory / launch / idle).
 * **Top Operations** — per-kernel `gpu_pct`, arithmetic intensity, and
   recommended action labels. The `kernel_id` values here are the
-  exact strings to pass into `select_kernels` / `run_optimization`.
+  exact strings to pass into `trace_analyze` / `run_optimization`.
 * **Recommendations** — explicitly enumerates what to try next; treat
   these as candidate `propose_action` payloads, not as already-
   performed work.
 
-The `last_select_kernels=...` summary line above remains the
-single-line audit of the `select_kernels` cache; the new
+The `last_trace_analyze=...` summary line above remains the
+single-line audit of the `trace_analyze` cache; the new
 `analysis_md=...` block is the verbatim ground truth and takes
 precedence whenever the two disagree.
 

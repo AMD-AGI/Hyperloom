@@ -72,6 +72,11 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # only fallback ``support`` entry.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline",
+    # GAP 1 — Coordinator-internal warm-recipe replay. Same workspace
+    # shape as ``baseline`` (under ``runs/replay_warm_recipe/<task_id>/``);
+    # included so the registry-loader-failure path still pre-mkdirs the
+    # workspace for the replay task that the PRELUDE hook will enqueue.
+    "replay_warm_recipe",
     # Coordinator-internal analysis actions. Which one runs is chosen
     # by ``shared_state.enable_roofline`` (``--enable-roofline`` /
     # ``--no-enable-roofline``, default on): ``roofline`` is the
@@ -91,11 +96,19 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     # ``explore`` already includes it in the registry-derived set, the
     # fallback only matters when the yaml can't be loaded.
     "integrate_patch",
+    # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor
+    # mirroring integrate_patch (applies an upstream PR + benches +
+    # KEEP/REVERT). pipeline_phase=explore puts it in the registry-derived
+    # runs/<kind>/ set; the fallback only matters on registry load failure.
+    "framework_pr",
     # IR-7 (Saturday May 2026): ``assess_remaining_gaps`` is a thin
     # wrapper that dispatches the ``session_steward_specialist``
     # domain. Pipeline_phase ``explore`` includes it in the
     # registry-derived set; fallback covers the rare bootstrap miss.
     "assess_remaining_gaps",
+    # Cross-domain ReAct sub-agent; owns
+    # ``agents/orchestration/dynamic_actions/<dyn_id>/``.
+    "dynamic_action",
     "integrate", "kernel_opt", "deep_kernel_analysis",
     "operator_tuning", "vendor_kernel_config",
     "recover",
@@ -284,6 +297,58 @@ def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# dynamic_action artefact paths.
+# Layout: ``<session_dir>/agents/orchestration/dynamic_actions/<dyn_id>/``
+# holds ``spec.json``, ``seed_kit.json``, ``sub_agent_journal.md``,
+# ``proposal_set.json``, ``critic_verdict.json``,
+# ``dispatch_history.jsonl``, and ``telemetry.json``.
+# ---------------------------------------------------------------------------
+def dynamic_actions_root(session_dir: Path) -> Path:
+    """Parent dir of every per-``dyn_id`` artefact dir."""
+    return agent_dir(session_dir, "orchestration") / "dynamic_actions"
+
+
+def dynamic_action_artifact_dir(session_dir: Path, dyn_id: str) -> Path:
+    """Per-``dyn_id`` artefact root. Caller mkdir's before writing."""
+    did = str(dyn_id or "").strip() or "unknown"
+    return dynamic_actions_root(session_dir) / did
+
+
+def dynamic_action_spec_path(session_dir: Path, dyn_id: str) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "spec.json"
+
+
+def dynamic_action_seed_kit_path(session_dir: Path, dyn_id: str) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "seed_kit.json"
+
+
+def dynamic_action_dispatch_history_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "dispatch_history.jsonl"
+
+
+def dynamic_action_proposal_set_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "proposal_set.json"
+
+
+def dynamic_action_critic_verdict_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    """Verdict envelope written by the Critic."""
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "critic_verdict.json"
+
+
+def dynamic_action_telemetry_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    """Per-``dyn_id`` terminal-state rollup written on lifecycle exit."""
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "telemetry.json"
+
+
+# ---------------------------------------------------------------------------
 # External baseline comparison artefacts (DESIGN: target_analysis is report-only)
 # ---------------------------------------------------------------------------
 # These paths sit under a dedicated top-level subdir rather than
@@ -388,6 +453,40 @@ def cortex_audit_jsonl(session_dir: Path) -> Path:
     return cortex_dir(session_dir) / ".kb_audit.jsonl"
 
 
+# ---------------------------------------------------------------------------
+# recipe-snapshot v2 — per-session bookkeeping.
+#
+# Lives under a separate ``runtime/recipe_snapshot/`` subtree (NOT
+# ``runtime/cortex/``) so the v2 dispatcher can stay decoupled from
+# the legacy ``/v1/points`` client during the gradual cutover.
+#
+# History: under the original Phase 1 design this directory also held
+# ``.pending.ndjson`` / ``.flushed.ndjson`` / ``.dead_letter.ndjson``
+# queues for failed central-server writes. Those have been retired —
+# under the local-write design (commit "feat(recipe_kb): local-only
+# recipe-snapshot store with history archival") writes never go to
+# the central server, so the failed-write fan-out has nothing to
+# queue. Only the read-side audit log (``.audit.jsonl``) and the
+# directory itself survive; both are kept for the dispatcher's
+# remote-failure logging path.
+# ---------------------------------------------------------------------------
+def recipe_snapshot_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/`` — dispatcher / remote-client
+    per-session bookkeeping root.
+    """
+    return Path(session_dir) / "runtime" / "recipe_snapshot"
+
+
+def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only
+    synchronous audit of every recipe-snapshot remote READ call
+    (success or failure) the dispatcher made directly. Writes are
+    local-only and don't traverse this audit (the local store has
+    its own atomic write contract).
+    """
+    return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
+
+
 def pr_monitor_status_json(session_dir: Path) -> Path:
     """``<sd>/runtime/cortex/.pr_monitor_status.json`` — one-shot marker
     written by ``cli._bootstrap_knowledge_plane`` with
@@ -444,6 +543,13 @@ __all__ = [
     "cortex_pitfalls_json",
     "cortex_sid_file",
     "cortex_warm_json",
+    "dynamic_action_artifact_dir",
+    "dynamic_action_critic_verdict_path",
+    "dynamic_action_dispatch_history_path",
+    "dynamic_action_proposal_set_path",
+    "dynamic_action_seed_kit_path",
+    "dynamic_action_spec_path",
+    "dynamic_actions_root",
     "kernel_agent_runs_dir",
     "kernel_workspace",
     "logs_dir",

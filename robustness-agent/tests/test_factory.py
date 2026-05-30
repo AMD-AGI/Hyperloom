@@ -13,7 +13,6 @@ from robustness_agent.role.prompt_inputs import (
     ReactorContext,
     SharedStateSnapshot,
 )
-from robustness_agent.sources.base import HealthState
 
 
 @pytest.mark.asyncio
