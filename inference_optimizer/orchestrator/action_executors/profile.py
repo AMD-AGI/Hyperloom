@@ -327,9 +327,27 @@ def _safe_mtime(p: Path) -> float:
 
 
 def _default_profile_config() -> Path:
-    """Resolve default profile YAML based on $FRAMEWORK env (sglang/vllm)."""
+    """Resolve default profile YAML based on $FRAMEWORK env.
+
+    Recognised values: ``atom``, ``vllm``, ``sglang``. Unknown / unset
+    values fall back to ``profile_sglang.yaml`` so existing sglang-default
+    tests keep passing.
+
+    The atom branch ships separately because the materializer reads the
+    top-level ``benchmark.framework`` field from the YAML (NOT
+    ``$FRAMEWORK``) to resolve Magpie's wrapper script — silently
+    falling through to ``profile_sglang.yaml`` on ``FRAMEWORK=atom``
+    would launch ``sglang_mi*x.sh`` under an atom-named session, which
+    crashes on atom-only boxes and would run sglang under an atom
+    session on multi-framework boxes.
+    """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    name = "profile_vllm.yaml" if fw == "vllm" else "profile_sglang.yaml"
+    if fw == "atom":
+        name = "profile_atom.yaml"
+    elif fw == "vllm":
+        name = "profile_vllm.yaml"
+    else:
+        name = "profile_sglang.yaml"
     return asset_root() / "scripts" / "configs" / name
 
 
@@ -493,24 +511,20 @@ class ProfileExecutor(BaselineExecutor):
         return None
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        # B2: atom (Magpie v1) has no torch_profiler wiring. atom_mi*x.sh
-        # accepts PROFILE=1 but silently no-ops; injecting sglang/vllm
-        # TraceLens flags into EXTRA_ATOM_ARGS would crash atom's argparse.
-        # Short-circuit here so the EXPLORE specialist's occasional profile
-        # proposal degrades to a skipped delegated_result instead of a
-        # spurious failed run. Coordinator already treats skipped as
-        # non-fatal (no RCA escalation, no current_best mutation).
-        if os.environ.get("FRAMEWORK", "").strip().lower() == "atom":
-            return {
-                "status": "skipped",
-                "framework": "atom",
-                "error_class": "atom_no_profiler",
-                "error": (
-                    "atom framework has no torch_profiler integration in "
-                    "Magpie v1; profile/roofline are no-ops for this run. "
-                    "See atom_boost_tutorials.md §6."
-                ),
-            }
+        # IR-8 (atom): the historical short-circuit returned status="skipped"
+        # here because atom_mi*x.sh accepted PROFILE=1 but silently no-op'd.
+        # The Magpie atom wrapper now bridges PROFILE=1 to atom's
+        # --torch-profiler-dir CLI flag (see atom_mi*x.sh PROFILER_ARGS),
+        # the atom OpenAI server exposes /start_profile and /stop_profile,
+        # and the InferenceX benchmark client auto-POSTs both around the
+        # bench window. Atom writes standard *.pt.trace.json.gz chrome
+        # traces under <workspace>/torch_trace/rank_<N>/ which our
+        # _candidate_trace_dirs probe + rglob("*.trace.json.gz") matches
+        # unchanged, and TraceLens consumes those traces unchanged
+        # (framework-agnostic). So the executor falls through to the same
+        # path as sglang/vllm. The TraceLens-flag injection guard for
+        # atom still lives in _workload_envs.py (atom's argparse rejects
+        # vLLM-style --profiler-config.* flags).
         # Override action label so per-task output lands under runs/profile/
         # rather than runs/baseline/ when the runner derives the path.
         params = ctx.task.params or {}
@@ -558,7 +572,7 @@ class ProfileExecutor(BaselineExecutor):
                 # PD knobs auto-resolved by the helper from $PD_* env
                 # (cli.py exported them). See baseline.py for rationale.
                 await restart_server_for_round(
-                    extra_sglang_args=str(params.get("extra_sglang_args") or ""),
+                    extra_server_args=str(params.get("extra_server_args") or ""),
                     torch_profiler_dir=round_trace_root,
                     framework=os.environ.get("FRAMEWORK") or None,
                     model_path=(
