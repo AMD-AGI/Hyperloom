@@ -252,9 +252,16 @@ def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
 # yaml-hardcoded TP=1 and OOM-ed retry forever).
 # ===========================================================================
 def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
-    """TP env var must override yaml hardcode (was 1, becomes 8)."""
+    """TP env var must override yaml hardcode (was 1, becomes 8).
+
+    Bypass the visible-GPU clamp added in #zihao/qwen3-8b-e2e — that clamp
+    intentionally pulls TP back down to ``torch.cuda.device_count()`` when
+    the operator over-requests, but here we explicitly want to assert the
+    env-wins contract regardless of the host's GPU count.
+    """
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -276,9 +283,16 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
     tmp_path, monkeypatch,
 ):
     """When TP=8 is set via env but ROCR_VISIBLE_DEVICES isn't explicit,
-    expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices."""
+    expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices.
+
+    The TP clamp is bypassed here so the assertion holds on hosts with
+    fewer than 8 visible GPUs; the clamp's own behaviour is exercised by
+    ``test_materialize_config_with_envs_clamps_tp_to_visible_gpus`` in
+    ``test_baseline_param_overrides``.
+    """
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -306,9 +320,16 @@ def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
 ):
     """If explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires,
     `_workload_envs` auto-expands to 0..TP-1 and logs a warning, so SGLang
-    actually sees enough GPUs to start."""
+    actually sees enough GPUs to start.
+
+    The TP clamp is bypassed here because the assertion is specifically
+    about the *original* ROCR expansion logic that runs after TP is
+    resolved; on a 4-GPU CI box without the bypass the clamp would pull
+    TP down to 4 and ROCR would not need expansion at all.
+    """
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())

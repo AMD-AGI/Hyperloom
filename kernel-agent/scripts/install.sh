@@ -115,8 +115,24 @@ GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_REF="${GEAK_REF:-ec61bdbdb151904ec187a8d89518afb969c53737}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
-# Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
-GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+# GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
+# endpoint.  Force the LiteLLM provider prefix to `openai/` for bare Claude
+# model names so LiteLLM uses the OpenAI-compatible transformer instead of the
+# Anthropic /v1/messages transformer.  Without this, GEAK gets
+# Primus.00009 / NotFound on the same key+URL that works through
+# /chat/completions.
+GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+case "${GEAK_MODEL_NAME_RAW}" in
+  openai/*|anthropic/*|gpt-*|o1-*|o3-*|o4-*)
+    GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
+    ;;
+  claude-*)
+    GEAK_MODEL_NAME_VAL="openai/${GEAK_MODEL_NAME_RAW}"
+    ;;
+  *)
+    GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
+    ;;
+esac
 # Run mode for the GEAK CLI. Drives ``run.mode`` in the generated
 # ``$GEAK_CONFIG`` yaml: ``full`` (default) selects the 2 h / 5-round preset
 # at ``run.budgets.full`` and ``run.presets.full``; ``quick`` selects the
@@ -176,13 +192,12 @@ CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
 GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
 # LiteLLM provider-specific base_url normalisation:
-#   * Anthropic client appends /v1/messages itself; leaving /v1 here yields
-#     /v1/v1/messages → 404. Strip /v1 when GEAK is on a claude model.
-#   * OpenAI client tolerates both shapes (verified), so for gpt-* models
-#     leave the original base_url alone to stay compatible with operators
-#     who set OPENAI_BASE_URL with the trailing /v1.
+#   * openai/* models require the OpenAI-compatible base URL, which in our
+#     gateway includes the trailing /v1.  Preserve it.
+#   * anthropic/* models use /v1/messages internally; strip a trailing /v1
+#     only when the operator explicitly selects an anthropic provider.
 case "${GEAK_MODEL_NAME_VAL}" in
-  claude-*|anthropic/claude-*)
+  anthropic/claude-*)
     GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/v1}"
     GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/}"
     ;;
@@ -770,6 +785,14 @@ run:
     full:
       orchestrator:
         max_rounds: 5
+env:
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  timeout: 3600
 EOF
       chmod 600 "$GEAK_CONFIG"
       grep -Eq '^[[:space:]]*model_class:[[:space:]]*litellm[[:space:]]*$' "$GEAK_CONFIG" \
@@ -796,6 +819,142 @@ EOF
   if [ "$DRY_RUN" -eq 0 ]; then
     command -v geak >/dev/null 2>&1 || verify_die "geak CLI not found"
   fi
+  patch_geak_minisweagent_runtime
+}
+
+patch_geak_minisweagent_runtime() {
+  # Hyperloom runtime patch for GEAK-v3 / mini-swe-agent 1.14.4.
+  #
+  # Two issues were observed during Qwen3-8B GEAK runs:
+  #   1. minisweagent.models.litellm_model converted tool schemas to
+  #      function.input_schema. LiteLLM's OpenAI-shape Anthropic mapper reads
+  #      function.parameters, so every tool reached Claude with an empty schema
+  #      and Claude repeatedly emitted bash{}.
+  #   2. Bare claude-* model names made LiteLLM choose Anthropic /v1/messages,
+  #      while our gateway is OpenAI-compatible /chat/completions. The config
+  #      generation above now rewrites bare claude-* to openai/claude-* and
+  #      preserves the /v1 base_url.
+  #
+  # This patch is intentionally idempotent and applies both to the writable GEAK
+  # source mirror and to the installed site-packages copy used by the current
+  # pod. Keeping it here makes Hyperloom's source tree the durable owner of the
+  # workaround; direct runtime edits are only a validation artefact.
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+paths: list[Path] = []
+
+mirror = Path(os.environ.get("HYPERLOOM_ROOT", "")) / "geak" / "src" / "minisweagent"
+if mirror.exists():
+    paths.append(mirror)
+
+try:
+    import minisweagent  # type: ignore
+    paths.append(Path(minisweagent.__file__).resolve().parent)
+except Exception:
+    pass
+
+seen: set[Path] = set()
+for root in paths:
+    root = root.resolve()
+    if root in seen:
+        continue
+    seen.add(root)
+
+    litellm_model = root / "models" / "litellm_model.py"
+    if litellm_model.exists():
+        text = litellm_model.read_text()
+        old = '''        function: dict[str, Any] = {
+            "name": name,
+            "description": func.get("description", ""),
+            "input_schema": func.get(
+                "parameters",
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            ),
+        }'''
+        new = '''        schema = func.get("parameters") or func.get(
+            "input_schema",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        )
+        function: dict[str, Any] = {
+            "name": name,
+            "description": func.get("description", ""),
+            "parameters": schema,
+        }'''
+        if old in text:
+            litellm_model.write_text(text.replace(old, new, 1))
+            print(f"[kernel-agent] patched LiteLLM tool schema: {litellm_model}")
+        elif '"parameters": schema' in text:
+            print(f"[kernel-agent] LiteLLM tool schema already patched: {litellm_model}")
+        else:
+            print(f"[kernel-agent WARN] LiteLLM schema patch pattern not found: {litellm_model}")
+
+    cfg = root / "config" / "mini_kernel_strategy_list.yaml"
+    if cfg.exists():
+        text = cfg.read_text()
+        marker = "Never call `bash` with `{}` or an empty command."
+        if marker not in text:
+            needle = (
+                "    Your response must contain exactly ONE tool call.\n"
+                "    Include a THOUGHT section before your tool call where you explain your reasoning process.\n"
+            )
+            repl = needle + (
+                "    If you choose the `bash` tool, its arguments MUST include a non-empty\n"
+                "    `command` string, for example:\n"
+                "    {\"command\": \"python3 scripts/task_runner.py correctness\"}.\n"
+                "    Never call `bash` with `{}` or an empty command.\n"
+            )
+            if needle in text:
+                cfg.write_text(text.replace(needle, repl, 1))
+                print(f"[kernel-agent] patched bash prompt guidance: {cfg}")
+            else:
+                print(f"[kernel-agent WARN] bash prompt guidance pattern not found: {cfg}")
+        else:
+            print(f"[kernel-agent] bash prompt guidance already patched: {cfg}")
+
+    tools_json = root / "tools" / "tools.json"
+    if tools_json.exists():
+        data = json.loads(tools_json.read_text())
+        changed = False
+        for tool in data:
+            if tool.get("name") == "bash":
+                desc = (
+                    "Execute shell commands directly in bash. REQUIRED: pass a "
+                    "non-empty `command` string in the arguments object. Never "
+                    "call bash with `{}`."
+                )
+                cmd_desc = "The non-empty bash command to execute, e.g. `ls -la /tmp`."
+                if tool.get("description") != desc:
+                    tool["description"] = desc
+                    changed = True
+                params = tool.setdefault("parameters", {})
+                params.setdefault("type", "object")
+                params.setdefault("properties", {}).setdefault("command", {})["type"] = "string"
+                if params["properties"]["command"].get("description") != cmd_desc:
+                    params["properties"]["command"]["description"] = cmd_desc
+                    changed = True
+                if params.get("required") != ["command"]:
+                    params["required"] = ["command"]
+                    changed = True
+        if changed:
+            tools_json.write_text(json.dumps(data, indent=2) + "\n")
+            print(f"[kernel-agent] patched bash tool schema docs: {tools_json}")
+        else:
+            print(f"[kernel-agent] bash tool schema docs already patched: {tools_json}")
+PY
 }
 
 ensure_rag_index() {
