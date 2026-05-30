@@ -218,4 +218,3 @@ def test_build_includes_explore_action_in_both_modes(registry):
         assert "### validate" not in text, (
             f"unexpected validate phase header (no_kernel={no_kernel})"
         )
-
