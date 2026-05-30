@@ -61,9 +61,9 @@ def test_orchestration_prompt_includes_phase_contract(registry):
         objective_value=10.0,
         max_minutes=120,
     )
-    # PHASE CONTRACT section + all 5 phase names + R1 hint anchor.
+    # PHASE CONTRACT section + every phase name + R1 hint anchor.
     assert "PHASE CONTRACT" in text
-    for phase in ("PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+    for phase in ("PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
         assert phase in text, f"missing phase {phase} from orchestration prompt"
     assert "phase-allowed actions" in text.lower()
     assert "policy_denied" in text.lower()
@@ -166,6 +166,30 @@ def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
     assert "EXPLORE: elapsed=240s" in out
     # Both lines present.
     assert out.count("elapsed=") == 2
+
+
+def test_shared_state_phase_budget_telemetry_includes_framework_pr():
+    # Regression for the hardcoded 5-phase tuple that swallowed
+    # FRAMEWORK_PR. The renderer should iterate ``PHASE_NAMES`` so
+    # any phase that appears in ``phase_history`` shows up.
+    s = SharedState(max_minutes=60)
+    s.record_phase_transition(
+        to_phase="PRELUDE", reason="phase_entered", evidence={},
+        ts="2026-05-19T00:00:00+00:00", ts_unix=1_000_000.0,
+    )
+    s.record_phase_transition(
+        to_phase="FRAMEWORK_PR", reason="prelude_done", evidence={},
+        ts="2026-05-19T00:01:00+00:00", ts_unix=1_000_060.0,
+    )
+    s.record_phase_transition(
+        to_phase="EXPLORE", reason="framework_pr_phase_done", evidence={},
+        ts="2026-05-19T00:03:00+00:00", ts_unix=1_000_180.0,
+    )
+    out = s.to_phase_budget_telemetry(now_unix=1_000_300.0)
+    assert "PRELUDE: elapsed=60s" in out
+    assert "FRAMEWORK_PR: elapsed=120s" in out
+    assert "EXPLORE: elapsed=120s" in out
+    assert out.count("elapsed=") == 3
 
 
 def test_shared_state_warm_start_summary_empty_when_no_recipe():
@@ -289,6 +313,9 @@ async def test_compose_prompt_robustness_includes_budget_telemetry(
 ):
     c = coordinator_with_mocks
     try:
+        # Skip FRAMEWORK_PR so PRELUDE → EXPLORE remains the routing
+        # this telemetry test exercises.
+        c.shared_state.framework_phase_enabled = False
         # Force a transition so phase_history has a second row + we get
         # a phase budget telemetry block with PRELUDE elapsed.
         c.shared_state.baseline_tput = 1500.0

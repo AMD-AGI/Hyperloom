@@ -178,7 +178,7 @@ def test_specialist_web_tools_denied_outside_explore_phase(
 def test_specialist_pr_monitor_allowed_in_any_phase():
     """PR Monitor read tools are explicitly NOT phase-restricted
     (KB_design §3.11 §4.5)."""
-    for phase in ("PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
+    for phase in ("PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
         gate = _gate(_State(phase=phase))
         for tool in PR_MONITOR_TOOL_NAMES:
             gate.validate_tool_invocation(tool, source_role="specialist")
