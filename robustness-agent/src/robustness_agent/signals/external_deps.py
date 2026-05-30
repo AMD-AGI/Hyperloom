@@ -13,7 +13,7 @@ session:
   ``$TRACELENS_ROOT`` / ``$INFERENCEX_PATH`` / ``$OOB_SRC`` either
   errored or took longer than the configured budget. WekaFS is the
   read-only source mount Hyperloom relies on for source-code, traces,
-  and benchmark scripts; ``select_kernels`` and the OOB CLI hang
+  and benchmark scripts; ``trace_analyze`` and the OOB CLI hang
   silently when the mount goes slow / drops.
 
 * **J3 ``tracelens_cli_missing``** — neither
@@ -182,7 +182,7 @@ def _mount_symptoms(
                     subject={"path": path},
                     source="local",
                     suggestion=(
-                        "WekaFS mount may have dropped; select_kernels / "
+                        "WekaFS mount may have dropped; trace_analyze / "
                         "OOB CLI / benchmark scripts will hang. Check "
                         "the read-only mount; consider re-mounting"
                     ),
@@ -218,7 +218,7 @@ def _mount_symptoms(
                 source="local",
                 suggestion=(
                     "WekaFS read latency degrading; if it persists, "
-                    "select_kernels / OOB CLI requests will time out"
+                    "trace_analyze / OOB CLI requests will time out"
                 ),
             )
         )
@@ -247,7 +247,7 @@ def _tracelens_symptoms(
             severity=SymptomSeverity.HIGH,
             summary=(
                 f"neither TraceLens CLI is on PATH "
-                f"(checked: {sorted(found.keys())!r}); select_kernels "
+                f"(checked: {sorted(found.keys())!r}); trace_analyze "
                 f"will fail every tick until install.sh is re-run"
             ),
             evidence={
