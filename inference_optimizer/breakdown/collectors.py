@@ -3006,6 +3006,195 @@ def _reconstruct_gain_ledger(
 _KERNEL_ROOFLINE_REL_PATH = "reports/kernel_roofline.json"
 
 
+# ---------------------------------------------------------------------------
+# Roofline — optimization-progress curve (Dashboard 对接清单 §2)
+# ---------------------------------------------------------------------------
+# Default ratio of vendor-peak HBM bandwidth that's actually achievable.
+# Vendor specs are theoretical maxima; sustained throughput is bounded
+# by memory-controller scheduling, cache-line granularity, thermal /
+# power throttling, and (for multi-GPU) XGMI arbitration. 70% is the
+# conservative target Hyperloom optimizes against — see Dashboard-
+# Roofline 对接清单 §2 for rationale.
+DEFAULT_ROOFLINE_TARGET_RATIO = 0.70
+
+
+def collect_roofline(
+    session_dir: Path,
+    state: dict[str, Any],
+    manifest: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Build the ``roofline`` section feeding the optimization-progress
+    chart (Dashboard-Roofline 对接清单 §2).
+
+    Pulls everything from in-memory ``state`` + ``manifest``; never
+    re-runs benchmarks. The dashboard reads sbd alone — no
+    ``state.json`` walk on the consumer side.
+
+    Output shape (RoofLine TypedDict):
+
+    * ``trajectory[]`` — 1 baseline point + N KEEP points, sorted by
+      ts. Always at least one point (baseline) when ``baseline_tput``
+      is known; empty when the session never finished baseline.
+    * ``ceiling_tok_per_sec`` / ``target_tok_per_sec`` —
+      ``state.roofline_snapshots[-1]`` (latest snapshot, not [0]; the
+      ceiling can drift across re-runs as the snapshot pipeline
+      refines its peak estimate). ``None`` when no snapshot exists;
+      ``ceiling_available`` is the explicit boolean flag.
+    * ``current_best_tput`` — last trajectory point's tput, validated
+      against ``state.current_best.tput`` when present.
+    * ``current_best_pct_of_*`` — convenience ratios for the dashboard
+      callout. ``None`` when the ceiling is missing.
+    * ``snapshots[]`` — full passthrough of ``state.roofline_snapshots``
+      for tooltips / drill-downs.
+
+    Never raises; structured failures land in ``warnings`` and the
+    section becomes a partial dict.
+    """
+    # ── Trajectory: baseline + each KEEP ────────────────────────────────
+    baseline_tput = _to_float(state.get("baseline_tput")) or 0.0
+    trajectory: list[dict[str, Any]] = []
+    if baseline_tput > 0:
+        trajectory.append({
+            "ts":         str(manifest.get("created_at_utc") or ""),
+            "tput":       baseline_tput,
+            "label":      "baseline",
+            "action":     "baseline",
+            "gain_pct":   0.0,
+            "flags":      "",
+            "extra_envs": {},
+        })
+
+    stack = state.get("optimization_stack") or []
+    if isinstance(stack, list):
+        # The stack is already in promotion order, but sort by ts as a
+        # belt-and-braces guard against legacy paths that prepended.
+        ordered = sorted(
+            (e for e in stack if isinstance(e, dict)),
+            key=lambda e: str(e.get("ts") or ""),
+        )
+        for entry in ordered:
+            tput = _to_float(entry.get("tput"))
+            if tput is None or tput <= 0:
+                continue
+            gain_pct = (
+                ((tput - baseline_tput) / baseline_tput * 100.0)
+                if baseline_tput > 0 else 0.0
+            )
+            trajectory.append({
+                "ts":         str(entry.get("ts") or ""),
+                "tput":       tput,
+                "label":      str(entry.get("variant_name") or entry.get("action") or ""),
+                "action":     str(entry.get("action") or ""),
+                "gain_pct":   round(gain_pct, 4),
+                "flags":      str(entry.get("candidate_extra_sglang_args") or ""),
+                "extra_envs": dict(entry.get("extra_envs") or {}),
+            })
+
+    # ── Reference lines: ceiling + target ───────────────────────────────
+    snapshots_raw = state.get("roofline_snapshots") or []
+    snapshots: list[dict[str, Any]] = []
+    if isinstance(snapshots_raw, list):
+        for snap in snapshots_raw:
+            if isinstance(snap, dict):
+                snapshots.append(_normalize_roofline_snapshot(snap))
+
+    # Use the LATEST snapshot for headline numbers — the ceiling
+    # estimate refines as the watermark roofline pipeline reruns.
+    latest_snap = snapshots[-1] if snapshots else None
+    ceiling_tok = (
+        _to_float(latest_snap.get("theoretical_peak_tok_per_sec"))
+        if latest_snap else None
+    )
+    ceiling_available = ceiling_tok is not None and ceiling_tok > 0
+    target_tok = (
+        round(ceiling_tok * DEFAULT_ROOFLINE_TARGET_RATIO, 4)
+        if ceiling_available else None
+    )
+
+    # ── Headline numbers ────────────────────────────────────────────────
+    current_best_tput = (
+        trajectory[-1]["tput"] if trajectory else 0.0
+    )
+    cumulative_gain_pct = _to_float(state.get("cumulative_gain")) or 0.0
+    pct_of_ceiling = (
+        round(current_best_tput / ceiling_tok * 100.0, 4)
+        if ceiling_available and current_best_tput > 0 else None
+    )
+    pct_of_target = (
+        round(current_best_tput / target_tok * 100.0, 4)
+        if (target_tok and target_tok > 0 and current_best_tput > 0) else None
+    )
+
+    out: dict[str, Any] = {
+        "ceiling_tok_per_sec":          ceiling_tok,
+        "target_tok_per_sec":           target_tok,
+        "ceiling_ratio_target":         DEFAULT_ROOFLINE_TARGET_RATIO,
+        "ceiling_available":            ceiling_available,
+        "trajectory":                   trajectory,
+        "baseline_tput":                baseline_tput,
+        "current_best_tput":            current_best_tput,
+        "cumulative_gain_pct":          round(cumulative_gain_pct, 4),
+        "current_best_pct_of_ceiling":  pct_of_ceiling,
+        "current_best_pct_of_target":   pct_of_target,
+        "roofline_failure_streak":      _to_int(state.get("roofline_failure_streak")) or 0,
+        "snapshots":                    snapshots,
+    }
+    if latest_snap:
+        out["snapshot_top_bottleneck"] = str(latest_snap.get("top_bottleneck") or "")
+        within = _to_float(latest_snap.get("within_roofline_pct"))
+        if within is not None:
+            out["snapshot_within_roofline_pct"] = within
+        gap = _to_float(latest_snap.get("gap_to_roofline_pct"))
+        if gap is not None:
+            out["snapshot_gap_to_roofline_pct"] = gap
+
+    # Sanity check: trajectory tail should match state.current_best.tput
+    # when both are known. A divergence means the stack wasn't fully
+    # promoted (resume mid-promotion) — surface it instead of hiding.
+    cb_tput = _to_float((state.get("current_best") or {}).get("tput"))
+    if (
+        cb_tput is not None and cb_tput > 0
+        and current_best_tput > 0
+        and abs(cb_tput - current_best_tput) / max(cb_tput, 1.0) > 0.001
+    ):
+        warnings.append(
+            f"roofline.current_best_tput ({current_best_tput:.2f}) does not "
+            f"match state.current_best.tput ({cb_tput:.2f}); the trajectory "
+            f"may be missing a promotion event."
+        )
+    return out
+
+
+def _normalize_roofline_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
+    """Coerce one ``state.roofline_snapshots[]`` entry to the schema."""
+    top_kernel_raw = snap.get("top_kernel") or {}
+    top_kernel: dict[str, Any] = {}
+    if isinstance(top_kernel_raw, dict):
+        top_kernel = {
+            "name":           str(top_kernel_raw.get("name") or ""),
+            "bound_type":     str(top_kernel_raw.get("bound_type") or ""),
+            "efficiency_pct": _to_float(top_kernel_raw.get("efficiency_pct")) or 0.0,
+            "gpu_pct":        _to_float(top_kernel_raw.get("gpu_pct")) or 0.0,
+        }
+    return {
+        "snapshot_id":                  _to_int(snap.get("snapshot_id")) or 0,
+        "ts":                           str(snap.get("ts") or ""),
+        "achieved_tok_per_sec":         _to_float(snap.get("achieved_tok_per_sec")) or 0.0,
+        "theoretical_peak_tok_per_sec": _to_float(snap.get("theoretical_peak_tok_per_sec")) or 0.0,
+        "within_roofline_pct":          _to_float(snap.get("within_roofline_pct")) or 0.0,
+        "gap_to_roofline_pct":          _to_float(snap.get("gap_to_roofline_pct")) or 0.0,
+        "compute_pct":                  _to_float(snap.get("compute_pct")) or 0.0,
+        "idle_pct":                     _to_float(snap.get("idle_pct")) or 0.0,
+        "comm_pct":                     _to_float(snap.get("comm_pct")) or 0.0,
+        "top_bottleneck":               str(snap.get("top_bottleneck") or ""),
+        "top_kernel":                   top_kernel,
+        "analysis_md_path":             str(snap.get("analysis_md_path") or ""),
+        "kernel_roofline_path":         str(snap.get("kernel_roofline_path") or ""),
+        "trace_input":                  str(snap.get("trace_input") or ""),
+    }
+
+
 def collect_kernel_roofline(
     session_dir: Path,
     warnings: list[str],
