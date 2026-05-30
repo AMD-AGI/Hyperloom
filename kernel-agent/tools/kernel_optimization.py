@@ -1099,6 +1099,38 @@ def build_prompt(
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
     kernel_metadata = build_kernel_metadata(candidate, args)
+    # Budget-protocol preamble. mini-swe-agent renders a ``step N ($X.XX)``
+    # header before every tool call where ``$X.XX`` is the cumulative LLM
+    # token spend. With GEAK's per-task cost-limit disabled (``--cost-limit
+    # 0.0``) this number is pure telemetry — it does NOT terminate the
+    # agent. In the May 2026 M2.5 N36 run multiple GEAK rounds nonetheless
+    # exited at step 3 / ~$2 with a ``budget exhausted`` panic-submit and
+    # zero code edits, throwing away ~90% of the 60-minute wall-clock
+    # budget that actually governs the task. Re-iterate the contract in
+    # the prompt so the LLM treats the header as a cost meter, not a
+    # stop sign. Wall-clock budget is sourced from the runner's
+    # ``geak_budget_minutes`` (default 60); the prompt repeats it verbatim
+    # rather than re-deriving so it stays accurate if the operator lowers
+    # the budget via ``RUN_OPT_GEAK_BUDGET_MINUTES``.
+    budget_protocol_block = (
+        "## BUDGET PROTOCOL (read this FIRST, before any tool call):\n"
+        "Every `mini-swe-agent step N ($X.XX)` header shows CUMULATIVE LLM TOKEN COST\n"
+        "in dollars. This is **TELEMETRY**, NOT a budget signal. The per-task LLM\n"
+        "cost_limit has been disabled (`--cost-limit 0.0`); you will NOT be terminated\n"
+        "by the cost meter at $2, $5, $10, $20, $50, or $100. The ONLY budget that\n"
+        "ends your task is the wall-clock timeout managed by the runner.\n"
+        "\n"
+        "Prior failed runs have been observed to exit at step ~3 with ~$2 spend,\n"
+        "declaring 'budget exhausted' WITHOUT making any code changes. Every one of\n"
+        "those runs threw away 90%+ of the available wall-clock budget. **DO NOT\n"
+        "REPEAT THAT MISTAKE.**\n"
+        "\n"
+        "Successful runs typically use 30-60 tool calls and $15-$40 of token spend\n"
+        "across the full wall-clock budget. Plan for THAT scale. Read the target\n"
+        "kernel, write an optimization, rebuild, test, iterate. If you see a low\n"
+        "step / low $ telemetry header and your impulse is 'submit now to be safe'\n"
+        "— that impulse is WRONG. Make the edit. Run the test. Iterate.\n"
+    )
     # PR-K: source attribution note. When TraceLens originally attributed a
     # kernel to a python ``@compile_ops`` wrapper (e.g. ``aiter/ops/moe_op.py``
     # for ``ck_moe_stage1``) and tracelens_analysis promoted it to the device
@@ -1371,6 +1403,7 @@ def build_prompt(
     return "\n".join([
         f"# TASK: Optimize the `{kernel_name}` kernel",
         "",
+        budget_protocol_block,
         platform_intro,
         "",
         f"kernel_name: {kernel_name}",
