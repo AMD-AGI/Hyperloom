@@ -378,7 +378,9 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert len(coord.shared_state.optimization_stack) == 1
     entry = coord.shared_state.optimization_stack[0]
     assert entry["action"] == "replay_warm_recipe"
-    assert entry["extra_sglang_args"] == "--attention-backend AITER"
+    # Stack entries carry the canonical ``extra_server_args`` key
+    # (aligned with the EXPLORE-KEEP shape from _lift_to_current_best).
+    assert entry["extra_server_args"] == "--attention-backend AITER"
     assert entry["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
     assert entry["tput"] == 738.0
     # Gain bookkeeping.
