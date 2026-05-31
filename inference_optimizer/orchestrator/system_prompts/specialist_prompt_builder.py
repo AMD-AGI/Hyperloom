@@ -442,7 +442,7 @@ class SpecialistPromptInputs:
     # Cortex KB sub-graph (§3.5 §6 part 4)
     kb_subgraph: dict[str, Any] = field(default_factory=dict)
 
-    # Roofline / TraceLens evidence (§3.5 §6 part 4a — post-N31).
+    # Roofline / TraceLens evidence (§3.5 §6 part 4a).
     # Filled by ``Coordinator._warm_specialist_params`` from
     # :attr:`SharedState.last_trace_analyze`. Expected keys:
     # ``analysis_md_path``, ``roofline_snapshot_id``,
@@ -691,7 +691,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Section 4a — Roofline / TraceLens evidence (post-N31)
+# Section 4a — Roofline / TraceLens evidence
 # ---------------------------------------------------------------------------
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section.
@@ -710,6 +710,8 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
       (extracted via :func:`roofline_snapshot.extract_workload_summary`).
     * ``hot_kernels_top15``: list of hot-kernel dicts (top 8 already
       sliced by the warmer to bound token cost).
+    * ``kernel_roofline_top15``: optional per-kernel roofline projection
+      with AI / efficiency / utilization fields.
 
     Returns an empty section (just the heading + ``(none)`` placeholder)
     when ``roofline_evidence`` is empty so the specialist still sees the
@@ -747,6 +749,58 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
                 rows.append(f"- {label}: {float(val):.1f}%")
             else:
                 rows.append(f"- {label}: {val}")
+        rows.append("")
+
+    roofline = ev.get("kernel_roofline_top15") or []
+    if isinstance(roofline, list) and roofline:
+        rows.append(
+            "**Kernel roofline "
+            "(kernel_id | name | gpu_pct | bound | AI | eff_pct | "
+            "compute_pct | bandwidth_pct | action):**"
+        )
+        rows.append("")
+        rows.append(
+            "| kernel_id | name | gpu_pct | bound | AI | eff_pct | "
+            "compute_pct | bandwidth_pct | action |"
+        )
+        rows.append("|---|---|---:|---|---:|---:|---:|---:|---|")
+        for k in roofline:
+            if not isinstance(k, dict):
+                continue
+            kid = str(k.get("kernel_id") or "")
+            name = str(k.get("name") or "")
+            gpu_pct = k.get("gpu_pct")
+            gpu_pct_str = (
+                f"{float(gpu_pct):.2f}%" if isinstance(gpu_pct, (int, float))
+                else "—"
+            )
+            bound = str(k.get("bound_type") or k.get("bottleneck") or "")
+            ai = k.get("arithmetic_intensity")
+            if ai is None:
+                ai = k.get("flops_per_byte")
+            ai_str = (
+                f"{float(ai):.3g}" if isinstance(ai, (int, float)) else "—"
+            )
+            eff = k.get("efficiency_percent")
+            eff_str = (
+                f"{float(eff):.2f}%" if isinstance(eff, (int, float)) else "—"
+            )
+            comp = k.get("compute_utilization_pct")
+            comp_str = (
+                f"{float(comp):.2f}%" if isinstance(comp, (int, float)) else "—"
+            )
+            bw = k.get("bandwidth_utilization_pct")
+            bw_str = (
+                f"{float(bw):.2f}%" if isinstance(bw, (int, float)) else "—"
+            )
+            actions = k.get("recommended_actions") or []
+            action = str(k.get("suggestion") or "")
+            if not action and isinstance(actions, list) and actions:
+                action = str(actions[0])
+            rows.append(
+                f"| `{kid}` | {name} | {gpu_pct_str} | {bound} | {ai_str} | "
+                f"{eff_str} | {comp_str} | {bw_str} | {action} |"
+            )
         rows.append("")
 
     hot = ev.get("hot_kernels_top15") or []
