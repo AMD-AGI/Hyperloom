@@ -29,7 +29,6 @@ These tests pin the contract N3 (Coordinator sequence_denial) and N5
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import pytest

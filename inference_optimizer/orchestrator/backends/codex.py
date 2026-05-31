@@ -35,15 +35,14 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from ..intent_parser import (
-    Intent,
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import Backend, BackendError, BackendTurnResult
+from .base import BackendError, BackendTurnResult, parse_call_timeout_env
 
 
 _OUTPUT_INSTRUCTIONS = """
@@ -131,7 +130,16 @@ class CodexBackend:
     # ``await create(...)`` for the full TCP timeout. Bounding it at
     # asyncio level guarantees the orchestrator reactor never sits idle
     # past this budget.
-    call_timeout_s: float = 120.0
+    #
+    # Env-var override ``INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC`` mirrors
+    # the claude backend knob; same rationale (heavy critic / kernel prompts
+    # may exceed 120 s on the AMD gateway under load).
+    call_timeout_s: float = field(
+        default_factory=lambda: parse_call_timeout_env(
+            "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",
+            default=120.0,
+        )
+    )
 
     # Test seam — set to bypass real OpenAI client construction.
     client_factory: Callable[[], Any] | None = None

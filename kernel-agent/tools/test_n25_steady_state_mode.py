@@ -55,7 +55,6 @@ CLI flag tests:
 from __future__ import annotations
 
 import csv
-import os
 import subprocess
 import sys
 from pathlib import Path

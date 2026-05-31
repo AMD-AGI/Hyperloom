@@ -37,7 +37,6 @@ For a true 2h end-to-end run with a hard target, prefer the CLI::
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 

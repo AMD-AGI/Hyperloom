@@ -25,9 +25,14 @@ from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 # ``integrate_patch`` is the new orchestrator-side apply+restart+gate
 # step that consumes specialist worktree patches.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
-    # prep (2)
+    # prep (3)
     "target_analysis":      "prep",
     "baseline":             "prep",
+    # GAP 1 — Coordinator-internal one-shot warm-recipe replay.
+    # Same prep family as ``baseline`` (it is essentially a re-baseline
+    # with the KB best_config applied). PolicyGate denies LLM
+    # propose_action / delegate via ``analysis_action_not_llm_proposable``.
+    "replay_warm_recipe":   "prep",
     # analysis (2) — Coordinator-internal analysis actions, selected
     # at runtime by ``shared_state.enable_roofline`` (``--enable-roofline``
     # / ``--no-enable-roofline``, default on):
@@ -47,14 +52,21 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     # EXPLORE-phase serving-lane-locked patch integration step.
     "explore":              "shallow",
     "integrate_patch":      "shallow",
+    # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor.
+    # Mirrors integrate_patch's role for the new phase; LLM may not
+    # propose it (framework_pr_action_not_llm_proposable, Stage 3).
+    "framework_pr":         "shallow",
     "sweep":                "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
-    # creative (2) — PR-A1: specialist LLM sub-agent dispatch;
+    # creative (3) — PR-A1: specialist LLM sub-agent dispatch;
     # IR-7 (Saturday May 2026): assess_remaining_gaps is a thin
-    # wrapper that dispatches the session_steward_specialist domain.
+    # wrapper that dispatches the session_steward_specialist domain;
+    # dynamic_action.MD P1: cross-domain multi-turn ReAct sub-agent
+    # dispatch (supplementary EXPLORE channel).
     "specialist":           "creative",
     "assess_remaining_gaps": "creative",
+    "dynamic_action":        "creative",
     # deep_kernel (5)
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",
