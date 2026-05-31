@@ -153,13 +153,6 @@ ALLOWED_FILES: dict[str, str] = {
         "IR-8 entry names the legacy extra_sglang_args alias as "
         "compat-surface context",
 
-    # Repo orientation doc documents the compat-alias convention itself,
-    # naming both the legacy and canonical field names so contributors
-    # understand the rename + static-guard discipline.
-    "CLAUDE.md":
-        "conventions section documents the extra_sglang_args -> "
-        "extra_server_args compat-alias rename convention",
-
 }
 
 
