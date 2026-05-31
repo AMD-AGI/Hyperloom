@@ -68,9 +68,9 @@ ALLOWED_FILES: dict[str, str] = {
     "inference_optimizer/orchestrator/shared_state.py":
         "_migrate_legacy_extra_sglang_args_keys walker + state.json transform",
     "inference_optimizer/orchestrator/action_executors/_explore_roofline_filter.py":
-        "roofline filter still consumes GridVariant.extra_sglang_args",
-    "inference_optimizer/orchestrator/action_executors/explore.py":
-        "explore skip ledger preserves GridVariant.extra_sglang_args",
+        "roofline filter reads canonical extra_server_args with a "
+        "read-only legacy extra_sglang_args fallback for pre-rename "
+        "variant objects",
     "inference_optimizer/orchestrator/optimization_journal.py":
         "journal classification reads existing stack/variant args fields",
     # The materializer keeps the legacy name in its env-routing docstring
@@ -102,14 +102,14 @@ ALLOWED_FILES: dict[str, str] = {
         "compat helper test surface",
     "inference_optimizer/tests/test_back_compat_legacy_field_name.py":
         "back-compat regression tests",
-    "inference_optimizer/tests/test_explore_executor.py":
-        "explore executor regression tests assert legacy ledger fields",
     "inference_optimizer/tests/test_explore_roofline_filter.py":
         "roofline filter tests exercise GridVariant.extra_sglang_args",
     "inference_optimizer/tests/test_grid_runner.py":
         "GridVariant back-compat tests exercise extra_sglang_args kwarg",
-    "inference_optimizer/tests/test_integrate_payload_defaults.py":
-        "integrate defaulting tests cover migrated stack entries",
+    "inference_optimizer/tests/test_coordinator_kb_writes.py":
+        "recipe write-back regression test asserts best_config / "
+        "what_worked emit the KB-legacy extra_sglang_args field read "
+        "from canonical state",
     "inference_optimizer/tests/test_no_legacy_writer_sites.py":
         "this guard's allowlist + docstring",
     "inference_optimizer/tests/test_optimization_journal.py":
