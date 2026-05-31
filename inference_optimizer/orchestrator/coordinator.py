@@ -387,6 +387,40 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
     return out
 
 
+# Flags whose argparse consumes multiple bare tokens before the next ``--``.
+_MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset({
+    "--cuda-graph-bs",
+    "--cuda-graph-max-bs",
+})
+
+
+def _merge_cumulative_extra_sglang_args(
+    base_args: str,
+    candidate_args: str,
+    full_args: str,
+) -> str:
+    """Build cumulative launch args for a KEEP without double-stacking.
+
+    Explore variants usually record the *full* cumulative ``extra_sglang_args``
+    for the stack layer being kept. Joining ``base_args + candidate_args`` when
+    both are full stacks duplicates flags; dedupe then corrupts multi-value
+    knobs such as ``--cuda-graph-bs``.
+    """
+    base = str(base_args or "").strip()
+    candidate = str(candidate_args or "").strip()
+    full = str(full_args or "").strip()
+    if full and full != candidate:
+        merged = full
+    elif candidate and base:
+        if candidate.startswith(base) or base in candidate.split():
+            merged = candidate
+        else:
+            merged = f"{base} {candidate}".strip()
+    else:
+        merged = candidate or full or base
+    return _dedupe_extra_sglang_args(merged)
+
+
 def _dedupe_extra_sglang_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string.
 
@@ -405,6 +439,10 @@ def _dedupe_extra_sglang_args(args_str: str) -> str:
     was re-appended verbatim. Dedupe is a sane normalization: keep each
     flag once, with the value of its last occurrence — same semantics
     argparse would have applied at launch.
+
+    Flags in ``_MULTI_VALUE_SGLANG_FLAGS`` (e.g. ``--cuda-graph-bs``) accept
+    multiple values per occurrence; those runs are preserved so dedupe does
+    not leave stray integers between flags.
 
     Bare flags (no value, e.g. ``--enable-prefix-caching``) are also
     deduped (kept once, position preserved by first appearance).
@@ -427,12 +465,16 @@ def _dedupe_extra_sglang_args(args_str: str) -> str:
         t = tokens[i]
         if t.startswith("--"):
             flag = t
-            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-                pair = [flag, tokens[i + 1]]
-                i += 2
-            else:
-                pair = [flag]
+            i += 1
+            values: list[str] = []
+            if flag in _MULTI_VALUE_SGLANG_FLAGS:
+                while i < len(tokens) and not tokens[i].startswith("--"):
+                    values.append(tokens[i])
+                    i += 1
+            elif i < len(tokens) and not tokens[i].startswith("--"):
+                values = [tokens[i]]
                 i += 1
+            pair = [flag, *values] if values else [flag]
             if flag not in pair_by_flag:
                 order.append(flag)
             pair_by_flag[flag] = pair
@@ -8744,6 +8786,18 @@ class Coordinator:
             ):
                 if key in current_best:
                     best_config[key] = current_best[key]
+        # Prefer the last validated stack layer for launch args — current_best
+        # can carry a corrupted cumulative string when promote dedupe regressed.
+        if opt_stack:
+            last_entry = opt_stack[-1]
+            if isinstance(last_entry, dict):
+                stack_args = str(
+                    last_entry.get("candidate_extra_sglang_args")
+                    or last_entry.get("extra_sglang_args")
+                    or "",
+                ).strip()
+                if stack_args:
+                    best_config["extra_sglang_args"] = stack_args
         what_worked: list[dict[str, Any]] = []
         for idx, entry in enumerate(opt_stack):
             if not isinstance(entry, dict):
@@ -9004,21 +9058,9 @@ class Coordinator:
         full_args = ""
         if isinstance(bv, dict):
             full_args = str(bv.get("extra_sglang_args") or "").strip()
-        if base_args and candidate_args and full_args == candidate_args:
-            full_args = " ".join((base_args, candidate_args))
-        elif not full_args:
-            full_args = " ".join(
-                part for part in (base_args, candidate_args) if part
-            )
-        # Dedupe repeated ``--flag value`` pairs so the cumulative
-        # extra_sglang_args reflects what argparse will actually honor
-        # (last value wins). Without this, every promote that re-applies
-        # a multi-value combo candidate (e.g.
-        # ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128 --cuda-graph-max-bs 256``)
-        # leaves multiple copies of the same flag in the final args
-        # string, which breaks reproduce-launch dashboards and the
-        # final.extra_sglang_args field surfaced by session_breakdown.
-        full_args = _dedupe_extra_sglang_args(full_args)
+        full_args = _merge_cumulative_extra_sglang_args(
+            base_args, candidate_args, full_args,
+        )
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
