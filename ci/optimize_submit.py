@@ -48,10 +48,12 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import requests
@@ -103,6 +105,24 @@ DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
 # checkout (left over from earlier non-hyperloom layouts on some sandboxes).
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_INFERENCEX_PATH = "/wekafs/hyperloom/InferenceX"
+# OOB + TraceLens live next to InferenceX on the same hyperloom-managed mount.
+# Like DEFAULT_INFERENCEX_PATH these are core42 fallbacks; --oob-path /
+# --tracelens-root (or SAFE_OPTIMIZE_* env) override per-cluster.
+DEFAULT_OOB_PATH = "/wekafs/hyperloom/OOB"
+DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
+DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
+DEFAULT_MAX_HOURS = 12.0
+DEFAULT_TARGET_GAIN = 30.0
+DEFAULT_RESULTS_PATH = "$RESULT_DIR"
+
+_KERNEL_BACKEND_ALIASES = {
+    "geak": "GEAK",
+    "claude": "Claude Code",
+    "claude-code": "Claude Code",
+    "claude code": "Claude Code",
+    "codex": "Codex",
+    "cursor": "Cursor",
+}
 
 # Canonical prompt prefix lives in ci/prompt_prefix.txt next to this script.
 # Single source of truth — same file is read by the GitHub workflow Submit
@@ -133,6 +153,28 @@ def _load_default_prompt_prefix() -> str:
     except OSError:
         pass
     return ""
+
+
+def parse_kernel_backends(raw: str | None) -> list[str]:
+    """Normalize user-facing kernel backend names for SaFE's API payload."""
+
+    if not raw:
+        return list(DEFAULT_KERNEL_BACKENDS)
+    out: list[str] = []
+    for part in raw.replace(";", ",").split(","):
+        item = part.strip()
+        if not item:
+            continue
+        key = item.lower()
+        normalized = _KERNEL_BACKEND_ALIASES.get(key)
+        if normalized is None:
+            raise ValueError(
+                f"unknown kernel backend {item!r}; expected one of "
+                "geak, claude, codex, cursor"
+            )
+        if normalized not in out:
+            out.append(normalized)
+    return out or list(DEFAULT_KERNEL_BACKENDS)
 
 # Architectures well-supported by SGLang on ROCm 7.x.
 SGLANG_ARCHS: set[str] = {
@@ -641,8 +683,14 @@ class SafeOptimizeClient:
         mode: str = "local",
         gpu_type: str | None = None,
         inferencex_path: str | None = None,
+        oob_path: str | None = None,
+        tracelens_root: str | None = None,
         prompt_prefix: str | None = None,
         prompt_suffix: str | None = None,
+        kernel_backends: list[str] | None = None,
+        max_hours: float | None = None,
+        target_gain: float | None = None,
+        results_path: str | None = None,
     ) -> dict:
         # Pick the workspace for this submit. Default = self.submit_workspace
         # (single-workspace mode). When a round-robin pool is configured,
@@ -674,8 +722,14 @@ class SafeOptimizeClient:
             "isl": isl,
             "osl": osl,
             "concurrency": concurrency,
-            "kernelBackends": ["Claude Code"],
+            "kernelBackends": list(kernel_backends or DEFAULT_KERNEL_BACKENDS),
         }
+        if max_hours and max_hours > 0:
+            body["maxHours"] = max_hours
+        if target_gain and target_gain > 0:
+            body["targetGain"] = target_gain
+        if results_path:
+            body["resultsPath"] = results_path
         if image:
             body["image"] = image
         # Override SaFE backend's wrong-for-core42 defaults (MI355X /
@@ -684,6 +738,10 @@ class SafeOptimizeClient:
             body["gpuType"] = gpu_type
         if inferencex_path:
             body["inferencexPath"] = inferencex_path
+        if oob_path:
+            body["oobPath"] = oob_path
+        if tracelens_root:
+            body["tracelensRoot"] = tracelens_root
         # Optional prefix/suffix forwarded to BuildHyperloomPrompt on the
         # SaFE side. We use this to point the skill at the alternate
         # inference_optimizer SKILL.md the batch lives in, before the
@@ -1000,6 +1058,10 @@ class SubmissionRecord:
     # last_task.clawSessionId in wait_and_collect_one.
     claw_session_id: str | None = None
     display_name: str | None = None
+    model_path: str | None = None
+    safe_user_id: str | None = None
+    safe_started_at: str | None = None
+    safe_finished_at: str | None = None
     detected: dict | None = None
     overrides: dict = field(default_factory=dict)
     pool: dict = field(default_factory=dict)
@@ -1015,6 +1077,7 @@ class SubmissionRecord:
     artifacts_dir: str | None = None   # local dir where artifacts landed
     artifact_count: int = 0
     artifact_files: list[str] = field(default_factory=list)
+    artifact_sources: list[dict] = field(default_factory=list)
 
 
 # ── Per-model flow ──────────────────────────────────────────────────────────────
@@ -1032,8 +1095,14 @@ def process_model(
     mode: str,
     gpu_type: str | None = None,
     inferencex_path: str | None = None,
+    oob_path: str | None = None,
+    tracelens_root: str | None = None,
     prompt_prefix: str | None = None,
     prompt_suffix: str | None = None,
+    kernel_backends: list[str] | None = None,
+    max_hours: float | None = None,
+    target_gain: float | None = None,
+    results_path: str | None = None,
     pool_metadata: dict | None = None,
 ) -> SubmissionRecord:
     rec = SubmissionRecord(
@@ -1067,6 +1136,14 @@ def process_model(
     display_name = f"{repo_id.split('/')[-1]}-{precision.lower()}-{framework}-mi300x"
     rec.display_name = display_name
     rec.overrides["mode"] = mode
+    if kernel_backends:
+        rec.overrides["kernel_backends"] = kernel_backends
+    if max_hours:
+        rec.overrides["max_hours"] = max_hours
+    if target_gain:
+        rec.overrides["target_gain"] = target_gain
+    if results_path:
+        rec.overrides["results_path"] = results_path
 
     if dry_run:
         rec.status = "dry-run"
@@ -1152,7 +1229,10 @@ def process_model(
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
             mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path,
-            prompt_prefix=prompt_prefix, prompt_suffix=prompt_suffix)
+            oob_path=oob_path, tracelens_root=tracelens_root,
+            prompt_prefix=prompt_prefix, prompt_suffix=prompt_suffix,
+            kernel_backends=kernel_backends, max_hours=max_hours,
+            target_gain=target_gain, results_path=results_path)
     except Exception as e:
         rec.status = "failed"
         rec.error = f"submit_task: {e}"
@@ -1208,6 +1288,46 @@ def _safe_local_path(artifacts_dir: Path, task_id: str, remote_path: str) -> Pat
     return artifacts_dir / task_id / Path(*parts) if parts else artifacts_dir / task_id / "artifact.bin"
 
 
+def _record_artifact_source(
+    rec: SubmissionRecord,
+    local_path: Path,
+    source_type: str,
+    *,
+    remote_path: str | None = None,
+    source_path: str | None = None,
+    session_dir: str | None = None,
+) -> None:
+    entry = {
+        "source_type": source_type,
+        "local_path": str(local_path).replace("\\", "/"),
+        "file_name": local_path.name,
+    }
+    if remote_path:
+        entry["remote_path"] = remote_path
+    if source_path:
+        entry["source_path"] = source_path
+    if session_dir:
+        entry["session_dir"] = session_dir
+    rec.artifact_sources.append(entry)
+
+
+def _write_artifact_sources(task_dir: Path, rec: SubmissionRecord) -> None:
+    if not rec.artifact_sources:
+        return
+    payload = {
+        "task_id": rec.task_id,
+        "model": rec.model,
+        "claw_session_id": rec.claw_session_id,
+        "artifact_dir": str(task_dir).replace("\\", "/"),
+        "files": rec.artifact_sources,
+    }
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "artifact_sources.json").write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+
 # Files that MUST be present in the task directory for the run to count as
 # "delivered". session_breakdown.json was promoted from optional/audit to a
 # key result in 2026-05 because claw-stats-service / the V2 dashboard prefer
@@ -1252,6 +1372,82 @@ def _metrics_have_positive_throughput(path: str) -> bool:
         return float(baseline) > 0 and float(optimized) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _timestamp_hint_variants(value: str) -> set[str]:
+    """Return path-matchable variants for skill session timestamps."""
+    raw = value.strip()
+    if not raw:
+        return set()
+    compact = raw.replace("T", "").replace("t", "").replace("Z", "").replace("z", "")
+    variants = {raw, raw.lower()}
+    if compact and compact != raw:
+        variants.update({compact, compact.lower()})
+    return variants
+
+
+def _session_hints_from_artifact_items(items: list[dict]) -> set[str]:
+    hints: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        text = " ".join(
+            str(item.get(key) or "")
+            for key in ("path", "downloadPath", "name")
+        )
+        for match in re.findall(r"\b\d{8}T\d{6}Z\b", text, flags=re.IGNORECASE):
+            hints.update(_timestamp_hint_variants(match))
+    return hints
+
+
+def _path_has_session_hint(path: str, hints: set[str]) -> bool:
+    if not hints:
+        return False
+    norm_path = _norm_token(path)
+    return any(_norm_token(hint) in norm_path for hint in hints)
+
+
+def _parse_safe_timestamp(value: str | None) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _parse_session_timestamp(value: str) -> datetime | None:
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw.upper(), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _session_timestamp_from_path(path: str) -> str:
+    matches = re.findall(r"\b\d{8}T\d{6}Z\b", path, flags=re.IGNORECASE)
+    return matches[-1].upper() if matches else ""
+
+
+def _timestamp_in_task_window(timestamp: str, rec: SubmissionRecord, margin_hours: int = 2) -> bool:
+    ts = _parse_session_timestamp(timestamp)
+    start = _parse_safe_timestamp(rec.safe_started_at)
+    end = _parse_safe_timestamp(rec.safe_finished_at)
+    if ts is None or start is None:
+        return False
+    if end is None:
+        end = start + timedelta(hours=24)
+    return (start - timedelta(hours=margin_hours)) <= ts <= (end + timedelta(hours=margin_hours))
+
+
+def _record_has_task_window(rec: SubmissionRecord) -> bool:
+    return _parse_safe_timestamp(rec.safe_started_at) is not None
 
 
 def _category_from_arch(arch: str | None) -> str:
@@ -1602,6 +1798,76 @@ def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
     return True
 
 
+def _candidate_model_dir_names(rec: SubmissionRecord) -> list[str]:
+    names: list[str] = []
+    for value in (
+        rec.model_path or "",
+        (rec.model or "").replace("/", "-"),
+        (rec.model or "").split("/")[-1],
+        rec.display_name or "",
+    ):
+        name = str(value or "").strip().rstrip("/\\").split("/")[-1]
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _json_positive_perf(data: dict) -> bool:
+    def positive(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+    baseline = data.get("baseline") if isinstance(data.get("baseline"), dict) else {}
+    final = data.get("final") if isinstance(data.get("final"), dict) else {}
+    best = data.get("best") if isinstance(data.get("best"), dict) else {}
+    base_values = (
+        data.get("baseline_tput"),
+        data.get("baseline_throughput"),
+        data.get("tok_per_gpu_baseline"),
+        baseline.get("throughput_tok_s_per_gpu"),
+        baseline.get("output_throughput"),
+    )
+    opt_values = (
+        data.get("best_tput"),
+        data.get("optimized_throughput"),
+        data.get("tok_per_gpu_optimized"),
+        final.get("throughput_tok_s_per_gpu"),
+        final.get("output_throughput"),
+        best.get("throughput_tok_s_per_gpu"),
+        best.get("output_throughput"),
+    )
+    return any(positive(v) for v in base_values) and any(positive(v) for v in opt_values)
+
+
+def _json_model_field(data: dict) -> str:
+    workload = data.get("workload") if isinstance(data.get("workload"), dict) else {}
+    session = data.get("session") if isinstance(data.get("session"), dict) else {}
+    meta = data.get("session_meta") if isinstance(data.get("session_meta"), dict) else {}
+    for value in (
+        data.get("model"),
+        data.get("model_name"),
+        workload.get("model_name"),
+        workload.get("model"),
+        session.get("model"),
+        meta.get("model"),
+    ):
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def _json_claw_session_id(data: dict) -> str:
+    session = data.get("session") if isinstance(data.get("session"), dict) else {}
+    meta = data.get("session_meta") if isinstance(data.get("session_meta"), dict) else {}
+    for value in (
+        data.get("claw_session_id"),
+        session.get("claw_session_id"),
+        meta.get("claw_session_id"),
+    ):
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
 def _env_truthy(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in {
         "1", "true", "yes", "y", "on",
@@ -1643,6 +1909,7 @@ def _nfs_fallback_collect(
     rec: SubmissionRecord,
     artifacts_dir: Path,
     copy_full_session: bool = False,
+    current_session_hints: set[str] | None = None,
 ) -> int:
     """Scan NFS result directories for files matching this model.
 
@@ -1669,6 +1936,7 @@ def _nfs_fallback_collect(
 
     Returns count of files copied.
     """
+    current_session_hints = set(current_session_hints or set())
     nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
     model_basename = (rec.model or "").split("/")[-1]
     model_short = model_basename.lower().replace("-", "").replace("_", "").replace(".", "")
@@ -1680,7 +1948,14 @@ def _nfs_fallback_collect(
 
     copied = 0
 
-    # ── Stage A: legacy canonical dirs (matched by entry name) ──────────────
+    has_task_scoped_model_dir = bool(rec.safe_user_id and _record_has_task_window(rec))
+    if not current_session_hints and not has_task_scoped_model_dir:
+        log.info("[task %s] NFS fallback skipped: no current-session "
+                 "timestamp hints from SaFE artifacts or task time window",
+                 rec.task_id)
+        return copied
+
+    # ── Stage A: legacy canonical dirs (matched by current timestamp) ───────
     legacy_scan_dirs = [
         f"{nfs_root}/hyperloom-results",
         f"{nfs_root}/results/ci",
@@ -1694,6 +1969,8 @@ def _nfs_fallback_collect(
         except Exception:
             continue
         for entry in entries:
+            if not _path_has_session_hint(entry, current_session_hints):
+                continue
             entry_clean = entry.lower().replace("-", "").replace("_", "").replace(".", "")
             if model_short not in entry_clean:
                 continue
@@ -1712,6 +1989,13 @@ def _nfs_fallback_collect(
                         try:
                             shutil.copy2(src, dst)
                             _backfill_ci_metrics_file(dst, rec)
+                            _record_artifact_source(
+                                rec,
+                                dst,
+                                "nfs_legacy",
+                                source_path=src,
+                                session_dir=candidate,
+                            )
                         except Exception as e:
                             log.warning("[task %s] NFS legacy copy %s -> %s failed: %s",
                                         rec.task_id, src, dst, e)
@@ -1728,29 +2012,81 @@ def _nfs_fallback_collect(
     if copied:
         return copied
 
-    # ── Stage B: /wekafs/users/<uid>/<session>/...  matched by model field ──
+    # ── Stage B: /wekafs/users/<uid>/<session>/...  matched by timestamp ────
     users_root = f"{nfs_root}/users"
     if not os.path.isdir(users_root):
         return copied
 
-    # Primary match: exact equality via the JSON `model` field when the agent
-    # wrote it. Secondary match: conservative session-dir match. The secondary
-    # path is needed for HyperloomV2 runs that persist
-    # /wekafs/users/<uid>/<display-ish-dir>/ci_metrics.json without a `model`
+    # Primary match: exact equality via JSON model fields when the agent wrote
+    # them. Secondary match: conservative session-dir match. The secondary path
+    # is needed for HyperloomV2 runs that persist result JSON without a `model`
     # field in the JSON (observed in Run 25813519878).
     target = _norm_token(model_basename)
     if not target:
         return copied
 
     def _model_field_matches(model_field: str) -> bool:
-        return _norm_token(model_field) == target
+        observed = _norm_token(model_field)
+        allowed = {
+            target,
+            _norm_token((rec.model or "").replace("/", "-")),
+            _norm_token((rec.model_path or "").rstrip("/\\").split("/")[-1]),
+        }
+        allowed.discard("")
+        return observed in allowed or _norm_token(model_field.split("/")[-1]) in allowed
 
-    # rglob with depth 4 is enough for the layouts we've seen:
+    def _consider_result_file(path: str, session_dir: str, score_base: int) -> None:
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+
+        model_field = _json_model_field(data)
+        if model_field:
+            if not _model_field_matches(model_field):
+                return
+            score = score_base + 100
+        else:
+            session_name = os.path.basename(session_dir.rstrip("/"))
+            parent_name = os.path.basename(os.path.dirname(session_dir.rstrip("/")))
+            if not (
+                _record_matches_session_dir(rec, session_name)
+                or _record_matches_session_dir(rec, parent_name)
+            ):
+                return
+            score = score_base + 60
+
+        claw = _json_claw_session_id(data)
+        if rec.claw_session_id and claw:
+            if rec.claw_session_id != claw:
+                return
+            score += 30
+        if _json_positive_perf(data):
+            score += 10
+        else:
+            log.info("[task %s] candidate %s matched but has no positive "
+                     "throughput (will use only if no better match)",
+                     rec.task_id, path)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return
+        candidates.append((score, mtime, path, session_dir))
+
+    # rglob with depth 4/5 is enough for the legacy layouts we've seen:
     #   /wekafs/users/<uid>/<session>/ci_metrics.json                (depth 4)
     #   /wekafs/users/<uid>/<session>/phase10_report/ci_metrics.json (depth 5)
     #   /wekafs/users/<uid>/<session>/results/ci_metrics.json        (depth 5)
-    candidates: list[tuple[int, float, str, str]] = []  # (score, mtime, ci_path, session_dir)
-    for uid_dir in os.listdir(users_root):
+    candidates: list[tuple[int, float, str, str]] = []  # (score, mtime, marker_path, session_dir)
+    uid_dirs = [rec.safe_user_id] if rec.safe_user_id else os.listdir(users_root)
+    for uid_dir in uid_dirs:
+        if not uid_dir:
+            continue
         uid_path = os.path.join(users_root, uid_dir)
         if not os.path.isdir(uid_path):
             continue
@@ -1758,40 +2094,63 @@ def _nfs_fallback_collect(
             sess_path = os.path.join(uid_path, sess)
             if not os.path.isdir(sess_path):
                 continue
+            if not _path_has_session_hint(sess_path, current_session_hints):
+                continue
             for sub in ("", "phase10_report", "results"):
                 ci_path = os.path.join(sess_path, sub, "ci_metrics.json") \
                     if sub else os.path.join(sess_path, "ci_metrics.json")
-                if not os.path.isfile(ci_path):
+                _consider_result_file(ci_path, sess_path, 0)
+
+        # Current HyperloomV2 layout on core42:
+        #   /wekafs/users/<uid>/<model-path-basename>/<YYYYmmddTHHMMSSZ>/
+        #     session_breakdown.json
+        #     reports/final.md
+        #
+        # SaFE's artifact API may list only workspace source files for these
+        # runs, so there is no artifact-derived timestamp hint. In that case,
+        # accept timestamp directories only when they are under this exact
+        # SaFE user id + exact model dir and fall inside the task's
+        # startedAt/finishedAt window.
+        if rec.safe_user_id and uid_dir == rec.safe_user_id:
+            for model_dir_name in _candidate_model_dir_names(rec):
+                model_dir = os.path.join(uid_path, model_dir_name)
+                if not os.path.isdir(model_dir):
                     continue
                 try:
-                    with open(ci_path, encoding="utf-8") as f:
-                        data = json.load(f)
+                    ts_entries = sorted(os.listdir(model_dir), reverse=True)
                 except Exception:
                     continue
-                model_field = str(data.get("model") or "")
-                if model_field:
-                    if not _model_field_matches(model_field):
+                for ts_entry in ts_entries:
+                    session_dir = os.path.join(model_dir, ts_entry)
+                    if not os.path.isdir(session_dir):
                         continue
-                    score = 100
-                else:
-                    if not _record_matches_session_dir(rec, sess):
-                        continue
-                    score = 60
-                if _metrics_have_positive_throughput(ci_path):
-                    score += 10
-                else:
-                    log.info("[task %s] candidate %s matched but has no positive "
-                             "throughput (will use only if no better match)",
-                             rec.task_id, ci_path)
-                try:
-                    mtime = os.path.getmtime(ci_path)
-                except OSError:
-                    continue
-                candidates.append((score, mtime, ci_path, sess_path))
+                    ts = _session_timestamp_from_path(ts_entry)
+                    if current_session_hints:
+                        if not _path_has_session_hint(session_dir, current_session_hints):
+                            continue
+                        score_base = 40
+                    else:
+                        if not _timestamp_in_task_window(ts, rec):
+                            continue
+                        score_base = 30
+                    for sub, filename in (
+                        ("", "ci_metrics.json"),
+                        ("phase10_report", "ci_metrics.json"),
+                        ("results", "ci_metrics.json"),
+                        ("", "session_breakdown.json"),
+                        ("phase10_report", "session_breakdown.json"),
+                        ("v2_session", "session_breakdown.json"),
+                    ):
+                        result_path = os.path.join(session_dir, sub, filename) if sub \
+                            else os.path.join(session_dir, filename)
+                        _consider_result_file(result_path, session_dir, score_base)
 
     if not candidates:
-        log.info("[task %s] no /wekafs/users/<uid>/* ci_metrics.json matched "
-                 "model=%s", rec.task_id, model_basename)
+        log.info("[task %s] no /wekafs/users candidate matched model=%s "
+                 "(user_id=%s, hints=%s, task_window=%s)",
+                 rec.task_id, model_basename, rec.safe_user_id or "?",
+                 ",".join(sorted(current_session_hints)) or "-",
+                 "yes" if _record_has_task_window(rec) else "no")
         return copied
 
     # Pick highest-confidence, then freshest match — same model can be re-run
@@ -1831,6 +2190,13 @@ def _nfs_fallback_collect(
         try:
             shutil.copy2(src, dst)
             _backfill_ci_metrics_file(dst, rec)
+            _record_artifact_source(
+                rec,
+                dst,
+                "nfs_user_session",
+                source_path=src,
+                session_dir=best_sess,
+            )
         except Exception as e:
             log.warning("[task %s] NFS user-session copy %s -> %s failed: %s",
                         rec.task_id, src, dst, e)
@@ -1882,6 +2248,10 @@ def wait_and_collect_one(
     rec.final_phase = last_task.get("currentPhase")
     rec.final_message = (last_task.get("message") or "")[:500] or None
     rec.claw_session_id = (last_task.get("clawSessionId") or "").strip() or None
+    rec.model_path = (last_task.get("modelPath") or "").strip() or rec.model_path
+    rec.safe_user_id = (last_task.get("userId") or "").strip() or rec.safe_user_id
+    rec.safe_started_at = (last_task.get("startedAt") or "").strip() or rec.safe_started_at
+    rec.safe_finished_at = (last_task.get("finishedAt") or "").strip() or rec.safe_finished_at
     rec.sandbox_duration_seconds = _sandbox_duration_seconds(last_task)
     if rec.claw_session_id:
         log.info("[task %s] clawSessionId=%s duration=%ss",
@@ -1919,6 +2289,10 @@ def wait_and_collect_one(
             time.sleep(15)
     log.info("[task %s] safe artifacts: %d total, %d to download",
              rec.task_id, len(items), len(wanted))
+    current_session_hints = _session_hints_from_artifact_items(items)
+    if current_session_hints:
+        log.info("[task %s] current session timestamp hints from artifacts: %s",
+                 rec.task_id, ", ".join(sorted(current_session_hints)))
 
     task_dir = artifacts_dir / rec.task_id
     rec.artifacts_dir = str(task_dir)
@@ -1930,6 +2304,12 @@ def wait_and_collect_one(
         try:
             n = safe.download_artifact_to(rec.task_id, it, str(local))
             _backfill_ci_metrics_file(local, rec)
+            _record_artifact_source(
+                rec,
+                local,
+                "safe_artifact_api",
+                remote_path=path,
+            )
             rec.artifact_files.append(str(local))
             rec.artifact_count += 1
             log.info("[task %s] saved %s (%d bytes)", rec.task_id, path, n)
@@ -1944,7 +2324,10 @@ def wait_and_collect_one(
                  rec.task_id, has_metrics, has_report)
         copy_full_session = all_artifacts or _env_truthy("SAFE_OPTIMIZE_COPY_FULL_SESSION")
         n_added = _nfs_fallback_collect(
-            rec, artifacts_dir, copy_full_session=copy_full_session,
+            rec,
+            artifacts_dir,
+            copy_full_session=copy_full_session,
+            current_session_hints=current_session_hints,
         )
         if n_added:
             log.info("[task %s] NFS fallback added %d files", rec.task_id, n_added)
@@ -1955,14 +2338,23 @@ def wait_and_collect_one(
     # SOURCE files so operators ssh-ing into /wekafs/users/<uid>/<sess>/
     # see image/hyperloom_commit/category/sandbox_duration_seconds without
     # downloading the GHA artifact zip. No-op when wekafs isn't mounted.
+    if rec.final_status == "Succeeded":
+        try:
+            n_wkfs = _backfill_wekafs_in_place(rec)
+            if n_wkfs:
+                log.info("[task %s] wekafs in-place backfill updated %d file(s)",
+                         rec.task_id, n_wkfs)
+        except Exception as e:
+            log.warning("[task %s] wekafs in-place backfill skipped due to %s: %s",
+                        rec.task_id, type(e).__name__, e)
+    else:
+        log.info("[task %s] wekafs in-place backfill skipped for final_status=%s",
+                 rec.task_id, rec.final_status or "?")
     try:
-        n_wkfs = _backfill_wekafs_in_place(rec)
-        if n_wkfs:
-            log.info("[task %s] wekafs in-place backfill updated %d file(s)",
-                     rec.task_id, n_wkfs)
+        _write_artifact_sources(task_dir, rec)
     except Exception as e:
-        log.warning("[task %s] wekafs in-place backfill skipped due to %s: %s",
-                    rec.task_id, type(e).__name__, e)
+        log.warning("[task %s] artifact source metadata write skipped: %s",
+                    rec.task_id, e)
     return rec
 
 
@@ -2157,6 +2549,13 @@ def _build_parser() -> argparse.ArgumentParser:
                              f"(defaults to $SAFE_OPTIMIZE_INFERENCEX_PATH then "
                              f"'{DEFAULT_INFERENCEX_PATH}'). SaFE backend default is "
                              f"/hyperloom/InferenceX which doesn't exist on core42.")
+    parser.add_argument("--oob-path", default="",
+                        help=f"OOB checkout path inside the sandbox (defaults to "
+                             f"$SAFE_OPTIMIZE_OOB_PATH then '{DEFAULT_OOB_PATH}').")
+    parser.add_argument("--tracelens-root", default="",
+                        help=f"TraceLens checkout path inside the sandbox (defaults "
+                             f"to $SAFE_OPTIMIZE_TRACELENS_ROOT then "
+                             f"'{DEFAULT_TRACELENS_ROOT}').")
     parser.add_argument("--prompt-prefix",
                         default=_load_default_prompt_prefix(),
                         help="Free-form prefix prepended to the SaFE-generated "
@@ -2167,6 +2566,25 @@ def _build_parser() -> argparse.ArgumentParser:
                         default=os.environ.get("SAFE_OPTIMIZE_PROMPT_SUFFIX", ""),
                         help="Optional free-form suffix appended to the SaFE-generated "
                              "Hyperloom prompt. (env: $SAFE_OPTIMIZE_PROMPT_SUFFIX)")
+    parser.add_argument("--kernel-opt-backends",
+                        default=os.environ.get("SAFE_OPTIMIZE_KERNEL_BACKENDS", ""),
+                        help="Comma-separated kernel optimization backends to send "
+                             "to SaFE's kernelBackends field. Aliases: geak, "
+                             "claude, codex, cursor. Default: geak,claude,codex "
+                             "(GEAK first).")
+    parser.add_argument("--max-hours", type=float,
+                        default=float(os.environ.get("SAFE_OPTIMIZE_MAX_HOURS", DEFAULT_MAX_HOURS)),
+                        help="Max hours passed to the Hyperloom optimizer prompt "
+                             "(default: 12).")
+    parser.add_argument("--target-gain", type=float,
+                        default=float(os.environ.get("SAFE_OPTIMIZE_TARGET_GAIN", DEFAULT_TARGET_GAIN)),
+                        help="Target gain %% passed to the Hyperloom optimizer prompt "
+                             "(default: 30).")
+    parser.add_argument("--results-path",
+                        default=os.environ.get("SAFE_OPTIMIZE_RESULTS_PATH", DEFAULT_RESULTS_PATH),
+                        help="Results path passed to SaFE's prompt builder "
+                             "(default: $RESULT_DIR so the prompt respects the "
+                             "CI-selected persistent/ephemeral result root).")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="HuggingFace token (or set $HF_TOKEN)")
 
@@ -2210,8 +2628,8 @@ def _build_parser() -> argparse.ArgumentParser:
                              f"{', '.join(DEFAULT_ARTIFACT_PATTERNS)})")
     parser.add_argument("--artifacts-dir", default="task-artifacts",
                         help="Local directory where per-task artifacts land (default: ./task-artifacts)")
-    parser.add_argument("--task-timeout-min", type=int, default=480,
-                        help="Per-task wait timeout in minutes (default: 480 = 8h)")
+    parser.add_argument("--task-timeout-min", type=int, default=720,
+                        help="Per-task wait timeout in minutes (default: 720 = 12h)")
     parser.add_argument("--poll-interval-s", type=int, default=60,
                         help="How often to poll task status, seconds (default: 60)")
     parser.add_argument("--wait-parallel", type=int, default=8,
@@ -2266,6 +2684,17 @@ def main() -> int:
     inferencex_path = (args.inferencex_path
                        or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
                        or DEFAULT_INFERENCEX_PATH)
+    oob_path = (args.oob_path
+                or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
+                or DEFAULT_OOB_PATH)
+    tracelens_root = (args.tracelens_root
+                      or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT")
+                      or DEFAULT_TRACELENS_ROOT)
+    try:
+        kernel_backends = parse_kernel_backends(args.kernel_opt_backends)
+    except ValueError as e:
+        log.error("%s", e)
+        return 2
 
     if not api_key and not args.dry_run:
         log.error("no API key set (CLAW_API_KEY / SAFE_API_KEY / --api-key)")
@@ -2273,8 +2702,9 @@ def main() -> int:
 
     log.info("SaFE base_url=%s register_workspace=%s submit_workspace=%s volume=%s",
              base_url, register_workspace, submit_workspace, volume)
-    log.info("Cluster prompt fields: gpu_type=%s inferencex_path=%s",
-             gpu_type, inferencex_path)
+    log.info("Cluster prompt fields: gpu_type=%s inferencex_path=%s oob_path=%s tracelens_root=%s",
+             gpu_type, inferencex_path, oob_path, tracelens_root)
+    log.info("Kernel backends: %s", ", ".join(kernel_backends))
     if submit_workspaces_pool:
         log.info("submit round-robin pool: %s (overrides --submit-workspace)",
                  ",".join(submit_workspaces_pool))
@@ -2333,8 +2763,14 @@ def main() -> int:
             mode=args.mode,
             gpu_type=gpu_type,
             inferencex_path=inferencex_path,
+            oob_path=oob_path,
+            tracelens_root=tracelens_root,
             prompt_prefix=args.prompt_prefix or None,
             prompt_suffix=args.prompt_suffix or None,
+            kernel_backends=kernel_backends,
+            max_hours=args.max_hours,
+            target_gain=args.target_gain,
+            results_path=args.results_path,
             pool_metadata=pool_metadata,
         )
         records.append(rec)
@@ -2366,6 +2802,9 @@ def main() -> int:
         log.info("=" * 60)
         log.info("Final task statuses: %s",
                  ", ".join(f"{k}={v}" for k, v in sorted(final_counts.items())))
+        non_success = [r for r in records if r.task_id and r.final_status != "Succeeded"]
+    else:
+        non_success = []
 
     # Manifest is written *after* wait/collect so it captures final_status etc.
     if args.output_dir:
@@ -2374,8 +2813,10 @@ def main() -> int:
 
     if args.dry_run:
         return 0
-    # Non-zero only when nothing was submitted at all (per user request:
-    # "完成就算成功" — partial task failures don't fail the workflow).
+    if non_success:
+        log.error("Non-success terminal statuses: %s",
+                  ", ".join(f"{r.model}:{r.final_status or 'Pending'}" for r in non_success))
+        return 2
     return 0 if submitted > 0 else 1
 
 

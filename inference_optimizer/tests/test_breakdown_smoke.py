@@ -606,6 +606,738 @@ def test_attribution_method_missing(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A1.0a: framework_pr surfaces in source_breakdown + phase_breakdown
+# ---------------------------------------------------------------------------
+# FRAMEWORK_PR is a phase between PRELUDE and
+# EXPLORE that bakes in upstream PRs. Before this PR landed,
+# framework_pr KEEPs fell into the legacy ``other`` family bucket and
+# silently disappeared from ``source_breakdown`` — manifesting as
+# leaderboard rows where Params + Backends + Kernel summed to far
+# below ``validated_total_pct``. These tests pin the new behaviour.
+def test_attribution_framework_pr_surfaces_in_source_breakdown(
+    tmp_path: Path,
+) -> None:
+    """A KEEP with ``action == "framework_pr"`` contributes to the new
+    ``framework_pr_pct_of_total`` field instead of being lost."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 22.85,
+        "optimization_stack": [
+            {"action": "params",       "variant_name": "torch_compile_on", "gain_pct": 0.53},
+            {"action": "framework_pr", "variant_name": "PR:26311",         "gain_pct": 22.43},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "params",       "variant_name": "torch_compile_on",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 0.53,
+             "delta_pct": 0.53,
+             "ts": "2026-05-29T11:00:00+00:00"},
+            {"action": "framework_pr", "variant_name": "PR:26311",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 0.53, "cum_gain_after": 22.85,
+             "delta_pct": 22.32,
+             "ts": "2026-05-29T11:30:00+00:00"},
+        ],
+    })
+    sb = build(sd)["attribution"]["source_breakdown"]
+    assert sb["framework_pr_pct_of_total"] == pytest.approx(22.32)
+    assert sb["params_pct_of_total"] == pytest.approx(0.53)
+    # Reconciliation: kernel + backends + params + sweep + framework_pr
+    # ≈ validated_total. The legacy "other" bucket no longer eats
+    # framework_pr gain.
+    summed = (
+        sb["geak_pct_of_total"]
+        + sb["oob_pct_of_total"]
+        + sb["backends_pct_of_total"]
+        + sb["params_pct_of_total"]
+        + sb["sweep_pct_of_total"]
+        + sb["framework_pr_pct_of_total"]
+    )
+    assert summed == pytest.approx(sb["validated_total_pct"], abs=0.05)
+
+
+def test_attribution_framework_pr_pct_emitted_even_when_zero(
+    tmp_path: Path,
+) -> None:
+    """``framework_pr_pct_of_total`` is always emitted (defaults to 0.0)
+    so the dashboard can iterate the catalogue without hasattr checks."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 5.0,
+        "optimization_stack": [
+            {"action": "params", "variant_name": "p1", "gain_pct": 5.0},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "params", "variant_name": "p1",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 5.0,
+             "delta_pct": 5.0,
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+    })
+    sb = build(sd)["attribution"]["source_breakdown"]
+    assert "framework_pr_pct_of_total" in sb
+    assert sb["framework_pr_pct_of_total"] == 0.0
+
+
+def test_attribution_phase_breakdown_framework_pr_by_pr(
+    tmp_path: Path,
+) -> None:
+    """``phase_breakdown.framework_pr.by_pr`` aggregates per-PR gain.
+    Each entry's ``variant_name`` is the PR label (``PR:<num>`` or
+    ``PR:<repo>#<num>``); the bucket key is the variant_name verbatim."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 30.0,
+        "phase_history": [
+            {"to_phase": "PRELUDE",      "ts_unix": 1000.0},
+            {"to_phase": "FRAMEWORK_PR", "ts_unix": 1100.0},
+            {"to_phase": "EXPLORE",      "ts_unix": 2000.0},
+        ],
+        "optimization_stack": [
+            {"action": "framework_pr", "variant_name": "PR:26311"},
+            {"action": "framework_pr", "variant_name": "PR:sgl#9912"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "framework_pr", "variant_name": "PR:26311",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 18.0,
+             "delta_pct": 18.0,
+             "ts_unix": 1200.0},
+            {"action": "framework_pr", "variant_name": "PR:sgl#9912",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 18.0, "cum_gain_after": 30.0,
+             "delta_pct": 12.0,
+             "ts_unix": 1500.0},
+        ],
+    })
+    pb = build(sd)["attribution"]["phase_breakdown"]
+    assert "framework_pr" in pb
+    assert pb["framework_pr"]["total_gain_pct"] == pytest.approx(30.0)
+    assert pb["framework_pr"]["by_pr"]["PR:26311"] == pytest.approx(18.0)
+    assert pb["framework_pr"]["by_pr"]["PR:sgl#9912"] == pytest.approx(12.0)
+
+
+def test_attribution_framework_pr_phase_fallback_when_no_phase_history(
+    tmp_path: Path,
+) -> None:
+    """Without ``phase_history`` the collector falls back to action
+    family. ``framework_pr`` actions land in the framework_pr phase
+    bucket (not ``unattributed``) so the gain is still surfaced."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 10.0,
+        "optimization_stack": [
+            {"action": "framework_pr", "variant_name": "PR:42",
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "framework_pr", "variant_name": "PR:42",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 10.0,
+             "delta_pct": 10.0,
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+    })
+    pb = build(sd)["attribution"]["phase_breakdown"]
+    assert pb["framework_pr"]["total_gain_pct"] == pytest.approx(10.0)
+    assert pb["framework_pr"]["by_pr"]["PR:42"] == pytest.approx(10.0)
+    # Nothing should leak into ``unattributed``.
+    assert "unattributed" not in pb or pb["unattributed"]["total_gain_pct"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# A1.0b: phase_breakdown.explore.by_domain key normalization
+# ---------------------------------------------------------------------------
+# Pre-PR-B the orchestrator's raw ``provenance`` strings landed in
+# ``by_domain`` verbatim — keys looked like ``"specialist:serving_specialist"``
+# / ``"legacy:backends"`` / ``"default_grid"``. Consumers had to splice
+# the prefix every time they iterated. The collector now strips
+# ``specialist:`` and folds ``legacy:*`` into ``legacy_*``; this section
+# pins that contract.
+def test_phase_breakdown_explore_by_domain_strips_specialist_prefix(
+    tmp_path: Path,
+) -> None:
+    """``provenance = 'specialist:serving_specialist'`` surfaces under
+    the bare ``serving_specialist`` key — the dashboard never sees the
+    raw prefix. Multiple specialist provenances go to distinct buckets
+    and sum independently."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 12.0,
+        "phase_history": [
+            {"to_phase": "EXPLORE", "ts_unix": 1000.0},
+        ],
+        "explore_search": {
+            "winners_history": [
+                {"fingerprint": "fp_serving",
+                 "provenance": "specialist:serving_specialist"},
+                {"fingerprint": "fp_kernel_switch",
+                 "provenance": "specialist:kernel_switch_specialist"},
+            ],
+        },
+        "optimization_stack": [
+            {"action": "explore", "variant_name": "v_a", "fingerprint": "fp_serving"},
+            {"action": "explore", "variant_name": "v_b", "fingerprint": "fp_kernel_switch"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "explore", "variant_name": "v_a",
+             "fingerprint": "fp_serving",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 7.0,
+             "delta_pct": 7.0, "ts_unix": 1100.0},
+            {"action": "explore", "variant_name": "v_b",
+             "fingerprint": "fp_kernel_switch",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 7.0, "cum_gain_after": 12.0,
+             "delta_pct": 5.0, "ts_unix": 1200.0},
+        ],
+    })
+    pb = build(sd)["attribution"]["phase_breakdown"]
+    by_domain = pb["explore"]["by_domain"]
+    assert by_domain["serving_specialist"] == pytest.approx(7.0)
+    assert by_domain["kernel_switch_specialist"] == pytest.approx(5.0)
+    # Raw prefix must not leak.
+    assert "specialist:serving_specialist" not in by_domain
+    assert "specialist:kernel_switch_specialist" not in by_domain
+
+
+def test_phase_breakdown_legacy_provenance_folded_to_legacy_prefix(
+    tmp_path: Path,
+) -> None:
+    """``provenance = 'legacy:backends'`` (resume of a pre-v0.8 session)
+    becomes ``legacy_backends`` so it sits next to specialist keys
+    without masquerading as one — the dashboard can group / hide
+    legacy buckets explicitly."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 5.0,
+        "phase_history": [
+            {"to_phase": "EXPLORE", "ts_unix": 1000.0},
+        ],
+        "explore_search": {
+            "winners_history": [
+                {"fingerprint": "fp_legacy", "provenance": "legacy:backends"},
+            ],
+        },
+        "optimization_stack": [
+            {"action": "explore", "variant_name": "v_legacy", "fingerprint": "fp_legacy"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "explore", "variant_name": "v_legacy",
+             "fingerprint": "fp_legacy",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 5.0,
+             "delta_pct": 5.0, "ts_unix": 1100.0},
+        ],
+    })
+    by_domain = build(sd)["attribution"]["phase_breakdown"]["explore"]["by_domain"]
+    assert by_domain["legacy_backends"] == pytest.approx(5.0)
+    # Raw colon-form must not surface.
+    assert "legacy:backends" not in by_domain
+    # And it must NOT collide with the specialist namespace.
+    assert "backends" not in by_domain
+
+
+def test_phase_breakdown_default_grid_and_llm_direct_pass_through(
+    tmp_path: Path,
+) -> None:
+    """Non-specialist provenance (``default_grid`` / ``llm_direct``)
+    passes through verbatim — they're already valid stable keys."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 4.0,
+        "phase_history": [
+            {"to_phase": "EXPLORE", "ts_unix": 1000.0},
+        ],
+        "explore_search": {
+            "winners_history": [
+                {"fingerprint": "fp_grid", "provenance": "default_grid"},
+                {"fingerprint": "fp_direct", "provenance": "llm_direct"},
+            ],
+        },
+        "optimization_stack": [
+            {"action": "explore", "variant_name": "v_grid",   "fingerprint": "fp_grid"},
+            {"action": "explore", "variant_name": "v_direct", "fingerprint": "fp_direct"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "explore", "variant_name": "v_grid",
+             "fingerprint": "fp_grid",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 1.0,
+             "delta_pct": 1.0, "ts_unix": 1100.0},
+            {"action": "explore", "variant_name": "v_direct",
+             "fingerprint": "fp_direct",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 1.0, "cum_gain_after": 4.0,
+             "delta_pct": 3.0, "ts_unix": 1200.0},
+        ],
+    })
+    by_domain = build(sd)["attribution"]["phase_breakdown"]["explore"]["by_domain"]
+    assert by_domain["default_grid"] == pytest.approx(1.0)
+    assert by_domain["llm_direct"] == pytest.approx(3.0)
+
+
+# ---------------------------------------------------------------------------
+# A1.0c: capability_summary.specialist.by_specialist per-domain split
+# ---------------------------------------------------------------------------
+def test_capability_summary_specialist_by_specialist_from_domain_breakdown(
+    tmp_path: Path,
+) -> None:
+    """``domain_breakdown`` is the authoritative source. Each round's
+    per-domain dict is folded into the headline ``by_specialist``
+    counters; status is derived per-domain."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    _write_state(sd, _basic_state(specialist_rounds=[
+        _specialist_round(
+            round_id=1,
+            domains=["serving_specialist"],
+            proposals_total=3, proposals_kept=2,
+            domain_breakdown={
+                "serving_specialist": {
+                    "dispatched": 1, "proposals_total": 3,
+                    "proposals_kept": 2, "proposals_rejected": 1,
+                },
+            },
+        ),
+        _specialist_round(
+            round_id=2,
+            domains=["kernel_switch_specialist", "comm_specialist"],
+            proposals_total=5, proposals_kept=0,
+            domain_breakdown={
+                "kernel_switch_specialist": {
+                    "dispatched": 1, "proposals_total": 3,
+                    "proposals_kept": 0, "proposals_rejected": 3,
+                },
+                "comm_specialist": {
+                    "dispatched": 1, "proposals_total": 2,
+                    "proposals_kept": 0, "proposals_rejected": 2,
+                },
+            },
+        ),
+    ]))
+    spec = build(sd)["capability_summary"]["specialist"]
+    bs = spec["by_specialist"]
+    # serving_specialist: dispatched once, 2 keeps → kept.
+    assert bs["serving_specialist"]["status"] == "kept"
+    assert bs["serving_specialist"]["attempts"] == 1
+    assert bs["serving_specialist"]["tested"] == 3
+    assert bs["serving_specialist"]["keeps"] == 2
+    # kernel_switch_specialist: tested but no keep → tried.
+    assert bs["kernel_switch_specialist"]["status"] == "tried"
+    assert bs["kernel_switch_specialist"]["tested"] == 3
+    # Untouched domains remain not_attempted.
+    for d in (
+        "compiler_specialist", "system_specialist",
+        "pr_intel_specialist", "session_steward_specialist",
+    ):
+        assert bs[d]["status"] == "not_attempted"
+        assert bs[d]["attempts"] == 0
+    # Headline row still aggregates everything.
+    assert spec["attempts"] == 2
+    assert spec["tested"] == 8
+    assert spec["keeps"] == 2
+
+
+def test_capability_summary_specialist_by_specialist_falls_back_to_domains_list(
+    tmp_path: Path,
+) -> None:
+    """Legacy round predates ``domain_breakdown``: collector imputes
+    even share across the listed ``domains`` so the per-domain
+    counters add up to the parent row."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    _write_state(sd, _basic_state(specialist_rounds=[
+        # No domain_breakdown — the helper-built fixture sets one by
+        # default, so override it explicitly to {}.
+        _specialist_round(
+            round_id=1,
+            domains=["serving_specialist", "compiler_specialist"],
+            proposals_total=4, proposals_kept=2,
+            domain_breakdown={},
+        ),
+    ]))
+    spec = build(sd)["capability_summary"]["specialist"]
+    bs = spec["by_specialist"]
+    # 4 tested split evenly = 2 each; 2 kept split evenly = 1 each.
+    assert bs["serving_specialist"]["attempts"] == 1
+    assert bs["serving_specialist"]["tested"] == 2
+    assert bs["serving_specialist"]["keeps"] == 1
+    assert bs["serving_specialist"]["status"] == "kept"
+    assert bs["compiler_specialist"]["attempts"] == 1
+    assert bs["compiler_specialist"]["tested"] == 2
+    assert bs["compiler_specialist"]["keeps"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A1.1: kernel_roofline (Dashboard-Roofline 对接清单 §1)
+# ---------------------------------------------------------------------------
+# The collector mirrors ``<sd>/reports/kernel_roofline.json`` so the
+# dashboard's hot-kernel table is fed directly from sbd. The on-disk
+# file is produced by the kernel-agent's tracelens roofline pipeline;
+# every field is optional from the breakdown's POV — collectors must
+# not raise when the file is missing or malformed.
+def _kernel_roofline_fixture(tmp_path: Path, payload: dict | None) -> Path:
+    """Build a session_dir with optional reports/kernel_roofline.json."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "kr"})
+    _write_json(sd / "state.json", {"session_id": "kr"})
+    if payload is not None:
+        _write_json(sd / "reports" / "kernel_roofline.json", payload)
+    return sd
+
+
+def test_kernel_roofline_missing_file_returns_empty_dict(tmp_path: Path) -> None:
+    """No ``reports/kernel_roofline.json`` → empty dict, no warning.
+    Most sessions never run the roofline pipeline; a warning would
+    spam every breakdown."""
+    sd = _kernel_roofline_fixture(tmp_path, payload=None)
+    bd = build(sd)
+    assert bd["kernel_roofline"] == {}
+    assert not any("kernel_roofline" in w for w in bd["warnings"])
+
+
+def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
+    """Happy path: every field arrives as documented in
+    Dashboard-Roofline 对接清单 §1, types are preserved, and the
+    kernels list keeps its on-disk order (dashboard sorts client-side)."""
+    payload = {
+        "schema_version": 1,
+        "source": "tracelens_analysis",
+        "analysis_md_path": "/abs/analysis.md",
+        "kernel_candidates_path": "/abs/kernel_candidates.json",
+        "trace_input": "/abs/torch_trace",
+        "trace_input_type": "capture_dir",
+        "kernels": [
+            {
+                "kernel_id": "k001",
+                "name": "aiter::ck_moe_stage2",
+                "source_file": "/sgl-workspace/aiter/csrc/foo.cu",
+                "kernel_category": "MoE",
+                "bound_type": "memory-bound",
+                "arithmetic_intensity": 104.39,
+                "flops_per_byte": 104.39,
+                "efficiency_percent": 37.77,
+                "gpu_pct": 29.002,
+                "call_count": 48,
+                "duration_us": 6874.0,
+                "reusable_native_kernel": True,
+            },
+            {
+                "kernel_id": "k002",
+                "name": "aten::mm",
+                "source_file": "",
+                "kernel_category": "unknown",
+                "bound_type": "compute-bound",
+                "arithmetic_intensity": 215.58,
+                "flops_per_byte": 215.58,
+                "efficiency_percent": 14.82,
+                "gpu_pct": 3.485,
+                "call_count": 48,
+                "duration_us": 826.0,
+                "reusable_native_kernel": False,
+            },
+        ],
+    }
+    sd = _kernel_roofline_fixture(tmp_path, payload=payload)
+    kr = build(sd)["kernel_roofline"]
+
+    # Envelope
+    assert kr["schema_version"] == 1
+    assert kr["source"] == "tracelens_analysis"
+    assert kr["analysis_md_path"] == "/abs/analysis.md"
+    assert kr["trace_input_type"] == "capture_dir"
+
+    # Order preserved (dashboard sorts client-side; we don't pre-sort).
+    assert [k["kernel_id"] for k in kr["kernels"]] == ["k001", "k002"]
+
+    # Field-by-field type fidelity on the first kernel.
+    k1 = kr["kernels"][0]
+    assert k1["kernel_category"] == "MoE"
+    assert k1["bound_type"] == "memory-bound"
+    assert k1["efficiency_percent"] == pytest.approx(37.77)
+    assert k1["gpu_pct"] == pytest.approx(29.002)
+    assert k1["call_count"] == 48
+    assert k1["duration_us"] == pytest.approx(6874.0)
+    assert k1["reusable_native_kernel"] is True
+    # Compute-bound entry preserves False explicitly.
+    assert kr["kernels"][1]["reusable_native_kernel"] is False
+
+
+def test_kernel_roofline_malformed_kernels_drops_to_empty_list(tmp_path: Path) -> None:
+    """``kernels`` arriving as something other than a list (e.g. a
+    pre-aggregation dict) is replaced with ``[]`` and a warning is
+    emitted; envelope fields still round-trip."""
+    payload = {
+        "schema_version": 1,
+        "source": "tracelens_analysis",
+        "kernels": {"k001": {"name": "broken"}},  # wrong shape
+    }
+    sd = _kernel_roofline_fixture(tmp_path, payload=payload)
+    bd = build(sd)
+    kr = bd["kernel_roofline"]
+    assert kr["schema_version"] == 1
+    assert kr["source"] == "tracelens_analysis"
+    assert kr["kernels"] == []
+    assert any("kernel_roofline.kernels is not a list" in w for w in bd["warnings"])
+
+
+def test_kernel_roofline_non_dict_blob_returns_empty(tmp_path: Path) -> None:
+    """Top-level JSON value is not an object (e.g. a stray array
+    written by an older tool) → empty dict + warning, never raise."""
+    sd = tmp_path / "session"
+    _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "kr"})
+    _write_json(sd / "state.json", {"session_id": "kr"})
+    (sd / "reports").mkdir(parents=True, exist_ok=True)
+    (sd / "reports" / "kernel_roofline.json").write_text(
+        json.dumps([{"kernel_id": "k001"}]), encoding="utf-8",
+    )
+    bd = build(sd)
+    assert bd["kernel_roofline"] == {}
+    assert any("not a JSON object" in w for w in bd["warnings"])
+
+
+def test_kernel_roofline_empty_kernels_list_is_valid(tmp_path: Path) -> None:
+    """``kernels: []`` is a legitimate state (pipeline ran but found no
+    hot kernels above threshold). Envelope passes through; no warning."""
+    payload = {
+        "schema_version": 1,
+        "source": "tracelens_analysis",
+        "kernels": [],
+    }
+    sd = _kernel_roofline_fixture(tmp_path, payload=payload)
+    bd = build(sd)
+    assert bd["kernel_roofline"]["kernels"] == []
+    assert not any("kernel_roofline" in w for w in bd["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# A1.2: roofline (Dashboard-Roofline 对接清单 §2)
+# ---------------------------------------------------------------------------
+# The optimization-progress chart consumer. Inputs are entirely
+# in-memory state + manifest; collector never re-runs benchmarks.
+def _roofline_fixture(
+    tmp_path: Path,
+    *,
+    state: dict,
+    manifest: dict | None = None,
+) -> Path:
+    """Session fixture for ``collect_roofline``; ``manifest`` defaults
+    to a minimal stub with ``created_at_utc``."""
+    sd = tmp_path / "session"
+    _write_json(
+        sd / "manifest.json",
+        manifest or {
+            "schema_version": 1,
+            "session_id": "rl",
+            "created_at_utc": "2026-05-29T10:40:50+00:00",
+        },
+    )
+    base_state: dict = {"session_id": "rl"}
+    base_state.update(state)
+    _write_json(sd / "state.json", base_state)
+    return sd
+
+
+def test_roofline_full_payload_baseline_plus_one_keep(tmp_path: Path) -> None:
+    """Real-shape payload from the live ``Qwen3-30B-A3B-Base`` session
+    used as the dashboard reference fixture — baseline + 1 KEEP +
+    1 snapshot. Verifies trajectory ordering, gain math, ceiling /
+    target derivation, and the percent-of-* convenience numbers."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 1300.34,
+        "cumulative_gain": 1.0146,
+        "current_best": {
+            "action": "explore",
+            "tput": 1313.5356953711394,
+        },
+        "optimization_stack": [
+            {
+                "action": "explore",
+                "candidate_extra_sglang_args": "--num-continuous-decode-steps 4 --scheduler-recv-interval 4",
+                "extra_envs": {},
+                "tput": 1313.5356953711394,
+                "ts": "2026-05-29T11:18:24.339975+00:00",
+                "variant_name": "continuous_decode_steps_4",
+            },
+        ],
+        "roofline_snapshots": [
+            {
+                "snapshot_id": 1,
+                "ts": "2026-05-29T11:06:03.891380+00:00",
+                "achieved_tok_per_sec": 1300.34,
+                "theoretical_peak_tok_per_sec": 1976.8214052878614,
+                "within_roofline_pct": 65.78,
+                "gap_to_roofline_pct": 34.22,
+                "compute_pct": 29.95,
+                "idle_pct": 70.02,
+                "comm_pct": 0.0,
+                "top_bottleneck": "MoE_unfused",
+                "top_kernel": {
+                    "name": "aiter::ck_moe_stage1",
+                    "bound_type": "memory",
+                    "efficiency_pct": 48.35,
+                    "gpu_pct": 9.17,
+                },
+            },
+        ],
+    })
+    rl = build(sd)["roofline"]
+
+    # Trajectory: baseline + 1 KEEP, both have ts.
+    assert len(rl["trajectory"]) == 2
+    assert rl["trajectory"][0]["label"] == "baseline"
+    assert rl["trajectory"][0]["action"] == "baseline"
+    assert rl["trajectory"][0]["ts"] == "2026-05-29T10:40:50+00:00"
+    assert rl["trajectory"][0]["tput"] == pytest.approx(1300.34)
+    assert rl["trajectory"][0]["gain_pct"] == 0.0
+    assert rl["trajectory"][1]["label"] == "continuous_decode_steps_4"
+    assert rl["trajectory"][1]["tput"] == pytest.approx(1313.5356953711394)
+    assert rl["trajectory"][1]["flags"] == "--num-continuous-decode-steps 4 --scheduler-recv-interval 4"
+    # gain at point 1 = (1313.54 - 1300.34) / 1300.34 * 100 ≈ 1.015%
+    assert rl["trajectory"][1]["gain_pct"] == pytest.approx(1.015, abs=0.01)
+
+    # Reference lines (target = ceiling × 0.70).
+    assert rl["ceiling_available"] is True
+    assert rl["ceiling_tok_per_sec"] == pytest.approx(1976.82, abs=0.01)
+    assert rl["target_tok_per_sec"] == pytest.approx(1976.82 * 0.70, abs=0.01)
+    assert rl["ceiling_ratio_target"] == pytest.approx(0.70)
+
+    # Headline numbers.
+    assert rl["baseline_tput"] == pytest.approx(1300.34)
+    assert rl["current_best_tput"] == pytest.approx(1313.5356953711394)
+    # 1313.54 / 1976.82 ≈ 66.45%
+    assert rl["current_best_pct_of_ceiling"] == pytest.approx(66.45, abs=0.05)
+    # 1313.54 / (1976.82 * 0.70) ≈ 94.93%
+    assert rl["current_best_pct_of_target"] == pytest.approx(94.93, abs=0.05)
+
+    # Tooltip carryover.
+    assert rl["snapshot_top_bottleneck"] == "MoE_unfused"
+    assert rl["snapshot_within_roofline_pct"] == pytest.approx(65.78)
+
+    # Snapshots list passthrough.
+    assert len(rl["snapshots"]) == 1
+    assert rl["snapshots"][0]["theoretical_peak_tok_per_sec"] == pytest.approx(
+        1976.8214052878614,
+    )
+
+
+def test_roofline_no_snapshot_means_no_ceiling(tmp_path: Path) -> None:
+    """Sessions that never ran the watermark roofline pipeline have
+    no ``roofline_snapshots``. The trajectory is still drawn (baseline
+    + KEEPs), but ceiling/target/percent-of-* are explicitly None and
+    ``ceiling_available`` is False so the dashboard hides the
+    reference lines."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 100.0,
+        "cumulative_gain": 5.0,
+        "current_best": {"tput": 105.0},
+        "optimization_stack": [
+            {"action": "explore", "tput": 105.0, "variant_name": "v1",
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+    })
+    rl = build(sd)["roofline"]
+
+    assert rl["ceiling_available"] is False
+    assert rl["ceiling_tok_per_sec"] is None
+    assert rl["target_tok_per_sec"] is None
+    assert rl["current_best_pct_of_ceiling"] is None
+    assert rl["current_best_pct_of_target"] is None
+    # Trajectory still present.
+    assert len(rl["trajectory"]) == 2
+    assert rl["snapshots"] == []
+
+
+def test_roofline_no_keep_yet_baseline_only(tmp_path: Path) -> None:
+    """Mid-session before any KEEP: trajectory holds only the baseline
+    point; current_best == baseline; cumulative_gain == 0."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 200.0,
+        "cumulative_gain": 0.0,
+        "current_best": {"tput": 200.0},
+        "optimization_stack": [],
+    })
+    rl = build(sd)["roofline"]
+
+    assert len(rl["trajectory"]) == 1
+    assert rl["trajectory"][0]["label"] == "baseline"
+    assert rl["current_best_tput"] == pytest.approx(200.0)
+    assert rl["cumulative_gain_pct"] == 0.0
+
+
+def test_roofline_baseline_failed_empty_trajectory(tmp_path: Path) -> None:
+    """When ``baseline_tput`` is 0 (baseline never finished), the
+    trajectory is empty — the dashboard surfaces "no data" instead
+    of plotting against zero."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 0.0,
+        "cumulative_gain": 0.0,
+        "optimization_stack": [],
+    })
+    rl = build(sd)["roofline"]
+
+    assert rl["trajectory"] == []
+    assert rl["baseline_tput"] == 0.0
+    assert rl["current_best_tput"] == 0.0
+
+
+def test_roofline_uses_latest_snapshot_for_ceiling(tmp_path: Path) -> None:
+    """Multiple ``roofline_snapshots`` exist (the watermark pipeline
+    refines the peak across reruns). The ceiling is read from the
+    LATEST snapshot, not snapshots[0]."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 1000.0,
+        "cumulative_gain": 0.0,
+        "current_best": {"tput": 1000.0},
+        "optimization_stack": [],
+        "roofline_snapshots": [
+            {"snapshot_id": 1, "theoretical_peak_tok_per_sec": 1500.0,
+             "ts": "2026-05-29T10:00:00+00:00"},
+            {"snapshot_id": 2, "theoretical_peak_tok_per_sec": 1700.0,
+             "ts": "2026-05-29T11:00:00+00:00",
+             "top_bottleneck": "kv_cache"},
+        ],
+    })
+    rl = build(sd)["roofline"]
+    # Ceiling pulled from snapshot[-1] not [0].
+    assert rl["ceiling_tok_per_sec"] == pytest.approx(1700.0)
+    assert rl["snapshot_top_bottleneck"] == "kv_cache"
+    assert len(rl["snapshots"]) == 2
+
+
+def test_roofline_trajectory_diverges_from_current_best_emits_warning(
+    tmp_path: Path,
+) -> None:
+    """If the trajectory tail's tput doesn't agree with
+    ``state.current_best.tput`` (resume mid-promotion bug), the
+    collector surfaces the divergence as a warning instead of hiding
+    it."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 100.0,
+        "cumulative_gain": 5.0,
+        "current_best": {"tput": 110.0},      # mismatched
+        "optimization_stack": [
+            {"action": "explore", "tput": 105.0, "variant_name": "v1",
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+    })
+    bd = build(sd)
+    assert any(
+        "roofline.current_best_tput" in w and "current_best.tput" in w
+        for w in bd["warnings"]
+    )
+
+
+def test_roofline_failure_streak_passes_through(tmp_path: Path) -> None:
+    """``roofline_failure_streak`` is consumed by the dashboard to
+    show a "stale" badge on the ceiling reference line when the
+    watermark pipeline has failed repeatedly."""
+    sd = _roofline_fixture(tmp_path, state={
+        "baseline_tput": 100.0,
+        "current_best": {"tput": 100.0},
+        "roofline_failure_streak": 3,
+        "optimization_stack": [],
+    })
+    rl = build(sd)["roofline"]
+    assert rl["roofline_failure_streak"] == 3
+
+
+# ---------------------------------------------------------------------------
 # A2: final.ttft_mean_ms reconstruction
 # ---------------------------------------------------------------------------
 def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:
@@ -1269,12 +2001,22 @@ def test_capability_summary_specialist_row_when_no_rounds(tmp_path):
     _write_state(sd, _basic_state())
     b = build(sd)
     spec = b["capability_summary"]["specialist"]
-    assert spec == {
-        "status":   "not_attempted",
-        "attempts": 0,
-        "keeps":    0,
-        "tested":   0,
-    }
+    # Headline counters
+    assert spec["status"] == "not_attempted"
+    assert spec["attempts"] == 0
+    assert spec["keeps"] == 0
+    assert spec["tested"] == 0
+    # Stable shape: every catalogue specialist seeded at zero so the
+    # dashboard can iterate without presence checks.
+    for d in (
+        "serving_specialist", "kernel_switch_specialist",
+        "comm_specialist", "compiler_specialist", "system_specialist",
+        "pr_intel_specialist", "session_steward_specialist",
+    ):
+        assert spec["by_specialist"][d] == {
+            "status": "not_attempted",
+            "attempts": 0, "keeps": 0, "tested": 0,
+        }
 
 
 def test_capability_summary_specialist_agrees_with_specialist_runs(tmp_path):
