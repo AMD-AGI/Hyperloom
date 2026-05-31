@@ -108,6 +108,15 @@ class _StubTaskRegistry:
             t.state = new_state  # type: ignore[assignment]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_watermark_env(monkeypatch: pytest.MonkeyPatch):
+    """Ensure each test starts with a clean ``HYPERLOOM_ROOFLINE_WATERMARK_RATIO``
+    env var so values inherited from the operator's shell don't shift
+    the default-1.10 threshold under existing tests. Tests that need a
+    specific override call ``monkeypatch.setenv`` themselves."""
+    monkeypatch.delenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", raising=False)
+
+
 @pytest.fixture
 def coord(tmp_path: Path) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
@@ -165,6 +174,68 @@ def test_watermark_check_false_when_already_pending(coord: Coordinator):
     coord.shared_state.cumulative_gain_validated = 20.0
     coord.shared_state.auto_roofline_pending_task_id = "in-flight-rl"
     assert coord._needs_roofline_for_watermark() is False
+
+
+# ===========================================================================
+# 1b. Watermark ratio env-var override
+# ===========================================================================
+class TestWatermarkRatioEnvOverride:
+    """``HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` allows operators to tune
+    the watermark threshold without code edits (Step C addition). Default
+    stays at 1.10 (PR #321); invalid / unsafe values fall back to the
+    default so a typo can't melt the analysis pipeline."""
+
+    def test_env_var_lowers_threshold_to_5pct(
+        self, coord: Coordinator, monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "1.05")
+        coord.shared_state.baseline_tput = 100.0
+        coord.shared_state.last_roofline_tput = 100.0
+        coord.shared_state.cumulative_gain_validated = 6.0
+        assert coord._needs_roofline_for_watermark() is True
+
+    def test_env_var_raises_threshold_to_20pct(
+        self, coord: Coordinator, monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "1.20")
+        coord.shared_state.baseline_tput = 100.0
+        coord.shared_state.last_roofline_tput = 100.0
+        coord.shared_state.cumulative_gain_validated = 15.0
+        assert coord._needs_roofline_for_watermark() is False
+
+    def test_unset_env_var_defaults_to_1_10(
+        self, coord: Coordinator, monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.delenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", raising=False)
+        coord.shared_state.baseline_tput = 100.0
+        coord.shared_state.last_roofline_tput = 100.0
+        coord.shared_state.cumulative_gain_validated = 10.0
+        assert coord._needs_roofline_for_watermark() is True
+
+    @pytest.mark.parametrize("bad_value", ["abc", "", "0.95", "1.0", "-1.5"])
+    def test_invalid_or_unsafe_value_falls_back_to_default(
+        self,
+        coord: Coordinator,
+        monkeypatch: pytest.MonkeyPatch,
+        bad_value: str,
+    ):
+        """Garbage / unsafe values (e.g. <= 1.0 would re-fire constantly)
+        must fall back to 1.10. 9% gain is below default → False."""
+        monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", bad_value)
+        coord.shared_state.baseline_tput = 100.0
+        coord.shared_state.last_roofline_tput = 100.0
+        coord.shared_state.cumulative_gain_validated = 9.0
+        assert coord._needs_roofline_for_watermark() is False
+
+    def test_resolver_returns_default_when_unset(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Direct unit on the module-level resolver: no env var → 1.10."""
+        from inference_optimizer.orchestrator.coordinator import (
+            _resolve_roofline_watermark_ratio,
+        )
+        monkeypatch.delenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", raising=False)
+        assert _resolve_roofline_watermark_ratio() == 1.10
 
 
 # ===========================================================================

@@ -2820,6 +2820,73 @@ def _promote_legacy_gain_entries(
     return out
 
 
+# ---------------------------------------------------------------------------
+# §13b Roofline (PR #321 single-path + watermark refresh model)
+# ---------------------------------------------------------------------------
+def collect_roofline(
+    state: dict[str, Any],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Surface the per-session roofline comparison for breakdown
+    consumers.
+
+    Reads :attr:`SharedState.roofline_snapshots` (append-only history
+    written by :meth:`SharedState.record_trace_analyze`) and shapes a
+    single entry suitable for the ``Roofline`` renderer in
+    :mod:`breakdown.reporters._renderers.roofline`.
+
+    The shape matches what the renderer expects:
+
+    .. code-block:: python
+
+        [{
+            "source_path": str,            # state.json (authoritative source)
+            "mode":        "single_snapshot" | "before_after",
+            "baseline":    {snapshot_id, ts, compute_pct, idle_pct,
+                            comm_pct, top_bottleneck, top_kernel: {...},
+                            analysis_md_path, trace_input},
+            "latest":      {... same keys ...},
+            "delta":       {compute_pct, idle_pct, comm_pct,
+                            top_kernel_efficiency_pct},   # only when before_after
+        }]
+
+    Returns an empty list when ``state.roofline_snapshots`` is absent /
+    empty (no roofline action ever completed). Best-effort: parsing
+    errors are recorded in ``warnings`` and the section degrades to an
+    empty list rather than blocking the whole breakdown export.
+    """
+    snapshots = state.get("roofline_snapshots")
+    if not isinstance(snapshots, list) or not snapshots:
+        return []
+    try:
+        # Lazy import to keep the breakdown package free of orchestrator
+        # imports at module load time (avoids the circular import path
+        # ``orchestrator → breakdown → orchestrator``).
+        from ..orchestrator.roofline_snapshot import (
+            build_roofline_comparison_from_history,
+        )
+        cmp = build_roofline_comparison_from_history(snapshots)
+    except Exception as exc:  # noqa: BLE001 — defensive
+        warnings.append(
+            f"collect_roofline: failed to build comparison from "
+            f"roofline_snapshots ({len(snapshots)} entries): "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return []
+    if not cmp:
+        return []
+    entry: dict[str, Any] = {
+        "source_path": "state.json#roofline_snapshots",
+        "mode": cmp.get("mode") or "single_snapshot",
+        "baseline": cmp.get("baseline") or {},
+        "latest": cmp.get("latest") or {},
+    }
+    delta = cmp.get("delta")
+    if isinstance(delta, dict) and delta:
+        entry["delta"] = delta
+    return [entry]
+
+
 def collect_attribution(
     state: dict[str, Any],
     geak_invocations: list[dict[str, Any]],
