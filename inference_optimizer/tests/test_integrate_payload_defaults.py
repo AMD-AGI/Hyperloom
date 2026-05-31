@@ -7,7 +7,7 @@ Magpie re-baseline inputs that Orchestration omits just as often:
 
 * ``base_tput``         from ``state.baseline_tput``
 * ``config_path``       from ``state.baseline_config_path``
-* ``extra_sglang_args`` from ``state.current_best["extra_sglang_args"]``
+* ``extra_server_args`` from ``state.current_best["extra_server_args"]``
 
 These tests pin (a) per-field defaulting, (b) explicit-payload wins,
 and (c) the wiring through ``integrate_handler`` so the pre-existing
@@ -46,7 +46,7 @@ def _seed_state(
         state.current_best = {
             "action": "kernel_opt",
             "tput": 900.0,
-            "extra_sglang_args": current_best_args,
+            "extra_server_args": current_best_args,
         }
     state.save(session_dir)
     return state
@@ -67,7 +67,7 @@ class TestFillIntegrateDefaultsFromState:
 
         assert out["base_tput"] == 800.0
         assert out["config_path"] == "/tmp/base.yaml"
-        assert out["extra_sglang_args"] == "--page-size 16"
+        assert out["extra_server_args"] == "--page-size 16"
         assert out["kernel_id"] == "k_abc"
 
     def test_payload_base_tput_wins(self, session_dir):
@@ -98,11 +98,11 @@ class TestFillIntegrateDefaultsFromState:
         _seed_state(session_dir, current_best_args="--from-state")
 
         out = krh._fill_integrate_defaults_from_state(
-            {"kernel_id": "k_abc", "extra_sglang_args": "--from-payload"},
+            {"kernel_id": "k_abc", "extra_server_args": "--from-payload"},
             session_dir=session_dir,
         )
 
-        assert out["extra_sglang_args"] == "--from-payload"
+        assert out["extra_server_args"] == "--from-payload"
 
     def test_empty_state_no_op(self, session_dir):
         _seed_state(session_dir)  # all defaults zero/empty
@@ -113,7 +113,7 @@ class TestFillIntegrateDefaultsFromState:
 
         assert "base_tput" not in out or out["base_tput"] in (0.0, 0)
         assert not out.get("config_path")
-        assert not out.get("extra_sglang_args")
+        assert not out.get("extra_server_args")
 
     def test_returns_shallow_copy_not_mutating_input(self, session_dir):
         _seed_state(session_dir, baseline_tput=800.0)
