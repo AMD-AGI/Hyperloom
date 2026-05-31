@@ -3997,12 +3997,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 session_dir=session_dir,
             )
         )
-        # Note: main commit 8e69732 also adds an N31 "resume backfill"
-        # block that copies last_trace_analyze into
-        # last_trace_analyze_baseline. The baseline-freeze field is
-        # main's N31 final-roofline machinery, which F3-3 retired on
-        # this branch in favour of gain-only freshness; the backfill
-        # therefore has no live consumer and is omitted.
+        # No resume backfill is required for the roofline comparison
+        # pipeline: PR #321 retired the ``last_trace_analyze_baseline``
+        # baseline-freeze field in favour of the append-only
+        # ``roofline_snapshots`` history, which is restored verbatim by
+        # ``SharedState.from_dict`` (missing key → empty list default).
     else:
         # Resolve model path from --model first, then $MODEL_PATH env. Without
         # either, fail fast: silently falling back to the YAML's hardcoded

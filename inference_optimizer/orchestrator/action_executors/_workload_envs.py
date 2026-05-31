@@ -463,7 +463,22 @@ def materialize_config_with_envs(
     if "NUM_WARMUPS" not in envs:
         envs["NUM_WARMUPS"] = min(conc_val, 8)
     if server_args:
-        envs[server_args_env_name(bench.get("framework"))] = server_args
+        # PR-B: merge into the yaml-default EXTRA_SGLANG_ARGS / EXTRA_VLLM_ARGS
+        # rather than overwriting. The profile path's
+        # ``--enable-profile-cuda-graph`` / ``--enable-shape-discovery-for-
+        # cuda-graph-profile`` flags are injected upstream (lines ~295 /
+        # ~321) into ``envs[<framework_env>]``; a plain overwrite here
+        # silently drops them whenever the caller supplies any
+        # ``extra_sglang_args`` (e.g. watermark roofline inheriting
+        # ``current_best.extra_sglang_args``), and the profile sub-step
+        # ends up running without graph capture instrumentation.
+        from ._grid_runner import merge_server_args
+        framework_env = server_args_env_name(bench.get("framework"))
+        existing = str(envs.get(framework_env, "")).strip()
+        if existing:
+            envs[framework_env] = merge_server_args(existing, server_args)
+        else:
+            envs[framework_env] = server_args
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
     # Accuracy eval (GSM8K) is OFF by default because Magpie main and
