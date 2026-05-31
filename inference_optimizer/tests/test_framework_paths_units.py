@@ -42,10 +42,20 @@ class TestNormalizeRoot:
 
 
 class TestResolveSourceFileAllowlist:
-    def test_default_when_env_empty(self):
+    def test_default_when_env_empty(self, monkeypatch):
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
         assert fp.resolve_source_file_allowlist() == fp._DEFAULT_SOURCE_ROOTS
 
+    def test_merges_discovered_roots(self, monkeypatch):
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (
+            "/usr/local/lib/python3.12/dist-packages/vllm/",
+        ))
+        roots = fp.resolve_source_file_allowlist()
+        assert fp._DEFAULT_SOURCE_ROOTS[0] in roots
+        assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
+
     def test_appends_extra_roots_unique_in_order(self, monkeypatch):
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
         monkeypatch.setenv(
             "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
             "/opt/custom/sglang:/sgl-workspace/aiter:/opt/other/vllm",
@@ -176,15 +186,35 @@ class TestResolveVllmArgUtils:
         assert "not found" in source
 
 
+class TestGlobInstallPackageRoots:
+    def test_finds_dist_packages_under_usr_local(self, tmp_path, monkeypatch):
+        base = tmp_path / "usr_local_lib" / "python3.12" / "dist-packages"
+        (base / "vllm").mkdir(parents=True)
+        monkeypatch.setattr(
+            fp, "_INSTALL_GLOB_PARENTS", (tmp_path / "usr_local_lib",),
+        )
+        roots = fp._glob_install_package_roots()
+        assert any("dist-packages/vllm/" in r for r in roots)
+
+
+class TestResolvePatchTargetRoots:
+    def test_includes_static_fallback_when_discovery_empty(self, monkeypatch):
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", raising=False)
+        roots = fp.resolve_patch_target_roots()
+        assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
+        assert "/aiter_meta/csrc/" in roots
+
+
 class TestProbeFrameworkSourceRootsForEnv:
-    def test_returns_default_dirs_when_present(self, tmp_path, monkeypatch):
-        # Simulate /sgl-workspace/* existing for one of the defaults.
+    def test_returns_existing_dirs_only(self, tmp_path, monkeypatch):
         present = tmp_path / "fake_root"
         present.mkdir()
-        monkeypatch.setattr(
-            fp, "_DEFAULT_SOURCE_ROOTS", (f"{present}/",),
-        )
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (
+            f"{present}/",
+            f"{tmp_path / 'missing'}/",
+        ))
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
         result = fp.probe_framework_source_roots_for_env()
         assert result == f"{present}/"
 
@@ -197,20 +227,8 @@ class TestProbeFrameworkSourceRootsForEnv:
             (site / name).mkdir(parents=True)
         monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
         result = fp.probe_framework_source_roots_for_env()
         for name in ("vllm", "sglang", "aiter"):
             assert f"{name}/" in result
-
-    def test_dedupes_origins_against_defaults(self, tmp_path, monkeypatch):
-        # When find_spec returns the same path as a default root, the
-        # de-dupe keeps only the first occurrence.
-        shared = tmp_path / "shared"
-        shared.mkdir()
-        monkeypatch.setattr(
-            fp, "_DEFAULT_SOURCE_ROOTS", (f"{shared}/",),
-        )
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: shared)
-        result = fp.probe_framework_source_roots_for_env()
-        # Single entry, even though spec lookups all resolved to the same dir.
-        assert result == f"{shared}/"
