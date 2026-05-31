@@ -685,33 +685,19 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    # Production vLLM wheel install layout (system dist-packages).
-    # Required since vLLM in the current image ships under
-    # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
-    # editable ``/sgl-workspace/vllm/`` checkout the legacy entries
-    # assumed. The python3.10 fallback covers older images where the
-    # interpreter has not yet been bumped.
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-    # aiter ships its device sources (.cu/.cuh) in the sibling ``aiter_meta``
-    # package (``<...>/aiter_meta/csrc/``), NOT under ``aiter/`` — so the
-    # ``aiter/`` entries above never match a resolved device source.
-    # ``_reusable_roots()`` also adds aiter's own ``AITER_CSRC_DIR`` at
-    # runtime; this static substring covers the common wheel layout when
-    # aiter cannot be imported for the dynamic probe.
-    "/aiter_meta/csrc/",
-)
+@functools.lru_cache(maxsize=1)
+def _framework_patch_roots() -> tuple[str, ...]:
+    """Framework install roots (shared with PolicyGate / apply_kernel_patch)."""
+    try:
+        from inference_optimizer.orchestrator.framework_paths import (
+            resolve_patch_target_roots,
+        )
+
+        return resolve_patch_target_roots()
+    except ImportError:
+        from apply_kernel_patch import known_target_roots
+
+        return known_target_roots()
 
 
 @functools.lru_cache(maxsize=1)
@@ -728,13 +714,12 @@ def _aiter_csrc_root() -> str:
 
 
 def _reusable_roots() -> tuple[str, ...]:
-    """Static reusable roots plus aiter's own (dynamic) csrc root, so a device
-    source resolved via aiter's build registry counts as reusable regardless
-    of where the wheel placed ``aiter_meta``."""
+    """Discovered framework roots plus aiter's own (dynamic) csrc root."""
+    roots = _framework_patch_roots()
     csrc = _aiter_csrc_root()
-    if csrc and csrc not in _REUSABLE_SOURCE_ROOTS:
-        return _REUSABLE_SOURCE_ROOTS + (csrc,)
-    return _REUSABLE_SOURCE_ROOTS
+    if csrc and csrc not in roots:
+        return roots + (csrc,)
+    return roots
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
 # raw memcpy/copy ops, and PyTorch native copy. Folded from the feature

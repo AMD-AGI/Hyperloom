@@ -96,25 +96,13 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    # Production vLLM wheel install layout (system dist-packages). Keep
-    # this in sync with ``kernel-agent/tools/tracelens_analysis.py`` so
-    # both the kernel-agent classifier and the orchestrator-side gate
-    # in ``run_optimization_handler`` agree on what counts as a
-    # reusable framework source.
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-)
+
+
+def _reusable_source_roots() -> tuple[str, ...]:
+    """Framework install roots for patchability checks (dynamic discovery)."""
+    from .framework_paths import resolve_patch_target_roots
+
+    return resolve_patch_target_roots()
 _APPLY_TOOL_MODULE: Any | None = None
 # GEAK is FIRST per SKILL.md "high-priority handoff" contract: every kernel
 # Claude/Codex can rewrite, GEAK can rewrite too, and GEAK's GPU-only
@@ -264,7 +252,7 @@ def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
     if any(marker in lower_file for marker in _RUNTIME_GENERATED_SOURCE_MARKERS):
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
-        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+        return not any(root in lower_file for root in _reusable_source_roots())
     return False
 
 
@@ -481,7 +469,7 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "source_file": source_file,
         }
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+    if not any(root in lower_file for root in _reusable_source_roots()):
         return {
             "status": "failed",
             "error_class": "unstable_source_path",
