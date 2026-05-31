@@ -1148,7 +1148,7 @@ def test_roofline_full_payload_baseline_plus_one_keep(tmp_path: Path) -> None:
         "optimization_stack": [
             {
                 "action": "explore",
-                "candidate_extra_sglang_args": "--num-continuous-decode-steps 4 --scheduler-recv-interval 4",
+                "candidate_extra_server_args": "--num-continuous-decode-steps 4 --scheduler-recv-interval 4",
                 "extra_envs": {},
                 "tput": 1313.5356953711394,
                 "ts": "2026-05-29T11:18:24.339975+00:00",

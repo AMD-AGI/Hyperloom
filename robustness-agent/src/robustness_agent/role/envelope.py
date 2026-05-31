@@ -213,6 +213,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "params_search",
     # structured gaps ledger.
     "gaps",
+    # dynamic_action aggregate view + round counter
+    # (Coordinator-only writer; LLM cannot self-narrate dispatch
+    # outcomes via UPDATE_STATE).
+    "dynamic_actions",
+    "dynamic_action_round_count",
 })
 
 
