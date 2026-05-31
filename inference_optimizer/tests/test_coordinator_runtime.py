@@ -936,6 +936,66 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_handle_unpromotable_roofline_increments_failure_streak(
+    session_dir, caplog,
+):
+    """Repro: watermark-roofline failure must increment roofline_failure_streak,
+    eagerly clear auto_roofline_pending_task_id, and emit an Auto-roofline warning.
+
+    Real-world trigger: session Qwen-Qwen3-30B-A3B-Base/20260529T104050Z, task
+    42922ce4 — RooflineExecutor returned {status:failed, error_class:profile_failed}
+    (profile sub-step found no .trace.json.gz files). The result correctly landed
+    in roofline_attempts with decision='no_promote', but roofline_failure_streak
+    stayed at 0 and no warning was logged because _handle_unpromotable_result has
+    no roofline-specific branch — the streak/warning code in
+    _promote_to_shared_state's task_kind=='roofline' else clause is unreachable
+    from the unpromotable path.
+    """
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task_id = "t-roofline-fail-42922ce4"
+        c.shared_state.auto_roofline_pending_task_id = task_id
+        streak_before = c.shared_state.roofline_failure_streak
+        # Mirror RooflineExecutor._failed("profile", ...) exactly.
+        result = {
+            "status": "failed",
+            "error_class": "profile_failed",
+            "error": "profile sub-step failed",
+            "phase": "profile",
+            "sub_result": {"status": "failed", "error_class": "no_trace_files"},
+        }
+        import logging
+        with caplog.at_level(logging.WARNING,
+                             logger="inference_optimizer.orchestrator.coordinator"):
+            await c._handle_unpromotable_result(
+                _mk_task("roofline", task_id), result,
+            )
+        # (a) audit entry exists (this part already works pre-fix).
+        assert len(c.shared_state.roofline_attempts) == 1
+        attempt = c.shared_state.roofline_attempts[-1]
+        assert attempt["status"] == "failed"
+        assert attempt["decision"] == "no_promote"
+        # (b) failure streak should be +1 so prompt + plateau judge can see it.
+        assert c.shared_state.roofline_failure_streak == streak_before + 1, (
+            "roofline_failure_streak silently stays at 0; LLM + operators have "
+            "no way to know the watermark-driven analysis refresh failed."
+        )
+        # (c) pending gate should be cleared eagerly (mirror promote path 7530/7628).
+        assert c.shared_state.auto_roofline_pending_task_id == "", (
+            "auto_roofline_pending_task_id still points at the failed task; "
+            "subsequent dispatches stay blocked until denial-time lazy clear."
+        )
+        # (d) operator-visible warning must be logged (mirror promote path 7606).
+        assert any(
+            "Auto-roofline" in r.message and "failed" in r.message
+            for r in caplog.records
+        ), "no 'Auto-roofline ... failed' WARNING was logged"
+    finally:
+        await c.stop()
+
+
 # ===========================================================================
 # (formerly test_coordinator_baseline_fingerprint.py)
 # ===========================================================================
