@@ -2735,19 +2735,6 @@ def collect_roofline(
         "baseline": cmp.get("baseline") or {},
         "latest": cmp.get("latest") or {},
     }
-    # Surface the session-level decode-roofline ceiling at the top so
-    # dashboards don't have to reach into baseline/latest sub-dicts.
-    # The ceiling is identical across all snapshots within a session
-    # (hardware + model + isl/osl don't change), so we promote it
-    # from whichever side carries it.
-    baseline_dict = entry["baseline"] if isinstance(entry["baseline"], dict) else {}
-    latest_dict = entry["latest"] if isinstance(entry["latest"], dict) else {}
-    peak = (
-        baseline_dict.get("theoretical_peak_tok_per_sec")
-        or latest_dict.get("theoretical_peak_tok_per_sec")
-    )
-    if isinstance(peak, (int, float)) and peak > 0:
-        entry["theoretical_peak_tok_per_sec"] = float(peak)
     delta = cmp.get("delta")
     if isinstance(delta, dict) and delta:
         entry["delta"] = delta

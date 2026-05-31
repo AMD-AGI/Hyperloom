@@ -155,16 +155,6 @@ def build(
                                             warnings,
                                         ),
                                         warnings)
-    # Roofline before/after comparison sourced from
-    # ``state.roofline_snapshots`` (PR #321 single-path watermark
-    # refresh history). Returns ``[]`` when no roofline action ran,
-    # which the ``Roofline`` renderer treats as "silently skipped".
-    roofline           = _safe_collect("roofline",
-                                        lambda: collectors.collect_roofline(
-                                            state, warnings,
-                                        ),
-                                        warnings,
-                                        default=[])
     kb_provenance      = _safe_collect("kb_provenance",
                                         lambda: collectors.collect_kb_provenance(
                                             session_dir, state, manifest, warnings,
@@ -224,11 +214,6 @@ def build(
         "critic_robustness":   critic_robustness,
         "telemetry":           telemetry,
         "attribution":         attribution,
-        # Roofline section consumed by
-        # :mod:`breakdown.reporters._renderers.roofline`. Sourced from
-        # ``state.roofline_snapshots`` (PR #321 single-path history);
-        # empty list when no roofline action ever completed.
-        "roofline":            roofline,
         # Cortex KB integration audit (KB_design §3.13 M1 §4
         # "kb_provenance"). Added as a new top-level section rather than
         # bumping ``schema_version`` because every field is optional; the
