@@ -1151,9 +1151,11 @@ def wants_steward_assessment(
     if not triggered:
         return False
     assessment = getattr(state, "last_remaining_gaps_assessment", None) or {}
-    if isinstance(assessment, dict) and assessment.get("recommendation"):
-        # Already have a verdict; Coordinator should be routing on it.
-        return False
+    if isinstance(assessment, dict):
+        rec = str(assessment.get("recommendation") or "").strip().lower()
+        if rec in ("continue_explore", "advance_to_kernel", "stop_session"):
+            # Already have a routable verdict.
+            return False
     return True
 
 
