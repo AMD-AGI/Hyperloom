@@ -603,7 +603,7 @@ def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
 def _fill_integrate_defaults_from_state(
     payload: dict, *, session_dir: Path,
 ) -> dict:
-    """Pull ``base_tput`` / ``config_path`` / ``extra_sglang_args`` defaults from SharedState.
+    """Pull ``base_tput`` / ``config_path`` / ``extra_server_args`` defaults from SharedState.
 
     Sibling of ``_resolve_integrate_payload`` but runs *before* the
     ``base_tput > 0`` hard-check at the top of ``integrate_handler``.
@@ -631,11 +631,22 @@ def _fill_integrate_defaults_from_state(
         if cfg:
             resolved["config_path"] = cfg
 
+    # Field was renamed ``extra_sglang_args`` -> ``extra_server_args``
+    # (framework-neutral; see compat.payload_aliases). SharedState.load
+    # migrates the legacy key on disk, so ``current_best`` carries the
+    # canonical key after load — read canonical first, keep a read-only
+    # legacy fallback for any in-flight pre-migration dict, and always
+    # WRITE the canonical key so the downstream integrate flow
+    # (read_extra_server_args) resolves it without a deprecation warning.
     current_best = getattr(state, "current_best", None) or {}
-    if not resolved.get("extra_sglang_args") and isinstance(current_best, dict):
-        cb_args = current_best.get("extra_sglang_args") or ""
+    if not resolved.get("extra_server_args") and isinstance(current_best, dict):
+        cb_args = (
+            current_best.get("extra_server_args")
+            or current_best.get("extra_sglang_args")
+            or ""
+        )
         if cb_args:
-            resolved["extra_sglang_args"] = cb_args
+            resolved["extra_server_args"] = cb_args
 
     return resolved
 
