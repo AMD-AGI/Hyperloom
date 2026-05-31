@@ -727,7 +727,7 @@ class RooflineTrajectoryPoint(TypedDict, total=False):
     label: str                       # "baseline" / variant_name
     action: str                      # "baseline" / "explore" / "kernel_opt" / ...
     gain_pct: float                  # cumulative gain vs baseline at this point
-    flags: str                       # candidate_extra_sglang_args
+    flags: str                       # candidate_extra_server_args
     extra_envs: dict[str, str]       # KEY=value pairs the variant set
 
 

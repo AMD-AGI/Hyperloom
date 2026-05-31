@@ -514,7 +514,10 @@ def test_harvest_mtime_gating_skips_stale_leaks(tmp_path):
         "fresh post-launch csv",
     )
 
-    cutoff = stale.stat().st_mtime + 1.0
+    # Cutoff sits well beyond the mtime-gate slack from the stale file
+    # (which is ~1h old) while remaining at-or-before the fresh file's
+    # mtime, so the stale leak is rejected and the fresh one is adopted.
+    cutoff = stale.stat().st_mtime + 60.0
     harvested = harvest_leaked_artifacts(
         destination,
         subprocess_started_unix=cutoff,
