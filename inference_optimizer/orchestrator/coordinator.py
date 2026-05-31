@@ -137,6 +137,9 @@ _BASELINE_SELF_LOOP_THRESHOLD: int = 2
 _STEWARD_RECS: frozenset[str] = frozenset({
     "continue_explore", "advance_to_kernel", "stop_session",
 })
+# Retries for session_steward subprocess / LLM transport failures only.
+# Empty or malformed *LLM* verdicts still coerce to stop_session.
+_STEWARD_MAX_INFRA_RETRIES: int = 3
 
 # Actions whose output should observe the freshest ``analysis.md`` /
 # ``last_profile_trace`` snapshot. Every dispatch path
@@ -2398,19 +2401,20 @@ class Coordinator:
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
         )
-        # Two acceptance rules:
-        # 1. If the recipe had a recorded historical gain, we want at
-        #    least ``min_reproduce`` of that figure.
-        # 2. If the recipe didn't carry one (expected_gain=0), any
-        #    positive measurement counts (we trust the recipe at face
-        #    value because nothing else to compare to).
-        reproduced = False
-        if expected_gain > 0:
-            reproduced = measured_gain >= (expected_gain * min_reproduce)
-        else:
-            reproduced = measured_gain > 0
+        # Adopt KB best_config whenever replay beats the session baseline
+        # (operator policy: any measured uplift is worth seeding the stack).
+        # ``expected_gain`` / ``min_reproduce`` are retained in the outcome
+        # for audit only — they no longer gate promotion.
+        reproduced = measured_gain > 0
         outcome["actual_gain_pct"] = round(measured_gain, 3)
         outcome["throughput_after"] = tput
+        if expected_gain > 0:
+            historical_bar = expected_gain * min_reproduce
+            if measured_gain > 0 and measured_gain < historical_bar:
+                outcome["below_historical_reproduce_pct"] = True
+                outcome["historical_reproduce_bar_pct"] = round(
+                    historical_bar, 3,
+                )
         if reproduced:
             # R4-4 defense: pushing an empty stack entry (with no
             # extra_sglang_args / extra_envs) corrupts session_breakdown
@@ -3249,8 +3253,22 @@ class Coordinator:
             )
         return task
 
+    @staticmethod
+    def _steward_infrastructure_failure(done_payload: dict[str, Any]) -> bool:
+        """True when the steward subprocess failed before a real verdict."""
+        if not isinstance(done_payload, dict):
+            return True
+        reason = str(done_payload.get("reason") or "").strip().lower()
+        if reason.startswith("subprocess_"):
+            return True
+        if bool(done_payload.get("empty")) and not str(
+            done_payload.get("recommendation") or "",
+        ).strip():
+            return True
+        return False
+
     async def _enqueue_internal_steward_task(
-        self, *, reason: str,
+        self, *, reason: str, retry_attempt: int = 0,
     ) -> "Task | None":
         """IR-7 — enqueue a Coordinator-owned session_steward_specialist task.
 
@@ -3278,14 +3296,20 @@ class Coordinator:
             (self.shared_state.explore_search or {}).get("cursor") or 0
         )
         idempotency_key = f"internal-steward-round{round_id}"
+        if retry_attempt > 0:
+            idempotency_key = (
+                f"{idempotency_key}-retry{int(retry_attempt)}"
+            )
         # Avoid re-enqueueing if a steward verdict already landed in
         # this round (paranoia — wants_steward_assessment should have
         # returned False, but defense-in-depth).
         last = self.shared_state.last_remaining_gaps_assessment or {}
         if isinstance(last, dict) and last.get(
             "round_at_assessment"
-        ) == round_id and last.get("recommendation"):
-            return None
+        ) == round_id:
+            last_rec = str(last.get("recommendation") or "").strip().lower()
+            if last_rec in _STEWARD_RECS:
+                return None
         params: dict[str, Any] = {
             "domain": "session_steward_specialist",
             "gap_canonical_id": f"gap.steward.round{round_id}",
@@ -6815,18 +6839,73 @@ class Coordinator:
         ``continue_explore`` is coerced to ``advance_to_kernel`` so
         the EXPLORE→KERNEL transition becomes mandatory.
 
-        Out-of-vocab ``recommendation`` values are coerced to
-        ``stop_session`` (defense in depth — the LLM can write any
-        string, but we only honour the closed enum).
+        Infrastructure failures (stale heartbeat, subprocess timeout, empty
+        synthesis) schedule up to :data:`_STEWARD_MAX_INFRA_RETRIES` fresh
+        steward tasks with a new idempotency key. Only genuine LLM
+        out-of-vocab strings coerce to ``stop_session``.
         """
         raw_rec = str(done_payload.get("recommendation") or "").strip().lower()
         if raw_rec not in _STEWARD_RECS:
-            log.warning(
-                "steward: out-of-vocab recommendation=%r for task=%s; "
-                "coercing to 'stop_session'",
-                raw_rec, task.task_id,
-            )
-            raw_rec = "stop_session"
+            if Coordinator._steward_infrastructure_failure(done_payload):
+                round_at = int(
+                    (self.shared_state.explore_search or {}).get("cursor") or 0
+                )
+                failures = dict(
+                    getattr(
+                        self.shared_state,
+                        "steward_infra_failures_by_round",
+                        None,
+                    ) or {},
+                )
+                round_key = str(round_at)
+                attempt = int(failures.get(round_key, 0) or 0) + 1
+                failures[round_key] = attempt
+                self.shared_state.steward_infra_failures_by_round = failures
+                fail_reason = str(done_payload.get("reason") or "")[:240]
+                self.shared_state.record_steward_assessment(
+                    recommendation="",
+                    next_gap_canonical_id="",
+                    remaining_potential_pct_estimate=0.0,
+                    rationale=(
+                        f"steward infrastructure failure ({fail_reason}); "
+                        f"attempt {attempt}/{_STEWARD_MAX_INFRA_RETRIES}"
+                    ),
+                    task_id=task.task_id,
+                    round_at_assessment=round_at,
+                    source_payload=done_payload,
+                )
+                try:
+                    self.shared_state.save(self.session_dir)
+                except Exception:  # noqa: BLE001
+                    log.exception("steward: save after infra failure failed")
+                if attempt < _STEWARD_MAX_INFRA_RETRIES:
+                    log.warning(
+                        "steward: infrastructure failure (%s) for task=%s; "
+                        "scheduling retry %d/%d",
+                        fail_reason or "unknown",
+                        task.task_id,
+                        attempt,
+                        _STEWARD_MAX_INFRA_RETRIES,
+                    )
+                    await self._enqueue_internal_steward_task(
+                        reason="infra_retry",
+                        retry_attempt=attempt,
+                    )
+                    return
+                log.warning(
+                    "steward: infrastructure retries exhausted for "
+                    "round=%s; defaulting to advance_to_kernel "
+                    "(not stop_session)",
+                    round_at,
+                )
+                raw_rec = "advance_to_kernel"
+            else:
+                log.warning(
+                    "steward: out-of-vocab recommendation=%r for task=%s; "
+                    "coercing to 'stop_session'",
+                    raw_rec, task.task_id,
+                )
+                raw_rec = "stop_session"
         # Antiloop: only one continuation per session.
         if (
             raw_rec == "continue_explore"
