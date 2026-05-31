@@ -228,3 +228,40 @@ def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
     assert row["best_config"].get("name") == "good"
     # T0-written fingerprint version survives the CLOSE fingerprint merge.
     assert row["stack_fingerprint"].get("vllm_version") == "0.6.0"
+
+
+# ===========================================================================
+# Regression: recipe write-back must read the renamed canonical
+# ``extra_server_args`` off current_best / optimization_stack (state is
+# migrated on load) and still emit the KB-legacy ``extra_sglang_args``
+# field. Reading the stale name silently dropped the server args and
+# broke warm-replay reproduction in the next session.
+# ===========================================================================
+def test_recipe_attrs_read_canonical_extra_server_args(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    ss = coord.shared_state
+    ss.current_best = {
+        "action": "explore",
+        "name": "win",
+        "tput": 900.0,
+        # canonical key, as written by _lift_to_current_best post-rename
+        "extra_server_args": "--page-size 16",
+        "extra_envs": {"SGLANG_X": "1"},
+    }
+    ss.optimization_stack = [{
+        "action": "explore",
+        "name": "win",
+        "extra_server_args": "--page-size 16",
+        "extra_envs": {"SGLANG_X": "1"},
+    }]
+    ss.gain_per_stack_entry = [12.5]
+
+    attrs = coord._build_recipe_attrs_from_state()
+
+    # best_config carries the args under the KB-legacy field name, read
+    # from the canonical state key.
+    assert attrs["best_config"]["extra_sglang_args"] == "--page-size 16"
+    # what_worked entries likewise carry the args (not an empty string).
+    assert attrs["what_worked"], "what_worked should not be empty"
+    assert attrs["what_worked"][0]["extra_sglang_args"] == "--page-size 16"
+    assert attrs["what_worked"][0]["gain_pct"] == 12.5
