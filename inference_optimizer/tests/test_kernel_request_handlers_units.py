@@ -94,7 +94,7 @@ class TestRuntimeGeneratedKernel:
 
     def test_reusable_source_root_overrides_compile_marker(self):
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
-        roots = krh._REUSABLE_SOURCE_ROOTS
+        roots = krh._reusable_source_roots()
         if not markers or not roots:
             pytest.skip("required tables empty in build")
         marker = next(iter(markers))
