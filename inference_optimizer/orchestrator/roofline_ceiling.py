@@ -293,15 +293,18 @@ def _compute_expert_decomposition(
     HF config key aliases handled here so the MoE detection stays
     architecture-agnostic:
       * ``num_experts`` (Qwen3 MoE, Mixtral, …)
-      * ``n_routed_experts`` (DeepSeek V3 / GigaChat — V3-derived models).
+      * ``n_routed_experts`` (DeepSeek V3 / GigaChat — V3-derived models)
+      * ``num_local_experts`` (gpt-oss family — GptOssForCausalLM).
     Shared experts (``n_shared_experts``) are intentionally not folded
-    in: they are always-active and already counted in the non-expert
-    bytes via the safetensors total. Adding them to the routed count
-    would double-count and slightly inflate the divisor.
+    in: they are always-active and the safetensors total already lumps
+    them into ``non_expert_bytes`` via ``weight_bytes - routed_pool``,
+    so ``active = non_expert + (k/n)*routed`` correctly counts them
+    as always-active without double-charging the routed top-k pool.
     """
     num_experts = int(
         cfg.get("num_experts")
         or cfg.get("n_routed_experts")  # DeepSeek V3 alias
+        or cfg.get("num_local_experts")  # gpt-oss alias
         or 0
     )
     experts_per_tok = int(cfg.get("num_experts_per_tok") or 0)

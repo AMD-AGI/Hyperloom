@@ -261,6 +261,7 @@ def _write_synthetic_model(
     num_experts_per_tok: int | None = None,
     moe_intermediate_size: int | None = None,
     n_routed_experts: int | None = None,
+    num_local_experts: int | None = None,
     quant_method: str | None = None,
     dtype: str | None = None,
 ) -> None:
@@ -270,10 +271,11 @@ def _write_synthetic_model(
     branch). Pass ``num_experts`` / ``num_experts_per_tok`` /
     ``moe_intermediate_size`` to emit an MoE config (Qwen3-A3B style).
     Pass ``n_routed_experts`` to emit a DeepSeek-V3-style alias instead
-    of ``num_experts``. Pass ``quant_method`` (e.g. ``"fp8"``) to emit
-    a ``quantization_config`` block. Pass ``dtype`` to write the
-    DeepSeek-style activation-dtype field alongside / instead of the
-    standard ``torch_dtype``.
+    of ``num_experts``. Pass ``num_local_experts`` to emit a gpt-oss-
+    style alias (GptOssForCausalLM). Pass ``quant_method``
+    (e.g. ``"fp8"``) to emit a ``quantization_config`` block. Pass
+    ``dtype`` to write the DeepSeek-style activation-dtype field
+    alongside / instead of the standard ``torch_dtype``.
     """
     model_dir.mkdir(parents=True, exist_ok=True)
     config: dict = {
@@ -294,6 +296,8 @@ def _write_synthetic_model(
         config["moe_intermediate_size"] = moe_intermediate_size
     if n_routed_experts is not None:
         config["n_routed_experts"] = n_routed_experts
+    if num_local_experts is not None:
+        config["num_local_experts"] = num_local_experts
     if quant_method is not None:
         config["quantization_config"] = {
             "quant_method": quant_method,
@@ -1210,3 +1214,42 @@ class TestDeepSeekV3ConfigAliases:
         # params arithmetic in compute_compute_bound_ceiling_tok_per_sec
         # would silently fall back to bf16.
         assert _resolve_dtype_bytes("mxfp4") == 0.5
+
+    def test_num_local_experts_alias_equivalent_to_num_experts(self, tmp_path):
+        # gpt-oss family (GptOssForCausalLM) writes the routed-expert
+        # count under ``num_local_experts``. Without the alias the helper
+        # degraded to dense on gpt-oss-120b and inflated the active-
+        # weight divisor ~13x (full 65 GB instead of routed 5 GB),
+        # collapsing within% to ~28% on a memory-bound decode that
+        # should sit ~70-80%. Two synthetic configs identical except
+        # for the field name must produce identical ModelMeta.
+        # bf16-equiv total_size has to be larger than the routed pool
+        # (128 experts × 36 layers × 3 × 2880 × 2880 × 2 bytes ≈ 229 GB),
+        # otherwise ``_compute_expert_decomposition`` triggers its
+        # "expert pool ≥ weight_bytes" safe-degrade and the test would
+        # falsely fail. Real gpt-oss-120b ships as mxfp4 (~65 GB on
+        # disk); the bf16 equivalent is ~260 GB, which we use here so
+        # the MoE decomposition path executes.
+        common = dict(
+            total_size=260_000_000_000,
+            num_layers=36, num_kv_heads=8,
+            hidden_size=2880, num_attention_heads=64,
+            torch_dtype="bfloat16",
+            num_experts_per_tok=4,
+            moe_intermediate_size=2880,
+        )
+        _write_synthetic_model(
+            tmp_path / "qwen_alias", num_experts=128, **common
+        )
+        _write_synthetic_model(
+            tmp_path / "gptoss_alias", num_local_experts=128, **common
+        )
+        qwen = load_model_meta(str(tmp_path / "qwen_alias"))
+        gptoss = load_model_meta(str(tmp_path / "gptoss_alias"))
+        assert qwen is not None and gptoss is not None
+        assert qwen.num_experts == gptoss.num_experts == 128
+        assert qwen.experts_per_tok == gptoss.experts_per_tok == 4
+        assert qwen.expert_weight_bytes == gptoss.expert_weight_bytes
+        assert qwen.active_weight_bytes == gptoss.active_weight_bytes
+        # And both must be < weight_bytes (MoE shrinks the divisor).
+        assert qwen.active_weight_bytes < qwen.weight_bytes
