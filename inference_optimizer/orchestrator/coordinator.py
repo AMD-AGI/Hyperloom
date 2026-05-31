@@ -8813,6 +8813,32 @@ class Coordinator:
                 "error_class": result_payload.get("error_class"),
             }
             any_changed = True
+        # Mirror the roofline failure-handling that lives in the promote
+        # path (see `task_kind == "roofline"` else branch): bump the
+        # outer streak counter, clear the auto-roofline gate, and emit
+        # the canonical operator warning so a silent watermark-refresh
+        # failure (profile sub-step returned no .trace.json.gz, etc.)
+        # is no longer invisible to operators / Orchestration prompt.
+        if task.kind == "roofline":
+            if hasattr(self.shared_state, "roofline_failure_streak"):
+                self.shared_state.roofline_failure_streak += 1
+            if (
+                self.shared_state.auto_roofline_pending_task_id
+                == task.task_id
+            ):
+                self.shared_state.auto_roofline_pending_task_id = ""
+                await self._drain_proposals_awaiting_roofline()
+            any_changed = True
+            log.warning(
+                "Auto-roofline %s failed (reason=%s phase=%s "
+                "error_class=%s); continuing in degraded mode "
+                "(specialists / explore proceed without a fresh "
+                "analysis_md). No retry, no fallback.",
+                task.task_id,
+                str((task.params or {}).get("reason") or ""),
+                result_payload.get("phase"),
+                result_payload.get("error_class"),
+            )
         if any_changed:
             self.shared_state.save(self.session_dir)
         if baseline_event_payload is not None:
