@@ -394,9 +394,9 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert coord.shared_state.current_best["tput"] == 738.0
 
 
-def test_promote_warm_replay_drift_does_not_push_stack(tmp_path):
-    """Measured gain below the reproduce threshold → tag as ``drift``
-    but do NOT push onto stack (let EXPLORE start from clean baseline)."""
+def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
+    """Any replay tput above baseline seeds the stack (policy A), even
+    when below the historical reproduce bar."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -405,16 +405,37 @@ def test_promote_warm_replay_drift_does_not_push_stack(tmp_path):
     }
     task = _StubTask(params={
         "extra_sglang_args": "--attention-backend AITER",
+        "baseline_tput_anchor": 600.0,
     })
-    # 10% gain — well below 25% × 0.8 = 20% threshold.
+    # +10% vs baseline; below 25% × 0.8 historical bar but still adopted.
     result = {"status": "succeeded", "output_throughput": 660.0}
     coord._promote_warm_replay(result, task=task)
 
     outcome = coord.shared_state.warm_replay_outcome
-    assert outcome["status"] == "drift"
+    assert outcome["status"] == "reproduced"
     assert outcome["actual_gain_pct"] == 10.0
-    assert "below" in outcome["reason"]
-    # NO stack push.
+    assert outcome.get("below_historical_reproduce_pct") is True
+    assert len(coord.shared_state.optimization_stack) == 1
+    assert coord.shared_state.current_best["action"] == "warm_replay"
+
+
+def test_promote_warm_replay_no_gain_is_drift(tmp_path):
+    """Zero or negative measured gain → ``drift``, no stack push."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "warm_recipe_tier": "exact",
+    }
+    task = _StubTask(params={
+        "extra_sglang_args": "--attention-backend AITER",
+        "baseline_tput_anchor": 600.0,
+    })
+    result = {"status": "succeeded", "output_throughput": 600.0}
+    coord._promote_warm_replay(result, task=task)
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "drift"
     assert coord.shared_state.optimization_stack == []
     assert coord.shared_state.cumulative_gain == 0.0
 
