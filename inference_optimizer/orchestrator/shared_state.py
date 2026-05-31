@@ -95,6 +95,14 @@ _DEFAULT_LAST_FAILURES = 10
 # in :meth:`SharedState.record_phase_transition`.
 _PHASE_HISTORY_CAP = 100
 
+# roofline_snapshots history cap. PRELUDE bootstrap writes #1; every
+# +10% watermark crossing writes a refresh. Even a pathological run
+# with 50 watermark crossings would stay well under this cap; the
+# limit only exists to prevent unbounded state.json growth if the
+# refresh policy ever loosens. Cap is enforced in
+# :meth:`SharedState.record_trace_analyze`.
+_ROOFLINE_SNAPSHOTS_CAP = 50
+
 # gap ledger caps. ``_GAPS_MAX_ENTRIES`` bounds the
 # total list so a pathological session can't blow up state.json;
 # ``_GAPS_ATTEMPTS_HISTORY`` bounds the per-gap ``attempts`` list so even
@@ -200,7 +208,9 @@ class TraceAnalyzeSnapshot:
 
     trace_input: str = ""
     candidates_path: str = ""
+    kernel_roofline_path: str = ""
     hot_kernels_top15: list[dict[str, Any]] = field(default_factory=list)
+    kernel_roofline_top15: list[dict[str, Any]] = field(default_factory=list)
     task_groups: list[dict[str, Any]] = field(default_factory=list)
     reusable_native_kernel_ids: list[str] = field(default_factory=list)
     trace_health_warnings: list[dict[str, Any]] = field(default_factory=list)
@@ -216,7 +226,9 @@ class TraceAnalyzeSnapshot:
         return cls(
             trace_input=str(d.get("trace_input") or ""),
             candidates_path=str(d.get("candidates_path") or ""),
+            kernel_roofline_path=str(d.get("kernel_roofline_path") or ""),
             hot_kernels_top15=list(d.get("hot_kernels_top15") or []),
+            kernel_roofline_top15=list(d.get("kernel_roofline_top15") or []),
             task_groups=list(d.get("task_groups") or []),
             reusable_native_kernel_ids=list(
                 d.get("reusable_native_kernel_ids") or []
@@ -500,6 +512,22 @@ class SharedState:
     # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
+    # Append-only history of compact roofline snapshots used by
+    # ``report.py`` to render the ``## Roofline Comparison`` section.
+    # PR #321 retired the legacy ``last_trace_analyze_baseline``
+    # baseline-freeze field; the snapshot history preserves the first
+    # (baseline) snapshot across watermark-driven refreshes of
+    # ``last_trace_analyze`` so a real before/after comparison stays
+    # available even after multiple +10% refreshes overwrite the
+    # latest-snapshot cache.
+    #
+    # Each entry matches the shape returned by
+    # :func:`orchestrator.roofline_snapshot.build_roofline_snapshot`
+    # (snapshot_id / ts / compute_pct / idle_pct / comm_pct /
+    # top_bottleneck / top_kernel) plus ``analysis_md_path`` and
+    # ``trace_input`` for downstream re-extraction. Capped at
+    # ``MAX_ROOFLINE_SNAPSHOTS`` to bound on-disk state.json size.
+    roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # N27 — outer roofline failure counter. Bumped by
     # ``Coordinator._promote_to_shared_state`` on every failed
     # ``roofline`` task and reset to 0 on the next successful one.
@@ -2764,10 +2792,17 @@ class SharedState:
 
         On every successful call, ``roofline_snapshot_id`` is read from the
         previous ``last_trace_analyze`` and incremented by one — giving a
-        monotonic counter the orchestration prompt + N31 final-roofline
-        guard rely on. ``roofline_baseline_gain_at_snapshot`` captures
+        monotonic counter the orchestration prompt + the watermark-driven
+        freshness gate (:meth:`Coordinator._needs_roofline_for_watermark`)
+        both rely on. ``roofline_baseline_gain_at_snapshot`` captures
         ``cumulative_gain_validated`` at write time so the prompt can
         surface the gain delta since the report was taken.
+
+        A compact copy is also appended to
+        :attr:`roofline_snapshots` (PR #321 retired the legacy
+        ``last_trace_analyze_baseline`` field; the history list is the
+        new source for ``report.py``'s ``## Roofline Comparison``
+        before/after view).
 
         ``analysis_md_text`` is read verbatim from
         ``result['trace_report_path']``; OSErrors degrade silently to
@@ -2786,25 +2821,59 @@ class SharedState:
             artifacts = result.get("artifact_paths") or {}
             if isinstance(artifacts, dict):
                 candidates_path = artifacts.get("kernel_candidates", "") or ""
+        kernel_roofline_path = result.get("kernel_roofline_path") or ""
+        if not kernel_roofline_path:
+            artifacts = result.get("artifact_paths") or {}
+            if isinstance(artifacts, dict):
+                kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
         hot = result.get("hot_kernels") or []
         summary: list[dict[str, Any]] = []
+        kernel_roofline: list[dict[str, Any]] = []
         reusable_ids: list[str] = []
         for entry in hot[:15] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
             kid = entry.get("kernel_id")
             reusable = bool(entry.get("reusable_native_kernel"))
-            summary.append({
+            arithmetic_intensity = entry.get("arithmetic_intensity")
+            if arithmetic_intensity is None:
+                arithmetic_intensity = entry.get("flops_per_byte")
+            efficiency_percent = entry.get("efficiency_percent")
+            if efficiency_percent is None:
+                efficiency_percent = entry.get("efficiency_pct")
+            summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
                 "gpu_pct": entry.get("gpu_pct"),
                 "bottleneck": entry.get("bottleneck"),
-                "arithmetic_intensity": entry.get("arithmetic_intensity"),
+                "bound_type": entry.get("bound_type"),
+                "arithmetic_intensity": arithmetic_intensity,
+                "flops_per_byte": entry.get("flops_per_byte"),
+                "efficiency_percent": efficiency_percent,
+                "compute_utilization_pct": entry.get("compute_utilization_pct"),
+                "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
+                "suggestion": entry.get("suggestion") or "",
+                "roofline_name": entry.get("roofline_name"),
                 "source_file": entry.get("source_file"),
                 "reusable_native_kernel": reusable,
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
-            })
+            }
+            summary.append(summary_entry)
+            if any(
+                summary_entry.get(key) not in (None, "", [])
+                for key in (
+                    "bound_type",
+                    "arithmetic_intensity",
+                    "flops_per_byte",
+                    "efficiency_percent",
+                    "compute_utilization_pct",
+                    "bandwidth_utilization_pct",
+                    "suggestion",
+                    "roofline_name",
+                )
+            ):
+                kernel_roofline.append(dict(summary_entry))
             if reusable and kid:
                 reusable_ids.append(str(kid))
 
@@ -2840,10 +2909,13 @@ class SharedState:
         if not isinstance(task_groups, list):
             task_groups = []
 
+        ts_iso = _now_iso()
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
+            "kernel_roofline_path": str(kernel_roofline_path),
             "hot_kernels_top15": summary,
+            "kernel_roofline_top15": kernel_roofline,
             "task_groups": task_groups,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,
@@ -2853,11 +2925,74 @@ class SharedState:
             "roofline_baseline_gain_at_snapshot": float(
                 self.cumulative_gain_validated,
             ),
-            "ts": _now_iso(),
+            "ts": ts_iso,
         }
         # Mirror the snapshot id at the top level so PolicyGate /
         # Coordinator can read it without the nested-dict lookup.
         self.roofline_snapshot_id = snapshot_id
+
+        # Append a compact history entry for the report-side Roofline
+        # Comparison renderer. Parses analysis.md once at write time so
+        # the renderer never has to (and the snapshot survives even if
+        # the on-disk file is later deleted). Best-effort: parsing
+        # errors degrade silently to None fields.
+        try:
+            from .roofline_snapshot import build_roofline_snapshot
+            # Stamp decode-roofline ceiling + measured throughput so
+            # the dashboard can surface "% within roofline" without
+            # re-reading model files. Ceiling is a session-level
+            # constant (hardware + model + isl/osl don't change),
+            # achieved tput is current_best.tput if optimization has
+            # produced a winner, else baseline_tput.
+            from .roofline_ceiling import (
+                RooflineBreakdown,
+                compute_roofline_breakdown_from_state,
+            )
+            # Two-sided roofline (T_mem + T_cmp + min) — see formula
+            # change in roofline_ceiling.py. ``peak_tput`` continues to
+            # equal ``min(mem, cmp)`` so the existing dashboard
+            # ``theoretical_peak_tok_per_sec`` field stays meaningful.
+            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+            try:
+                breakdown = compute_roofline_breakdown_from_state(self)
+            except Exception:  # noqa: BLE001 — ceiling is best-effort
+                pass
+            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+            achieved_tput = 0.0
+            cb = self.current_best if isinstance(self.current_best, dict) else {}
+            cb_tput = cb.get("tput")
+            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                achieved_tput = float(cb_tput)
+            elif isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
+                achieved_tput = float(self.baseline_tput)
+            history_entry = build_roofline_snapshot(
+                snapshot_id=snapshot_id,
+                ts=ts_iso,
+                analysis_md_path=str(analysis_md_path),
+                theoretical_peak_tok_per_sec=peak_tput,
+                achieved_tok_per_sec=achieved_tput,
+                mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
+                cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
+                bound_kind=breakdown.bound_kind,
+            )
+            history_entry["trace_input"] = str(trace_input)
+            history_entry["analysis_md_path"] = str(analysis_md_path)
+            # 9fe4609 sidecar artifact pointer: dashboards read this
+            # path to surface per-kernel roofline data from the
+            # tracelens-written ``reports/kernel_roofline.json``.
+            history_entry["kernel_roofline_path"] = str(kernel_roofline_path)
+            if not isinstance(self.roofline_snapshots, list):
+                self.roofline_snapshots = []
+            self.roofline_snapshots.append(history_entry)
+            if len(self.roofline_snapshots) > _ROOFLINE_SNAPSHOTS_CAP:
+                # Drop oldest non-baseline entries; always keep
+                # snapshot #1 so the report's "baseline" anchor never
+                # rotates away.
+                base = self.roofline_snapshots[0]
+                tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1):]
+                self.roofline_snapshots = [base, *tail]
+        except Exception:  # noqa: BLE001 — never block record on render concerns
+            pass
 
     def record_sweep(self, result: dict[str, Any]) -> None:
         if not isinstance(result, dict):
