@@ -407,7 +407,7 @@ async def test_explore_executor_auto_derives_variant_timeout(
         ws = _fake_workspace(slot, tput=805.0)
         return [VariantResult(
             name="v_smoke",
-            extra_sglang_args="--smoke",
+            extra_server_args="--smoke",
             extra_envs={},
             status="succeeded",
             output_throughput=805.0,
@@ -470,7 +470,7 @@ async def test_explore_executor_safety_margin_param_overrides_default(
         ws = _fake_workspace(slot, tput=805.0)
         return [VariantResult(
             name="v_smoke",
-            extra_sglang_args="--smoke",
+            extra_server_args="--smoke",
             extra_envs={},
             status="succeeded",
             output_throughput=805.0,
@@ -536,7 +536,7 @@ async def test_explore_executor_roofline_hard_gate_drops_saturated_variants(
         ws = _fake_workspace(slot, tput=805.0)
         return [VariantResult(
             name=gv.name,
-            extra_sglang_args=gv.extra_sglang_args,
+            extra_server_args=gv.extra_server_args,
             extra_envs=dict(gv.extra_envs),
             status="succeeded",
             output_throughput=805.0,
@@ -625,7 +625,7 @@ async def test_explore_executor_roofline_gate_disabled_by_default(
         ws = _fake_workspace(slot, tput=805.0)
         return [VariantResult(
             name=gv.name,
-            extra_sglang_args=gv.extra_sglang_args,
+            extra_server_args=gv.extra_server_args,
             extra_envs=dict(gv.extra_envs),
             status="succeeded",
             output_throughput=805.0,
@@ -688,7 +688,7 @@ async def test_explore_executor_explicit_variant_timeout_wins(
         ws = _fake_workspace(slot, tput=805.0)
         return [VariantResult(
             name="v_smoke",
-            extra_sglang_args="--smoke",
+            extra_server_args="--smoke",
             extra_envs={},
             status="succeeded",
             output_throughput=805.0,

@@ -3266,7 +3266,7 @@ def collect_roofline(
                 "label":      str(entry.get("variant_name") or entry.get("action") or ""),
                 "action":     str(entry.get("action") or ""),
                 "gain_pct":   round(gain_pct, 4),
-                "flags":      str(entry.get("candidate_extra_sglang_args") or ""),
+                "flags":      str(entry.get("candidate_extra_server_args") or ""),
                 "extra_envs": dict(entry.get("extra_envs") or {}),
             })
 
