@@ -2450,7 +2450,12 @@ class Coordinator:
                 "action":            "replay_warm_recipe",
                 "name":              "warm_replay",
                 "variant_name":      "warm_replay",
-                "extra_sglang_args": warm_args,
+                # Canonical key — matches the stack entries
+                # ``_lift_to_current_best`` writes for normal EXPLORE
+                # KEEPs so downstream readers (stack-rebench, KB
+                # write-back, session_breakdown) all key on the same
+                # ``extra_server_args`` name post-rename.
+                "extra_server_args": warm_args,
                 "extra_envs":        warm_envs,
                 "tput":              float(tput),
                 "gain_pct":          round(measured_gain, 3),
@@ -2507,7 +2512,9 @@ class Coordinator:
                 "action": "warm_replay",
                 "name": "warm_replay",
                 "tput": tput,
-                "extra_sglang_args": warm_args,
+                # Canonical key — matches the ``current_best`` shape
+                # ``_lift_to_current_best`` writes for normal KEEPs.
+                "extra_server_args": warm_args,
                 "extra_envs": warm_envs,
             }
             log.info(
@@ -9867,12 +9874,23 @@ class Coordinator:
         opt_stack = getattr(ss, "optimization_stack", []) or []
         gain_per_stack = getattr(ss, "gain_per_stack_entry", []) or []
         last_failures = getattr(ss, "last_action_failures", []) or []
+        # Internal state (current_best / optimization_stack) carries the
+        # renamed canonical ``extra_server_args`` after SharedState.load
+        # migrates legacy keys. Read canonical first (legacy fallback for
+        # pre-migration dicts), but WRITE the KB-legacy ``extra_sglang_args``
+        # key into best_config / what_worked because the RecipeKB
+        # best_config schema + the warm-replay reader (allowlisted) still
+        # key on the legacy name. Reading the stale name here would emit an
+        # empty args field and silently break warm-replay reproduction.
         best_config: dict[str, Any] = {}
         if isinstance(current_best, dict):
-            for key in (
-                "extra_sglang_args", "extra_envs", "args", "envs",
-                "name", "tput", "accuracy",
-            ):
+            cb_args = (
+                current_best.get("extra_server_args")
+                or current_best.get("extra_sglang_args")
+            )
+            if cb_args:
+                best_config["extra_sglang_args"] = str(cb_args)
+            for key in ("extra_envs", "args", "envs", "name", "tput", "accuracy"):
                 if key in current_best:
                     best_config[key] = current_best[key]
         what_worked: list[dict[str, Any]] = []
@@ -9884,7 +9902,11 @@ class Coordinator:
                 gain_per = gain_per_stack[idx]
             what_worked.append({
                 "name":              str(entry.get("name") or ""),
-                "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                "extra_sglang_args": str(
+                    entry.get("extra_server_args")
+                    or entry.get("extra_sglang_args")
+                    or ""
+                ),
                 "extra_envs":        dict(entry.get("extra_envs") or {}),
                 "gain_pct":          gain_per,
             })
