@@ -48,6 +48,9 @@ class _StubSharedState:
     warm_replay_attempted: bool = False
     warm_replay_outcome: dict = field(default_factory=dict)
     warm_history_injected: bool = False
+    auto_roofline_pending_task_id: str = ""
+    enable_roofline: bool = True
+    last_baseline: dict = field(default_factory=dict)
     explore_search: dict = field(default_factory=dict)
     optimization_stack: list = field(default_factory=list)
     gain_per_stack_entry: list = field(default_factory=list)
@@ -454,6 +457,49 @@ def test_promote_warm_replay_failed_records_outcome(tmp_path):
     assert "GPU OOM" in outcome["reason"]
     # No stack push on failure.
     assert coord.shared_state.optimization_stack == []
+
+
+# ===========================================================================
+# PRELUDE bootstrap — serialize warm-replay before initial roofline
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_prelude_initial_analysis_deferred_while_warm_replay_in_flight(
+    tmp_path,
+):
+    """Initial roofline must not enqueue while KB replay is still running."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    assert coord.shared_state.warm_replay_outcome["status"] == "in_flight"
+    assert len(coord.tasks.calls) == 1
+
+    await coord._maybe_enqueue_prelude_initial_analysis_after_baseline(
+        baseline_tput=600.0,
+    )
+    assert len(coord.tasks.calls) == 1
+    assert not coord.shared_state.auto_roofline_pending_task_id
+
+
+@pytest.mark.asyncio
+async def test_prelude_initial_analysis_enqueued_after_warm_replay_finishes(
+    tmp_path,
+):
+    """Deferred initial roofline enqueues once warm-replay outcome settles."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    coord._promote_warm_replay(
+        {"status": "failed", "error_class": "crash", "error": "killed"},
+        task=_StubTask(),
+    )
+    assert coord.shared_state.warm_replay_outcome["status"] == "failed"
+
+    await coord._maybe_enqueue_prelude_initial_analysis_after_baseline()
+    assert len(coord.tasks.calls) == 2
+    assert coord.tasks.calls[1]["idempotency_key"] == (
+        "internal-analysis-prelude_initial"
+    )
+    assert coord.shared_state.auto_roofline_pending_task_id
 
 
 # ===========================================================================
