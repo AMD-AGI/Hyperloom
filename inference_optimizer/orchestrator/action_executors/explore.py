@@ -782,7 +782,7 @@ class ExploreExecutor:
                     for entry in dropped_by_roofline:
                         skipped_dup.append({
                             "name": entry.get("name", ""),
-                            "extra_sglang_args": entry.get("extra_sglang_args", ""),
+                            "extra_server_args": entry.get("extra_server_args", ""),
                             "reason": "roofline_saturated",
                             "categories": entry.get("categories", []),
                             "saturated_directions": entry.get(
