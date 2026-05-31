@@ -109,7 +109,7 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     # Cross-domain ReAct sub-agent; owns
     # ``agents/orchestration/dynamic_actions/<dyn_id>/``.
     "dynamic_action",
-    "integrate", "kernel_opt", "deep_kernel_analysis",
+    "integrate", "kernel_opt", "deep_kernel_analysis", "gemm_tuning",
     "operator_tuning", "vendor_kernel_config",
     "recover",
 })

@@ -43,6 +43,7 @@ import logging
 import os
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -162,6 +163,7 @@ _DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
 # ``KERNEL_OPT_MAX_PARALLEL`` env (>=1).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0
+_DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
 
 
 @functools.lru_cache(maxsize=1)
@@ -754,6 +756,185 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
 
     proc = await asyncio.to_thread(_run)
     return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+# ---------------------------------------------------------------------------
+def _normalize_precision(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _gemm_tuning_timeout_sec(payload: dict) -> int:
+    raw = payload.get("timeout_sec") or os.environ.get(
+        "HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC",
+        "",
+    )
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        value = _DEFAULT_GEMM_TUNING_TIMEOUT_SEC
+    return max(60, value)
+
+
+def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
+    raw = payload.get("workspace_path")
+    if raw:
+        return Path(raw)
+    suffix = str(payload.get("task_id") or payload.get("request_id") or "").strip()
+    if not suffix:
+        suffix = f"request_{int(time.time())}"
+    return Path(session_dir) / "runs" / "gemm_tuning" / suffix
+
+
+def _write_gemm_tuning_benchmark_script(
+    *,
+    workspace: Path,
+    model_path: str,
+    framework: str,
+    gpu_type: str,
+    tp: int,
+    conc: int,
+    isl: int,
+    osl: int,
+) -> Path:
+    """Create an isolated benchmark wrapper for GEAK GEMM tuning.
+
+    The wrapper uses a distinct default port and delegates lifecycle cleanup
+    to the benchmark script's own PID/trap handling. It deliberately avoids
+    global `pgrep sglang` cleanup so it cannot kill the main optimizer's
+    benchmark server when GEMM tuning runs inside a live session.
+    """
+    runner = f"/hyperloom/InferenceX/benchmarks/{framework}_{gpu_type}.sh"
+    path = workspace / "geak_gemm_benchmark.sh"
+    path.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+export MODEL={shlex.quote(model_path)}
+export TP={int(tp)}
+export CONC={int(conc)}
+export ISL={int(isl)}
+export OSL={int(osl)}
+export RANDOM_RANGE_RATIO="${{RANDOM_RANGE_RATIO:-1}}"
+export NUM_PROMPTS="${{NUM_PROMPTS:-320}}"
+export NUM_WARMUPS="${{NUM_WARMUPS:-8}}"
+export RUN_EVAL="${{RUN_EVAL:-false}}"
+export RESULT_DIR="${{RESULT_DIR:-$PWD/gemm_benchmark_result}}"
+export RESULT_FILENAME="${{RESULT_FILENAME:-bench_serving.json}}"
+export PORT="${{PORT:-18888}}"
+export PATH="/opt/node20/bin:/opt/venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export INFERENCEX_PATH="/hyperloom/InferenceX"
+mkdir -p "$RESULT_DIR"
+cd "$INFERENCEX_PATH"
+exec {shlex.quote(runner)}
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+async def run_gemm_tuning_handler(
+    payload: dict, *, session_dir: Path,
+) -> HandlerResult:
+    """Run GEAK's FP8 block-scale GEMM tuning workflow.
+
+    This is intentionally separate from ``run_optimization``: it tunes
+    vendor/aiter GEMM dispatch configuration before source-level kernel
+    rewrites spend GEAK/OOB budget on individual reusable native kernels.
+    """
+    from .shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    precision = _normalize_precision(payload.get("precision") or state.precision)
+    if precision != "fp8":
+        return {
+            "status": "skipped",
+            "decision": "REVERT",
+            "error_class": "fp8_only_action",
+            "error": f"GEAK GEMM tuning only applies to FP8 workloads (precision={precision or '(unset)'})",
+            "precision": precision,
+        }
+    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
+    if framework != "sglang":
+        return {
+            "status": "skipped",
+            "decision": "REVERT",
+            "error_class": "unsupported_framework",
+            "error": f"GEAK GEMM tuning first version supports SGLang only (framework={framework or '(unset)'})",
+            "framework": framework,
+            "precision": precision,
+        }
+    root_err = _kernel_agent_root_error()
+    if root_err:
+        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
+
+    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
+    if not model_path:
+        return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
+    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
+    conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 0)
+    isl = int(payload.get("isl") or state.isl or os.environ.get("ISL") or 0)
+    osl = int(payload.get("osl") or state.osl or os.environ.get("OSL") or 0)
+    gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "").strip().lower()
+    benchmark_script = str(
+        payload.get("benchmark_script")
+        or os.environ.get("GEAK_GEMM_BENCHMARK_SCRIPT")
+        or ""
+    ).strip()
+    if not benchmark_script:
+        if not gpu_type:
+            gpu_type = "mi355x"
+        benchmark_script = str(_write_gemm_tuning_benchmark_script(
+            workspace=workspace,
+            model_path=model_path,
+            framework=framework,
+            gpu_type=gpu_type,
+            tp=tp,
+            conc=conc,
+            isl=isl,
+            osl=osl,
+        ))
+    geak_config = str(payload.get("config") or os.environ.get("GEAK_CONFIG") or "").strip()
+    baseline_tput = payload.get("baseline_tput")
+    if baseline_tput is None:
+        baseline_tput = state.baseline_tput
+
+    input_json = workspace / "gemm_tuning_input.json"
+    input_payload = {
+        "cwd": str(workspace),
+        "model_path": model_path,
+        "benchmark_script": benchmark_script,
+        "framework": framework,
+        "precision": precision,
+        "gpu_type": gpu_type,
+        "tp": tp,
+        "conc": conc,
+        "isl": isl,
+        "osl": osl,
+        "baseline_tput": float(baseline_tput or 0.0),
+    }
+    if geak_config:
+        input_payload["config"] = geak_config
+    if payload.get("dry_run"):
+        input_payload["dry_run"] = True
+    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    cmd = [
+        "python3",
+        str(_kernel_agent_tool_path("gemm_tuning.py")),
+        "--input-json", str(input_json),
+    ]
+
+    rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_tuning_timeout_sec(payload))
+    result = _shape_tool_result(rc, stdout, stderr)
+    result.setdefault("workspace", str(workspace))
+    result.setdefault("precision", precision)
+    result.setdefault("framework", framework)
+    result.setdefault("model_path", model_path)
+    result.setdefault("benchmark_script", benchmark_script)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1587,8 +1768,13 @@ async def _run_optimization_single(
         cmd += ["--source-file", str(payload["source_file"])]
     if target_platform:
         cmd += ["--target-platform", str(target_platform)]
-    if payload.get("extra_server_args"):
-        cmd += ["--extra-sglang-args", str(payload["extra_server_args"])]
+    extra_args = str(
+        payload.get("extra_server_args")
+        or payload.get("extra_sglang_args")
+        or ""
+    ).strip()
+    if extra_args:
+        cmd += ["--extra-sglang-args", extra_args]
     if payload.get("candidates_path"):
         cmd += ["--candidates-path", str(payload["candidates_path"])]
     if payload.get("benchmark_file"):
@@ -1938,6 +2124,7 @@ async def integrate_handler(
 # requests routed via ``Coordinator._handle_request``.
 KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze":    trace_analyze_handler,
+    "run_gemm_tuning":  run_gemm_tuning_handler,
     "run_optimization": run_optimization_handler,
     "integrate":        integrate_handler,
     "apply_patch":      integrate_handler,   # alias — same flow
@@ -1958,6 +2145,7 @@ __all__ = [
     "get_handler",
     "has_handler",
     "integrate_handler",
+    "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
 ]
