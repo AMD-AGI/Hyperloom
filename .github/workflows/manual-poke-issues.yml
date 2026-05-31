@@ -1,0 +1,221 @@
+name: Scan & poke stale issues
+
+# Manually-triggered ops tool. Scans every open issue and, for those where:
+#   - the issue author is NOT on the AMD-AGI/safe team, AND
+#   - the last real (non-bot) reply was from a SaFE member, AND
+#   - that reply was >= HOURS_THRESHOLD hours ago
+# adds labels 'awaiting-author-response' + 'stale' and posts the standard
+# warning comment, as github-actions[bot]. The stale-issues workflow will
+# then close those issues ~24h later.
+#
+# Default mode is dry-run: it just prints the list and changes nothing.
+# Flip dry_run to false to actually act.
+#
+# Use cases:
+#   - Backfilling history that predates the auto-stale automation
+#   - Periodic audit of "ball-on-author" issues that somehow lost their label
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run only (just list matching issues, no labels/comments)'
+        required: true
+        type: boolean
+        default: true
+      hours_threshold:
+        description: 'Hours since SaFE last reply to consider the issue stale'
+        required: false
+        type: string
+        default: '48'
+
+permissions:
+  contents: read
+
+jobs:
+  scan-and-poke:
+    permissions:
+      issues: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch SaFE team members
+        id: team
+        env:
+          GH_TOKEN: ${{ secrets.SAFE_TEAM_READ_TOKEN }}
+        run: |
+          set -e
+
+          MEMBERS_RAW=$(gh api orgs/AMD-AGI/teams/safe/members --paginate --jq '.[].login' 2>&1 || true)
+          MEMBERS_CLEAN=$(echo "$MEMBERS_RAW" | grep -E '^[a-zA-Z][a-zA-Z0-9_-]*$' || true)
+          COUNT=$(echo "$MEMBERS_CLEAN" | grep -c . || true)
+
+          if [ "${COUNT:-0}" -ge 1 ]; then
+            echo "Fetched $COUNT SaFE members live:"
+            echo "$MEMBERS_CLEAN"
+            JSON=$(echo "$MEMBERS_CLEAN" | jq -R . | jq -s -c .)
+            {
+              echo "members=$JSON"
+              echo "source=live"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Could not fetch SaFE team live; using fallback list"
+            echo "API response was:"
+            echo "$MEMBERS_RAW"
+            # Fallback list (last refreshed: 2026-05-21)
+            # To refresh:
+            #   gh api orgs/AMD-AGI/teams/safe/members --paginate --jq '.[].login'
+            {
+              echo 'members=["nehaprakriya","haishuok0525","chaojhou","weilei0120","zhanglei-amd","fengshaoyi-amd","xiaofei-zheng","chennyiiis","lishuoshuo-amd","luochen-amd","BaoYunkai","ZhengGong-amd"]'
+              echo "source=fallback"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Scan & poke
+        uses: actions/github-script@v9
+        env:
+          SAFE_TEAM_JSON: ${{ steps.team.outputs.members }}
+          SAFE_TEAM_SOURCE: ${{ steps.team.outputs.source }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          HOURS_THRESHOLD: ${{ inputs.hours_threshold }}
+        with:
+          script: |
+            const SAFE_TEAM = JSON.parse(process.env.SAFE_TEAM_JSON);
+            const source = process.env.SAFE_TEAM_SOURCE;
+            const safeSet = new Set(SAFE_TEAM.map(s => s.toLowerCase()));
+            const dryRun = process.env.DRY_RUN === 'true';
+            const hoursThreshold = parseFloat(process.env.HOURS_THRESHOLD) || 48;
+
+            core.info(`SaFE roster (${source}, ${safeSet.size}): ${[...safeSet].join(', ')}`);
+            core.info(`Dry-run: ${dryRun}`);
+            core.info(`Hours threshold: ${hoursThreshold}`);
+            core.info('');
+
+            const { owner, repo } = context.repo;
+            const now = new Date();
+
+            // List all open issues; filter out PRs
+            const allItems = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const issues = allItems.filter(i => !i.pull_request);
+            core.info(`Open issues to scan: ${issues.length}`);
+            core.info('');
+
+            const candidates = [];     // matching issues, not yet poked
+            const alreadyPoked = [];   // matching issues but already have 'stale' label
+
+            for (const issue of issues) {
+              const authorLogin = issue.user.login.toLowerCase();
+              // Skip if author is SaFE (their own internal issues)
+              if (safeSet.has(authorLogin)) continue;
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: issue.number, per_page: 100,
+              });
+
+              let lastSafeAt = null;
+              let lastSafeBy = null;
+              let nonSafeAfterSafe = false;
+
+              for (const c of comments) {
+                const cAuthor = c.user.login.toLowerCase();
+                const isBot = c.user.type === 'Bot' || cAuthor.endsWith('[bot]');
+                if (isBot) continue;
+                if (safeSet.has(cAuthor)) {
+                  lastSafeAt = new Date(c.created_at);
+                  lastSafeBy = c.user.login;
+                  nonSafeAfterSafe = false;
+                } else {
+                  if (lastSafeAt) nonSafeAfterSafe = true;
+                }
+              }
+
+              if (lastSafeAt && !nonSafeAfterSafe) {
+                const hours = (now - lastSafeAt) / 3600000;
+                if (hours >= hoursThreshold) {
+                  const labels = new Set((issue.labels || []).map(l => typeof l === 'string' ? l : l.name));
+                  const entry = {
+                    num: issue.number,
+                    author: issue.user.login,
+                    lastSafeBy,
+                    hours: Math.round(hours * 10) / 10,
+                    title: issue.title,
+                    currentLabels: labels,
+                  };
+                  // 'stale' label means we have already poked this issue; skip to avoid
+                  // re-posting the warning comment every time the workflow is run.
+                  if (labels.has('stale')) {
+                    alreadyPoked.push(entry);
+                  } else {
+                    candidates.push(entry);
+                  }
+                }
+              }
+            }
+
+            candidates.sort((a, b) => b.hours - a.hours);
+            alreadyPoked.sort((a, b) => b.hours - a.hours);
+
+            core.info('=== Matching issues ===');
+            core.info(`To process: ${candidates.length}`);
+            for (const c of candidates) {
+              core.info(`  #${c.num} (${c.author}, ${c.hours}h since @${c.lastSafeBy}): ${c.title}`);
+            }
+            if (alreadyPoked.length > 0) {
+              core.info(`Already poked (skipped, have 'stale' label): ${alreadyPoked.length}`);
+              for (const c of alreadyPoked) {
+                core.info(`  #${c.num} (${c.author}, ${c.hours}h since @${c.lastSafeBy}): ${c.title}`);
+              }
+            }
+            core.info('');
+
+            if (candidates.length === 0) {
+              core.info('Nothing to do.');
+              return;
+            }
+
+            if (dryRun) {
+              core.info('Dry-run mode: not making any changes.');
+              core.info('To actually act on these issues, re-run with dry_run=false.');
+              return;
+            }
+
+            const warnMsg =
+              `This issue has been quiet for about **2 days** since our last reply.\n\n` +
+              `It will be closed automatically in **1 day** if there is no further activity. ` +
+              `If you are still working on this, please leave a comment with any update — that will reset the timer.`;
+
+            const errors = [];
+            for (const c of candidates) {
+              core.info(`--- Poking #${c.num} ---`);
+              try {
+                const newLabels = ['awaiting-author-response', 'stale']
+                  .filter(l => !c.currentLabels.has(l));
+                if (newLabels.length > 0) {
+                  await github.rest.issues.addLabels({
+                    owner, repo, issue_number: c.num,
+                    labels: newLabels,
+                  });
+                  core.info(`  + labels: ${newLabels.join(', ')}`);
+                } else {
+                  core.info('  labels already present, skipping');
+                }
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: c.num, body: warnMsg,
+                });
+                core.info('  + warning comment');
+              } catch (e) {
+                core.error(`#${c.num}: ${e.message}`);
+                errors.push({ num: c.num, msg: e.message });
+              }
+            }
+
+            if (errors.length > 0) {
+              core.setFailed(
+                `${errors.length} issue(s) failed: ` +
+                errors.map(e => `#${e.num} (${e.msg})`).join(', ')
+              );
+            } else {
+              core.info('');
+              core.info(`Done. Processed ${candidates.length} issue(s).`);
+            }

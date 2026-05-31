@@ -1,0 +1,131 @@
+name: Inference Optimization PR-CI
+
+# Dedicated PR-CI workflow for the inference-optimization pipeline.
+# Triggered ONLY when a maintainer approves a PR that also carries the
+# `run-pr-ci` label. Clones PR head into the SaFE sandbox and runs the
+# inference_optimizer skill from PR head (NOT from the wekafs deployed
+# snapshot under /wekafs/HyperloomV2), so reviewer-visible InferenceX
+# numbers reflect the *proposed* code change.
+#
+# Why a dedicated file (separate from inference-optimization-ci.yml)?
+#   * schedule / workflow_dispatch CI's yml is byte-identical to main
+#     even after PR-CI lands. No mental model overhead "which branch
+#     does this trigger take in the same file"; one file = one event class.
+#   * GITHUB_TOKEN env, label gate, `--pr-mode` flag, and PR-head checkout
+#     all live in one self-contained workflow. An edit to PR-CI cannot
+#     accidentally change schedule behavior, and vice versa.
+#   * `pull_request_review` only triggers workflows that already exist on
+#     the default branch — once this file is on main, every future PR
+#     review is evaluated against it. Keeping the surface area minimal
+#     here is a security property, not a stylistic one.
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+
+env:
+  SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
+  NFS_ROOT: ${{ secrets.NFS_ROOT }}
+  HARBOR_PREFIX: ${{ secrets.HARBOR_PREFIX }}
+  KERNEL_OPT_WORKSPACE: ${{ secrets.KERNEL_OPT_WORKSPACE }}
+  CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
+  WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+  SANDBOX_WORKSPACE: ${{ secrets.SANDBOX_WORKSPACE }}
+  LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+  # Per-run installation token, default scope `contents: read` on this
+  # repo only, lifetime is bounded by the workflow run (typically <8h).
+  # Forwarded into the sandbox via prompt text (Claw API has no env-
+  # injection field) so the agent can git-clone AMD-AGI/Hyperloom @ PR
+  # head. Why GITHUB_TOKEN over a user-created PAT:
+  #   * AMD-AGI org policy bans Classic PATs ("forbidden from accessing
+  #     this repository") and gates fine-grained PATs behind admin
+  #     approval — neither is a viable supply-chain.
+  #   * GITHUB_TOKEN dies with the workflow run, so a SaFE-side leak
+  #     has a bounded blast radius (vs. a 30-day PAT).
+  # actions/checkout@v6 already authenticates against the same token in
+  # the job below; we are just propagating the same capability into the
+  # sandbox.
+  HYPERLOOM_PR_CI_GH_TOKEN: ${{ github.token }}
+
+jobs:
+  pr-ci:
+    name: "PR-CI ${{ matrix.key }}"
+    runs-on: hyperloom-mh826
+    timeout-minutes: 510
+    # Two gates, both must pass:
+    #   1. review.state == 'approved'   (comment / request_changes don't
+    #                                    burn a hyperloom-mh826 GPU slot)
+    #   2. PR carries the `run-pr-ci` label  (reviewer opt-in; PR-CI burns
+    #                                          hours of MI300X time, so we
+    #                                          don't run on every approval)
+    # No `event_name` clause needed — this workflow's only trigger is
+    # pull_request_review (no schedule / workflow_dispatch alongside).
+    # Create the label once via: gh label create run-pr-ci.
+    if: >-
+      github.event.review.state == 'approved' &&
+      contains(github.event.pull_request.labels.*.name, 'run-pr-ci')
+    strategy:
+      fail-fast: false
+      matrix:
+        # PR-CI hard-codes dsr1 (the canonical InferenceX comparison
+        # model). schedule / workflow_dispatch in inference-optimization-
+        # ci.yml honor a configurable matrix; PR-CI deliberately doesn't,
+        # because dsr1 is the only model whose tok/s number reviewers
+        # consistently use to compare against PR proposals.
+        key: [dsr1-fp8-mi300x-sglang]
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Default checkout uses PR *base* on pull_request_review;
+          # we want PR head so the orchestrator + prompt template files
+          # match what the PR proposes (the agent will then git-clone
+          # the same head sha into the sandbox separately).
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Run optimization (PR-CI)
+        working-directory: ci
+        env:
+          PR_NUMBER:  ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # github.token is auto-injected per workflow run; an empty
+          # value here would mean Actions itself is misconfigured.
+          # Fail loud rather than silently sending a half-built prompt
+          # to the sandbox.
+          if [ -z "${HYPERLOOM_PR_CI_GH_TOKEN:-}" ]; then
+            echo "::error::github.token is empty — Actions runner misconfigured (workflows on this repo always get a default GITHUB_TOKEN)"
+            exit 2
+          fi
+          python3 orchestrator.py \
+            --trigger "pr-approve-PR${PR_NUMBER:-?}" \
+            --models "${{ matrix.key }}" \
+            --output-dir "${{ github.workspace }}/ci-output" \
+            --pr-mode \
+            --git-ref "$PR_HEAD_SHA"
+
+      - name: Rename per-model summary
+        if: always()
+        run: |
+          KEY="${{ matrix.key }}"
+          if [ -f "${{ github.workspace }}/ci-output/ci_summary.json" ]; then
+            cp "${{ github.workspace }}/ci-output/ci_summary.json" \
+               "${{ github.workspace }}/ci-output/ci_summary_${KEY}.json"
+          fi
+
+      - name: Upload PR-CI report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # Distinct prefix from schedule CI's `report-*` so reviewers
+          # can tell at a glance which workflow produced an artifact.
+          name: pr-ci-report-${{ matrix.key }}
+          path: |
+            ci-output/ci_report.md
+            ci-output/ci_summary_${{ matrix.key }}.json
+            ci-output/github_summary.md
+            ci-output/*/optimization_report.md
+          retention-days: 90

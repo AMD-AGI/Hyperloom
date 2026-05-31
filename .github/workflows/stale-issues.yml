@@ -1,0 +1,57 @@
+name: Auto-close stale issues awaiting author response
+
+# Runs hourly. Only acts on issues labeled 'awaiting-author-response':
+#   - After ~48h with no activity -> add 'stale' + post warning comment
+#   - After another ~24h          -> close + post farewell comment
+#
+# PRs are never touched. Issues labeled 'pinned' or 'keep-open' are exempt.
+# The 'awaiting-author-response' label is managed by issue-ball-tracker.yml.
+
+on:
+  schedule:
+    - cron: '30 * * * *'      # Every hour at HH:30 UTC
+  workflow_dispatch:           # Manual trigger for testing
+
+permissions:
+  contents: read
+
+jobs:
+  stale:
+    permissions:
+      issues: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          # ---- Scope: issues only, never touch PRs ----
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+
+          # ---- Only act on issues waiting on the author ----
+          any-of-issue-labels: 'awaiting-author-response'
+
+          # ---- Never auto-close issues marked to keep open ----
+          exempt-issue-labels: 'pinned,keep-open'
+
+          # ---- Timing: 2 days no activity -> stale, +1 day -> close ----
+          days-before-issue-stale: 2
+          days-before-issue-close: 1
+
+          stale-issue-label: 'stale'
+
+          # When the issue is updated (commented / edited), remove 'stale'
+          remove-stale-when-updated: true
+
+          stale-issue-message: |
+            This issue has been quiet for about **2 days** since our last reply.
+
+            It will be closed automatically in **1 day** if there is no further activity.
+            If you are still working on this, please leave a comment with any update — that will reset the timer.
+
+          close-issue-message: |
+            This issue has been automatically closed because there was no response for about **3 days** after our last comment.
+
+            If you would like to continue the discussion, please feel free to reopen this issue or leave a new comment — we will be happy to take another look.
+
+          # Be polite to the API
+          operations-per-run: 100

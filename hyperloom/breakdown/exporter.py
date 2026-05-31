@@ -219,7 +219,6 @@ def _json_default(obj: Any) -> Any:
 __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
-    "SCHEMA_VERSION",
     "build",
     "write_breakdown_json",
 ]

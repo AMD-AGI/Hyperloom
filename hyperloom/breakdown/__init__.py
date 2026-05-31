@@ -18,11 +18,11 @@ from __future__ import annotations
 from .exporter import (
     BREAKDOWN_FILENAME,
     EXPORTER_VERSION,
-    SCHEMA_VERSION,
     build,
     write_breakdown_json,
 )
 from .reporters import render_session_report
+from .schema import SCHEMA_VERSION
 
 __all__ = [
     "BREAKDOWN_FILENAME",

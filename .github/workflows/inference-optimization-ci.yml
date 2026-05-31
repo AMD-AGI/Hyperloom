@@ -1,0 +1,203 @@
+name: Inference Optimization CI
+
+on:
+  schedule:
+    - cron: '0 2 * * 6'
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 'Comma-separated model keys (empty = all from ci-config.yaml)'
+        required: false
+        default: ''
+      trigger_reason:
+        description: 'Trigger reason'
+        required: false
+        default: 'manual'
+
+permissions:
+  contents: read
+
+env:
+  SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
+  NFS_ROOT: ${{ secrets.NFS_ROOT }}
+  HARBOR_PREFIX: ${{ secrets.HARBOR_PREFIX }}
+  KERNEL_OPT_WORKSPACE: ${{ secrets.KERNEL_OPT_WORKSPACE }}
+  CLAW_API_KEY: ${{ secrets.CLAW_API_KEY }}
+  WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+  SANDBOX_WORKSPACE: ${{ secrets.SANDBOX_WORKSPACE }}
+  LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+
+jobs:
+  prepare:
+    name: Prepare Model Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Generate matrix
+        id: matrix
+        working-directory: ci
+        env:
+          INPUT_MODELS: ${{ github.event.inputs.models }}
+        run: |
+          pip3 install -q pyyaml 2>/dev/null || pip install -q pyyaml
+          python3 generate_matrix.py
+
+  optimize:
+    name: "${{ matrix.key }}"
+    needs: prepare
+    runs-on: hyperloom-mh826
+    # InferenceX-comparable models are the small fixed corpus in
+    # ci/ci-config.yaml. They are allowed to run much longer than the
+    # production_1000 optimize-submit pool because they are used for
+    # InferenceX PR / benchmark comparison work.
+    timeout-minutes: 4320
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Report latest InferenceX image versions
+        continue-on-error: true
+        run: |
+          SCRIPT="$GITHUB_WORKSPACE/inference_optimization/InferenceX/utils/check_image_versions.py"
+          for INFERENCEX_CONFIG in \
+            "${NFS_ROOT}/InferenceX/.github/configs/amd-master.yaml" \
+            /wekafs/hyperloom/InferenceX/.github/configs/amd-master.yaml \
+            /wekafs/InferenceX/.github/configs/amd-master.yaml \
+            /hyperloom/InferenceX/.github/configs/amd-master.yaml; do
+            if [ -f "$INFERENCEX_CONFIG" ]; then
+              pip install requests packaging pyyaml --quiet
+              python3 "$SCRIPT" --config-files "$INFERENCEX_CONFIG"
+              break
+            fi
+          done
+          if [ ! -f "$INFERENCEX_CONFIG" ]; then
+            echo "amd-master.yaml not found, skipping image version report"
+          fi
+
+      - name: Run optimization
+        working-directory: ci
+        run: |
+          TRIGGER="${{ github.event.inputs.trigger_reason || 'scheduled' }}"
+          python3 orchestrator.py \
+            --trigger "$TRIGGER" \
+            --models "${{ matrix.key }}" \
+            --output-dir "${{ github.workspace }}/ci-output"
+
+      - name: Upload model report
+        if: always()
+        run: |
+          # Rename summary to include model key so merge-multiple doesn't overwrite it
+          KEY="${{ matrix.key }}"
+          if [ -f "${{ github.workspace }}/ci-output/ci_summary.json" ]; then
+            cp "${{ github.workspace }}/ci-output/ci_summary.json" \
+               "${{ github.workspace }}/ci-output/ci_summary_${KEY}.json"
+          fi
+
+      - name: Upload model report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ matrix.key }}
+          path: |
+            ci-output/**
+          retention-days: 90
+
+  submit-inferenceX-pr:
+    name: Submit InferenceX PR
+    needs: optimize
+    runs-on: hyperloom-mh826
+    if: always() && !cancelled()
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all model reports
+        uses: actions/download-artifact@v8
+        with:
+          path: ci-output
+          pattern: report-*
+          merge-multiple: true
+
+      - name: Install dependencies
+        working-directory: ci
+        run: pip3 install -q -r requirements.txt
+
+      - name: Merge per-model summaries
+        working-directory: ci
+        run: |
+          python3 -c "
+          import json, glob, sys
+          summaries = glob.glob('${{ github.workspace }}/ci-output/ci_summary_*.json')
+          if not summaries:
+              # fallback: single-model run — ci_summary.json present directly
+              fallback = '${{ github.workspace }}/ci-output/ci_summary.json'
+              summaries = [fallback] if __import__('os').path.exists(fallback) else []
+          if not summaries:
+              print('No ci_summary.json found'); sys.exit(0)
+          merged = json.loads(open(summaries[0]).read())
+          for s in summaries[1:]:
+              data = json.loads(open(s).read())
+              merged['models'].extend(data.get('models', []))
+          merged['stats']['total'] = len(merged['models'])
+          merged['stats']['completed'] = sum(1 for m in merged['models'] if m.get('status')=='completed')
+          open('${{ github.workspace }}/ci-output/ci_summary_merged.json','w').write(json.dumps(merged, indent=2))
+          print(f'Merged {len(merged[\"models\"])} models')
+          "
+
+      - name: Submit PR to InferenceX
+        working-directory: ci
+        env:
+          INFERENCEX_FORK_TOKEN: ${{ secrets.INFERENCEX_FORK_TOKEN }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          python3 pr_submitter.py \
+            --summary "${{ github.workspace }}/ci-output/ci_summary_merged.json" \
+            --reports-dir "${{ github.workspace }}/ci-output"
+
+  detect-inferenceX:
+    name: Check InferenceX Updates
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - name: Restore cached SHA
+        uses: actions/cache/restore@v5
+        with:
+          path: .inferenceX_last_sha
+          key: inferenceX-sha
+
+      - name: Check for changes
+        id: check
+        run: |
+          LATEST=$(git ls-remote https://github.com/SemiAnalysisAI/InferenceX.git refs/heads/main | cut -f1)
+          CACHED=""
+          if [ -f ".inferenceX_last_sha" ]; then
+            CACHED=$(cat ".inferenceX_last_sha")
+          fi
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          if [ "$LATEST" != "$CACHED" ] && [ -n "$LATEST" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "$LATEST" > .inferenceX_last_sha
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Save cached SHA
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: .inferenceX_last_sha
+          key: inferenceX-sha-${{ steps.check.outputs.latest }}
+
+      - name: Trigger optimization
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          gh workflow run inference-optimization-ci.yml \
+            -f trigger_reason=inferenceX -f models=""
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

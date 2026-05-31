@@ -1,0 +1,184 @@
+name: Project Board Automation
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, closed]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned, reopened]
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_NUMBER: "43"
+  ORGANIZATION: "AMD-AGI"
+
+jobs:
+  project-automation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine target status
+        id: status
+        run: |
+          EVENT="${{ github.event_name }}"
+          ACTION="${{ github.event.action }}"
+          TARGET_STATUS=""
+
+          if [[ "$EVENT" == "pull_request" ]]; then
+            case "$ACTION" in
+              opened|reopened|ready_for_review)
+                TARGET_STATUS="In review"
+                ;;
+              closed)
+                if [[ "${{ github.event.pull_request.merged }}" == "true" ]]; then
+                  # PR merged -> Done is handled by built-in workflow, skip
+                  echo "skip=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+                ;;
+            esac
+          elif [[ "$EVENT" == "pull_request_review" ]]; then
+            if [[ "${{ github.event.review.state }}" == "changes_requested" ]]; then
+              TARGET_STATUS="In progress"
+            fi
+          elif [[ "$EVENT" == "issues" ]]; then
+            case "$ACTION" in
+              assigned)
+                TARGET_STATUS="In progress"
+                ;;
+              reopened)
+                TARGET_STATUS="Ready"
+                ;;
+              opened)
+                # New issue -> handled by built-in "Item added" workflow, skip
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
+          fi
+
+          if [[ -z "$TARGET_STATUS" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "target_status=$TARGET_STATUS" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get content node ID
+        if: steps.status.outputs.skip != 'true'
+        id: content
+        run: |
+          EVENT="${{ github.event_name }}"
+          if [[ "$EVENT" == "pull_request" || "$EVENT" == "pull_request_review" ]]; then
+            echo "node_id=${{ github.event.pull_request.node_id }}" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT" == "issues" ]]; then
+            echo "node_id=${{ github.event.issue.node_id }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get project data
+        if: steps.status.outputs.skip != 'true'
+        id: project
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          # Fetch project ID, status field ID, and all status option IDs
+          RESULT=$(gh api graphql -f query='
+            query($org: String!, $number: Int!) {
+              organization(login: $org) {
+                projectV2(number: $number) {
+                  id
+                  field(name: "Status") {
+                    ... on ProjectV2SingleSelectField {
+                      id
+                      options {
+                        id
+                        name
+                      }
+                    }
+                  }
+                }
+              }
+            }' -f org="${ORGANIZATION}" -F number="${PROJECT_NUMBER}")
+
+          PROJECT_ID=$(echo "$RESULT" | jq -r '.data.organization.projectV2.id')
+          FIELD_ID=$(echo "$RESULT" | jq -r '.data.organization.projectV2.field.id')
+
+          TARGET="${{ steps.status.outputs.target_status }}"
+          OPTION_ID=$(echo "$RESULT" | jq -r --arg name "$TARGET" \
+            '.data.organization.projectV2.field.options[] | select(.name == $name) | .id')
+
+          if [[ -z "$OPTION_ID" || "$OPTION_ID" == "null" ]]; then
+            echo "::error::Status option '$TARGET' not found in project"
+            exit 1
+          fi
+
+          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+          echo "field_id=$FIELD_ID" >> "$GITHUB_OUTPUT"
+          echo "option_id=$OPTION_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Find item in project
+        if: steps.status.outputs.skip != 'true'
+        id: item
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          NODE_ID="${{ steps.content.outputs.node_id }}"
+          PROJECT_ID="${{ steps.project.outputs.project_id }}"
+
+          RESULT=$(gh api graphql -f query='
+            query($nodeId: ID!) {
+              node(id: $nodeId) {
+                ... on Issue {
+                  projectItems(first: 20) {
+                    nodes { id project { id } }
+                  }
+                }
+                ... on PullRequest {
+                  projectItems(first: 20) {
+                    nodes { id project { id } }
+                  }
+                }
+              }
+            }' -f nodeId="$NODE_ID")
+
+          ITEM_ID=$(echo "$RESULT" | jq -r --arg pid "$PROJECT_ID" \
+            '.. | .nodes? // empty | .[] | select(.project.id == $pid) | .id' | head -1)
+
+          if [[ -z "$ITEM_ID" || "$ITEM_ID" == "null" ]]; then
+            # Item not in project yet, add it first
+            ADD_RESULT=$(gh api graphql -f query='
+              mutation($projectId: ID!, $contentId: ID!) {
+                addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+                  item { id }
+                }
+              }' -f projectId="$PROJECT_ID" -f contentId="$NODE_ID")
+
+            ITEM_ID=$(echo "$ADD_RESULT" | jq -r '.data.addProjectV2ItemById.item.id')
+          fi
+
+          echo "item_id=$ITEM_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Update project item status
+        if: steps.status.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          gh api graphql -f query='
+            mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId
+                itemId: $itemId
+                fieldId: $fieldId
+                value: { singleSelectOptionId: $optionId }
+              }) {
+                projectV2Item { id }
+              }
+            }' \
+            -f projectId="${{ steps.project.outputs.project_id }}" \
+            -f itemId="${{ steps.item.outputs.item_id }}" \
+            -f fieldId="${{ steps.project.outputs.field_id }}" \
+            -f optionId="${{ steps.project.outputs.option_id }}"
+
+          echo "✅ Updated status to: ${{ steps.status.outputs.target_status }}"

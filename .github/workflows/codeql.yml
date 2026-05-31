@@ -1,0 +1,29 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+  security-events: write
+  # ``codeql-action/analyze`` reads the current workflow run via
+  # ``GET /repos/.../actions/runs/{id}`` to attach run metadata to the
+  # SARIF upload + send completion telemetry. Without ``actions: read``
+  # both calls fail with ``Resource not accessible by integration``.
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@v3
