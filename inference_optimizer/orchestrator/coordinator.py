@@ -2547,6 +2547,50 @@ class Coordinator:
         state.warm_replay_outcome = outcome
         state.save(self.session_dir)
 
+    async def _maybe_enqueue_prelude_initial_analysis_after_baseline(
+        self,
+        *,
+        baseline_tput: float | None = None,
+    ) -> None:
+        """Enqueue the PRELUDE-bootstrap roofline/profile task after baseline.
+
+        Skipped while warm-replay is ``in_flight`` so two Magpie/sglang
+        jobs do not contend for the same GPU/port. Called from the
+        baseline completion hook and again when warm-replay promotion
+        finishes (success, drift, or failure).
+        """
+        state = self.shared_state
+        if _phase_state.warm_replay_in_flight(state):
+            log.info(
+                "PRELUDE: deferring initial %s until warm-replay completes",
+                self._internal_analysis_kind(),
+            )
+            return
+        if baseline_tput is None:
+            try:
+                baseline_tput = float(state.baseline_tput or 0.0)
+            except (TypeError, ValueError):
+                baseline_tput = 0.0
+        if not isinstance(baseline_tput, (int, float)) or baseline_tput <= 0:
+            return
+        if (state.auto_roofline_pending_task_id or "").strip():
+            return
+        try:
+            rl_task = await self._enqueue_internal_analysis_task(
+                reason="prelude_initial",
+            )
+            state.auto_roofline_pending_task_id = rl_task.task_id
+            log.info(
+                "PRELUDE: baseline landed (tput=%.2f); auto-enqueued "
+                "initial %s task=%s",
+                float(baseline_tput), rl_task.kind, rl_task.task_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception(
+                "PRELUDE: failed to enqueue initial analysis task "
+                "after baseline: %r", exc,
+            )
+
     async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
         """Build + enqueue a Coordinator-internal analysis task.
 
@@ -9219,17 +9263,19 @@ class Coordinator:
             #   Step 1. Inject warm-recipe history into dedup ledger
             #           (so already-tested REVERTs from past sessions
             #            can't be re-proposed). Cheap + KB-disabled-safe.
-            #   Step 2. Enqueue warm-replay (operates on server lifecycle
-            #            lane; reproduces the historical best_config).
-            #   Step 3. Enqueue auto-analysis (operates on profile_lane;
-            #            different lane → runs in parallel with replay).
+            #   Step 2. Enqueue warm-replay (Magpie + sglang on GPU).
+            #   Step 3. Enqueue auto-analysis (roofline/profile) via
+            #            :meth:`_maybe_enqueue_prelude_initial_analysis_after_baseline`.
+            #            Deferred while warm-replay is ``in_flight`` and
+            #            retried when replay promotion finishes.
             #
             # Ordering rationale: history-inject before warm-replay is
             # mandatory (the replay task must inherit the up-to-date
-            # ledger). Warm-replay before analysis is preferred so that
-            # the first cumulative_gain bump and the optimization_stack
-            # seed are recorded BEFORE specialist dispatch (specialist
-            # prompts read state.json at dispatch time).
+            # ledger). Warm-replay must finish before the initial
+            # roofline — both launch Magpie on the same GPU/port even
+            # though their lane keys differ. Stack seed + cumulative_gain
+            # from a reproduced replay must land before FRAMEWORK_PR /
+            # specialist dispatch (prompts read state.json at dispatch).
             #
             # Skip conditions:
             # * baseline tput missing or invalid;
@@ -9256,22 +9302,10 @@ class Coordinator:
                     log.exception(
                         "PRELUDE: failed to enqueue warm-replay task: %r", exc,
                     )
-                # Step 3 — auto-analysis (roofline / profile).
-                try:
-                    rl_task = await self._enqueue_internal_analysis_task(
-                        reason="prelude_initial",
-                    )
-                    self.shared_state.auto_roofline_pending_task_id = rl_task.task_id
-                    log.info(
-                        "PRELUDE: baseline landed (tput=%.2f); auto-enqueued "
-                        "initial %s task=%s",
-                        float(tput), rl_task.kind, rl_task.task_id,
-                    )
-                except Exception as exc:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "PRELUDE: failed to enqueue initial analysis task "
-                        "after baseline: %r", exc,
-                    )
+                # Step 3 — auto-analysis (roofline / profile); may defer.
+                await self._maybe_enqueue_prelude_initial_analysis_after_baseline(
+                    baseline_tput=float(tput),
+                )
         elif task_kind == "replay_warm_recipe":
             # GAP 1 — separate promote path so the replay result does
             # NOT overwrite ``baseline_tput`` / ``current_best`` via
@@ -9281,6 +9315,8 @@ class Coordinator:
                 self._promote_warm_replay(result, task=task)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("warm-replay promote failed")
+            # PRELUDE initial roofline was deferred while replay ran.
+            await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
         elif task_kind == "profile":
             # B2 (atom): profile_executor short-circuits to
             # status="skipped" with error_class="atom_no_profiler" when
