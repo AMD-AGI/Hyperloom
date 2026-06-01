@@ -196,7 +196,8 @@ contract lives in `orchestrator/system_prompts/orchestration.md`. In
 brief:
 
 - **IR-4 specialist-first**: EXPLORE grids must carry
-  `provenance='specialist:<domain>'` (≤1 per round) or `'default_grid'`
+  `provenance='specialist:<domain>'` (up to `research_lane_capacity` per
+  round, hard cap 6) or `'default_grid'`
   (cold-start, uncapped); all-`llm_direct` grids are denied. Specialists
   author patches into an isolated worktree; `integrate_patch` does the
   actual `git apply` + throughput/accuracy gate.
