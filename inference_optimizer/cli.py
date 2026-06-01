@@ -3339,7 +3339,18 @@ def _build_recipe_kb_dispatcher(
 
         gbrain_remote = build_gbrain_remote_from_env()
         if gbrain_remote is not None and gbrain_remote.enabled:
-            return RecipeKB(local=local_store, remote=gbrain_remote)
+            kb = RecipeKB(local=local_store, remote=gbrain_remote)
+            # Close the loop: mirror local recipe writes into gbrain (the
+            # read cache) so a future session's remote read returns the
+            # champion config, not a bare anchor. Local write stays
+            # authoritative; the mirror is best-effort. Falls back to the
+            # bare dispatcher if the write-side MCP can't be built.
+            from .recipe_kb.gbrain_ingest import (
+                GbrainMirroringRecipeKB,
+                build_mirror_mcp_from_env,
+            )
+            mirror_mcp = build_mirror_mcp_from_env()
+            return GbrainMirroringRecipeKB(kb, mirror_mcp) if mirror_mcp is not None else kb
         # Selected but not configured: stay local-only rather than
         # silently falling back to the cortex kb-service.
         return RecipeKB(local=local_store, remote=None)
