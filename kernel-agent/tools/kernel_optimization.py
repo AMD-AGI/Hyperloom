@@ -2769,6 +2769,16 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
 def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
     if not verification["compile_passed"]:
+        # ``compile_passed`` is computed as ``bool(best)`` in build_verification,
+        # so a False value can mean either "we compiled and it failed" OR
+        # "we never had a usable backend attempt to compile from". Distinguish
+        # them via ``artifact_error`` so operators can tell apart a real compile
+        # regression (action: fix the kernel) from a backend-dispatch failure
+        # (action: fix Ray / network / auth and retry).
+        err = (verification.get("artifact_error") or "").strip()
+        if err and verification.get("best_attempt_id", "") == "":
+            return {"decision": "REVERT",
+                    "reasons": [f"backend dispatch failed: {err}"]}
         return {"decision": "REVERT", "reasons": ["compile failed"]}
     if not verification["correctness_passed"]:
         reasons.append("correctness evidence missing or failed")
