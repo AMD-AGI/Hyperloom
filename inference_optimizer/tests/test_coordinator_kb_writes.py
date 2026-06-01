@@ -251,7 +251,9 @@ def _seed_kept_kernel(coord: Coordinator) -> None:
             "last_decision": "KEEP",
             "last_micro_speedup": 1.3202,
             "last_artifact_path": "/x/optimized_versions/v1_n128_launch_tuning.cu",
-            "source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+            # record_kernel_opt persists the source under ``last_source_file``
+            # (NOT ``source_file``); the recipe builder must read that key.
+            "last_source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
         },
     }
     ss.kernel_integrate_attempts = {
@@ -281,6 +283,12 @@ def test_build_recipe_attrs_surfaces_kept_kernel(tmp_path: Path) -> None:
     assert k is not None, f"k006 not in {kopts}"
     assert k["micro_speedup"] == 1.3202
     assert k["decision"] == "KEEP"
+    # source_file is read from the ``last_source_file`` ledger key
+    # (record_kernel_opt's actual field) so warm-start can relocate the
+    # patched source; an empty string means the wrong key was read.
+    assert k["source_file"] == (
+        "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu"
+    )
     # E2E verification outcome must be carried, not dropped.
     assert k["e2e_gain_pct"] == -0.094
     assert k["e2e_tput"] == 2477.82
