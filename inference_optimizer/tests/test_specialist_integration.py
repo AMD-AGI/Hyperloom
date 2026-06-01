@@ -357,7 +357,7 @@ async def test_specialist_adapter_run_returns_dict_via_runner(tmp_path: Path):
                 "variant_name": "moe_expert_parallel",
                 "rationale": "expand expert parallelism per the merged PR",
                 "predicted_impact": "5-8% throughput uplift",
-                "extra_sglang_args": "--expert-parallel-size 8",
+                "extra_server_args": "--expert-parallel-size 8",
                 "extra_envs": {},
                 "kb_evidence": ["pr.sgl-project/sglang#1234"],
                 "review_notes": "verified by warm PR feed",
