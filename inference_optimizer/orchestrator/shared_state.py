@@ -2915,9 +2915,13 @@ class SharedState:
         analysis_md_text = ""
         if analysis_md_path:
             try:
-                # No truncation: typical analysis.md is 10-20 KB, worst
-                # case ~200 KB — well within the 200K-token orchestration
-                # context budget.
+                # Stored verbatim, but the prompt path strips embedded
+                # base64 data-URLs before injection (see
+                # ``_format_analysis_md_full`` /
+                # ``strip_base64_data_urls``). A raw analysis.md can be
+                # ~120K tokens of base64 images; post-strip it is ~6K
+                # tokens of actual report text. NEVER inject this field
+                # raw — always go through the strip helper.
                 analysis_md_text = Path(analysis_md_path).read_text(
                     encoding="utf-8", errors="replace",
                 )
