@@ -878,6 +878,10 @@ async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path)
     so the historical structured ``skipped`` short-circuit is retired.
     """
     monkeypatch.setenv("FRAMEWORK", "atom")
+    # Anchor session/runs paths under the test tmp dir. Without this the
+    # executor falls back to the ``/workspace/hyperloom`` default, which is
+    # not writable on a clean CI runner (PermissionError on ``/workspace``).
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     pe = ProfileExecutor()
     # Sentinel-patch the parent __call__ so we can prove the normal path
     # is reached without launching Magpie in this unit test.
