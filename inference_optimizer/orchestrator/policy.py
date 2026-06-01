@@ -562,10 +562,10 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset({
 # source trees that legitimately live outside session_dir. We allowlist
 # the well-known parents here; anything else falls through to the
 # session_dir containment check.
-SOURCE_FILE_ALLOWLIST: tuple[str, ...] = resolve_source_file_allowlist()
-
 # Field name-only allowlist: when the payload key is `source_file`, the
-# value may match SOURCE_FILE_ALLOWLIST instead of being session-rooted.
+# value may match :func:`resolve_source_file_allowlist` instead of being
+# session-rooted. Resolved at check time so importlib/glob discovery and
+# env overrides apply without a process restart.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
 
 
@@ -2591,7 +2591,7 @@ class PolicyGate:
 
     def _path_in_source_allowlist(self, value: str) -> bool:
         s = str(value)
-        return any(s.startswith(p) for p in SOURCE_FILE_ALLOWLIST)
+        return any(s.startswith(p) for p in resolve_source_file_allowlist())
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
         """Match a value against runtime-resolved trace path prefixes.
@@ -2635,7 +2635,7 @@ class PolicyGate:
                 raise PolicyDenied(
                     f"role={role.name!r} {intent_type.value} payload field "
                     f"{key!r}={node!r} is not under session_dir or any of "
-                    f"{list(SOURCE_FILE_ALLOWLIST)!r}",
+                    f"{list(resolve_source_file_allowlist())!r}",
                     rule="source_file_not_allowlisted",
                     hint=("kernel-opt may only target framework source trees "
                           "under aiter/sglang/vllm; reject the request"),
@@ -2703,7 +2703,6 @@ __all__ = [
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
-    "SOURCE_FILE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",
 ]
