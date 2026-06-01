@@ -8,7 +8,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -964,7 +963,7 @@ def _coerce_cli_value(value: str | bool) -> Any:
         return text
 
 
-def parse_extra_sglang_args(extra_args: str) -> dict[str, Any]:
+def parse_extra_server_args(extra_args: str) -> dict[str, Any]:
     """Parse selected SGLang flags from an EXTRA_SGLANG_ARGS-style string."""
     if not extra_args.strip():
         return {}
@@ -1024,12 +1023,21 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         runtime_flags.update(candidate["runtime_flags"])
     runtime_flags.setdefault("is_multigpu", bool(candidate.get("is_multigpu")))
     runtime_flags.setdefault("num_gpus_recommended", candidate.get("num_gpus_recommended"))
-    extra_sglang_args = (
-        getattr(args, "extra_sglang_args", "")
-        or candidate.get("extra_sglang_args", "")
+    # The canonical payload key is ``extra_server_args`` (renamed from
+    # the legacy ``extra_sglang_args``); the local shim accepts both
+    # shapes on read so envelopes still carrying the legacy key work.
+    # The kernel-agent ``tools/`` directory is added to sys.path (not
+    # used as a package), so import the shim by bare module name.
+    from _payload_aliases import (  # type: ignore[import-not-found]
+        read_extra_server_args as _read_eserver,
+    )
+    extra_server_args = (
+        getattr(args, "extra_server_args", "")
+        or _read_eserver(candidate)
+        or candidate.get("candidate_extra_server_args", "")
         or candidate.get("candidate_extra_sglang_args", "")
     )
-    parsed_sglang_args = parse_extra_sglang_args(str(extra_sglang_args))
+    parsed_sglang_args = parse_extra_server_args(str(extra_server_args))
     for key in (
         "attention_backend",
         "decode_attention_backend",
@@ -1045,7 +1053,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     runtime_args = candidate.get("runtime_args") if isinstance(candidate.get("runtime_args"), dict) else {}
     runtime_args = dict(runtime_args)
     if parsed_sglang_args:
-        runtime_args.setdefault("extra_sglang_args", parsed_sglang_args.get("raw", str(extra_sglang_args)))
+        runtime_args.setdefault("extra_server_args", parsed_sglang_args.get("raw", str(extra_server_args)))
     for key in (
         "kv_cache_dtype",
         "page_size",
@@ -1128,6 +1136,38 @@ def build_prompt(
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
     kernel_metadata = build_kernel_metadata(candidate, args)
+    # Budget-protocol preamble. mini-swe-agent renders a ``step N ($X.XX)``
+    # header before every tool call where ``$X.XX`` is the cumulative LLM
+    # token spend. With GEAK's per-task cost-limit disabled (``--cost-limit
+    # 0.0``) this number is pure telemetry — it does NOT terminate the
+    # agent. In the May 2026 M2.5 N36 run multiple GEAK rounds nonetheless
+    # exited at step 3 / ~$2 with a ``budget exhausted`` panic-submit and
+    # zero code edits, throwing away ~90% of the 60-minute wall-clock
+    # budget that actually governs the task. Re-iterate the contract in
+    # the prompt so the LLM treats the header as a cost meter, not a
+    # stop sign. Wall-clock budget is sourced from the runner's
+    # ``geak_budget_minutes`` (default 60); the prompt repeats it verbatim
+    # rather than re-deriving so it stays accurate if the operator lowers
+    # the budget via ``RUN_OPT_GEAK_BUDGET_MINUTES``.
+    budget_protocol_block = (
+        "## BUDGET PROTOCOL (read this FIRST, before any tool call):\n"
+        "Every `mini-swe-agent step N ($X.XX)` header shows CUMULATIVE LLM TOKEN COST\n"
+        "in dollars. This is **TELEMETRY**, NOT a budget signal. The per-task LLM\n"
+        "cost_limit has been disabled (`--cost-limit 0.0`); you will NOT be terminated\n"
+        "by the cost meter at $2, $5, $10, $20, $50, or $100. The ONLY budget that\n"
+        "ends your task is the wall-clock timeout managed by the runner.\n"
+        "\n"
+        "Prior failed runs have been observed to exit at step ~3 with ~$2 spend,\n"
+        "declaring 'budget exhausted' WITHOUT making any code changes. Every one of\n"
+        "those runs threw away 90%+ of the available wall-clock budget. **DO NOT\n"
+        "REPEAT THAT MISTAKE.**\n"
+        "\n"
+        "Successful runs typically use 30-60 tool calls and $15-$40 of token spend\n"
+        "across the full wall-clock budget. Plan for THAT scale. Read the target\n"
+        "kernel, write an optimization, rebuild, test, iterate. If you see a low\n"
+        "step / low $ telemetry header and your impulse is 'submit now to be safe'\n"
+        "— that impulse is WRONG. Make the edit. Run the test. Iterate.\n"
+    )
     # PR-K: source attribution note. When TraceLens originally attributed a
     # kernel to a python ``@compile_ops`` wrapper (e.g. ``aiter/ops/moe_op.py``
     # for ``ck_moe_stage1``) and tracelens_analysis promoted it to the device
@@ -1400,6 +1440,7 @@ def build_prompt(
     return "\n".join([
         f"# TASK: Optimize the `{kernel_name}` kernel",
         "",
+        budget_protocol_block,
         platform_intro,
         "",
         f"kernel_name: {kernel_name}",
@@ -1514,20 +1555,137 @@ def _set_yaml_tools_rag(text: str, enabled: bool) -> str:
     return "\n".join(out) + "\n"
 
 
-def _geak_config_for_run(args: argparse.Namespace, prompt_file: Path) -> str:
+_DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC = 3600
+
+
+def _ensure_yaml_env_timeout(text: str, *, timeout: int = _DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC) -> str:
+    """Inject ``env.timeout`` if the GEAK config doesn't already define one.
+
+    mini-swe-agent's ``LocalEnvironmentConfig.timeout`` defaults to 30 seconds.
+    Without an explicit override, GEAK's test command dies with
+    ``Test command timed out`` after 30s. This helper ensures the config
+    always has a reasonable timeout (default 3600s).
+    """
+    timeout = max(60, int(timeout))
+    has_env = re.search(r"^env\s*:\s*(?:#.*)?$", text, flags=re.MULTILINE)
+    if has_env:
+        # Only mutate the timeout line; leave the rest of the env block alone.
+        m = re.search(
+            r"^(env\s*:\s*(?:#.*)?\n(?:[ \t]+.*\n)*)",
+            text,
+            flags=re.MULTILINE,
+        )
+        if not m:
+            return text
+        block = m.group(1)
+        timeout_re = re.compile(r"^([ \t]+)timeout\s*:\s*(\d+)\s*$", flags=re.MULTILINE)
+        existing = timeout_re.search(block)
+        if existing:
+            current = int(existing.group(2))
+            if current >= timeout:
+                return text
+            new_block = timeout_re.sub(f"{existing.group(1)}timeout: {timeout}", block, count=1)
+        else:
+            indent = "  "
+            for line in block.splitlines()[1:]:
+                stripped = line.lstrip(" \t")
+                if stripped and not stripped.startswith("#"):
+                    indent = line[: len(line) - len(stripped)] or indent
+                    break
+            new_block = block.rstrip("\n") + f"\n{indent}timeout: {timeout}\n"
+        return text.replace(block, new_block, 1)
+    addition = (
+        "\n"
+        "# Injected by Hyperloom kernel_optimization: mini-swe-agent\n"
+        "# LocalEnvironmentConfig defaults timeout=30 which kills every\n"
+        "# patch test inside the auto-generated unittest harness.\n"
+        "env:\n"
+        "  env:\n"
+        "    PAGER: cat\n"
+        "    MANPAGER: cat\n"
+        "    LESS: -R\n"
+        "    PIP_PROGRESS_BAR: 'off'\n"
+        "    TQDM_DISABLE: '1'\n"
+        f"  timeout: {timeout}\n"
+    )
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + addition
+
+
+def _geak_config_for_run(
+    args: argparse.Namespace,
+    prompt_file: Path,
+) -> str:
     """Create a per-run GEAK config only when runtime overrides need it."""
     base_config = os.environ.get("GEAK_CONFIG", "")
-    if not getattr(args, "disable_rag", False):
-        return base_config
     if not base_config or not Path(base_config).is_file():
         return base_config
-    override = prompt_file.parent / f"{prompt_file.stem}.geak-config.yaml"
     text = Path(base_config).read_text(encoding="utf-8", errors="replace")
-    override.write_text(_set_yaml_tools_rag(text, enabled=False), encoding="utf-8")
+    new_text = text
+    if getattr(args, "disable_rag", False):
+        new_text = _set_yaml_tools_rag(new_text, enabled=False)
+    new_text = _ensure_yaml_env_timeout(new_text, timeout=_DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC)
+    if new_text == text:
+        return base_config
+    override = prompt_file.parent / f"{prompt_file.stem}.geak-config.yaml"
+    override.write_text(new_text, encoding="utf-8")
     return str(override)
 
 
-def _apply_geak_env_overrides(args: argparse.Namespace, prompt_file: Path) -> dict[str, str | None]:
+def _extract_py_path(test_command: str) -> str | None:
+    """Extract the .py file path from a test command string."""
+    try:
+        for part in shlex.split(test_command):
+            if part.endswith(".py"):
+                return part
+    except ValueError:
+        pass
+    return None
+
+
+def _try_generate_harness(
+    test_command: str,
+    candidate: dict,
+    source_file: str,
+    out_dir: Path,
+    kernel_repo: str,
+    log_path: Path | None,
+) -> str | None:
+    """Try to auto-generate a GEAK-compatible harness from a benchmark file.
+
+    Returns a new test_command pointing to the generated harness, or None.
+    """
+    bench_py = _extract_py_path(test_command)
+    if not bench_py or not Path(bench_py).is_file():
+        return None
+
+    try:
+        tools_dir = str(Path(__file__).resolve().parent)
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from harness_generator import maybe_generate_harness
+
+        hr = maybe_generate_harness(
+            benchmark_file=bench_py,
+            candidate=candidate,
+            source_file=source_file,
+            out_dir=out_dir,
+            kernel_repo=kernel_repo,
+            log_fn=(lambda msg: append_log(log_path, msg)) if log_path else None,
+        )
+        if hr is not None:
+            return hr.test_command
+    except Exception as exc:
+        if log_path:
+            append_log(log_path, f"[harness_gen] failed: {exc}")
+    return None
+
+
+def _apply_geak_env_overrides(
+    args: argparse.Namespace,
+    prompt_file: Path,
+) -> dict[str, str | None]:
     """Temporarily tune GEAK env for this attempt; caller must restore."""
     keys = ("GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE")
     previous = {key: os.environ.get(key) for key in keys}
@@ -1626,35 +1784,47 @@ def invoke_backend(
         if backend == "geak":
             geak = _import_backend("geak_submit")
             out_dir = _geak_output_dir(args.session_id, prompt_file)
-            # GEAK preprocess will INVENT a wrong path (e.g.
-            # `/sgl-workspace/aiter/./benchmarks/bench_<kernel>.py` which does
-            # not exist) when --test-command is empty, causing torchrun exit 2
-            # at baseline measurement. Always pick a real existing test from
-            # candidate.benchmark_files, prefixing with `torchrun` for the
-            # multi-GPU path so collective init_process_group succeeds.
-            #
-            # ``_render_geak_test_command`` adds two guards on top of the
-            # legacy ``for bf in bench_files: ... break`` selector:
-            #   1. semantically reorders ``bench_files`` by kernel name so
-            #      e.g. ``fmha_v3_varlen_fwd`` no longer picks ``test_pa.py``
-            #      ahead of ``test_mha.py`` just because TraceLens listed PA
-            #      first;
-            #   2. prefixes ``timeout <N>`` so Metrix-instrumented Step 5 in
-            #      GEAK's preprocessor cannot stall the whole GEAK budget on
-            #      a runaway no-arg benchmark (e.g. ``test_pa.py``'s 90-case
-            #      default matrix).
+            # test_command: prefer external --test-command generated by the
+            # unittest skill; otherwise derive from benchmark files with the
+            # kernel-aware selector/timeout wrapper.
+            test_command = getattr(args, "test_command", "").strip()
             cand_name = str((candidate or {}).get("name") or "")
             is_multigpu = (
                 bool((candidate or {}).get("is_multigpu"))
                 or kernel_name_implies_multigpu(cand_name)
             )
-            test_command = _render_geak_test_command(
-                kernel_name=cand_name,
-                bench_files=bench_files,
-                is_multigpu=is_multigpu,
-                num_gpus=num_gpus,
-                timeout_sec=_profile_timeout_sec(),
-            )
+            if not test_command:
+                # GEAK preprocess may invent a non-existent bench path when
+                # --test-command is empty. Always provide a real test command.
+                test_command = _render_geak_test_command(
+                    kernel_name=cand_name,
+                    bench_files=bench_files,
+                    is_multigpu=is_multigpu,
+                    num_gpus=num_gpus,
+                    timeout_sec=_profile_timeout_sec(),
+                )
+            # Auto-generate GEAK-compatible harness when needed (e.g. raw
+            # AITER op_test without 4-mode CLI contract).
+            if test_command:
+                _harness_cmd = _try_generate_harness(
+                    test_command, candidate, source_file, out_dir,
+                    kernel_repo, log_path,
+                )
+                if _harness_cmd:
+                    test_command = _harness_cmd
+            if log_path is not None and test_command:
+                append_log(log_path, f"[geak] test_command={test_command}")
+            if test_command:
+                import shutil as _shutil
+                harness_dir = out_dir / "unittest"
+                harness_dir.mkdir(parents=True, exist_ok=True)
+                for _tc_part in test_command.split("&&"):
+                    for _w in _tc_part.strip().split():
+                        if _w.endswith(".py") and Path(_w).exists():
+                            _dst = harness_dir / Path(_w).name
+                            if _dst.exists() and _dst.resolve() == Path(_w).resolve():
+                                continue
+                            _shutil.copy2(_w, _dst)
             previous_env = _apply_geak_env_overrides(args, prompt_file)
             try:
                 result = geak.submit(
@@ -1672,6 +1842,8 @@ def invoke_backend(
                 _restore_env(previous_env)
             result["stdout"] = result.get("stdout_tail", "")
             result["output_dir"] = str(out_dir)
+            if test_command:
+                result["test_command"] = test_command
             # Surface GEAK partial outputs (final_report.json / results dir)
             # so a SIGTERM'd attempt with patches on disk still gets
             # promoted to "partial" by the run_attempt scanner below.
@@ -1794,7 +1966,33 @@ def run_attempt(
     append_log(log_path, f"[attempt {attempt_id}] backend={backend}")
 
     source_suffix = Path(source_file).suffix if source_file else ".txt"
-    optimized_path = run_dir / "optimized" / f"{attempt_id}_optimized{source_suffix or '.txt'}"
+    # In dry-run we still emit a synthetic source-suffixed placeholder so the
+    # downstream verification path can pick it up as a real artifact (preserved
+    # for back-compat with the dry-run smoke tests). For real backend runs we
+    # capture the raw subprocess stdout to a `.log` file instead of pretending
+    # it is the optimized CU/PY source: GEAK / claude / codex stdout is the
+    # mini-swe-agent / OOB conversation log, not a kernel source. Writing it
+    # with a `.cu` suffix and then handing it to `_select_source_artifact`
+    # made `_source_text_looks_complete` false-positive match generic
+    # English text containing markers like "void " or "extern " and report
+    # the log file as `artifact_source=source_file` (observed on Qwen3-8B
+    # k007 rmsnorm_quant and k013 silu_and_mul, 2026-05-20). The new `.log`
+    # suffix routes the stdout through `_extract_source_block` instead — that
+    # path scans for fenced code blocks (Claude/Codex sometimes emit the full
+    # optimized CU as ```cuda```) and only returns a real artifact when one
+    # exists, otherwise verification falls back cleanly to GEAK patches /
+    # `optimized_versions/` artefacts via the canonical backend_paths keys.
+    #
+    # Downstream-consumer contract: see ``kernel-agent/SKILL.md`` § *Per-
+    # attempt stdout file naming* — external scripts (dashboards, breakdown
+    # collector, etc.) MUST either read ``attempt["optimized_path"]`` from
+    # ``optimization_attempts.jsonl`` or glob ``<attempt_id>*`` under
+    # ``runs/<sid>/optimized/`` so both legacy ``_optimized.<suffix>`` and the
+    # new ``_stdout.log`` are picked up transparently.
+    if args.dry_run:
+        optimized_path = run_dir / "optimized" / f"{attempt_id}_optimized{source_suffix or '.txt'}"
+    else:
+        optimized_path = run_dir / "optimized" / f"{attempt_id}_stdout.log"
     optimized_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.dry_run:
@@ -1821,7 +2019,10 @@ def run_attempt(
             status = "timeout"
         else:
             status = "failed"
-        if returncode == 0 and full_stdout.strip():
+        # Always materialise the stdout `.log` (even on non-zero returncode);
+        # this is the durable audit trail for the attempt and the source for
+        # the code-fence extraction fallback.
+        if full_stdout.strip():
             optimized_path.write_text(full_stdout, encoding="utf-8")
         append_log(log_path, stdout_tail)
 
@@ -1884,6 +2085,9 @@ def run_attempt(
                 backend_paths["cli_execution_log"] = cli_log
             if session_id_oob:
                 backend_paths["oob_session_id"] = session_id_oob
+            test_cmd_used = (result.get("test_command") or "") if isinstance(result, dict) else ""
+            if test_cmd_used:
+                backend_paths["test_command"] = test_cmd_used
             # GEAK partial-output surface (forwarded by invoke_backend on
             # the geak branch). final_report.json / per-round patches.
             geak_final = (result.get("geak_final_report") or "") if isinstance(result, dict) else ""
@@ -2686,6 +2890,9 @@ def main() -> int:
                         help="Run GEAK with tools.rag disabled for this request.")
     parser.add_argument("--disable-xs-memory", action="store_true",
                         help="Disable GEAK cross-session memory retrieval/write-back for this request.")
+    parser.add_argument("--test-command", type=str, default="",
+                        help="Test command from unittest skill. "
+                             "Passed to GEAK as --test-command.")
     parser.add_argument("--num-gpus", type=int,
                         default=int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0")),
                         help="Per-task GPU reservation; 0 means follow the "

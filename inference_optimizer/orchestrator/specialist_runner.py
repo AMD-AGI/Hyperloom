@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from ..session_paths import runs_dir
-from .backends.base import Backend, BackendError
+from .backends.base import BackendError
 from .intent_parser import Intent, IntentType
 from .specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -443,10 +443,15 @@ class SpecialistRunner:
                 warm_start_pitfalls=list(
                     params.get("warm_start_pitfalls") or []
                 ),
+                warm_start_lessons=list(
+                    params.get("warm_start_lessons") or []
+                ),
+                session_snapshot=dict(params.get("session_snapshot") or {}),
                 pr_feed=list(params.get("pr_feed") or []),
                 pr_monitor_available=bool(
                     params.get("pr_monitor_available", True)
                 ),
+                framework=str(params.get("framework") or ""),
                 framework_source_roots=tuple(
                     params.get("framework_source_roots") or ()
                 ),
@@ -468,6 +473,11 @@ class SpecialistRunner:
                 isl=int(params.get("isl") or 0),
                 osl=int(params.get("osl") or 0),
                 max_model_len=int(params.get("max_model_len") or 0),
+                # GAP 8 — runtime fingerprint surfaced to the prompt so
+                # ``_format_version_note`` can annotate version-mismatched
+                # lessons / pitfalls. Both empty when the Coordinator
+                # didn't warm them (legacy callers / pre-PR sessions).
+                framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(
                     str(workspace_for_prompt) if workspace_for_prompt else ""
                 ),

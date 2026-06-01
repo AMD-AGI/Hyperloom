@@ -1,7 +1,7 @@
 """Shared helper for backends / params executors.
 
 Each runner's job is essentially: take a base Magpie YAML + a list of
-(name, extra_sglang_args, extra_envs) variants, run Magpie once per
+(name, extra_server_args, extra_envs) variants, run Magpie once per
 variant, parse `benchmark_report.json`, return the winners.
 
 We share the "run one Magpie variant" loop here so backends.py / params.py
@@ -11,7 +11,6 @@ stay tiny and only declare the grid (the marathon DFS playbook).
 from __future__ import annotations
 
 import asyncio
-import copy
 import hashlib
 import json
 import logging
@@ -20,7 +19,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,16 +59,16 @@ log = logging.getLogger(__name__)
 #     ledger while staying compact in ``state.json`` and prompt summaries.
 # ---------------------------------------------------------------------------
 def variant_fingerprint(
-    extra_sglang_args: str | None,
+    extra_server_args: str | None,
     extra_envs: dict[str, Any] | None,
 ) -> str:
-    """Stable content fingerprint for a (extra_sglang_args, extra_envs) pair.
+    """Stable content fingerprint for a (extra_server_args, extra_envs) pair.
 
     See module-level rationale. Name and note are intentionally NOT part of
     the input — two variants with identical content but different names
     (e.g. ``A`` and ``A_v2``) must collapse to the same fingerprint.
     """
-    args_text = str(extra_sglang_args or "")
+    args_text = str(extra_server_args or "")
     try:
         args_tokens = sorted(shlex.split(args_text))
     except ValueError:
@@ -133,7 +131,7 @@ def _resolve_session_dir() -> Path:
 
 
 _MAGPIE_CWD_DEFAULT = "/tmp"
-_VARIANT_TIMEOUT_SEC_DEFAULT = 2400
+_VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 workload
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +235,7 @@ def apply_multi_node_invalid_variants(
     kept: list[GridVariant] = []
     dropped: list[dict] = []
     for v in grid:
-        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_sglang_args or "")
+        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
         if m and int(m.group(1)) < conc:
             dropped.append({
                 "name": v.name,
@@ -385,7 +383,7 @@ def apply_single_node_invalid_variants(
 
 
 # Multi-node-hot sglang flags that depend on model class (MLA / MoE) or
-# sglang version. Each entry maps a substring of ``extra_sglang_args`` to
+# sglang version. Each entry maps a substring of ``extra_server_args`` to
 # a compatibility predicate. Keep this list small and well-documented;
 # anything more dynamic should live in the action_registry's
 # ``applicable_when`` schema instead.
@@ -396,40 +394,92 @@ _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
 )
 
 
-# Cache for ``_probe_sglang_help_text`` — populated on first call so we
-# avoid spawning a subprocess per-variant. Cleared by ``importlib.reload``
-# during tests. Sentinel ``None`` = not yet probed.
-_SGLANG_HELP_CACHE: str | None = None
+# Per-framework cache for ``_probe_server_help_text`` — populated on
+# first call per framework so we avoid spawning a subprocess per-variant.
+# Cleared by ``importlib.reload`` during tests. Empty results are NOT
+# cached so a transient failure (e.g. mocked subprocess raises once)
+# re-probes on the next call. The single-key ``_SGLANG_HELP_CACHE``
+# this replaces is preserved as a back-compat alias below; callers that
+# pre-date the rename keep working through ``_probe_sglang_help_text``.
+_HELP_TEXT_CACHE: dict[str, str] = {}
+
+# Per-framework subprocess command for ``--help`` text extraction. Each
+# command must be a single-shot ``python3 -c <inline>`` invocation so
+# the probe's 10-second timeout covers the import cost. Failure paths
+# (importerror / argparse exit / etc.) are captured by the broad
+# ``except Exception`` in ``_probe_server_help_text``.
+_HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
+    "sglang": (
+        "python3", "-c",
+        "from sglang.launch_server import parser; parser.print_help()",
+    ),
+    "vllm": (
+        "python3", "-c",
+        "from vllm.entrypoints.openai.api_server import make_arg_parser; "
+        "make_arg_parser(None).print_help()",
+    ),
+    # atom branch: the audited atom version exposes EngineArgs.add_cli_args
+    # on ``atom.model_engine.arg_utils`` (mirrors vLLM's EngineArgs). Build
+    # a throwaway ArgumentParser, let atom populate it, and print the help
+    # surface for substring matching against grid-variant flag literals.
+    "atom": (
+        "python3", "-c",
+        "import argparse; from atom.model_engine.arg_utils import EngineArgs; "
+        "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p); "
+        "p.print_help()",
+    ),
+}
 
 
-def _probe_sglang_help_text() -> str:
-    """Best-effort fetch of ``sglang launch_server --help`` text.
+def _probe_server_help_text(framework: str) -> str:
+    """Best-effort fetch of ``<framework> --help`` text for grid-variant
+    flag validation.
 
-    Returns ``""`` on ANY failure (subprocess timeout, sglang not
-    importable in the current Python, sandbox without sglang installed,
-    test-time subprocess mocks that mis-handle this probe's argv shape,
-    ValueError from a too-strict mock side_effect, etc.). Callers MUST
-    treat empty as "I don't know what sglang supports" and fall through
-    to NOT filtering (defer to graceful runtime failure).
+    Supported frameworks: ``sglang``, ``vllm``, ``atom``. Unknown values
+    return ``""`` (defer to graceful runtime failure). The cache is
+    keyed by framework so a multi-framework test box doesn't leak the
+    first-probed framework's output into the second's slot.
+
+    Returns ``""`` on ANY failure (subprocess timeout, framework not
+    importable in the current Python, sandbox without the framework
+    installed, test-time subprocess mocks that mis-handle this probe's
+    argv shape, ValueError from a too-strict mock side_effect, etc.).
+    Callers MUST treat empty as "I don't know what this framework
+    supports" and fall through to NOT filtering. Empty results are NOT
+    cached so a transient mock-side failure does not poison the cache.
 
     The broad ``except Exception`` is deliberate: this probe is purely
-    a perf optimisation (saves a wasted 10-min sglang restart per
+    a perf optimisation (saves a wasted 10-min server restart per
     incompatible variant). It must NEVER crash the optimizer or fail
     a unit test that mocks ``subprocess.run`` for unrelated reasons.
     """
-    global _SGLANG_HELP_CACHE
-    if _SGLANG_HELP_CACHE is not None:
-        return _SGLANG_HELP_CACHE
+    fw = (framework or "").strip().lower()
+    if fw in _HELP_TEXT_CACHE:
+        return _HELP_TEXT_CACHE[fw]
+    cmd = _HELP_PROBE_COMMANDS.get(fw)
+    if cmd is None:
+        return ""
     try:
         proc = subprocess.run(
-            ["python3", "-c",
-             "from sglang.launch_server import parser; parser.print_help()"],
+            list(cmd),
             capture_output=True, text=True, timeout=10,
         )
-        _SGLANG_HELP_CACHE = (proc.stdout or "") + (proc.stderr or "")
+        out = (proc.stdout or "") + (proc.stderr or "")
     except Exception:  # noqa: BLE001 — best-effort, see docstring
-        _SGLANG_HELP_CACHE = ""
-    return _SGLANG_HELP_CACHE
+        out = ""
+    if out:
+        _HELP_TEXT_CACHE[fw] = out
+    return out
+
+
+def _probe_sglang_help_text() -> str:
+    """Back-compat shim — defer to the framework-keyed probe.
+
+    Pre-dates the multi-framework rename; kept so in-process tests that
+    monkey-patch this exact name still work. New call sites should use
+    ``_probe_server_help_text("sglang")`` directly.
+    """
+    return _probe_server_help_text("sglang")
 
 
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
@@ -485,13 +535,19 @@ def apply_compatibility_filter(
         # No MODEL_PATH set -> can't detect -> assume compatible.
         is_mla, is_moe = True, True
 
-    sglang_help = _probe_sglang_help_text()
-    sglang_help_available = bool(sglang_help)
+    # Pick the live framework's --help text. Default to sglang so
+    # existing test fixtures that don't pass ``framework=`` (and pre-
+    # atom call sites) keep their old behaviour. atom / vllm flow in
+    # through callers that thread the rendered ``benchmark.framework``
+    # value down here.
+    fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+    help_text = _probe_server_help_text(fw)
+    help_available = bool(help_text)
 
     kept: list[GridVariant] = []
     dropped: list[dict] = []
     for v in grid:
-        args = v.extra_sglang_args or ""
+        args = v.extra_server_args or ""
         skip_reason: str | None = None
         for flag, required_class in _COMPATIBILITY_FLAG_RULES:
             if flag not in args:
@@ -508,11 +564,13 @@ def apply_compatibility_filter(
                     f"{required_class.upper()}-class"
                 )
                 break
-            # sglang flag-support predicate (only when help is readable)
-            if sglang_help_available and flag not in sglang_help:
+            # Framework flag-support predicate (only when help is
+            # readable). Reason mentions the active framework so log
+            # readers can tell which `--help` rejected the variant.
+            if help_available and flag not in help_text:
                 skip_reason = (
-                    f"{flag} not present in `sglang --help` output; "
-                    "current sglang version likely too old"
+                    f"{flag} not present in `{fw} --help` output; "
+                    f"current {fw} version likely too old"
                 )
                 break
         if skip_reason:
@@ -565,19 +623,116 @@ def apply_user_skip_list(
     return kept, dropped
 
 
-@dataclass
+@dataclass(init=False)
 class GridVariant:
     """One row of the grid we're going to test."""
 
     name: str                                    # human-readable label
-    extra_sglang_args: str = ""                  # appended via EXTRA_SGLANG_ARGS env
+    extra_server_args: str = ""                  # appended via EXTRA_{SGLANG,VLLM,ATOM}_ARGS env
     extra_envs: dict[str, str] = field(default_factory=dict)
     note: str = ""                                # optional reason / category
+
+    def __init__(
+        self,
+        name: str,
+        extra_server_args: str = "",
+        extra_envs: dict[str, str] | None = None,
+        note: str = "",
+        *,
+        extra_sglang_args: str | None = None,
+    ) -> None:
+        # Back-compat keyword alias for the historical
+        # ``extra_sglang_args`` kwarg name. Operators / tests /
+        # third-party callers may still construct
+        # ``GridVariant(extra_sglang_args="x")``; route that into the
+        # canonical attribute with a single DeprecationWarning so the
+        # callsite shows up in audit logs.
+        if extra_sglang_args is not None:
+            import warnings as _warnings
+            _warnings.warn(
+                "GridVariant(extra_sglang_args=...) is a deprecation "
+                "alias for GridVariant(extra_server_args=...) and will "
+                "be removed in the next Hyperloom release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if not extra_server_args:
+                extra_server_args = extra_sglang_args
+        self.name = name
+        self.extra_server_args = extra_server_args
+        self.extra_envs = dict(extra_envs) if extra_envs is not None else {}
+        self.note = note
 
     @property
     def fingerprint(self) -> str:
         """Content fingerprint used as dedup-ledger key. See module doc."""
-        return variant_fingerprint(self.extra_sglang_args, self.extra_envs)
+        return variant_fingerprint(self.extra_server_args, self.extra_envs)
+
+
+def coerce_extra_envs(value: Any) -> dict[str, str]:
+    """Normalize Orchestration-supplied ``extra_envs`` to ``dict[str,str]``.
+
+    The Orchestration LLM tends to emit ``extra_envs`` in three shapes
+    even though only the dict form is contractually correct:
+
+    1. ``{"FOO": "1", "BAR": "2"}`` — canonical.
+    2. ``"FOO=1 BAR=2"`` or ``"FOO=1\nBAR=2"`` — shell-style string; the
+       LLM cribs this from `export FOO=1 BAR=2` examples in prompts.
+    3. ``["FOO=1", "BAR=2"]`` — list of ``KEY=VAL`` tokens; sometimes
+       emitted alongside ``synergy_groups`` lists.
+
+    Previously the grid-construction sites accepted only shape #1 and
+    silently propagated #2/#3 into :class:`GridVariant.extra_envs`, where
+    :func:`_run_magpie` and :func:`variant_fingerprint` call ``.items()``
+    and crash with ``AttributeError("'str' object has no attribute
+    'items'")`` — taking the entire ``backends`` / ``params`` round
+    down. This helper keeps the contract narrow at the boundary so the
+    downstream pipeline only ever sees a clean dict.
+
+    Unknown shapes (anything that isn't dict/str/list/None) are coerced
+    to an empty dict; the action ledger records the round but no envs
+    are exported. Caller logging surfaces the variant name so the LLM
+    can self-correct on the next round.
+    """
+    if isinstance(value, dict):
+        return {str(k): str(v) for k, v in value.items() if k is not None}
+    if isinstance(value, str):
+        out: dict[str, str] = {}
+        # Accept newline, semicolon, or whitespace separation; values
+        # never contain ``=`` in practice but we split on the first ``=``
+        # only to preserve URL-style assignments like ``HF_ENDPOINT=https://...``.
+        tokens = re.split(r"[\s;]+", value.strip())
+        for tok in tokens:
+            if not tok:
+                continue
+            if "=" not in tok:
+                continue
+            k, v = tok.split("=", 1)
+            k = k.strip()
+            if not k:
+                continue
+            out[k] = v.strip()
+        return out
+    if isinstance(value, (list, tuple)):
+        out_l: dict[str, str] = {}
+        for item in value:
+            if isinstance(item, dict):
+                # ``[{"FOO": "1"}, {"BAR": "2"}]`` — merge in order so
+                # later entries win, mirroring shell ``export`` semantics.
+                for k, v in item.items():
+                    if k is None:
+                        continue
+                    out_l[str(k)] = str(v)
+                continue
+            if not isinstance(item, str) or "=" not in item:
+                continue
+            k, v = item.split("=", 1)
+            k = k.strip()
+            if not k:
+                continue
+            out_l[k] = v.strip()
+        return out_l
+    return {}
 
 
 @dataclass
@@ -585,7 +740,7 @@ class VariantResult:
     """One bench run's parsed result."""
 
     name: str
-    extra_sglang_args: str
+    extra_server_args: str
     extra_envs: dict[str, str]
     status: str
     output_throughput: float | None = None
@@ -628,12 +783,12 @@ class VariantResult:
     @property
     def fingerprint(self) -> str:
         """Same fingerprint scheme as :class:`GridVariant`."""
-        return variant_fingerprint(self.extra_sglang_args, self.extra_envs)
+        return variant_fingerprint(self.extra_server_args, self.extra_envs)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name":               self.name,
-            "extra_sglang_args":  self.extra_sglang_args,
+            "extra_server_args":  self.extra_server_args,
             "extra_envs":         self.extra_envs,
             "fingerprint":        self.fingerprint,
             "status":             self.status,
@@ -861,7 +1016,7 @@ def _build_variant_yaml(
     combined = merge_server_args(
         str(envs.get(extra_args_env, "")),
         base_extra_args,
-        variant.extra_sglang_args,
+        variant.extra_server_args,
     )
     if combined:
         envs[extra_args_env] = combined
@@ -917,9 +1072,45 @@ def _kill_stale_servers() -> None:
     import time
 
     _KILL_PATTERNS = ("VLLM::Worker", "VLLM::EngineCore", "vllm.entrypoints",
-                      "vllm serve", "sglang.srt", "sglang.launch_server")
+                      "vllm serve", "sglang.srt", "sglang.launch_server",
+                      # atom server entrypoint (analogous to vllm.entrypoints).
+                      "atom.entrypoints", "atom.entrypoints.openai_server")
+
+    # atom spawns its ModelRunner workers via ``multiprocessing.spawn`` — their
+    # cmdline is the generic ``spawn_main ... --multiprocessing-fork`` so they
+    # cannot be matched by _KILL_PATTERNS. On server teardown they routinely
+    # orphan to init (ppid=1) yet keep their full HIP/VRAM reservation (~87 %
+    # of each MI3xx GPU for an 8B+ model), which OOM-kills the *next* atom
+    # server (baseline ok, then roofline/profile/explore all fail to allocate
+    # KV cache). We identify these survivors by the atom install (and aiter
+    # JIT cache) mmap'd into their address space — a signature the optimizer's
+    # own Ray / multiprocessing children never carry.
+    _FORK_MARKERS = (b"--multiprocessing-fork", b"spawn_main")
+    _ATOM_MAP_SIGNATURES = ("/ATOM/atom/", "/aiter/jit/", "/aiter-test/aiter/")
 
     my_pid = os.getpid()
+    try:
+        my_pgid = os.getpgrp()
+    except OSError:
+        my_pgid = -1
+
+    def _is_orphaned_atom_worker(pid: int, cmdline: bytes) -> bool:
+        if not any(m in cmdline for m in _FORK_MARKERS):
+            return False
+        # Never touch a worker that belongs to *our* process group.
+        try:
+            if my_pgid != -1 and os.getpgid(pid) == my_pgid:
+                return False
+        except (OSError, ProcessLookupError):
+            return False
+        try:
+            with open(f"/proc/{pid}/maps", "r", errors="replace") as fh:
+                maps = fh.read()
+        except (OSError, PermissionError):
+            return False
+        return any(sig in maps for sig in _ATOM_MAP_SIGNATURES)
+
+    killed_atom = False
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
@@ -931,22 +1122,35 @@ def _kill_stale_servers() -> None:
         except (OSError, PermissionError):
             continue
         text = cmdline.replace(b"\0", b" ").decode("utf-8", "replace")
-        if any(pat in text for pat in _KILL_PATTERNS):
+        is_atom_server = "atom.entrypoints" in text
+        if any(pat in text for pat in _KILL_PATTERNS) or _is_orphaned_atom_worker(pid, cmdline):
+            killed_atom = killed_atom or is_atom_server or b"--multiprocessing-fork" in cmdline
+            # Kill the whole process group when we can — atom servers fan out
+            # ModelRunner children that must die with the leader.
+            try:
+                pgid = os.getpgid(pid)
+                if pgid not in (my_pgid, 0):
+                    os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
 
-    # Clear /dev/shm vllm/nccl/cuda segments that prevent re-binding.
-    for pattern in ("/dev/shm/vllm*", "/dev/shm/nccl*", "/dev/shm/cuda*"):
+    # Clear /dev/shm vllm/nccl/cuda/torch segments that prevent re-binding.
+    for pattern in ("/dev/shm/vllm*", "/dev/shm/nccl*", "/dev/shm/cuda*",
+                    "/dev/shm/torch*", "/dev/shm/atom*"):
         for f in glob.glob(pattern):
             try:
                 os.remove(f)
             except OSError:
                 pass
 
-    # Brief pause for KFD (ROCm kernel driver) async VRAM release.
-    time.sleep(2)
+    # Brief pause for KFD (ROCm kernel driver) async VRAM release. Atom workers
+    # hold tens-to-hundreds of GB, whose async teardown lags well past 2s, so
+    # give the driver longer to actually reclaim before the next server boots.
+    time.sleep(8 if killed_atom else 2)
 
 
 def _run_magpie(
@@ -1131,10 +1335,10 @@ async def run_grid(
                 variant_name=variant.name,
                 error_class="yaml_build_error",
                 error_summary=repr(exc),
-                extra_args=variant.extra_sglang_args,
+                extra_args=variant.extra_server_args,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed", error=f"yaml_build_error: {exc!r}",
                 error_class="yaml_build_error",
@@ -1152,7 +1356,7 @@ async def run_grid(
         )
         log.info(
             "grid_runner: variant %d/%d name=%s args=%s",
-            i + 1, len(grid), variant.name, variant.extra_sglang_args,
+            i + 1, len(grid), variant.name, variant.extra_server_args,
         )
 
         # Multi-node only: restart sglang/vllm with this variant's
@@ -1169,8 +1373,8 @@ async def run_grid(
             # the grid surface), so PD config stays constant across
             # variants within one run.
             await restart_server_for_round(
-                extra_sglang_args=merge_server_args(
-                    base_extra_args, variant.extra_sglang_args,
+                extra_server_args=merge_server_args(
+                    base_extra_args, variant.extra_server_args,
                 ),
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
@@ -1186,10 +1390,10 @@ async def run_grid(
                 variant_name=variant.name,
                 error_class="mn_server_restart_failed",
                 error_summary=str(exc),
-                extra_args=variant.extra_sglang_args,
+                extra_args=variant.extra_server_args,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 error=f"mn_server_restart_failed: {exc}",
@@ -1239,10 +1443,10 @@ async def run_grid(
                 variant_name=variant.name,
                 error_class="magpie_timeout",
                 error_summary=str(exc),
-                extra_args=variant.extra_sglang_args,
+                extra_args=variant.extra_server_args,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed", error=f"timeout: {exc}",
                 error_class="magpie_timeout",
@@ -1279,7 +1483,7 @@ async def run_grid(
                 subprocess_started_unix=variant_started_unix,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 returncode=rc,
@@ -1344,10 +1548,10 @@ async def run_grid(
                 variant_name=variant.name,
                 error_class="no_benchmark_workspace",
                 error_summary=no_ws_error_summary,
-                extra_args=variant.extra_sglang_args,
+                extra_args=variant.extra_server_args,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 returncode=rc,
@@ -1393,10 +1597,10 @@ async def run_grid(
                 variant_name=variant.name,
                 error_class=invalid_class,
                 error_summary=error,
-                extra_args=variant.extra_sglang_args,
+                extra_args=variant.extra_server_args,
             )
             results.append(VariantResult(
-                name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+                name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="failed",
                 workspace=str(workspace),
@@ -1415,7 +1619,7 @@ async def run_grid(
             continue
 
         results.append(VariantResult(
-            name=variant.name, extra_sglang_args=variant.extra_sglang_args,
+            name=variant.name, extra_server_args=variant.extra_server_args,
             extra_envs=dict(variant.extra_envs),
             status="succeeded",
             output_throughput=measurement.get("output_throughput"),

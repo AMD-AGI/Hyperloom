@@ -17,12 +17,11 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from inference_optimizer.orchestrator.action_executors.framework_pr import (
-    DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     FrameworkPrExecutor,
     _candidate_slug,
     _fetch_diff_to_path,
@@ -318,7 +317,7 @@ async def test_executor_fetch_failure_returns_fetch_failed(tmp_path: Path):
 def _mk_variant_result(*, tput: float | None, status: str = "succeeded") -> VariantResult:
     return VariantResult(
         name="framework-pr-x",
-        extra_sglang_args="",
+        extra_server_args="",
         extra_envs={},
         status=status,
         output_throughput=tput,

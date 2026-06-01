@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import gzip
 import json
 import os
@@ -729,67 +730,81 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS_STATIC = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/sgl-workspace/flydsl/",
-    # FlyDSL kernel checkout used as $DSL2_ROOT on this stack: the real
-    # rewritable source for PR #668 moe_flydsl pseudo-ops lives here
-    # (kernels/moe_gemm_2stage.py). Without this the candidate is rejected
-    # "source not under a reusable framework root" and never reaches GEAK.
-    # NOTE: matched against a lower-cased path (classify_patchability uses
-    # ``lower_file``), so this entry must be lower-case.
-    "/wekafs/yunkai/flydsl/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/flydsl/",
-    # Production vLLM wheel install layout (system dist-packages).
-    # Required since vLLM in the current image ships under
-    # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
-    # editable ``/sgl-workspace/vllm/`` checkout the legacy entries
-    # assumed. The python3.10 fallback covers older images where the
-    # interpreter has not yet been bumped.
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.12/dist-packages/flydsl/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/flydsl/",
-)
+@functools.lru_cache(maxsize=1)
+def _framework_patch_roots() -> tuple[str, ...]:
+    """Framework install roots (shared with PolicyGate / apply_kernel_patch).
 
-
-def _extra_reusable_roots_from_env() -> tuple[str, ...]:
-    """Extra reusable roots from ``HYPERLOOM_EXTRA_REUSABLE_ROOTS``.
-
-    ``:``-separated (PATH convention). Trailing slashes are appended
-    and case is lowered so callers can substring-match the same way
-    they do against :data:`_REUSABLE_SOURCE_ROOTS_STATIC`.
+    Sourced from ``framework_paths.resolve_patch_target_roots`` (importlib +
+    glob discovery + static fallbacks, incl. atom). Callers below lower-case
+    the source path before the substring check, so we also emit a lower-case
+    variant of every root (``/app/ATOM/atom/`` -> ``/app/atom/atom/``) to keep
+    the case-insensitive match working.
     """
-    raw = os.environ.get("HYPERLOOM_EXTRA_REUSABLE_ROOTS", "")
-    if not raw:
-        return ()
-    extra: list[str] = []
-    for entry in raw.split(":"):
-        entry = entry.strip()
-        if not entry:
-            continue
-        if not entry.endswith("/"):
-            entry = entry + "/"
-        extra.append(entry.lower())
-    return tuple(extra)
+    try:
+        from inference_optimizer.orchestrator.framework_paths import (
+            resolve_patch_target_roots,
+        )
+
+        roots = resolve_patch_target_roots()
+    except ImportError:
+        from apply_kernel_patch import known_target_roots
+
+        roots = known_target_roots()
+    out: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        for variant in (root, root.lower()):
+            if variant and variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    return tuple(out)
 
 
-def _reusable_source_roots() -> tuple[str, ...]:
-    """Static roots + env-extended roots. Recomputed per call."""
-    return _REUSABLE_SOURCE_ROOTS_STATIC + _extra_reusable_roots_from_env()
+@functools.lru_cache(maxsize=1)
+def _aiter_csrc_root() -> str:
+    """aiter's own device-source root (e.g. ``.../aiter_meta/csrc/``),
+    resolved from the installed package. Empty when aiter is not importable.
+    Cached once per process."""
+    try:
+        import aiter.jit.core as _jc  # type: ignore
+    except Exception:
+        return ""
+    raw = (getattr(_jc, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
+    return (raw.rstrip("/") + "/") if raw else ""
 
 
-# Back-compat alias for callers that read the constant directly.
-_REUSABLE_SOURCE_ROOTS = _REUSABLE_SOURCE_ROOTS_STATIC
+def _flydsl_reusable_roots() -> tuple[str, ...]:
+    """FlyDSL kernel checkout root(s) for PR #668 moe_flydsl pseudo-ops.
+
+    The real rewritable source for ``pseudo_op::moe_flydsl_*`` lives under
+    ``$DSL2_ROOT/kernels/`` (e.g. moe_gemm_2stage.py). The dynamic
+    framework-root discovery does not know about the FlyDSL checkout, so
+    without this the candidate is rejected "source not under a reusable
+    framework root" and never reaches GEAK. Lower-cased because
+    classify_patchability matches against ``lower_file``. ``$DSL2_ROOT`` /
+    ``$FLYDSL_ROOT`` take precedence; the WekaFS checkout is the default.
+    """
+    out: list[str] = []
+    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
+        val = (os.environ.get(env_key, "") or "").strip()
+        if val:
+            out.append((val.rstrip("/") + "/").lower())
+    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+        if default not in out:
+            out.append(default)
+    return tuple(out)
+
+
+def _reusable_roots() -> tuple[str, ...]:
+    """Discovered framework roots + aiter csrc + FlyDSL checkout (dynamic)."""
+    roots = _framework_patch_roots()
+    csrc = _aiter_csrc_root()
+    if csrc and csrc not in roots:
+        roots = roots + (csrc,)
+    for fly in _flydsl_reusable_roots():
+        if fly not in roots:
+            roots = roots + (fly,)
+    return roots
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
 # raw memcpy/copy ops, and PyTorch native copy. Folded from the feature
@@ -825,7 +840,7 @@ def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
         # A stable in-repo SGLang/vLLM Triton source can still be reusable.
-        return not any(root in lower_file for root in _reusable_source_roots())
+        return not any(root in lower_file for root in _reusable_roots())
     return False
 
 
@@ -874,7 +889,7 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"runtime-generated (torch.compile / Inductor cache): {source_file}"
         )
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _reusable_source_roots()):
+    if not any(root in lower_file for root in _reusable_roots()):
         return False, (
             f"source not under a reusable framework root: {source_file}"
         )
@@ -1801,9 +1816,120 @@ def merge_roofline_into_candidates(
         else:
             item.setdefault("bottleneck", "unknown")
             item.setdefault("arithmetic_intensity", None)
-            item.setdefault("compute_utilization_pct", 0.0)
-            item.setdefault("bandwidth_utilization_pct", 0.0)
+            item.setdefault("compute_utilization_pct", None)
+            item.setdefault("bandwidth_utilization_pct", None)
             item.setdefault("recommended_actions", [])
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Project one hot-kernel candidate into the kernel-roofline view."""
+    arithmetic_intensity = _first_non_empty(
+        candidate.get("arithmetic_intensity"),
+        candidate.get("flops_per_byte"),
+    )
+    return {
+        "kernel_id": candidate.get("kernel_id"),
+        "name": candidate.get("name"),
+        "gpu_pct": candidate.get("gpu_pct"),
+        "duration_us": candidate.get("duration_us"),
+        "call_count": candidate.get("call_count"),
+        "kernel_category": candidate.get("kernel_category"),
+        "source_file": candidate.get("source_file"),
+        "bottleneck": _first_non_empty(
+            candidate.get("bottleneck"),
+            candidate.get("bound_type"),
+        ),
+        "bound_type": candidate.get("bound_type"),
+        "arithmetic_intensity": arithmetic_intensity,
+        "flops_per_byte": candidate.get("flops_per_byte"),
+        "efficiency_percent": candidate.get("efficiency_percent"),
+        "compute_utilization_pct": candidate.get("compute_utilization_pct"),
+        "bandwidth_utilization_pct": candidate.get("bandwidth_utilization_pct"),
+        "suggestion": candidate.get("suggestion") or "",
+        "roofline_name": candidate.get("roofline_name"),
+        "recommended_actions": list(candidate.get("recommended_actions") or []),
+        "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
+    }
+
+
+def build_kernel_roofline_payload(
+    *,
+    trace_input: str,
+    trace_input_type: str,
+    analysis_md_path: str,
+    kernel_candidates_path: str,
+    roofline_json_path: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the structured per-kernel roofline sidecar.
+
+    This sidecar is a view over TraceLens candidates plus optional
+    ``--roofline-json`` enrichment. It does not invent missing
+    utilization counters: absent compute/bandwidth utilization stays
+    ``null`` in JSON.
+    """
+    rows = [
+        _kernel_roofline_row(candidate)
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    ]
+    return {
+        "schema_version": 1,
+        "source": "tracelens_analysis",
+        "trace_input": trace_input,
+        "trace_input_type": trace_input_type,
+        "analysis_md_path": analysis_md_path,
+        "kernel_candidates_path": kernel_candidates_path,
+        "roofline_json_path": roofline_json_path,
+        "kernels": rows,
+    }
+
+
+def kernel_roofline_path_for_run(run_dir: Path) -> Path:
+    """Return the session-level kernel roofline report path (latest pointer).
+
+    PR-C: ``run_dir`` is now ``.../runs/<session_id>/<ts>_<run_id>/`` so
+    we walk one extra level up to reach the kernel-agent root.
+    Pre-PR-C layout (``.../runs/<session_id>/``) is still supported via
+    the fallback branch in case a caller invokes this with an old-shape
+    path.
+
+    The session-level path remains the dashboard's stable entry point
+    (one path, always the latest). Per-snapshot analysis.md /
+    kernel_candidates.json etc. live under the per-invocation run_dir
+    and are stamped into ``roofline_snapshots[i].analysis_md_path``
+    so historical snapshots survive intact.
+    """
+    try:
+        # PR-C layout: .../runs/<session_id>/<ts>_<run_id>/
+        session_sub = run_dir.parent
+        runs_dir = session_sub.parent
+        kernel_agent_dir = runs_dir.parent
+    except (IndexError, AttributeError):
+        return run_dir / "reports" / "kernel_roofline.json"
+    if runs_dir.name == "runs" and kernel_agent_dir.name == "kernel-agent":
+        session_dir = kernel_agent_dir.parent
+        return session_dir / "reports" / "kernel_roofline.json"
+    # Backward-compat: pre-PR-C layout (.../runs/<session_id>/)
+    try:
+        runs_dir_legacy = run_dir.parent
+        kernel_agent_dir_legacy = runs_dir_legacy.parent
+    except (IndexError, AttributeError):
+        return run_dir / "reports" / "kernel_roofline.json"
+    if (
+        runs_dir_legacy.name == "runs"
+        and kernel_agent_dir_legacy.name == "kernel-agent"
+    ):
+        session_dir = kernel_agent_dir_legacy.parent
+        return session_dir / "reports" / "kernel_roofline.json"
+    return run_dir / "reports" / "kernel_roofline.json"
 
 
 def _candidate_model_config_paths(model_name: str) -> list[Path]:
@@ -2182,6 +2308,7 @@ def write_reports(
     }
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
+    kernel_candidates_path = run_dir / "kernel_candidates.json"
     # Per AMD-AGI/Hyperloom#314: ``kernel_candidates.json::hot_kernels``
     # is the dispatch payload consumed by the kernel-opt path
     # (``kernel_optimization.load_candidates``, ``parallel_e2e_runner``,
@@ -2207,8 +2334,13 @@ def write_reports(
         if isinstance(c, dict) and c.get("reusable_native_kernel") is not True
     ]
     atomic_write_json(
-        run_dir / "kernel_candidates.json",
-        {**report, "hot_kernels": routable_candidates, "skipped_kernels": skipped_kernels},
+        kernel_candidates_path,
+        {
+            **report,
+            "hot_kernels": routable_candidates,
+            "skipped_kernels": skipped_kernels,
+            "task_groups": task_groups,
+        },
     )
 
     # PR-A §3: per-run audit sidecar listing which TraceLens hot kernels
@@ -2264,9 +2396,26 @@ def write_reports(
             )
             existing_report_path = stub_md
 
-    return {
+    kernel_roofline_path = kernel_roofline_path_for_run(run_dir)
+    kernel_roofline_payload = build_kernel_roofline_payload(
+        trace_input=str(Path(args.trace_input).resolve()),
+        trace_input_type=trace_input_type,
+        analysis_md_path=(
+            str(existing_report_path) if existing_report_path else ""
+        ),
+        kernel_candidates_path=str(kernel_candidates_path),
+        roofline_json_path=(
+            str(Path(args.roofline_json).expanduser())
+            if getattr(args, "roofline_json", "") else ""
+        ),
+        candidates=candidates,
+    )
+    atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
+
+    artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
-        "kernel_candidates": str(run_dir / "kernel_candidates.json"),
+        "kernel_candidates": str(kernel_candidates_path),
+        "kernel_roofline": str(kernel_roofline_path),
         "tracelens_report_json": str(tracelens_dir / "tracelens_report.json"),
         # Post-#203 (PR #217): the canonical Markdown exit IS the
         # upstream SDK orchestrator's analysis.md surfaced via
@@ -2276,6 +2425,7 @@ def write_reports(
         "trace_report_path": str(existing_report_path) if existing_report_path else "",
         "tracelens_summary": str(summary_path),
     }
+    return artifact_paths
 
 
 def _default_workspace_path() -> str:
@@ -2471,8 +2621,20 @@ def main() -> int:
     session_id = args.session_id or uuid.uuid4().hex[:12]
     run_id = f"tl-{uuid.uuid4().hex[:8]}"
     started_at = utc_now()
+    # PR-C: per-tracelens-invocation sub-directory so PRELUDE + every
+    # watermark refresh keeps its own analysis.md / kernel_candidates /
+    # trace_split / etc. instead of overwriting the previous run's
+    # files. Format ``<compact_timestamp>_<run_id>`` — sorts
+    # chronologically, run_id keeps uniqueness across same-second
+    # invocations. Pre-PR-C readers walking ``.../runs/<session_id>/``
+    # directly will need to descend one more level; ``kernel_roofline_
+    # path_for_run`` has been updated to handle both layouts.
+    ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0]
+    if not ts_compact.endswith("Z"):
+        ts_compact = ts_compact + "Z"
+    sub_dir = f"{ts_compact}_{run_id}"
     root = Path(args.workspace_path) / "kernel-agent"
-    run_dir = root / "runs" / session_id
+    run_dir = root / "runs" / session_id / sub_dir
     log_path = run_dir / "logs" / "tracelens_analysis" / f"{run_id}.log"
     status_path = run_dir / "status" / "tracelens_analysis" / f"{run_id}.json"
     artifacts: dict[str, str] = {}

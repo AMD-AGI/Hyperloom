@@ -53,11 +53,67 @@ log = logging.getLogger(__name__)
 # sentinel in a properly-patched run).
 _TRACE_INSPECT_BYTES = 2_000_000
 
+# Upper bound (decompressed bytes) for the confirmation streaming scan
+# used only when the cheap leading-window sample finds zero of a
+# sentinel. A full main trace can be 600 MB+ decompressed; the
+# ``execute_*`` per-step annotations are interleaved with the kernel
+# event stream and routinely land well past the leading 2 MB window,
+# so a window-only check false-positives on large traces. Streaming up
+# to this cap (well under a full decompress) confirms genuine absence
+# before we emit a warning. Override via
+# ``INFERENCE_OPTIMIZER_TRACE_CONFIRM_BYTES``.
+_TRACE_CONFIRM_BYTES = 64_000_000
+
 # Minimum fraction of ``cpu_op`` events that should carry an
 # ``Input Dims`` field for a ``capture_traces/`` file to be considered
 # healthy (Deval's reference run reports 99.97%; we set the gate
 # generously low so trivial misses don't false-positive).
 _INPUT_DIMS_FRACTION_FLOOR = 0.90
+
+
+def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) -> bool:
+    """Stream-decompress ``path`` looking for ``substring``, reading at
+    most ``max_bytes`` decompressed bytes (default
+    :data:`_TRACE_CONFIRM_BYTES`, overridable via
+    ``INFERENCE_OPTIMIZER_TRACE_CONFIRM_BYTES``).
+
+    Used as a confirmation pass when the cheap leading-window sample
+    (:func:`_sample_trace_text`) finds zero occurrences — large traces
+    interleave the per-step annotations far past the 2 MB window, so a
+    window-only "absent" verdict must be confirmed before warning.
+    Returns ``False`` on any IO/decode error (best-effort, never raises).
+    """
+    if not substring:
+        return False
+    if max_bytes is None:
+        try:
+            max_bytes = int(
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_TRACE_CONFIRM_BYTES",
+                    _TRACE_CONFIRM_BYTES,
+                )
+            )
+        except (TypeError, ValueError):
+            max_bytes = _TRACE_CONFIRM_BYTES
+    read = 0
+    carry = ""
+    chunk_size = 4_000_000
+    try:
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+            while read < max_bytes:
+                chunk = fh.read(chunk_size)
+                if not chunk:
+                    break
+                read += len(chunk)
+                if substring in (carry + chunk):
+                    return True
+                # Keep a tail long enough to catch a sentinel split
+                # across the chunk boundary.
+                carry = chunk[-(len(substring)):]
+    except (OSError, EOFError, UnicodeDecodeError) as e:
+        log.debug("_trace_contains: cannot stream %s: %s", path, e)
+        return False
+    return False
 
 
 def _sample_trace_text(path: Path) -> str | None:
@@ -151,12 +207,22 @@ def _validate_trace_structure(
             cpu_op_count = _count_substring_occurrences(text, '"name": "cpu_op"')
             input_dims_count = _count_substring_occurrences(text, '"Input Dims"')
             if cpu_op_count == 0:
+                # ROCm / SGLang builds frequently record graph-capture
+                # kernel events under names other than the literal
+                # ``"name": "cpu_op"`` (e.g. ``sglang_profiler::*``
+                # entries), so a zero count here does NOT by itself mean
+                # capture failed — shape discovery can still have fired
+                # (see the server-side ``kernel_shape_profiler enabled``
+                # log line and Check [5]). Keep this as an informational
+                # signal, not a regression verdict.
                 issues.append(
-                    f"[2] capture file {target.name} has no cpu_op events "
-                    f"in the first {_TRACE_INSPECT_BYTES//1_000_000} MB — "
-                    "graph capture wrote files but they don't contain "
-                    "kernel-level events. Possible upstream profiler "
-                    "regression."
+                    f"[2] capture file {target.name} has no literal "
+                    f"'cpu_op' events in the first "
+                    f"{_TRACE_INSPECT_BYTES//1_000_000} MB — on ROCm/SGLang "
+                    "this is often just an event-naming difference (kernels "
+                    "logged under 'sglang_profiler::*'); cross-check Check "
+                    "[5] (kernel_shape_profiler) and the server log before "
+                    "treating it as a capture regression."
                 )
             elif input_dims_count / max(cpu_op_count, 1) < _INPUT_DIMS_FRACTION_FLOOR:
                 pct = 100.0 * input_dims_count / cpu_op_count
@@ -187,22 +253,36 @@ def _validate_trace_structure(
                 main_text, '"name": "user_annotation"',
             )
             execute_count = _count_substring_occurrences(main_text, '"execute_')
-            if user_ann_count == 0:
-                issues.append(
-                    f"[3] main trace {main_traces[0].name} has no "
-                    "user_annotation events — InferenceX per-step "
-                    "annotations didn't fire. Verify roofline_annotations "
-                    "reached the framework (PROFILE_EXTRA_BODY consumed; "
-                    "see #210)."
+            # The real health signal for "per-step instrumentation fired"
+            # is the presence of ``execute_*`` annotation labels — those
+            # are what the trace splitter keys on and what roofline
+            # analysis consumes. The ``"name": "user_annotation"`` wrapper
+            # is profiler-version-dependent: some torch / SGLang builds
+            # (e.g. sglang 0.5.11 on ROCm) emit the ``execute_*`` markers
+            # under a different event ``name`` / ``cat`` and never produce
+            # the literal ``user_annotation`` string, so gating the warning
+            # on ``user_ann_count == 0`` false-positives on a perfectly
+            # healthy trace. Only warn when the ``execute_*`` labels are
+            # genuinely absent (both signals missing). The leading 2 MB
+            # window routinely misses ``execute_*`` markers on a 600 MB+
+            # trace, so confirm genuine absence with a bounded streaming
+            # scan before warning — otherwise a healthy run emits a
+            # misleading "annotations didn't fire" warning every profile.
+            if execute_count == 0 and user_ann_count == 0:
+                confirmed_absent = not (
+                    _trace_contains(main_traces[0], '"execute_')
+                    or _trace_contains(
+                        main_traces[0], '"name": "user_annotation"'
+                    )
                 )
-            elif execute_count == 0:
-                issues.append(
-                    f"[3] main trace {main_traces[0].name} has "
-                    f"user_annotation events but no execute_* annotations "
-                    "— InferenceX is annotating but the per-step "
-                    "execute_* labels are missing. Check the InferenceX "
-                    "version actually loaded by Magpie."
-                )
+                if confirmed_absent:
+                    issues.append(
+                        f"[3] main trace {main_traces[0].name} has no "
+                        "execute_* / user_annotation events — InferenceX "
+                        "per-step annotations didn't fire. Verify "
+                        "roofline_annotations reached the framework "
+                        "(PROFILE_EXTRA_BODY consumed; see #210)."
+                    )
 
     # --- Check 4 (Deval): per-file execute_* in trace_split/ ---
     # Each splitter output should contain its own slice of execute_*
@@ -280,7 +360,7 @@ def _validate_trace_structure(
 PROFILE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
 )
-PROFILE_DEFAULT_TIMEOUT_SEC = 2400     # Magpie + sglang profile is heavier, 40 min wall cap
+PROFILE_DEFAULT_TIMEOUT_SEC = 14400    # 4 h wall cap; Qwen3-32B TP=1 profile needs ~3 h with steady-state window
 
 
 def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
@@ -327,9 +407,27 @@ def _safe_mtime(p: Path) -> float:
 
 
 def _default_profile_config() -> Path:
-    """Resolve default profile YAML based on $FRAMEWORK env (sglang/vllm)."""
+    """Resolve default profile YAML based on $FRAMEWORK env.
+
+    Recognised values: ``atom``, ``vllm``, ``sglang``. Unknown / unset
+    values fall back to ``profile_sglang.yaml`` so existing sglang-default
+    tests keep passing.
+
+    The atom branch ships separately because the materializer reads the
+    top-level ``benchmark.framework`` field from the YAML (NOT
+    ``$FRAMEWORK``) to resolve Magpie's wrapper script — silently
+    falling through to ``profile_sglang.yaml`` on ``FRAMEWORK=atom``
+    would launch ``sglang_mi*x.sh`` under an atom-named session, which
+    crashes on atom-only boxes and would run sglang under an atom
+    session on multi-framework boxes.
+    """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    name = "profile_vllm.yaml" if fw == "vllm" else "profile_sglang.yaml"
+    if fw == "atom":
+        name = "profile_atom.yaml"
+    elif fw == "vllm":
+        name = "profile_vllm.yaml"
+    else:
+        name = "profile_sglang.yaml"
     return asset_root() / "scripts" / "configs" / name
 
 
@@ -493,27 +591,41 @@ class ProfileExecutor(BaselineExecutor):
         return None
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        # B2: atom (Magpie v1) has no torch_profiler wiring. atom_mi*x.sh
-        # accepts PROFILE=1 but silently no-ops; injecting sglang/vllm
-        # TraceLens flags into EXTRA_ATOM_ARGS would crash atom's argparse.
-        # Short-circuit here so the EXPLORE specialist's occasional profile
-        # proposal degrades to a skipped delegated_result instead of a
-        # spurious failed run. Coordinator already treats skipped as
-        # non-fatal (no RCA escalation, no current_best mutation).
-        if os.environ.get("FRAMEWORK", "").strip().lower() == "atom":
-            return {
-                "status": "skipped",
-                "framework": "atom",
-                "error_class": "atom_no_profiler",
-                "error": (
-                    "atom framework has no torch_profiler integration in "
-                    "Magpie v1; profile/roofline are no-ops for this run. "
-                    "See atom_boost_tutorials.md §6."
-                ),
-            }
+        # IR-8 (atom): the historical short-circuit returned status="skipped"
+        # here because atom_mi*x.sh accepted PROFILE=1 but silently no-op'd.
+        # The Magpie atom wrapper now bridges PROFILE=1 to atom's
+        # --torch-profiler-dir CLI flag (see atom_mi*x.sh PROFILER_ARGS),
+        # the atom OpenAI server exposes /start_profile and /stop_profile,
+        # and the InferenceX benchmark client auto-POSTs both around the
+        # bench window. Atom writes standard *.pt.trace.json.gz chrome
+        # traces under <workspace>/torch_trace/rank_<N>/ which our
+        # _candidate_trace_dirs probe + rglob("*.trace.json.gz") matches
+        # unchanged, and TraceLens consumes those traces unchanged
+        # (framework-agnostic). So the executor falls through to the same
+        # path as sglang/vllm. The TraceLens-flag injection guard for
+        # atom still lives in _workload_envs.py (atom's argparse rejects
+        # vLLM-style --profiler-config.* flags).
         # Override action label so per-task output lands under runs/profile/
         # rather than runs/baseline/ when the runner derives the path.
         params = ctx.task.params or {}
+        # PR-B: Watermark refresh inheritance of current_best.extra_sglang_args.
+        # Coordinator._enqueue_internal_analysis_task stamps
+        # ``current_best.extra_sglang_args`` into params["base_extra_args"]
+        # so the profile run captures a trace that reflects the optimized
+        # workload rather than the bare baseline. We merge it into
+        # ``params["extra_sglang_args"]`` here so the downstream
+        # ``materialize_config_with_envs`` call (in BaselineExecutor)
+        # picks it up via the standard ``extra_sglang_args`` channel.
+        # Without this merge, the watermark snapshot's trace_analyze
+        # KPI is byte-identical to the PRELUDE snapshot's, hiding the
+        # actual optimization gain on the dashboard.
+        base_args = str(params.get("base_extra_args") or "").strip()
+        if base_args:
+            from ._grid_runner import merge_server_args
+            params["extra_sglang_args"] = merge_server_args(
+                base_args,
+                str(params.get("extra_sglang_args") or "").strip(),
+            )
         extra = getattr(ctx, "extra", None) or {}
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
@@ -558,7 +670,7 @@ class ProfileExecutor(BaselineExecutor):
                 # PD knobs auto-resolved by the helper from $PD_* env
                 # (cli.py exported them). See baseline.py for rationale.
                 await restart_server_for_round(
-                    extra_sglang_args=str(params.get("extra_sglang_args") or ""),
+                    extra_server_args=str(params.get("extra_server_args") or ""),
                     torch_profiler_dir=round_trace_root,
                     framework=os.environ.get("FRAMEWORK") or None,
                     model_path=(

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 
 from inference_optimizer.orchestrator import phase_state
 
@@ -330,3 +329,69 @@ def test_compute_next_phase_framework_pr_stays_when_no_signal():
         state, framework_phase_enabled=True, max_hours=10.0,
     )
     assert out is None
+
+
+# ---------------------------------------------------------------------------
+# compute_next_phase routing with explore_enabled=False (--no-explore)
+# ---------------------------------------------------------------------------
+def test_compute_next_phase_prelude_skips_explore_to_kernel():
+    state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
+    out = phase_state.compute_next_phase(
+        state,
+        framework_phase_enabled=False,
+        explore_enabled=False,
+        kernel_enabled=True,
+    )
+    assert out is not None
+    next_phase, reason, ev = out
+    assert next_phase == phase_state.PHASE_KERNEL
+    assert reason == "prelude_done"
+    assert ev.get("explore_skipped") is True
+
+
+def test_compute_next_phase_prelude_skips_to_sweep_when_no_explore_no_kernel():
+    state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
+    out = phase_state.compute_next_phase(
+        state,
+        framework_phase_enabled=False,
+        explore_enabled=False,
+        kernel_enabled=False,
+    )
+    assert out is not None
+    next_phase, reason, ev = out
+    assert next_phase == phase_state.PHASE_SWEEP
+    assert reason == "prelude_done"
+    assert ev.get("explore_skipped") is True
+
+
+def test_compute_next_phase_framework_pr_skips_explore_to_kernel():
+    state = _State(
+        phase=phase_state.PHASE_FRAMEWORK_PR,
+        framework_pr_batches=[
+            {"max_gain_pct_observed_in_batch": 0.1},
+            {"max_gain_pct_observed_in_batch": 0.0},
+            {"max_gain_pct_observed_in_batch": 0.2},
+        ],
+    )
+    out = phase_state.compute_next_phase(
+        state,
+        framework_phase_enabled=True,
+        explore_enabled=False,
+        kernel_enabled=True,
+    )
+    assert out is not None
+    next_phase, reason, ev = out
+    assert next_phase == phase_state.PHASE_KERNEL
+    assert reason == "framework_pr_plateau"
+    assert ev.get("explore_skipped") is True
+
+
+def test_compute_next_phase_explore_enabled_default_routes_to_explore():
+    # Regression: the default explore_enabled=True keeps PRELUDE -> EXPLORE
+    # with no explore_skipped marker.
+    state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
+    out = phase_state.compute_next_phase(state, framework_phase_enabled=False)
+    assert out is not None
+    next_phase, _reason, ev = out
+    assert next_phase == phase_state.PHASE_EXPLORE
+    assert "explore_skipped" not in ev

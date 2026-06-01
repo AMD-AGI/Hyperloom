@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from pathlib import Path
 
@@ -367,6 +366,15 @@ async def test_local_probe_runs_health_probes(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
 
+    # Isolate from host shell pollution: a configured ``$OPENAI_BASE_URL``
+    # would otherwise make the external-deps sub-probe fire an extra
+    # ``/models`` gateway request through the same mock transport, inflating
+    # ``seen`` and breaking the exact-count assertion below. This test only
+    # exercises ``_probe_local_servers``, so unset the gateway env vars and
+    # disable the orthogonal external-deps probe.
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+
     cfg = lp.LocalProbeConfig(
         session_dir=None,
         disk_mountpoints=(str(tmp_path),),
@@ -377,6 +385,7 @@ async def test_local_probe_runs_health_probes(monkeypatch, tmp_path: Path):
             "http://localhost:30002/dead",
         ),
         health_probe_timeout_s=1.0,
+        external_deps_enabled=False,
     )
     data = await lp.LocalProbeSource(cfg).fetch(ctx=None)
     by_url = {entry["url"]: entry for entry in data.local_server_health}

@@ -55,13 +55,10 @@ Outputs (dict, returned to the bus as ``delegated_result.result``):
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
-import shutil
 import subprocess
-import time
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +80,7 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_KEEP_THRESHOLD_PCT = 0.2
-DEFAULT_VARIANT_TIMEOUT_SEC = 2400
+DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 long workload
 
 
 def _now_iso() -> str:
@@ -718,7 +715,7 @@ class IntegratePatchExecutor:
         # as the variant's extra_envs.
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}",
-            extra_sglang_args=str(params.get("base_extra_args") or "").strip(),
+            extra_server_args=str(params.get("base_extra_args") or "").strip(),
             extra_envs=dict(config_changes_applied),
             note=f"integrate_patch:{specialist_task_id}",
         )

@@ -25,9 +25,14 @@ from inference_optimizer.orchestrator.policy import KERNEL_OWNED_ACTIONS
 # ``integrate_patch`` is the new orchestrator-side apply+restart+gate
 # step that consumes specialist worktree patches.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
-    # prep (2)
+    # prep (3)
     "target_analysis":      "prep",
     "baseline":             "prep",
+    # GAP 1 — Coordinator-internal one-shot warm-recipe replay.
+    # Same prep family as ``baseline`` (it is essentially a re-baseline
+    # with the KB best_config applied). PolicyGate denies LLM
+    # propose_action / delegate via ``analysis_action_not_llm_proposable``.
+    "replay_warm_recipe":   "prep",
     # analysis (2) — Coordinator-internal analysis actions, selected
     # at runtime by ``shared_state.enable_roofline`` (``--enable-roofline``
     # / ``--no-enable-roofline``, default on):
@@ -54,17 +59,21 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "sweep":                "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
-    # creative (2) — PR-A1: specialist LLM sub-agent dispatch;
+    # creative (3) — PR-A1: specialist LLM sub-agent dispatch;
     # IR-7 (Saturday May 2026): assess_remaining_gaps is a thin
-    # wrapper that dispatches the session_steward_specialist domain.
+    # wrapper that dispatches the session_steward_specialist domain;
+    # dynamic_action.MD P1: cross-domain multi-turn ReAct sub-agent
+    # dispatch (supplementary EXPLORE channel).
     "specialist":           "creative",
     "assess_remaining_gaps": "creative",
-    # deep_kernel (5)
+    "dynamic_action":        "creative",
+    # deep_kernel (6)
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",
     "deep_kernel_analysis": "deep_kernel",
     "operator_tuning":      "deep_kernel",
     "vendor_kernel_config": "deep_kernel",
+    "gemm_tuning":          "deep_kernel",
     # resilience (1)
     "recover":              "resilience",
 }
@@ -124,6 +133,15 @@ def test_kernel_opt_has_three_lanes_and_high_cost(registry):
     assert m is not None
     assert set(m.requires_lanes) == {"server_lifecycle", "workspace_mutation", "benchmark_lane"}
     assert m.cost_minutes_p75 >= 60
+
+
+def test_gemm_tuning_action_metadata(registry):
+    m = registry.get("gemm_tuning")
+    assert m is not None
+    assert m.family == "deep_kernel"
+    assert m.pipeline_phase == "deep"
+    assert set(m.requires_lanes) == {"server_lifecycle", "workspace_mutation", "benchmark_lane"}
+    assert "precision == 'fp8'" in m.applicable_when
 
 
 def test_recover_owned_by_robustness_handle(registry):
