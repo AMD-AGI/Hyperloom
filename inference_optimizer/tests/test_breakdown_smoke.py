@@ -743,6 +743,185 @@ def test_attribution_framework_pr_phase_fallback_when_no_phase_history(
 
 
 # ---------------------------------------------------------------------------
+# A1.0d: gemm_tuning surfaces in source_breakdown + phase_breakdown
+# ---------------------------------------------------------------------------
+# FP8 GEMM tuning runs at KERNEL entry; ``coordinator`` promotes a
+# successful tune (best_speedup > 1.0) into ``optimization_stack`` with
+# ``action="gemm_tuning"``. Before this fix landed it fell into
+# ``"other"`` and silently disappeared from the dashboard's per-source
+# totals — same shape of bug as framework_pr.
+def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
+    tmp_path: Path,
+) -> None:
+    """A KEEP with ``action == "gemm_tuning"`` contributes to the new
+    ``gemm_tuning_pct_of_total`` field instead of being lost to ``other``."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 12.0,
+        "optimization_stack": [
+            {"action": "gemm_tuning",
+             "variant_name": "a8w8_blockscale_tuned_gemm",
+             "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
+             "gain_pct": 12.0},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "gemm_tuning",
+             "variant_name": "a8w8_blockscale_tuned_gemm",
+             "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 12.0,
+             "delta_pct": 12.0,
+             "ts": "2026-06-01T11:00:00+00:00"},
+        ],
+    })
+    sb = build(sd)["attribution"]["source_breakdown"]
+    assert sb["gemm_tuning_pct_of_total"] == pytest.approx(12.0)
+    # Reconciliation: per-source rows sum to ``validated_total_pct``
+    # within rounding (no more black-hole ``other`` for gemm_tuning).
+    summed = (
+        sb["geak_pct_of_total"] + sb["oob_pct_of_total"]
+        + sb["backends_pct_of_total"] + sb["params_pct_of_total"]
+        + sb["sweep_pct_of_total"]
+        + sb["framework_pr_pct_of_total"]
+        + sb["gemm_tuning_pct_of_total"]
+    )
+    assert summed == pytest.approx(sb["validated_total_pct"], abs=0.05)
+
+
+def test_attribution_gemm_tuning_pct_emitted_even_when_zero(
+    tmp_path: Path,
+) -> None:
+    """Always emit ``gemm_tuning_pct_of_total`` (default 0.0). The
+    dashboard iterates the catalogue without presence checks."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 5.0,
+        "optimization_stack": [
+            {"action": "params", "variant_name": "p1", "gain_pct": 5.0},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "params", "variant_name": "p1",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 5.0,
+             "delta_pct": 5.0,
+             "ts": "2026-06-01T11:00:00+00:00"},
+        ],
+    })
+    sb = build(sd)["attribution"]["source_breakdown"]
+    assert "gemm_tuning_pct_of_total" in sb
+    assert sb["gemm_tuning_pct_of_total"] == 0.0
+
+
+def test_attribution_phase_breakdown_gemm_tuning_by_tuned_file(
+    tmp_path: Path,
+) -> None:
+    """``phase_breakdown.gemm_tuning.by_tuned_file`` aggregates per
+    adopted CSV. Two distinct tuned files surface as two keys, each
+    with their own delta (covers the unlikely but supported case of
+    multiple GEMM tunes per session)."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 18.0,
+        "phase_history": [
+            {"to_phase": "PRELUDE", "ts_unix": 1000.0},
+            {"to_phase": "KERNEL",  "ts_unix": 1500.0},
+        ],
+        "optimization_stack": [
+            {"action": "gemm_tuning",
+             "variant_name": "a8w8_blockscale_tuned_gemm",
+             "tuned_file": "/tmp/csv_a.csv"},
+            {"action": "gemm_tuning",
+             "variant_name": "a8w8_blockscale_tuned_gemm",
+             "tuned_file": "/tmp/csv_b.csv"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "gemm_tuning",
+             "variant_name": "a8w8_blockscale_tuned_gemm",
+             "tuned_file": "/tmp/csv_a.csv",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 11.0,
+             "delta_pct": 11.0, "ts_unix": 1600.0},
+            {"action": "gemm_tuning",
+             "variant_name": "a8w8_blockscale_tuned_gemm",
+             "tuned_file": "/tmp/csv_b.csv",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 11.0, "cum_gain_after": 18.0,
+             "delta_pct": 7.0, "ts_unix": 1700.0},
+        ],
+    })
+    pb = build(sd)["attribution"]["phase_breakdown"]
+    gt = pb["gemm_tuning"]
+    assert gt["total_gain_pct"] == pytest.approx(18.0)
+    assert gt["by_tuned_file"]["/tmp/csv_a.csv"] == pytest.approx(11.0)
+    assert gt["by_tuned_file"]["/tmp/csv_b.csv"] == pytest.approx(7.0)
+
+
+def test_attribution_gemm_tuning_phase_fallback_when_no_phase_history(
+    tmp_path: Path,
+) -> None:
+    """Without ``phase_history`` the collector falls back to action
+    family. ``gemm_tuning`` lands in its own bucket — not
+    ``unattributed`` and not ``kernel`` — so the gain is attributed
+    to the deterministic tuner specifically."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 8.0,
+        "optimization_stack": [
+            {"action": "gemm_tuning",
+             "variant_name": "a8w8_blockscale_tuned_gemm",
+             "tuned_file": "/tmp/csv.csv",
+             "ts": "2026-06-01T11:00:00+00:00"},
+        ],
+        "gain_per_stack_entry": [
+            {"action": "gemm_tuning",
+             "variant_name": "a8w8_blockscale_tuned_gemm",
+             "tuned_file": "/tmp/csv.csv",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 8.0,
+             "delta_pct": 8.0,
+             "ts": "2026-06-01T11:00:00+00:00"},
+        ],
+    })
+    pb = build(sd)["attribution"]["phase_breakdown"]
+    assert pb["gemm_tuning"]["total_gain_pct"] == pytest.approx(8.0)
+    assert pb["gemm_tuning"]["by_tuned_file"]["/tmp/csv.csv"] == pytest.approx(8.0)
+    # No bleed into kernel / unattributed.
+    assert pb.get("kernel", {}).get("total_gain_pct", 0.0) == 0.0
+    assert (
+        "unattributed" not in pb
+        or pb["unattributed"]["total_gain_pct"] == 0.0
+    )
+
+
+def test_attribution_gemm_tuning_falls_back_to_variant_name_then_question_mark(
+    tmp_path: Path,
+) -> None:
+    """When ``tuned_file`` is missing the bucket key falls back to
+    ``variant_name``; if that is also empty, ``"?"``. The bucket key
+    is always a string (no None / empty key)."""
+    sd = _attribution_fixture(tmp_path, {
+        "cumulative_gain_validated": 4.0,
+        "optimization_stack": [
+            {"action": "gemm_tuning",
+             "variant_name": "a8w8_blockscale_tuned_gemm"},
+            {"action": "gemm_tuning"},  # both missing
+        ],
+        "gain_per_stack_entry": [
+            {"action": "gemm_tuning",
+             "variant_name": "a8w8_blockscale_tuned_gemm",
+             "stack_len_before": 0, "stack_len_after": 1,
+             "cum_gain_before": 0.0, "cum_gain_after": 3.0,
+             "delta_pct": 3.0,
+             "ts": "2026-06-01T11:00:00+00:00"},
+            {"action": "gemm_tuning",
+             "stack_len_before": 1, "stack_len_after": 2,
+             "cum_gain_before": 3.0, "cum_gain_after": 4.0,
+             "delta_pct": 1.0,
+             "ts": "2026-06-01T11:01:00+00:00"},
+        ],
+    })
+    by_tuned = build(sd)["attribution"]["phase_breakdown"]["gemm_tuning"]["by_tuned_file"]
+    assert by_tuned["a8w8_blockscale_tuned_gemm"] == pytest.approx(3.0)
+    assert by_tuned["?"] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
 # A1.0b: phase_breakdown.explore.by_domain key normalization
 # ---------------------------------------------------------------------------
 # Pre-PR-B the orchestrator's raw ``provenance`` strings landed in
