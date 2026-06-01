@@ -1,276 +1,129 @@
 name: SaFE Optimize Tiny
 
-# optimize-tiny — drives the FULL 3B-12B HuggingFace base-model pool (5341
-# small models) through SaFE inference optimization in one long-running
-# controller job.
-#
-# Unlike `SaFE Optimize Submit` (one matrix job per model, capped by GitHub's
-# ~256-job matrix limit), Tiny runs a SINGLE job that manages its own
-# 300-wide thread pool: 150 concurrent SaFE tasks on core42-sandbox + 150 on
-# core42-hyperloom. The instant one model finishes, the next is pulled from the
-# queue, so all 5341 models drain through ~300 always-busy slots. Each model
-# gets a 4-hour optimizer budget.
-#
-# Progressive reporting: the controller rebuilds ci_summary.{md,json} and posts
-# the Teams Adaptive-Card table every 10 completed models (reusing the same
-# build_summary.py + send_webhook.py the Submit workflow uses), so the live
-# ranking shows up long before the multi-day batch finishes.
-#
-# Manual dispatch only — there is intentionally no cron. While Tiny owns the
-# pool, the Submit workflow's cron is disabled (see optimize-submit.yml).
-#
-# Resuming a multi-day run: re-dispatch with `resume=true`; models already
-# terminal in tiny-output/progress.ndjson are skipped. (Requires the run to
-# reuse the same runner workspace, or restore tiny-output/ first.)
+# Thin scheduled/manual entrypoint for the 3B-12B Tiny pool.
+# It intentionally delegates to `SaFE Optimize Submit` so submission, waiting,
+# artifact collection, summary rendering, webhook, and perf publishing stay
+# byte-for-byte on the same path as the regular SaFE submit workflow.
 
 on:
+  schedule:
+    - cron: '0 */4 * * *'
   workflow_dispatch:
     inputs:
-      candidates_file:
-        description: 'Candidates JSON (pool order). Default = the 3B-12B base pool (5341 models).'
-        required: false
-        default: 'candidates/hf_3b_12b_base_inference_2026-06-01.json'
-      start_index:
-        description: 'Skip the first N candidates (pool order). For splitting runs.'
-        required: false
-        default: '0'
-      limit:
-        description: 'Process at most N candidates after start_index. 0 = all.'
-        required: false
-        default: '0'
-      sandbox_cap:
-        description: 'Concurrent in-flight tasks on core42-sandbox.'
-        required: false
-        default: '150'
-      hyperloom_cap:
-        description: 'Concurrent in-flight tasks on core42-hyperloom.'
-        required: false
-        default: '150'
-      register_concurrency:
-        description: 'Max concurrent register+download+submit ops (bounds the storage fan-out).'
-        required: false
-        default: '32'
-      report_every:
-        description: 'Rebuild summary + post webhook every K completed models. 0 = final only.'
-        required: false
-        default: '10'
-      max_hours:
-        description: 'Per-model optimizer budget in hours (Tiny default 4).'
-        required: false
-        default: '4'
-      task_timeout_min:
-        description: 'Per-task wait timeout in minutes (default 240 = 4h).'
-        required: false
-        default: '240'
-      sandbox_workspace:
-        description: 'Submit workspace for pool A.'
-        required: false
-        default: 'core42-sandbox'
-      hyperloom_workspace:
-        description: 'Submit workspace for pool B.'
-        required: false
-        default: 'core42-hyperloom'
-      isl:
-        description: 'Input sequence length'
-        required: false
-        default: '1024'
-      osl:
-        description: 'Output sequence length'
-        required: false
-        default: '1024'
-      mode:
-        description: 'Execution mode forwarded to SaFE'
-        required: false
-        default: 'local'
-        type: choice
-        options: [local, claw]
-      target_gpu:
-        description: 'Reference GPU for the InferenceX comparison column.'
-        required: false
-        default: 'mi300x'
-        type: choice
-        options: [mi300x, b200, h100, mi355x, mi325x]
-      kernel_opt_backends:
-        description: 'Kernel optimization backends forwarded to SaFE.'
-        required: false
-        default: 'geak,claude,codex'
-      prompt_prefix:
-        description: 'Override prompt prefix. Leave empty to use ci/prompt_prefix.txt (recommended).'
+      batch_index:
+        description: 'Optional 0-based batch override. Empty = derive from the current 4-hour UTC slot.'
         required: false
         default: ''
-      prewarm:
-        description: 'Pre-pull each repo into /wekafs/models before SaFE register.'
-        type: boolean
-        required: false
-        default: true
-      all_artifacts:
-        description: 'Download the full session per task (recommended — no re-fetch later).'
-        type: boolean
-        required: false
-        default: true
-      upload_task_artifacts:
-        description: 'Also upload the full per-task artifacts tree to GHA (LARGE for 5341 models).'
-        type: boolean
-        required: false
-        default: false
-      resume:
-        description: 'Skip models already terminal in tiny-output/progress.ndjson.'
-        type: boolean
-        required: false
-        default: false
       dry_run:
-        description: 'Print the plan only; do not register or submit.'
+        description: 'Forward dry_run=true to SaFE Optimize Submit.'
         type: boolean
         required: false
         default: false
 
 permissions:
   contents: read
-  actions: read
+  actions: write
 
-# Only one Tiny run at a time — it owns the whole pool. Queue follow-ups
-# instead of cancelling an in-flight multi-day batch.
 concurrency:
-  group: optimize-tiny
+  group: optimize-tiny-dispatch
   cancel-in-progress: false
 
 jobs:
-  tiny:
-    name: Tiny controller (300-wide)
-    # Self-hosted hyperloom-4hhzn mounts /wekafs RW (prewarm needs it) and can
-    # reach both the SaFE API and the hyperloom-results-service ingress.
-    runs-on: hyperloom-4hhzn
-    # GitHub self-hosted job ceiling is 5 days (7200 min). A 5341-model pool at
-    # 300-wide / 4h each drains in ~3 days; the headroom absorbs queue stalls.
-    timeout-minutes: 7200
+  dispatch-submit:
+    name: Dispatch 60-model Tiny submit
+    runs-on: hyperloom-mh826
+    timeout-minutes: 10
     env:
-      CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
-      SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
-      HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
-      HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
-      SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
-      SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
-      SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
-      WEBHOOK_URL:                      ${{ secrets.WEBHOOK_URL }}
-      DASHBOARD_URL:                    ${{ secrets.HYPERLOOM_DASHBOARD_URL }}
+      CANDIDATES_FILE: candidates/hf_3b_12b_base_inference_2026-06-01.json
+      CANDIDATES_PATH: ci/candidates/hf_3b_12b_base_inference_2026-06-01.json
+      BATCH_SIZE: '60'
+      SUBMIT_WORKSPACES: core42-sandbox,core42-hyperloom
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install dependencies
-        working-directory: ci
-        run: pip install --quiet requests PyYAML 'huggingface_hub>=0.24'
-
-      - name: Run Tiny controller
-        working-directory: ci
+      - name: Resolve Tiny batch
+        id: batch
         env:
-          INPUT_CANDIDATES_FILE:     ${{ github.event.inputs.candidates_file }}
-          INPUT_START_INDEX:         ${{ github.event.inputs.start_index }}
-          INPUT_LIMIT:               ${{ github.event.inputs.limit }}
-          INPUT_SANDBOX_CAP:         ${{ github.event.inputs.sandbox_cap }}
-          INPUT_HYPERLOOM_CAP:       ${{ github.event.inputs.hyperloom_cap }}
-          INPUT_REGISTER_CONCURRENCY: ${{ github.event.inputs.register_concurrency }}
-          INPUT_REPORT_EVERY:        ${{ github.event.inputs.report_every }}
-          INPUT_MAX_HOURS:           ${{ github.event.inputs.max_hours }}
-          INPUT_TASK_TIMEOUT_MIN:    ${{ github.event.inputs.task_timeout_min }}
-          INPUT_SANDBOX_WORKSPACE:   ${{ github.event.inputs.sandbox_workspace }}
-          INPUT_HYPERLOOM_WORKSPACE: ${{ github.event.inputs.hyperloom_workspace }}
-          INPUT_ISL:                 ${{ github.event.inputs.isl }}
-          INPUT_OSL:                 ${{ github.event.inputs.osl }}
-          INPUT_MODE:                ${{ github.event.inputs.mode }}
-          INPUT_TARGET_GPU:          ${{ github.event.inputs.target_gpu }}
-          INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
-          INPUT_PROMPT_PREFIX:       ${{ github.event.inputs.prompt_prefix }}
-          INPUT_PREWARM:             ${{ github.event.inputs.prewarm }}
-          INPUT_ALL_ARTIFACTS:       ${{ github.event.inputs.all_artifacts }}
-          INPUT_RESUME:              ${{ github.event.inputs.resume }}
-          INPUT_DRY_RUN:             ${{ github.event.inputs.dry_run }}
-          # GitHub-issued, repo-scoped, 7-day token. Embedded into the sandbox
-          # clone URL so the agent can `git clone` the private Hyperloom repo at
-          # this exact commit. Never echoed into the log.
-          HYPERLOOM_GIT_TOKEN:       ${{ github.token }}
+          INPUT_BATCH_INDEX: ${{ github.event.inputs.batch_index }}
         run: |
           set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import math
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
 
-          # ── Prompt prefix (single source of truth = ci/prompt_prefix.txt) ──
-          # Identical guarantee to optimize-submit: SaFE promptPrefix MUST be
-          # non-empty, and we pin the sandbox's Hyperloom checkout to this SHA.
-          # We write the final value to a file (not argv) so the token in the
-          # clone URL never appears in `ps`/process listings.
-          PREFIX_FILE="${RUNNER_TEMP:-/tmp}/tiny_prompt_prefix.txt"
-          PROMPT_PREFIX_VALUE="${INPUT_PROMPT_PREFIX:-}"
-          if [ -z "$PROMPT_PREFIX_VALUE" ] && [ -f "prompt_prefix.txt" ]; then
-            PROMPT_PREFIX_VALUE="$(cat prompt_prefix.txt)"
-            echo "[prompt_prefix] loaded fallback from ci/prompt_prefix.txt ($(wc -c < prompt_prefix.txt) bytes)"
-          fi
-          if [ -z "$PROMPT_PREFIX_VALUE" ]; then
-            echo "::error::prompt_prefix is empty and ci/prompt_prefix.txt is missing — refusing to submit with empty promptPrefix"
-            exit 1
-          fi
-          if [ -n "${GITHUB_SHA:-}" ]; then
-            if [ -z "${HYPERLOOM_GIT_TOKEN:-}" ]; then
-              echo "::error::HYPERLOOM_GIT_TOKEN not set; cannot pin sandbox checkout to a private repo"
-              exit 1
-            fi
-            REPO_URL_AUTH="https://x-access-token:${HYPERLOOM_GIT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            PROMPT_PREFIX_VALUE="CI SOURCE PIN:"$'\n'"  export HYPERLOOM_SOURCE_REF=\"${GITHUB_SHA}\""$'\n'"  export HYPERLOOM_SOURCE_REPO=\"${REPO_URL_AUTH}\""$'\n\n'"${PROMPT_PREFIX_VALUE}"
-            echo "[prompt_prefix] pinned sandbox Hyperloom checkout to ${GITHUB_SHA} (token-authenticated clone URL injected)"
-          fi
-          printf '%s' "$PROMPT_PREFIX_VALUE" > "$PREFIX_FILE"
+          raw = (os.environ.get("INPUT_BATCH_INDEX") or "").strip()
+          batch_size = int(os.environ["BATCH_SIZE"])
+          data = json.loads(Path(os.environ["CANDIDATES_PATH"]).read_text(encoding="utf-8"))
+          pool_size = len(data.get("candidates") or [])
+          batches = max(math.ceil(pool_size / batch_size), 1)
 
-          ARGS=(--candidates-file "${INPUT_CANDIDATES_FILE:-candidates/hf_3b_12b_base_inference_2026-06-01.json}")
-          ARGS+=(--start-index "${INPUT_START_INDEX:-0}")
-          ARGS+=(--limit "${INPUT_LIMIT:-0}")
-          ARGS+=(--sandbox-cap "${INPUT_SANDBOX_CAP:-150}")
-          ARGS+=(--hyperloom-cap "${INPUT_HYPERLOOM_CAP:-150}")
-          ARGS+=(--sandbox-workspace "${INPUT_SANDBOX_WORKSPACE:-core42-sandbox}")
-          ARGS+=(--hyperloom-workspace "${INPUT_HYPERLOOM_WORKSPACE:-core42-hyperloom}")
-          ARGS+=(--register-concurrency "${INPUT_REGISTER_CONCURRENCY:-32}")
-          ARGS+=(--report-every "${INPUT_REPORT_EVERY:-10}")
-          ARGS+=(--max-hours "${INPUT_MAX_HOURS:-4}")
-          ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-240}")
-          ARGS+=(--isl "${INPUT_ISL:-1024}" --osl "${INPUT_OSL:-1024}")
-          ARGS+=(--mode "${INPUT_MODE:-local}")
-          ARGS+=(--target-gpu "${INPUT_TARGET_GPU:-mi300x}")
-          ARGS+=(--kernel-opt-backends "${INPUT_KERNEL_OPT_BACKENDS:-geak,claude,codex}")
-          ARGS+=(--results-path '$RESULT_DIR')
-          ARGS+=(--prompt-prefix-file "$PREFIX_FILE")
-          ARGS+=(--output-dir "${GITHUB_WORKSPACE}/tiny-output")
-          ARGS+=(--artifacts-dir "${GITHUB_WORKSPACE}/tiny-artifacts")
-          ARGS+=(--summary-out-dir "${GITHUB_WORKSPACE}/tiny-summary-out")
-          if [ "${INPUT_PREWARM:-true}" != "true" ]; then ARGS+=(--no-prewarm); fi
-          if [ "${INPUT_ALL_ARTIFACTS:-true}" != "true" ]; then ARGS+=(--no-all-artifacts); fi
-          if [ "${INPUT_RESUME:-false}" = "true" ]; then ARGS+=(--resume); fi
-          if [ "${INPUT_DRY_RUN:-false}" = "true" ]; then ARGS+=(--dry-run); fi
+          if raw:
+              try:
+                  batch_index = max(int(raw), 0) % batches
+              except ValueError:
+                  batch_index = 0
+          else:
+              epoch = datetime(2026, 6, 1, tzinfo=timezone.utc)
+              now = datetime.now(timezone.utc)
+              days = max((now.date() - epoch.date()).days, 0)
+              slot = days * 6 + (now.hour // 4)
+              batch_index = slot % batches
 
-          python3 -u tiny_submit.py "${ARGS[@]}"
+          start = batch_index * batch_size
+          end = min(start + batch_size, pool_size)
+          print(f"batch_index={batch_index}")
+          print(f"pool_size={pool_size}")
+          print(f"batches={batches}")
+          print(f"slice={start}:{end}")
+          PY
 
-      - name: Render summary to job summary
-        if: always()
+      - name: Dispatch SaFE Optimize Submit
         run: |
-          if [ -f "${{ github.workspace }}/tiny-summary-out/ci_summary.md" ]; then
-            cat "${{ github.workspace }}/tiny-summary-out/ci_summary.md" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "_No Tiny summary produced._" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          set -euo pipefail
+          dry_run="${DRY_RUN:-false}"
+          ref="${GITHUB_REF_NAME}"
+          batch_index="${{ steps.batch.outputs.batch_index }}"
 
-      - name: Upload manifest + summary
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tiny-summary
-          path: |
-            tiny-output/submission_manifest.json
-            tiny-output/submission_manifest.md
-            tiny-output/progress.ndjson
-            tiny-summary-out/
-          retention-days: 45
-          if-no-files-found: warn
+          echo "Dispatching optimize-submit.yml on ref=${ref}"
+          echo "Tiny pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
+          echo "Batch size: ${BATCH_SIZE}; max_parallel=60; submit_workspaces=${SUBMIT_WORKSPACES}"
 
-      - name: Upload full task artifacts (optional)
-        if: always() && github.event.inputs.upload_task_artifacts == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: tiny-task-artifacts
-          path: tiny-artifacts/
-          retention-days: 30
-          if-no-files-found: warn
+          payload=$(python3 - <<'PY'
+          import json
+          import os
+
+          payload = {
+              "ref": os.environ["GITHUB_REF_NAME"],
+              "inputs": {
+                  "models": "",
+                  "candidates_file": os.environ["CANDIDATES_FILE"],
+                  "batch_index": os.environ["BATCH_INDEX"],
+                  "batch_size": os.environ["BATCH_SIZE"],
+                  "exclude_leaderboard": "false",
+                  "exclude_active_workflows": "true",
+                  "max_parallel": "60",
+                  "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
+                  "task_timeout_min": "240",
+                  "max_hours": "4",
+                  "all_artifacts": "true",
+                  "dry_run": os.environ.get("DRY_RUN") or "false",
+              },
+          }
+          print(json.dumps(payload))
+          PY
+          )
+
+          curl -fsS \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/optimize-submit.yml/dispatches" \
+            -d "$payload"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          BATCH_INDEX: ${{ steps.batch.outputs.batch_index }}
