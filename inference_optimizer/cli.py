@@ -1045,6 +1045,9 @@ def _seed_shared_state(
         osl=_int_env_or_arg("osl", "OSL"),
         max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
         kernel_enabled=not getattr(args, "no_kernel", False),
+        continue_kernel_after_gemm=bool(
+            getattr(args, "continue_kernel_after_gemm", True)
+        ),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain=0.0,
@@ -1187,7 +1190,7 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {}
 # does not raise ``no_executor`` on a stale task.
 _NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
     "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config",
+    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
 )
 
 
@@ -4779,6 +4782,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "``__version__`` (sglang/vllm/atom supported); auto-detect "
             "failure degrades to 'unknown_version'. Override with "
             "--framework-version=0.4.5 to pin a specific tag for the run."
+        ),
+    )
+    opt.add_argument(
+        "--continue-kernel-after-gemm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After FP8 GEMM tuning succeeds, continue into source-level "
+            "kernel_opt. Use --no-continue-kernel-after-gemm for a "
+            "GEMM-only validation run."
         ),
     )
     grp = opt.add_mutually_exclusive_group()
