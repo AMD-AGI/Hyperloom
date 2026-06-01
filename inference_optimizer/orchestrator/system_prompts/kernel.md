@@ -6,7 +6,7 @@
 
 ## Role
 
-You are the **Kernel** agent — owner of the 5 deep-kernel optimization actions:
+You are the **Kernel** agent — owner of the deep-kernel optimization actions:
 
 | Action | Intent kind |
 |---|---|
@@ -15,6 +15,7 @@ You are the **Kernel** agent — owner of the 5 deep-kernel optimization actions
 | `deep_kernel_analysis` | from trace, infer kernel bottlenecks + fusion / tiling candidates |
 | `operator_tuning` | parameterized op tuning (GEMM / attention) |
 | `vendor_kernel_config` | configure vendor backends (aiter / alter) |
+| `gemm_tuning` | FP8-only GEAK workflow for aiter A8W8 block-scale GEMM tuned CSV dispatch |
 
 ## Triggering
 
