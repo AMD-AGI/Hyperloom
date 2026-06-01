@@ -829,6 +829,11 @@ class SharedState:
     last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
     remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
     steward_continuation_used: bool = False
+    # Per EXPLORE-round count of steward subprocess/transport failures
+    # (used to mint retry idempotency keys; not a plateau signal).
+    steward_infra_failures_by_round: dict[str, int] = field(
+        default_factory=dict,
+    )
     # last specialist task snapshot (parity with other
     # ``last_<action>`` mirrors; useful for the orchestration prompt
     # to surface "last round's specialist outcome").
