@@ -20,9 +20,15 @@ LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}
 
 PRIMUS_CLAW_REPO="${PRIMUS_CLAW_REPO:-https://github.com/AMD-AGI/Primus-Claw.git}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
-TRACELENS_PKG_REPO="${TRACELENS_PKG_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
+# TraceLens public (AMD-AGI/TraceLens): Python package, perf-report CLIs,
+# agent skill bundle, and SGLang/vLLM patch tree for _server_patcher.
+TRACELENS_PKG_REPO="${TRACELENS_PKG_REPO:-${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}}"
+TRACELENS_PKG_REF="${TRACELENS_PKG_REF:-${TRACELENS_REF:-main}}"
+# TraceLens-internal: roofline numbers, gains estimates, MI355/MI455 MAF.
+# ON by default (dual install). Set TRACELENS_INSTALL_INTERNAL=0 to skip.
 TRACELENS_INTERNAL_REPO="${TRACELENS_INTERNAL_REPO:-https://github.com/AMD-AGI/TraceLens-internal.git}"
 TRACELENS_INTERNAL_REF="${TRACELENS_INTERNAL_REF:-release/hyperloom_integration_0.3.1}"
+TRACELENS_INSTALL_INTERNAL="${TRACELENS_INSTALL_INTERNAL:-1}"
 # Preferred container-local checkouts when operators install TraceLens manually.
 TRACELENS_PKG_DEFAULT_ROOT="${TRACELENS_PKG_DEFAULT_ROOT:-/workspace/TraceLens}"
 TRACELENS_DEFAULT_ROOT="${TRACELENS_DEFAULT_ROOT:-/workspace/TraceLens-internal}"
@@ -46,8 +52,9 @@ Options:
 Advanced env overrides:
   REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV,
   OOB_SRC, INFERENCEX_PATH, TRACELENS_PKG_ROOT, TRACELENS_ROOT,
-  PRIMUS_CLAW_REPO, INFERENCEX_REPO,
-  TRACELENS_PKG_REPO, TRACELENS_INTERNAL_REPO, TRACELENS_INTERNAL_REF
+  TRACELENS_INTERNAL_ROOT, PRIMUS_CLAW_REPO, INFERENCEX_REPO,
+  TRACELENS_PKG_REPO, TRACELENS_PKG_REF, TRACELENS_REPO, TRACELENS_REF,
+  TRACELENS_INSTALL_INTERNAL, TRACELENS_INTERNAL_REPO, TRACELENS_INTERNAL_REF
 EOF
 }
 
@@ -188,9 +195,28 @@ resolve_tracelens() {
     :
   else
     TRACELENS_PKG_ROOT="${HYPERLOOM_DEPS_ROOT}/TraceLens"
-    clone_or_update "TraceLens" "$TRACELENS_PKG_REPO" "$TRACELENS_PKG_ROOT" ""
+    clone_or_update "TraceLens" "$TRACELENS_PKG_REPO" "$TRACELENS_PKG_ROOT" "$TRACELENS_PKG_REF"
     export TRACELENS_PKG_ROOT
     log "TRACELENS_PKG_ROOT: ${TRACELENS_PKG_ROOT}"
+  fi
+
+  local install_internal=0
+  if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then install_internal=1; fi
+  case "${TRACELENS_INSTALL_INTERNAL:-1}" in
+    1|true|TRUE|yes|YES) install_internal=1 ;;
+    0|false|FALSE|no|NO) install_internal=0 ;;
+  esac
+  if [ "$install_internal" -eq 0 ]; then
+    log "TraceLens-internal: skipped (set TRACELENS_INSTALL_INTERNAL=1 to opt in)"
+    return 0
+  fi
+
+  if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+    [ -d "$TRACELENS_INTERNAL_ROOT" ] || die "TRACELENS_INTERNAL_ROOT is set but does not exist: ${TRACELENS_INTERNAL_ROOT}"
+    TRACELENS_ROOT="$TRACELENS_INTERNAL_ROOT"
+    export TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
+    log "TRACELENS_ROOT: using TRACELENS_INTERNAL_ROOT ${TRACELENS_ROOT}"
+    return 0
   fi
 
   if _resolve_existing_checkout TRACELENS_ROOT "$TRACELENS_DEFAULT_ROOT"; then
@@ -250,7 +276,12 @@ write_local_env() {
     write_export OOB_SRC "$OOB_SRC"
     write_export INFERENCEX_PATH "$INFERENCEX_PATH"
     write_export TRACELENS_PKG_ROOT "$TRACELENS_PKG_ROOT"
-    write_export TRACELENS_ROOT "$TRACELENS_ROOT"
+    if [ -n "${TRACELENS_ROOT:-}" ]; then
+      write_export TRACELENS_ROOT "$TRACELENS_ROOT"
+    fi
+    if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+      write_export TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
+    fi
   } > "$LOCAL_SETUP_ENV"
   chmod 600 "$LOCAL_SETUP_ENV"
   log "wrote ${LOCAL_SETUP_ENV}"

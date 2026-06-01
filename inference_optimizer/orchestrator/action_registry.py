@@ -33,7 +33,7 @@ v0.6 schema (DESIGN §16.2)::
     max_turns:           int
     lease_ttl_sec:       int
     applicable_when:     list[str]    # free-form predicates
-    # v0.6.2 (Phase 1) prompt-builder additions:
+    # prompt-builder additions:
     description:         str          # 1-line action brief consumed by
                                       # prompt_builder; defaults to name
                                       # when missing.
@@ -52,9 +52,9 @@ v0.6 vs v0.5 schema:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..paths import asset_actions_dir
 
@@ -66,9 +66,9 @@ VALID_FAMILIES: frozenset[str] = frozenset({
 
 VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex"})
 
-# Phase 1 (prompt_builder) — coarse-grained pipeline phase used to group
-# actions inside the Orchestration system prompt (e.g. "Run prep actions
-# first, then move to explore..."). Kept intentionally small; map onto the
+# Coarse-grained pipeline phase used by prompt_builder to group actions
+# inside the Orchestration system prompt (e.g. "Run prep actions first,
+# then move to explore..."). Kept intentionally small; map onto the
 # DESIGN §11 timeline rather than the family taxonomy because family is
 # scheduler-oriented (prep/analysis/...) while phases are LLM-oriented.
 VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
@@ -128,6 +128,7 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "backends":                "exploration",
     "sweep":                   "exploration",
     "kernel_opt":              "exploration",
+    "gemm_tuning":             "exploration",
     "compiler_tuning":         "exploration",
     "comm_optimization":       "exploration",
     "operator_tuning":         "exploration",
@@ -137,6 +138,9 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "validate_stack":          "exploration",
     "dream":                   "exploration",
     "re_explore":              "exploration",
+    # dynamic_action — multi-turn ReAct sub-agent that explores a
+    # cross-domain patch combination (dynamic_action.MD P1).
+    "dynamic_action":          "exploration",
 }
 _DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
 
@@ -183,7 +187,7 @@ class ActionMetadata:
     max_turns: int = 30
     lease_ttl_sec: int = 1800
     applicable_when: tuple[str, ...] = ()
-    # Phase 1 prompt-builder fields — see module docstring.
+    # prompt-builder fields — see module docstring.
     description: str = ""
     pipeline_phase: str = "explore"
     typical_runtime_min: float = 0.0
@@ -227,7 +231,7 @@ class ActionMetadata:
                 f"action {expected_name!r}: preferred_backend={backend!r} not in "
                 f"{sorted(VALID_BACKENDS)!r}"
             )
-        # Phase 1 prompt-builder fields. All optional; missing values fall back
+        # prompt-builder fields. All optional; missing values fall back
         # to safe defaults so old yaml files keep parsing while new ones can
         # opt into richer prompts.
         cost_p50 = float(data["cost_minutes_p50"])

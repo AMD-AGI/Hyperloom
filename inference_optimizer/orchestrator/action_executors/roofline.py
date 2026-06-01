@@ -272,6 +272,14 @@ class RooflineExecutor:
         self.shared_state = shared_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        # IR-8 (atom): the historical short-circuit returned status="skipped"
+        # because profile was a hard dependency and atom had no profiler
+        # wiring. The Magpie atom wrapper now bridges PROFILE=1 to atom's
+        # --torch-profiler-dir CLI flag, so the composite's profile sub-
+        # step succeeds and the trace_analyze sub-step consumes the
+        # resulting *.pt.trace.json.gz unchanged (TraceLens is framework-
+        # agnostic). The executor falls through to the same path as
+        # sglang/vllm.
         # Lazy imports avoid pulling shell-out / yaml machinery at
         # module load time (consistent with how the BaselineExecutor
         # subclass is constructed lazily by cli).
@@ -438,6 +446,7 @@ class RooflineExecutor:
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": str(trace_path),
             "analysis_md_path": cached.get("analysis_md_path", ""),
+            "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile_result.get("workspace"),
         }
 

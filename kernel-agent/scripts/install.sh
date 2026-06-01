@@ -77,6 +77,8 @@ TRACELENS_PKG_ROOT="${TRACELENS_PKG_ROOT:-/workspace/TraceLens}"
 TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens-internal}"
 # Writable mirror when $TRACELENS_ROOT is on a read-only mount (e.g. /wekafs/...).
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
+# Optional override for the internal checkout (defaults to $TRACELENS_ROOT).
+TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 
 # Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
 # is missing from env, source $REPO_ROOT/.env (resolved above from this
@@ -100,14 +102,35 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
   fi
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
-# memory together. Keep this overridable so future GEAK fixes can move Hyperloom
-# forward without reworking the installer contract.
-GEAK_REF="${GEAK_REF:-v3.2.0}"
+# Pin GEAK to the save-and-test-diff-fallthrough fix tip
+# (https://github.com/AMD-AGI/GEAK/pull/244, not yet released as a tag).
+# We pin to the *commit SHA* of the branch tip, NOT the branch name, so a
+# future force-push / rebase upstream cannot silently change what every
+# fresh install gets.
+# TODO(post-GEAK-PR-244): once PR #244 lands and ships in a new GEAK tag,
+# revert this pin to the tag (e.g. v3.2.1) for stronger discoverability.
+# Operators can override with GEAK_REF=<tag|branch|sha>.
+GEAK_REF="${GEAK_REF:-ec61bdbdb151904ec187a8d89518afb969c53737}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
-# Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
-GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+# GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
+# endpoint.  Force the LiteLLM provider prefix to `openai/` for bare Claude
+# model names so LiteLLM uses the OpenAI-compatible transformer instead of the
+# Anthropic /v1/messages transformer.  Without this, GEAK gets
+# Primus.00009 / NotFound on the same key+URL that works through
+# /chat/completions.
+GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+case "${GEAK_MODEL_NAME_RAW}" in
+  openai/*|anthropic/*|gpt-*|o1-*|o3-*|o4-*)
+    GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
+    ;;
+  claude-*)
+    GEAK_MODEL_NAME_VAL="openai/${GEAK_MODEL_NAME_RAW}"
+    ;;
+  *)
+    GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
+    ;;
+esac
 # Run mode for the GEAK CLI. Drives ``run.mode`` in the generated
 # ``$GEAK_CONFIG`` yaml: ``full`` (default) selects the 2 h / 5-round preset
 # at ``run.budgets.full`` and ``run.presets.full``; ``quick`` selects the
@@ -167,13 +190,12 @@ CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
 GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
 # LiteLLM provider-specific base_url normalisation:
-#   * Anthropic client appends /v1/messages itself; leaving /v1 here yields
-#     /v1/v1/messages → 404. Strip /v1 when GEAK is on a claude model.
-#   * OpenAI client tolerates both shapes (verified), so for gpt-* models
-#     leave the original base_url alone to stay compatible with operators
-#     who set OPENAI_BASE_URL with the trailing /v1.
+#   * openai/* models require the OpenAI-compatible base URL, which in our
+#     gateway includes the trailing /v1.  Preserve it.
+#   * anthropic/* models use /v1/messages internally; strip a trailing /v1
+#     only when the operator explicitly selects an anthropic provider.
 case "${GEAK_MODEL_NAME_VAL}" in
-  claude-*|anthropic/claude-*)
+  anthropic/claude-*)
     GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/v1}"
     GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/}"
     ;;
@@ -257,6 +279,58 @@ die() { echo "[kernel-agent ERROR] $*" >&2; exit 1; }
 verify_die() {
   if [ "$CHECK_ONLY" -eq 1 ]; then warn "$1"; else die "$1"; fi
 }
+
+# Preflight credential validation. The env+.env fallback loader above
+# (lines 89-105) only LOADS missing keys; it does not VALIDATE that they
+# were actually provided. Without this gate, a missing SAFE_API_KEY or
+# OPENAI_BASE_URL would slip past pip install / GEAK clone / aiter JIT
+# (~10-20 minutes of work) and only blow up at the final
+# generate_geak_litellm_config step (line ~670). Fail fast here so the
+# operator can fix .env / export before any expensive work happens.
+#
+# Strict mode by design: no bypass env var. The chained installer
+# steps (GEAK config, OOB CLI auth) all need real credentials, so an
+# install without them cannot finish anyway. The only downgrade path
+# is --check-only / --dry-run, which is for introspection only and
+# does not actually install.
+preflight_validate_credentials() {
+  local missing=()
+  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
+  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
+  if [ "${#missing[@]}" -eq 0 ]; then
+    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+    return 0
+  fi
+  local env_file_status
+  if [ -f "$REPO_ROOT/.env" ]; then
+    env_file_status="present"
+  else
+    env_file_status="not found"
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
+         "continuing because --check-only / --dry-run is active. GEAK " \
+         "config generation will still fail later unless these are set " \
+         "before a real install."
+    return 0
+  fi
+  cat >&2 <<EOF
+[kernel-agent ERROR] Missing required credential(s): ${missing[*]}
+
+Tried loading from:
+  - shell environment
+  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+
+Fix one of:
+  1. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
+  2. Export directly into the shell before re-running:
+       export SAFE_API_KEY=sk-xxxxx
+       export OPENAI_BASE_URL=https://gateway.example.com/v1
+EOF
+  exit 2
+}
+preflight_validate_credentials
 
 run() {
   log "$*"
@@ -567,6 +641,7 @@ _pip_install_editable() {
 }
 
 ensure_tracelens() {
+  # Legacy bundle fallback: post-2026-05-18 images ship ${HYPERLOOM_BUNDLE}/TraceLens.
   if [ ! -d "$TRACELENS_PKG_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens" ]; then
     TRACELENS_PKG_ROOT="${HYPERLOOM_BUNDLE}/TraceLens"
   fi
@@ -613,8 +688,12 @@ ensure_tracelens() {
       rm -f "$TRACELENS_ROOT/.hl_write_test"
     fi
   fi
-  _pip_install_editable "$TRACELENS_ROOT" "TraceLens-internal"
+  local internal_root="${TRACELENS_INTERNAL_ROOT:-$TRACELENS_ROOT}"
+  _pip_install_editable "$internal_root" "TraceLens-internal"
   export TRACELENS_PKG_ROOT TRACELENS_ROOT
+  if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+    export TRACELENS_INTERNAL_ROOT
+  fi
   if [ "$DRY_RUN" -eq 0 ]; then
     # TraceLens #124: only the inference variant is accepted (the correct
     # entry for vLLM/SGLang traces). Hyperloom is inference-only since
@@ -635,7 +714,18 @@ ensure_geak() {
     mkdir -p "${HYPERLOOM_ROOT}" "$(dirname "$GEAK_CONFIG")" "$(dirname "$GEAK_MEMORY_STORE_PATH_VAL")"
   fi
   if [ ! -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
-    run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
+    # ``git clone --branch`` only accepts tags / branches, not SHAs. Detect
+    # a 7-40 hex char SHA and use a fetch-checkout dance instead so the
+    # SHA pin above stays shallow. GitHub serves shallow SHA fetches
+    # (uploadpack.allowReachableSHA1InWant=true).
+    if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      run git init -q "${HYPERLOOM_ROOT}/geak"
+      run git -C "${HYPERLOOM_ROOT}/geak" remote add origin "$GEAK_REPO"
+      run git -C "${HYPERLOOM_ROOT}/geak" fetch --depth 1 origin "$GEAK_REF"
+      run git -C "${HYPERLOOM_ROOT}/geak" checkout -q FETCH_HEAD
+    else
+      run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
+    fi
   else
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
   fi
@@ -721,6 +811,14 @@ run:
     full:
       orchestrator:
         max_rounds: 5
+env:
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  timeout: 3600
 EOF
       chmod 600 "$GEAK_CONFIG"
       grep -Eq '^[[:space:]]*model_class:[[:space:]]*litellm[[:space:]]*$' "$GEAK_CONFIG" \
@@ -747,6 +845,142 @@ EOF
   if [ "$DRY_RUN" -eq 0 ]; then
     command -v geak >/dev/null 2>&1 || verify_die "geak CLI not found"
   fi
+  patch_geak_minisweagent_runtime
+}
+
+patch_geak_minisweagent_runtime() {
+  # Hyperloom runtime patch for GEAK-v3 / mini-swe-agent 1.14.4.
+  #
+  # Two issues were observed during Qwen3-8B GEAK runs:
+  #   1. minisweagent.models.litellm_model converted tool schemas to
+  #      function.input_schema. LiteLLM's OpenAI-shape Anthropic mapper reads
+  #      function.parameters, so every tool reached Claude with an empty schema
+  #      and Claude repeatedly emitted bash{}.
+  #   2. Bare claude-* model names made LiteLLM choose Anthropic /v1/messages,
+  #      while our gateway is OpenAI-compatible /chat/completions. The config
+  #      generation above now rewrites bare claude-* to openai/claude-* and
+  #      preserves the /v1 base_url.
+  #
+  # This patch is intentionally idempotent and applies both to the writable GEAK
+  # source mirror and to the installed site-packages copy used by the current
+  # pod. Keeping it here makes Hyperloom's source tree the durable owner of the
+  # workaround; direct runtime edits are only a validation artefact.
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+paths: list[Path] = []
+
+mirror = Path(os.environ.get("HYPERLOOM_ROOT", "")) / "geak" / "src" / "minisweagent"
+if mirror.exists():
+    paths.append(mirror)
+
+try:
+    import minisweagent  # type: ignore
+    paths.append(Path(minisweagent.__file__).resolve().parent)
+except Exception:
+    pass
+
+seen: set[Path] = set()
+for root in paths:
+    root = root.resolve()
+    if root in seen:
+        continue
+    seen.add(root)
+
+    litellm_model = root / "models" / "litellm_model.py"
+    if litellm_model.exists():
+        text = litellm_model.read_text()
+        old = '''        function: dict[str, Any] = {
+            "name": name,
+            "description": func.get("description", ""),
+            "input_schema": func.get(
+                "parameters",
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            ),
+        }'''
+        new = '''        schema = func.get("parameters") or func.get(
+            "input_schema",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        )
+        function: dict[str, Any] = {
+            "name": name,
+            "description": func.get("description", ""),
+            "parameters": schema,
+        }'''
+        if old in text:
+            litellm_model.write_text(text.replace(old, new, 1))
+            print(f"[kernel-agent] patched LiteLLM tool schema: {litellm_model}")
+        elif '"parameters": schema' in text:
+            print(f"[kernel-agent] LiteLLM tool schema already patched: {litellm_model}")
+        else:
+            print(f"[kernel-agent WARN] LiteLLM schema patch pattern not found: {litellm_model}")
+
+    cfg = root / "config" / "mini_kernel_strategy_list.yaml"
+    if cfg.exists():
+        text = cfg.read_text()
+        marker = "Never call `bash` with `{}` or an empty command."
+        if marker not in text:
+            needle = (
+                "    Your response must contain exactly ONE tool call.\n"
+                "    Include a THOUGHT section before your tool call where you explain your reasoning process.\n"
+            )
+            repl = needle + (
+                "    If you choose the `bash` tool, its arguments MUST include a non-empty\n"
+                "    `command` string, for example:\n"
+                "    {\"command\": \"python3 scripts/task_runner.py correctness\"}.\n"
+                "    Never call `bash` with `{}` or an empty command.\n"
+            )
+            if needle in text:
+                cfg.write_text(text.replace(needle, repl, 1))
+                print(f"[kernel-agent] patched bash prompt guidance: {cfg}")
+            else:
+                print(f"[kernel-agent WARN] bash prompt guidance pattern not found: {cfg}")
+        else:
+            print(f"[kernel-agent] bash prompt guidance already patched: {cfg}")
+
+    tools_json = root / "tools" / "tools.json"
+    if tools_json.exists():
+        data = json.loads(tools_json.read_text())
+        changed = False
+        for tool in data:
+            if tool.get("name") == "bash":
+                desc = (
+                    "Execute shell commands directly in bash. REQUIRED: pass a "
+                    "non-empty `command` string in the arguments object. Never "
+                    "call bash with `{}`."
+                )
+                cmd_desc = "The non-empty bash command to execute, e.g. `ls -la /tmp`."
+                if tool.get("description") != desc:
+                    tool["description"] = desc
+                    changed = True
+                params = tool.setdefault("parameters", {})
+                params.setdefault("type", "object")
+                params.setdefault("properties", {}).setdefault("command", {})["type"] = "string"
+                if params["properties"]["command"].get("description") != cmd_desc:
+                    params["properties"]["command"]["description"] = cmd_desc
+                    changed = True
+                if params.get("required") != ["command"]:
+                    params["required"] = ["command"]
+                    changed = True
+        if changed:
+            tools_json.write_text(json.dumps(data, indent=2) + "\n")
+            print(f"[kernel-agent] patched bash tool schema docs: {tools_json}")
+        else:
+            print(f"[kernel-agent] bash tool schema docs already patched: {tools_json}")
+PY
 }
 
 ensure_rag_index() {
@@ -913,6 +1147,7 @@ write_env_file() {
     # mirror instead of falling back to the read-only /wekafs default.
     [ -n "${TRACELENS_PKG_ROOT:-}" ] && echo "export TRACELENS_PKG_ROOT='${TRACELENS_PKG_ROOT}'"
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
+    [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"

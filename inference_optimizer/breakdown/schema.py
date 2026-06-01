@@ -58,7 +58,7 @@ class WorkloadObjective(TypedDict, total=False):
 
 
 class Workload(TypedDict, total=False):
-    framework: str                # sglang / vllm
+    framework: str                # sglang / vllm / atom
     framework_version: str
     model_name: str
     model_path: str
@@ -130,7 +130,7 @@ class Final(TypedDict, total=False):
     validated_at_stack_len: int
     validated_ts: str
     stack_changed_after_validation: bool
-    extra_sglang_args: str
+    extra_server_args: str
     extra_envs: dict[str, Any]
     action_path: list[str]        # ordered list of action:variant labels from optimization_stack
     ttft_mean_ms: float | None
@@ -147,7 +147,7 @@ class Final(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 class PhaseEvent(TypedDict, total=False):
     ts: str
-    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / select_kernels / integrate
+    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
     task_id: str
     kernel_id: str | None         # only for kernel-owned actions
     status: str                   # succeeded / failed
@@ -172,6 +172,14 @@ class CapabilityEntry(TypedDict, total=False):
     # v0.8 M3 explore-specific:
     keep_unstable_count: int      # KEEP'd variants evicted by inlined stack rebench
     winners_history: int          # cumulative explore_search.winners_history length
+    # specialist-row only — per-domain split. Keys are
+    # SpecialistDomain.key strings (``serving_specialist`` /
+    # ``kernel_switch_specialist`` / ``comm_specialist`` /
+    # ``compiler_specialist`` / ``system_specialist`` /
+    # ``pr_intel_specialist`` / ``session_steward_specialist``). Every
+    # catalogue domain is seeded with a not_attempted entry so the
+    # dashboard can iterate without presence checks.
+    by_specialist: dict[str, "CapabilityEntry"]
 
 
 class CapabilitySummary(TypedDict, total=False):
@@ -267,7 +275,7 @@ class AdoptedKernel(TypedDict, total=False):
     kernel_id: str
     patch_path: str
     target_file: str
-    extra_sglang_args: str
+    extra_server_args: str
     e2e_gain_pct: float | None
     validated: bool
     last_status: str
@@ -300,7 +308,7 @@ class ParamSearchEntry(TypedDict, total=False):
     """One row from params_search.{tested,accepted,rejected}."""
     name: str
     fingerprint: str
-    extra_sglang_args: str
+    extra_server_args: str
     extra_envs: dict[str, Any]
     output_throughput: float | None
     gain_pct: float | None
@@ -432,7 +440,7 @@ class StackGainEntry(TypedDict, total=False):
     cum_gain_before: float
     cum_gain_after: float
     delta_pct: float | None       # None when validate_stack re-baselined
-    extra_sglang_args: str
+    extra_server_args: str
 
 
 class SourceBreakdown(TypedDict, total=False):
@@ -440,6 +448,18 @@ class SourceBreakdown(TypedDict, total=False):
     oob_pct_of_total: float
     # primary explore family bucket.
     explore_pct_of_total: float
+    # FRAMEWORK_PR phase contribution (PRELUDE → FRAMEWORK_PR →
+    # EXPLORE). Tracks gain from upstream-PR bake-ins as a separate
+    # row so the dashboard's per-source totals reconcile against
+    # ``validated_total_pct``; previously these KEEPs fell into
+    # ``other`` and silently disappeared.
+    framework_pr_pct_of_total: float
+    # GEMM_TUNING contribution (KERNEL-entry deterministic FP8 GEMM
+    # tuner). Bucketed separately from the ``kernel`` family so the
+    # dashboard can show "deterministic tuner gain" vs "source-level
+    # GEAK / OOB rewrite gain". Always emitted (0.0 on non-FP8
+    # workloads / when the tuner skipped or produced no KEEP).
+    gemm_tuning_pct_of_total: float
     backends_pct_of_total: float
     params_pct_of_total: float
     sweep_pct_of_total: float
@@ -448,9 +468,17 @@ class SourceBreakdown(TypedDict, total=False):
 
 class PhaseBreakdownExplore(TypedDict, total=False):
     """v0.8 M7 (KB_design §3.12 §4.6) — explore-phase gain split by
-    specialist domain. ``by_domain`` keys are SpecialistDomain.key
-    strings (``serving_specialist`` / …) plus ``default_grid`` /
-    ``llm_direct`` for non-specialist provenance."""
+    specialist domain.
+
+    ``by_domain`` keys are normalized — the collector strips
+    ``specialist:`` prefixes before bucketing, so consumers see the
+    bare SpecialistDomain.key (``serving_specialist`` /
+    ``kernel_switch_specialist`` / …). Non-specialist provenance
+    appears as ``default_grid`` / ``llm_direct``; resumed-from-v1
+    sessions appear as ``legacy_<action>`` (e.g. ``legacy_backends``)
+    so they don't masquerade as a real specialist domain. Empty
+    provenance falls back to ``unknown``.
+    """
     total_gain_pct: float
     by_domain: dict[str, float]
 
@@ -462,11 +490,34 @@ class PhaseBreakdownKernel(TypedDict, total=False):
     by_kernel_id: dict[str, float]
 
 
+class PhaseBreakdownFrameworkPr(TypedDict, total=False):
+    """FRAMEWORK_PR phase gain split by adopted PR
+    reference. ``by_pr`` keys are the entry's ``variant_name`` (PR
+    label, typically ``PR:<repo>#<num>`` or ``PR:<num>``); empty
+    string falls back to ``"?"``."""
+    total_gain_pct: float
+    by_pr: dict[str, float]
+
+
+class PhaseBreakdownGemmTuning(TypedDict, total=False):
+    """KERNEL-entry FP8 GEMM tuning gain split by tuned-CSV path.
+    ``by_tuned_file`` keys on the entry's ``tuned_file`` (absolute
+    path to ``a8w8_blockscale_tuned_gemm.csv``); fallbacks: entry's
+    ``variant_name`` then ``"?"`` so the key is always a string."""
+    total_gain_pct: float
+    by_tuned_file: dict[str, float]
+
+
 class PhaseBreakdown(TypedDict, total=False):
     """v0.8 M7 per-phase gain attribution (KB_design §3.13 M7 §6)."""
     prelude: PhaseBreakdownExplore         # always 0 by definition
+    framework_pr: PhaseBreakdownFrameworkPr  # PRELUDE → FRAMEWORK_PR → EXPLORE
     explore: PhaseBreakdownExplore
     kernel:  PhaseBreakdownKernel
+    # GEMM_TUNING is a KERNEL-entry deterministic step; bucketed
+    # separately so the dashboard can split tuner gain from
+    # source-level GEAK/OOB rewrite gain.
+    gemm_tuning: PhaseBreakdownGemmTuning
     sweep:   PhaseBreakdownExplore         # usually 0 (sweep is measurement)
     close:   PhaseBreakdownExplore         # usually 0
     unattributed: PhaseBreakdownExplore    # gain whose phase couldn't be inferred
@@ -486,7 +537,7 @@ class Attribution(TypedDict, total=False):
 # §16 Phase segments — v0.8 M2 phase state machine
 # ---------------------------------------------------------------------------
 class PhaseSegment(TypedDict, total=False):
-    phase: str                 # PRELUDE / EXPLORE / KERNEL / SWEEP / CLOSE
+    phase: str                 # PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE
     from_phase: str            # previous phase (empty for first segment)
     entered_ts: str            # iso UTC of entry
     entered_unix: float | None
@@ -554,11 +605,33 @@ class KBFlusherStatus(TypedDict, total=False):
     pid_path: str                  # absolute path to .kb_flusher.pid
 
 
+class WarmReplayOutcome(TypedDict, total=False):
+    """GAP 1 — warm-recipe replay result. Empty {} when the replay
+    never fired (``--no-warm-replay`` / low confidence / no recipe);
+    otherwise one of ``in_flight`` / ``reproduced`` / ``drift`` /
+    ``failed`` / ``skipped`` with the per-status fields populated."""
+    status: str
+    expected_gain_pct: float
+    actual_gain_pct: float
+    throughput_after: float
+    warm_recipe_tier: str
+    warm_recipe_conf: float
+    replay_task_id: str
+    error_class: str
+    reason: str
+
+
 class KBProvenance(TypedDict, total=False):
     cortex_session_id: str
     warm_start_ts: str
     warm_start_recipe_seen: bool
+    warm_start_recipe_tier: str
     warm_start_pitfall_count: int
+    warm_start_lesson_count: int
+    # GAP 1 — operator-visible warm-replay summary.
+    warm_replay: WarmReplayOutcome
+    warm_replay_attempted: bool
+    warm_history_injected: bool
     stack_fingerprint: dict[str, str]
     pending_edges: list[KBPendingEdge]
     queue: KBQueueStats
@@ -617,6 +690,9 @@ class SpecialistRound(TypedDict, total=False):
     proposals_kept: int
     proposals_rejected: int
     proposals_skipped: int
+    # Retired field — was populated by the T2 hypothesize hook (now
+    # gone). Kept on the schema so claw-stats-service readers that
+    # destructure specialist_runs[] don't break; always empty.
     kb_edge_ids: list[str]
     confidence_avg: float | None
     domain_breakdown: dict[str, SpecialistDomainBreakdown]
@@ -646,6 +722,219 @@ class SourceFiles(TypedDict, total=False):
     kernel_attempts: list[str]
     critic_workdir: str | None
     robustness_workdir: str | None
+
+
+# ---------------------------------------------------------------------------
+# Roofline — optimization-progress curve for the dashboard
+# ---------------------------------------------------------------------------
+# Drives the "优化进度曲线" panel (Dashboard-Roofline 对接清单 §2): a
+# stepped line from baseline through every KEEP, plotted against two
+# horizontal reference lines (ceiling = vendor peak, target = ceiling
+# × 0.70). All inputs derived from ``state.json`` so the dashboard
+# only needs to read ``session_breakdown.json``.
+class RooflineTrajectoryPoint(TypedDict, total=False):
+    """One x/y/tooltip on the optimization-progress curve.
+
+    ``x`` is an iso UTC timestamp; the dashboard may convert to a step
+    index for the horizontal axis. The first point is always
+    ``label = "baseline"`` (taken from ``manifest.created_at_utc`` +
+    ``state.baseline_tput``); subsequent points come from
+    ``state.optimization_stack[]`` in promotion order.
+    """
+    ts: str                          # iso UTC, x value
+    tput: float                      # tok/s, y value
+    label: str                       # "baseline" / variant_name
+    action: str                      # "baseline" / "explore" / "kernel_opt" / ...
+    gain_pct: float                  # cumulative gain vs baseline at this point
+    flags: str                       # candidate_extra_server_args
+    extra_envs: dict[str, str]       # KEY=value pairs the variant set
+
+
+class RooflineSnapshot(TypedDict, total=False):
+    """One ``state.roofline_snapshots[]`` entry mirrored verbatim.
+
+    Kept as a list (the dashboard reads ``snapshots[0]`` for the
+    headline ceiling but downstream tooling may want the full
+    history). Field shape mirrors the on-disk record so a future
+    snapshot field addition flows through transparently.
+    """
+    snapshot_id: int
+    ts: str
+    achieved_tok_per_sec: float
+    theoretical_peak_tok_per_sec: float       # ceiling, vendor peak (unreachable)
+    within_roofline_pct: float                # achieved / peak * 100
+    gap_to_roofline_pct: float
+    compute_pct: float
+    idle_pct: float
+    comm_pct: float
+    top_bottleneck: str                       # "MoE_unfused" etc
+    top_kernel: dict[str, Any]                # {name, bound_type, efficiency_pct, gpu_pct}
+    analysis_md_path: str
+    kernel_roofline_path: str
+    trace_input: str
+
+
+class RooflineProgress(TypedDict, total=False):
+    """Top-level ``roofline_progress`` section.
+
+    NOTE — this used to be called ``Roofline`` and exported under the
+    top-level key ``roofline``, but that collided with the markdown-
+    report renderer's pre-existing ``roofline`` list contract (per-
+    final.json comparison snapshots, populated by
+    ``collect_roofline``). The two surfaces serve different consumers
+    and the previous name clash silently broke the markdown report's
+    Roofline section. Renamed to ``roofline_progress`` so both
+    surfaces coexist.
+
+    Two products in one structure:
+
+    1. **Reference lines** (``ceiling_tok_per_sec`` / ``target_tok_per_sec``):
+       horizontal dashed lines on the chart. ``ceiling`` is the
+       vendor's theoretical peak (from the latest snapshot);
+       ``target = ceiling × ceiling_ratio_target`` (default 0.70 — see
+       Dashboard 对接清单 §2.1 for why we don't aim at 100%).
+
+    2. **Trajectory** (``trajectory[]``): the stepped line itself —
+       baseline + every KEEP, sorted by ts.
+
+    ``snapshots[]`` carries the raw ``state.roofline_snapshots[]``
+    entries verbatim for tooltips / drill-downs; consumers that just
+    want to render the chart can ignore it.
+
+    Edge cases (Dashboard-Roofline 对接清单 §5):
+    * No snapshot ever taken → ``ceiling_available = False``,
+      ``ceiling_tok_per_sec / target_tok_per_sec`` absent. Dashboard
+      hides the reference lines.
+    * No KEEP yet → ``trajectory`` has the single baseline point only.
+      ``current_best_tput == baseline_tput`` and
+      ``cumulative_gain_pct == 0.0``.
+    """
+    # Reference lines (only set when snapshots[] is non-empty)
+    ceiling_tok_per_sec: float | None
+    target_tok_per_sec: float | None
+    ceiling_ratio_target: float                # default 0.70
+    ceiling_available: bool
+    snapshot_top_bottleneck: str               # tooltip on the ceiling line
+    snapshot_within_roofline_pct: float
+    snapshot_gap_to_roofline_pct: float
+
+    # Trajectory
+    trajectory: list[RooflineTrajectoryPoint]
+
+    # Headline numbers (also derivable from trajectory[-1] /
+    # state.cumulative_gain — surfaced here so the dashboard's "current"
+    # callout doesn't need to compute them).
+    baseline_tput: float
+    current_best_tput: float
+    cumulative_gain_pct: float
+    current_best_pct_of_ceiling: float | None  # tput/ceiling*100, None when no ceiling
+    current_best_pct_of_target: float | None   # tput/target*100, None when no ceiling
+
+    # Audit / staleness
+    roofline_failure_streak: int               # consecutive watermark roofline failures
+    snapshots: list[RooflineSnapshot]
+
+
+# ---------------------------------------------------------------------------
+# Optimization stack — raw KEEP ledger passthrough
+# ---------------------------------------------------------------------------
+class OptimizationStackEntry(TypedDict, total=False):
+    """One KEEP from ``state.optimization_stack[]`` exposed verbatim.
+
+    Required-shape fields (always present on writers' entries):
+
+    * ``action`` — ``baseline`` / ``params`` / ``backends`` /
+      ``explore`` / ``kernel_opt`` / ``integrate`` / ``gemm_tuning``
+      / ``framework_pr`` / ``validate_stack``.
+    * ``variant_name`` — human-readable label (``vllm_kv_cache_fp8`` /
+      kid for kernel_opt / PR ref for framework_pr / etc.).
+    * ``candidate_extra_server_args`` — full CLI fragment patched into
+      the server launch.
+    * ``extra_envs`` — env-var dict patched into the launch.
+    * ``tput`` — measured throughput (tok/s/GPU) at this stack depth.
+    * ``ts`` — iso UTC promotion timestamp.
+    * ``workspace`` — absolute path to the benchmark workspace dir
+      (or None for synthetic / kernel-only entries).
+
+    GEMM-tuning-specific fields (optional, populated by the
+    Coordinator's ``_promote_gemm_tuning_keep`` path):
+
+    * ``tuned_file`` — absolute path to the produced
+      ``a8w8_blockscale_tuned_gemm.csv``.
+    * ``final_report_path`` — absolute path to ``final_report.json``.
+    * ``source`` — provenance label (e.g. ``kernel_entry_auto``).
+
+    Additional optional fields surface from individual writers:
+
+    * ``gain_pct`` — single-step % gain (kernel_opt promotions).
+    * ``kernel_id`` — kid for kernel-owned entries.
+    * ``fingerprint`` — content-hash deduplication key for explore.
+    * ``provenance`` — ``specialist:<domain>`` / ``default_grid`` /
+      ``llm_direct`` / ``legacy:<action>`` for explore winners.
+    * ``task_id`` — orchestrator task id (link to specialist_runs etc).
+    """
+    action: str
+    variant_name: str
+    candidate_extra_server_args: str
+    extra_envs: dict[str, str]
+    tput: float | None
+    ts: str
+    workspace: str | None
+    # gemm_tuning evidence
+    tuned_file: str
+    final_report_path: str
+    source: str
+    # generic optionals
+    gain_pct: float | None
+    kernel_id: str
+    fingerprint: str
+    provenance: str
+    task_id: str
+
+
+# ---------------------------------------------------------------------------
+# Kernel Roofline — hot-kernel table for the dashboard
+# ---------------------------------------------------------------------------
+# Mirrors ``<session_dir>/reports/kernel_roofline.json`` produced by the
+# kernel-agent's tracelens roofline pipeline. The dashboard renders one row
+# per kernel (default sort = ``gpu_pct`` desc); each entry is self-contained
+# so the consumer doesn't need to read the original report file.
+class KernelRooflineEntry(TypedDict, total=False):
+    """One hot-kernel row in the dashboard's kernel roofline table.
+
+    Keys mirror the on-disk shape; collector passes them through
+    verbatim (with type coercion) to keep the schema loose-coupled to
+    the tracelens output format. Fields documented in
+    ``Dashboard-Roofline 对接清单.md`` §1.
+    """
+    kernel_id: str                 # ``k001``..``k010``
+    name: str                      # ``aiter::ck_moe_stage1`` etc
+    source_file: str               # absolute path; "" when unknown
+    kernel_category: str           # ``MoE`` / ``LayerNorm`` / ``unknown``
+    bound_type: str                # ``memory-bound`` / ``compute-bound``
+    arithmetic_intensity: float
+    flops_per_byte: float
+    efficiency_percent: float      # kernel-self efficiency 0..100
+    gpu_pct: float                 # share of overall GPU time 0..100
+    call_count: int
+    duration_us: float
+    reusable_native_kernel: bool   # True ⇒ GEAK can swap in a custom kernel
+
+
+class KernelRoofline(TypedDict, total=False):
+    """Top-level ``kernel_roofline`` section.
+
+    Loaded from ``<session_dir>/reports/kernel_roofline.json`` when
+    present; left empty (``{}``) on missing / malformed file (collector
+    appends a warning instead of raising).
+    """
+    schema_version: int                    # tracelens output schema (currently 1)
+    source: str                            # provenance label, e.g. ``tracelens_analysis``
+    analysis_md_path: str                  # absolute path to the human-readable analysis
+    kernel_candidates_path: str            # absolute path to kernel_candidates.json
+    trace_input: str                       # absolute path to the trace dir
+    trace_input_type: str                  # ``capture_dir`` / ``trace_file`` / ...
+    kernels: list[KernelRooflineEntry]
 
 
 class SessionBreakdown(TypedDict, total=False):
@@ -682,6 +971,34 @@ class SessionBreakdown(TypedDict, total=False):
     kb_provenance: KBProvenance      # Cortex KB audit
     # specialist sub-agent dispatch records.
     specialist_runs: list[SpecialistRound]
+    # Raw KEEP ledger passthrough. Mirrors
+    # ``state.optimization_stack[]`` verbatim so downstream tooling
+    # (dashboard chart, GEMM-tuning visualization, audit trails) can
+    # read full per-entry evidence — including ``tuned_file`` /
+    # ``final_report_path`` for gemm_tuning entries and ``workspace``
+    # for any KEEP — without round-tripping back to state.json. The
+    # other "stack-derived" sections (``final.action_path``,
+    # ``attribution.gain_per_stack_entry``,
+    # ``roofline_progress.trajectory``) intentionally summarise this
+    # list for their respective consumers and don't carry the full
+    # per-entry metadata.
+    optimization_stack: list["OptimizationStackEntry"]
+    # Hot-kernel table for the dashboard (Dashboard-Roofline 对接清单
+    # §1). Mirrors ``<sd>/reports/kernel_roofline.json`` so consumers
+    # don't have to walk the kernel-agent output tree themselves.
+    kernel_roofline: KernelRoofline
+    # Per-snapshot roofline comparison list (one entry per
+    # ``state.roofline_snapshots`` history pass). Drives the markdown-
+    # report ``## Roofline`` section. Each entry has ``source_path /
+    # mode / baseline / latest / delta``.
+    roofline: list[dict[str, Any]]
+    # Optimization-progress curve for the dashboard
+    # (Dashboard-Roofline 对接清单 §2). Carries the trajectory
+    # (baseline + KEEP points), the ceiling/target reference lines,
+    # and the headline current-best numbers. Renamed from ``roofline``
+    # to ``roofline_progress`` to coexist with the existing list-
+    # shaped ``roofline`` consumed by the markdown renderer.
+    roofline_progress: RooflineProgress
 
     warnings: list[str]
     source_files: SourceFiles

@@ -157,6 +157,31 @@ def test_kill_remote_sigterms_then_process_exits(tmp_path, monkeypatch):
     assert not (d / "rank_0.pid").exists()
 
 
+def test_pd_decode_dist_init_port_derives_from_prefill():
+    """PD-disaggregated decode rendezvous port = prefill port + 1.
+
+    Covers operator override scenario: if `$RAYJOB_DIST_INIT_PORT` shifts
+    prefill (e.g. to 29501), decode must shift in lock-step (29502) so
+    the two endpoints never collide when both groups land on the same
+    host. Regression guard for the previous bug where decode was the
+    hard-coded constant `_PD_DECODE_DIST_INIT_PORT = 29501` and silently
+    clashed with an override of prefill to 29501.
+    """
+    lm = _load_script_module("lm_test_pd_decode_port", "launch_multinode.py")
+    # Default: 29500 → 29501
+    assert lm._pd_decode_dist_init_port(lm._DEFAULT_DIST_INIT_PORT) == 29501
+    # Operator override (the exact override example the source-comment cites)
+    assert lm._pd_decode_dist_init_port(29501) == 29502
+    # Arbitrary value: still + 1
+    assert lm._pd_decode_dist_init_port(40000) == 40001
+    # Hard-coded constant must NOT come back (regression guard).
+    assert not hasattr(lm, "_PD_DECODE_DIST_INIT_PORT"), (
+        "_PD_DECODE_DIST_INIT_PORT was reintroduced — decode port must "
+        "derive from args.dist_init_port + 1, not a separate constant, "
+        "or override of $RAYJOB_DIST_INIT_PORT silently collides."
+    )
+
+
 def test_build_sglang_cmd_head_has_host_port():
     lm = _load_script_module("lm_test_sglang_head", "launch_multinode.py")
     cmd = lm._build_sglang_cmd(

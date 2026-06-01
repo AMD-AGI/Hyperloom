@@ -148,6 +148,10 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         gpu_type_lc=str(merged["gpu_type"]).lower(),
         target_gpu=merged["target_gpu"],
         inferenceX_data=ifx_text,
+        inferencex_path=merged.get("inferencex_path", ""),
+        oob_path=merged.get("oob_path", ""),
+        tracelens_pkg_root=merged.get("tracelens_pkg_root", ""),
+        tracelens_root=merged.get("tracelens_root", ""),
         # Multi-node / Hyperloom-skill knobs (defaults match legacy single-node CI).
         nodes=nodes,
         target_gain=merged.get("target_gain", 10),
@@ -529,6 +533,9 @@ def main():
     claw_cfg["endpoint"] = resolve_var(claw_cfg["endpoint"])
     results_cfg["nfs_base"] = resolve_var(results_cfg.get("nfs_base", ""))
     defaults["inferencex_path"] = resolve_var(defaults.get("inferencex_path", ""))
+    defaults["oob_path"] = resolve_var(defaults.get("oob_path", ""))
+    defaults["tracelens_pkg_root"] = resolve_var(defaults.get("tracelens_pkg_root", ""))
+    defaults["tracelens_root"] = resolve_var(defaults.get("tracelens_root", ""))
     for m in config.get("models", []):
         if "model_path_override" in m:
             m["model_path_override"] = resolve_var(m["model_path_override"])

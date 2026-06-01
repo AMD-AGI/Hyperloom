@@ -32,7 +32,7 @@ from typing import Any, Iterable
 
 import httpx
 
-from .base import Source, SourceData, SourceUnavailable
+from .base import SourceData, SourceUnavailable
 
 
 log = logging.getLogger(__name__)
