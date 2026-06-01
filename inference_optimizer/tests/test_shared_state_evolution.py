@@ -430,21 +430,17 @@ def test_policy_blocks_llm_optimization_stack_write():
 # 9. KB_gaps/Gap-14 — search ledgers locked under CORE_STATE_FIELDS
 # ===========================================================================
 def test_search_ledgers_in_core_state_fields():
-    """KB_design §3.10 §6.2 — ``explore_search`` and the legacy
-    ``backends_search`` / ``params_search`` ledgers are
-    Coordinator-only fact-layer writes. Locking them as CORE
-    closes the Inv-10.2 defense surface KB_gaps/Gap-14 flagged."""
+    """KB_design §3.10 §6.2 — the unified ``explore_search`` ledger is a
+    Coordinator-only fact-layer write. Locking it as CORE closes the
+    Inv-10.2 defense surface KB_gaps/Gap-14 flagged."""
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
-    for field_name in ("explore_search", "backends_search", "params_search"):
-        assert field_name in CORE_STATE_FIELDS, (
-            f"{field_name!r} must be in CORE_STATE_FIELDS so LLM "
-            "update_state cannot rewrite the search ledger"
-        )
+    assert "explore_search" in CORE_STATE_FIELDS, (
+        "'explore_search' must be in CORE_STATE_FIELDS so LLM "
+        "update_state cannot rewrite the search ledger"
+    )
 
 
-@pytest.mark.parametrize(
-    "field_name", ["explore_search", "backends_search", "params_search"],
-)
+@pytest.mark.parametrize("field_name", ["explore_search"])
 def test_policy_blocks_llm_search_ledger_write(field_name):
     """LLM ``update_state{changes: {<ledger>: ...}}`` must surface a
     ``state_field`` denial."""
