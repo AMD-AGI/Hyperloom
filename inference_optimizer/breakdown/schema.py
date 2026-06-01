@@ -848,8 +848,8 @@ class OptimizationStackEntry(TypedDict, total=False):
       / ``framework_pr`` / ``validate_stack``.
     * ``variant_name`` — human-readable label (``vllm_kv_cache_fp8`` /
       kid for kernel_opt / PR ref for framework_pr / etc.).
-    * ``candidate_extra_sglang_args`` — full CLI fragment patched into
-      the SGLang launch.
+    * ``candidate_extra_server_args`` — full CLI fragment patched into
+      the server launch.
     * ``extra_envs`` — env-var dict patched into the launch.
     * ``tput`` — measured throughput (tok/s/GPU) at this stack depth.
     * ``ts`` — iso UTC promotion timestamp.
@@ -875,7 +875,7 @@ class OptimizationStackEntry(TypedDict, total=False):
     """
     action: str
     variant_name: str
-    candidate_extra_sglang_args: str
+    candidate_extra_server_args: str
     extra_envs: dict[str, str]
     tput: float | None
     ts: str

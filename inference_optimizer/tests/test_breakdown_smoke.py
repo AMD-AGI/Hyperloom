@@ -1624,7 +1624,7 @@ def test_optimization_stack_full_field_passthrough(tmp_path: Path) -> None:
             {
                 "action": "explore",
                 "variant_name": "continuous_decode_steps_4",
-                "candidate_extra_sglang_args":
+                "candidate_extra_server_args":
                     "--num-continuous-decode-steps 4 --scheduler-recv-interval 4",
                 "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
                 "tput": 1313.5356953711394,
@@ -1640,7 +1640,7 @@ def test_optimization_stack_full_field_passthrough(tmp_path: Path) -> None:
     e = stack[0]
     assert e["action"] == "explore"
     assert e["variant_name"] == "continuous_decode_steps_4"
-    assert e["candidate_extra_sglang_args"].startswith("--num-continuous-decode-steps")
+    assert e["candidate_extra_server_args"].startswith("--num-continuous-decode-steps")
     assert e["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
     assert e["tput"] == pytest.approx(1313.5356953711394)
     assert e["ts"] == "2026-05-29T11:18:24.339975+00:00"
@@ -1665,7 +1665,7 @@ def test_optimization_stack_passes_through_gemm_tuning_evidence(
             {
                 "action": "gemm_tuning",
                 "variant_name": "a8w8_blockscale_tuned_gemm",
-                "candidate_extra_sglang_args": "",
+                "candidate_extra_server_args": "",
                 "extra_envs": {
                     "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE":
                         "/abs/path/a8w8_blockscale_tuned_gemm.csv",

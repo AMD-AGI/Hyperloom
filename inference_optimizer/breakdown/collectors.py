@@ -3633,7 +3633,7 @@ def _normalize_optimization_stack_entry(raw: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {
         "action":                       str(raw.get("action") or ""),
         "variant_name":                 str(raw.get("variant_name") or ""),
-        "candidate_extra_sglang_args":  str(raw.get("candidate_extra_sglang_args") or ""),
+        "candidate_extra_server_args":  str(raw.get("candidate_extra_server_args") or ""),
         "extra_envs":                   dict(raw.get("extra_envs") or {}),
         "tput":                         _to_float(raw.get("tput")),
         "ts":                           str(raw.get("ts") or ""),
