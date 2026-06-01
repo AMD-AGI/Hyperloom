@@ -342,6 +342,55 @@ env vars BEFORE running `install.sh`. Single-node WekaFS-mount setups (the
 production default) need none of this — `ensure_tracelens` / `ensure_oob`
 already handle the read-only-source case.
 
+### Step 1.5 — Write the advisory `model_arch` profile (best-effort)
+
+Before launching, produce an **advisory** architecture profile so the
+orchestration + specialist prompts carry richer model context than the
+coarse `--model-class` tag. This is **best-effort and non-fatal**: a
+missing / invalid file simply causes Hyperloom to omit the section — it
+never blocks launch, never replaces `--model-class` (still required), and
+is always **subordinate to live TraceLens evidence** at runtime (it drives
+no deterministic gating — atom seed grid, framework gap token, recipe key,
+and prompt label all stay on `model_class`).
+
+Steps for the launching agent:
+
+1. **Gallery lookup** — fetch the LLM Architecture Gallery
+   (`https://sebastianraschka.com/llm-architecture-gallery/`) and locate
+   the card for the model being launched. Extract the schema fields below.
+2. **Fallback classify** — if the model is not in the gallery, do a
+   lightweight classify from the model's local `config.json` (decoder
+   type, attention variant, expert counts, MTP, SWA window) and set
+   `"source": "config_classify"`.
+3. **Write the convention file** — write the profile to
+   `$USER_DATA_PATH/model_arch.json` (the workspace root, parent of all
+   model/session dirs). Include `model_name` (required for the stale-file
+   guard — its basename must match the launched `--model` basename or
+   Hyperloom ignores the file). All other fields are optional; renderers
+   drop empty fields.
+
+```json
+{
+  "model_name": "DeepSeek-R1-0528",
+  "source": "gallery",
+  "decoder_type": "Sparse MoE",
+  "attention": "MLA",
+  "layer_mix": "61 MLA",
+  "kv_cache_per_token": "68.6 KiB",
+  "active_params": "37B active / 671B total",
+  "num_experts": 256,
+  "experts_per_tok": 8,
+  "mtp": true,
+  "swa_window": null,
+  "norm": "RMSNorm",
+  "notes": "DeepSeek V3-style: dense prefix + shared expert + MTP-1 path"
+}
+```
+
+If you cannot determine the architecture, skip this step — do not write a
+placeholder file. Hyperloom degrades silently (WARNING in its own logs)
+when the file is absent, invalid, or stale.
+
 ### Step 2 — Launch
 
 **Multi-node (`nodes >= 2`):** [`multi_node/SKILL.md`](multi_node/SKILL.md).
@@ -351,7 +400,7 @@ inference_optimizer optimize \
   --model "$MODEL_PATH" \
   --framework vllm \           # sglang (default) / vllm / atom (atom: single-node only, IR-8)
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
-  --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; biases per-action curated priors
+  --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; categorical key for atom seed grid + framework gap token + recipe key + prompt label
   --max-hours 2 \
   --compare-against-gpu B200   # optional — when set, fetches real InferenceX reference; when unset, target_analysis still runs and writes a 'no_target_gpu_configured' marker JSON
 ```
@@ -365,7 +414,7 @@ supply session metadata directly via CLI flags / env vars:
 | Model path | `--model` | — | required |
 | Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` — atom triggers the IR-8 multi-node guard only (kernel-agent / framework-agent / profile / roofline all run on atom) |
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
-| Model class | `--model-class` | `MODEL_CLASS` | drives `orchestrator/scoring.MODEL_CLASS_ACTION_PRIORS`; defaults to `moe_mla` when unset |
+| Model class | `--model-class` | `MODEL_CLASS` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); defaults to `moe_mla` when unset. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
 
 A user request to optimize a model is approval to run Step 1 on a fresh

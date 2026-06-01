@@ -7614,6 +7614,21 @@ class Coordinator:
         if int(getattr(state, "max_model_len", 0) or 0) > 0:
             params.setdefault("max_model_len", int(state.max_model_len))
 
+        # Advisory ``model_arch`` profile -> specialist ``## 2. HARDWARE
+        # CONTEXT`` via the existing ``arch_notes`` carrier. Reuses the
+        # single-source renderer from shared_state so the orchestration
+        # summary and specialist prompts stay in lockstep. Skipped entirely
+        # when no profile was loaded, so non-arch sessions render exactly as
+        # before. Prompt-context only; no deterministic gating reads it.
+        if "arch_notes" not in params:
+            from .shared_state import render_model_arch_compact
+
+            _arch_notes = render_model_arch_compact(
+                getattr(state, "model_arch", None)
+            )
+            if _arch_notes:
+                params["arch_notes"] = _arch_notes
+
         # fill gap-specific anchors from the
         # gaps[] ledger. Orchestration carries a ``gap_canonical_id``
         # via ``delegate.params`` (and also as the M5 ``gap`` field);
