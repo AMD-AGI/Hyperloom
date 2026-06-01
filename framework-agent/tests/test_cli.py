@@ -109,6 +109,38 @@ def test_main_explore_plan_happy_path(monkeypatch, tmp_path: Path, capsys) -> No
     assert captured["execute"] is False
 
 
+def test_main_candidates_accepts_atom_framework(monkeypatch, tmp_path: Path, capsys) -> None:
+    """``fa candidates`` must accept ``framework=atom`` (free-form
+    string, no enum validation) and forward the request through
+    enumerate_candidates unchanged. Smoke-tests that atom is a
+    first-class framework name in the fa CLI surface."""
+    req_payload = {
+        "framework": "atom",
+        "repo_url": "https://github.com/ROCm/ATOM.git",
+        "work_dir": str(tmp_path / "w"),
+        "baseline": {"throughput": 1.0},
+        "candidate_refs": ["main"],
+    }
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req_payload), encoding="utf-8")
+
+    import framework_agent.sources as src
+
+    captured = {}
+
+    def fake_enum(r):
+        captured["repo_url"] = r.repo_url
+        return [Candidate(ref="main", repo=r.repo_url, source="explicit")]
+
+    monkeypatch.setattr(src, "enumerate_candidates", fake_enum)
+
+    rc = cli.main(["candidates", "--request", str(req_path)])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 1
+    assert captured["repo_url"] == "https://github.com/ROCm/ATOM.git"
+
+
 def test_main_explore_execute_flag_propagates(monkeypatch, tmp_path: Path) -> None:
     """--execute must reach explorer.explore as execute=True."""
     req_payload = {

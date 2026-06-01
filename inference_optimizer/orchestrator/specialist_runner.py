@@ -451,6 +451,7 @@ class SpecialistRunner:
                 pr_monitor_available=bool(
                     params.get("pr_monitor_available", True)
                 ),
+                framework=str(params.get("framework") or ""),
                 framework_source_roots=tuple(
                     params.get("framework_source_roots") or ()
                 ),
@@ -476,7 +477,6 @@ class SpecialistRunner:
                 # ``_format_version_note`` can annotate version-mismatched
                 # lessons / pitfalls. Both empty when the Coordinator
                 # didn't warm them (legacy callers / pre-PR sessions).
-                framework=str(params.get("framework") or ""),
                 framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(
                     str(workspace_for_prompt) if workspace_for_prompt else ""

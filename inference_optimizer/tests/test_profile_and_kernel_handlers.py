@@ -252,13 +252,7 @@ def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
 # yaml-hardcoded TP=1 and OOM-ed retry forever).
 # ===========================================================================
 def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
-    """TP env var must override yaml hardcode (was 1, becomes 8).
-
-    Bypass the visible-GPU clamp added in #zihao/qwen3-8b-e2e — that clamp
-    intentionally pulls TP back down to ``torch.cuda.device_count()`` when
-    the operator over-requests, but here we explicitly want to assert the
-    env-wins contract regardless of the host's GPU count.
-    """
+    """TP env var must override yaml hardcode (was 1, becomes 8)."""
     import yaml
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -283,13 +277,7 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
     tmp_path, monkeypatch,
 ):
     """When TP=8 is set via env but ROCR_VISIBLE_DEVICES isn't explicit,
-    expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices.
-
-    The TP clamp is bypassed here so the assertion holds on hosts with
-    fewer than 8 visible GPUs; the clamp's own behaviour is exercised by
-    ``test_materialize_config_with_envs_clamps_tp_to_visible_gpus`` in
-    ``test_baseline_param_overrides``.
-    """
+    expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices."""
     import yaml
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -320,13 +308,7 @@ def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
 ):
     """If explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires,
     `_workload_envs` auto-expands to 0..TP-1 and logs a warning, so SGLang
-    actually sees enough GPUs to start.
-
-    The TP clamp is bypassed here because the assertion is specifically
-    about the *original* ROCR expansion logic that runs after TP is
-    resolved; on a 4-GPU CI box without the bypass the clamp would pull
-    TP down to 4 and ROCR would not need expansion at all.
-    """
+    actually sees enough GPUs to start."""
     import yaml
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -890,71 +872,65 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path):
-    """B2: FRAMEWORK=atom must short-circuit ProfileExecutor to a
-    structured skipped result BEFORE any Magpie subprocess is launched.
-    atom (Magpie v1) has no torch_profiler wiring — running the full
-    profile path would either silently no-op or, worse, crash because
-    sglang/vllm-specific --profiler-config flags get injected into
-    EXTRA_ATOM_ARGS. Verified by checking the result dict shape AND
-    that no subprocess machinery (BaselineExecutor.__call__ /
-    run_with_session_kill) ran."""
+    """FRAMEWORK=atom now falls through to the normal profile path.
+
+    The atom Magpie wrapper bridges PROFILE=1 to atom's torch profiler,
+    so the historical structured ``skipped`` short-circuit is retired.
+    """
     monkeypatch.setenv("FRAMEWORK", "atom")
     pe = ProfileExecutor()
-    # If the short-circuit fails, the executor would try to materialize a
-    # YAML and shell out to Magpie. Sentinel-patch the parent __call__ so
-    # we can prove it was never reached.
+    # Sentinel-patch the parent __call__ so we can prove the normal path
+    # is reached without launching Magpie in this unit test.
     called = {"parent": False}
 
-    async def _explode(self, ctx):  # pragma: no cover — must not run
+    async def _fake_parent(self, ctx):
         called["parent"] = True
         return {"status": "succeeded"}
 
-    monkeypatch.setattr(BaselineExecutor, "__call__", _explode)
+    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
 
     task = SimpleNamespace(params={}, task_id="t-atom-profile")
     ctx = SimpleNamespace(task=task, extra=None)
 
     result = await pe(ctx)
 
-    assert result["status"] == "skipped"
-    assert result["error_class"] == "atom_no_profiler"
-    assert "torch_profiler" in result["error"]
-    assert called["parent"] is False, (
-        "ProfileExecutor must short-circuit BEFORE BaselineExecutor.__call__"
-    )
+    assert result["status"] == "succeeded"
+    assert called["parent"] is True
 
 
 @pytest.mark.asyncio
 async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
-    """B2: FRAMEWORK=atom must short-circuit RooflineExecutor at its
-    entrypoint, returning status=skipped without invoking profile or
-    trace_analyze sub-steps. Critical because the composite would
-    otherwise treat a skipped profile_result as a failure (the existing
-    _failed("profile", ...) branch) and pollute roofline_failure_streak."""
+    """FRAMEWORK=atom now attempts the normal roofline profile sub-step."""
     from inference_optimizer.orchestrator.action_executors.roofline import (
         RooflineExecutor,
     )
 
     monkeypatch.setenv("FRAMEWORK", "atom")
-    # RooflineExecutor requires shared_state, but the atom guard returns
-    # before touching it — a sentinel object is enough.
     rexec = RooflineExecutor(shared_state=SimpleNamespace())
 
-    # Sentinel: prove the lazy import / sub-step orchestration never runs.
+    # Sentinel: prove the lazy import / sub-step orchestration is reached.
     import inference_optimizer.orchestrator.action_executors.profile as profile_mod
 
-    async def _explode(_ctx):  # pragma: no cover — must not run
+    async def _explode(_ctx):
         raise AssertionError("profile_executor must not be invoked under atom")
 
     monkeypatch.setattr(profile_mod, "profile_executor", _explode)
 
-    task = SimpleNamespace(params={}, task_id="t-atom-roofline")
-    ctx = SimpleNamespace(task=task, extra=None)
+    task = SimpleNamespace(
+        params={},
+        task_id="t-atom-roofline",
+        idempotency_key="t-atom-roofline",
+        requires_lanes=[],
+        allowed_tools=[],
+        side_effects=[],
+        lease_ttl_sec=0,
+    )
+    ctx = SimpleNamespace(task=task, lease=None, extra=None)
 
     result = await rexec(ctx)
-    assert result["status"] == "skipped"
-    assert result["error_class"] == "atom_no_profiler"
-    assert result["framework"] == "atom"
+    assert result["status"] == "failed"
+    assert result["phase"] == "profile"
+    assert "profile_executor raised" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -1253,8 +1229,8 @@ async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monke
         session_dir=session_dir,
     )
     assert res["candidates_path"] == "/tmp/kernel_candidates.json"
-    assert "--roofline-json" in captured["cmd"]
-    assert "/tmp/roofline.json" in captured["cmd"]
+    assert "--roofline-json" not in captured["cmd"]
+    assert "/tmp/roofline.json" not in captured["cmd"]
     assert "--capture-folder" in captured["cmd"]
     assert "/tmp/capture_traces" in captured["cmd"]
 
@@ -1773,7 +1749,7 @@ def test_record_trace_analyze_defaults_task_groups_to_empty_list(session_dir):
     assert state.last_trace_analyze.get("task_groups") == []
 
 
-def test_record_trace_analyze_filters_invalid_warning_entries(session_dir):
+def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
     """Defensive: a buggy tool emitting non-dict entries or dicts
     missing the ``code`` field shouldn't poison ``last_trace_analyze``.
     We accept only well-formed dicts with at least a ``code`` key so
@@ -2107,6 +2083,7 @@ def test_handlers_dispatch_table():
     """P2-2 only registered trace_analyze + run_optimization. P2-4
     added apply_patch + integrate (covered in test_p2_4_integrate_report)."""
     assert krh.has_handler("trace_analyze")
+    assert krh.has_handler("run_gemm_tuning")
     assert krh.has_handler("run_optimization")
     assert not krh.has_handler("totally_unknown_kind")
 
@@ -2388,10 +2365,10 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": cached_path,
     }
-    # Seed ``last_trace_analyze`` so the request-prerequisite gate
-    # clears. (Pre-M4 ``last_select_kernels`` mirror was removed in
-    # this branch.)
-    c.shared_state.last_trace_analyze = {
+    # On this branch ``_sequence_denial_for_request`` still consults
+    # ``last_select_kernels`` (the rename to ``trace_analyze`` is
+    # planned for M3); seed it with the same trace so the gate clears.
+    c.shared_state.last_select_kernels = {
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": cached_path,
     }
@@ -2480,7 +2457,7 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     with patch.object(krh, "_run_kernel_backend_sequence",
                        side_effect=fake_sequence):
         await krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy"},
+            payload={"candidates_path": "/dummy", "max_parallel": 3},
             candidates=candidates,
             session_dir=session_dir,
             record_partial=record_partial,
@@ -2760,11 +2737,9 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": "/wekafs/cached/candidates.json",
     }
-    # ``last_trace_analyze`` is the canonical request-prerequisite
-    # cache; just re-seed it here (the test sets only the prefix
-    # earlier — this assignment normalises that to a full dict so
-    # tests don't depend on a particular helper's seeding shape).
-    c.shared_state.last_trace_analyze = dict(c.shared_state.last_trace_analyze)
+    # The sequence gate on this branch still consults
+    # ``last_select_kernels`` (M3 will rename it to ``trace_analyze``).
+    c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
     c.shared_state.current_best = {
         "action": "integrate",
         "tput": 4500.0,
@@ -2815,7 +2790,7 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": "/wekafs/cached/candidates.json",
     }
-    c.shared_state.last_trace_analyze = dict(c.shared_state.last_trace_analyze)
+    c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
     c.shared_state.current_best = {"action": "backends", "tput": 4500.0}
 
     captured: dict = {}

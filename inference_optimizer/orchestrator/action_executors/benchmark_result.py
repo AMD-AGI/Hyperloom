@@ -61,6 +61,23 @@ _DEFAULT_LEAK_ARTIFACT_GLOBS: tuple[str, ...] = (
 )
 _DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 
+# Slack subtracted from ``subprocess_started_unix`` before comparing it
+# against a candidate leak's ``st_mtime``. The cutoff exists to reject
+# *stale* leaks from a previous run or an earlier grid variant, which are
+# always seconds-to-hours older than the current launch. A file written
+# *after* the launch can nonetheless report an ``st_mtime`` slightly
+# *behind* the ``time.time()`` we snapshot as ``subprocess_started_unix``:
+# filesystem mtime resolution is coarser than the monotonic-ish wall clock
+# (commonly 1s on NFS, and even on local ext4 we measured the freshly
+# written file's mtime trailing the pre-write clock by several ms). The old
+# 1e-3 (1ms) tolerance was below that skew, so genuinely fresh salvage
+# candidates were misclassified as stale and dropped — silently failing a
+# benchmark whose result had actually been written. One full second is
+# comfortably larger than any observed clock-vs-mtime skew / FS granularity,
+# yet far smaller than the multi-second gaps that separate genuinely stale
+# prior-run leaks, so it preserves the staleness guard without false drops.
+_MTIME_GATE_SLACK_SEC: float = 1.0
+
 
 def _to_float(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
@@ -144,10 +161,13 @@ def _rescue_candidate_paths(
        (currently ``/workspace/inferencex_result.json``).
 
     When ``subprocess_started_unix`` is provided, candidates whose mtime
-    is **earlier** than that timestamp are dropped. This guards against
-    a stale leak from a *previous* run masquerading as the current
-    run's result — without the cutoff we'd risk re-promoting a stale
-    1761.6 tok/s number after a fresh run silently failed.
+    is **earlier** than that timestamp (minus :data:`_MTIME_GATE_SLACK_SEC`)
+    are dropped. This guards against a stale leak from a *previous* run
+    masquerading as the current run's result — without the cutoff we'd risk
+    re-promoting a stale 1761.6 tok/s number after a fresh run silently
+    failed. The slack absorbs the skew between the wall clock used for
+    ``subprocess_started_unix`` and the coarser filesystem mtime resolution
+    so a leak written just after launch is not misjudged as stale.
 
     The function intentionally never raises: any I/O error on a single
     candidate is swallowed (the file is just skipped) so the caller's
@@ -180,7 +200,7 @@ def _rescue_candidate_paths(
                 mtime = path.stat().st_mtime
             except OSError:
                 return
-            if mtime + 1e-3 < float(subprocess_started_unix):
+            if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
                 return
         candidates.append(path)
 
@@ -365,7 +385,9 @@ def harvest_leaked_artifacts(
                         mtime = match.stat().st_mtime
                     except OSError:
                         continue
-                    if mtime + 1e-3 < float(subprocess_started_unix):
+                    if mtime + _MTIME_GATE_SLACK_SEC < float(
+                        subprocess_started_unix
+                    ):
                         continue
                 destination_path = destination / match.name
                 try:
