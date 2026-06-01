@@ -3555,6 +3555,36 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         )
 
 
+def _argv_has_option(argv: list[str], option: str) -> bool:
+    """Return True when argv explicitly carries ``option``."""
+    prefix = f"{option}="
+    return any(arg == option or arg.startswith(prefix) for arg in argv)
+
+
+def _export_workload_envs_for_optimize(
+    args: argparse.Namespace,
+    *,
+    nodes_resolved: int,
+    tp_resolved: int,
+    ep_resolved: int,
+    argv: list[str] | None = None,
+) -> None:
+    """Mirror explicit workload CLI flags into env for executors.
+
+    Single-node runs normally preserve YAML workload defaults. When the
+    operator explicitly passes ``--tp`` / ``--conc`` / ``--ep``, those values
+    must still win because the action executors read these knobs from
+    ``os.environ`` while materializing Magpie YAMLs.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if nodes_resolved >= 2 or _argv_has_option(argv, "--tp"):
+        os.environ["TP"] = str(tp_resolved)
+    if nodes_resolved >= 2 or _argv_has_option(argv, "--conc"):
+        os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
+    if nodes_resolved >= 2 or _argv_has_option(argv, "--ep"):
+        os.environ["EP"] = str(ep_resolved)
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     # Surface --nodes to the rest of the process (preflight diagnostics
     # and any executor that wants to short-circuit when the optimizer is
@@ -3614,20 +3644,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
-    # Re-export $TP / $CONC / $EP from the resolved CLI args, but ONLY in
-    # multi-node mode. Rationale: main's single-node design carries TP /
-    # CONC via `benchmark.envs.TP` / `benchmark.envs.CONC` in the YAML
-    # config (see SKILL.md §"Before a new model run"). Writing the
-    # argparse defaults ("1" / "8" / "1") back into os.environ here
-    # would silently override those YAML values via
-    # `_workload_envs.apply_runtime_benchmark_overrides` (which prefers
-    # env over envs.* for these keys). The multi-node orchestrator
-    # subprocess + sweep child workers still need to see the resolved
-    # CLI values, so the env export stays for nodes>=2 runs.
-    if nodes_resolved >= 2:
-        os.environ["TP"] = str(tp_resolved)
-        os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
-        os.environ["EP"] = str(ep_resolved)
+    # Re-export $TP / $CONC / $EP from resolved CLI args when the user
+    # explicitly supplied them, plus always for multi-node where child
+    # workers need the values. Avoid exporting argparse defaults in
+    # single-node mode because YAML workload defaults remain supported.
+    _export_workload_envs_for_optimize(
+        args,
+        nodes_resolved=nodes_resolved,
+        tp_resolved=tp_resolved,
+        ep_resolved=ep_resolved,
+    )
     # User-declared grid skip list. Resolution order is already enforced
     # by argparse default (--skip-variants > $SKIP_VARIANTS); we re-export
     # so executors started later via subprocess (multi-node orchestrator,
