@@ -16,10 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 from tracelens_analysis import (  # noqa: E402
-    _extra_reusable_roots_from_env,
     _flydsl_kernel_params,
+    _flydsl_reusable_roots,
     _looks_like_flydsl_source,
-    _reusable_source_roots,
+    _reusable_roots,
     classify_patchability,
     derive_kernel_category,
     enrich_candidates_with_runtime_metadata,
@@ -108,7 +108,9 @@ class TestReusableSourceRoots(unittest.TestCase):
         }
 
     def test_flydsl_sgl_workspace_root_is_reusable(self) -> None:
-        roots = _reusable_source_roots()
+        # /sgl-workspace/flydsl/ is one of the FlyDSL roots injected by
+        # _flydsl_reusable_roots() into the dynamic _reusable_roots() set.
+        roots = _reusable_roots()
         self.assertIn("/sgl-workspace/flydsl/", roots)
         cand = self._flydsl_candidate(
             "/sgl-workspace/flydsl/python/flydsl/ops/some_kernel.py",
@@ -117,9 +119,11 @@ class TestReusableSourceRoots(unittest.TestCase):
         self.assertTrue(reusable, msg=skip)
         self.assertEqual(skip, "")
 
-    def test_flydsl_site_packages_root_is_reusable(self) -> None:
+    def test_flydsl_default_wekafs_root_is_reusable(self) -> None:
+        # The WekaFS FlyDSL checkout used as $DSL2_ROOT on this stack is a
+        # default FlyDSL root, so its kernels reach GEAK (PR #668 contract).
         cand = self._flydsl_candidate(
-            "/usr/local/lib/python3.12/dist-packages/flydsl/kernels/k.py",
+            "/wekafs/yunkai/flydsl/kernels/moe_gemm_2stage.py",
         )
         reusable, skip = classify_patchability(cand)
         self.assertTrue(reusable, msg=skip)
@@ -130,38 +134,29 @@ class TestReusableSourceRoots(unittest.TestCase):
         self.assertFalse(reusable)
         self.assertIn("reusable framework root", skip)
 
-    def test_env_extension_admits_extra_root(self) -> None:
-        extra = "/wekafs/user-local/flydsl-kernels/"
-        with mock.patch.dict(
-            os.environ, {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": extra},
-        ):
-            self.assertIn(extra, _extra_reusable_roots_from_env())
-            self.assertIn(extra, _reusable_source_roots())
-            cand = self._flydsl_candidate(f"{extra}my_kernel.py")
+    def test_dsl2_root_env_injects_flydsl_root(self) -> None:
+        # $DSL2_ROOT (and $FLYDSL_ROOT) point at the live FlyDSL checkout;
+        # _flydsl_reusable_roots() must surface them (lower-cased, trailing
+        # slash) so a candidate under that checkout is patchable.
+        extra = "/wekafs/user-local/FlyDSL"
+        with mock.patch.dict(os.environ, {"DSL2_ROOT": extra}):
+            roots = _flydsl_reusable_roots()
+            self.assertIn("/wekafs/user-local/flydsl/", roots)
+            cand = self._flydsl_candidate(
+                "/wekafs/user-local/flydsl/kernels/k.py",
+            )
             reusable, skip = classify_patchability(cand)
             self.assertTrue(reusable, msg=skip)
 
-    def test_env_extension_normalizes_trailing_slash(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": "/no/trailing/slash"},
-        ):
-            roots = _extra_reusable_roots_from_env()
-            self.assertEqual(roots, ("/no/trailing/slash/",))
-
-    def test_env_extension_multiple_colon_separated(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": "/a/:/b/:/c"},
-        ):
-            roots = _extra_reusable_roots_from_env()
-            self.assertEqual(roots, ("/a/", "/b/", "/c/"))
-
-    def test_env_extension_absent_returns_empty(self) -> None:
+    def test_flydsl_roots_always_include_known_defaults(self) -> None:
+        # Even with no env override, the known FlyDSL checkouts are present.
         env = dict(os.environ)
-        env.pop("HYPERLOOM_EXTRA_REUSABLE_ROOTS", None)
+        env.pop("DSL2_ROOT", None)
+        env.pop("FLYDSL_ROOT", None)
         with mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(_extra_reusable_roots_from_env(), ())
+            roots = _flydsl_reusable_roots()
+            self.assertIn("/wekafs/yunkai/flydsl/", roots)
+            self.assertIn("/sgl-workspace/flydsl/", roots)
 
 
 class TestSourceTypeAdmission(unittest.TestCase):
@@ -395,20 +390,19 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
         self.handlers = kernel_request_handlers
 
     def test_orchestrator_allowlist_has_flydsl(self) -> None:
-        self.assertIn(
-            "/sgl-workspace/flydsl/", self.handlers._REUSABLE_SOURCE_ROOTS_STATIC,
-        )
-        self.assertIn(
-            "/usr/local/lib/python3.12/dist-packages/flydsl/",
-            self.handlers._REUSABLE_SOURCE_ROOTS_STATIC,
-        )
+        # Orchestrator gate (dynamic discovery) must include the FlyDSL
+        # checkout roots so it agrees with the kernel-agent classifier.
+        roots = self.handlers._reusable_source_roots()
+        self.assertIn("/sgl-workspace/flydsl/", roots)
+        self.assertIn("/wekafs/yunkai/flydsl/", roots)
 
-    def test_orchestrator_honours_env_override(self) -> None:
-        extra = "/wekafs/user-local/flydsl-kernels/"
-        with mock.patch.dict(
-            os.environ, {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": extra},
-        ):
-            self.assertIn(extra, self.handlers._reusable_source_roots())
+    def test_orchestrator_honours_dsl2_root_env(self) -> None:
+        extra = "/wekafs/user-local/FlyDSL"
+        with mock.patch.dict(os.environ, {"DSL2_ROOT": extra}):
+            self.assertIn(
+                "/wekafs/user-local/flydsl/",
+                self.handlers._reusable_source_roots(),
+            )
 
 
 if __name__ == "__main__":

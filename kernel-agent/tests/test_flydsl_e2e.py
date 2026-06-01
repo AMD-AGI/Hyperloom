@@ -80,11 +80,12 @@ class TestFlyDSLNaiveGemmEndToEnd(unittest.TestCase):
 
     def test_patchability_admits_fixture_via_env_override(self) -> None:
         """Bundled fixture sits outside the standard FlyDSL install roots;
-        ``HYPERLOOM_EXTRA_REUSABLE_ROOTS`` is the documented escape hatch
-        for self-hosted CI sandboxes (and for ad-hoc kernel checkouts on
-        a developer laptop)."""
+        pointing ``$FLYDSL_ROOT`` (or ``$DSL2_ROOT``) at the checkout is the
+        documented escape hatch for self-hosted CI sandboxes (and for ad-hoc
+        kernel checkouts on a developer laptop). The classifier surfaces it
+        via ``_flydsl_reusable_roots`` into the dynamic reusable-root set."""
         with mock.patch.dict(
-            os.environ, {"HYPERLOOM_EXTRA_REUSABLE_ROOTS": FIXTURE_DIR},
+            os.environ, {"FLYDSL_ROOT": FIXTURE_DIR},
         ):
             reusable, skip = classify_patchability(self._candidate())
         self.assertTrue(reusable, msg=skip)
