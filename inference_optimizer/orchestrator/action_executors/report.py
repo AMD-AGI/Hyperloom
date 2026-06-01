@@ -498,6 +498,49 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
         return None
 
 
+def _write_kernel_opt_summary(
+    state: SharedState,
+    session_dir: Path,
+    output_dir: Path,
+) -> Path | None:
+    """Build + atomically write ``reports/kernel_optimization_summary.json``.
+
+    Best-effort: any failure is logged and returns ``None`` so the
+    upstream ``final.json`` write still happens. The summary aggregates
+    :attr:`SharedState.kernel_opt_attempts` with per-kernel kernel-agent
+    ``results/<kid>.json`` so the front-end can answer "why did each
+    kernel-agent attempt not produce an optimized kernel?".
+    """
+    try:
+        from ..kernel_attempt_summary import build_kernel_optimization_summary
+        summary = build_kernel_optimization_summary(state, session_dir)
+        out_path = output_dir / "kernel_optimization_summary.json"
+        with out_path.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
+        return out_path
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "report_executor: failed to write kernel_optimization_summary.json: %s",
+            exc,
+        )
+        return None
+
+
+def _read_ko_summary_totals(path: Path) -> dict[str, int]:
+    """Re-read the just-written totals so the pointer in final.json
+    doesn't drift from the on-disk file."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        totals = data.get("totals") or {}
+        return {
+            k: int(v)
+            for k, v in totals.items()
+            if isinstance(v, (int, float))
+        }
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
 def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
     """Pick the most useful 1-line summary out of an event's payload."""
     summary = ""
@@ -592,6 +635,23 @@ class ReportExecutor:
             highlights,
             external_baseline=external_baseline,
         )
+
+        # Kernel-optimization forensic summary — separate file so the
+        # front-end can poll it independently of final.json. The pointer
+        # is added to final.json for discoverability.
+        ko_summary_path = _write_kernel_opt_summary(state, session_dir, output_dir)
+        if ko_summary_path is not None:
+            try:
+                rel = ko_summary_path.relative_to(session_dir)
+                summary["kernel_optimization_summary"] = {
+                    "report_path": str(rel),
+                    "totals": _read_ko_summary_totals(ko_summary_path),
+                }
+            except ValueError:
+                summary["kernel_optimization_summary"] = {
+                    "report_path": str(ko_summary_path),
+                    "totals": _read_ko_summary_totals(ko_summary_path),
+                }
 
         json_path = output_dir / "final.json"
         md_path = output_dir / "final.md"

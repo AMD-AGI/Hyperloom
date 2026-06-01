@@ -1559,7 +1559,64 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
+    _print_kernel_opt_summary_line(state)
     print("===============================================")
+
+
+def _print_kernel_opt_summary_line(state: SharedState) -> None:
+    """One-line forensic readout of kernel_opt attempts at session end.
+
+    Pulls the same aggregation used by
+    ``reports/kernel_optimization_summary.json`` so stdout matches the
+    on-disk report. Best-effort: any failure is swallowed (this is a
+    summary print, not a critical path).
+    """
+    try:
+        from .orchestrator.kernel_attempt_summary import (
+            build_kernel_optimization_summary,
+        )
+        session_dir = _resolve_session_dir_for_summary(state)
+        if session_dir is None:
+            return
+        summary = build_kernel_optimization_summary(state, session_dir)
+        totals = summary.get("totals") or {}
+        attempted = int(totals.get("attempted") or 0)
+        if attempted == 0 and int(totals.get("unattempted") or 0) == 0:
+            return
+        integrated = int(totals.get("integrated") or 0)
+        rejected = int(totals.get("rejected") or 0)
+        unattempted = int(totals.get("unattempted") or 0)
+        print(
+            f"  kernel_opt           : {attempted} attempted "
+            f"({integrated} integrated, {rejected} rejected), "
+            f"{unattempted} unattempted in top candidates"
+        )
+        takeaways = summary.get("top_takeaways") or []
+        if len(takeaways) >= 2:
+            print(f"  kernel_opt_top_cause : {takeaways[1]}")
+        report_path = (
+            Path(session_dir) / "reports" / "kernel_optimization_summary.json"
+        )
+        if report_path.is_file():
+            print(f"  kernel_opt_report    : {report_path}")
+    except Exception:  # noqa: BLE001 — stdout print must never fail the run
+        pass
+
+
+def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
+    """Best-effort session_dir lookup for the stdout kernel_opt line.
+
+    SharedState does not carry session_dir directly, so we use the same
+    discovery the SessionInit path uses: HYPERLOOM_SESSION_DIR env when
+    set, else the cwd-anchored default. Returns ``None`` if neither
+    resolves to an existing directory.
+    """
+    env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
+    if env_sd:
+        p = Path(env_sd).expanduser()
+        if p.is_dir():
+            return p
+    return None
 
 
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
