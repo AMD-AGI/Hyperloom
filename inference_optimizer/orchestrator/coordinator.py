@@ -2059,7 +2059,7 @@ class Coordinator:
 
     async def _run_kernel_opt_after_gemm(self) -> None:
         """Run the source-level kernel optimization batch after GEMM tuning."""
-        cached = self.shared_state.last_trace_analyze or self.shared_state.last_select_kernels or {}
+        cached = self.shared_state.last_trace_analyze or {}
         candidates_path = str(cached.get("candidates_path") or "")
         if not candidates_path:
             log.info("KERNEL entry: skip kernel_opt after GEMM; no candidates_path")
