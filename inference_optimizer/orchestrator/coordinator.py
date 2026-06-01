@@ -8458,11 +8458,20 @@ class Coordinator:
         kind = classify_change_kind(
             task.kind, variant_attrs if isinstance(variant_attrs, dict) else None,
         )
-        change = summarize_change(
-            task.kind,
-            variant_attrs if isinstance(variant_attrs, dict) else {"name": variant_name},
-            None,
-        )
+        # Ensure the change summary is variant-specific. When the variant
+        # dict carries no args/envs/name, summarize_change drops to the bare
+        # task kind ("explore"), so every regressed explore variant would
+        # write an indistinguishable KB pitfall/lesson description. Fall back
+        # to the variant_name (always present) so the row identifies which
+        # variant it was about.
+        change_attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
+        if not (
+            change_attrs.get("extra_sglang_args")
+            or change_attrs.get("extra_envs")
+            or change_attrs.get("name")
+        ) and variant_name:
+            change_attrs["name"] = variant_name
+        change = summarize_change(task.kind, change_attrs, None)
         error_class = None
         reason = None
         if outcome == OUTCOME_REVERT:
@@ -8858,9 +8867,15 @@ class Coordinator:
             integ = integ_by_kid.get(str(kid))
             e2e_gain = 0.0
             e2e_tput = 0.0
+            e2e_decision = ""
             integrated = False
             if isinstance(integ, dict):
                 integrated = True
+                # Integrate-layer verdict (KEEP / REVERT / NEEDS_REVIEW).
+                # ``decision`` below stays the micro-layer KEEP; this carries
+                # the E2E outcome so warm-start can skip a kernel whose patch
+                # was reverted at integrate (micro win, E2E loss).
+                e2e_decision = str(integ.get("last_decision") or "").upper()
                 try:
                     e2e_gain = float(integ.get("best_gain_pct") or 0.0)
                 except (TypeError, ValueError):
@@ -8886,6 +8901,7 @@ class Coordinator:
                 "decision":      "KEEP",
                 "e2e_gain_pct":  e2e_gain,
                 "e2e_tput":      e2e_tput,
+                "e2e_decision":  e2e_decision,
                 "integrated":    integrated,
                 "ts":            str(e.get("last_ts") or e.get("ts") or ""),
             })
@@ -8985,6 +9001,24 @@ class Coordinator:
                                     or self.session_dir.name),
                 "gain_pct":     cumulative_validated or cumulative_total,
                 "stack_len":    validated_stack_len or len(opt_stack),
+                # arbor-shape provenance so the session row is self-describing
+                # (before/after tput + when + which knobs). Previously omitted,
+                # leaving every recipe.json session at 0.0 / "" / [].
+                "throughput_before": float(getattr(ss, "baseline_tput", 0.0) or 0.0),
+                "throughput_after":  (
+                    float(current_best.get("tput", 0.0))
+                    if isinstance(current_best, dict) else 0.0
+                ),
+                "date":          datetime.now(timezone.utc).isoformat(),
+                "actions_taken": [
+                    nm for nm in (
+                        str(
+                            e.get("variant_name") or e.get("name")
+                            or e.get("action") or ""
+                        ).strip()
+                        for e in opt_stack if isinstance(e, dict)
+                    ) if nm
+                ],
             }],
         }
 
@@ -9122,16 +9156,40 @@ class Coordinator:
             }
             # Only overwrite best_config / best_throughput when THIS
             # session is an actual improvement (or the row has none).
-            # A CLOSE that ended without a validated win
-            # (best_throughput == 0.0) must NOT clobber a better
-            # historical config. Omitting the keys makes
+            # A CLOSE that ended without a validated win must NOT clobber a
+            # better historical config. Omitting the keys makes
             # ``_kb_amend_recipe`` preserve the live values.
+            #
+            # Two-part guard:
+            #   1. ``has_validated_win`` — this session produced a real
+            #      optimization (non-empty validated stack, positive validated
+            #      gain, OR a current_best that carries launch flags). A bare
+            #      baseline (no stack, gain<=0, no extra args) is NOT a win:
+            #      its tput is cross-workload-incomparable and it carries no
+            #      flags, so overwriting both drops the recipe's launch args
+            #      and clobbers a validated config (repro session
+            #      20260531T144553Z: 2813@isl256 clobbered 2532@isl1024).
+            #   2. ``my_tput > live_tput`` — even a real win must beat the
+            #      stored best before it replaces it.
             my_tput = float(attrs.get("best_throughput") or 0.0)
+            cb_now = getattr(ss, "current_best", {}) or {}
+            cb_args_now = (
+                str(cb_now.get("extra_sglang_args") or "").strip()
+                if isinstance(cb_now, dict) else ""
+            )
+            validated_gain = float(
+                getattr(ss, "cumulative_gain_validated", 0.0) or 0.0
+            )
+            has_validated_win = bool(
+                (getattr(ss, "optimization_stack", []) or [])
+                or validated_gain > 0.0
+                or cb_args_now
+            )
             try:
                 live_tput = float(existing_row.get("best_throughput") or 0.0)
             except (TypeError, ValueError):
                 live_tput = 0.0
-            if my_tput > live_tput:
+            if has_validated_win and my_tput > live_tput:
                 overrides["best_config"] = attrs["best_config"]
                 overrides["best_throughput"] = my_tput
             # Merge stack_fingerprint rather than replace: T0 stamps

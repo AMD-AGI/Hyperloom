@@ -164,6 +164,10 @@ class KernelOptimization:
     decision: str = ""
     e2e_gain_pct: float = 0.0
     e2e_tput: float = 0.0
+    # Integrate-layer verdict (KEEP / REVERT / NEEDS_REVIEW). ``decision``
+    # above stays the micro-layer KEEP; this carries the E2E outcome so
+    # warm-start can skip a kernel whose patch was reverted at integrate.
+    e2e_decision: str = ""
     integrated: bool = False
     ts: str = ""
 
@@ -176,6 +180,7 @@ class KernelOptimization:
             "decision":      str(self.decision),
             "e2e_gain_pct":  float(self.e2e_gain_pct),
             "e2e_tput":      float(self.e2e_tput),
+            "e2e_decision":  str(self.e2e_decision),
             "integrated":    bool(self.integrated),
             "ts":            str(self.ts),
         }
@@ -190,6 +195,7 @@ class KernelOptimization:
             decision=str(d.get("decision") or ""),
             e2e_gain_pct=float(d.get("e2e_gain_pct") or 0.0),
             e2e_tput=float(d.get("e2e_tput") or 0.0),
+            e2e_decision=str(d.get("e2e_decision") or ""),
             integrated=bool(d.get("integrated") or False),
             ts=str(d.get("ts") or ""),
         )
