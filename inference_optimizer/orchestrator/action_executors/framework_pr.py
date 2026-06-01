@@ -607,7 +607,7 @@ class FrameworkPrExecutor:
 
         variant = GridVariant(
             name=f"framework-pr-{slug}"[:96],
-            extra_sglang_args=str(params.get("base_extra_args") or "").strip(),
+            extra_server_args=str(params.get("base_extra_args") or "").strip(),
             extra_envs={},
             note=f"framework_pr:{slug}",
         )

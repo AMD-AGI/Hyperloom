@@ -72,6 +72,14 @@ class FakeAssistantMessage:
 
 
 @dataclass
+class FakeResultMessage:
+    """Stand-in for the SDK's terminal ResultMessage (carries .result —
+    the consolidated final assistant text)."""
+    result: str = ""
+    content: list[Any] = field(default_factory=list)
+
+
+@dataclass
 class FakeOptions:
     """Stand-in for ClaudeAgentOptions — captures kwargs for assertions."""
     kwargs: dict[str, Any] = field(default_factory=dict)
@@ -370,6 +378,101 @@ async def test_run_invalid_tool_use_input_drops_block_silently():
     # 2 tool_blocks counted, but only 1 valid intent
     assert res.metadata["tool_blocks"] == 2
     assert len(res.intents) == 1
+
+
+# ===========================================================================
+# raw_completion mode (dynamic_action ReAct runner backend)
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_raw_completion_returns_raw_text_without_intent():
+    """raw_completion mode: a text-only reply yields raw_text and does
+    NOT raise NoIntentEmitted."""
+    action = '{"tool": "read_source", "args": {"path": "/x"}}'
+    msgs = [
+        FakeAssistantMessage(content=[TextBlock(text=action)]),
+        FakeResultMessage(result=action),
+    ]
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory(msgs),
+        sdk_options_cls=FakeOptions,
+        raw_completion=True,
+    )
+    res = await backend.run("p")
+    assert res.intents == []
+    assert res.raw_text == action  # not duplicated
+
+
+@pytest.mark.asyncio
+async def test_raw_completion_prefers_result_no_duplication():
+    """The streamed TextBlock and the terminal ResultMessage.result
+    carry the same content; raw_text must not concatenate both."""
+    text = '{"tool": "emit_proposal", "args": {}}'
+    msgs = [
+        FakeAssistantMessage(content=[TextBlock(text=text)]),
+        FakeResultMessage(result=text),
+    ]
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory(msgs),
+        sdk_options_cls=FakeOptions,
+        raw_completion=True,
+    )
+    res = await backend.run("p")
+    assert res.raw_text == text
+    assert res.raw_text.count('"tool"') == 1
+
+
+@pytest.mark.asyncio
+async def test_raw_completion_falls_back_to_text_blocks_without_result():
+    """When no ResultMessage is emitted, raw_text is the joined
+    TextBlocks."""
+    msgs = [FakeAssistantMessage(content=[
+        TextBlock(text="part-a "), TextBlock(text="part-b"),
+    ])]
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory(msgs),
+        sdk_options_cls=FakeOptions,
+        raw_completion=True,
+    )
+    res = await backend.run("p")
+    assert res.raw_text == "part-a part-b"
+
+
+@pytest.mark.asyncio
+async def test_raw_completion_options_disable_tools_and_skip_suffix():
+    """raw_completion options: all tools disallowed, no MCP server, no
+    OUTPUT FORMAT suffix, and max_turns bumped above the SDK's strict
+    single-turn cap."""
+    captured: dict[str, Any] = {}
+
+    async def q(*, prompt, options):
+        captured["kwargs"] = options.kwargs
+        captured["prompt"] = prompt
+        yield FakeResultMessage(result="ok")
+
+    backend = ClaudeBackend(
+        sdk_query_factory=q,
+        sdk_options_cls=FakeOptions,
+        raw_completion=True,
+    )
+    await backend.run("the prompt", system_prompt="sys", max_turns=1)
+    kw = captured["kwargs"]
+    assert kw["allowed_tools"] == []
+    assert kw["disallowed_tools"]  # built-ins blocked
+    assert "mcp_servers" not in kw
+    assert kw["max_turns"] >= 2
+    assert "OUTPUT FORMAT" not in captured["prompt"]
+    assert captured["prompt"] == "the prompt"
+
+
+def test_raw_completion_disables_emit_intent_mcp():
+    """Constructing with raw_completion=True must not register the
+    emit_intent MCP server."""
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([]),
+        sdk_options_cls=FakeOptions,
+        raw_completion=True,
+    )
+    assert backend.has_emit_intent_tool is False
 
 
 # ===========================================================================

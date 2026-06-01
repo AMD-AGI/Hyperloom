@@ -17,6 +17,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
 
 from inference_optimizer.orchestrator.backends.critic_mock import (
     MockCriticBackend,
@@ -309,6 +310,70 @@ def test_prompt_includes_diff_url_when_present(tmp_path: Path) -> None:
     }
     _call_gate(stub, cand)
     assert "https://github.com/sgl-project/sglang/pull/1.diff" in backend.last_prompt
+
+
+# ---------------------------------------------------------------------------
+# atom-candidate rendering parity
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "framework, diff_url",
+    [
+        ("sglang", "https://github.com/sgl-project/sglang/pull/100.diff"),
+        ("vllm",   "https://github.com/ROCm/vllm/pull/200.diff"),
+        ("atom",   "https://github.com/ROCm/ATOM/pull/123/files"),
+    ],
+)
+def test_critic_prompt_renders_candidate_diff_url_across_frameworks(
+    tmp_path: Path, framework: str, diff_url: str,
+) -> None:
+    """The Critic prompt must carry the candidate's ``diff_url``
+    verbatim regardless of framework. atom uses the
+    ``github.com/ROCm/ATOM/pull/N/files`` URL shape (variant of the
+    canonical PR-diff URL); the prompt rendering must not reject or
+    reshape it."""
+    backend = _PromptCapturingBackend()
+    stub = _CoordinatorStub(tmp_path, backend)
+    cand = {
+        "candidate_id": f"pr-{framework}",
+        "batch_id":     f"b-{framework}",
+        "pr_url":       diff_url.rsplit("/", 1)[0],
+        "diff_url":     diff_url,
+        "framework":    framework,
+    }
+    _call_gate(stub, cand)
+    assert diff_url in backend.last_prompt
+    # Framework name carried into the prompt verbatim too.
+    assert framework in backend.last_prompt
+
+
+def test_critic_prompt_no_framework_specific_rule_text_for_atom(
+    tmp_path: Path,
+) -> None:
+    """The Critic prompt body assembled for an atom candidate must not
+    contain rule text that's specific to sglang or vllm (e.g.
+    ``"sglang-specific"``, ``"vllm-specific"``). Concrete examples that
+    *mention* sglang or vllm are fine — the guard is on rule-flavour
+    substrings that would systematically bias the verdict against atom
+    by reference to the other frameworks' conventions."""
+    backend = _PromptCapturingBackend()
+    stub = _CoordinatorStub(tmp_path, backend)
+    cand = {
+        "candidate_id": "pr-atom-rules",
+        "batch_id":     "b-atom-rules",
+        "pr_url":       "https://github.com/ROCm/ATOM/pull/9",
+        "diff_url":     "https://github.com/ROCm/ATOM/pull/9.diff",
+        "framework":    "atom",
+        "title":        "perf: atom MTP scheduler",
+    }
+    _call_gate(stub, cand)
+    assert "sglang-specific" not in backend.last_prompt, (
+        "Critic prompt for atom candidate contains sglang-specific "
+        "rule text; rephrase the rule to be framework-neutral."
+    )
+    assert "vllm-specific" not in backend.last_prompt, (
+        "Critic prompt for atom candidate contains vllm-specific "
+        "rule text; rephrase the rule to be framework-neutral."
+    )
 
 
 def test_prompt_includes_session_local_priors(tmp_path: Path) -> None:

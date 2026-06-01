@@ -73,6 +73,21 @@ class TestListAndMatch:
         """When no keyword matches, the result is an empty list."""
         assert kb._match_domains("totally unrelated free-form text") == []
 
+    def test_match_domains_atom_keyword_hit(self) -> None:
+        """``atom`` lives under the framework domain alongside sglang /
+        vllm so a gap description mentioning atom can pull
+        framework-domain KB priors. Pinned here so a future trim of
+        DOMAIN_KEYWORDS doesn't silently drop it."""
+        domains = kb._match_domains("improve atom moe throughput on mi300x")
+        assert "framework" in domains, (
+            f"atom must hit the framework domain; got {domains!r}"
+        )
+
+    def test_atom_in_framework_domain_keywords_constant(self) -> None:
+        """Constant-level guard: ``atom`` must appear in the
+        ``framework`` domain's keyword list."""
+        assert "atom" in kb.DOMAIN_KEYWORDS["framework"]
+
 
 class TestSelectKb:
     """select_kb priority and fallback behaviour."""
@@ -278,3 +293,81 @@ class TestKbCli:
         assert rc == 2
         err = capsys.readouterr().err
         assert "claude_agent_sdk not installed" in err
+
+
+# ---------------------------------------------------------------------------
+# Per-framework KB partition (`framework_optimization/<fw>/`)
+# ---------------------------------------------------------------------------
+
+
+class TestPathForFramework:
+    """``path_for_framework`` resolves the per-framework KB partition."""
+
+    def test_atom_partition_path_resolves(self, kb_root: Path) -> None:
+        path = kb.path_for_framework("atom")
+        assert path == kb_root / "framework_optimization" / "atom"
+
+    @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
+    def test_path_resolves_for_all_known_frameworks(
+        self, kb_root: Path, framework: str,
+    ) -> None:
+        path = kb.path_for_framework(framework)
+        assert path == kb_root / "framework_optimization" / framework
+
+    def test_path_lowercases_and_strips(self, kb_root: Path) -> None:
+        # ``"  Atom  "`` and ``"ATOM"`` must resolve to the same
+        # partition as ``"atom"`` — keeps the partition stable across
+        # casing variation in CLI inputs / config files.
+        path_a = kb.path_for_framework("  Atom  ")
+        path_b = kb.path_for_framework("ATOM")
+        path_c = kb.path_for_framework("atom")
+        assert path_a == path_b == path_c
+
+    def test_empty_framework_returns_partition_root(self, kb_root: Path) -> None:
+        # Per the helper's docstring, an empty / whitespace framework
+        # resolves to the partition root so callers can detect
+        # "framework not selected".
+        assert kb.path_for_framework("") == kb_root / "framework_optimization"
+        assert kb.path_for_framework("   ") == kb_root / "framework_optimization"
+
+    def test_partition_dir_not_created_eagerly(self, kb_root: Path) -> None:
+        # ``path_for_framework`` is read-only; it must NOT create the
+        # partition directory on disk.
+        _ = kb.path_for_framework("atom")
+        assert not (kb_root / "framework_optimization" / "atom").exists()
+
+
+class TestContributeToKbForFramework:
+    """``contribute_to_kb_for_framework`` writes to the framework
+    sub-partition lazily."""
+
+    def test_creates_partition_on_first_write(self, kb_root: Path) -> None:
+        path = kb.contribute_to_kb_for_framework(
+            "atom",
+            finding="MTP with `--num-speculative-tokens 3` regressed on FP8 Qwen3-32B",
+            source="explore",
+            session_id="sess-atom-001",
+        )
+        expected = kb_root / "framework_optimization" / "atom" / "empirical_kb.md"
+        assert path == expected
+        assert expected.is_file()
+        body = expected.read_text()
+        assert "source=`explore`" in body
+        assert "sess-atom-001" in body
+        assert "MTP" in body
+
+    def test_appends_subsequent_findings(self, kb_root: Path) -> None:
+        kb.contribute_to_kb_for_framework(
+            "atom", finding="first", source="explore", session_id="s1",
+        )
+        kb.contribute_to_kb_for_framework(
+            "atom", finding="second", source="explore", session_id="s1",
+        )
+        body = (
+            kb_root / "framework_optimization" / "atom" / "empirical_kb.md"
+        ).read_text()
+        # Both findings present, separated by the `---` divider the
+        # helper emits.
+        assert body.count("---") == 2
+        assert "first" in body
+        assert "second" in body

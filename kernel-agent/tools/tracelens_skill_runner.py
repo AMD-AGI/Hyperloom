@@ -96,7 +96,11 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
     requested = (requested or "").strip().lower()
     if requested and requested != "default":
         return requested
-    if (framework or "").strip().lower() in {"vllm", "sglang"}:
+    # atom traces share the chrome-trace JSON shape produced by the
+    # torch profiler API used by sglang/vllm, so inference-mode kernel
+    # grouping applies; otherwise atom falls through to generic torch
+    # grouping which obscures per-iteration boundaries.
+    if (framework or "").strip().lower() in {"vllm", "sglang", "atom"}:
         return "inference"
     return requested or "default"
 
@@ -965,6 +969,28 @@ _FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
         "/usr/local/lib/python3.10/dist-packages",
         "/opt/venv/lib/python3.10/site-packages",
         "/sgl-workspace/vllm",
+    ),
+    # kernel-agent's offline source-file resolver walks this fallback
+    # table when ``import atom`` hasn't run (CSV-only parses, static-
+    # analysis paths). Without it, atom kernels referenced by a
+    # TraceLens CSV under ``/app/ATOM/atom/`` or ``site-packages/atom/``
+    # fall through to the "could not resolve" branch and the kernel-opt
+    # proposal is silently rejected. The roots below mirror the entries
+    # in ``inference_optimizer.orchestrator.kernel_request_handlers
+    # ._REUSABLE_SOURCE_ROOTS`` and
+    # ``kernel-agent/tools/tracelens_analysis._REUSABLE_SOURCE_ROOTS``;
+    # the cross-file sync is pinned by
+    # ``test_framework_paths_units.py::
+    # test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync``.
+    # ``/app/ATOM`` (the editable-install parent) is the canonical-case
+    # root: joining ``atom/model_engine/...`` against it recovers the
+    # on-disk file.
+    "atom": (
+        "/app/ATOM",
+        "/usr/local/lib/python3.12/dist-packages",
+        "/usr/local/lib/python3.10/dist-packages",
+        "/opt/venv/lib/python3.10/site-packages",
+        "/opt/venv/lib/python3.12/site-packages",
     ),
 }
 _FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"

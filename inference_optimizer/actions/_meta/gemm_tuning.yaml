@@ -1,0 +1,34 @@
+name: gemm_tuning
+family: deep_kernel
+cost_minutes_p50: 30.0
+cost_minutes_p75: 60.0
+expected_gain_pct: [5.0, 20.0]
+accuracy_risk: 0.10
+crash_risk: 0.10
+prerequisites:
+  - baseline
+  - roofline
+requires_lanes:
+  - server_lifecycle
+  - workspace_mutation
+  - benchmark_lane
+allowed_tools:
+  - emit_intent
+  - Read
+  - Bash
+  - Edit
+side_effects:
+  - workspace_write
+  - server_restart
+  - writes_config
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 25
+lease_ttl_sec: 5400
+description: "FP8-only GEAK workflow that tunes aiter A8W8 block-scale GEMM CSV dispatch before source-level kernel rewrite."
+pipeline_phase: deep
+typical_runtime_min: 30.0
+applicable_when:
+  - "precision == 'fp8'"
+  - "framework == 'sglang'"
+  - "operator_bottleneck_identified"
