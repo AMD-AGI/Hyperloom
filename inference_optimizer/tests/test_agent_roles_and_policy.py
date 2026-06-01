@@ -46,6 +46,7 @@ from inference_optimizer.orchestrator.policy import (
     ROBUSTNESS_ONLY_INTENTS,
     ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
 )
+from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import asset_system_prompts_dir
 
 
@@ -119,10 +120,10 @@ def test_robustness_scheduling_police():
 # ===========================================================================
 # PolicyGate constants
 # ===========================================================================
-def test_kernel_owned_actions_v06_five():
+def test_kernel_owned_actions_include_gemm_tuning():
     assert KERNEL_OWNED_ACTIONS == frozenset({
         "kernel_opt", "integrate", "deep_kernel_analysis",
-        "operator_tuning", "vendor_kernel_config",
+        "operator_tuning", "vendor_kernel_config", "gemm_tuning",
     })
 
 
@@ -181,6 +182,26 @@ def test_gate_orchestration_delegate_kernel_owned_rejected(gate):
             payload={"action_name": "kernel_opt"},
         ))
     assert exc.value.rule == "kernel_owned_by_kernel_agent"
+
+
+def test_gate_gemm_tuning_rejected_for_non_fp8_proposal():
+    state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", Intent(
+            type=IntentType.PROPOSE_ACTION,
+            payload={"action_name": "gemm_tuning", "predicted_gain_pct": 10.0},
+        ))
+    assert exc.value.rule == "fp8_only_action"
+
+
+def test_gate_run_gemm_tuning_request_allowed_for_fp8():
+    state = SharedState(phase="KERNEL", precision="fp8", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    gate.validate_intent("orchestration", Intent(
+        type=IntentType.REQUEST,
+        payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
+    ))
 
 
 def test_gate_orchestration_delegate_normal_action_ok(gate):

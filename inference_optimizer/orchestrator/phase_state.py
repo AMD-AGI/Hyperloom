@@ -154,7 +154,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_KERNEL: frozenset({
         # KERNEL_OWNED_ACTIONS from policy.py.
         "kernel_opt", "integrate", "deep_kernel_analysis",
-        "operator_tuning", "vendor_kernel_config",
+        "operator_tuning", "vendor_kernel_config", "gemm_tuning",
         # ``roofline`` / ``profile`` are auto-enqueued on watermark
         # crossing here too — kernel integrate KEEPs flow through the
         # same single-writer hook as explore/specialist KEEPs; mode is
@@ -898,12 +898,32 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
 
 
 # ----------------------- per-phase judgments -------------------------------
+def warm_replay_in_flight(state: Any) -> bool:
+    """True while the PRELUDE warm-recipe replay task has not finished.
+
+    The Coordinator stamps ``warm_replay_outcome.status='in_flight'`` at
+    enqueue time and clears it in ``_promote_warm_replay``. PRELUDE must
+    not exit (and the initial roofline must not enqueue) until this
+    returns False — both paths launch Magpie/sglang on the same GPU.
+    """
+    outcome = getattr(state, "warm_replay_outcome", None) or {}
+    if not isinstance(outcome, dict):
+        return False
+    return str(outcome.get("status") or "").strip() == "in_flight"
+
+
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """``baseline_tput > 0`` → reason=``prelude_done``, target=EXPLORE.
+    """``baseline_tput > 0`` and warm-replay settled → ``prelude_done``.
 
     Returns ``(reason, evidence)`` when ready to transition, ``None``
     otherwise. Evidence is later spliced into ``phase_history``.
+
+    Warm-replay blocks the exit while ``warm_replay_in_flight`` so
+    FRAMEWORK_PR / auto-roofline cannot start a second Magpie job on
+    the GPU before the KB config replay finishes.
     """
+    if warm_replay_in_flight(state):
+        return None
     try:
         tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -966,7 +986,7 @@ def exit_normal_explore(
        ``INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1`` (Coordinator
        reads + passes through) once their fleet is fully v0.8 to
        fail closed.
-    4. Phase budget exhausted.
+    5. Phase budget exhausted.
     """
     # Priority 0 — HARD force-exit (IR-6).
     forced, force_ev = should_force_exit_explore(
@@ -1155,9 +1175,11 @@ def wants_steward_assessment(
     if not triggered:
         return False
     assessment = getattr(state, "last_remaining_gaps_assessment", None) or {}
-    if isinstance(assessment, dict) and assessment.get("recommendation"):
-        # Already have a verdict; Coordinator should be routing on it.
-        return False
+    if isinstance(assessment, dict):
+        rec = str(assessment.get("recommendation") or "").strip().lower()
+        if rec in ("continue_explore", "advance_to_kernel", "stop_session"):
+            # Already have a routable verdict.
+            return False
     return True
 
 
@@ -1181,9 +1203,14 @@ def exit_normal_kernel(
     2. ``skip_to_sweep`` hint (non-terminal "no more leverage" from the
        _has_no_more_leverage safety net) → ``no_more_leverage``; KERNEL
        already exits to SWEEP so this just forces the wind-down now.
-    3. Real :func:`compute_plateau_kernel` (KB_design §3.8 §5.2
+    3. FP8 GEMM tuning completed and no source-level kernel attempts are
+       queued/recorded → move on to SWEEP. GEMM tuning is the deterministic
+       KERNEL-entry operator-level lever; if it succeeded and the LLM has
+       not produced kernel_opt work, do not burn the entire KERNEL budget
+       on heartbeat turns.
+    4. Real :func:`compute_plateau_kernel` (KB_design §3.8 §5.2
        OR-of clauses).
-    4. Phase budget exhausted.
+    5. Phase budget exhausted.
     """
     if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
         return "no_more_leverage", {
@@ -1192,6 +1219,21 @@ def exit_normal_kernel(
         }
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0
+    last_gemm = getattr(state, "last_gemm_tuning", None) or {}
+    kernel_attempts = getattr(state, "kernel_opt_attempts", None) or {}
+    if (
+        isinstance(last_gemm, dict)
+        and str(last_gemm.get("status") or "").lower() in {"complete", "completed", "ok", "succeeded", "success"}
+        and str(last_gemm.get("decision") or "").upper() == "KEEP"
+        and not kernel_attempts
+        and not bool(getattr(state, "continue_kernel_after_gemm", True))
+    ):
+        return "plateau_kernel", {
+            "evidence": "gemm_tuning_complete_no_kernel_opt",
+            "rejected_kernel_count": rejected_count,
+            "gemm_speedup": last_gemm.get("best_speedup"),
+            "tuned_file": last_gemm.get("tuned_file"),
+        }
     triggered, evidence = compute_plateau_kernel(
         state,
         lookback=plateau_lookback,
@@ -1715,5 +1757,6 @@ __all__ = [
     "phase_index",
     "session_remaining_seconds",
     "should_force_exit_explore",
+    "warm_replay_in_flight",
     "wants_steward_assessment",
 ]

@@ -311,6 +311,9 @@ class SharedState:
     # kernel is also disabled). Mirrors the ``kernel_enabled`` /
     # ``framework_phase_enabled`` opt-out pattern.
     explore_enabled: bool = True
+    # After deterministic FP8 GEMM tuning succeeds, continue into source-level
+    # kernel_opt by default. Operators can disable this for a GEMM-only run.
+    continue_kernel_after_gemm: bool = True
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
@@ -666,6 +669,10 @@ class SharedState:
     # symmetry.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
+    # GEAK FP8 GEMM tuning snapshot. This is kernel-owned but not a
+    # source-level kernel rewrite: it produces an aiter A8W8 block-scale
+    # tuned CSV and (for SGLang) a dispatch patch before kernel_opt runs.
+    last_gemm_tuning: dict[str, Any] = field(default_factory=dict)
     # ``last_backends`` / ``last_params``
     # / ``last_validate_stack`` are legacy resume-parity zombies: the
     # legacy actions are denied at PolicyGate so new sessions never
@@ -685,6 +692,7 @@ class SharedState:
     last_roofline: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
+    gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     # ``backends_attempts`` /
     # ``params_attempts`` / ``validate_stack_attempts`` are kept as
@@ -821,6 +829,11 @@ class SharedState:
     last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
     remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
     steward_continuation_used: bool = False
+    # Per EXPLORE-round count of steward subprocess/transport failures
+    # (used to mint retry idempotency keys; not a plateau signal).
+    steward_infra_failures_by_round: dict[str, int] = field(
+        default_factory=dict,
+    )
     # last specialist task snapshot (parity with other
     # ``last_<action>`` mirrors; useful for the orchestration prompt
     # to surface "last round's specialist outcome").
@@ -2347,6 +2360,17 @@ class SharedState:
             )
 
         self.kernel_opt_attempts[kernel_id] = entry
+
+    def record_gemm_tuning(self, result: dict[str, Any]) -> None:
+        """Capture the GEAK GEMM tuning result for sequencing and prompts."""
+        if not isinstance(result, dict):
+            result = {"status": "failed", "error": "non-dict gemm tuning result"}
+        entry = dict(result)
+        entry.setdefault("ts", _now_iso())
+        self.last_gemm_tuning = entry
+        attempts = list(self.gemm_tuning_attempts or [])
+        attempts.append(entry)
+        self.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
 
     # ------------------------------------------------------------------
     # Multi-KEEP integrate queue helpers (PR-B follow-up).
@@ -4205,6 +4229,7 @@ class SharedState:
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
             f"last_profile={self._format_attempt(self.last_profile)}",
+            f"last_gemm_tuning={self._format_attempt(self.last_gemm_tuning)}",
             f"last_explore={self._format_attempt(self.last_explore)}",
             f"last_sweep={self._format_attempt(self.last_sweep)}",
             f"attempts_history={self._format_attempts_history()}",

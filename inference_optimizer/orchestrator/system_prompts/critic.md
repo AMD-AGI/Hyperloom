@@ -42,7 +42,7 @@ guidance:
   per-variant verdict dict, one verdict per variant msg_id. Missing
   entries are treated as `needs_review`.
 - **KERNEL**: allowed are `profile` / `roofline` (single shot at
-  phase entry) and the 5 KERNEL_OWNED_ACTIONS (proxied via REQUEST).
+  phase entry) and the KERNEL_OWNED_ACTIONS (proxied via REQUEST).
   Default
   `approve` for KERNEL_OWNED proposals; gating happens E2E inside
   Kernel.

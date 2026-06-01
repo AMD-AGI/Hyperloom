@@ -66,6 +66,8 @@ def test_allowed_actions_disjoint_phases():
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "kernel_opt" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL"]
     assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
+    assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL"]
+    assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
     assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
@@ -133,6 +135,18 @@ def test_exit_normal_prelude_triggers_on_baseline_tput():
     reason, evidence = out
     assert reason == "prelude_done"
     assert evidence["baseline_tput"] == 1234.5
+
+
+def test_exit_normal_prelude_blocked_while_warm_replay_in_flight():
+    """PRELUDE must not advance to FRAMEWORK_PR until warm-replay settles."""
+    state = SimpleNamespace(
+        baseline_tput=1234.5,
+        warm_replay_outcome={"status": "in_flight", "replay_task_id": "abc"},
+    )
+    assert phase_state.exit_normal_prelude(state) is None
+    state.warm_replay_outcome = {"status": "failed"}
+    out = phase_state.exit_normal_prelude(state)
+    assert out is not None and out[0] == "prelude_done"
 
 
 def test_exit_terminal_prelude_after_three_baseline_failures():

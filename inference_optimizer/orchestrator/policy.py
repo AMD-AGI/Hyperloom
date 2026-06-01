@@ -117,6 +117,12 @@ KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
     "deep_kernel_analysis",
     "operator_tuning",
     "vendor_kernel_config",
+    "gemm_tuning",
+})
+
+FP8_ONLY_ACTIONS: frozenset[str] = frozenset({
+    "gemm_tuning",
+    "run_gemm_tuning",
 })
 
 
@@ -556,10 +562,10 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset({
 # source trees that legitimately live outside session_dir. We allowlist
 # the well-known parents here; anything else falls through to the
 # session_dir containment check.
-SOURCE_FILE_ALLOWLIST: tuple[str, ...] = resolve_source_file_allowlist()
-
 # Field name-only allowlist: when the payload key is `source_file`, the
-# value may match SOURCE_FILE_ALLOWLIST instead of being session-rooted.
+# value may match :func:`resolve_source_file_allowlist` instead of being
+# session-rooted. Resolved at check time so importlib/glob discovery and
+# env overrides apply without a process restart.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
 
 
@@ -958,6 +964,7 @@ class PolicyGate:
         # Same gain-driven / explore-minimum gates apply at the
         # delegate channel so kernel_opt cannot bypass them by skipping
         # propose_action.
+        self._validate_fp8_only_action(action_name, intent_kind="delegate")
         self._validate_gain_driven_kernel_opt(action_name)
         self._validate_explore_minimum_before_kernel_opt(action_name)
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
@@ -1065,6 +1072,7 @@ class PolicyGate:
         # F3-2 (Roofline-v2 N19c): gain-driven kernel_opt lock — until
         # cheap rounds have plateaued, kernel_opt is denied so we don't
         # spend a 30 min GPU lane on a cheap-still-earning frontier.
+        self._validate_fp8_only_action(action_name, intent_kind="propose_action")
         self._validate_gain_driven_kernel_opt(action_name)
         # F3-5: explore-attempt minimum guard — kernel_opt requires at
         # least one successful explore round on record (replaces the
@@ -1274,6 +1282,7 @@ class PolicyGate:
         # their REQUEST kind: kernel_opt / integrate / etc.).
         if target == "kernel" and kind in KERNEL_OWNED_ACTIONS:
             self._validate_phase_action(role, kind, intent_kind="request")
+        self._validate_fp8_only_action(kind, intent_kind="request")
         # v0.8 §3.11 R4 / R5 — defense in depth: a REQUEST.kind cannot
         # smuggle a KB write / external tool invocation either.
         self._validate_no_kb_write_collision(kind, intent_kind="request")
@@ -1531,6 +1540,42 @@ class PolicyGate:
             f"action {action_name!r} not allowed in phase={phase}",
             rule="phase_incompatible",
             hint=hint,
+        )
+
+    # ------------------------------------------------------------------
+    # FP8-only actions
+    # ------------------------------------------------------------------
+    def _validate_fp8_only_action(
+        self,
+        action_name: str,
+        *,
+        intent_kind: str,
+    ) -> None:
+        """Reject GEMM tuning for non-FP8 sessions.
+
+        ``gemm_tuning`` drives aiter A8W8 block-scale FP8 GEMM CSV
+        dispatch. Running it on BF16 / non-quantized workloads wastes the
+        serving lane and may patch the wrong framework path, so enforce the
+        precision contract at the intent boundary. The handler repeats the
+        same check as defense in depth for programmatic callers.
+        """
+        if not action_name or action_name not in FP8_ONLY_ACTIONS:
+            return
+        state = self.shared_state
+        if state is None:
+            return
+        precision = str(getattr(state, "precision", "") or "").strip().lower()
+        if precision == "fp8":
+            return
+        raise PolicyDenied(
+            f"action {action_name!r} is FP8-only but session precision={precision or '(unset)'!r}",
+            rule="fp8_only_action",
+            hint=(
+                f"intent_kind={intent_kind!r}: GEAK GEMM tuning only applies "
+                "to FP8 block-scale workloads. Set PRECISION=fp8 / "
+                "--precision fp8, or skip gemm_tuning and continue with "
+                "non-FP8 actions."
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -2546,7 +2591,7 @@ class PolicyGate:
 
     def _path_in_source_allowlist(self, value: str) -> bool:
         s = str(value)
-        return any(s.startswith(p) for p in SOURCE_FILE_ALLOWLIST)
+        return any(s.startswith(p) for p in resolve_source_file_allowlist())
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
         """Match a value against runtime-resolved trace path prefixes.
@@ -2590,7 +2635,7 @@ class PolicyGate:
                 raise PolicyDenied(
                     f"role={role.name!r} {intent_type.value} payload field "
                     f"{key!r}={node!r} is not under session_dir or any of "
-                    f"{list(SOURCE_FILE_ALLOWLIST)!r}",
+                    f"{list(resolve_source_file_allowlist())!r}",
                     rule="source_file_not_allowlisted",
                     hint=("kernel-opt may only target framework source trees "
                           "under aiter/sglang/vllm; reject the request"),
@@ -2658,7 +2703,6 @@ __all__ = [
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
-    "SOURCE_FILE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",
 ]
