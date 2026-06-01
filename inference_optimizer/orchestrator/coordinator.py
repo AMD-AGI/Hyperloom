@@ -1912,7 +1912,7 @@ class Coordinator:
         return verdict_row
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
-        """No-op KERNEL entry hook.
+        """Run deterministic KERNEL-entry setup before LLM kernel work.
 
         Roofline is auto-enqueued at PRELUDE (initial) and on every
         10% watermark crossing of ``last_roofline_tput`` — see
@@ -1929,6 +1929,178 @@ class Coordinator:
                 "KERNEL entry hook fired with kernel_enabled=False "
                 "(from=%s)", from_phase or "<unknown>",
             )
+            return
+        if not self._gemm_tuning_required_before_kernel_opt():
+            return
+
+        log.info(
+            "KERNEL entry: running FP8 GEMM tuning before source-level kernel_opt",
+        )
+        self._record_phase_entry_evidence(
+            gemm_tuning={"status": "running", "source": "kernel_entry_auto"},
+        )
+        try:
+            from .kernel_request_handlers import run_gemm_tuning_handler
+
+            result = await run_gemm_tuning_handler(
+                {
+                    "task_id": "kernel_entry_gemm_tuning",
+                    "reason": "kernel_entry_auto",
+                },
+                session_dir=self.session_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("KERNEL entry GEMM tuning failed")
+            result = {
+                "status": "failed",
+                "decision": "REVERT",
+                "error_class": exc.__class__.__name__,
+                "error": repr(exc),
+            }
+        self.shared_state.record_gemm_tuning(result)
+        self._promote_gemm_tuning_keep(result)
+        self.shared_state.save(self.session_dir)
+        status = str(result.get("status") or "unknown")
+        await self.bus.append_and_seq(Message.new(
+            "kernel",
+            "orchestration",
+            "response",
+            {
+                "in_reply_to": "",
+                "kind": "run_gemm_tuning_done",
+                "status": status,
+                "result": result,
+                "source": "kernel_entry_auto",
+            },
+            priority=1,
+        ))
+        self._record_phase_entry_evidence(
+            gemm_tuning={
+                "status": "done" if status in {"ok", "complete", "succeeded"} else status,
+                "source": "kernel_entry_auto",
+                "best_speedup": result.get("best_speedup"),
+                "tuned_file": result.get("tuned_file"),
+            },
+        )
+        if self._should_continue_kernel_after_gemm():
+            await self._run_kernel_opt_after_gemm()
+
+    def _promote_gemm_tuning_keep(self, result: dict[str, Any]) -> None:
+        """Promote a successful GEMM tuning run into the main gain ledger."""
+        if not isinstance(result, dict):
+            return
+        status = str(result.get("status") or "").strip().lower()
+        decision = str(result.get("decision") or "").strip().upper()
+        if status not in {"ok", "complete", "completed", "succeeded", "success"}:
+            return
+        if decision != "KEEP":
+            return
+        try:
+            speedup = float(result.get("best_speedup") or 0.0)
+            baseline = float(self.shared_state.baseline_tput or 0.0)
+        except (TypeError, ValueError):
+            return
+        if speedup <= 1.0 or baseline <= 0:
+            return
+        tuned_tput = baseline * speedup
+        tuned_file = str(result.get("tuned_file") or "")
+        final_report = str(result.get("final_report_path") or "")
+        existing = {
+            str(item.get("tuned_file") or "")
+            for item in (self.shared_state.optimization_stack or [])
+            if isinstance(item, dict) and item.get("action") == "gemm_tuning"
+        }
+        ts = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "action": "gemm_tuning",
+            "variant_name": "a8w8_blockscale_tuned_gemm",
+            "tuned_file": tuned_file,
+            "final_report_path": final_report,
+            "gain_pct": (speedup - 1.0) * 100.0,
+            "tput": tuned_tput,
+            "workspace": result.get("workspace"),
+            "extra_envs": (
+                {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file}
+                if tuned_file else {}
+            ),
+            "source": "kernel_entry_auto",
+            "ts": ts,
+        }
+        if tuned_file not in existing:
+            self.shared_state.optimization_stack.append(entry)
+            self.shared_state.append_stack_gain_entry(
+                action="gemm_tuning",
+                variant_name="a8w8_blockscale_tuned_gemm",
+                new_tput=tuned_tput,
+                ts=ts,
+            )
+        self.shared_state.current_best = {
+            "action": "gemm_tuning",
+            "tput": tuned_tput,
+            "variant_name": "a8w8_blockscale_tuned_gemm",
+            "tuned_file": tuned_file,
+            "final_report_path": final_report,
+            "workspace": result.get("workspace"),
+            "extra_envs": entry["extra_envs"],
+        }
+        self.shared_state.cumulative_gain = (speedup - 1.0) * 100.0
+        # The GEMM action's own tuned benchmark is an end-to-end serving run,
+        # so it is already a validated stack measurement for this entry.
+        self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
+        self.shared_state.cumulative_gain_validated_ts = ts
+        self.shared_state.cumulative_gain_validated_stack_len = len(
+            self.shared_state.optimization_stack or []
+        )
+
+    def _should_continue_kernel_after_gemm(self) -> bool:
+        if not bool(getattr(self.shared_state, "continue_kernel_after_gemm", True)):
+            return False
+        return bool(self.shared_state.untried_hot_reusable_kernels())
+
+    async def _run_kernel_opt_after_gemm(self) -> None:
+        """Run the source-level kernel optimization batch after GEMM tuning."""
+        cached = self.shared_state.last_trace_analyze or {}
+        candidates_path = str(cached.get("candidates_path") or "")
+        if not candidates_path:
+            log.info("KERNEL entry: skip kernel_opt after GEMM; no candidates_path")
+            return
+        log.info(
+            "KERNEL entry: continuing to source-level kernel_opt after GEMM tuning",
+        )
+        try:
+            from .kernel_request_handlers import run_optimization_handler
+
+            result = await run_optimization_handler(
+                {
+                    "candidates_path": candidates_path,
+                    "session_id": self.session_dir.name,
+                },
+                session_dir=self.session_dir,
+                record_partial=self._record_kernel_opt_partial,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("KERNEL entry run_optimization after GEMM failed")
+            result = {
+                "status": "failed",
+                "error_class": exc.__class__.__name__,
+                "error": repr(exc),
+            }
+        await self.bus.append_and_seq(Message.new(
+            "kernel",
+            "orchestration",
+            "response",
+            {
+                "in_reply_to": "",
+                "kind": "run_optimization_done",
+                "status": result.get("status", "ok") if isinstance(result, dict) else "failed",
+                "result": result,
+                "source": "kernel_entry_auto_after_gemm",
+            },
+            priority=1,
+        ))
+        if isinstance(result, dict) and not result.get("batch_mode"):
+            self.shared_state.record_kernel_opt(result)
+        self.shared_state.save(self.session_dir)
 
     # ------------------------------------------------------------------
     # Auto-roofline — single-path PRELUDE bootstrap + 10% watermark
@@ -3054,10 +3226,8 @@ class Coordinator:
             report_task = await self._enqueue_internal_report_task(
                 reason="close_phase_entry",
             )
-            terminal_state = await self._wait_for_task_terminal(
-                report_task.task_id,
-                timeout_sec=self.CLOSE_REPORT_TIMEOUT_SEC,
-            )
+            report_result = await self.sub.run_task(report_task)
+            terminal_state = report_result.state
             if terminal_state in {"succeeded", None}:
                 await self._record_close_step(
                     "report", status="done",
@@ -3080,10 +3250,8 @@ class Coordinator:
             bd_task = await self._enqueue_internal_session_breakdown_task(
                 reason="close_phase_entry",
             )
-            terminal_state = await self._wait_for_task_terminal(
-                bd_task.task_id,
-                timeout_sec=self.CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC,
-            )
+            bd_result = await self.sub.run_task(bd_task)
+            terminal_state = bd_result.state
             if terminal_state in {"succeeded", None}:
                 await self._record_close_step(
                     "session_breakdown", status="done",
@@ -4438,6 +4606,16 @@ class Coordinator:
                     "Do NOT propose kernel_opt / run_optimization / "
                     "integrate until this cache populates."
                 )
+            if self._gemm_tuning_required_before_kernel_opt():
+                return (
+                    "TODO 4a/5: FP8 GEMM tuning is required before "
+                    "source-level kernel_opt. This SGLang session has "
+                    "precision='fp8' and last_gemm_tuning is empty/non-terminal; "
+                    "emit request{target_agent='kernel', kind='run_gemm_tuning', "
+                    "params={}} so GEAK can tune aiter A8W8 block-scale "
+                    "GEMM CSV dispatch before run_optimization spends GEAK "
+                    "budget on individual native kernels."
+                )
             pending_kid = self._kernel_opt_keep_pending()
             if pending_kid:
                 return (
@@ -4931,11 +5109,17 @@ class Coordinator:
         # was removed in this branch.
         select = self.shared_state.last_trace_analyze or {}
         needs_select = select.get("trace_input") != self.shared_state.last_profile_trace
-        if needs_select and req_kind != "trace_analyze":
+        if needs_select and req_kind not in {"trace_analyze", "run_gemm_tuning"}:
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: trace_analyze must run first",
                 rule="execution_order",
                 hint="emit request kind='trace_analyze' for last_profile_trace",
+            )
+        if req_kind == "run_optimization" and self._gemm_tuning_required_before_kernel_opt():
+            return PolicyDenied(
+                "request kind='run_optimization' denied: FP8 GEMM tuning must run first",
+                rule="execution_order",
+                hint="emit request kind='run_gemm_tuning' before run_optimization",
             )
         # Note (c900791): main also gates ``run_optimization`` here on a
         # gain-driven N19c rule (snapshot_id >= 1 + cheap-attempt
@@ -5006,6 +5190,33 @@ class Coordinator:
         if len(deltas) < window:
             return False
         return (sum(deltas) / float(len(deltas))) < float(epsilon)
+
+    @staticmethod
+    def _skip_gemm_tuning() -> bool:
+        return os.environ.get(
+            "INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _gemm_tuning_required_before_kernel_opt(self) -> bool:
+        """Return True when FP8 SGLang GEMM tuning should run first."""
+        if self._skip_gemm_tuning():
+            return False
+        ss = self.shared_state
+        precision = str(getattr(ss, "precision", "") or "").strip().lower()
+        framework = str(getattr(ss, "framework", "") or "").strip().lower()
+        if precision != "fp8" or framework != "sglang":
+            return False
+        last = getattr(ss, "last_gemm_tuning", {}) or {}
+        status = str(last.get("status") or "").strip().lower()
+        return status not in {
+            "ok",
+            "succeeded",
+            "success",
+            "complete",
+            "completed",
+            "skipped",
+            "failed",
+        }
 
     # Note: main commit c900791 also ports the N22 keyword-implied
     # advice (``_record_keyword_implied_advice``,
@@ -7616,7 +7827,7 @@ class Coordinator:
         specialist catalogue.
         """
         a = str(action or "").strip().lower()
-        if a in {"kernel_opt", "integrate", "trace_analyze", "run_optimization"}:
+        if a in {"kernel_opt", "integrate", "trace_analyze", "run_gemm_tuning", "run_optimization"}:
             return ("kernel", "kernel_switch_specialist")
         if a in {"profile", "roofline"}:
             return ("kernel", "kernel_switch_specialist")
@@ -8272,6 +8483,9 @@ class Coordinator:
                     # accounting on the action-priority table). The
                     # scoreboard was retired by KB_design §3.9 on this
                     # branch (                     # §4), so the post-record bookkeeping is omitted.
+                    self.shared_state.save(self.session_dir)
+                if kind == "run_gemm_tuning":
+                    self.shared_state.record_gemm_tuning(result)
                     self.shared_state.save(self.session_dir)
                 if kind == "integrate":
                     if result.get("status") != "skipped":

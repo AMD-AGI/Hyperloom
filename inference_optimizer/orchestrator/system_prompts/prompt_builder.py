@@ -69,6 +69,7 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "sweep",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
+    "gemm_tuning",
     # finalize
     "report",
     # support — ``recover`` frees leaked VRAM and (when
@@ -109,7 +110,7 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
 # section so the LLM picks the right transport.
 KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
     "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config",
+    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
 })
 
 # Actions that accept LLM-injected grid candidates via ``params.grid``.
@@ -352,6 +353,8 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     if meta.name in KERNEL_OWNED_ACTIONS:
         if meta.name == "kernel_opt":
             kind_hint = "run_optimization"
+        elif meta.name == "gemm_tuning":
+            kind_hint = "run_gemm_tuning"
         elif meta.name == "integrate":
             kind_hint = "integrate"
         else:
@@ -712,7 +715,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
 _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-The three kernel-owned actions (`trace_analyze`, `kernel_opt`,
+The four kernel-owned actions (`trace_analyze`, `gemm_tuning`, `kernel_opt`,
 `integrate`) are picked by the LLM per the DECISION FRAMEWORK (phase
 allowed-set + gaps + KB priors); v0.8 §3.9 retired the legacy
 `Action scores` board, so there is no system-side priority ranking.
@@ -720,8 +723,9 @@ The blocks below are only **payload templates** describing how to
 build the REQUEST once you have selected the action. The Coordinator
 still hard-gates the obvious prerequisites (TODO 3/4 fires after a
 `kernel_opt` KEEP forces `integrate`); `trace_analyze` itself is
-enforced only at the REQUEST layer for `run_optimization`, and explore
-actions are NEVER gated on it.
+enforced only at the REQUEST layer for `run_optimization`, while
+`gemm_tuning` is gated by FP8/SGLang + `last_gemm_tuning`. Explore
+actions are NEVER gated on either request.
 
 ### KERNEL-phase decision signals
 
@@ -764,7 +768,17 @@ Pick the next kernel-owned REQUEST by reading facts in this order
   before kernel_opt / integrate cycles.
 
   NOTE: pre-M4 alias `select_kernels` was removed in this branch.
-  Use `kind='trace_analyze'` exclusively.
+  Use `kind='trace_analyze'` exclusively for kernel candidate analysis.
+
+### `gemm_tuning` — payload for `run_gemm_tuning` (FP8 SGLang only)
+
+  request{target_agent: 'kernel', kind: 'run_gemm_tuning', params={}}
+
+  STRICT: only emit for `precision='fp8'` SGLang workloads and only when
+  `last_gemm_tuning` is empty. The Coordinator runs this before the first
+  `run_optimization` so aiter's tuned A8W8 block-scale GEMM CSV dispatch
+  can remove config-level GEMM bottlenecks before source-level GEAK
+  kernel rewrites spend GPU budget.
 
 ### `kernel_opt` — payload for `run_optimization`
 
