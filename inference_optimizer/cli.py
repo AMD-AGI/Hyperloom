@@ -4612,6 +4612,41 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     "emergency final report write failed (non-fatal)"
                 )
 
+    # Post-hook: concurrency sweep across CONC for baseline + optimized.
+    # Off by default; opt in with --enable-conc-sweep. Runs only after
+    # final.json / final.md have been written so its pointer can be
+    # merged in without racing the close-sequence report writer.
+    conc_sweep_payload: dict[str, Any] | None = None
+    if getattr(args, "enable_conc_sweep", False):
+        try:
+            from .orchestrator.conc_sweep import (
+                format_summary_line as _cs_format,
+                run_conc_sweep,
+            )
+            concs_raw = getattr(args, "conc_sweep_concs", "") or ""
+            concs_list: list[int] = []
+            for tok in str(concs_raw).split(","):
+                t = tok.strip()
+                if not t:
+                    continue
+                try:
+                    concs_list.append(int(t))
+                except ValueError:
+                    log.warning(
+                        "conc_sweep: ignoring non-integer CONC token %r", t,
+                    )
+            conc_sweep_payload = await run_conc_sweep(
+                coordinator.shared_state,
+                session_dir,
+                concs=concs_list or None,
+                variant_timeout_sec=int(
+                    getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
+                ),
+            )
+            print(_cs_format(conc_sweep_payload))
+        except Exception:  # noqa: BLE001
+            log.exception("conc_sweep post-hook failed (non-fatal)")
+
     _print_final_summary(coordinator.shared_state, stop_reason)
     return 0 if stop_reason in (
         "target_reached",
@@ -5437,6 +5472,55 @@ def _build_parser() -> argparse.ArgumentParser:
              "identical (same idempotency keys, same pending-task "
              "dispatch gate, same watermark anchor update). Env: "
              "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
+    )
+    # ------------------------------------------------------------------
+    # Post-optimization concurrency sweep (off by default).
+    #
+    # Runs an extra "baseline vs optimized" Magpie grid across CONC
+    # values after the close-sequence report has been written. The
+    # output is JSON/CSV in ``reports/conc_sweep_summary.json``; the
+    # frontend pairs it with the roofline ceiling to visualise the
+    # full curve. See ``orchestrator/conc_sweep.py``.
+    #
+    # Costs ~30 min/point on an 8xMI300 box, so this is an explicit
+    # opt-in. Skip conditions (no baseline, no ``current_best``, no
+    # ISL/OSL) short-circuit before any subprocess is launched and
+    # are recorded in the JSON envelope.
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--enable-conc-sweep",
+        dest="enable_conc_sweep",
+        action=argparse.BooleanOptionalAction,
+        default=(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP", "",
+            ).strip().lower() in ("1", "true", "yes", "on")
+        ),
+        help="Run a post-optimization concurrency sweep (baseline vs "
+             "current_best across CONC) and write "
+             "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
+             "Off by default; opt in with this flag or "
+             "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=1.",
+    )
+    opt.add_argument(
+        "--conc-sweep-concs",
+        dest="conc_sweep_concs",
+        type=str,
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", "1,2,4,8,16,32,64,128",
+        ),
+        help="Comma-separated CONC ladder for --enable-conc-sweep. "
+             "Default 1,2,4,8,16,32,64,128.",
+    )
+    opt.add_argument(
+        "--conc-sweep-timeout-sec",
+        dest="conc_sweep_timeout_sec",
+        type=int,
+        default=int(os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_TIMEOUT_SEC", "1800",
+        )),
+        help="Per-variant timeout (seconds) for --enable-conc-sweep. "
+             "Default 1800 (~30 min). Total budget is 2 × N × timeout.",
     )
     # Retired flags that operator scripts may still pass. We hard-fail
     # at argparse time with a one-line migration hint instead of
