@@ -249,7 +249,7 @@ def test_build_sweep_params_non_dict_recipe_falls_back(bad):
 @pytest.mark.asyncio
 async def test_enqueue_internal_sweep_task_inherits_baseline_config(coord):
     coord.shared_state.baseline_config_path = "/tmp/baseline.yaml"
-    coord.shared_state.current_best = {"extra_sglang_args": "--mla 1"}
+    coord.shared_state.current_best = {"extra_server_args": "--mla 1"}
     coord.shared_state.last_baseline = {"benchmark_script": "sglang_mi300x.sh"}
     task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
     assert task.kind == "sweep"
@@ -267,9 +267,9 @@ async def test_enqueue_internal_sweep_task_inherits_baseline_config(coord):
 
 @pytest.mark.asyncio
 async def test_enqueue_internal_sweep_task_omits_empty_strings(coord):
-    """Empty extra_sglang_args / benchmark_script must not land in params
+    """Empty extra_server_args / benchmark_script must not land in params
     (avoids stomping executor defaults with empty strings)."""
-    coord.shared_state.current_best = {"extra_sglang_args": ""}
+    coord.shared_state.current_best = {"extra_server_args": ""}
     coord.shared_state.last_baseline = {"benchmark_script": ""}
     task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
     assert "base_extra_args" not in task.params

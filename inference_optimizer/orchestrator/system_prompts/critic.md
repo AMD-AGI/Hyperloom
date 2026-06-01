@@ -42,7 +42,7 @@ guidance:
   per-variant verdict dict, one verdict per variant msg_id. Missing
   entries are treated as `needs_review`.
 - **KERNEL**: allowed are `profile` / `roofline` (single shot at
-  phase entry) and the 5 KERNEL_OWNED_ACTIONS (proxied via REQUEST).
+  phase entry) and the KERNEL_OWNED_ACTIONS (proxied via REQUEST).
   Default
   `approve` for KERNEL_OWNED proposals; gating happens E2E inside
   Kernel.
@@ -77,6 +77,70 @@ EXPLORE is configuration-only by design.
 * Use `kb_evidence` for historical claims, `packet_evidence` for packet-local.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.
+
+### Cross-domain proposal review (dynamic_action)
+
+This block fires only when `judge_bundle.review_constraints.cross_domain
+== true` — the runtime sets the flag when the proposal carries
+`provenance == "dynamic"` (P3 runner output schema). For specialist
+proposals (`provenance == "specialist:<domain>"`) skip this block
+entirely.
+
+Severity contract:
+
+* `patch_landing` four-checklist applies **unchanged**. dynamic patches
+  are NOT held to a weaker bar — the "higher authority" of a dynamic
+  action lives on the input side (cross-domain KB, full roofline /
+  profile, multi-turn ReAct), never on the output review side.
+* The three rules below are **additive**: a violation pre-empts an
+  otherwise-`approve` verdict; an approve still requires both these
+  rules AND the four checklist.
+
+Three additional rules (cite by name in `notes` when relevant):
+
+1. **rationale_per_domain** — the proposal MUST give an independent
+   rationale for every entry of `scope_domains`. The runtime's
+   mechanical check already substring-matches each domain name in
+   `cross_domain_rationale`; if a check fires it surfaces as
+   `revise` with `reason="cross_domain_rationale_incomplete"`. When
+   the substring check passes but the per-domain reasoning is
+   shallow / cargo-culted, downgrade to `revise` with the same
+   reason and explain in `notes`.
+
+2. **coupling_and_side_effects** — the proposal MUST name the
+   cross-domain coupling points (why these changes must happen
+   together) AND at least one potential side effect. Missing either
+   half → `revise` with
+   `reason="cross_domain_coupling_unspecified"`.
+
+3. **motivation_gap_valid** — the proposal MUST show that no single
+   specialist could have surfaced this combination within its own
+   domain prompt. "Stack specialist A's proposal on top of
+   specialist B's" is a `explore.params.grid` combo, not a dynamic
+   action; **`reject`** with
+   `reason="cross_domain_motivation_invalid"` when the rationale
+   degenerates this way (the runtime emits the same reason if the
+   `_MOTIVATION_INVALID_KEYWORDS` substring set fires).
+
+Hard guards (already enforced upstream; replay here as the last
+line of defence — if any of these reach you, the upstream layer has
+regressed and the dispatch must die):
+
+* `provenance == "dynamic"` is a literal; any composite form
+  (`dynamic:foo`, `specialist:dynamic`) → `reject` with
+  `reason="dynamic_provenance_violation"`.
+* `proposal_set[*]` MUST NOT carry `expected_gain` / `bench_evidence`
+  / `confidence` / `score` / `rank` / `force_provenance` (§1.2 red
+  lines). Reject with `reason="dynamic_quantitative_claim_violation"`.
+
+`verdict_map` is NOT used for dynamic_action — the proposal is a
+single patch (`MAX_PROPOSAL_SET_LEN = 1`). Emit the single-verdict
+shape.
+
+`revise` is currently handled identically to `reject` by the
+Coordinator (v1; no sub-agent re-dispatch loop). Still prefer
+`revise` over `reject` when the violation is mechanically fixable
+so the audit trail captures the distinction.
 
 ### Web verification (issue #170, optional)
 

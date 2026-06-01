@@ -359,6 +359,8 @@ def merge_model_config(
         "mode": model_cfg.get("mode", defaults.get("mode", "claw")),
         "gpu_type": model_cfg.get("target_gpu", parsed["runner"]).upper(),
         "inferencex_path": defaults.get("inferencex_path") or (get_nfs_root() + "/InferenceX"),
+        "oob_path": defaults.get("oob_path") or (get_nfs_root() + "/OOB"),
+        "tracelens_root": defaults.get("tracelens_root") or (get_nfs_root() + "/TraceLens-internal"),
         "result_dir": defaults.get("result_dir", "/workspace/hyperloom"),
         "inferenceX_benchmarks": ifx_benchmarks,
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),

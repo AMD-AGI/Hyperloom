@@ -125,6 +125,7 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     md.write_text("# Executive Summary\nCompute 51%, Idle 48%\n", encoding="utf-8")
     ta = _trace_analyze_success()
     ta["trace_report_path"] = str(md)
+    ta["kernel_roofline_path"] = "/tmp/reports/kernel_roofline.json"
 
     p1, p2 = _patch_subs(_profile_success("/tmp/trace.gz"), ta)
     executor = RooflineExecutor(shared_state=state)
@@ -135,6 +136,7 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     assert result["snapshot_id"] == 1
     assert result["last_profile_trace"] == "/tmp/trace.gz"
     assert result["analysis_md_path"] == str(md)
+    assert result["kernel_roofline_path"] == "/tmp/reports/kernel_roofline.json"
     assert result["profile_workspace"] == "/tmp/workspace"
     assert "executed_at_iso" in result
 
@@ -144,6 +146,7 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     assert state.last_profile_args == "--mem-fraction-static=0.92"
     cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == str(md)
+    assert cached["kernel_roofline_path"] == "/tmp/reports/kernel_roofline.json"
     assert "Executive Summary" in cached["analysis_md_text"]
     assert cached["roofline_snapshot_id"] == 1
     assert cached["roofline_baseline_gain_at_snapshot"] == 2.5

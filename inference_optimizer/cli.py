@@ -134,12 +134,11 @@ class _RetiredFlag(argparse.Action):
 def _orchestration_rules_fragment_path() -> Path:
     """Path to the rules-only fragment consumed by ``prompt_builder``.
 
-    Phase 1 collapsed ``orchestration.md`` to a small "rules + output protocol"
-    fragment; the full system prompt is composed at runtime from
+    ``orchestration.md`` is a small "rules + output protocol" fragment;
+    the full system prompt is composed at runtime from
     :class:`ActionMetadata` and run-level parameters by
-    :func:`build_orchestration_prompt`. The legacy
-    ``orchestration.no_kernel.md`` was deleted — kernel-vs-no-kernel is now
-    a builder parameter, not a separate file.
+    :func:`build_orchestration_prompt`. Kernel-vs-no-kernel is a builder
+    parameter, not a separate file.
     """
     return asset_system_prompts_dir() / "orchestration.md"
 
@@ -389,42 +388,42 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """B3: tighten incompatible CLI knobs when --framework atom is selected.
+    """IR-8: validate atom-specific CLI knob compatibility.
 
-    atom in Magpie v1 has neither a torch_profiler integration (so
-    roofline cannot produce a trace) nor a source-patcher for the
-    framework-agent's PR loop (the kernel-agent / framework-agent assume
-    sglang/vllm source layouts). Auto-disabling kernel-agent +
-    framework-agent + roofline phases keeps the rest of the run sensible
-    without forcing the operator to remember three extra flags. Explicit
-    user opt-in for any of these is preserved (we only flip a value when
-    it is still at its enabled default).
+    The function's only responsibility is the multi-node fail-fast
+    guard. The forward-looking alias :data:`_assert_atom_single_node`
+    (defined below) resolves to this same callable — new call sites
+    are encouraged to prefer the clearer name.
 
-    atom multi-node is also unsupported (Magpie wrapper / atom server
-    have no multi-node TP wiring) — fail-fast on ``--nodes >= 2`` so
-    operators don't burn a ~6-min cold start on a doomed run.
+    What works on atom today (NO auto-tightening applied):
 
-    Returns the list of flag names auto-disabled (for callers that want
-    to log / assert). Calls ``sys.exit(2)`` on the multi-node guard
-    failure.
+    * kernel-agent — atom source roots are wired into PolicyGate's
+      allowlist, ``_REUSABLE_SOURCE_ROOTS``, and the server-flag
+      pre-flight probe; ``--no-kernel`` is preserved at its False
+      default.
+    * framework-agent — atom's repo URL
+      (https://github.com/ROCm/ATOM.git) is in
+      ``framework_agent.repo_map``; ``--no-framework`` is preserved
+      at its False default, so the FRAMEWORK_PR phase runs.
+    * profile / roofline / TraceLens — atom's OpenAI-compatible
+      server exposes /start_profile and /stop_profile HTTP endpoints,
+      the atom engine takes a ``--torch-profiler-dir`` CLI flag, and
+      Magpie's ``atom_mi*x.sh`` bridges ``PROFILE=1`` to that flag.
+      atom writes standard ``*.pt.trace.json.gz`` chrome traces which
+      TraceLens consumes unchanged.
+
+    What still fails fast on atom:
+
+    * ``--nodes >= 2`` — atom multi-node TP wiring is not yet
+      implemented in either the Magpie wrapper or the atom server.
+      ``sys.exit(2)`` so operators don't burn a ~6-min cold start on
+      a doomed run.
+
+    Returns the list of flag names auto-disabled — always empty since
+    no defaults are flipped. The return type is preserved so callers
+    that append to / log the list keep working unchanged.
     """
     auto_disabled: list[str] = []
-    if not getattr(args, "no_kernel", False):
-        args.no_kernel = True
-        auto_disabled.append("--no-kernel")
-    if not getattr(args, "no_framework", False):
-        args.no_framework = True
-        auto_disabled.append("--no-framework")
-    if getattr(args, "enable_roofline", True):
-        args.enable_roofline = False
-        auto_disabled.append("--no-enable-roofline")
-    if auto_disabled:
-        print(
-            f"  framework=atom: auto-disabling "
-            f"{', '.join(auto_disabled)} (atom has no profiler / "
-            "sglang/vllm-specific source patcher; see "
-            "atom_boost_tutorials.md §6)"
-        )
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
             "ERROR: --framework atom does not support multi-node "
@@ -433,7 +432,20 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
             file=sys.stderr,
         )
         sys.exit(2)
+    print(
+        "  framework=atom: no auto-disable applied (kernel-agent + "
+        "framework-agent + profile / roofline / TraceLens all wired "
+        "for atom); --nodes>=2 guard active — see SKILL.md IR-8"
+    )
     return auto_disabled
+
+
+# Forward-looking alias. The name ``_apply_atom_auto_tighten`` is kept
+# because tests / SKILL references still cite it. New call sites that
+# want the clearer name can use this alias; the body is the same
+# function — both names point at the same callable object so
+# monkeypatching either still works.
+_assert_atom_single_node = _apply_atom_auto_tighten
 
 
 def _resolve_gpu_type(
@@ -1033,6 +1045,9 @@ def _seed_shared_state(
         osl=_int_env_or_arg("osl", "OSL"),
         max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
         kernel_enabled=not getattr(args, "no_kernel", False),
+        continue_kernel_after_gemm=bool(
+            getattr(args, "continue_kernel_after_gemm", True)
+        ),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain=0.0,
@@ -1047,6 +1062,9 @@ def _seed_shared_state(
         # EXPLORE). ``--no-framework`` skips it; default on. Mirrors
         # the ``--no-kernel`` / ``kernel_enabled`` pattern.
         framework_phase_enabled=not bool(getattr(args, "no_framework", False)),
+        # ``--no-explore`` skips the EXPLORE phase entirely (PRELUDE /
+        # FRAMEWORK_PR → KERNEL, or → SWEEP when kernel is also off).
+        explore_enabled=not bool(getattr(args, "no_explore", False)),
         gain_driven_kernel_opt=bool(
             getattr(args, "gain_driven_kernel_opt", False),
         ),
@@ -1172,7 +1190,7 @@ _REAL_EXECUTORS_KERNEL_ONLY: dict[str, Any] = {}
 # does not raise ``no_executor`` on a stale task.
 _NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = (
     "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config",
+    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
 )
 
 
@@ -1333,6 +1351,64 @@ def _build_specialist_executor(
     return _executor
 
 
+def _build_dynamic_action_executor(
+    args: argparse.Namespace,
+) -> "Callable[[Any], Awaitable[dict]]":
+    """Build a SubAgentRunner-compatible executor backed by
+    :class:`DynamicActionRunner`.
+
+    Production uses a real Claude backend; tests register a
+    :class:`MockBackend` through the same path. Falls back to the
+    stub executor when no ``claude`` binary is on PATH.
+    """
+    import shutil
+
+    from .orchestrator.dynamic_action_runner import (
+        DEFAULT_TURN_CAP,
+        DEFAULT_WALL_CLOCK_BUDGET_SEC,
+        DynamicActionRunner,
+    )
+    from .orchestrator.action_executors.dynamic_action import (
+        dynamic_action_executor as _stub_executor,
+    )
+    from .orchestrator.framework_paths import resolve_source_file_allowlist
+
+    claude_bin = shutil.which("claude") or ""
+    if not claude_bin:
+        log.warning(
+            "dynamic_action: `claude` binary not on PATH; falling "
+            "back to the stub executor (empty proposal_set).",
+        )
+        return _stub_executor
+
+    model = (
+        getattr(args, "dynamic_action_model", None)
+        or getattr(args, "claude_model", "")
+    ).strip()
+    turn_cap_raw = getattr(args, "dynamic_action_turn_cap", None)
+    turn_cap = int(turn_cap_raw) if turn_cap_raw else DEFAULT_TURN_CAP
+    wall_clock_raw = getattr(args, "dynamic_action_wall_clock_sec", None)
+    wall_clock = (
+        float(wall_clock_raw) if wall_clock_raw
+        else DEFAULT_WALL_CLOCK_BUDGET_SEC
+    )
+    backend = ClaudeBackend(
+        model=model, max_turns_default=1, raw_completion=True,
+    )
+    runner = DynamicActionRunner(
+        backend,
+        wall_clock_budget_sec=wall_clock,
+        turn_cap=turn_cap,
+        framework_source_roots=tuple(resolve_source_file_allowlist()),
+    )
+
+    async def _executor(ctx: Any) -> dict:
+        result = await runner.run(ctx)
+        return result.to_dict()
+
+    return _executor
+
+
 def _register_executors(
     coordinator: Coordinator,
     *,
@@ -1340,6 +1416,7 @@ def _register_executors(
     compare_against_gpu: str | None = None,
     session_dir: Path | None = None,
     specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
+    dynamic_action_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
 ) -> None:
     """Wire all currently-available action executors.
 
@@ -1384,6 +1461,20 @@ def _register_executors(
     # (cli only passes a non-None executor when capacity > 0).
     if specialist_executor is not None:
         coordinator.sub.register_executor("specialist", specialist_executor)
+
+    # Register the runner-driven dynamic_action executor when
+    # available; otherwise fall back to the stub.
+    if dynamic_action_executor is not None:
+        coordinator.sub.register_executor(
+            "dynamic_action", dynamic_action_executor,
+        )
+    else:
+        from .orchestrator.action_executors.dynamic_action import (
+            dynamic_action_executor as _stub_dynamic_action_executor,
+        )
+        coordinator.sub.register_executor(
+            "dynamic_action", _stub_dynamic_action_executor,
+        )
 
     # PR-A4 (Arbor-into-Hyperloom): wire the real IntegratePatchExecutor.
     # The executor reads the specialist's worktree patches, applies them
@@ -3774,6 +3865,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             cur_phase = (getattr(state, "phase", "") or "").strip().upper()
             if cur_phase in ("", "PRELUDE"):
                 state.framework_phase_enabled = False
+                # Persist immediately: the later conditional save only
+                # runs when there was a prior stop_reason / crash, so a
+                # clean resume would otherwise drop this toggle on the
+                # next disk reload.
+                state.save(session_dir)
                 print(
                     "  framework phase       : DISABLING for resume "
                     "(--no-framework + phase=PRELUDE)"
@@ -3781,6 +3877,27 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             else:
                 print(
                     f"  framework phase       : WARN --no-framework ignored; "
+                    f"session is already in phase={cur_phase!r} "
+                    f"(cannot retroactively skip)"
+                )
+        # Same persistence contract for the EXPLORE phase toggle.
+        if not bool(getattr(state, "explore_enabled", True)):
+            args.no_explore = True
+            print("  explore phase         : DISABLED (persisted from original run)")
+        elif bool(getattr(args, "no_explore", False)):
+            # Operator passed --no-explore on resume of an explore-enabled
+            # session. Only honour it before EXPLORE has been entered —
+            # retroactively skipping a phase we are in/past is incoherent.
+            cur_phase = (getattr(state, "phase", "") or "").strip().upper()
+            if cur_phase in ("", "PRELUDE", "FRAMEWORK_PR"):
+                state.explore_enabled = False
+                print(
+                    "  explore phase         : DISABLING for resume "
+                    f"(--no-explore + phase={cur_phase or 'PRELUDE'})"
+                )
+            else:
+                print(
+                    f"  explore phase         : WARN --no-explore ignored; "
                     f"session is already in phase={cur_phase!r} "
                     f"(cannot retroactively skip)"
                 )
@@ -3883,12 +4000,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 session_dir=session_dir,
             )
         )
-        # Note: main commit 8e69732 also adds an N31 "resume backfill"
-        # block that copies last_trace_analyze into
-        # last_trace_analyze_baseline. The baseline-freeze field is
-        # main's N31 final-roofline machinery, which F3-3 retired on
-        # this branch in favour of gain-only freshness; the backfill
-        # therefore has no live consumer and is omitted.
+        # No resume backfill is required for the roofline comparison
+        # pipeline: PR #321 retired the ``last_trace_analyze_baseline``
+        # baseline-freeze field in favour of the append-only
+        # ``roofline_snapshots`` history, which is restored verbatim by
+        # ``SharedState.from_dict`` (missing key → empty list default).
     else:
         # Resolve model path from --model first, then $MODEL_PATH env. Without
         # either, fail fast: silently falling back to the YAML's hardcoded
@@ -4075,6 +4191,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     })
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     no_kernel = getattr(args, "no_kernel", False)
+    no_explore = getattr(args, "no_explore", False)
+    if no_explore and no_kernel:
+        print(
+            "WARNING: --no-explore and --no-kernel are both set; the run "
+            "collapses to baseline -> SWEEP over an empty optimization_stack "
+            "(no EXPLORE param search, no KERNEL rewrites). SWEEP only "
+            "re-validates the baseline recipe. Continuing as requested.",
+            file=sys.stderr,
+        )
+    elif no_explore:
+        print("Explore phase   : DISABLED (--no-explore); "
+              f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}")
 
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
@@ -4311,12 +4439,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             session_dir=session_dir,
             knowledge_plane=knowledge_plane,
         )
+    dynamic_action_executor: "Any" = _build_dynamic_action_executor(args)
     _register_executors(
         coordinator,
         no_kernel=no_kernel,
         compare_against_gpu=getattr(args, "compare_against_gpu", None),
         session_dir=session_dir,
         specialist_executor=specialist_executor,
+        dynamic_action_executor=dynamic_action_executor,
     )
     # Persist effective system prompts for resume / drift inspection.
     _snapshot_system_prompts(session_dir, prompts=prompts)
@@ -4464,9 +4594,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Inference framework to benchmark / optimize. Resolution order: "
              "--framework > $FRAMEWORK env > sglang (default). Selection is "
              "session-wide; mixing frameworks in a single session is not "
-             "supported. NOTE: --framework atom is single-node-only and has "
-             "no profiler / framework-source-patcher integration; B3 "
-             "auto-tightens incompatible phases off when atom is selected.",
+             "supported. NOTE: --framework atom is single-node-only "
+             "(``--nodes>=2`` fails fast); profile / roofline, "
+             "kernel-agent, and framework-agent are all enabled on atom. "
+             "The auto-tighten guard only enforces ``--nodes 1``.",
     )
     opt.add_argument(
         "--nodes", type=int,
@@ -4653,6 +4784,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "--framework-version=0.4.5 to pin a specific tag for the run."
         ),
     )
+    opt.add_argument(
+        "--continue-kernel-after-gemm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After FP8 GEMM tuning succeeds, continue into source-level "
+            "kernel_opt. Use --no-continue-kernel-after-gemm for a "
+            "GEMM-only validation run."
+        ),
+    )
     grp = opt.add_mutually_exclusive_group()
     grp.add_argument("--target-gain", type=float, default=None,
                       help="Stop when cumulative_gain >= N%% over baseline")
@@ -4737,6 +4878,13 @@ def _build_parser() -> argparse.ArgumentParser:
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
+    opt.add_argument("--no-explore", action="store_true", default=False,
+                      help="Skip the EXPLORE phase entirely. PRELUDE (and "
+                           "FRAMEWORK_PR, if enabled) route straight to KERNEL "
+                           "— or to SWEEP when --no-kernel is also set. Useful "
+                           "for a baseline -> kernel-only run, or to validate "
+                           "the current recipe via SWEEP without a serving-"
+                           "param search. Default: explore enabled.")
     opt.add_argument(
         "--launch-info-file", type=str, default=None,
         help="Write a JSON file with the launched session's pid, "
@@ -5102,6 +5250,41 @@ def _build_parser() -> argparse.ArgumentParser:
         or None,
         help="Claude model used for specialist sub-agents (defaults to "
              "the orchestration --claude-model). KB_design §3.5 §6.",
+    )
+    opt.add_argument(
+        "--dynamic-action-model",
+        dest="dynamic_action_model",
+        type=str,
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_DYNAMIC_ACTION_MODEL", "",
+        ) or None,
+        help="Claude model used for dynamic_action sub-agents (defaults "
+             "to --claude-model).",
+    )
+    opt.add_argument(
+        "--dynamic-action-turn-cap",
+        dest="dynamic_action_turn_cap",
+        type=int,
+        default=int(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DYNAMIC_ACTION_TURN_CAP", "0",
+            ) or "0",
+        ) or None,
+        help="Hard cap on ReAct turns per dynamic_action dispatch "
+             "(default 12). Per dynamic_action_runner.DEFAULT_TURN_CAP.",
+    )
+    opt.add_argument(
+        "--dynamic-action-wall-clock-sec",
+        dest="dynamic_action_wall_clock_sec",
+        type=float,
+        default=float(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_DYNAMIC_ACTION_WALL_CLOCK_SEC", "0",
+            ) or "0",
+        ) or None,
+        help="Wall-clock budget per dynamic_action dispatch (default "
+             "900s = 15 min). Per "
+             "dynamic_action_runner.DEFAULT_WALL_CLOCK_BUDGET_SEC.",
     )
     opt.add_argument(
         "--specialist-max-turns",
