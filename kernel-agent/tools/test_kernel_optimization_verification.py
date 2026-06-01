@@ -1508,3 +1508,77 @@ def test_build_prompt_omits_priority_block_for_legacy_candidates():
         _prompt_args("mi300x"),
     )
     assert "## Optimization priorities" not in prompt
+
+
+# ============================================================================
+# Defect 1 regression: make_proposal must surface ``artifact_error`` instead of
+# the misleading "compile failed" string when zero backend attempts ever
+# produced a usable result (e.g. wedged Ray cluster -> ConnectionError on every
+# submit). Without this, an infra failure looks like a real compile regression
+# in state.json:last_kernel_opt.reasons. See:
+#   /home/sapmajum/hyperloom_work/logs/geak_dispatch_audit.md Defect 1
+# ============================================================================
+def test_make_proposal_surfaces_backend_dispatch_failure():
+    """When every backend dispatch failed and ``best`` is None, the REVERT
+    reason must call out the real cause (no usable backend attempt) so
+    operators don't chase a phantom compile regression."""
+    verification = {
+        "compile_passed": False,
+        "correctness_passed": False,
+        "artifact_valid": False,
+        "artifact_error": "no usable backend attempt",
+        "best_attempt_id": "",
+        "best_backend": "",
+        "best_artifact_path": "",
+        "micro_speedup": 0.0,
+        "micro_speedup_source": "default_unmeasured",
+    }
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "REVERT"
+    assert len(proposal["reasons"]) == 1
+    assert "backend dispatch failed" in proposal["reasons"][0]
+    assert "no usable backend attempt" in proposal["reasons"][0]
+    # The misleading legacy string must NOT appear when we know the real cause.
+    assert "compile failed" not in proposal["reasons"][0]
+
+
+def test_make_proposal_keeps_legacy_compile_failed_when_artifact_lookup_failed():
+    """Real compile-side regression path: an attempt produced output but the
+    artifact resolution failed (best_attempt_id non-empty, artifact_error
+    describes the lookup failure). Decision must still be REVERT with the
+    legacy 'compile failed' reason — only the *dispatch-side* path is rewritten.
+    """
+    verification = {
+        "compile_passed": False,
+        "correctness_passed": False,
+        "artifact_valid": False,
+        "artifact_error": "no complete .hip source artifact found; tried: x.hip",
+        "best_attempt_id": "geak-abc",
+        "best_backend": "geak",
+        "best_artifact_path": "",
+        "micro_speedup": 0.0,
+        "micro_speedup_source": "default_unmeasured",
+    }
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "REVERT"
+    assert proposal["reasons"] == ["compile failed"]
+
+
+def test_make_proposal_empty_artifact_error_falls_back_to_compile_failed():
+    """Belt-and-braces: if compile_passed=False and artifact_error is empty
+    (shouldn't happen given build_verification's default, but guard against
+    future refactors), we must not crash and must keep the legacy reason."""
+    verification = {
+        "compile_passed": False,
+        "correctness_passed": False,
+        "artifact_valid": False,
+        "artifact_error": "",
+        "best_attempt_id": "",
+        "best_backend": "",
+        "best_artifact_path": "",
+        "micro_speedup": 0.0,
+        "micro_speedup_source": "default_unmeasured",
+    }
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "REVERT"
+    assert proposal["reasons"] == ["compile failed"]
