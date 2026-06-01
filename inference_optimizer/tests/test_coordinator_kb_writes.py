@@ -293,6 +293,10 @@ def test_build_recipe_attrs_surfaces_kept_kernel(tmp_path: Path) -> None:
     assert k["e2e_gain_pct"] == -0.094
     assert k["e2e_tput"] == 2477.82
     assert k["integrated"] is True
+    # ``decision`` stays the micro-layer KEEP; the integrate verdict rides
+    # the separate ``e2e_decision`` field so warm-start can tell a kept
+    # micro win from its (possibly reverted) E2E outcome.
+    assert k["e2e_decision"] == "NEEDS_REVIEW"
 
 
 def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
@@ -309,3 +313,205 @@ def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
     k006 = next(k for k in kopts if k.get("kernel_id") == "k006")
     assert k006["micro_speedup"] == 1.3202
     assert k006["e2e_gain_pct"] == -0.094
+
+
+# ===========================================================================
+# R-8 (P0): a bare-baseline CLOSE whose tput happens to exceed a historical
+# best (different workload shape, no flags) must NOT overwrite the validated
+# best_config. Repro for session 20260531T144553Z where a flagless baseline
+# (2813 tok/s @ ISL/OSL=256) clobbered the warm_replay recipe (2532 tok/s @
+# ISL/OSL=1024), dropping every extra_sglang_arg from the KB.
+# ===========================================================================
+def test_close_does_not_clobber_with_bare_baseline_higher_tput(
+    tmp_path: Path,
+) -> None:
+    coord = _make_coordinator(tmp_path)
+    cid = _expected_cid()
+    coord.cortex_kb.put_recipe(
+        canonical_id=cid, model=_MODEL, hardware=_HW, framework=_FW,
+        framework_version=_FWV, precision=_PREC,
+        best_config={
+            "name": "warm_replay",
+            "extra_sglang_args": "--schedule-policy lpm --page-size 16",
+            "tput": "2532",
+        },
+        best_throughput=2532.0,
+    )
+    # This session ended on the bare baseline: no validated stack, no
+    # validated gain, current_best is the baseline itself (no flags) — but
+    # its tput (different workload) is numerically higher than the stored
+    # best. The numeric better-throughput guard alone would let it through.
+    ss = coord.shared_state
+    ss.current_best = {"action": "baseline", "name": "baseline", "tput": 2813.5}
+    ss.optimization_stack = []
+    ss.cumulative_gain_validated = 0.0
+    ss.cumulative_gain = 0.0
+    coord.cortex_finalize_recipe_and_journal()
+    row = coord.cortex_kb.get_recipe(canonical_id=cid)
+    assert row["best_throughput"] == 2532.0, (
+        "bare-baseline CLOSE clobbered a validated best_throughput"
+    )
+    assert row["best_config"].get("extra_sglang_args") == (
+        "--schedule-policy lpm --page-size 16"
+    ), "warm_replay launch flags were dropped by a flagless baseline overwrite"
+
+
+def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
+    """Counterpart guard: a genuine validated win (non-empty stack, real
+    flags, higher tput) DOES update best_config/best_throughput."""
+    coord = _make_coordinator(tmp_path)
+    cid = _expected_cid()
+    coord.cortex_kb.put_recipe(
+        canonical_id=cid, model=_MODEL, hardware=_HW, framework=_FW,
+        framework_version=_FWV, precision=_PREC,
+        best_config={"name": "old", "extra_sglang_args": "--page-size 16",
+                     "tput": "2000"},
+        best_throughput=2000.0,
+    )
+    ss = coord.shared_state
+    ss.current_best = {
+        "name": "tuned",
+        "extra_sglang_args": "--page-size 32 --schedule-policy lpm",
+        "tput": 2200.0,
+    }
+    ss.optimization_stack = [{
+        "action": "explore", "variant_name": "page32",
+        "extra_sglang_args": "--page-size 32 --schedule-policy lpm",
+    }]
+    ss.cumulative_gain_validated = 10.0
+    coord.cortex_finalize_recipe_and_journal()
+    row = coord.cortex_kb.get_recipe(canonical_id=cid)
+    assert row["best_throughput"] == 2200.0
+    assert "--page-size 32" in row["best_config"].get("extra_sglang_args", "")
+
+
+# ===========================================================================
+# R-9 (P1): kernel_optimizations[].e2e_decision must carry the integrate
+# verdict (KEEP/REVERT/NEEDS_REVIEW). Repro for session 20260531T144553Z
+# where k007 integrate REVERT'd (E2E -1.05%) but the recipe row only showed
+# the micro-layer decision=KEEP, hiding that the patch was rolled back.
+# ===========================================================================
+def test_kernel_e2e_decision_reflects_integrate_revert(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    ss = coord.shared_state
+    ss.kernel_opt_attempts = {
+        "k007": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 2.42,
+            "last_artifact_path": "/x/optimized_versions/v1_multirow.cu",
+            "last_source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        },
+    }
+    ss.kernel_integrate_attempts = {
+        "k007|/x/optimized_versions/v1_multirow.cu|": {
+            "kernel_id": "k007",
+            "best_gain_pct": -1.0488865062914727,
+            "last_decision": "REVERT",
+            "attempts": [
+                {"decision": "REVERT", "new_tput": 2784.0072254162687,
+                 "gain_pct": -1.0488865062914727},
+            ],
+        },
+    }
+    attrs = coord._build_recipe_attrs_from_state()
+    kopts = attrs.get("kernel_optimizations") or []
+    k = next((x for x in kopts if x.get("kernel_id") == "k007"), None)
+    assert k is not None, f"k007 missing from {kopts}"
+    # Micro-layer KEEP is preserved (kernel agent did keep its artifact).
+    assert k["decision"] == "KEEP"
+    # E2E integrate verdict must be surfaced as REVERT — NOT hidden.
+    assert k["e2e_decision"] == "REVERT"
+    assert k["integrated"] is True
+    assert round(k["e2e_gain_pct"], 2) == -1.05
+
+
+def test_kernel_e2e_decision_micro_only_when_not_integrated(
+    tmp_path: Path,
+) -> None:
+    """A micro-KEEP kernel that never reached integrate has no E2E verdict;
+    e2e_decision stays empty and integrated is False."""
+    coord = _make_coordinator(tmp_path)
+    ss = coord.shared_state
+    ss.kernel_opt_attempts = {
+        "k009": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 1.241,
+            "last_artifact_path": "/x/optimized_versions/v1_multirow.cu",
+            "last_source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
+        },
+    }
+    ss.kernel_integrate_attempts = {}
+    attrs = coord._build_recipe_attrs_from_state()
+    kopts = attrs.get("kernel_optimizations") or []
+    k = next((x for x in kopts if x.get("kernel_id") == "k009"), None)
+    assert k is not None
+    assert k["decision"] == "KEEP"
+    assert k["integrated"] is False
+    assert k["e2e_decision"] == ""
+
+
+# ===========================================================================
+# R-10 (P3): sessions[] entry must carry throughput_before/after, a date,
+# and the list of stack actions. Repro for recipe.json where every session
+# row had throughput_before/after=0.0, date="", actions_taken=[].
+# ===========================================================================
+def test_session_entry_carries_throughput_date_and_actions(
+    tmp_path: Path,
+) -> None:
+    coord = _make_coordinator(tmp_path)
+    ss = coord.shared_state
+    ss.baseline_tput = 2000.0
+    ss.current_best = {
+        "name": "tuned", "tput": 2150.0,
+        "extra_sglang_args": "--page-size 32",
+    }
+    ss.optimization_stack = [
+        {"action": "explore", "variant_name": "page32"},
+        {"action": "explore", "variant_name": "stream_interval_4"},
+    ]
+    ss.cumulative_gain_validated = 7.5
+    ss.cumulative_gain_validated_stack_len = 2
+    attrs = coord._build_recipe_attrs_from_state()
+    sessions = attrs.get("sessions") or []
+    assert sessions, "no session entry emitted"
+    s = sessions[0]
+    assert s["throughput_before"] == 2000.0
+    assert s["throughput_after"] == 2150.0
+    assert s["date"], "session date must not be empty"
+    assert s["actions_taken"] == ["page32", "stream_interval_4"]
+
+
+# ===========================================================================
+# R-11 (P4): a per-variant pitfall whose variant dict is empty must still
+# carry the variant NAME in its description, not collapse to the bare task
+# kind ("explore"). Repro for recipe.json where five distinct regressed
+# explore variants all wrote the indistinguishable description
+# "[sglang] explore → regress on ...".
+# ===========================================================================
+def test_pitfall_description_uses_variant_name_not_bare_kind(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    coord = _make_coordinator(tmp_path)
+    task = SimpleNamespace(kind="explore", task_id="t-1")
+    coord._record_fact_per_variant(
+        task=task,
+        source_session_id="sess-1",
+        variant_outcome={
+            "outcome": "REVERT",
+            "variant_name": "page64_no_radix",
+            # Empty variant dict is the bug trigger: summarize_change used
+            # to drop to task.kind ("explore") instead of the variant name.
+            "variant": {},
+            "metrics": {"gain_pct": -10.0},
+        },
+    )
+    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    descs = [p.get("description") for p in (row.get("pitfalls") or [])]
+    assert any("page64_no_radix" in (d or "") for d in descs), descs
+    # The bare-kind description must NOT be what we wrote.
+    assert not any(
+        (d or "") == f"[{_FW}] explore → regress on {_MODEL}/{_HW}"
+        for d in descs
+    ), descs
