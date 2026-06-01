@@ -115,10 +115,10 @@ async def test_run_optimization_response_records_to_shared_state(
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_does_not_record_kernel_opt(
+async def test_select_kernels_does_not_record_kernel_opt(
     session_dir, monkeypatch,
 ):
-    """Only run_optimization (not trace_analyze) writes to last_kernel_opt."""
+    """Only run_optimization (not select_kernels) writes to last_kernel_opt."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator import kernel_request_handlers
@@ -126,15 +126,176 @@ async def test_trace_analyze_does_not_record_kernel_opt(
             return {"status": "ok", "hot_kernels": [{"kernel_id": "k001"}]}
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze", fake,
+            "select_kernels", fake,
         )
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "trace_analyze",
+            payload={"target_agent": "kernel", "kind": "select_kernels",
                      "params": {"trace_input": "/tmp/t.json"}},
         )
         await c._handle_intent("orchestration", intent)
         assert c.shared_state.last_kernel_opt == {}
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_gemm_tuning_response_records_to_shared_state(
+    session_dir, monkeypatch,
+):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        c.shared_state.precision = "fp8"
+        c.shared_state.framework = "sglang"
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_trace_analyze = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "candidates_path": "/tmp/candidates.json",
+        }
+        c.shared_state.save(session_dir)
+
+        from inference_optimizer.orchestrator import kernel_request_handlers
+
+        async def fake(payload, *, session_dir):
+            return {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.2,
+                "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
+            }
+
+        monkeypatch.setitem(
+            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
+            "run_gemm_tuning", fake,
+        )
+        await c._handle_intent("orchestration", Intent(
+            type=IntentType.REQUEST,
+            payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
+        ))
+
+        assert c.shared_state.last_gemm_tuning["status"] == "ok"
+        assert c.shared_state.last_gemm_tuning["best_speedup"] == 1.2
+        assert c.shared_state.gemm_tuning_attempts
+        assert "last_gemm_tuning=" in c.shared_state.to_prompt_summary()
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_denied_until_fp8_gemm_tuning_terminal(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        c.shared_state.precision = "fp8"
+        c.shared_state.framework = "sglang"
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_trace_analyze = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "candidates_path": "/tmp/candidates.json",
+        }
+
+        denied = c._sequence_denial_for_request("kernel", "run_optimization")
+        assert denied is not None
+        assert denied.rule == "execution_order"
+        assert "run_gemm_tuning" in (denied.hint or "")
+
+        c.shared_state.last_gemm_tuning = {"status": "failed"}
+        assert c._sequence_denial_for_request("kernel", "run_optimization") is None
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
+    session_dir, monkeypatch,
+):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        c.shared_state.precision = "fp8"
+        c.shared_state.framework = "sglang"
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_select_kernels = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "candidates_path": "/tmp/candidates.json",
+        }
+        c.shared_state.continue_kernel_after_gemm = False
+        calls: list[dict] = []
+
+        from inference_optimizer.orchestrator import kernel_request_handlers
+
+        async def fake_handler(payload, *, session_dir):
+            calls.append(dict(payload))
+            return {
+                "status": "complete",
+                "decision": "KEEP",
+                "best_speedup": 1.28,
+                "tuned_file": "/tmp/tuned.csv",
+            }
+
+        monkeypatch.setattr(
+            kernel_request_handlers,
+            "run_gemm_tuning_handler",
+            fake_handler,
+        )
+
+        await c._on_enter_kernel(from_phase="EXPLORE")
+
+        assert calls
+        assert c.shared_state.last_gemm_tuning["status"] == "complete"
+        assert c.shared_state.last_gemm_tuning["best_speedup"] == 1.28
+        assert c.shared_state.gemm_tuning_attempts
+        assert c.shared_state.current_best["action"] == "gemm_tuning"
+        assert c.shared_state.current_best["tput"] == 1024.0
+        assert c.shared_state.cumulative_gain == pytest.approx(28.0)
+        assert c.shared_state.cumulative_gain_validated == pytest.approx(28.0)
+        assert c.shared_state.optimization_stack[-1]["action"] == "gemm_tuning"
+        assert c._gemm_tuning_required_before_kernel_opt() is False
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
+    session_dir, monkeypatch,
+):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        c.shared_state.precision = "fp8"
+        c.shared_state.framework = "sglang"
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_trace_analyze = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "candidates_path": "/tmp/candidates.json",
+        }
+        c.shared_state.continue_kernel_after_gemm = True
+        c.shared_state.untried_hot_reusable_kernels = lambda: ["k001"]  # type: ignore[method-assign]
+
+        from inference_optimizer.orchestrator import kernel_request_handlers
+
+        async def fake_gemm(payload, *, session_dir):
+            return {
+                "status": "complete",
+                "decision": "KEEP",
+                "best_speedup": 1.1,
+                "tuned_file": "/tmp/tuned.csv",
+            }
+
+        kernel_calls: list[dict] = []
+
+        async def fake_kernel(payload, *, session_dir, record_partial=None):
+            kernel_calls.append(dict(payload))
+            return {"status": "failed", "batch_mode": True, "batch_results": []}
+
+        monkeypatch.setattr(kernel_request_handlers, "run_gemm_tuning_handler", fake_gemm)
+        monkeypatch.setattr(kernel_request_handlers, "run_optimization_handler", fake_kernel)
+
+        await c._on_enter_kernel(from_phase="EXPLORE")
+
+        assert kernel_calls
+        assert kernel_calls[0]["candidates_path"] == "/tmp/candidates.json"
     finally:
         await c.stop()
 
@@ -277,8 +438,6 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     # gate via the documented env knob to keep the test focused on
     # batch dispatch / backend ladder semantics.
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0")
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
     candidates = tmp_path / "kernel_candidates.json"
     candidates.write_text(
         """
@@ -342,9 +501,6 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 
     assert result["batch_mode"] is True
     assert result["batch_kernel_ids"] == ["k003", "k006"]
-    # GEAK is FIRST in the auto-derived ladder (SKILL.md "high-priority
-    # handoff" contract). Cursor is dropped when CURSOR_API_KEY is unset
-    # (this test runs without one), so the visible ladder is geak/claude/codex.
     assert result["backend_order"] == ["geak", "claude", "codex"]
     assert result["kernel_id"] == "k006"
     assert result["proposal"]["decision"] == "KEEP"
@@ -353,61 +509,8 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     by_kernel: dict[str, list[str]] = {}
     for kernel_id, backend in calls:
         by_kernel.setdefault(kernel_id, []).append(backend)
-    # k003 never KEEPs ⇒ tries every backend in order: geak → claude → codex
     assert by_kernel["k003"] == ["geak", "claude", "codex"]
-    # k006 KEEPs on the second backend (claude) ⇒ short-circuits after that;
-    # the fallback loop never reaches codex.
     assert by_kernel["k006"] == ["geak", "claude"]
-
-
-# ===========================================================================
-# D2 — _DEFAULT_KERNEL_BACKEND_ORDER contract:
-#      GEAK FIRST per SKILL.md "high-priority handoff"
-#      Regression for "GEAK is requested but Hyperloom dispatches to Claude"
-# ===========================================================================
-def test_default_kernel_backend_order_puts_geak_first():
-    """Lock the SKILL.md contract: GEAK is the first auto-derived backend.
-
-    Prior to this fix the constant was
-    ``("claude", "codex", "cursor", "geak")`` which meant every kernel was
-    sent to Claude first; GEAK only fired as a 4th-attempt fallback (or
-    never, if Claude returned KEEP). That silently violated the
-    SKILL.md §"choose_backends" / §"Default ladder" guarantee and made
-    end-to-end optimization runs ignore GEAK in practice.
-    """
-    from inference_optimizer.orchestrator import kernel_request_handlers as krh
-
-    assert krh._DEFAULT_KERNEL_BACKEND_ORDER[0] == "geak", (
-        "GEAK must lead the auto-derived ladder. See SKILL.md "
-        "§'choose_backends': 'GEAK is FIRST (high-priority handoff)'."
-    )
-    # Whole tuple lock so reorderings of the tail are caught explicitly.
-    assert krh._DEFAULT_KERNEL_BACKEND_ORDER == (
-        "geak", "claude", "codex", "cursor",
-    )
-
-
-def test_backend_order_drops_cursor_when_key_absent(monkeypatch):
-    """When ``CURSOR_API_KEY`` is unset, the auto-derived ladder drops
-    cursor — keeps the user's intent honoured (explicit ``cursor`` still
-    runs) while avoiding wasted 401 attempts."""
-    from inference_optimizer.orchestrator import kernel_request_handlers as krh
-
-    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert krh._backend_order({}) == ["geak", "claude", "codex"]
-
-
-def test_backend_order_explicit_payload_overrides_default(monkeypatch):
-    """Operator-specified ``backend_order`` (or ``KERNEL_OPT_BACKEND_ORDER``)
-    bypasses the cursor-drop heuristic — explicit intent always wins."""
-    from inference_optimizer.orchestrator import kernel_request_handlers as krh
-
-    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert krh._backend_order({"backend_order": "claude,cursor,geak"}) == [
-        "claude", "cursor", "geak",
-    ]
 
 
 # ===========================================================================

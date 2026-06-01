@@ -235,3 +235,52 @@ def test_existing_fields_still_populated(tmp_path: Path) -> None:
     assert cached["roofline_snapshot_id"] == 1
     assert cached["roofline_baseline_gain_at_snapshot"] == 0.0
     assert cached["ts"]
+
+
+def test_record_trace_analyze_preserves_kernel_roofline_fields(
+    tmp_path: Path,
+) -> None:
+    """Kernel-roofline fields from TraceLens candidates survive caching."""
+    analysis_md = tmp_path / "analysis.md"
+    analysis_md.write_text("# hi", encoding="utf-8")
+
+    state = SharedState()
+    state.record_trace_analyze(
+        {"trace_input": "/some/trace.json"},
+        {
+            "hot_kernels": [
+                {
+                    "kernel_id": "k1",
+                    "name": "rmsnorm_kernel",
+                    "gpu_pct": 8.2,
+                    "bottleneck": "memory",
+                    "bound_type": "memory",
+                    "flops_per_byte": 0.45,
+                    "efficiency_percent": 31.2,
+                    "compute_utilization_pct": 9.1,
+                    "bandwidth_utilization_pct": 72.4,
+                    "suggestion": "reduce memory traffic",
+                    "roofline_name": "rmsnorm_kernel",
+                    "source_file": "/tmp/rmsnorm.py",
+                    "recommended_actions": ["fuse adjacent ops"],
+                    "reusable_native_kernel": True,
+                },
+            ],
+            "candidates_path": "/some/kc.json",
+            "kernel_roofline_path": "/some/reports/kernel_roofline.json",
+            "trace_report_path": str(analysis_md),
+            "trace_health_warnings": [],
+        },
+    )
+
+    cached = state.last_trace_analyze
+    assert cached["kernel_roofline_path"] == "/some/reports/kernel_roofline.json"
+    row = cached["hot_kernels_top15"][0]
+    assert row["bound_type"] == "memory"
+    assert row["arithmetic_intensity"] == 0.45
+    assert row["flops_per_byte"] == 0.45
+    assert row["efficiency_percent"] == 31.2
+    assert row["compute_utilization_pct"] == 9.1
+    assert row["bandwidth_utilization_pct"] == 72.4
+    assert row["suggestion"] == "reduce memory traffic"
+    assert cached["kernel_roofline_top15"][0] == row
