@@ -4,7 +4,7 @@ The fingerprint is the cross-action dedup-ledger key (used by
 ``params_search`` and ``backends_search``). It MUST satisfy:
 
 * ``name`` is not an input → renames cannot bypass dedup.
-* ``extra_sglang_args`` is normalized by ``shlex.split`` + sort →
+* ``extra_server_args`` is normalized by ``shlex.split`` + sort →
   permutations of the same flags collide.
 * ``extra_envs`` is normalized by sorted ``(str(k), str(v))`` pairs →
   dict insertion order and ``"1"`` vs ``1`` collide.
@@ -82,7 +82,7 @@ def test_variant_result_fingerprint_matches_grid_variant() -> None:
     gv = GridVariant("g", args, envs)
     vr = VariantResult(
         name="g",
-        extra_sglang_args=args,
+        extra_server_args=args,
         extra_envs=envs,
         status="succeeded",
     )
@@ -93,7 +93,7 @@ def test_variant_result_fingerprint_matches_grid_variant() -> None:
 def test_variant_result_to_dict_carries_fingerprint() -> None:
     vr = VariantResult(
         name="g",
-        extra_sglang_args="--block-size 128",
+        extra_server_args="--block-size 128",
         extra_envs={"A": "1"},
         status="succeeded",
     )
@@ -111,15 +111,15 @@ def test_shared_state_migrates_legacy_name_keyed_tested() -> None:
         "params_search": {
             "schema_version": 1,
             "accepted": [
-                {"name": "A", "extra_sglang_args": "--A", "extra_envs": {}},
+                {"name": "A", "extra_server_args": "--A", "extra_envs": {}},
             ],
             "rejected": [
-                {"name": "C", "extra_sglang_args": "--C", "extra_envs": {}},
+                {"name": "C", "extra_server_args": "--C", "extra_envs": {}},
             ],
             "tested": {
-                "A": {"name": "A", "extra_sglang_args": "--A", "extra_envs": {}},
-                "B": {"name": "B", "extra_sglang_args": "--B", "extra_envs": {}},
-                "C": {"name": "C", "extra_sglang_args": "--C", "extra_envs": {}},
+                "A": {"name": "A", "extra_server_args": "--A", "extra_envs": {}},
+                "B": {"name": "B", "extra_server_args": "--B", "extra_envs": {}},
+                "C": {"name": "C", "extra_server_args": "--C", "extra_envs": {}},
             },
             "cursor": 3,
         },

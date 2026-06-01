@@ -94,11 +94,11 @@ def _exp_state(*, gain: float = 6.5) -> dict:
         ],
         "backends_attempts": [
             {"ts": "2026-05-19T09:50:00+00:00",
-             "extra_sglang_args": "--known-flag-a --known-flag-c"},
+             "extra_server_args": "--known-flag-a --known-flag-c"},
         ],
         "params_attempts": [
             {"ts": "2026-05-19T09:55:00+00:00",
-             "extra_sglang_args": "--known-flag-b"},
+             "extra_server_args": "--known-flag-b"},
         ],
         "cumulative_gain_validated_ts": "2026-05-19T10:30:00+00:00",
         "discovered_flags": {

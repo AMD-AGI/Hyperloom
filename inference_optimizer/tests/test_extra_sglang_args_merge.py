@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from inference_optimizer.orchestrator.coordinator import (
-    _dedupe_extra_sglang_args,
+    _dedupe_extra_server_args,
     _merge_cumulative_extra_sglang_args,
 )
 
@@ -34,9 +34,9 @@ def test_dedupe_preserves_cuda_graph_bs_multi_values() -> None:
         "--schedule-policy lpm --cuda-graph-bs 1 2 4 8 16 24 32 48 64 80 "
         "--mem-fraction-static 0.92 --page-size 16"
     )
-    assert _dedupe_extra_sglang_args(args) == args
+    assert _dedupe_extra_server_args(args) == args
 
 
 def test_dedupe_last_wins_single_value_flags() -> None:
     args = "--mem-fraction-static 0.90 --mem-fraction-static 0.92"
-    assert _dedupe_extra_sglang_args(args) == "--mem-fraction-static 0.92"
+    assert _dedupe_extra_server_args(args) == "--mem-fraction-static 0.92"

@@ -1,9 +1,21 @@
 """Framework source-root resolution for PolicyGate and flag discovery.
 
 Containers may ship framework code under ``/sgl-workspace/{aiter,sglang,vllm}``
-or under ``site-packages`` / ``dist-packages`` when only pip wheels are present.
-This module centralises probe order so PolicyGate, AST discovery, install.sh,
-and ``apply_kernel_patch`` agree.
+or ``/app/ATOM/atom`` (atom editable install), or under ``site-packages`` /
+``dist-packages`` when only pip wheels are present. This module centralises
+probe order so PolicyGate, AST discovery, install.sh, and
+``apply_kernel_patch`` all agree.
+
+Three frameworks are first-class today (alphabetical):
+
+* atom    — ``/app/ATOM/atom/`` editable install layout, ``arg_utils.py``
+  under ``model_engine/``.
+* sglang  — ``/sgl-workspace/sglang/python/sglang/srt/server_args.py``.
+* vllm    — ``/sgl-workspace/vllm/vllm/engine/arg_utils.py``.
+
+aiter is included in the source-roots allowlist because it's a kernel
+library shared across all three frameworks (atom imports it for fused
+MoE / MLA paths the same way sglang/vllm do).
 """
 
 from __future__ import annotations
@@ -19,14 +31,22 @@ _DEFAULT_SGLANG_SERVER_ARGS = Path(
 _DEFAULT_VLLM_ARG_UTILS = Path(
     "/sgl-workspace/vllm/vllm/engine/arg_utils.py"
 )
+_DEFAULT_ATOM_ARG_UTILS = Path(
+    "/app/ATOM/atom/model_engine/arg_utils.py"
+)
 
 _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
     "/sgl-workspace/vllm/",
+    # atom's editable-install layout. Production atom boxes also expose
+    # atom under ``/opt/venv/lib/pythonX.Y/site-packages/atom/`` — that
+    # path is picked up dynamically by ``probe_framework_source_roots_for_env``
+    # via the VIRTUAL_ENV glob below, mirroring the sglang/vllm pattern.
+    "/app/ATOM/atom/",
 )
 
-_FRAMEWORK_PACKAGES: tuple[str, ...] = ("aiter", "sglang", "vllm")
+_FRAMEWORK_PACKAGES: tuple[str, ...] = ("aiter", "sglang", "vllm", "atom")
 
 # Parents scanned for ``python*/{site,dist}-packages/<pkg>`` wheel layouts.
 _INSTALL_GLOB_PARENTS: tuple[Path, ...] = (
@@ -42,12 +62,20 @@ _STATIC_PATCH_FALLBACK_ROOTS: tuple[str, ...] = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/opt/venv/lib/python3.10/site-packages/atom/",
+    "/opt/venv/lib/python3.12/site-packages/aiter/",
+    "/opt/venv/lib/python3.12/site-packages/sglang/",
+    "/opt/venv/lib/python3.12/site-packages/vllm/",
+    "/opt/venv/lib/python3.12/site-packages/atom/",
     "/usr/local/lib/python3.12/dist-packages/aiter/",
     "/usr/local/lib/python3.12/dist-packages/sglang/",
     "/usr/local/lib/python3.12/dist-packages/vllm/",
+    "/usr/local/lib/python3.12/dist-packages/atom/",
     "/usr/local/lib/python3.10/dist-packages/aiter/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
+    "/usr/local/lib/python3.10/dist-packages/atom/",
+    "/app/ATOM/atom/",
     _AITER_META_CSRC_ROOT,
 )
 
@@ -89,9 +117,11 @@ def _glob_install_package_roots() -> tuple[str, ...]:
         "python*/dist-packages/aiter",
         "python*/dist-packages/sglang",
         "python*/dist-packages/vllm",
+        "python*/dist-packages/atom",
         "python*/site-packages/aiter",
         "python*/site-packages/sglang",
         "python*/site-packages/vllm",
+        "python*/site-packages/atom",
     )
     found: list[str] = []
     seen: set[str] = set()
@@ -137,6 +167,7 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
                 "python*/site-packages/vllm",
                 "python*/site-packages/sglang",
                 "python*/site-packages/aiter",
+                "python*/site-packages/atom",
             ):
                 for match in sorted(site.glob(pattern)):
                     if match.is_dir():
@@ -224,6 +255,46 @@ def resolve_vllm_arg_utils_path() -> tuple[Path, str]:
     )
 
 
+def resolve_atom_arg_utils_path() -> tuple[Path, str]:
+    """Resolve atom ``model_engine/arg_utils.py`` for AST discovery.
+
+    Symmetric with ``resolve_sglang_server_args_path()`` and
+    ``resolve_vllm_arg_utils_path()``:
+
+    1. Honour ``$INFERENCE_OPTIMIZER_ATOM_ARG_UTILS`` if set (operator
+       override for non-default layouts).
+    2. Check the default editable-install location
+       ``/app/ATOM/atom/model_engine/arg_utils.py``.
+    3. Fall back to ``importlib.util.find_spec("atom")`` and walk to
+       ``<origin>/model_engine/arg_utils.py``.
+
+    Returns ``(Path, str)`` where the str is the file path on success or
+    a diagnostic message on failure (same contract as the sister
+    helpers).
+    """
+    override = os.environ.get("INFERENCE_OPTIMIZER_ATOM_ARG_UTILS", "").strip()
+    if override:
+        p = Path(override)
+        if p.is_file():
+            return p, str(p)
+        return p, f"INFERENCE_OPTIMIZER_ATOM_ARG_UTILS={override} not found"
+    if _DEFAULT_ATOM_ARG_UTILS.is_file():
+        return _DEFAULT_ATOM_ARG_UTILS, str(_DEFAULT_ATOM_ARG_UTILS)
+    origin = _find_spec_origin("atom")
+    if origin is not None:
+        candidate = origin / "model_engine" / "arg_utils.py"
+        if candidate.is_file():
+            return candidate, str(candidate)
+        for alt in (
+            origin / "atom" / "model_engine" / "arg_utils.py",
+        ):
+            if alt.is_file():
+                return alt, str(alt)
+    return _DEFAULT_ATOM_ARG_UTILS, (
+        f"atom arg_utils not found (checked {_DEFAULT_ATOM_ARG_UTILS})"
+    )
+
+
 def probe_framework_source_roots_for_env() -> str:
     """Colon-separated roots for ``INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS``."""
     found: list[str] = []
@@ -234,10 +305,52 @@ def probe_framework_source_roots_for_env() -> str:
     return ":".join(found)
 
 
+# ---------------------------------------------------------------------------
+# Discovery summary — operator-facing log helper.
+# install.sh consumes this to emit a one-line ``sglang=ok atom=ok ...``
+# summary after the colon-separated probe. Preflight greps the line, so
+# keep its format stable.
+# ---------------------------------------------------------------------------
+
+# Buckets are ordered so substring matching is deterministic — atom is
+# checked BEFORE vllm/sglang to keep parity with
+# ``server_args_env_name``'s ordering convention (atom paths never contain
+# vllm/sglang substrings today, but the explicit ordering keeps a future
+# framework name like "atom-vllm" from accidentally falling into the
+# wrong bucket).
+_FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter")
+
+
+def summarise_framework_root_discovery(roots: str) -> str:
+    """Return ``"sglang=ok atom=missing ..."``-style one-line summary.
+
+    Input is the colon-separated string emitted by
+    ``probe_framework_source_roots_for_env``. Output is a single
+    space-separated line where each framework reports ``=ok`` if any
+    discovered root path contains the framework name and ``=missing``
+    otherwise. Buckets are emitted in the order declared by
+    ``_FRAMEWORK_BUCKETS`` so the line is stable across runs.
+
+    Used by ``install.sh`` to give operators a one-line "did atom get
+    picked up" answer; tested via the matching pytest case rather than
+    via install.sh shell smoke (the helper is operator-visible
+    observability, not a control-flow boundary).
+    """
+    parts: list[str] = []
+    items = [p.strip().lower() for p in (roots or "").split(":") if p.strip()]
+    for fw in _FRAMEWORK_BUCKETS:
+        token = f"/{fw}/"
+        status = "ok" if any(item.endswith(token) for item in items) else "missing"
+        parts.append(f"{fw}={status}")
+    return " ".join(parts)
+
+
 __all__ = [
     "probe_framework_source_roots_for_env",
+    "resolve_atom_arg_utils_path",
     "resolve_patch_target_roots",
     "resolve_sglang_server_args_path",
     "resolve_source_file_allowlist",
     "resolve_vllm_arg_utils_path",
+    "summarise_framework_root_discovery",
 ]
