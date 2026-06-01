@@ -3582,6 +3582,84 @@ def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Optimization stack — raw KEEP ledger passthrough
+# ---------------------------------------------------------------------------
+# ``state.optimization_stack[]`` is the authoritative ordered list of
+# every promotion the Coordinator has accepted in this session. Other
+# breakdown sections summarise it for specific consumers
+# (``final.action_path`` is a label-only string list,
+# ``attribution.gain_per_stack_entry`` is the gain ledger,
+# ``roofline_progress.trajectory`` is the chart-friendly view) but
+# none of them carry the full per-entry metadata downstream tooling
+# may need — e.g. ``tuned_file`` / ``final_report_path`` on a
+# ``gemm_tuning`` entry, or ``workspace`` for arbitrary KEEPs.
+#
+# This passthrough surfaces the raw stack at sbd top level so
+# consumers that need the full evidence set can read sbd alone (no
+# state.json walk on the consumer side, matching the dashboard
+# read-once contract).
+#
+# Field shape mirrors the in-state-dict shape; entries are coerced
+# defensively (string/None/dict) so downstream tooling never has to
+# guard against type drift.
+def collect_optimization_stack(
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Mirror ``state.optimization_stack[]`` to the breakdown.
+
+    Returns ``[]`` when the field is absent or empty (pre-baseline /
+    fresh session). Never raises.
+    """
+    stack = state.get("optimization_stack") or []
+    if not isinstance(stack, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in stack:
+        if not isinstance(entry, dict):
+            continue
+        out.append(_normalize_optimization_stack_entry(entry))
+    return out
+
+
+def _normalize_optimization_stack_entry(raw: dict[str, Any]) -> dict[str, Any]:
+    """Coerce one stack entry to the schema shape with stable types.
+
+    Unknown / future fields pass through verbatim under their raw
+    keys so the schema can lag the state writer without losing data
+    (forward compatibility — see Inv-10.1 fact-layer compat).
+    """
+    # Known fields — coerced types
+    out: dict[str, Any] = {
+        "action":                       str(raw.get("action") or ""),
+        "variant_name":                 str(raw.get("variant_name") or ""),
+        "candidate_extra_sglang_args":  str(raw.get("candidate_extra_sglang_args") or ""),
+        "extra_envs":                   dict(raw.get("extra_envs") or {}),
+        "tput":                         _to_float(raw.get("tput")),
+        "ts":                           str(raw.get("ts") or ""),
+        "workspace":                    raw.get("workspace"),
+    }
+    # gemm_tuning-specific evidence (optional, only populated by the
+    # Coordinator's ``_promote_gemm_tuning_keep`` path).
+    if "tuned_file" in raw:
+        out["tuned_file"] = str(raw.get("tuned_file") or "")
+    if "final_report_path" in raw:
+        out["final_report_path"] = str(raw.get("final_report_path") or "")
+    if "source" in raw:
+        out["source"] = str(raw.get("source") or "")
+    if "gain_pct" in raw:
+        out["gain_pct"] = _to_float(raw.get("gain_pct"))
+    if "kernel_id" in raw:
+        out["kernel_id"] = str(raw.get("kernel_id") or "")
+    if "fingerprint" in raw:
+        out["fingerprint"] = str(raw.get("fingerprint") or "")
+    if "provenance" in raw:
+        out["provenance"] = str(raw.get("provenance") or "")
+    if "task_id" in raw:
+        out["task_id"] = str(raw.get("task_id") or "")
+    return out
+
+
 def collect_source_files(
     session_dir: Path,
     baseline_path: str | None,

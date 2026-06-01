@@ -1593,6 +1593,156 @@ def test_roofline_list_empty_when_no_snapshots(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A1.4: optimization_stack passthrough (raw KEEP ledger)
+# ---------------------------------------------------------------------------
+# Mirrors ``state.optimization_stack[]`` to sbd top level so downstream
+# tooling can read the full per-entry evidence without round-tripping
+# back to state.json. Other "stack-derived" sections summarise this
+# list for specific consumers but drop the per-entry metadata
+# (workspace / tuned_file / etc.) that GEMM-tuning visualisation and
+# audit trails need.
+def test_optimization_stack_empty_when_state_has_no_stack(tmp_path: Path) -> None:
+    """Pre-baseline / fresh session: ``state.optimization_stack`` is
+    absent or empty → top-level field is ``[]``, no warning."""
+    sd = _roofline_progress_fixture(tmp_path, state={
+        "baseline_tput": 0.0,
+        "cumulative_gain": 0.0,
+    })
+    bd = build(sd)
+    assert bd["optimization_stack"] == []
+
+
+def test_optimization_stack_full_field_passthrough(tmp_path: Path) -> None:
+    """Standard explore KEEP: the full known field set surfaces with
+    coerced types. ``extra_envs`` is a real dict, ``tput`` a float,
+    ``workspace`` survives null."""
+    sd = _roofline_progress_fixture(tmp_path, state={
+        "baseline_tput": 1300.0,
+        "current_best": {"tput": 1313.0},
+        "cumulative_gain": 1.0,
+        "optimization_stack": [
+            {
+                "action": "explore",
+                "variant_name": "continuous_decode_steps_4",
+                "candidate_extra_sglang_args":
+                    "--num-continuous-decode-steps 4 --scheduler-recv-interval 4",
+                "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+                "tput": 1313.5356953711394,
+                "ts": "2026-05-29T11:18:24.339975+00:00",
+                "workspace": None,
+                "fingerprint": "abc123",
+                "provenance": "specialist:serving_specialist",
+            },
+        ],
+    })
+    stack = build(sd)["optimization_stack"]
+    assert len(stack) == 1
+    e = stack[0]
+    assert e["action"] == "explore"
+    assert e["variant_name"] == "continuous_decode_steps_4"
+    assert e["candidate_extra_sglang_args"].startswith("--num-continuous-decode-steps")
+    assert e["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+    assert e["tput"] == pytest.approx(1313.5356953711394)
+    assert e["ts"] == "2026-05-29T11:18:24.339975+00:00"
+    assert e["workspace"] is None
+    # Optional fields surface when present.
+    assert e["fingerprint"] == "abc123"
+    assert e["provenance"] == "specialist:serving_specialist"
+
+
+def test_optimization_stack_passes_through_gemm_tuning_evidence(
+    tmp_path: Path,
+) -> None:
+    """A ``gemm_tuning`` KEEP carries ``tuned_file`` /
+    ``final_report_path`` / ``source`` / ``gain_pct`` — these are the
+    full evidence the dashboard needs to attribute speedup to the
+    deterministic FP8 tuner. The passthrough preserves them all."""
+    sd = _roofline_progress_fixture(tmp_path, state={
+        "baseline_tput": 100.0,
+        "current_best": {"tput": 110.0},
+        "cumulative_gain": 10.0,
+        "optimization_stack": [
+            {
+                "action": "gemm_tuning",
+                "variant_name": "a8w8_blockscale_tuned_gemm",
+                "candidate_extra_sglang_args": "",
+                "extra_envs": {
+                    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE":
+                        "/abs/path/a8w8_blockscale_tuned_gemm.csv",
+                },
+                "tput": 110.0,
+                "ts": "2026-06-01T10:00:00+00:00",
+                "workspace": "/abs/path/gemm_tuning_001",
+                "tuned_file": "/abs/path/a8w8_blockscale_tuned_gemm.csv",
+                "final_report_path": "/abs/path/final_report.json",
+                "gain_pct": 10.0,
+                "source": "kernel_entry_auto",
+            },
+        ],
+    })
+    stack = build(sd)["optimization_stack"]
+    assert len(stack) == 1
+    e = stack[0]
+    assert e["action"] == "gemm_tuning"
+    assert e["tuned_file"] == "/abs/path/a8w8_blockscale_tuned_gemm.csv"
+    assert e["final_report_path"] == "/abs/path/final_report.json"
+    assert e["source"] == "kernel_entry_auto"
+    assert e["gain_pct"] == pytest.approx(10.0)
+    # extra_envs preserves the AITER override that gemm_tuning sets.
+    assert e["extra_envs"]["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"].endswith(
+        "a8w8_blockscale_tuned_gemm.csv"
+    )
+
+
+def test_optimization_stack_preserves_promotion_order(
+    tmp_path: Path,
+) -> None:
+    """Multi-step session: stack order is preserved verbatim (the
+    Coordinator writes in promotion order; the passthrough must NOT
+    re-sort or de-dupe). Critical for dashboard timelines that bind
+    each step to its predecessor."""
+    sd = _roofline_progress_fixture(tmp_path, state={
+        "baseline_tput": 100.0,
+        "current_best": {"tput": 130.0},
+        "cumulative_gain": 30.0,
+        "optimization_stack": [
+            {"action": "params",  "variant_name": "p1", "tput": 110.0,
+             "ts": "2026-06-01T10:00:00+00:00"},
+            {"action": "gemm_tuning", "variant_name": "a8w8_tuned",
+             "tuned_file": "/abs/csv.csv", "tput": 120.0,
+             "ts": "2026-06-01T10:30:00+00:00"},
+            {"action": "kernel_opt", "variant_name": "k005", "tput": 130.0,
+             "ts": "2026-06-01T11:00:00+00:00",
+             "kernel_id": "k005"},
+        ],
+    })
+    stack = build(sd)["optimization_stack"]
+    assert [e["action"] for e in stack] == ["params", "gemm_tuning", "kernel_opt"]
+    assert stack[1]["tuned_file"] == "/abs/csv.csv"
+    assert stack[2]["kernel_id"] == "k005"
+
+
+def test_optimization_stack_drops_non_dict_entries(tmp_path: Path) -> None:
+    """Defensive: malformed entries (e.g. a stray string) are dropped
+    rather than crashing the whole export."""
+    sd = _roofline_progress_fixture(tmp_path, state={
+        "baseline_tput": 100.0,
+        "current_best": {"tput": 110.0},
+        "cumulative_gain": 10.0,
+        "optimization_stack": [
+            {"action": "params", "variant_name": "p1", "tput": 110.0,
+             "ts": "2026-06-01T10:00:00+00:00"},
+            "garbage",
+            None,
+            42,
+        ],
+    })
+    stack = build(sd)["optimization_stack"]
+    assert len(stack) == 1
+    assert stack[0]["action"] == "params"
+
+
+# ---------------------------------------------------------------------------
 # A2: final.ttft_mean_ms reconstruction
 # ---------------------------------------------------------------------------
 def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:

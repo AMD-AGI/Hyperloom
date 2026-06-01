@@ -171,6 +171,14 @@ def build(
                                         ),
                                         warnings,
                                         default=[])
+    # Raw ``state.optimization_stack[]`` passthrough so downstream
+    # tooling can see the full per-entry evidence (tuned_file /
+    # workspace / etc.) without having to re-read state.json. Pure
+    # mirror; never raises.
+    optimization_stack = _safe_collect("optimization_stack",
+                                        lambda: collectors.collect_optimization_stack(state),
+                                        warnings,
+                                        default=[])
     # Hot-kernel roofline table (Dashboard §1). Pulls
     # ``<sd>/reports/kernel_roofline.json`` so dashboards consume sbd
     # exclusively and never have to walk the kernel-agent tree.
@@ -251,6 +259,10 @@ def build(
         "kb_provenance":       kb_provenance,
         # specialist sub-agent dispatch records.
         "specialist_runs":     specialist_runs,
+        # Raw KEEP ledger passthrough. Mirrors
+        # ``state.optimization_stack[]`` verbatim. Empty list on
+        # pre-baseline / fresh sessions.
+        "optimization_stack":  optimization_stack,
         # Hot-kernel roofline table (Dashboard-Roofline 对接清单 §1).
         # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
         # absent — the dashboard hides the table on empty.
