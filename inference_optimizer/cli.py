@@ -1189,20 +1189,9 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 
 # Real executors enabled in every run mode (kernel + no-kernel).
 #
-# v0.8 M3 + KB_gaps/Gap-10: the legacy ``backends`` / ``params`` /
-# ``validate_stack`` registrations have been removed alongside
-# PolicyGate's ``action_deprecated`` rule. The merged ``explore``
-# action subsumes the per-variant KEEP/REVERT plus the per-KEEP stack
-# rebench; validate_stack is no longer a
-# standalone action.
-#
-# The legacy executor Python modules (``action_executors/backends.py``,
-# ``params.py``, ``validate_stack.py``) have been physically deleted
-# from the tree. The legacy resume audit trails (``backends_attempts``
-# etc.) keep their meaning on disk so legacy session resumes still
-# render correctly. New sessions never see these action names because
-# PolicyGate denies them with ``rule='action_deprecated'`` before a
-# task is ever queued.
+# The merged ``explore`` action subsumes the per-variant KEEP/REVERT
+# plus the per-KEEP stack rebench; there is no standalone validation
+# action.
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline":          baseline_executor,
     # GAP 1 — ``replay_warm_recipe`` runs the same Magpie subprocess
@@ -1230,8 +1219,7 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     # cleans up leaked VRAM owners and, behind
     # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, optionally shells out to
     # ``rocm-smi --gpureset``. See
-    # ``orchestrator/action_executors/recover.py``. ``validate_stack``
-    # has been retired and is intentionally absent.
+    # ``orchestrator/action_executors/recover.py``.
     "recover":           recover_executor,
 }
 

@@ -9,8 +9,7 @@ internally invokes two atomic sub-steps in order:
    profiler against the running server and produce a `trace_dir`
    (and downstream `last_profile_trace`).
 2. **`trace_analyze`** — invokes the kernel-agent `tracelens_analysis.py`
-   tool (the request handler renamed from `select_kernels` in N1)
-   which runs TraceLens internally (`trace_split` →
+   tool which runs TraceLens internally (`trace_split` →
    `kernel_candidates` → write `analysis.md` + `summary.json`).
 
 After both sub-steps succeed, `SharedState` carries:
