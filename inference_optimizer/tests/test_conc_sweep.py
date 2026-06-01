@@ -341,15 +341,10 @@ def _fake_variant(
     )
 
 
-def test_run_conc_sweep_happy_path_writes_reports_and_patches_final_json(
+def test_run_conc_sweep_happy_path_writes_reports(
     session_dir: Path, baseline_yaml: Path,
 ):
     state = _make_state(baseline_config_path=str(baseline_yaml))
-    # Seed an existing final.json so the pointer-patch path is exercised.
-    final_json_path = session_dir / "reports" / "final.json"
-    final_json_path.write_text(
-        json.dumps({"stop_reason": "target_reached", "cumulative_gain": 12.3}),
-    )
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         out: list[VariantResult] = []
@@ -412,16 +407,11 @@ def test_run_conc_sweep_happy_path_writes_reports_and_patches_final_json(
     assert len(rows) == 6  # 3 baseline + 3 optimized
     assert {r["arm"] for r in rows} == {"baseline", "optimized"}
 
-    # final.json got the pointer.
-    final_disk = json.loads(final_json_path.read_text())
-    assert final_disk["stop_reason"] == "target_reached"
-    assert "conc_sweep_summary" in final_disk
-    assert final_disk["conc_sweep_summary"]["status"] == "succeeded"
-    assert final_disk["conc_sweep_summary"]["summary"]["best_speedup"] == \
-        pytest.approx(1.30)
-    # Pointer is a session-relative path.
-    assert final_disk["conc_sweep_summary"]["report_path"] == \
-        "reports/conc_sweep_summary.json"
+    # final.json pointer is owned by report.py (added at CLOSE), not
+    # by run_conc_sweep itself. Confirm we did NOT touch the file
+    # here -- the SWEEP-phase action must run strictly before CLOSE.
+    final_json_path = session_dir / "reports" / "final.json"
+    assert not final_json_path.exists()
 
 
 def test_run_conc_sweep_optimized_oom_yields_failed_pair(
@@ -559,11 +549,12 @@ def test_run_conc_sweep_envs_only_optimization_triggers_run(
     assert payload["optimized"]["extra_envs"] == {"SGLANG_MOE_ENABLE": "1"}
 
 
-def test_run_conc_sweep_missing_final_json_does_not_raise(
+def test_run_conc_sweep_does_not_touch_final_json(
     session_dir: Path, baseline_yaml: Path,
 ):
-    """Pointer-patch must no-op cleanly when final.json is absent
-    (e.g. close-sequence skipped)."""
+    """conc_sweep is now a SWEEP-phase action that runs strictly
+    BEFORE CLOSE writes final.json. It must never create or modify
+    final.json; the pointer is added later by report.py."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     final_json_path = session_dir / "reports" / "final.json"
     assert not final_json_path.exists()
@@ -632,9 +623,9 @@ def test_default_concs_is_powers_of_two():
     assert DEFAULT_CONCS == [1, 2, 4, 8, 16, 32, 64, 128]
 
 
-def test_default_total_budget_is_two_hours():
-    """Doc-pin: default total wall-clock budget is 2h."""
-    assert DEFAULT_TOTAL_BUDGET_SEC == 7200
+def test_default_total_budget_is_two_and_half_hours():
+    """Doc-pin: default total wall-clock budget is 2.5h."""
+    assert DEFAULT_TOTAL_BUDGET_SEC == 9000
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +763,101 @@ def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
     # Every recorded per-variant timeout must be <= the total budget.
     assert all(t <= 120 for t in recorded_timeouts)
     assert all(t >= 1 for t in recorded_timeouts)
+
+
+# ---------------------------------------------------------------------------
+# ActionExecutor integration (SWEEP-phase dispatch)
+# ---------------------------------------------------------------------------
+
+
+def test_conc_sweep_executor_loads_state_and_dispatches(
+    session_dir: Path, baseline_yaml: Path,
+):
+    """ConcSweepExecutor reloads SharedState from session_dir and
+    threads the registry fields (concs / total_budget / variant_timeout)
+    through to ``run_conc_sweep``."""
+    from inference_optimizer.orchestrator.action_executors.conc_sweep import (
+        ConcSweepExecutor,
+    )
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    state.conc_sweep_enabled = True
+    state.conc_sweep_concs = [1, 4]
+    state.conc_sweep_total_budget_sec = 60
+    state.conc_sweep_variant_timeout_sec = 30
+    state.save(session_dir)
+
+    # Build a fake RunnerContext.
+    class _Task:
+        params = {}  # executor should fall back to SharedState values
+    class _Ctx:
+        task = _Task()
+        extra = {"session_dir": str(session_dir)}
+    captured: dict = {}
+
+    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec,
+                       total_budget_sec, **_kw):
+        captured["concs"] = list(concs)
+        captured["timeout"] = variant_timeout_sec
+        captured["budget"] = total_budget_sec
+        return {
+            "status": "succeeded", "summary": {"successful_pairs": 2},
+        }
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.conc_sweep.run_conc_sweep",
+        side_effect=_fake_run,
+    ):
+        result = asyncio.run(ConcSweepExecutor()(_Ctx()))
+
+    assert result["status"] == "succeeded"
+    assert captured["concs"] == [1, 4]
+    assert captured["timeout"] == 30
+    assert captured["budget"] == 60
+
+
+def test_conc_sweep_executor_missing_session_dir_yields_failure():
+    from inference_optimizer.orchestrator.action_executors.conc_sweep import (
+        ConcSweepExecutor,
+    )
+    class _Task:
+        params = {}
+    class _Ctx:
+        task = _Task()
+        extra: dict = {}
+    result = asyncio.run(ConcSweepExecutor()(_Ctx()))
+    assert result["status"] == "failed"
+    assert result["error_class"] == "missing_session_dir"
+
+
+def test_conc_sweep_executor_remaps_skip_to_succeeded(
+    session_dir: Path, baseline_yaml: Path,
+):
+    """A run_conc_sweep skip is not an executor failure -- the
+    SubAgentRunner only treats Magpie crashes as failed. The wrapper
+    should surface ``was_skipped=True`` + ``status='succeeded'``."""
+    from inference_optimizer.orchestrator.action_executors.conc_sweep import (
+        ConcSweepExecutor,
+    )
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    state.save(session_dir)
+
+    class _Task:
+        params = {}
+    class _Ctx:
+        task = _Task()
+        extra = {"session_dir": str(session_dir)}
+
+    async def _fake_run(*_a, **_kw):
+        return {"status": "skipped", "skip_reason": "no_baseline_tput"}
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.conc_sweep.run_conc_sweep",
+        side_effect=_fake_run,
+    ):
+        result = asyncio.run(ConcSweepExecutor()(_Ctx()))
+    assert result["status"] == "succeeded"
+    assert result["was_skipped"] is True
+    assert result["skip_reason"] == "no_baseline_tput"
 
 
 def test_format_summary_line_budget_exhausted_suffix():

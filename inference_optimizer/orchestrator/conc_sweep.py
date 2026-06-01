@@ -78,14 +78,15 @@ DEFAULT_NUM_PROMPTS_FACTOR = 5
 # ``--conc-sweep-timeout-sec``.
 DEFAULT_VARIANT_TIMEOUT_SEC = 1800
 
-# Total wall-clock budget (seconds) across the whole conc-sweep
-# post-hook. Independent of the main session budget — this caps how
-# long the post-hook itself may run before stopping the remaining
-# variants and writing whatever data was collected. Default 7200
-# (2h); operator override via ``--conc-sweep-total-budget-sec``.
-# Set to 0 or negative to disable (run unbounded until per-variant
-# timeouts trip).
-DEFAULT_TOTAL_BUDGET_SEC = 7200
+# Total wall-clock budget (seconds) across the whole conc_sweep
+# action. Caps how long the action itself may run before stopping
+# the remaining variants and writing whatever data was collected.
+# Default 9000 (~2.5h); operator override via
+# ``--conc-sweep-total-budget-sec``. Set to 0 or negative to disable
+# (run unbounded until per-variant timeouts trip). conc_sweep runs
+# as a SWEEP-phase action so it is also bounded above by the main
+# session wall-clock deadline.
+DEFAULT_TOTAL_BUDGET_SEC = 9000
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
@@ -270,44 +271,6 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         writer.writeheader()
         for p in points:
             writer.writerow({k: p.get(k) for k in columns})
-
-
-def _patch_final_json_pointer(
-    session_dir: Path,
-    summary_json_path: Path,
-    payload: dict[str, Any],
-) -> None:
-    """Merge a ``conc_sweep_summary`` pointer into ``reports/final.json``.
-
-    Idempotent + best-effort: missing / unparseable final.json silently
-    no-ops so a sweep run never fails the whole session just because
-    the close-sequence report was skipped.
-    """
-    final_path = reports_dir(session_dir) / "final.json"
-    if not final_path.exists():
-        return
-    try:
-        data = json.loads(final_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("conc_sweep: cannot patch final.json (%s)", exc)
-        return
-    if not isinstance(data, dict):
-        return
-    try:
-        rel = summary_json_path.relative_to(session_dir).as_posix()
-    except ValueError:
-        rel = summary_json_path.as_posix()
-    data["conc_sweep_summary"] = {
-        "report_path": rel,
-        "status":      payload.get("status"),
-        "summary":     payload.get("summary", {}),
-    }
-    try:
-        final_path.write_text(
-            json.dumps(data, indent=2, sort_keys=True), encoding="utf-8",
-        )
-    except OSError as exc:
-        log.warning("conc_sweep: cannot rewrite final.json (%s)", exc)
 
 
 def _skip(reason: str, **extras: Any) -> dict[str, Any]:
@@ -503,7 +466,9 @@ async def run_conc_sweep(
         _write_csv(csv_path, baseline_points + optimized_points)
         payload["report_json_path"] = json_path.as_posix()
         payload["report_csv_path"] = csv_path.as_posix()
-        _patch_final_json_pointer(session_dir, json_path, payload)
+        # final.json pointer is added by report.py at CLOSE -- the
+        # action runs strictly before CLOSE so report.py can read
+        # this file freshly. See ``_write_conc_sweep_pointer`` there.
 
     log.info(
         "conc_sweep: done — successful_pairs=%d failed_pairs=%d best_speedup=%s",

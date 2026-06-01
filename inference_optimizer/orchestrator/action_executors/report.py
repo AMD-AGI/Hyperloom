@@ -526,6 +526,39 @@ def _write_kernel_opt_summary(
         return None
 
 
+def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
+    """Build the ``conc_sweep_summary`` pointer block for ``final.json``.
+
+    Returns ``None`` when the conc_sweep action did not write a
+    summary (either disabled, skipped, or report write failed). The
+    pointer is small (report_path + status + summary) so the
+    front-end can decide whether to lazy-load the full
+    ``conc_sweep_summary.json`` payload.
+    """
+    from ...session_paths import reports_dir as _reports_dir
+    json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
+    if not json_path.exists():
+        return None
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning(
+            "report_executor: cannot read conc_sweep_summary.json: %s", exc,
+        )
+        return None
+    try:
+        rel = json_path.relative_to(session_dir).as_posix()
+    except ValueError:
+        rel = json_path.as_posix()
+    return {
+        "report_path":      rel,
+        "status":           data.get("status"),
+        "summary":          data.get("summary", {}),
+        "budget_exhausted": bool(data.get("budget_exhausted", False)),
+        "total_budget_sec": data.get("total_budget_sec"),
+    }
+
+
 def _read_ko_summary_totals(path: Path) -> dict[str, int]:
     """Re-read the just-written totals so the pointer in final.json
     doesn't drift from the on-disk file."""
@@ -652,6 +685,14 @@ class ReportExecutor:
                     "report_path": str(ko_summary_path),
                     "totals": _read_ko_summary_totals(ko_summary_path),
                 }
+
+        # Post-sweep concurrency comparison pointer. The conc_sweep
+        # action (SWEEP-phase, off by default) writes its own JSON +
+        # CSV; we just surface a compact summary in final.json so the
+        # front-end discovers it without having to globbing reports/.
+        cs_pointer = _read_conc_sweep_pointer(session_dir)
+        if cs_pointer is not None:
+            summary["conc_sweep_summary"] = cs_pointer
 
         json_path = output_dir / "final.json"
         md_path = output_dir / "final.md"
