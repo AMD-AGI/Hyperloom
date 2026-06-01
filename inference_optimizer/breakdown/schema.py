@@ -454,6 +454,12 @@ class SourceBreakdown(TypedDict, total=False):
     # ``validated_total_pct``; previously these KEEPs fell into
     # ``other`` and silently disappeared.
     framework_pr_pct_of_total: float
+    # GEMM_TUNING contribution (KERNEL-entry deterministic FP8 GEMM
+    # tuner). Bucketed separately from the ``kernel`` family so the
+    # dashboard can show "deterministic tuner gain" vs "source-level
+    # GEAK / OOB rewrite gain". Always emitted (0.0 on non-FP8
+    # workloads / when the tuner skipped or produced no KEEP).
+    gemm_tuning_pct_of_total: float
     backends_pct_of_total: float
     params_pct_of_total: float
     sweep_pct_of_total: float
@@ -493,12 +499,25 @@ class PhaseBreakdownFrameworkPr(TypedDict, total=False):
     by_pr: dict[str, float]
 
 
+class PhaseBreakdownGemmTuning(TypedDict, total=False):
+    """KERNEL-entry FP8 GEMM tuning gain split by tuned-CSV path.
+    ``by_tuned_file`` keys on the entry's ``tuned_file`` (absolute
+    path to ``a8w8_blockscale_tuned_gemm.csv``); fallbacks: entry's
+    ``variant_name`` then ``"?"`` so the key is always a string."""
+    total_gain_pct: float
+    by_tuned_file: dict[str, float]
+
+
 class PhaseBreakdown(TypedDict, total=False):
     """v0.8 M7 per-phase gain attribution (KB_design §3.13 M7 §6)."""
     prelude: PhaseBreakdownExplore         # always 0 by definition
     framework_pr: PhaseBreakdownFrameworkPr  # PRELUDE → FRAMEWORK_PR → EXPLORE
     explore: PhaseBreakdownExplore
     kernel:  PhaseBreakdownKernel
+    # GEMM_TUNING is a KERNEL-entry deterministic step; bucketed
+    # separately so the dashboard can split tuner gain from
+    # source-level GEAK/OOB rewrite gain.
+    gemm_tuning: PhaseBreakdownGemmTuning
     sweep:   PhaseBreakdownExplore         # usually 0 (sweep is measurement)
     close:   PhaseBreakdownExplore         # usually 0
     unattributed: PhaseBreakdownExplore    # gain whose phase couldn't be inferred
