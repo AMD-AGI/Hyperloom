@@ -117,6 +117,23 @@ def _reusable_source_roots() -> tuple[str, ...]:
             if variant and variant not in seen:
                 seen.add(variant)
                 out.append(variant)
+    # FlyDSL kernel checkout(s) used as $DSL2_ROOT for PR #668
+    # pseudo_op::moe_flydsl_* candidates. Kept in sync with the kernel-agent
+    # classifier (`tracelens_analysis._flydsl_reusable_roots`) so the
+    # orchestrator gate and the classifier agree on FlyDSL patchability;
+    # without this the in-loop run_optimization gate would reject FlyDSL
+    # sources the classifier already admitted.
+    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
+        val = (os.environ.get(env_key, "") or "").strip()
+        if val:
+            cand = (val.rstrip("/") + "/").lower()
+            if cand not in seen:
+                seen.add(cand)
+                out.append(cand)
+    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+        if default not in seen:
+            seen.add(default)
+            out.append(default)
     return tuple(out)
 _APPLY_TOOL_MODULE: Any | None = None
 # GEAK is FIRST per SKILL.md "high-priority handoff" contract: every kernel
@@ -231,6 +248,7 @@ _CANDIDATE_ENV_PREFIXES = (
     "VLLM_",
     "AITER_",
     "TRITON_",
+    "FLYDSL_",
     "HIPBLASLT_",
     "PYTORCH_TUNABLEOP_",
 )
