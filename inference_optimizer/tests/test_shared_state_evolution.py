@@ -84,7 +84,7 @@ _FACT_LAYER_PAYLOAD: dict = {
     "current_best": {
         "variant_name": "bs_a_b_c",
         "tput": 1450.0,
-        "extra_sglang_args": "--mla",
+        "extra_server_args": "--mla",
         "extra_envs": {"FOO": "bar"},
     },
     "cumulative_gain": 17.5,

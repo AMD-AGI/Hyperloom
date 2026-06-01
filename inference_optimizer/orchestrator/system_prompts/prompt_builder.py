@@ -62,10 +62,14 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # apply+restart+gate that consumes specialist worktree patches.
     # Both live under pipeline_phase=explore in the registry.
     "specialist",
+    # Supplementary cross-domain ReAct sub-agent channel; EXPLORE-only,
+    # round-cap 1, sits next to specialist in the catalogue.
+    "dynamic_action",
     "integrate_patch",
     "sweep",
     # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
     "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
+    "gemm_tuning",
     # finalize
     "report",
     # support — ``recover`` frees leaked VRAM and (when
@@ -89,6 +93,7 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # PR-A1 (Arbor-into-Hyperloom): specialist + integrate_patch are
     # always-on; they are EXPLORE-phase actions and unrelated to kernel mode.
     "specialist",
+    "dynamic_action",
     "integrate_patch",
     "sweep",
     # finalize
@@ -105,7 +110,7 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
 # section so the LLM picks the right transport.
 KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
     "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config",
+    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
 })
 
 # Actions that accept LLM-injected grid candidates via ``params.grid``.
@@ -348,6 +353,8 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     if meta.name in KERNEL_OWNED_ACTIONS:
         if meta.name == "kernel_opt":
             kind_hint = "run_optimization"
+        elif meta.name == "gemm_tuning":
+            kind_hint = "run_gemm_tuning"
         elif meta.name == "integrate":
             kind_hint = "integrate"
         else:
@@ -383,6 +390,27 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "config_changes?={ENV_VAR: value}, "
             "keep_threshold_pct?=0.2, "
             "accuracy_baseline?={task: {metric: score}}}}"
+        )
+    # Mirrors the specialist emit hint shape: payload field table +
+    # key constraints + PolicyGate reason-code surface for self-correction.
+    if meta.name == "dynamic_action":
+        return (
+            "delegate{action_name='dynamic_action', params={"
+            "motivation_gap_text=<why no single specialist can cover>, "
+            "scope_domains=[<>=2 specialist domain keys>], "
+            "side_effects_declared=[<framework_source|...>], "
+            "budget_hint?=<low|medium|high>}}. "
+            "Constraints: scope_domains length >= 2; "
+            "side_effects_declared must not include any kernel-owned "
+            "action / metric / accuracy_gate / server lifecycle; "
+            "at most 1 dispatch per EXPLORE round. "
+            "PolicyGate reason codes on denial: "
+            "dynamic_phase_violation / dynamic_source_violation / "
+            "dynamic_payload_schema / dynamic_scope_too_narrow / "
+            "dynamic_scope_unknown_domain / "
+            "dynamic_side_effects_red_line / "
+            "dynamic_kernel_only_disallowed / "
+            "dynamic_round_cap_exhausted."
         )
     return (
         f"propose_action{{action_name='{meta.name}', "
@@ -564,7 +592,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   `error_excerpt` / `workspace` / `raw_result_path` /",
         "   `extras.fingerprint`. The fingerprint is the canonical hash of",
         "   the eight params fields that determine baseline behavior:",
-        "   `benchmark_script` / `result_dir` / `extra_sglang_args` /",
+        "   `benchmark_script` / `result_dir` / `extra_server_args` /",
         "   `extra_envs` / `model_path` / `gpu_type` / `config_path` /",
         "   `disable_run_eval`.",
         "2. **`last_action_failures`** (global rolling log capped at the last",
@@ -584,7 +612,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "  `rule='baseline_self_loop'`. Bump at least one of: `params.benchmark_script`",
         "  (a sanitized `*.sh` file name — Magpie's `dsr1_fp8_mi300x.sh` hardcodes",
         "  `--result-dir /workspace/`, but `sglang_mi300x.sh` respects",
-        "  `$RESULT_DIR`), `params.result_dir`, `params.extra_sglang_args`, or",
+        "  `$RESULT_DIR`), `params.result_dir`, `params.extra_server_args`, or",
         "  `params.extra_envs`.",
         "* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`",
         "  warning ⇒ leak salvage missed.** The script wrote results outside the",
@@ -629,14 +657,23 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "`params.synergy_mode='auto'`) on the next `delegate`:",
         "",
         "**Variant identity is content-based.** The executor hashes",
-        "`(sorted(extra_sglang_args tokens), sorted(extra_envs pairs))` and",
+        "`(sorted(extra_server_args tokens), sorted(extra_envs pairs))` and",
         "indexes `SharedState.explore_search.tested` by that",
         "fingerprint. Renaming an already-tested variant (e.g. `attn_aiter`",
         "→ `attn_aiter_v2`) does NOT bypass dedup — your grid entry will be",
-        "dropped before launch. To re-test, change the actual `extra_sglang_args`",
+        "dropped before launch. To re-test, change the actual `extra_server_args`",
         "or `extra_envs`. The unified `explore_search` ledger (KB_design",
         "§3.4 §4.3) is the authoritative dedup source and filters BOTH",
         "default grids and LLM-supplied `params.grid` uniformly.",
+        "",
+        "**`extra_server_args` is framework-neutral.** It is the payload-",
+        "surface field that carries arbitrary server-launch flags into the",
+        "Magpie wrapper. Under `--framework sglang` its value is routed",
+        "into `EXTRA_SGLANG_ARGS`; under `vllm`, `EXTRA_VLLM_ARGS`; under",
+        "`atom`, `EXTRA_ATOM_ARGS`. The historical key name",
+        "`extra_sglang_args` (sglang-era) is accepted on read for one",
+        "release with a deprecation warning; emit new proposals with the",
+        "canonical name only.",
         "",
         "**Use the numeric `gain_pct` on every row.** The `*_search` and",
         "`backend_winners_history` blocks now render `±x.xx%` per variant.",
@@ -678,7 +715,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
 _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-The three kernel-owned actions (`trace_analyze`, `kernel_opt`,
+The four kernel-owned actions (`trace_analyze`, `gemm_tuning`, `kernel_opt`,
 `integrate`) are picked by the LLM per the DECISION FRAMEWORK (phase
 allowed-set + gaps + KB priors); v0.8 §3.9 retired the legacy
 `Action scores` board, so there is no system-side priority ranking.
@@ -686,8 +723,9 @@ The blocks below are only **payload templates** describing how to
 build the REQUEST once you have selected the action. The Coordinator
 still hard-gates the obvious prerequisites (TODO 3/4 fires after a
 `kernel_opt` KEEP forces `integrate`); `trace_analyze` itself is
-enforced only at the REQUEST layer for `run_optimization`, and explore
-actions are NEVER gated on it.
+enforced only at the REQUEST layer for `run_optimization`, while
+`gemm_tuning` is gated by FP8/SGLang + `last_gemm_tuning`. Explore
+actions are NEVER gated on either request.
 
 ### KERNEL-phase decision signals
 
@@ -730,7 +768,17 @@ Pick the next kernel-owned REQUEST by reading facts in this order
   before kernel_opt / integrate cycles.
 
   NOTE: pre-M4 alias `select_kernels` was removed in this branch.
-  Use `kind='trace_analyze'` exclusively.
+  Use `kind='trace_analyze'` exclusively for kernel candidate analysis.
+
+### `gemm_tuning` — payload for `run_gemm_tuning` (FP8 SGLang only)
+
+  request{target_agent: 'kernel', kind: 'run_gemm_tuning', params={}}
+
+  STRICT: only emit for `precision='fp8'` SGLang workloads and only when
+  `last_gemm_tuning` is empty. The Coordinator runs this before the first
+  `run_optimization` so aiter's tuned A8W8 block-scale GEMM CSV dispatch
+  can remove config-level GEMM bottlenecks before source-level GEAK
+  kernel rewrites spend GPU budget.
 
 ### `kernel_opt` — payload for `run_optimization`
 
@@ -786,7 +834,7 @@ until the patch lands on `optimization_stack`. Payload:
 
   request{target_agent: 'kernel', kind: 'integrate',
           params: {kernel_id, patch_path, target_file, base_tput,
-                   extra_sglang_args, config_path}}
+                   extra_server_args, config_path}}
 
 If you omit `base_tput`, the Coordinator auto-fills it from
 `current_best.tput` so chained integrates (multi-KEEP drain, see below)
@@ -894,6 +942,34 @@ def _read_rules_fragment(path: Path | None) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Entry declaration for the supplementary cross-domain ReAct channel.
+# Renders only when ``dynamic_action`` is in the enabled action set.
+# No triggering heuristics, examples, or fallback guidance — those
+# would shift the channel from supplementary to default.
+# ---------------------------------------------------------------------------
+def _section_dynamic_action(actions: list[ActionMetadata]) -> list[str] | None:
+    if not any(a.name == "dynamic_action" for a in actions):
+        return None
+    return [
+        "## 6b. DYNAMIC ACTION (supplementary EXPLORE channel)",
+        "",
+        "If you believe a single cross-domain patch combination exists",
+        "that no specialist could surface within its own-domain prompt",
+        "boundary, you MAY dispatch one `dynamic_action` in the EXPLORE",
+        "phase via `delegate{action_name='dynamic_action', params={...}}`.",
+        "",
+        "`dynamic_action` is a **supplementary** channel, not the default.",
+        "Specialists remain the primary EXPLORE entry. At most ONE",
+        "`dynamic_action` dispatch is allowed per EXPLORE round.",
+        "",
+        "Payload contract is closed; see the EMIT line on the action",
+        "catalogue entry above for the field table + PolicyGate denial",
+        "reason codes. The `=== Dynamic Action History ===` block (when",
+        "non-empty) lists the most recent outcomes of your own dispatches.",
+    ]
+
+
 def _section_rules(rules_md: str) -> list[str]:
     body = rules_md.strip() or (
         "(orchestration.md rules fragment not found — Coordinator will still"
@@ -971,6 +1047,12 @@ def build_orchestration_prompt(
     ]
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
+    # Dynamic action declaration sits after the decision framework
+    # so the LLM sees the supplementary-channel framing once it has
+    # internalised the specialist-first decision flow.
+    dyn_section = _section_dynamic_action(actions)
+    if dyn_section is not None:
+        sections.append(dyn_section)
     sections.append(_section_rules(rules_md))
 
     # Join sections with a blank line between each; ensure single trailing

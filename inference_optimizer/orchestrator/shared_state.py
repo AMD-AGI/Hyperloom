@@ -95,6 +95,14 @@ _DEFAULT_LAST_FAILURES = 10
 # in :meth:`SharedState.record_phase_transition`.
 _PHASE_HISTORY_CAP = 100
 
+# roofline_snapshots history cap. PRELUDE bootstrap writes #1; every
+# +10% watermark crossing writes a refresh. Even a pathological run
+# with 50 watermark crossings would stay well under this cap; the
+# limit only exists to prevent unbounded state.json growth if the
+# refresh policy ever loosens. Cap is enforced in
+# :meth:`SharedState.record_trace_analyze`.
+_ROOFLINE_SNAPSHOTS_CAP = 50
+
 # gap ledger caps. ``_GAPS_MAX_ENTRIES`` bounds the
 # total list so a pathological session can't blow up state.json;
 # ``_GAPS_ATTEMPTS_HISTORY`` bounds the per-gap ``attempts`` list so even
@@ -143,6 +151,48 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 LATEST_STATE_SCHEMA_VERSION: int = 2
 
 
+# The payload-surface field was renamed from ``extra_sglang_args``
+# (sglang-era name) to ``extra_server_args`` (framework-neutral).
+# The on-disk state.json may carry the legacy key in any of several
+# deeply-nested ledgers, so a one-shot walk-and-rewrite on load is
+# the cleanest migration — the next save then emits canonical only
+# and a re-load is a no-op.
+_PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
+    "extra_sglang_args":           "extra_server_args",
+    "candidate_extra_sglang_args": "candidate_extra_server_args",
+}
+
+
+def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
+    """Recursively rewrite legacy ``extra_sglang_args`` field names in-place.
+
+    Walks every dict and list reachable from ``obj`` and renames keys
+    listed in :data:`_PHASE4_LEGACY_KEY_RENAMES` to their canonical
+    counterparts. When both names are present on the same dict the
+    canonical value is kept (writer migration is considered done as
+    soon as the new key appears); otherwise the legacy value is
+    copied over.
+
+    Returns the total number of keys rewritten so the caller can log
+    a single info-level migration event.
+    """
+    migrated = 0
+    if isinstance(obj, dict):
+        for legacy_key, canonical_key in _PHASE4_LEGACY_KEY_RENAMES.items():
+            if legacy_key in obj:
+                if canonical_key not in obj:
+                    obj[canonical_key] = obj.pop(legacy_key)
+                else:
+                    del obj[legacy_key]
+                migrated += 1
+        for v in obj.values():
+            migrated += _migrate_legacy_extra_sglang_args_keys(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            migrated += _migrate_legacy_extra_sglang_args_keys(item)
+    return migrated
+
+
 @dataclass
 class TraceAnalyzeSnapshot:
     """Reference shape for ``SharedState.last_trace_analyze``.
@@ -158,7 +208,9 @@ class TraceAnalyzeSnapshot:
 
     trace_input: str = ""
     candidates_path: str = ""
+    kernel_roofline_path: str = ""
     hot_kernels_top15: list[dict[str, Any]] = field(default_factory=list)
+    kernel_roofline_top15: list[dict[str, Any]] = field(default_factory=list)
     task_groups: list[dict[str, Any]] = field(default_factory=list)
     reusable_native_kernel_ids: list[str] = field(default_factory=list)
     trace_health_warnings: list[dict[str, Any]] = field(default_factory=list)
@@ -174,7 +226,9 @@ class TraceAnalyzeSnapshot:
         return cls(
             trace_input=str(d.get("trace_input") or ""),
             candidates_path=str(d.get("candidates_path") or ""),
+            kernel_roofline_path=str(d.get("kernel_roofline_path") or ""),
             hot_kernels_top15=list(d.get("hot_kernels_top15") or []),
+            kernel_roofline_top15=list(d.get("kernel_roofline_top15") or []),
             task_groups=list(d.get("task_groups") or []),
             reusable_native_kernel_ids=list(
                 d.get("reusable_native_kernel_ids") or []
@@ -252,6 +306,14 @@ class SharedState:
     osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
+    # When False (CLI ``--no-explore``) the EXPLORE phase is skipped:
+    # PRELUDE / FRAMEWORK_PR route straight to KERNEL (or SWEEP when
+    # kernel is also disabled). Mirrors the ``kernel_enabled`` /
+    # ``framework_phase_enabled`` opt-out pattern.
+    explore_enabled: bool = True
+    # After deterministic FP8 GEMM tuning succeeds, continue into source-level
+    # kernel_opt by default. Operators can disable this for a GEMM-only run.
+    continue_kernel_after_gemm: bool = True
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
@@ -453,6 +515,22 @@ class SharedState:
     # ------------------------------------------------------------------
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
+    # Append-only history of compact roofline snapshots used by
+    # ``report.py`` to render the ``## Roofline Comparison`` section.
+    # PR #321 retired the legacy ``last_trace_analyze_baseline``
+    # baseline-freeze field; the snapshot history preserves the first
+    # (baseline) snapshot across watermark-driven refreshes of
+    # ``last_trace_analyze`` so a real before/after comparison stays
+    # available even after multiple +10% refreshes overwrite the
+    # latest-snapshot cache.
+    #
+    # Each entry matches the shape returned by
+    # :func:`orchestrator.roofline_snapshot.build_roofline_snapshot`
+    # (snapshot_id / ts / compute_pct / idle_pct / comm_pct /
+    # top_bottleneck / top_kernel) plus ``analysis_md_path`` and
+    # ``trace_input`` for downstream re-extraction. Capped at
+    # ``MAX_ROOFLINE_SNAPSHOTS`` to bound on-disk state.json size.
+    roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # N27 — outer roofline failure counter. Bumped by
     # ``Coordinator._promote_to_shared_state`` on every failed
     # ``roofline`` task and reset to 0 on the next successful one.
@@ -591,6 +669,10 @@ class SharedState:
     # symmetry.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
+    # GEAK FP8 GEMM tuning snapshot. This is kernel-owned but not a
+    # source-level kernel rewrite: it produces an aiter A8W8 block-scale
+    # tuned CSV and (for SGLang) a dispatch patch before kernel_opt runs.
+    last_gemm_tuning: dict[str, Any] = field(default_factory=dict)
     # ``last_backends`` / ``last_params``
     # / ``last_validate_stack`` are legacy resume-parity zombies: the
     # legacy actions are denied at PolicyGate so new sessions never
@@ -610,6 +692,7 @@ class SharedState:
     last_roofline: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
+    gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     # ``backends_attempts`` /
     # ``params_attempts`` / ``validate_stack_attempts`` are kept as
@@ -675,16 +758,16 @@ class SharedState:
     #   {
     #     "schema_version": 1,
     #     "tested": {
-    #       fingerprint: {name, extra_sglang_args, extra_envs, outcome,
+    #       fingerprint: {name, extra_server_args, extra_envs, outcome,
     #                     round_id, ts, gain_pct, tput, provenance,
     #                     workload_signature}
     #     },
     #     "accepted": [
-    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #       {fingerprint, name, extra_server_args, extra_envs,
     #        gain_pct, stack_index, accepted_at_round, ts}
     #     ],
     #     "rejected": [
-    #       {fingerprint, name, extra_sglang_args, extra_envs,
+    #       {fingerprint, name, extra_server_args, extra_envs,
     #        reason, gain_pct, tput, round_id, ts}
     #     ],
     #     "winners_history": [
@@ -790,6 +873,17 @@ class SharedState:
     # storm detector fires when this crosses the configured cap
     # without a single non-empty proposal_set in the same window.
     explore_specialist_dispatched_count: int = 0
+    # Aggregate view of dynamic_action dispatches keyed by ``dyn_id``;
+    # Coordinator-only writer (``CORE_STATE_FIELDS`` blocks LLM
+    # ``UPDATE_STATE``). Each value is the lifecycle summary dict
+    # (status / last_outcome / cumulative_gain / …).
+    dynamic_actions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per-EXPLORE-round counter of *successful* dynamic_action
+    # dispatches (PolicyGate denials do not increment). Reset on
+    # every fresh EXPLORE entry; read by
+    # ``PolicyGate._validate_dynamic_action_dispatch`` for the
+    # ``MAX_DYNAMIC_PER_ROUND`` cap; Coordinator is the sole writer.
+    dynamic_action_round_count: int = 0
     # research_lane capacity locked at session start
     #. M5 default is 1 (single-specialist series);
     # M6 raises to 6 (concurrent). PolicyGate denies mid-session
@@ -829,7 +923,7 @@ class SharedState:
     discovered_flags: dict[str, Any] = field(default_factory=dict)
     # Rolling per-action winners log (cap 20) used by IR-26 idea
     # generation. Schema: ``{action, round_id, base_tput,
-    # winners: [{name, tput, gain_pct, extra_sglang_args, extra_envs}],
+    # winners: [{name, tput, gain_pct, extra_server_args, extra_envs}],
     # best: {...}, ts}``.
     backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
     # Synergy combo keys (``"name1+name2+..."``) already tested this
@@ -1013,6 +1107,21 @@ class SharedState:
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
         migration_events: list[str] = []
 
+        # Migrate the ``extra_sglang_args`` -> ``extra_server_args`` rename
+        # (same for ``candidate_extra_sglang_args``). The on-disk shape
+        # stays a plain dict, so the legacy key may appear in any of the
+        # many nested ledgers (winners, baseline_artifacts, action_attempts,
+        # explore_search, etc.). Walk the entire payload once at load time
+        # and rewrite the legacy keys in place — the next save will then
+        # emit canonical only and a future load of the same file is a no-op.
+        legacy_migrations = _migrate_legacy_extra_sglang_args_keys(raw)
+        if legacy_migrations:
+            migration_events.append(
+                f"extra_server_args rename: migrated {legacy_migrations} legacy "
+                f"extra_sglang_args / candidate_extra_sglang_args key(s) "
+                f"to extra_server_args / candidate_extra_server_args"
+            )
+
         # Filter to known fields so older / newer state.json shapes don't
         # crash. Unknown keys are dropped; missing keys fall back to defaults.
         known = {f for f in cls.__dataclass_fields__}
@@ -1074,9 +1183,9 @@ class SharedState:
                     "v0.8 §3.9: dropped legacy scoreboard fields from "
                     "state.json (%s).", summary,
                 )
-        # Phase 7 of the dedup-by-fingerprint plan: migrate any v1
-        # ``params_search`` ledger (where ``tested`` was keyed by display
-        # name) to schema v2 (keyed by content fingerprint). Backends has
+        # Migrate any v1 ``params_search`` ledger (where ``tested`` was
+        # keyed by display name) to schema v2 (keyed by content
+        # fingerprint). Backends has
         # no pre-fingerprint persisted data so it only needs default-key
         # normalization. We do this here — at the load boundary — so the
         # executor and Coordinator paths can assume the v2 schema and
@@ -1195,7 +1304,7 @@ class SharedState:
         Idempotent: already-migrated ledgers are returned with only the
         defensive defaults filled in. A legacy v1 ledger whose ``tested``
         is keyed by variant name gets re-keyed by content fingerprint
-        re-computed from the stored ``extra_sglang_args`` / ``extra_envs``;
+        re-computed from the stored ``extra_server_args`` / ``extra_envs``;
         the original name is preserved inside each entry and surfaced
         through ``name_index`` so display lookups remain stable.
         """
@@ -1240,8 +1349,8 @@ class SharedState:
             # full ``result`` dict under ``result``; check both.
             nested = entry.get("result") if isinstance(entry.get("result"), dict) else {}
             args = str(
-                entry.get("extra_sglang_args")
-                or nested.get("extra_sglang_args") or ""
+                entry.get("extra_server_args")
+                or nested.get("extra_server_args") or ""
             )
             envs = dict(
                 entry.get("extra_envs")
@@ -1250,7 +1359,7 @@ class SharedState:
             fp = variant_fingerprint(args, envs)
             new_entry = dict(entry)
             new_entry.setdefault("name", str(key))
-            new_entry.setdefault("extra_sglang_args", args)
+            new_entry.setdefault("extra_server_args", args)
             new_entry.setdefault("extra_envs", envs)
             new_entry["fingerprint"] = fp
             migrated[fp] = new_entry
@@ -1267,7 +1376,7 @@ class SharedState:
                 v = dict(v)
                 if not v.get("fingerprint"):
                     v["fingerprint"] = variant_fingerprint(
-                        str(v.get("extra_sglang_args") or ""),
+                        str(v.get("extra_server_args") or ""),
                         dict(v.get("extra_envs") or {}),
                     )
                 rebuilt.append(v)
@@ -1386,7 +1495,7 @@ class SharedState:
                         and all(c in "0123456789abcdef" for c in fp_key))
                     else str(entry.get("fingerprint")
                              or _fp(
-                                 str(entry.get("extra_sglang_args") or ""),
+                                 str(entry.get("extra_server_args") or ""),
                                  dict(entry.get("extra_envs") or {}),
                              ))
                 )
@@ -1394,7 +1503,7 @@ class SharedState:
                 row = {
                     "fingerprint": fp,
                     "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_server_args": str(entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "note": str(entry.get("note") or ""),
                     "outcome": outcome,
@@ -1425,13 +1534,13 @@ class SharedState:
                 if not isinstance(entry, dict):
                     continue
                 fp = str(entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_sglang_args") or ""),
+                    str(entry.get("extra_server_args") or ""),
                     dict(entry.get("extra_envs") or {}),
                 ))
                 row = {
                     "fingerprint": fp,
                     "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_server_args": str(entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "note": str(entry.get("note") or ""),
                     "gain_pct": entry.get("gain_pct"),
@@ -1467,7 +1576,7 @@ class SharedState:
                 if not isinstance(entry, dict):
                     continue
                 fp = str(entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_sglang_args") or ""),
+                    str(entry.get("extra_server_args") or ""),
                     dict(entry.get("extra_envs") or {}),
                 ))
                 if fp in accepted_fps:
@@ -1475,7 +1584,7 @@ class SharedState:
                 row = {
                     "fingerprint": fp,
                     "name": str(entry.get("name") or ""),
-                    "extra_sglang_args": str(entry.get("extra_sglang_args") or ""),
+                    "extra_server_args": str(entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "note": str(entry.get("note") or ""),
                     "reason": str(entry.get("reason") or "not_keep"),
@@ -1515,7 +1624,7 @@ class SharedState:
                 fp_val = entry.get("fingerprint")
                 if not fp_val:
                     fp_val = _fp(
-                        str(entry.get("extra_sglang_args") or ""),
+                        str(entry.get("extra_server_args") or ""),
                         dict(entry.get("extra_envs") or {}),
                     )
                 wh.append({
@@ -1525,7 +1634,7 @@ class SharedState:
                     "fingerprint": str(fp_val),
                     "gain_pct": entry.get("gain_pct"),
                     "extra_args": str(entry.get("extra_args")
-                                       or entry.get("extra_sglang_args") or ""),
+                                       or entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
                     "provenance": str(entry.get("provenance")
                                        or f"legacy:{legacy_action}"),
@@ -1939,7 +2048,12 @@ class SharedState:
             or payload.get("source_file")
             or ""
         )
-        extra_args = str(payload.get("extra_sglang_args") or "").strip()
+        # ``payload`` is an external envelope (LLM intent or sub-agent
+        # kernel_opt result); route through the compat helper so a legacy
+        # ``extra_sglang_args`` key still resolves with a single
+        # DeprecationWarning logged via stacklevel=3.
+        from ..compat.payload_aliases import read_extra_server_args
+        extra_args = read_extra_server_args(payload).strip()
         return kernel_id, patch_path, target_file, extra_args
 
     def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
@@ -2003,7 +2117,7 @@ class SharedState:
             "kernel_id": kernel_id,
             "patch_path": patch_path,
             "target_file": target_file,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
             "attempts": attempts,
             "attempt_count": len(attempts),
             "best_gain_pct": best_gain,
@@ -2033,7 +2147,7 @@ class SharedState:
             "kernel_id": kernel_id,
             "patch_path": patch_path,
             "target_file": target_file,
-            "extra_sglang_args": extra_args,
+            "extra_server_args": extra_args,
             "attempt_count": len(attempts),
             "best_gain_pct": best_gain,
             "keep_threshold_pct": keep_threshold_pct,
@@ -2246,6 +2360,17 @@ class SharedState:
             )
 
         self.kernel_opt_attempts[kernel_id] = entry
+
+    def record_gemm_tuning(self, result: dict[str, Any]) -> None:
+        """Capture the GEAK GEMM tuning result for sequencing and prompts."""
+        if not isinstance(result, dict):
+            result = {"status": "failed", "error": "non-dict gemm tuning result"}
+        entry = dict(result)
+        entry.setdefault("ts", _now_iso())
+        self.last_gemm_tuning = entry
+        attempts = list(self.gemm_tuning_attempts or [])
+        attempts.append(entry)
+        self.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
 
     # ------------------------------------------------------------------
     # Multi-KEEP integrate queue helpers (PR-B follow-up).
@@ -2691,10 +2816,17 @@ class SharedState:
 
         On every successful call, ``roofline_snapshot_id`` is read from the
         previous ``last_trace_analyze`` and incremented by one — giving a
-        monotonic counter the orchestration prompt + N31 final-roofline
-        guard rely on. ``roofline_baseline_gain_at_snapshot`` captures
+        monotonic counter the orchestration prompt + the watermark-driven
+        freshness gate (:meth:`Coordinator._needs_roofline_for_watermark`)
+        both rely on. ``roofline_baseline_gain_at_snapshot`` captures
         ``cumulative_gain_validated`` at write time so the prompt can
         surface the gain delta since the report was taken.
+
+        A compact copy is also appended to
+        :attr:`roofline_snapshots` (PR #321 retired the legacy
+        ``last_trace_analyze_baseline`` field; the history list is the
+        new source for ``report.py``'s ``## Roofline Comparison``
+        before/after view).
 
         ``analysis_md_text`` is read verbatim from
         ``result['trace_report_path']``; OSErrors degrade silently to
@@ -2713,25 +2845,59 @@ class SharedState:
             artifacts = result.get("artifact_paths") or {}
             if isinstance(artifacts, dict):
                 candidates_path = artifacts.get("kernel_candidates", "") or ""
+        kernel_roofline_path = result.get("kernel_roofline_path") or ""
+        if not kernel_roofline_path:
+            artifacts = result.get("artifact_paths") or {}
+            if isinstance(artifacts, dict):
+                kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
         hot = result.get("hot_kernels") or []
         summary: list[dict[str, Any]] = []
+        kernel_roofline: list[dict[str, Any]] = []
         reusable_ids: list[str] = []
         for entry in hot[:15] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
             kid = entry.get("kernel_id")
             reusable = bool(entry.get("reusable_native_kernel"))
-            summary.append({
+            arithmetic_intensity = entry.get("arithmetic_intensity")
+            if arithmetic_intensity is None:
+                arithmetic_intensity = entry.get("flops_per_byte")
+            efficiency_percent = entry.get("efficiency_percent")
+            if efficiency_percent is None:
+                efficiency_percent = entry.get("efficiency_pct")
+            summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
                 "gpu_pct": entry.get("gpu_pct"),
                 "bottleneck": entry.get("bottleneck"),
-                "arithmetic_intensity": entry.get("arithmetic_intensity"),
+                "bound_type": entry.get("bound_type"),
+                "arithmetic_intensity": arithmetic_intensity,
+                "flops_per_byte": entry.get("flops_per_byte"),
+                "efficiency_percent": efficiency_percent,
+                "compute_utilization_pct": entry.get("compute_utilization_pct"),
+                "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
+                "suggestion": entry.get("suggestion") or "",
+                "roofline_name": entry.get("roofline_name"),
                 "source_file": entry.get("source_file"),
                 "reusable_native_kernel": reusable,
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
-            })
+            }
+            summary.append(summary_entry)
+            if any(
+                summary_entry.get(key) not in (None, "", [])
+                for key in (
+                    "bound_type",
+                    "arithmetic_intensity",
+                    "flops_per_byte",
+                    "efficiency_percent",
+                    "compute_utilization_pct",
+                    "bandwidth_utilization_pct",
+                    "suggestion",
+                    "roofline_name",
+                )
+            ):
+                kernel_roofline.append(dict(summary_entry))
             if reusable and kid:
                 reusable_ids.append(str(kid))
 
@@ -2767,10 +2933,13 @@ class SharedState:
         if not isinstance(task_groups, list):
             task_groups = []
 
+        ts_iso = _now_iso()
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "candidates_path": str(candidates_path),
+            "kernel_roofline_path": str(kernel_roofline_path),
             "hot_kernels_top15": summary,
+            "kernel_roofline_top15": kernel_roofline,
             "task_groups": task_groups,
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": warnings_cleaned,
@@ -2780,11 +2949,74 @@ class SharedState:
             "roofline_baseline_gain_at_snapshot": float(
                 self.cumulative_gain_validated,
             ),
-            "ts": _now_iso(),
+            "ts": ts_iso,
         }
         # Mirror the snapshot id at the top level so PolicyGate /
         # Coordinator can read it without the nested-dict lookup.
         self.roofline_snapshot_id = snapshot_id
+
+        # Append a compact history entry for the report-side Roofline
+        # Comparison renderer. Parses analysis.md once at write time so
+        # the renderer never has to (and the snapshot survives even if
+        # the on-disk file is later deleted). Best-effort: parsing
+        # errors degrade silently to None fields.
+        try:
+            from .roofline_snapshot import build_roofline_snapshot
+            # Stamp decode-roofline ceiling + measured throughput so
+            # the dashboard can surface "% within roofline" without
+            # re-reading model files. Ceiling is a session-level
+            # constant (hardware + model + isl/osl don't change),
+            # achieved tput is current_best.tput if optimization has
+            # produced a winner, else baseline_tput.
+            from .roofline_ceiling import (
+                RooflineBreakdown,
+                compute_roofline_breakdown_from_state,
+            )
+            # Two-sided roofline (T_mem + T_cmp + min) — see formula
+            # change in roofline_ceiling.py. ``peak_tput`` continues to
+            # equal ``min(mem, cmp)`` so the existing dashboard
+            # ``theoretical_peak_tok_per_sec`` field stays meaningful.
+            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+            try:
+                breakdown = compute_roofline_breakdown_from_state(self)
+            except Exception:  # noqa: BLE001 — ceiling is best-effort
+                pass
+            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+            achieved_tput = 0.0
+            cb = self.current_best if isinstance(self.current_best, dict) else {}
+            cb_tput = cb.get("tput")
+            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                achieved_tput = float(cb_tput)
+            elif isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
+                achieved_tput = float(self.baseline_tput)
+            history_entry = build_roofline_snapshot(
+                snapshot_id=snapshot_id,
+                ts=ts_iso,
+                analysis_md_path=str(analysis_md_path),
+                theoretical_peak_tok_per_sec=peak_tput,
+                achieved_tok_per_sec=achieved_tput,
+                mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
+                cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
+                bound_kind=breakdown.bound_kind,
+            )
+            history_entry["trace_input"] = str(trace_input)
+            history_entry["analysis_md_path"] = str(analysis_md_path)
+            # 9fe4609 sidecar artifact pointer: dashboards read this
+            # path to surface per-kernel roofline data from the
+            # tracelens-written ``reports/kernel_roofline.json``.
+            history_entry["kernel_roofline_path"] = str(kernel_roofline_path)
+            if not isinstance(self.roofline_snapshots, list):
+                self.roofline_snapshots = []
+            self.roofline_snapshots.append(history_entry)
+            if len(self.roofline_snapshots) > _ROOFLINE_SNAPSHOTS_CAP:
+                # Drop oldest non-baseline entries; always keep
+                # snapshot #1 so the report's "baseline" anchor never
+                # rotates away.
+                base = self.roofline_snapshots[0]
+                tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1):]
+                self.roofline_snapshots = [base, *tail]
+        except Exception:  # noqa: BLE001 — never block record on render concerns
+            pass
 
     def record_sweep(self, result: dict[str, Any]) -> None:
         if not isinstance(result, dict):
@@ -3048,6 +3280,191 @@ class SharedState:
         """
         self.explore_specialist_dispatched_count = 0
 
+    def record_dynamic_action_dispatch(
+        self, dyn_id: str, summary: dict[str, Any],
+    ) -> int:
+        """Register a freshly-dispatched ``dynamic_action`` + bump the
+        per-round counter atomically.
+
+        Coordinator-only writer (CORE_STATE_FIELDS protects it from
+        LLM ``UPDATE_STATE``). Idempotent on ``dyn_id``: a re-record
+        overwrites the summary but does not double-bump the counter.
+        Returns the post-increment round counter value.
+        """
+        key = str(dyn_id or "").strip()
+        if not key:
+            return self.dynamic_action_round_count
+        was_new = key not in self.dynamic_actions
+        self.dynamic_actions[key] = dict(summary or {})
+        if was_new:
+            self.dynamic_action_round_count = int(
+                self.dynamic_action_round_count or 0
+            ) + 1
+        return self.dynamic_action_round_count
+
+    def reset_dynamic_action_round_count(self) -> None:
+        """Clear the per-EXPLORE round cap counter; the cumulative
+        ``dynamic_actions`` ledger is preserved across rounds."""
+        self.dynamic_action_round_count = 0
+
+    def record_dynamic_action_outcome(
+        self,
+        dyn_id: str,
+        *,
+        status: str,
+        last_outcome: str | None = None,
+        cumulative_gain: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Transition-validated update of the summary row keyed by
+        ``dyn_id``.
+
+        Coordinator-only writer (``CORE_STATE_FIELDS`` guards it from
+        LLM ``UPDATE_STATE``). Only keys passed in are touched;
+        ``last_outcome`` defaults to the prompt-friendly label for
+        ``status``; ``last_updated_at`` is always refreshed. Illegal
+        transitions are logged and skipped so a buggy hook cannot
+        corrupt the audit trail.
+        """
+        # Local import avoids the cycle with
+        # :mod:`dynamic_action_proposal`.
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            LAST_OUTCOME_BY_STATUS,
+            can_transition,
+        )
+
+        key = str(dyn_id or "").strip()
+        if not key:
+            return
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        try:
+            target_status = DynamicActionStatus(
+                str(status or "").strip(),
+            )
+        except ValueError:
+            _log.warning(
+                "record_dynamic_action_outcome: unknown status=%r for "
+                "dyn_id=%s; dropping write",
+                status, key,
+            )
+            return
+        existing = dict(self.dynamic_actions.get(key) or {})
+        current_status_raw = existing.get("status")
+        current_status: DynamicActionStatus | None
+        if current_status_raw:
+            try:
+                current_status = DynamicActionStatus(str(current_status_raw))
+            except ValueError:
+                current_status = None
+        else:
+            current_status = None
+        if not can_transition(current_status, target_status):
+            _log.warning(
+                "record_dynamic_action_outcome: illegal transition "
+                "%s → %s for dyn_id=%s; preserving prior state",
+                current_status_raw or "(none)", target_status.value, key,
+            )
+            return
+        existing.setdefault("dyn_id", key)
+        existing["status"] = target_status.value
+        existing["last_outcome"] = str(
+            last_outcome
+            if last_outcome is not None
+            else LAST_OUTCOME_BY_STATUS.get(target_status, target_status.value.lower()),
+        )
+        if cumulative_gain is not None:
+            existing["cumulative_gain"] = float(cumulative_gain)
+        if extra:
+            for k, v in extra.items():
+                existing[k] = v
+        existing["last_updated_at"] = _now_iso()
+        self.dynamic_actions[key] = existing
+
+    def to_dynamic_actions_prompt_section(
+        self,
+        *,
+        max_entries: int = 5,
+        title: str = "Dynamic Action History",
+    ) -> str:
+        """Compact ``=== <title> ===`` block for orchestration prompt
+        injection.
+
+        Renders the most recent ``max_entries`` summaries sorted by
+        ``last_updated_at`` descending (stable tiebreak on
+        ``dyn_id``). Older rows are collapsed into an elision marker
+        pointing at the on-disk artefact dir. Returns the empty
+        string when no rows exist so callers can skip the section.
+        """
+        summaries = self.dynamic_actions or {}
+        if not summaries:
+            return ""
+        from .dynamic_action_proposal import (
+            DynamicActionStatus,
+            LAST_OUTCOME_BY_STATUS,
+        )
+
+        ordered = sorted(
+            summaries.items(),
+            key=lambda kv: (
+                str(kv[1].get("last_updated_at") or ""),
+                str(kv[0]),
+            ),
+            reverse=True,
+        )
+        recent = ordered[: max(0, int(max_entries))]
+        older = ordered[max(0, int(max_entries)):]
+        lines: list[str] = [f"=== {title} ==="]
+        for _dyn_id, summary in recent:
+            lines.append(self._format_dynamic_action_summary_row(
+                summary,
+                _last_outcome_lookup=LAST_OUTCOME_BY_STATUS,
+                _status_enum=DynamicActionStatus,
+            ))
+        if older:
+            lines.append(
+                f"... ({len(older)} more older entries; full list in "
+                f"$SESSION_DIR/agents/orchestration/dynamic_actions/)"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_dynamic_action_summary_row(
+        summary: dict[str, Any],
+        *,
+        _last_outcome_lookup: dict | None = None,
+        _status_enum: Any | None = None,
+    ) -> str:
+        """Render one compact summary row (~50 tokens):
+
+            - <dyn_id> [<STATUS>, gain=<delta>%] scope=[d1,d2]
+              motivation: "<motivation_gap_short>"
+              artifact: <artifact_path>
+        """
+        dyn_id = str(summary.get("dyn_id") or "(unknown)")
+        status = str(summary.get("status") or "(unknown)")
+        scope = list(summary.get("scope_domains") or ())
+        motivation = str(summary.get("motivation_gap_short") or "").strip()
+        if not motivation:
+            motivation = "(no motivation summary)"
+        gain = summary.get("cumulative_gain")
+        gain_text = (
+            f"gain={gain:+.2f}%" if isinstance(gain, (int, float)) else "gain=n/a"
+        )
+        artifact = str(summary.get("artifact_path") or "(missing)")
+        last_outcome = str(summary.get("last_outcome") or "")
+        last_outcome_suffix = (
+            f" outcome={last_outcome}" if last_outcome else ""
+        )
+        head = (
+            f"- {dyn_id} [{status}, {gain_text}{last_outcome_suffix}] "
+            f"scope={scope!r}"
+        )
+        body = f'  motivation: "{motivation}"'
+        tail = f"  artifact: {artifact}"
+        return "\n".join((head, body, tail))
+
     def record_specialist_patch_verdict(
         self, specialist_task_id: str, verdict: str,
     ) -> None:
@@ -3156,15 +3573,15 @@ class SharedState:
             return
         from .action_executors._canonical_fingerprint import canonical_fingerprint
         args = str(
-            variant.get("candidate_extra_sglang_args")
-            or variant.get("extra_sglang_args") or ""
+            variant.get("candidate_extra_server_args")
+            or variant.get("extra_server_args") or ""
         )
         envs = dict(variant.get("extra_envs") or {})
         fp = str(variant.get("fingerprint") or canonical_fingerprint(args, envs))
         entry = {
             "fingerprint": fp,
             "name": str(variant.get("name") or ""),
-            "extra_sglang_args": args,
+            "extra_server_args": args,
             "extra_envs": envs,
             "note": str(variant.get("note") or ""),
             "tput": variant.get("output_throughput") or variant.get("tput"),
@@ -3262,15 +3679,15 @@ class SharedState:
 
         def _stamped(entry: dict[str, Any]) -> dict[str, Any]:
             args = str(
-                entry.get("candidate_extra_sglang_args")
-                or entry.get("extra_sglang_args") or ""
+                entry.get("candidate_extra_server_args")
+                or entry.get("extra_server_args") or ""
             )
             envs = dict(entry.get("extra_envs") or {})
             return {
                 "name": str(entry.get("name", "")),
                 "tput": entry.get("output_throughput") or entry.get("tput"),
                 "gain_pct": entry.get("gain_pct"),
-                "extra_sglang_args": args,
+                "extra_server_args": args,
                 "extra_envs": envs,
                 "note": str(entry.get("note") or ""),
                 "fingerprint": (
@@ -3328,7 +3745,7 @@ class SharedState:
         action: str,
         variant_name: str | None,
         new_tput: float,
-        extra_sglang_args: str = "",
+        extra_server_args: str = "",
         ts: str | None = None,
     ) -> float | None:
         """N32b: Mirror an ``optimization_stack`` append into
@@ -3370,13 +3787,13 @@ class SharedState:
         if self.optimization_stack or not isinstance(self.current_best, dict):
             return
         variant = self.current_best.get("variant_name")
-        extra_args = self.current_best.get("extra_sglang_args")
+        extra_args = self.current_best.get("extra_server_args")
         if not variant and not extra_args:
             return
         self.optimization_stack = [{
             "action": self.current_best.get("action", "unknown"),
             "variant_name": variant or "legacy_current_best",
-            "extra_sglang_args": extra_args or "",
+            "extra_server_args": extra_args or "",
             "extra_envs": dict(self.current_best.get("extra_envs") or {}),
             "tput": self.current_best.get("tput"),
             "workspace": self.current_best.get("workspace"),
@@ -3390,7 +3807,7 @@ class SharedState:
             )
 
     # ------------------------------------------------------------------
-    # Time-budget helpers (Phase 2 — consumed by Coordinator._compose_prompt)
+    # Time-budget helpers (consumed by Coordinator._compose_prompt)
     # ------------------------------------------------------------------
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
         """Wall-clock minutes since ``start_ts``.
@@ -3812,6 +4229,7 @@ class SharedState:
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
             f"last_profile={self._format_attempt(self.last_profile)}",
+            f"last_gemm_tuning={self._format_attempt(self.last_gemm_tuning)}",
             f"last_explore={self._format_attempt(self.last_explore)}",
             f"last_sweep={self._format_attempt(self.last_sweep)}",
             f"attempts_history={self._format_attempts_history()}",
@@ -3949,7 +4367,7 @@ class SharedState:
             else ""
         )
         args = (
-            str(entry.get("extra_sglang_args") or "").strip()
+            str(entry.get("extra_server_args") or "").strip()
             or "(no-flag)"
         )
         envs = entry.get("extra_envs") or {}
