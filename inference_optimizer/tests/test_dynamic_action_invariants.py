@@ -489,6 +489,9 @@ class TestInvariant_4_KernelOwnedDenial:
             "deep_kernel_analysis",
             "operator_tuning",
             "vendor_kernel_config",
+            # Added by the fp8 gemm-tuning integration (#371): gemm_tuning
+            # is a kernel-owned action, so the locked set grows by one.
+            "gemm_tuning",
         })
 
 
