@@ -63,7 +63,7 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
     """Read the kernel breakdown JSON and return one canonical bottleneck keyword.
 
     ``breakdown_path`` is expected to be the value of
-    ``SharedState.last_profile_kernel_breakdown`` — the profile / pmc_roofline
+    ``SharedState.last_profile_kernel_breakdown`` — the profile / roofline
     executors write this as a sorted-by-time list (or dict with ``top_kernels``).
     Returns "" when:
       * path is empty / missing / unreadable / unparseable

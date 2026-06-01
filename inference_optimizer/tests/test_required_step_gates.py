@@ -14,22 +14,13 @@ and ``remove-select-kernels-action-gate``):
   the kernel_id has not yet been integrated into ``optimization_stack``
   (and is not on ``rejected_kernel_ids``).
 
-Two former gates have been demoted; this file holds reverse regressions
-for both:
-
-* ``pmc_roofline`` has been physically removed (PMC counter / rocprof
-  collection is no longer part of the action catalogue — the F1
-  composite ``roofline`` action superseded it). The reverse-regression
-  tests below assert no leftover ``pmc_roofline must run before …``
-  denial fires for any other action.
-* ``trace_analyze`` is now enforced ONLY at the REQUEST layer for
-  ``run_optimization`` (see ``_sequence_denial_for_request``). Action-
-  layer explore actions (``params`` / ``backends`` / ``sweep`` /
-  ``report``) are never gated on a fresh ``last_trace_analyze`` cache.
+``trace_analyze`` is now enforced ONLY at the REQUEST layer for
+``run_optimization`` (see ``_sequence_denial_for_request``). Action-
+layer explore actions (``explore`` / ``sweep`` / ``report``) are never
+gated on a fresh ``last_trace_analyze`` cache.
 
 These tests exercise each remaining gate's open / closed transitions
-plus the matching ``_sequence_denial_for_action`` deny / allow pairs,
-and the reverse regressions for the two demoted gates.
+plus the matching ``_sequence_denial_for_action`` deny / allow pairs.
 """
 
 from __future__ import annotations
@@ -198,66 +189,13 @@ def test_target_analysis_denial_clears_after_baseline_json_written(session_dir):
     _write_baseline_json(session_dir)
     # baseline gate now applies (baseline_tput is 0). target_analysis no
     # longer blocks; the next gate down (baseline) is what speaks up.
-    # KB_gaps/Dead-C — exercise the gate via the v0.8 canonical
-    # ``explore`` action (the legacy ``backends`` name is denied earlier
-    # at PolicyGate ``action_deprecated`` and never reaches this layer).
+    # Exercise the gate via the canonical ``explore`` action.
     denied = coord._sequence_denial_for_action("explore")
     assert isinstance(denied, PolicyDenied)
     assert "baseline must run first" in str(denied)
     # target_analysis -> the gate has just been satisfied so it should
     # also pass through cleanly.
     assert coord._sequence_denial_for_action("baseline") is None
-
-
-# ===========================================================================
-# pmc_roofline gate — REMOVED (the action itself was retired in favour
-# of the F1 composite ``roofline``). The reverse regressions below
-# guard against any leftover hard-gate ever coming back.
-# ===========================================================================
-def test_no_pmc_roofline_mention_in_required_next_step(session_dir):
-    """``_required_next_step`` must never name the retired
-    ``pmc_roofline`` action."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {
-        "trace_input": "/tmp/profile.tar.gz",
-        "candidates_path": "/tmp/x.json",
-    }
-    todo = coord._required_next_step()
-    assert "pmc_roofline" not in todo
-    assert todo == ""
-
-
-def test_no_pmc_roofline_denial_for_any_action(session_dir):
-    """No surviving rule may produce a denial whose message contains
-    ``pmc_roofline must run before …``."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    for action in ("explore", "sweep", "report", "profile", "roofline"):
-        denied = coord._sequence_denial_for_action(action)
-        if denied is None:
-            continue
-        assert "pmc_roofline must run before" not in str(denied), (
-            f"{action!r} still hits a removed pmc_roofline gate: {denied!s}"
-        )
-
-
-def test_no_pmc_roofline_action_in_sequence_actions(session_dir):
-    """The Coordinator's ``sequence_actions`` set must not contain
-    ``pmc_roofline``; otherwise an LLM proposing the retired name would
-    receive a sequence denial instead of the canonical
-    ``unknown_action`` PolicyGate denial.
-    """
-    coord = Coordinator(session_dir, backends=_backends_full())
-    # Calling _sequence_denial_for_action with a name not in the set
-    # short-circuits to ``None`` regardless of state.
-    assert coord._sequence_denial_for_action("pmc_roofline") is None
 
 
 # ===========================================================================
@@ -356,11 +294,8 @@ def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
         coord, kernel_id="k-rmsnorm", decision="KEEP",
         source_file="/p/rmsnorm.py",
     )
-    # v0.8 M3 / KB_gaps/Dead-C — the canonical EXPLORE-phase actions
-    # (``explore`` + ``sweep``) must be denied while ``integrate`` is
-    # required. Legacy ``backends`` / ``params`` / ``validate_stack`` are
-    # already denied earlier at the PolicyGate ``action_deprecated`` rule
-    # so they never reach this sequence gate.
+    # The canonical EXPLORE-phase actions (``explore`` + ``sweep``)
+    # must be denied while ``integrate`` is required.
     for action in ("explore", "sweep"):
         denied = coord._sequence_denial_for_action(action)
         assert isinstance(denied, PolicyDenied), (
@@ -369,13 +304,10 @@ def test_integrate_denial_blocks_explore_but_allows_safe_actions(session_dir):
         assert denied.rule == "execution_order"
         assert "integrate must run first" in str(denied)
         assert "k-rmsnorm" in (denied.hint or "")
-    # integrate / report bypass the integrate gate; legacy
-    # ``validate_stack`` no longer appears in ``sequence_actions`` and
-    # short-circuits early. ``report``'s own PR-C hot-kernel gate is
-    # separately covered below.
+    # integrate / report bypass the integrate gate. ``report``'s own
+    # PR-C hot-kernel gate is separately covered below.
     assert coord._sequence_denial_for_action("integrate") is None
     assert coord._sequence_denial_for_action("report") is None
-    assert coord._sequence_denial_for_action("validate_stack") is None
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +341,7 @@ def test_report_denied_when_hot_reusable_kernels_untried(session_dir):
          "source_file": "/sgl/aiter/ops/rmsnorm.py"},
     ])
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    coord.shared_state.backends_attempts = [{"variant_name": "x"}]
+    coord.shared_state.explore_attempts = [{"variant_name": "x"}]
     coord.shared_state.last_cheap_delta_gain = 0.05  # below EPS
 
     denied = coord._sequence_denial_for_action("report")
@@ -476,7 +408,7 @@ def test_required_next_step_surfaces_untried_hot_kernels(session_dir):
          "source_file": "/p/rmsnorm.py"},
     ])
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    coord.shared_state.backends_attempts = [{"variant_name": "x"}]
+    coord.shared_state.explore_attempts = [{"variant_name": "x"}]
     coord.shared_state.last_cheap_delta_gain = 0.05  # below EPS
     todo = coord._required_next_step()
     assert "TODO 4a/5" in todo

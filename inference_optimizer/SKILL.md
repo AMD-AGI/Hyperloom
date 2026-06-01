@@ -255,10 +255,10 @@ Related rules that look reasonable but break things:
   action (PolicyGate denies it via
   `framework_pr_action_not_llm_proposable`). Use `--no-framework`
   to skip the phase entirely.
-- **No `sequence_denial` rule** consuming `backends_attempts` /
-  `params_attempts` — those fields have no writers and would
-  permanently deny `kernel_opt`. Use
-  `explore_attempts_minimum_before_kernel_opt`.
+- **`kernel_opt` sequencing** is gated by
+  `explore_attempts_minimum_before_kernel_opt`, which reads
+  `gain_per_stack_entry` (at least one successful explore round on
+  record) rather than any per-action attempt counter.
 
 ## Setup
 
