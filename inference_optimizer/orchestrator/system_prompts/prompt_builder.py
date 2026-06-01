@@ -47,15 +47,8 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     # analysis — roofline is Coordinator-auto-enqueued (PRELUDE + watermark);
     # not LLM-proposable. deep_kernel_analysis stays as a kernel-owned REQUEST.
     "roofline", "deep_kernel_analysis",
-    # explore
-    #
-    # v0.8 M3 + KB_gaps/Gap-10: the merged ``explore`` action is the
-    # ONLY grid-runner entry. The v0.6 ``backends`` / ``params`` /
-    # ``validate_stack`` names have been removed — PolicyGate's
-    # ``action_deprecated`` rule denies them at the intent boundary
-    # with a structured replacement hint (KB_design §3.4 / §3.13 M3
-    # §PR7). The executor modules stay in the tree so legacy resume
-    # paths still find their per-action audit fields (Inv-10.1).
+    # explore — the single grid-runner entry (per-KEEP stack rebench
+    # inlined).
     "explore",
     # PR-A1 (Arbor-into-Hyperloom): ``specialist`` is the LLM sub-agent
     # dispatch surface; ``integrate_patch`` is the orchestrator-side
@@ -74,20 +67,15 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "report",
     # support — ``recover`` frees leaked VRAM and (when
     # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``) attempts
-    # ``rocm-smi --gpureset``. KB_design §3.15 §2.3 retired the
-    # other ``support``-family stubs (``dream`` / ``re_explore`` /
-    # ``comm_optimization`` / ``compiler_tuning``); the replacement
-    # path is a specialist sub-agent.
+    # ``rocm-smi --gpureset``. The replacement path for diagnostic work
+    # is a specialist sub-agent.
     "recover",
 )
 
 NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # prep
     "target_analysis", "baseline",
-    # explore (no profile — it only feeds kernel-opt)
-    #
-    # Legacy backends/params/validate_stack removed in the legacy release /
-    # KB_gaps/Gap-10; merged into ``explore`` which carries an
+    # explore (no profile — it only feeds kernel-opt). Carries an
     # inlined per-KEEP stack rebench.
     "explore",
     # PR-A1 (Arbor-into-Hyperloom): specialist + integrate_patch are
@@ -119,17 +107,6 @@ KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
 GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
     "explore", "sweep",
 })
-
-# names PolicyGate's ``action_deprecated``
-# rule denies. Catalogue tag + denial hint share the same map. The
-# executors / yamls were physically deleted; the names persist only
-# in this denial surface so a legacy resume that emits one of these
-# gets a structured replacement hint instead of ``no_executor``.
-DEPRECATED_ACTIONS: dict[str, str] = {
-    "backends":       "Use `explore` instead (v0.8 M3 merged it in).",
-    "params":         "Use `explore` instead (v0.8 M3 merged it in).",
-    "validate_stack": "Use `explore` instead (per-KEEP stack rebench is inlined).",
-}
 
 # Phase ordering for the catalogue section. Any action whose pipeline_phase
 # is not in this tuple is appended at the end (defensive; current registry
@@ -329,11 +306,9 @@ def _section_pipeline_and_budget(
         "phases (analysis / support). If sum << budget, do an extra explore round",
         "before report.",
         "",
-        "v0.8 M3 + KB_gaps/Gap-10: ``explore`` runs its per-KEEP stack rebench",
-        "inline — there is no standalone ``validate_stack`` action any more.",
-        "The v0.6 ``backends`` / ``params`` / ``validate_stack`` names are denied",
-        "by PolicyGate with ``rule='action_deprecated'`` if proposed; route every",
-        "grid attempt through ``delegate{action_name='explore', params={grid: ...}}``.",
+        "``explore`` runs its per-KEEP stack rebench inline — there is no",
+        "standalone validation step. Route every grid attempt through",
+        "``delegate{action_name='explore', params={grid: ...}}``.",
         "",
         "At the wall-clock deadline the Coordinator auto-enqueues a deterministic",
         "`report` (no LLM) during closing phase — do not waste ticks re-proposing",
@@ -430,7 +405,7 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "base_extra_args?, base_tput?, accuracy_baseline?, "
             "keep_threshold_pct?: 0.2, stack_stable_threshold_pct?: 0.2}}`. "
             "Variants run serially; each KEEP triggers an inlined "
-            "stack rebench (replaces validate_stack). "
+            "stack rebench. "
             "**Provenance is now restricted (PR-A9):** every variant "
             "MUST carry provenance='specialist:<domain>' (a derived "
             "row from a specialist_done.proposal_set) OR "
@@ -459,11 +434,6 @@ def _format_grid_injection_hint(name: str) -> str | None:
     return None
 
 
-def _format_action_deprecation_hint(name: str) -> str | None:
-    """Return a DEPRECATED tag + replacement hint for v0.8 M3 retired actions."""
-    return DEPRECATED_ACTIONS.get(name)
-
-
 def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
     lines: list[str] = [
         "## 4. ACTIONS YOU MAY USE",
@@ -483,8 +453,6 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
             tag_parts: list[str] = []
             if name in KERNEL_OWNED_ACTIONS:
                 tag_parts.append("KERNEL-OWNED")
-            if name in DEPRECATED_ACTIONS:
-                tag_parts.append("DEPRECATED")
             tag = (" (" + ", ".join(tag_parts) + ")") if tag_parts else ""
             lines.append(
                 f"- **{name}**{tag} — {meta.description}"
@@ -497,9 +465,6 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
                 f"family={meta.family}"
             )
             lines.append(f"    EMIT: {_format_emit_hint(meta)}")
-            deprecation_hint = _format_action_deprecation_hint(name)
-            if deprecation_hint:
-                lines.append(f"    DEPRECATED: {deprecation_hint}")
             grid_hint = _format_grid_injection_hint(name)
             if grid_hint:
                 lines.append(f"    {grid_hint}")
@@ -517,12 +482,10 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   propose `report` once (if not already done) then heartbeat 'goal-reached'.",
         "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
         "   delegated_result; do NOT re-baseline on a positive result with warnings.",
-        "3. **Inlined stack-rebench (v0.8 M3 / KB_gaps/Gap-10)**: the merged",
-        "   ``explore`` action runs its own per-KEEP stack rebench, so there is",
-        "   no standalone ``validate_stack`` step to schedule. The legacy",
-        "   ``backends`` / ``params`` / ``validate_stack`` names are denied by",
-        "   PolicyGate (``rule='action_deprecated'``) — route every grid attempt",
-        "   through ``delegate{action_name='explore', params={grid: [...] }}``.",
+        "3. **Inlined stack-rebench**: the ``explore`` action runs its own",
+        "   per-KEEP stack rebench, so there is no standalone validation step",
+        "   to schedule. Route every grid attempt through",
+        "   ``delegate{action_name='explore', params={grid: [...] }}``.",
     ]
     lines.append(
         "4. **Analysis is auto-managed**. Roofline (or profile under "

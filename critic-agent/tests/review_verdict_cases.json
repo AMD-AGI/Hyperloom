@@ -271,7 +271,7 @@
         "kind": "propose_action"
       },
       "action_metadata": {
-        "name": "params",
+        "name": "explore",
         "family": "shallow",
         "owner": "orchestration",
         "accuracy_risk": 0
@@ -304,7 +304,7 @@
         "kind": "propose_action"
       },
       "action_metadata": {
-        "name": "comm_optimization",
+        "name": "explore",
         "family": "long",
         "owner": "orchestration",
         "accuracy_risk": 1
