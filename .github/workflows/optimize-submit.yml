@@ -31,11 +31,8 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  schedule:
-    # Run every 12 hours at UTC 00:00 and 12:00.
-    # Cron uses the fixed production candidate pool and excludes models queued
-    # or running in other optimize-submit workflows.
-    - cron: '0 0,12 * * *'
+  # Cron is intentionally disabled while optimize-thunder runs the full
+  # 3B-12B pool. Keep manual dispatch for targeted submit runs.
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
