@@ -734,6 +734,13 @@ _REUSABLE_SOURCE_ROOTS_STATIC = (
     "/sgl-workspace/sglang/",
     "/sgl-workspace/vllm/",
     "/sgl-workspace/flydsl/",
+    # FlyDSL kernel checkout used as $DSL2_ROOT on this stack: the real
+    # rewritable source for PR #668 moe_flydsl pseudo-ops lives here
+    # (kernels/moe_gemm_2stage.py). Without this the candidate is rejected
+    # "source not under a reusable framework root" and never reaches GEAK.
+    # NOTE: matched against a lower-cased path (classify_patchability uses
+    # ``lower_file``), so this entry must be lower-case.
+    "/wekafs/yunkai/flydsl/",
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
@@ -1604,6 +1611,25 @@ def _finalize_candidates(
         # (rare, but defensive).
         item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
         item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
+        # PR #668 FlyDSL pseudo-ops (pseudo_op::moe_flydsl_stage{1,2}) are
+        # synthetic and carry no source_file, so classify_patchability below
+        # would reject them ("source file not resolved") and kernel-opt would
+        # see zero reusable-native candidates. Inject the real FlyDSL MoE
+        # kernel source BEFORE the patchability gate so FlyDSL routes to GEAK.
+        # FlyDSL pseudo-ops either carry no source_file or a profiler frame
+        # label like ``aiter/fused_moe.py(986): fused_moe_2stages`` that is
+        # not a real rewritable path under a reusable framework root. In both
+        # cases inject the real FlyDSL MoE kernel source.
+        if item["source_type"] == "flydsl":
+            _sf = str(item.get("source_file") or "").strip()
+            if (not _sf) or (not os.path.isfile(_sf)):
+                _fb = _resolve_flydsl_source_fallback()
+                if _fb:
+                    item["source_file"] = _fb
+                    item["kernel_repo"] = (
+                        find_repo_root(_fb) or item.get("kernel_repo", "")
+                    )
+                    item["flydsl_source_from_fallback"] = True
         # Re-classify thin vendor / dispatch wrappers (the .so/.co loader
         # shims that have no rewritable kernel body). Even when the file
         # extension is .cu/.py and source_type would otherwise be hip_cpp/
@@ -1851,6 +1877,31 @@ _FLYDSL_BUFFER_LOAD_MARKERS = (
 )
 
 
+def _resolve_flydsl_source_fallback() -> str:
+    """Resolve the real FlyDSL MoE kernel source for pseudo-op candidates.
+
+    PR #668 pseudo-ops (``pseudo_op::moe_flydsl_stage{1,2}``) are synthetic
+    and carry no ``source_file``, so :func:`classify_patchability` would
+    reject them ("source file not resolved") and the kernel-opt routing
+    would see zero reusable-native candidates. The real rewritable source
+    is FlyDSL's 2-stage MoE GEMM kernel under ``$DSL2_ROOT/kernels/``.
+    Returns the first existing path, else "".
+    """
+    roots = [
+        os.environ.get("DSL2_ROOT", "").strip(),
+        os.environ.get("FLYDSL_ROOT", "").strip(),
+        "/wekafs/yunkai/FlyDSL",
+        "/sgl-workspace/flydsl",
+    ]
+    for root in roots:
+        if not root:
+            continue
+        cand = os.path.join(root, "kernels", "moe_gemm_2stage.py")
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
 def _flydsl_kernel_params(
     source_file: str, target_platform: str,
 ) -> dict[str, Any]:
@@ -1921,6 +1972,14 @@ def enrich_candidates_with_runtime_metadata(
                 for key, value in model_params.items():
                     params.setdefault(key, value)
         if item.get("source_type") == "flydsl":
+            # PR #668 pseudo-ops carry no source_file (or a non-file frame
+            # label). Inject the real FlyDSL MoE kernel source so GEAK has a
+            # file to rewrite.
+            _sf2 = str(item.get("source_file") or "").strip()
+            if (not _sf2) or (not os.path.isfile(_sf2)):
+                fb = _resolve_flydsl_source_fallback()
+                if fb:
+                    item["source_file"] = fb
             flydsl_params = _flydsl_kernel_params(
                 str(item.get("source_file") or ""), target_platform,
             )

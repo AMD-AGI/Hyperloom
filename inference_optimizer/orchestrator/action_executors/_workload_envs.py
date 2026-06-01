@@ -260,6 +260,25 @@ def materialize_config_with_envs(
         # captures warmup). Clamp to >= 0.
         if delay_iters < 0:
             delay_iters = 0
+        # Operator override for a SMALL eager FlyDSL profile: the default
+        # >=256-step capture is unsavable in eager (--disable-cuda-graph)
+        # mode for a 30B MoE (multi-GB with-stack torch trace hangs the
+        # profiler export), but eager is the only mode that records the
+        # aiter/fused_moe.py:flydsl_moe_stage1/2 python frames PR#668 keys on
+        # to inject the moe_flydsl pseudo-op. A handful of steps still yields
+        # plenty of MoE-layer frames. Set HYPERLOOM_PROFILE_MAX_ITERS to a
+        # small value (e.g. 8) together with the eager profile patch.
+        _ovr = os.environ.get("HYPERLOOM_PROFILE_MAX_ITERS", "").strip()
+        if _ovr.isdigit() and int(_ovr) > 0:
+            max_iters = int(_ovr)
+            try:
+                delay_iters = int(
+                    os.environ.get("HYPERLOOM_PROFILE_DELAY_ITERS", "8") or "8"
+                )
+            except (TypeError, ValueError):
+                delay_iters = 8
+            if delay_iters < 0:
+                delay_iters = 0
         # TraceLens #194 §2: NUM_PROMPTS must be large enough that the
         # benchmark engine reaches `delay_iters + max_iters` decode steps
         # before it runs out of prompts. With continuous batching at
@@ -323,10 +342,20 @@ def materialize_config_with_envs(
             # the yaml template has placeholder defaults for CONC=8.
             extra_body["start_step"] = delay_iters
             extra_body["num_steps"] = max_iters
-            extra_body.setdefault("shape_discovery", True)
+            # shape_discovery enables the kernel_shape_profiler (1457-ref
+            # instrumentation) which is cuda-graph-oriented and balloons an
+            # eager+with_stack trace until export_chrome_trace times out. The
+            # per-step user_annotations the TraceLens splitter needs come from
+            # roofline_annotations (scheduler patch), independent of
+            # shape_discovery, so allow disabling the latter via env for the
+            # eager FlyDSL-frame profile.
+            _shape_disc = os.environ.get(
+                "HYPERLOOM_PROFILE_SHAPE_DISCOVERY", "1",
+            ).strip().lower() not in {"0", "false", "no", "off"}
+            extra_body["shape_discovery"] = _shape_disc
             extra_body.setdefault("roofline_annotations", True)
             envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
-            if tracelens_patch_ok:
+            if tracelens_patch_ok and _shape_disc:
                 # #194 §5: a TraceLens-patched SGLang exposes
                 # --enable-shape-discovery-for-cuda-graph-profile as a
                 # server CLI flag. Without the patch SGLang's argparse
