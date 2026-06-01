@@ -24,9 +24,16 @@ _TECHNICAL_TERMS = frozenset({
     "fused", "fusion", "kernel", "hipify", "rocm", "hip", "nccl", "rccl",
     "allgather", "reducescatter", "reduce_scatter", "all_reduce",
     "prefill", "decode", "batching", "continuous_batching", "chunked_prefill",
-    "vllm", "sglang", "trtllm", "tensorrt", "lora", "qlora", "awq", "gptq",
+    "vllm", "sglang", "atom", "trtllm", "tensorrt", "lora", "qlora", "awq", "gptq",
     "marlin", "w4a16", "w8a8", "smoothquant", "activation_order",
     "custom_all_reduce", "custom_ar", "radix", "scheduler",
+    # atom-specific surfaces: PR titles in the ROCm/ATOM repo tend to
+    # mention these together; listing them here keeps the
+    # primus_cortex / github search relevance on the atom-shaped axis
+    # (MTP / EP / aiter routing) instead of collapsing to generic
+    # "moe" matches that surface unrelated PRs.
+    "mtp", "ep", "moe_ep", "dp_attention", "dp", "kv_cache_dtype",
+    "torch_profiler_dir",
     # GPU hardware codenames. Critical for relevance ranking: a gap such as
     # "improve sglang bf16 throughput on mi300x" must keep ``mi300x`` so the
     # downstream primus_cortex / github search can scope to AMD-validated PRs

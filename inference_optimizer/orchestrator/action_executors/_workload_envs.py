@@ -158,7 +158,6 @@ def materialize_config_with_envs(
     config_path: Path,
     output_dir: Path,
     *,
-    extra_sglang_args: str = "",
     extra_server_args: str = "",
     extra_envs: dict[str, Any] | None = None,
     model_path: str | None = None,
@@ -196,15 +195,18 @@ def materialize_config_with_envs(
     * ``NUM_PROMPTS`` and ``NUM_WARMUPS`` are computed adaptively from
       ``CONC`` and ``ISL+OSL`` (longer sequences → fewer prompts to keep
       each variant under ~3-5 min wall time).
-    * ``extra_sglang_args`` / ``extra_server_args`` (the latter wins) are
-      written to ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS`` based on the
-      configured framework.
+    * ``extra_server_args`` is the framework-neutral payload-surface
+      slot (the legacy name was ``extra_sglang_args``). The
+      materializer routes its value into the framework-specific env
+      name (``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS`` /
+      ``EXTRA_ATOM_ARGS``) based on the framework declared in the
+      YAML's ``benchmark.framework``.
     * ``extra_envs`` overrides any of the above.
 
     Returns the path to the materialized YAML written under ``output_dir``.
     Reuses the file name across calls so callers can locate it predictably.
     """
-    server_args = (extra_server_args or extra_sglang_args).strip()
+    server_args = (extra_server_args or "").strip()
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
@@ -310,17 +312,6 @@ def materialize_config_with_envs(
         str(envs.get("PROFILE", "")).strip() == "1"
         or (bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True)
     )
-    # Atom (Magpie v1) has no torch_profiler wiring — atom_mi*x.sh prints
-    # "[atom_*] PROFILE=1 received but atom profiler wiring is not yet
-    # implemented; ignoring." Injecting sglang/vllm-specific profiler CLI
-    # flags into EXTRA_ATOM_ARGS would cause atom argparse failures, so we
-    # treat atom-with-PROFILE as profile-disabled for env injection
-    # purposes. The ProfileExecutor / RooflineExecutor short-circuit
-    # before this is even rendered when FRAMEWORK=atom; this guard is
-    # defense-in-depth for direct callers (params/sweep/backends) that
-    # happen to render a YAML with profiler.torch_profiler.enabled=true.
-    if is_profile and str(bench.get("framework") or "").lower() == "atom":
-        is_profile = False
     profile_num_prompts: int | None = None
     if is_profile:
         try:
@@ -351,19 +342,56 @@ def materialize_config_with_envs(
         )
         profile_num_prompts = max(safe_conc, iters_to_prompts * 2)
         fw = str(bench.get("framework") or "").lower()
+        # atom check must precede vllm/sglang branches: atom doesn't
+        # contain a vllm/sglang substring today but the explicit
+        # ordering keeps a future framework name (e.g. "atom-vllm") from
+        # accidentally falling into the wrong branch. atom's HTTP
+        # start_profile/stop_profile path is driven by the InferenceX
+        # bench client's --profile flag (added by benchmark_lib.sh when
+        # PROFILE=1), and the trace directory is wired via
+        # atom_mi*x.sh's --torch-profiler-dir, so this Python layer has
+        # no profiler envs to set for atom — and must NOT inject
+        # --profiler-config.* style flags (atom argparse rejects them).
+        is_atom = "atom" in fw
         # Issue #194 §4 / §5: TraceLens-required profiler flags exist
         # only in patched vLLM / SGLang builds. Try to apply the
         # TraceLens patch set to the in-container install; on success
         # we inject the extra flags below, on failure we silently fall
         # back to today's safe set so vanilla images keep working.
-        # Default-on, disable via HYPERLOOM_ENABLE_PATCH=0.
+        # Default-on, disable via HYPERLOOM_ENABLE_PATCH=0. atom has no
+        # TraceLens patch set (atom's torch_profiler integration is
+        # native), so we skip the patcher entirely for atom — calling
+        # the sglang patcher would no-op but spam install warnings.
         tracelens_patch_ok = False
-        if _tracelens_patch_enabled():
+        if _tracelens_patch_enabled() and not is_atom:
             if "vllm" in fw:
                 tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
             else:
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
-        if "vllm" in fw:
+        if is_atom:
+            # atom writes trace files to
+            # <torch_profiler_dir>/rank_<N>/*.pt.trace.json.gz which our
+            # _candidate_trace_dirs probe matches unchanged.
+            #
+            # atom's profiler is HTTP-driven (POST /start_profile at server-up,
+            # /stop_profile at run end) and — unlike sglang's start_step/num_steps
+            # or vLLM's delay_iterations/max_iterations — has NO internal capture
+            # window: it records the ENTIRE bench-client run. The only lever that
+            # bounds atom's profiled decode-iteration count is the *workload
+            # length* (OSL) + prompt count, and OSL can only be clamped at the
+            # Magpie client layer (`--output-len`), never from this Python layer.
+            #
+            # Therefore the atom profile window lives in ONE place — Magpie's
+            # atom_mi*x.sh, which clamps OSL + NUM_PROMPTS when PROFILE=1 (see
+            # ATOM_PROFILE_OSL / ATOM_PROFILE_NUM_PROMPTS). We must NOT also force
+            # the sglang/vllm steady-state NUM_PROMPTS here: at OSL=1024 that
+            # ~780-prompt window is ~4096 decode iters, which starves aiter's
+            # shared-memory broadcast ring ("No available shared memory broadcast
+            # block found in 60s") until a tiny BROADCAST collective trips the
+            # 600s NCCL watchdog and aborts the run *before* /stop_profile flushes
+            # — leaving rank_*/ empty. Defer to Magpie (single source of truth).
+            profile_num_prompts = None
+        elif "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
             profiler_args_parts = [
                 f"--profiler-config.delay_iterations {delay_iters}",
@@ -435,7 +463,22 @@ def materialize_config_with_envs(
     if "NUM_WARMUPS" not in envs:
         envs["NUM_WARMUPS"] = min(conc_val, 8)
     if server_args:
-        envs[server_args_env_name(bench.get("framework"))] = server_args
+        # PR-B: merge into the yaml-default EXTRA_SGLANG_ARGS / EXTRA_VLLM_ARGS
+        # rather than overwriting. The profile path's
+        # ``--enable-profile-cuda-graph`` / ``--enable-shape-discovery-for-
+        # cuda-graph-profile`` flags are injected upstream (lines ~295 /
+        # ~321) into ``envs[<framework_env>]``; a plain overwrite here
+        # silently drops them whenever the caller supplies any
+        # ``extra_sglang_args`` (e.g. watermark roofline inheriting
+        # ``current_best.extra_sglang_args``), and the profile sub-step
+        # ends up running without graph capture instrumentation.
+        from ._grid_runner import merge_server_args
+        framework_env = server_args_env_name(bench.get("framework"))
+        existing = str(envs.get(framework_env, "")).strip()
+        if existing:
+            envs[framework_env] = merge_server_args(existing, server_args)
+        else:
+            envs[framework_env] = server_args
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
     # Accuracy eval (GSM8K) is OFF by default because Magpie main and
