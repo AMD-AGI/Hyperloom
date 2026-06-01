@@ -487,6 +487,68 @@ def test_promote_warm_replay_failed_records_outcome(tmp_path):
 
 
 # ===========================================================================
+# Routing-gate repro (review #1): a FAILED replay_warm_recipe result must be
+# classified so the dispatcher routes it to _promote_warm_replay (which clears
+# warm_replay_outcome.status='in_flight'). Otherwise it falls to
+# _handle_unpromotable_result, which never clears the flag, and PRELUDE can
+# never exit (warm_replay_in_flight stays True) — burning the whole budget.
+#
+# The previous repro called _promote_warm_replay directly, bypassing the
+# _is_promotable_result gate that actually decides the route in
+# _pump_dispatcher_once; it gave false confidence. These assert the gate.
+# ===========================================================================
+def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    # The replay reuses BaselineExecutor, so a timeout / OOM / nonzero exit
+    # surfaces as status="failed". The routing gate must NOT treat that as
+    # "unpromotable" for replay_warm_recipe, because only the promote path
+    # clears the in_flight flag.
+    assert coord._is_promotable_result(
+        "replay_warm_recipe", {"status": "failed", "error_class": "crash"},
+    ) is True, (
+        "failed replay must route to _promote_warm_replay so the in_flight "
+        "flag is cleared; otherwise PRELUDE never exits"
+    )
+    # A succeeded replay is of course promotable too.
+    assert coord._is_promotable_result(
+        "replay_warm_recipe", {"status": "succeeded", "output_throughput": 700.0},
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_failed_replay_clears_in_flight_via_full_routing(tmp_path):
+    """End-to-end through the dispatcher's promote/unpromotable decision:
+    a failed replay must leave ``warm_replay_in_flight`` False so PRELUDE
+    can exit. Mirrors the real _pump_dispatcher_once gate."""
+    from inference_optimizer.orchestrator.phase_state import (
+        warm_replay_in_flight,
+    )
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-replay-prelude",
+    }
+    assert warm_replay_in_flight(coord.shared_state) is True
+
+    failed = {"status": "failed", "error_class": "timeout", "error": "killed"}
+    task = _StubTask(kind="replay_warm_recipe")
+    # Reproduce the dispatcher decision: kept iff promotable.
+    if coord._is_promotable_result(task.kind, failed):
+        await coord._promote_to_shared_state(task.kind, failed, task=task)
+    else:
+        await coord._handle_unpromotable_result(task, failed)
+
+    assert warm_replay_in_flight(coord.shared_state) is False, (
+        "failed replay left warm_replay_in_flight True → PRELUDE would "
+        "never exit"
+    )
+    assert coord.shared_state.warm_replay_outcome["status"] == "failed"
+
+
+# ===========================================================================
 # PRELUDE bootstrap — serialize warm-replay before initial roofline
 # ===========================================================================
 @pytest.mark.asyncio
