@@ -4259,18 +4259,16 @@ class Coordinator:
                 if remaining_min <= 5.0 and not self.shared_state.closing_phase:
                     sections.append(
                         "WARNING: < 5 min remaining. Prefer `report` next; new "
-                        "explore rounds or validate_stack will likely be cut "
-                        "by the deadline."
+                        "`explore` rounds (which inline the stack rebench) "
+                        "will likely be cut by the deadline."
                     )
 
-        # Time budget — emitted for **every** agent that needs it. Robustness
-        # consumes it to fire the ``deadline_imminent`` signal that escalates
-        # to a ``delegate(report)`` wind-down; Orchestration uses it as a
-        # heads-up so it stops proposing fresh explore rounds when the
-        # deadline is close. Kernel and Critic ignore the section; their
-        # prompt parsers don't subscribe to it.
+        # Time budget for Robustness — it consumes this to fire the
+        # ``deadline_imminent`` signal that escalates to a ``delegate(report)``
+        # wind-down. Orchestration already got its copy in the Mission-progress
+        # block above; Kernel and Critic don't subscribe to it.
         if (
-            agent_name in ("orchestration", "robustness")
+            agent_name == "robustness"
             and self._run_deadline is not None
             and self._run_started_monotonic is not None
         ):
@@ -4287,51 +4285,6 @@ class Coordinator:
                 f"budget={budget_min}min  "
                 f"closing_phase={self.shared_state.closing_phase}"
             )
-            if (
-                agent_name == "orchestration"
-                and remaining_min <= 5.0
-                and not self.shared_state.closing_phase
-            ):
-                sections.append(
-                    "WARNING: < 5 min remaining. Prefer `report` next; new "
-                    "explore rounds or validate_stack will likely be cut "
-                    "by the deadline."
-                )
-
-        # Time budget — emitted for **every** agent that needs it. Robustness
-        # consumes it to fire the ``deadline_imminent`` signal that escalates
-        # to a ``delegate(report)`` wind-down; Orchestration uses it as a
-        # heads-up so it stops proposing fresh explore rounds when the
-        # deadline is close. Kernel and Critic ignore the section; their
-        # prompt parsers don't subscribe to it.
-        if (
-            agent_name in ("orchestration", "robustness")
-            and self._run_deadline is not None
-            and self._run_started_monotonic is not None
-        ):
-            remaining_min = max(
-                0.0, (self._run_deadline - time.monotonic()) / 60.0,
-            )
-            elapsed_min = (
-                time.monotonic() - self._run_started_monotonic
-            ) / 60.0
-            budget_min = self.shared_state.max_minutes or 0
-            sections.append("=== Time budget ===")
-            sections.append(
-                f"elapsed={elapsed_min:.1f}min  remaining={remaining_min:.1f}min  "
-                f"budget={budget_min}min  "
-                f"closing_phase={self.shared_state.closing_phase}"
-            )
-            if (
-                agent_name == "orchestration"
-                and remaining_min <= 5.0
-                and not self.shared_state.closing_phase
-            ):
-                sections.append(
-                    "WARNING: < 5 min remaining. Prefer `report` next; new "
-                    "`explore` rounds (which inline the stack rebench) "
-                    "will likely be cut by the deadline."
-                )
 
         # 1. Shared session state — gives the agent goal + progress context
         # even on tick 1 when the inbox is empty.
