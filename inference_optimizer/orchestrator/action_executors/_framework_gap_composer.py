@@ -116,8 +116,9 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
 def _normalize_model_class(model_class: str) -> str:
     """Reduce moe_mla / moe-swa / Dense / "" to a canonical lowercase token.
 
-    Matches the convention in scoring.MODEL_CLASS_ACTION_PRIORS so the gap
-    string stays grep-friendly across the codebase.
+    Uses the same canonicalisation rule (basename + lowercase, with
+    -/+/space tolerated) that every other ``model_class`` consumer applies
+    so the gap search token stays grep-friendly across the codebase.
     """
     raw = (model_class or "").strip().lower()
     if not raw:
