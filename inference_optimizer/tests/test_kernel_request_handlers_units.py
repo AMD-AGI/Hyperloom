@@ -97,7 +97,7 @@ class TestRuntimeGeneratedKernel:
 
     def test_reusable_source_root_overrides_compile_marker(self):
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
-        roots = krh._REUSABLE_SOURCE_ROOTS
+        roots = krh._reusable_source_roots()
         if not markers or not roots:
             pytest.skip("required tables empty in build")
         marker = next(iter(markers))
@@ -318,19 +318,20 @@ class TestReusableSourceRootsAtom:
         # case-sensitive ``startswith`` and keeps the canonical case in
         # ``framework_paths._DEFAULT_SOURCE_ROOTS`` separately.
         assert any(
-            "/app/atom/atom/" in r.lower() for r in krh._REUSABLE_SOURCE_ROOTS
+            "/app/atom/atom/" in r.lower()
+            for r in krh._reusable_source_roots()
         )
 
     def test_includes_atom_site_packages_python_3_10(self):
         assert any(
             "/opt/venv/lib/python3.10/site-packages/atom/" in r
-            for r in krh._REUSABLE_SOURCE_ROOTS
+            for r in krh._reusable_source_roots()
         )
 
     def test_includes_atom_site_packages_python_3_12(self):
         assert any(
             "/opt/venv/lib/python3.12/site-packages/atom/" in r
-            for r in krh._REUSABLE_SOURCE_ROOTS
+            for r in krh._reusable_source_roots()
         )
 
     def test_atom_path_classified_as_reusable(self):
