@@ -228,8 +228,10 @@ def _proxy() -> str:
 
 def _default_sglang_image() -> str:
     # v0.5.11 (2026-05-05): Spec V2 by default + DFLASH on ROCm + all-reduce/RMSNorm fusion.
-    # Confirmed available at harbor.core42.example-internal-host.invalid/proxy/lmsysorg/sglang.
-    return f"{_proxy()}/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
+    # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures kernels under
+    # HipGraphLaunch (issue #352). Drop the suffix once the fix lands in upstream ROCm.
+    # Pre-profilerfix image (restore when reverting): f"{_proxy()}/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
+    return f"{_proxy()}/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
 
 
 def _default_vllm_image() -> str:
