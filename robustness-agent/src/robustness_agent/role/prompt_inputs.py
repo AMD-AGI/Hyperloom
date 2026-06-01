@@ -75,26 +75,18 @@ _SCALAR_KEYS = {
     # ``last_*`` lines are aggregated by ``_parse_shared_state`` into
     # ``SharedStateSnapshot.explore_started`` so ``no_levers_found``
     # can defer until at least one explore family has been attempted.
-    # On v0.8 / this branch the canonical writer is ``last_explore``;
-    # ``last_backends`` / ``last_params`` / ``last_sweep`` /
-    # ``last_validate_stack`` are kept for resume parity with main
-    # snapshots (Inv-10.1) so the detection still fires when an old
-    # state.json is replayed. The values surface as either ``(none)``
-    # (Coordinator sentinel for "never") or a status= record.
+    # The canonical writers are ``last_explore`` / ``last_sweep``. The
+    # values surface as either ``(none)`` (Coordinator sentinel for
+    # "never") or a status= record.
     "last_explore",
-    "last_backends",
-    "last_params",
     "last_sweep",
-    "last_validate_stack",
 }
 
 # Subset of ``_SCALAR_KEYS`` whose presence with a non-``(none)`` value
 # flips :attr:`SharedStateSnapshot.explore_started` to True.
 _EXPLORE_FAMILY_KEYS = frozenset({
-    "last_backends",
-    "last_params",
+    "last_explore",
     "last_sweep",
-    "last_validate_stack",
 })
 
 # Pattern for the Coordinator's Time-budget body line, e.g.:
@@ -144,8 +136,8 @@ class SharedStateSnapshot:
     # #8). We parse the size from the rendered ``optimization_stack=``
     # line by counting commas; an exact list is too noisy for a signal.
     optimization_stack_size: int = 0
-    # ``explore_started`` is True once any explore family (backends /
-    # params / sweep / validate_stack) has produced at least one
+    # ``explore_started`` is True once any explore family (explore /
+    # sweep) has produced at least one
     # ``last_*`` record (i.e. its rendered Coordinator line is no
     # longer ``(none)``). ``no_levers_found`` defers until this flag
     # flips so the cold-start window (sglang launch + baseline +

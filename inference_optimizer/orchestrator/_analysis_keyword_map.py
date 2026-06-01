@@ -50,7 +50,7 @@ from typing import Iterable
 # variant names. Mapping is intentionally inclusive on the variant side
 # (a keyword like "cuda graph" maps to the WHOLE cuda_graph_* family)
 # so the LLM has the full sweep available; the executor's grid
-# de-duplication via `params_search.tested` fingerprint will skip
+# de-duplication via `explore_search.tested` fingerprint will skip
 # re-running variants already in current_best.
 ANALYSIS_KEYWORD_TO_VARIANTS: dict[str, tuple[str, ...]] = {
     # ---------- Compile / capture ----------

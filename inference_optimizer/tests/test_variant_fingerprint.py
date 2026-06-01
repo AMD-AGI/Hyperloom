@@ -1,7 +1,7 @@
 """Content fingerprint regression tests.
 
 The fingerprint is the cross-action dedup-ledger key (used by
-``params_search`` and ``backends_search``). It MUST satisfy:
+``explore_search``). It MUST satisfy:
 
 * ``name`` is not an input → renames cannot bypass dedup.
 * ``extra_server_args`` is normalized by ``shlex.split`` + sort →
@@ -102,39 +102,27 @@ def test_variant_result_to_dict_carries_fingerprint() -> None:
     assert len(d["fingerprint"]) == 16
 
 
-def test_shared_state_migrates_legacy_name_keyed_tested() -> None:
-    """SharedState.from_dict re-keys legacy v1 ``params_search.tested``
-    entries by content fingerprint and populates ``name_index``."""
+def test_shared_state_normalizes_explore_search_tested() -> None:
+    """SharedState.from_dict shapes the ``explore_search`` ledger with
+    defensive defaults and preserves fingerprint-keyed ``tested``."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
-    legacy = {
-        "params_search": {
+    fp_a = variant_fingerprint("--A", {})
+    raw = {
+        "explore_search": {
             "schema_version": 1,
-            "accepted": [
-                {"name": "A", "extra_server_args": "--A", "extra_envs": {}},
-            ],
-            "rejected": [
-                {"name": "C", "extra_server_args": "--C", "extra_envs": {}},
-            ],
             "tested": {
-                "A": {"name": "A", "extra_server_args": "--A", "extra_envs": {}},
-                "B": {"name": "B", "extra_server_args": "--B", "extra_envs": {}},
-                "C": {"name": "C", "extra_server_args": "--C", "extra_envs": {}},
+                fp_a: {
+                    "name": "A", "fingerprint": fp_a,
+                    "extra_server_args": "--A", "extra_envs": {},
+                },
             },
-            "cursor": 3,
         },
     }
-    ss = SharedState.from_dict(legacy)
-    fp_a = variant_fingerprint("--A", {})
-    fp_b = variant_fingerprint("--B", {})
-    fp_c = variant_fingerprint("--C", {})
-    migrated = ss.params_search
-    assert migrated["schema_version"] == 2
-    assert set(migrated["tested"].keys()) == {fp_a, fp_b, fp_c}
-    assert migrated["tested"][fp_a]["name"] == "A"
-    assert migrated["name_index"]["A"] == fp_a
-    assert migrated["name_index"]["B"] == fp_b
-    assert migrated["name_index"]["C"] == fp_c
-    # accepted/rejected get fingerprints stamped as well.
-    assert migrated["accepted"][0]["fingerprint"] == fp_a
-    assert migrated["rejected"][0]["fingerprint"] == fp_c
+    ss = SharedState.from_dict(raw)
+    es = ss.explore_search
+    assert es["tested"][fp_a]["name"] == "A"
+    assert es["accepted"] == []
+    assert es["rejected"] == []
+    assert "winners_history" in es
+    assert "synergy_attempted" in es

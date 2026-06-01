@@ -31,9 +31,8 @@ Every tick the per-tick prompt includes a `=== Phase ===` block with:
   - `elapsed_sec / budget_remaining_sec` — how much wall-clock this
     phase has already burned vs its budget.
 
-Per-phase intent map (the retired `backends`/`params`/`validate_stack`
-actions are denied by PolicyGate with `rule='action_deprecated'`; the
-canonical replacement is the merged `explore` action):
+Per-phase intent map (the merged `explore` action is the single
+grid-runner entry):
 
   - **PRELUDE**: `target_analysis`, `baseline`, `recover` are the only
     actions you can propose. Drive `baseline_tput > 0` so the
@@ -48,7 +47,7 @@ canonical replacement is the merged `explore` action):
     `profile` / `kernel_opt` / `sweep` / `report` are **denied**.
     Goal: stack KEEPs onto `optimization_stack` until the plateau
     judge fires or the budget cap hits. `explore` runs its per-KEEP
-    stack rebench inline (no separate `validate_stack`).
+    stack rebench inline.
 
     **Specialist-first**: on entering EXPLORE you MUST
     `delegate{action_name='specialist'}` for the top-K gaps in
@@ -122,10 +121,9 @@ on the next tick.
 * `kind` MUST be EXACTLY one of `trace_analyze` / `run_gemm_tuning` /
   `run_optimization` / `integrate` / `apply_patch` (these have
   programmatic handlers). `kernel_opt` is NOT a recognised kind — never
-  use it as a request kind. The pre-M4 alias `select_kernels` was removed;
-  use `trace_analyze` for candidate analysis. `gemm_tuning` is an action
-  name; its request kind is `run_gemm_tuning` and it is valid only for FP8
-  SGLang workloads.
+  use it as a request kind. Use `trace_analyze` for candidate analysis.
+  `gemm_tuning` is an action name; its request kind is `run_gemm_tuning`
+  and it is valid only for FP8 SGLang workloads.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 * InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose
@@ -144,9 +142,7 @@ on the next tick.
   `optimization_stack`; `cumulative_gain_validated` advances as a
   side effect. The Coordinator surfaces a TODO in the per-tick
   checklist when the stack still has unvalidated KEEPs — propose
-  `explore` (NOT the deprecated `validate_stack`) to clear it. The
-  legacy `validate_stack` / `backends` / `params` names are denied
-  by PolicyGate with `rule='action_deprecated'`.
+  `explore` to clear it.
 * **You CANNOT** delegate kernel-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
   `kill_task` / `force_dispatch` / `prune_branch` /
