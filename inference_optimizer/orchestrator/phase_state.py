@@ -898,12 +898,32 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
 
 
 # ----------------------- per-phase judgments -------------------------------
+def warm_replay_in_flight(state: Any) -> bool:
+    """True while the PRELUDE warm-recipe replay task has not finished.
+
+    The Coordinator stamps ``warm_replay_outcome.status='in_flight'`` at
+    enqueue time and clears it in ``_promote_warm_replay``. PRELUDE must
+    not exit (and the initial roofline must not enqueue) until this
+    returns False — both paths launch Magpie/sglang on the same GPU.
+    """
+    outcome = getattr(state, "warm_replay_outcome", None) or {}
+    if not isinstance(outcome, dict):
+        return False
+    return str(outcome.get("status") or "").strip() == "in_flight"
+
+
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """``baseline_tput > 0`` → reason=``prelude_done``, target=EXPLORE.
+    """``baseline_tput > 0`` and warm-replay settled → ``prelude_done``.
 
     Returns ``(reason, evidence)`` when ready to transition, ``None``
     otherwise. Evidence is later spliced into ``phase_history``.
+
+    Warm-replay blocks the exit while ``warm_replay_in_flight`` so
+    FRAMEWORK_PR / auto-roofline cannot start a second Magpie job on
+    the GPU before the KB config replay finishes.
     """
+    if warm_replay_in_flight(state):
+        return None
     try:
         tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -1155,9 +1175,11 @@ def wants_steward_assessment(
     if not triggered:
         return False
     assessment = getattr(state, "last_remaining_gaps_assessment", None) or {}
-    if isinstance(assessment, dict) and assessment.get("recommendation"):
-        # Already have a verdict; Coordinator should be routing on it.
-        return False
+    if isinstance(assessment, dict):
+        rec = str(assessment.get("recommendation") or "").strip().lower()
+        if rec in ("continue_explore", "advance_to_kernel", "stop_session"):
+            # Already have a routable verdict.
+            return False
     return True
 
 
@@ -1735,5 +1757,6 @@ __all__ = [
     "phase_index",
     "session_remaining_seconds",
     "should_force_exit_explore",
+    "warm_replay_in_flight",
     "wants_steward_assessment",
 ]
