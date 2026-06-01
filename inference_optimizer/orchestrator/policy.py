@@ -1714,9 +1714,39 @@ class PolicyGate:
     # ``provenance='specialist:*'`` variants Orchestration may stack
     # into one explore round. ``default_grid`` variants are unaffected
     # (cold-start path). Backstops the prompt instruction by hard-denying
-    # at PolicyGate so an over-eager LLM cannot ship a 5-way grid even
-    # if the orchestration prompt is later softened.
+    # at PolicyGate so an over-eager LLM cannot ship an oversized grid
+    # even if the orchestration prompt is later softened.
+    #
+    # The cap is dynamic: it tracks the session's
+    # ``research_lane_capacity`` (how many specialists may fan out in
+    # parallel per round), clamped to ``MAX_RESEARCH_LANE_CAPACITY`` (6).
+    # The historical hard-1 (``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS``)
+    # remains the fallback when SharedState / the field is unavailable.
+    # The rule id is kept as ``explore_specialist_grid_max_one`` for
+    # audit-trail / breakdown stability even though the numeric cap may
+    # now exceed one.
     # ------------------------------------------------------------------
+    def _effective_specialist_grid_cap(self) -> int:
+        """Per-round cap on ``provenance='specialist:*'`` explore variants.
+
+        Tracks ``SharedState.research_lane_capacity`` (clamped to
+        ``MAX_RESEARCH_LANE_CAPACITY``); falls back to
+        ``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS`` (1) when SharedState
+        is unavailable or the field is unset / non-positive.
+        """
+        ss = getattr(self, "shared_state", None)
+        rlc = 0
+        if ss is not None:
+            try:
+                rlc = int(getattr(ss, "research_lane_capacity", 0) or 0)
+            except (TypeError, ValueError):
+                rlc = 0
+        if rlc > 0:
+            cap = min(MAX_RESEARCH_LANE_CAPACITY, rlc)
+        else:
+            cap = MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS
+        return max(1, cap)
+
     def _validate_explore_grid_size(
         self, payload: dict[str, Any],
     ) -> None:
@@ -1731,18 +1761,23 @@ class PolicyGate:
             if isinstance(v, dict)
             and str(v.get("provenance") or "").startswith("specialist:")
         )
-        if specialist_sourced > MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS:
+        specialist_cap = self._effective_specialist_grid_cap()
+        if specialist_sourced > specialist_cap:
             raise PolicyDenied(
                 f"explore: grid contains {specialist_sourced} "
                 f"specialist-sourced variants; max "
-                f"{MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS} per round.",
+                f"{specialist_cap} per round "
+                f"(= research_lane_capacity).",
                 rule="explore_specialist_grid_max_one",
                 hint=(
                     "Across all specialist_done.proposal_set entries in "
-                    "the inbox, select AT MOST one variant per explore "
-                    "round to stamp provenance='specialist:<domain>'. "
-                    "If multiple specialist proposals look attractive, "
-                    "defer the runners-up to a subsequent explore round. "
+                    f"the inbox, select AT MOST {specialist_cap} variant(s) "
+                    "per explore round to stamp "
+                    "provenance='specialist:<domain>' (the cap tracks "
+                    "research_lane_capacity, hard-capped at "
+                    f"{MAX_RESEARCH_LANE_CAPACITY}). If more specialist "
+                    "proposals look attractive, defer the runners-up "
+                    "beyond the cap to a subsequent explore round. "
                     "``default_grid`` variants are unaffected (cold-start "
                     "path)."
                 ),
