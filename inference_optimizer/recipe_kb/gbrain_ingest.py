@@ -192,6 +192,67 @@ def ingest_local_to_gbrain(
     return stats
 
 
+def mirror_recipe(recipe: Mapping[str, Any], mcp: _GbrainMcp | None) -> bool:
+    """Best-effort mirror of ONE recipe dict into gbrain (read cache).
+
+    Returns True when a page was written, False when skipped (no config /
+    no mcp) or on a transport error. Never raises — the local write is
+    authoritative and a gbrain hiccup must not affect it.
+    """
+    if mcp is None:
+        return False
+    page = recipe_to_page(recipe)
+    if page is None:
+        return False
+    slug, content = page
+    try:
+        mcp.call("put_page", {"slug": slug, "content": content})
+        return True
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        log.warning("gbrain mirror put_page failed for %s: %r", slug, exc)
+        return False
+
+
+def build_mirror_mcp_from_env() -> _GbrainMcp | None:
+    """Build a write-side gbrain MCP client from env (background timeout)."""
+    base_url = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
+    token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
+    if not base_url or not token:
+        return None
+    from .. import recipe_snapshot_constants as C
+    return _GbrainMcp(base_url, token, C.DEFAULT_HTTP_TIMEOUT_SEC)
+
+
+class GbrainMirroringRecipeKB:
+    """Wrap a :class:`recipe_kb.RecipeKB` so a local ``put_recipe`` also
+    mirrors the recipe into gbrain (the read cache), best-effort.
+
+    Preserves the local-first contract: the wrapped dispatcher's local
+    write is authoritative and runs first; the gbrain mirror is a
+    post-write side-effect that never blocks or fails the local result.
+    Only recipes with a concrete ``best_config`` are mirrored (a T0
+    anchor has none -> skipped). Every other call (reads / append_attempt
+    / ...) delegates to the wrapped dispatcher unchanged.
+    """
+
+    def __init__(self, inner: Any, mcp: _GbrainMcp | None) -> None:
+        self._inner = inner
+        self._mcp = mcp
+
+    def put_recipe(self, **kwargs: Any) -> Any:
+        result = self._inner.put_recipe(**kwargs)
+        try:
+            mirror_recipe(kwargs, self._mcp)
+        except Exception as exc:  # noqa: BLE001 - never break the local write
+            log.warning("gbrain mirror skipped: %r", exc)
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate everything else (get_recipe / search / append_attempt /
+        # local / remote / ...) to the wrapped dispatcher.
+        return getattr(self._inner, name)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Bulk-ingest local recipe snapshots into gbrain.")
     ap.add_argument("--local-kb-root", default=os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", ""),
@@ -231,4 +292,11 @@ if __name__ == "__main__":
     sys.exit(main())
 
 
-__all__ = ["recipe_to_page", "ingest_local_to_gbrain", "main"]
+__all__ = [
+    "recipe_to_page",
+    "ingest_local_to_gbrain",
+    "mirror_recipe",
+    "build_mirror_mcp_from_env",
+    "GbrainMirroringRecipeKB",
+    "main",
+]
