@@ -437,6 +437,51 @@ def test_exit_normal_kernel_triggers_via_real_plateau():
     assert out[1]["evidence"] == "plateau_judgment"
 
 
+def test_exit_normal_kernel_after_gemm_tuning_complete_no_kernel_opt():
+    state = SimpleNamespace(
+        phase="KERNEL",
+        phase_started_unix=0.0,
+        max_minutes=0,
+        phase_budget_pct={},
+        kernel_integrate_attempts={},
+        kernel_opt_attempts={},
+        continue_kernel_after_gemm=False,
+        rejected_kernel_ids=[],
+        last_gemm_tuning={
+            "status": "complete",
+            "decision": "KEEP",
+            "best_speedup": 1.48,
+            "tuned_file": "/tmp/tuned.csv",
+        },
+        stop_reason="",
+    )
+    out = exit_normal_kernel(state)
+    assert out is not None
+    assert out[0] == "plateau_kernel"
+    assert out[1]["evidence"] == "gemm_tuning_complete_no_kernel_opt"
+    assert out[1]["gemm_speedup"] == 1.48
+
+
+def test_exit_normal_kernel_continues_after_gemm_by_default():
+    state = SimpleNamespace(
+        phase="KERNEL",
+        phase_started_unix=0.0,
+        max_minutes=0,
+        phase_budget_pct={},
+        kernel_integrate_attempts={},
+        kernel_opt_attempts={},
+        rejected_kernel_ids=[],
+        last_gemm_tuning={
+            "status": "complete",
+            "decision": "KEEP",
+            "best_speedup": 1.48,
+            "tuned_file": "/tmp/tuned.csv",
+        },
+        stop_reason="",
+    )
+    assert exit_normal_kernel(state) is None
+
+
 def test_compute_next_phase_skip_to_close_routes_to_close():
     state = SimpleNamespace(
         phase="EXPLORE",

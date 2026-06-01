@@ -67,12 +67,13 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "specialist":           "creative",
     "assess_remaining_gaps": "creative",
     "dynamic_action":        "creative",
-    # deep_kernel (5)
+    # deep_kernel (6)
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",
     "deep_kernel_analysis": "deep_kernel",
     "operator_tuning":      "deep_kernel",
     "vendor_kernel_config": "deep_kernel",
+    "gemm_tuning":          "deep_kernel",
     # resilience (1)
     "recover":              "resilience",
 }
@@ -132,6 +133,15 @@ def test_kernel_opt_has_three_lanes_and_high_cost(registry):
     assert m is not None
     assert set(m.requires_lanes) == {"server_lifecycle", "workspace_mutation", "benchmark_lane"}
     assert m.cost_minutes_p75 >= 60
+
+
+def test_gemm_tuning_action_metadata(registry):
+    m = registry.get("gemm_tuning")
+    assert m is not None
+    assert m.family == "deep_kernel"
+    assert m.pipeline_phase == "deep"
+    assert set(m.requires_lanes) == {"server_lifecycle", "workspace_mutation", "benchmark_lane"}
+    assert "precision == 'fp8'" in m.applicable_when
 
 
 def test_recover_owned_by_robustness_handle(registry):

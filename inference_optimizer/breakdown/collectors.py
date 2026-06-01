@@ -2771,6 +2771,16 @@ def _action_family(action: str) -> str:
     # Backends=1.74% + Kernel=0% summing to ≪ Validated=22.85%).
     if s == "framework_pr":
         return "framework_pr"
+    # GEMM_TUNING (KERNEL phase entry lever).
+    # FP8 GEMM tuning runs as the deterministic operator-level
+    # KERNEL-entry step before source-level kernel_opt; ``coordinator``
+    # promotes a successful tune (best_speedup > 1.0) into
+    # ``optimization_stack`` with ``action="gemm_tuning"``. We bucket
+    # these KEEPs separately from generic ``kernel`` so the dashboard
+    # can attribute speedup to the deterministic tuner vs source-level
+    # GEAK/OOB rewrites — same pattern as framework_pr.
+    if s == "gemm_tuning":
+        return "gemm_tuning"
     return "other"
 
 
@@ -2950,6 +2960,12 @@ def collect_attribution(
         # dedicated ``framework_pr_pct_of_total`` row that reconciles
         # against ``validated_total_pct``.
         "framework_pr": 0.0,
+        # GEMM_TUNING family. The FP8 A8W8 block-scale GEMM tuner runs
+        # at KERNEL entry and contributes its own row so the dashboard
+        # can show "deterministic tuner vs source-level kernel rewrite"
+        # separately. Separate from ``kernel`` family so a tuner KEEP
+        # doesn't get blended with GEAK/OOB attribution.
+        "gemm_tuning": 0.0,
     }
     for e in entries:
         if not isinstance(e, dict):
@@ -3013,6 +3029,11 @@ def collect_attribution(
             # disabled or contributed nothing) so the dashboard can
             # iterate the catalogue without presence checks.
             "framework_pr_pct_of_total": round(family_totals.get("framework_pr", 0.0), 2),
+            # GEMM_TUNING row (KERNEL-entry deterministic FP8 GEMM
+            # tuner). Always emitted (0.0 when the workload is not
+            # FP8 / the tuner skipped / no KEEP); the dashboard can
+            # iterate without presence checks.
+            "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
             # Legacy bucket aliases — preserved for legacy resume reports.
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total":   round(family_totals.get("params", 0.0), 2),
@@ -3112,6 +3133,14 @@ def _collect_phase_breakdown(
         "framework_pr": {"total_gain_pct": 0.0, "by_pr": {}},
         "explore": {"total_gain_pct": 0.0, "by_domain": {}},
         "kernel":  {"total_gain_pct": 0.0, "by_kernel_id": {}},
+        # GEMM_TUNING is the deterministic FP8 GEMM tuner that runs
+        # at KERNEL entry. Logically inside the KERNEL phase but
+        # bucketed separately so the dashboard can split deterministic
+        # tuner gain from source-level GEAK/OOB rewrites.
+        # ``by_tuned_file`` keys on ``state.optimization_stack[].tuned_file``
+        # (absolute path to the produced CSV) so each adopted tune is
+        # individually attributable.
+        "gemm_tuning": {"total_gain_pct": 0.0, "by_tuned_file": {}},
         "sweep":   {"total_gain_pct": 0.0},
         "close":   {"total_gain_pct": 0.0},
         "unattributed": {"total_gain_pct": 0.0},
@@ -3141,10 +3170,18 @@ def _collect_phase_breakdown(
             ts_f = 0.0
         phase = _phase_for(ts_f).lower()
         action = str(e.get("action") or "").lower()
+        fam = _action_family(action)
+        # ``gemm_tuning`` runs *inside* the KERNEL phase but is bucketed
+        # separately so the dashboard can split deterministic-tuner
+        # gain from source-level GEAK/OOB rewrite gain. Override the
+        # phase mapping by action family whenever the entry is a
+        # gemm_tuning entry, regardless of phase_history's coarser
+        # KERNEL label.
+        if fam == "gemm_tuning":
+            phase = "gemm_tuning"
         # When phase_history isn't usable, fall back to the action
         # family so we still bucket something usefully.
-        if phase not in phase_buckets:
-            fam = _action_family(action)
+        elif phase not in phase_buckets:
             if fam in ("explore", "backends", "params"):
                 phase = "explore"
             elif fam == "kernel":
@@ -3195,6 +3232,22 @@ def _collect_phase_breakdown(
             )
             by_pr[pr_key] = round(
                 float(by_pr.get(pr_key, 0.0)) + float(delta), 2,
+            )
+        elif phase == "gemm_tuning":
+            # Coordinator stamps the tuned CSV path on each
+            # ``optimization_stack[]`` entry; use that as the bucket
+            # key so the dashboard can show "this tune of this CSV"
+            # individually. Fall back to ``variant_name`` (currently
+            # always ``"a8w8_blockscale_tuned_gemm"``) and finally
+            # ``"?"`` so the key is always a string.
+            by_tuned = bucket.setdefault("by_tuned_file", {})
+            tuned_key = (
+                str(e.get("tuned_file") or "").strip()
+                or str(e.get("variant_name") or "").strip()
+                or "?"
+            )
+            by_tuned[tuned_key] = round(
+                float(by_tuned.get(tuned_key, 0.0)) + float(delta), 2,
             )
 
     # Drop the empty-by-default unattributed bucket when nothing
