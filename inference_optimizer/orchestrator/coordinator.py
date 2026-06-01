@@ -8875,7 +8875,12 @@ class Coordinator:
                         break
             out.append({
                 "kernel_id":     str(kid),
-                "source_file":   str(e.get("source_file") or ""),
+                # record_kernel_opt persists the source under
+                # ``last_source_file``; ``source_file`` is a legacy
+                # fallback for older ledger snapshots.
+                "source_file":   str(
+                    e.get("last_source_file") or e.get("source_file") or ""
+                ),
                 "artifact_path": str(e.get("last_artifact_path") or ""),
                 "micro_speedup": micro,
                 "decision":      "KEEP",
