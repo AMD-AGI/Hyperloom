@@ -180,11 +180,23 @@ def build(
                                         ),
                                         warnings,
                                         default={})
-    # Optimization-progress curve (Dashboard §2). Stack ledger +
-    # ceiling/target reference lines, derived from state.json so the
-    # dashboard reads sbd alone.
+    # Per-snapshot roofline comparison list driving the markdown-
+    # report ``## Roofline`` section. Built from
+    # ``state.roofline_snapshots`` history.
     roofline           = _safe_collect("roofline",
                                         lambda: collectors.collect_roofline(
+                                            state, warnings,
+                                        ),
+                                        warnings,
+                                        default=[])
+    # Optimization-progress curve (Dashboard §2). Stack ledger +
+    # ceiling/target reference lines, derived from state.json so the
+    # dashboard reads sbd alone. Used to be exported as ``roofline``
+    # but that clashed with the list-shaped section above used by the
+    # markdown renderer; renamed to ``roofline_progress`` so both
+    # surfaces coexist.
+    roofline_progress  = _safe_collect("roofline_progress",
+                                        lambda: collectors.collect_roofline_progress(
                                             sd, state, manifest, warnings,
                                         ),
                                         warnings,
@@ -243,11 +255,14 @@ def build(
         # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
         # absent — the dashboard hides the table on empty.
         "kernel_roofline":     kernel_roofline,
+        # Per-snapshot roofline comparison list (markdown-report
+        # source). Built from ``state.roofline_snapshots``.
+        "roofline":            roofline,
         # Optimization-progress curve (Dashboard-Roofline 对接清单 §2).
         # Always populated when baseline ran; ``ceiling_available`` is
         # False on sessions that never ran the watermark roofline
         # pipeline (dashboard hides the reference lines).
-        "roofline":            roofline,
+        "roofline_progress":   roofline_progress,
 
         "warnings":            warnings,
         "source_files":        source_files,

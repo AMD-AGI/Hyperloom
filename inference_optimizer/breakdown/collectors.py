@@ -3264,20 +3264,32 @@ _KERNEL_ROOFLINE_REL_PATH = "reports/kernel_roofline.json"
 DEFAULT_ROOFLINE_TARGET_RATIO = 0.70
 
 
-def collect_roofline(
+def collect_roofline_progress(
     session_dir: Path,
     state: dict[str, Any],
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Build the ``roofline`` section feeding the optimization-progress
-    chart (Dashboard-Roofline 对接清单 §2).
+    """Build the ``roofline_progress`` section feeding the
+    optimization-progress chart (Dashboard-Roofline 对接清单 §2).
+
+    Originally exported as the top-level ``roofline`` field, but that
+    name collided with the markdown-report renderer's existing
+    ``roofline`` list contract (per-final.json comparison snapshots
+    produced by :func:`collect_roofline`, populated from
+    ``state.roofline_snapshots``). After the merge of #368 + #370 the
+    two collectors silently shadowed each other in the same file
+    (Python kept the second definition); the dashboard chart payload
+    won and the markdown report's Roofline section started rendering
+    empty. Renaming this one to ``roofline_progress`` resolves the
+    clash — both surfaces are now stable, addressable independently,
+    and free to evolve.
 
     Pulls everything from in-memory ``state`` + ``manifest``; never
     re-runs benchmarks. The dashboard reads sbd alone — no
     ``state.json`` walk on the consumer side.
 
-    Output shape (RoofLine TypedDict):
+    Output shape (RooflineProgress TypedDict):
 
     * ``trajectory[]`` — 1 baseline point + N KEEP points, sorted by
       ts. Always at least one point (baseline) when ``baseline_tput``

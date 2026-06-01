@@ -755,8 +755,17 @@ class RooflineSnapshot(TypedDict, total=False):
     trace_input: str
 
 
-class Roofline(TypedDict, total=False):
-    """Top-level ``roofline`` section.
+class RooflineProgress(TypedDict, total=False):
+    """Top-level ``roofline_progress`` section.
+
+    NOTE — this used to be called ``Roofline`` and exported under the
+    top-level key ``roofline``, but that collided with the markdown-
+    report renderer's pre-existing ``roofline`` list contract (per-
+    final.json comparison snapshots, populated by
+    ``collect_roofline``). The two surfaces serve different consumers
+    and the previous name clash silently broke the markdown report's
+    Roofline section. Renamed to ``roofline_progress`` so both
+    surfaces coexist.
 
     Two products in one structure:
 
@@ -890,11 +899,18 @@ class SessionBreakdown(TypedDict, total=False):
     # §1). Mirrors ``<sd>/reports/kernel_roofline.json`` so consumers
     # don't have to walk the kernel-agent output tree themselves.
     kernel_roofline: KernelRoofline
+    # Per-snapshot roofline comparison list (one entry per
+    # ``state.roofline_snapshots`` history pass). Drives the markdown-
+    # report ``## Roofline`` section. Each entry has ``source_path /
+    # mode / baseline / latest / delta``.
+    roofline: list[dict[str, Any]]
     # Optimization-progress curve for the dashboard
     # (Dashboard-Roofline 对接清单 §2). Carries the trajectory
     # (baseline + KEEP points), the ceiling/target reference lines,
-    # and the headline current-best numbers.
-    roofline: Roofline
+    # and the headline current-best numbers. Renamed from ``roofline``
+    # to ``roofline_progress`` to coexist with the existing list-
+    # shaped ``roofline`` consumed by the markdown renderer.
+    roofline_progress: RooflineProgress
 
     warnings: list[str]
     source_files: SourceFiles

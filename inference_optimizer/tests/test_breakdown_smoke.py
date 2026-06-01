@@ -971,7 +971,7 @@ def test_capability_summary_specialist_by_specialist_falls_back_to_domains_list(
 # file is produced by the kernel-agent's tracelens roofline pipeline;
 # every field is optional from the breakdown's POV — collectors must
 # not raise when the file is missing or malformed.
-def _kernel_roofline_fixture(tmp_path: Path, payload: dict | None) -> Path:
+def _kernel_roofline_progress_fixture(tmp_path: Path, payload: dict | None) -> Path:
     """Build a session_dir with optional reports/kernel_roofline.json."""
     sd = tmp_path / "session"
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "kr"})
@@ -985,7 +985,7 @@ def test_kernel_roofline_missing_file_returns_empty_dict(tmp_path: Path) -> None
     """No ``reports/kernel_roofline.json`` → empty dict, no warning.
     Most sessions never run the roofline pipeline; a warning would
     spam every breakdown."""
-    sd = _kernel_roofline_fixture(tmp_path, payload=None)
+    sd = _kernel_roofline_progress_fixture(tmp_path, payload=None)
     bd = build(sd)
     assert bd["kernel_roofline"] == {}
     assert not any("kernel_roofline" in w for w in bd["warnings"])
@@ -1033,7 +1033,7 @@ def test_kernel_roofline_full_payload_passes_through(tmp_path: Path) -> None:
             },
         ],
     }
-    sd = _kernel_roofline_fixture(tmp_path, payload=payload)
+    sd = _kernel_roofline_progress_fixture(tmp_path, payload=payload)
     kr = build(sd)["kernel_roofline"]
 
     # Envelope
@@ -1067,7 +1067,7 @@ def test_kernel_roofline_malformed_kernels_drops_to_empty_list(tmp_path: Path) -
         "source": "tracelens_analysis",
         "kernels": {"k001": {"name": "broken"}},  # wrong shape
     }
-    sd = _kernel_roofline_fixture(tmp_path, payload=payload)
+    sd = _kernel_roofline_progress_fixture(tmp_path, payload=payload)
     bd = build(sd)
     kr = bd["kernel_roofline"]
     assert kr["schema_version"] == 1
@@ -1099,25 +1099,29 @@ def test_kernel_roofline_empty_kernels_list_is_valid(tmp_path: Path) -> None:
         "source": "tracelens_analysis",
         "kernels": [],
     }
-    sd = _kernel_roofline_fixture(tmp_path, payload=payload)
+    sd = _kernel_roofline_progress_fixture(tmp_path, payload=payload)
     bd = build(sd)
     assert bd["kernel_roofline"]["kernels"] == []
     assert not any("kernel_roofline" in w for w in bd["warnings"])
 
 
 # ---------------------------------------------------------------------------
-# A1.2: roofline (Dashboard-Roofline 对接清单 §2)
+# A1.2: roofline_progress (Dashboard-Roofline 对接清单 §2)
 # ---------------------------------------------------------------------------
 # The optimization-progress chart consumer. Inputs are entirely
 # in-memory state + manifest; collector never re-runs benchmarks.
-def _roofline_fixture(
+# Note: this section used to be exported under the top-level key
+# ``roofline``, but was renamed to ``roofline_progress`` to coexist
+# with the existing list-shaped ``roofline`` consumed by the markdown-
+# report renderer (see ``collect_roofline`` for that one).
+def _roofline_progress_fixture(
     tmp_path: Path,
     *,
     state: dict,
     manifest: dict | None = None,
 ) -> Path:
-    """Session fixture for ``collect_roofline``; ``manifest`` defaults
-    to a minimal stub with ``created_at_utc``."""
+    """Session fixture for ``collect_roofline_progress``; ``manifest``
+    defaults to a minimal stub with ``created_at_utc``."""
     sd = tmp_path / "session"
     _write_json(
         sd / "manifest.json",
@@ -1133,12 +1137,12 @@ def _roofline_fixture(
     return sd
 
 
-def test_roofline_full_payload_baseline_plus_one_keep(tmp_path: Path) -> None:
+def test_roofline_progress_full_payload_baseline_plus_one_keep(tmp_path: Path) -> None:
     """Real-shape payload from the live ``Qwen3-30B-A3B-Base`` session
     used as the dashboard reference fixture — baseline + 1 KEEP +
     1 snapshot. Verifies trajectory ordering, gain math, ceiling /
     target derivation, and the percent-of-* convenience numbers."""
-    sd = _roofline_fixture(tmp_path, state={
+    sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 1300.34,
         "cumulative_gain": 1.0146,
         "current_best": {
@@ -1176,7 +1180,7 @@ def test_roofline_full_payload_baseline_plus_one_keep(tmp_path: Path) -> None:
             },
         ],
     })
-    rl = build(sd)["roofline"]
+    rl = build(sd)["roofline_progress"]
 
     # Trajectory: baseline + 1 KEEP, both have ts.
     assert len(rl["trajectory"]) == 2
@@ -1216,13 +1220,13 @@ def test_roofline_full_payload_baseline_plus_one_keep(tmp_path: Path) -> None:
     )
 
 
-def test_roofline_no_snapshot_means_no_ceiling(tmp_path: Path) -> None:
+def test_roofline_progress_no_snapshot_means_no_ceiling(tmp_path: Path) -> None:
     """Sessions that never ran the watermark roofline pipeline have
     no ``roofline_snapshots``. The trajectory is still drawn (baseline
     + KEEPs), but ceiling/target/percent-of-* are explicitly None and
     ``ceiling_available`` is False so the dashboard hides the
     reference lines."""
-    sd = _roofline_fixture(tmp_path, state={
+    sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 100.0,
         "cumulative_gain": 5.0,
         "current_best": {"tput": 105.0},
@@ -1231,7 +1235,7 @@ def test_roofline_no_snapshot_means_no_ceiling(tmp_path: Path) -> None:
              "ts": "2026-05-29T11:00:00+00:00"},
         ],
     })
-    rl = build(sd)["roofline"]
+    rl = build(sd)["roofline_progress"]
 
     assert rl["ceiling_available"] is False
     assert rl["ceiling_tok_per_sec"] is None
@@ -1243,16 +1247,16 @@ def test_roofline_no_snapshot_means_no_ceiling(tmp_path: Path) -> None:
     assert rl["snapshots"] == []
 
 
-def test_roofline_no_keep_yet_baseline_only(tmp_path: Path) -> None:
+def test_roofline_progress_no_keep_yet_baseline_only(tmp_path: Path) -> None:
     """Mid-session before any KEEP: trajectory holds only the baseline
     point; current_best == baseline; cumulative_gain == 0."""
-    sd = _roofline_fixture(tmp_path, state={
+    sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 200.0,
         "cumulative_gain": 0.0,
         "current_best": {"tput": 200.0},
         "optimization_stack": [],
     })
-    rl = build(sd)["roofline"]
+    rl = build(sd)["roofline_progress"]
 
     assert len(rl["trajectory"]) == 1
     assert rl["trajectory"][0]["label"] == "baseline"
@@ -1260,27 +1264,27 @@ def test_roofline_no_keep_yet_baseline_only(tmp_path: Path) -> None:
     assert rl["cumulative_gain_pct"] == 0.0
 
 
-def test_roofline_baseline_failed_empty_trajectory(tmp_path: Path) -> None:
+def test_roofline_progress_baseline_failed_empty_trajectory(tmp_path: Path) -> None:
     """When ``baseline_tput`` is 0 (baseline never finished), the
     trajectory is empty — the dashboard surfaces "no data" instead
     of plotting against zero."""
-    sd = _roofline_fixture(tmp_path, state={
+    sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 0.0,
         "cumulative_gain": 0.0,
         "optimization_stack": [],
     })
-    rl = build(sd)["roofline"]
+    rl = build(sd)["roofline_progress"]
 
     assert rl["trajectory"] == []
     assert rl["baseline_tput"] == 0.0
     assert rl["current_best_tput"] == 0.0
 
 
-def test_roofline_uses_latest_snapshot_for_ceiling(tmp_path: Path) -> None:
+def test_roofline_progress_uses_latest_snapshot_for_ceiling(tmp_path: Path) -> None:
     """Multiple ``roofline_snapshots`` exist (the watermark pipeline
     refines the peak across reruns). The ceiling is read from the
     LATEST snapshot, not snapshots[0]."""
-    sd = _roofline_fixture(tmp_path, state={
+    sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 1000.0,
         "cumulative_gain": 0.0,
         "current_best": {"tput": 1000.0},
@@ -1293,21 +1297,21 @@ def test_roofline_uses_latest_snapshot_for_ceiling(tmp_path: Path) -> None:
              "top_bottleneck": "kv_cache"},
         ],
     })
-    rl = build(sd)["roofline"]
+    rl = build(sd)["roofline_progress"]
     # Ceiling pulled from snapshot[-1] not [0].
     assert rl["ceiling_tok_per_sec"] == pytest.approx(1700.0)
     assert rl["snapshot_top_bottleneck"] == "kv_cache"
     assert len(rl["snapshots"]) == 2
 
 
-def test_roofline_trajectory_diverges_from_current_best_emits_warning(
+def test_roofline_progress_trajectory_diverges_from_current_best_emits_warning(
     tmp_path: Path,
 ) -> None:
     """If the trajectory tail's tput doesn't agree with
     ``state.current_best.tput`` (resume mid-promotion bug), the
     collector surfaces the divergence as a warning instead of hiding
     it."""
-    sd = _roofline_fixture(tmp_path, state={
+    sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 100.0,
         "cumulative_gain": 5.0,
         "current_best": {"tput": 110.0},      # mismatched
@@ -1323,18 +1327,90 @@ def test_roofline_trajectory_diverges_from_current_best_emits_warning(
     )
 
 
-def test_roofline_failure_streak_passes_through(tmp_path: Path) -> None:
+def test_roofline_progress_failure_streak_passes_through(tmp_path: Path) -> None:
     """``roofline_failure_streak`` is consumed by the dashboard to
     show a "stale" badge on the ceiling reference line when the
     watermark pipeline has failed repeatedly."""
-    sd = _roofline_fixture(tmp_path, state={
+    sd = _roofline_progress_fixture(tmp_path, state={
         "baseline_tput": 100.0,
         "current_best": {"tput": 100.0},
         "roofline_failure_streak": 3,
         "optimization_stack": [],
     })
-    rl = build(sd)["roofline"]
+    rl = build(sd)["roofline_progress"]
     assert rl["roofline_failure_streak"] == 3
+
+
+# ---------------------------------------------------------------------------
+# A1.3: roofline + roofline_progress coexist (post name-clash fix)
+# ---------------------------------------------------------------------------
+# Before this fix the breakdown shipped two collectors both registered as
+# ``collect_roofline`` (one written for the markdown-report renderer, one
+# written for the dashboard chart). Python silently kept the second
+# definition and the first surface (the markdown-report list) was
+# evaluating to empty for every session — manifesting as the
+# `## Roofline` section disappearing from the report. These tests pin
+# that both surfaces now coexist as separate top-level keys.
+def test_roofline_and_roofline_progress_coexist_independently(
+    tmp_path: Path,
+) -> None:
+    """Sessions with at least one trace_analyze snapshot populate BOTH
+    surfaces: ``roofline`` (list, for the markdown renderer) and
+    ``roofline_progress`` (dict, for the dashboard chart). The two
+    are derived independently; populating one MUST NOT zero out the
+    other."""
+    sd = _roofline_progress_fixture(tmp_path, state={
+        "baseline_tput": 1300.0,
+        "current_best": {"tput": 1313.0},
+        "cumulative_gain": 1.0,
+        "optimization_stack": [
+            {"action": "explore", "variant_name": "v1",
+             "candidate_extra_server_args": "--num-continuous-decode-steps 4",
+             "extra_envs": {}, "tput": 1313.0,
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+        "roofline_snapshots": [
+            {"snapshot_id": 1, "ts": "2026-05-29T10:30:00+00:00",
+             "achieved_tok_per_sec": 1300.0,
+             "theoretical_peak_tok_per_sec": 1976.0,
+             "compute_pct": 30.0, "idle_pct": 69.0, "comm_pct": 1.0,
+             "top_bottleneck": "MoE_unfused",
+             "top_kernel": {"name": "aiter::ck_moe_stage1",
+                            "bound_type": "memory",
+                            "efficiency_pct": 48.0, "gpu_pct": 9.0}},
+        ],
+    })
+    bd = build(sd)
+    # Markdown-renderer surface: list of comparison entries.
+    assert isinstance(bd["roofline"], list)
+    assert len(bd["roofline"]) >= 1
+    entry = bd["roofline"][0]
+    assert "source_path" in entry
+    assert entry.get("baseline") or entry.get("latest")
+    # Dashboard surface: dict with trajectory + ceiling.
+    assert isinstance(bd["roofline_progress"], dict)
+    assert bd["roofline_progress"]["ceiling_available"] is True
+    assert len(bd["roofline_progress"]["trajectory"]) == 2
+
+
+def test_roofline_list_empty_when_no_snapshots(tmp_path: Path) -> None:
+    """Without any ``state.roofline_snapshots`` history the markdown-
+    renderer surface degrades to ``[]`` (the renderer hides the
+    section). The dashboard surface still populates from
+    ``optimization_stack`` so the trajectory chart is unaffected."""
+    sd = _roofline_progress_fixture(tmp_path, state={
+        "baseline_tput": 1300.0,
+        "current_best": {"tput": 1313.0},
+        "cumulative_gain": 1.0,
+        "optimization_stack": [
+            {"action": "explore", "variant_name": "v1", "tput": 1313.0,
+             "ts": "2026-05-29T11:00:00+00:00"},
+        ],
+    })
+    bd = build(sd)
+    assert bd["roofline"] == []
+    assert bd["roofline_progress"]["ceiling_available"] is False
+    assert len(bd["roofline_progress"]["trajectory"]) == 2
 
 
 # ---------------------------------------------------------------------------
