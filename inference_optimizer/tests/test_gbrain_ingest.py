@@ -100,3 +100,53 @@ def test_ingest_dry_run_writes_nothing() -> None:
     mcp = _FakeMcp()
     stats = ingest_local_to_gbrain(recipes=[_recipe()], mcp=mcp, dry_run=True)
     assert stats["ingested"] == 1 and mcp.puts == []
+
+
+def test_mirror_recipe_gates_and_writes() -> None:
+    from inference_optimizer.recipe_kb.gbrain_ingest import mirror_recipe
+    mcp = _FakeMcp()
+    assert mirror_recipe(_recipe(), mcp) is True and len(mcp.puts) == 1
+    # no concrete config -> skipped
+    assert mirror_recipe(_recipe(best_config={}), mcp) is False
+    # no mcp -> skipped
+    assert mirror_recipe(_recipe(), None) is False
+    assert len(mcp.puts) == 1
+
+
+class _RecordingInner:
+    def __init__(self) -> None:
+        self.put_calls: list[dict] = []
+
+    def put_recipe(self, **kw):
+        self.put_calls.append(kw)
+        return {"canonical_id": kw.get("canonical_id"), "version": 1}
+
+    def get_recipe(self, **kw):
+        return {"delegated": True}
+
+
+def test_mirroring_wrapper_local_first_then_mirror() -> None:
+    from inference_optimizer.recipe_kb.gbrain_ingest import GbrainMirroringRecipeKB
+    inner = _RecordingInner()
+    mcp = _FakeMcp()
+    kb = GbrainMirroringRecipeKB(inner, mcp)
+    r = kb.put_recipe(**_recipe())
+    # local write happened + returned, AND gbrain got the mirror
+    assert inner.put_calls and r["version"] == 1
+    assert len(mcp.puts) == 1
+    # reads delegate to inner
+    assert kb.get_recipe(canonical_id="x") == {"delegated": True}
+
+
+def test_mirroring_wrapper_mirror_failure_is_swallowed() -> None:
+    from inference_optimizer.recipe_kb.gbrain_ingest import GbrainMirroringRecipeKB
+
+    class _BoomMcp:
+        def call(self, *a, **k):
+            raise RuntimeError("gbrain down")
+
+    inner = _RecordingInner()
+    kb = GbrainMirroringRecipeKB(inner, _BoomMcp())
+    # local write still succeeds even though the mirror raises
+    r = kb.put_recipe(**_recipe())
+    assert inner.put_calls and r["version"] == 1
