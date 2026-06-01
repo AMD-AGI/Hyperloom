@@ -1,0 +1,55 @@
+name: FlyDSL Regression
+
+# Runs the FlyDSL kernel-path tests in ``kernel-agent/tests/`` on every
+# PR and push to main. The default ``tests-coverage.yml`` `pytest` invocation
+# honours ``pyproject.toml`` ``testpaths``, which does NOT include
+# ``kernel-agent/tests`` -- the FlyDSL classification + end-to-end suites
+# would otherwise be silently skipped in CI. This workflow exists so a
+# regression in source-type sniffing, kernel_category derivation, the
+# patchability gate, FLYDSL_* kernel_params extraction, or the GEAK
+# ``kernel_type=flydsl`` mapping fails a PR before it lands on main.
+#
+# Tracks Hyperloom issue #211 §5 ("add at least one FlyDSL kernel sample
+# to the multi-node CI pipeline ... so regressions in the FlyDSL path are
+# caught"). The bundled ``kernel-agent/tests/fixtures/flydsl_naive_gemm.py``
+# is the lifted ``kernel_playground/flydsl/naive_gemm_flydsl`` sample the
+# issue calls out by name.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "kernel-agent/tools/tracelens_analysis.py"
+      - "kernel-agent/tools/tracelens_skill_runner.py"
+      - "kernel-agent/tools/kernel_optimization.py"
+      - "kernel-agent/tests/test_flydsl_*.py"
+      - "kernel-agent/tests/fixtures/flydsl_*.py"
+      - "inference_optimizer/orchestrator/kernel_request_handlers.py"
+      - ".github/workflows/flydsl-regression.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  flydsl-tests:
+    name: kernel-agent FlyDSL tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Install minimal deps
+        run: |
+          pip install --upgrade pip
+          pip install pytest
+
+      - name: Run FlyDSL classification + e2e tests
+        run: |
+          pytest -v \
+            kernel-agent/tests/test_flydsl_classification.py \
+            kernel-agent/tests/test_flydsl_e2e.py
