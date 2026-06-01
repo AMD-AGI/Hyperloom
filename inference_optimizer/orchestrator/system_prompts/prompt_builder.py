@@ -415,11 +415,12 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "prompt window without any specialist research — is now "
             "DENIED by PolicyGate (rule "
             "'explore_requires_specialist_provenance'). **Per-round "
-            "cap:** at most ONE variant in the grid may carry "
-            "provenance='specialist:*' (rule "
+            "cap:** up to research_lane_capacity variants (hard cap 6) "
+            "in the grid may carry provenance='specialist:*' (rule "
             "'explore_specialist_grid_max_one'); pick the strongest "
-            "specialist proposal each round and defer the runners-up "
-            "to a subsequent round. provenance='default_grid' is "
+            "specialist proposals each round and defer any runners-up "
+            "beyond the cap to a subsequent round. "
+            "provenance='default_grid' is "
             "uncapped — cold-start rounds may emit several. The "
             "executor dedups against SharedState.explore_search by "
             "canonical_fingerprint, so a rename of an already-tested "
@@ -742,6 +743,13 @@ def _section_dynamic_action(actions: list[ActionMetadata]) -> list[str] | None:
         "`dynamic_action` is a **supplementary** channel, not the default.",
         "Specialists remain the primary EXPLORE entry. At most ONE",
         "`dynamic_action` dispatch is allowed per EXPLORE round.",
+        "",
+        "In particular, when an `explore` variant has just produced a",
+        "measurable KEEP, consider whether combining that winning",
+        "direction with an adjacent domain is worth a single",
+        "`dynamic_action` deep-dive this round. This is an encouragement,",
+        "not a requirement — skip it when no cross-domain combination is",
+        "apparent or when budget is tight.",
         "",
         "Payload contract is closed; see the EMIT line on the action",
         "catalogue entry above for the field table + PolicyGate denial",

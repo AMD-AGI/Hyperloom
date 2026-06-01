@@ -60,9 +60,11 @@ grid-runner entry):
     `provenance='specialist:<domain>'` (derived from a
     `specialist_done.proposal_set`) OR `provenance='default_grid'`
     (cold-start, no specialist yet). All-llm_direct grids are denied
-    (`explore_requires_specialist_provenance`). Per round select
-    AT MOST 1 specialist variant (`explore_specialist_grid_max_one`);
-    defer the rest. `default_grid` is uncapped. If no specialist
+    (`explore_requires_specialist_provenance`). Per round select up to
+    `research_lane_capacity` specialist variants (hard cap 6;
+    `explore_specialist_grid_max_one` — the numeric cap tracks
+    `research_lane_capacity`); prefer the strongest and defer any
+    runners-up beyond the cap. `default_grid` is uncapped. If no specialist
     variant survives this round, go straight to `integrate_patch` or
     dispatch the next specialist round instead of `explore`. The
     Critic reviews each variant against KB priors before it benches;
