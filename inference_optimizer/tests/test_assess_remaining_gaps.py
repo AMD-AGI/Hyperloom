@@ -108,6 +108,16 @@ def test_wants_steward_assessment_already_have_verdict():
     assert phase_state.wants_steward_assessment(state) is False
 
 
+def test_wants_steward_assessment_after_infra_failure_empty_rec():
+    """Empty recommendation after a transport failure should allow retry."""
+    state = _make_plateau_state()
+    state.last_remaining_gaps_assessment = {
+        "recommendation": "",
+        "rationale": "steward infrastructure failure (subprocess_stale_heartbeat)",
+    }
+    assert phase_state.wants_steward_assessment(state) is True
+
+
 def test_wants_steward_assessment_disabled_via_override():
     state = _make_plateau_state()
     state.plateau_overrides = {"steward_disabled": True}
@@ -340,6 +350,45 @@ async def test_route_continue_explore_grants_first_then_coerces_second():
     )
     assert state.pending_escalate_hint == "skip_to_kernel"
     assert state.last_remaining_gaps_assessment["recommendation"] == "advance_to_kernel"
+
+
+@pytest.mark.asyncio
+async def test_route_infra_failure_retries_without_stop(tmp_path):
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+
+    class _StewardTaskRegistry:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def create_or_return_existing(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return SimpleNamespace(
+                task_id="retry-steward",
+                kind=kwargs.get("kind"),
+                state="queued",
+            ), False
+
+    state = SharedState(session_id="t-route-infra", phase="EXPLORE")
+    state.explore_search = {"cursor": 2}
+    coord = Coordinator.__new__(Coordinator)
+    coord.shared_state = state
+    coord.session_dir = tmp_path
+    coord.tasks = _StewardTaskRegistry()
+    coord.knowledge_plane = None
+
+    task = SimpleNamespace(task_id="task-infra-1", params={})
+    payload = {
+        "domain": "session_steward_specialist",
+        "empty": True,
+        "reason": "subprocess_stale_heartbeat",
+        "summary": "subprocess_stale_heartbeat",
+    }
+    await coord._route_steward_verdict(task=task, done_payload=payload)
+    assert state.stop_reason in ("", None)
+    assert state.last_remaining_gaps_assessment["recommendation"] == ""
+    assert state.steward_infra_failures_by_round == {"2": 1}
+    assert len(coord.tasks.calls) == 1
+    assert "retry1" in coord.tasks.calls[0]["idempotency_key"]
 
 
 @pytest.mark.asyncio
