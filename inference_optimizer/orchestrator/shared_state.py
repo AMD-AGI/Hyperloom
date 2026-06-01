@@ -637,6 +637,12 @@ class SharedState:
     # PR scan no longer collapses the whole FRAMEWORK_PR phase
     # silently.
     framework_pr_discover_failures: int = 0
+    # Per-repo candidate cap passed to ``fa phase-discover`` during the
+    # FRAMEWORK_PR phase. 0 / unset → the Coordinator falls back to
+    # ``DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES``. Bumping this makes each
+    # batch probe deeper (more PRs per repo per batch). Round-trips via
+    # the dataclass asdict/from_dict path like every other field.
+    framework_pr_max_candidates: int = 0
     # FRAMEWORK_PR Critic-gate decisions, one row per reviewed candidate:
     # ``{candidate_id, batch_id, verdict, rationale, ts}``. The
     # Coordinator's pump calls the Critic backend before each
