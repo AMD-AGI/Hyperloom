@@ -4,7 +4,7 @@ An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperlo
 
 <p align="center"><img width="600" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
-Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens-internal/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets.
+Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets. The optional [TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/) extension adds roofline numbers, gains estimates, and MI355/MI455 MAF data on top of the open-source report — opt in by exporting `TRACELENS_INSTALL_INTERNAL=1` before running `local_setup.sh`.
 
 Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. 
 
