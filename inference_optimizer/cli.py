@@ -301,7 +301,7 @@ def _validate_critic_agent_runtime(root: Path) -> None:
             cwd=str(root),
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(
@@ -365,7 +365,7 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
             env=env,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(

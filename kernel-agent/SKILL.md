@@ -376,15 +376,22 @@ specify backends:
   rewrite too. Claude/Codex stay on as fallbacks if GEAK times out or
   rejects; `cursor` is appended when `$CURSOR_API_KEY` is provisioned (auto-
   dropped otherwise to avoid wasted 401 attempts). The kernel type
-  (Triton / HIP-C++ / Python / unknown) does NOT change the ladder; the
-  capability differences are GEAK-side, not Hyperloom-side, so we let GEAK
-  decide what to handle.
+  (Triton / HIP-C++ / FlyDSL / Python / unknown) does NOT change the ladder;
+  the capability differences are GEAK-side, not Hyperloom-side, so we let
+  GEAK decide what to handle.
 - **No-benchmark case**: still attempt GEAK but flag
   `geak_without_benchmark: true` so the KEEP gate downstream knows
   verification confidence is reduced (matches the existing user-specified
   behaviour — the auto-pick now follows the same contract).
 - **Vendor binary / hipBLASLt**: do not rewrite; return reason and
   `NEEDS_REVIEW`. Only case that yields an empty backend list upstream.
+
+FlyDSL kernels (`source_type=flydsl`, detected by content-sniffing
+`@flyc.kernel` / `flydsl.compiler` / `flydsl.expr` markers) are sent to
+GEAK with `kernel_type=flydsl`. GEAK's `task_parser.py` routes that to
+its `skills/flydsl/SKILL.md` (write / optimize / debug workflows for
+`@flyc.kernel` tile programs); Hyperloom does not maintain its own copy
+of the FlyDSL guidance.
 
 Multi-GPU collective kernels (`is_multigpu: True`, e.g. all-reduce / all-gather):
 `parallel_e2e_runner` automatically drops `geak` from the backend list because
