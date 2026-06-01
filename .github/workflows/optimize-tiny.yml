@@ -106,6 +106,8 @@ jobs:
                   "exclude_active_workflows": "true",
                   "max_parallel": "60",
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
+                  "task_timeout_min": "240",
+                  "max_hours": "4",
                   "all_artifacts": "true",
                   "dry_run": os.environ.get("DRY_RUN") or "false",
               },
