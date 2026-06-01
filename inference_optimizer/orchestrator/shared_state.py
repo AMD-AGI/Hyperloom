@@ -13,7 +13,11 @@ fields:
     session_id          str   — set by Coordinator at session creation
     model_name          str   — e.g. "meta-llama/Llama-3.1-8B-Instruct"
     model_path          str   — local NFS path to weights
-    model_class         str   — set by `classify` action
+    model_class         str   — categorical key supplied via --model-class
+    model_arch          dict  — advisory architecture profile (hybrid
+                                structured + free-text notes) loaded from
+                                the launcher's ``$USER_DATA_PATH/model_arch.json``;
+                                prompt-context only, no deterministic gating
     target_summary      str   — set by `target_analysis` action
     baseline_tput       float — tok/s/GPU after `baseline` action
     baseline_accuracy   float — GSM8K score after `baseline`
@@ -50,6 +54,48 @@ from typing import Any
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+# Ordered (key, label) projection for the advisory ``model_arch`` profile.
+# ``notes`` is rendered last as a free-text trailer. Keys absent / empty /
+# ``None`` are dropped so the rendered block stays compact and only
+# surfaces fields the launcher actually populated.
+_MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("decoder_type", "decoder"),
+    ("attention", "attention"),
+    ("layer_mix", "layers"),
+    ("kv_cache_per_token", "kv/token"),
+    ("active_params", "params"),
+    ("num_experts", "experts"),
+    ("experts_per_tok", "experts/tok"),
+    ("mtp", "mtp"),
+    ("swa_window", "swa_window"),
+    ("norm", "norm"),
+)
+
+
+def render_model_arch_compact(arch: dict | None) -> str:
+    """Render the advisory ``model_arch`` profile as a single compact line.
+
+    Returns ``""`` when ``arch`` is empty / not a dict so callers can omit
+    the prompt block entirely. Structured fields render as
+    ``decoder=Sparse MoE; attention=MLA; ...`` followed by an optional
+    ``notes=<free text>`` trailer. Empty / ``None`` field values are
+    dropped. This is the single source of truth shared by the
+    orchestration prompt summary and the specialist ``arch_notes`` carrier.
+    """
+    if not isinstance(arch, dict) or not arch:
+        return ""
+    parts: list[str] = []
+    for key, label in _MODEL_ARCH_STRUCTURED_FIELDS:
+        val = arch.get(key)
+        if val is None or val == "":
+            continue
+        parts.append(f"{label}={val}")
+    notes = str(arch.get("notes") or "").strip()
+    if notes:
+        parts.append(f"notes={notes}")
+    return "; ".join(parts)
 
 
 # Default partial-attempt cap for run_optimization. kernel_opt is an
@@ -262,6 +308,14 @@ class SharedState:
     model_name: str = ""
     model_path: str = ""
     model_class: str = ""
+    # Advisory architecture profile (hybrid: a few structured fields +
+    # free-text ``notes``). Produced pre-launch by the SKILL launcher
+    # (LLM Architecture Gallery lookup, else a lightweight classify) and
+    # loaded from ``$USER_DATA_PATH/model_arch.json``. Prompt-context only
+    # — no deterministic gating consumes it (atom seed grid / compat
+    # filter / framework gap token / recipe key stay on ``model_class``).
+    # Empty dict means "no profile available"; renderers omit the block.
+    model_arch: dict = field(default_factory=dict)
     framework: str = ""
     gpu_type: str = ""
     # Workload metadata mirrored from manifest.json at session start
@@ -4178,6 +4232,17 @@ class SharedState:
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
+        ]
+        # Advisory architecture profile (launcher-supplied). Prompt-context
+        # only; the live TraceLens ``analysis_md`` snapshot below remains the
+        # ground truth for bottleneck classification. Omit entirely when no
+        # profile was loaded so non-arch sessions render exactly as before.
+        _arch_line = render_model_arch_compact(self.model_arch)
+        if _arch_line:
+            lines.append(
+                f"model_arch(advisory; subordinate to TraceLens analysis_md)={_arch_line}"
+            )
+        lines += [
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
             f"current_best={self.current_best or '(none)'}",
@@ -4650,4 +4715,4 @@ class SharedState:
         )
 
 
-__all__ = ["SharedState"]
+__all__ = ["SharedState", "render_model_arch_compact"]
