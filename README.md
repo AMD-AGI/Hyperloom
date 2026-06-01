@@ -69,10 +69,12 @@ Local Mode runs Hyperloom in a remote AMD GPU environment, then uses Cursor to c
 
 You need an AMD GPU machine that supports MI300X or MI355X, using an SGLang or vLLM ROCm inference image. Example images:
 
-- SGLang MI300X: `lmsysorg/sglang:v0.5.11-rocm720-mi30x`
-- SGLang MI355X: `lmsysorg/sglang:v0.5.11-rocm720-mi35x`
+- SGLang MI300X: `harbor.core42.example-internal-host.invalid/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix`
+- SGLang MI355X: `harbor.core42.example-internal-host.invalid/proxy/primussafe/sglang:v0.5.11-rocm720-mi35x-profilerfix`
 - vLLM MI300X: `vllm/vllm-openai-rocm:v0.19.0`
 - vLLM MI355X: `vllm/vllm-openai-rocm:v0.19.0`
+
+> The SGLang `-profilerfix` images patch `libamdhip64`/`libroctracer` so rocprofiler captures kernels launched under HipGraphLaunch (issue #352). Use the stock `lmsysorg/sglang:v0.5.11-rocm720-*` images once that fix lands upstream in ROCm.
 
 Choose one environment:
 
@@ -90,7 +92,7 @@ docker run -d \
   --group-add video \
   -v /path/to/workspace:/workspace \
   -v /path/to/models:/models \
-  lmsysorg/sglang:v0.5.11-rocm720-mi30x \
+  harbor.core42.example-internal-host.invalid/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix \
   tail -f /dev/null
 ```
 
