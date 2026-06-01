@@ -48,6 +48,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import sys
@@ -750,7 +751,32 @@ class SafeOptimizeClient:
             body["promptPrefix"] = prompt_prefix
         if prompt_suffix:
             body["promptSuffix"] = prompt_suffix
-        return self._request("POST", "api/v1/optimization/tasks", body)
+        attempts = 8
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._request("POST", "api/v1/optimization/tasks", body)
+            except RuntimeError as e:
+                msg = str(e)
+                transient = (
+                    "HTTP 500" in msg
+                    or "HTTP 502" in msg
+                    or "HTTP 503" in msg
+                    or "HTTP 504" in msg
+                )
+                if not transient or attempt >= attempts:
+                    raise
+                delay = random.uniform(10, 60)
+                log.warning(
+                    "[submit] transient SaFE/Claw submit failure "
+                    "(attempt %d/%d, workspace=%s); retrying in %.1fs: %s",
+                    attempt,
+                    attempts,
+                    chosen_ws,
+                    delay,
+                    msg,
+                )
+                time.sleep(delay)
+        raise RuntimeError("unreachable submit retry loop exit")
 
     # ── Task lifecycle ──
 
