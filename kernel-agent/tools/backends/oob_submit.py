@@ -14,7 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ray_runtime import quiet_ray_init
+from ray_runtime import ensure_ray_cluster, quiet_ray_init, safe_runtime_env
 
 
 def _safety_system_prompt(kernel_repo: str, budget_minutes: float = 30.0,
@@ -277,6 +277,11 @@ def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "
     if prefer_ray:
         try:
             import ray  # noqa: F401
+            # Don't burn 30 s of ray.init retries on a wedged cluster. If
+            # `ray status` fails, ``ensure_ray_cluster`` will start a fresh
+            # head node here (safe no-op when the cluster is already healthy).
+            ensure_ray_cluster(num_gpus=num_gpus,
+                               log_path=output_dir / "ray_lifecycle.log")
             return run_via_ray(agent, prompt_file, output_dir, source_file,
                                max_turns, num_gpus, timeout_s,
                                extra_files=extra_files, kernel_repo=kernel_repo)
@@ -284,7 +289,11 @@ def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "
             return {
                 "returncode": 1,
                 "stdout_tail": "",
-                "stderr_tail": f"ray submission failed: {type(exc).__name__}: {exc}",
+                "stderr_tail": (
+                    f"ray submission failed: {type(exc).__name__}: {exc}\n"
+                    f"hint: check `ray status` in container; raylet zombie symptom is "
+                    f"`global_state_accessor.cc:500 ... retrying ... 'ray start' on this node'`."
+                ),
                 "stdout": "",
                 "gpu_ids": "",
                 "elapsed_s": 0.0,
