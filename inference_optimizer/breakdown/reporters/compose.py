@@ -23,7 +23,7 @@ Design notes:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from .base import REGISTRY, RenderedSection
 from .cross_section import GlobalFacts, build_global_facts

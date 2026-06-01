@@ -60,6 +60,11 @@ inference_optimizer/remain_todo.md
 inference_optimizer/remain_issue.md
 inference_optimizer/remain_robustness_todo.md
 
+# PR description scratchpad. Tools (gh CLI, codex) sometimes drop a
+# pr.md at the repo root when drafting a pull request; the
+# description belongs in the PR body, not in the tree.
+pr.md
+
 # F0/F1 integration: keep test baselines, dry-run merge maps, and
 # archived regression sweeps tracked.
 !docs/test-baselines/*.log
@@ -69,3 +74,5 @@ inference_optimizer/remain_robustness_todo.md
 # claude files
 *.claude
 CLAUDE.md
+boost_trap_files
+atom_boost_tutorials.md

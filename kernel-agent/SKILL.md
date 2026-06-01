@@ -213,7 +213,8 @@ python "$REPO_ROOT/kernel-agent/tools/kernel_optimization.py" \
   --kernel-id "$KERNEL_ID" \
   ${BACKENDS:+--backends "$BACKENDS"} \
   ${BENCHMARK_FILE:+--benchmark-file "$BENCHMARK_FILE"} \
-  ${TEST_HARNESS_PATH:+--test-harness-path "$TEST_HARNESS_PATH"}
+  ${TEST_HARNESS_PATH:+--test-harness-path "$TEST_HARNESS_PATH"} \
+  ${TEST_COMMAND:+--test-command "$TEST_COMMAND"}
 ```
 
 The tool returns optimization attempts, verification, and a proposal in one
@@ -225,6 +226,80 @@ metadata.
 If a requested backend is missing after `install.sh` succeeded, this is a
 real bug; record the missing backend attempt in `optimization_attempts.jsonl`
 and report it instead of crashing the resident session.
+
+#### Pre-GEAK Unittest Harness (unittest skill)
+
+Before `backend=geak` attempts, the main agent generates a GEAK-compatible
+test harness by following `kernel-agent/skills/unittest/SKILL.md`. The skill
+searches for existing tests, collects shapes/dtypes from TraceLens, and
+generates a 4-mode harness (`--correctness`/`--profile`/`--benchmark`/`--full-benchmark`).
+
+The resulting `test_command` is passed via `--test-command` to
+`kernel_optimization.py`, which forwards it to GEAK's `--test-command`.
+
+If the skill fails to produce a valid harness, omit `--test-command` and
+GEAK falls back to its own test discovery.
+
+Validation uses `kernel-agent/skills/unittest/validate_harness.py` for
+static checks (argparse + 4 flags + output markers) and runtime verification
+(run correctness + benchmark modes, check exit codes and markers).
+
+#### Merging same-kernel candidates
+
+TraceLens often emits **multiple `kernel_id`s for the same kernel function
+called at different shapes** — e.g. `aiter::rmsnorm` shows up as `k006`,
+`k007`, `k008` because the model invokes it at `(256,128)`, `(1024,128)`,
+and `(64,4096)`. These all resolve to the same `source_file` and the same
+underlying op.
+
+**Default (do-not-merge) behavior**: dispatch each `kernel_id` as a
+separate `run_optimization` request. The orchestrator picks them off
+`reusable_native_kernel_ids` one by one, GEAK runs its full
+preprocessing pipeline (`~4 min`) per task, and each task generates
+patches for one shape.
+
+**Merge optimization** (preferred when the candidates share
+`(name, source_file)`): batch them into a single `run_optimization`
+request whose harness covers all shapes. Concrete benefits:
+- **Preprocessing amortization**: GEAK preprocessing (discovery →
+  resolution → testcase selection → baseline/profile collection) takes
+  ~4 min regardless of shape count. Merging 3 candidates skips 8 min of
+  duplicated work.
+- **Better patch quality**: the sub-agent sees ALL shapes when reasoning
+  about the optimization, so it can pick a strategy that wins on
+  small-and-large shapes simultaneously instead of overfitting to one.
+- **Cross-shape correctness gate**: a patch that breaks any shape fails
+  `--correctness` immediately rather than being merged later and
+  discovered to regress.
+
+Mechanically:
+1. Group `reusable_native_kernel_ids` by `(candidate.name,
+   candidate.source_file)`.
+2. For each group with size > 1, build a synthetic merged candidate:
+   - `kernel_id`: `<name>_merged` (or any unique id)
+   - `name`, `source_file`, `kernel_repo`, `benchmark_files`: copied
+     from any member (they're equal within the group)
+   - `input_shapes`: concatenation of all members' `input_shapes`
+     (the unittest skill will dedupe by ndim + dtype when building
+     `ALL_CONFIGS`)
+   - `call_count`: sum of members' `call_count`
+   - `gpu_pct`: sum of members' `gpu_pct`
+   - `kernel_params` / `env_vars`: copied from the member with the
+     highest `call_count`
+3. Write the merged candidate(s) to a new `candidates_path` (do not
+   mutate the original `kernel_candidates.json`) and dispatch
+   `kernel_optimization.py --candidates-path <merged>.json
+   --kernel-id <merged_id>`.
+
+When **not** to merge:
+- Candidates share a `source_file` but resolve to different functions
+  inside it (different `kernel_params.kernel_name`).
+- Shapes span ndim or dtype boundaries that would force the harness
+  to special-case at runtime (e.g. mixing 1-D `(128,)` weight tensors
+  with 2-D activations is OK because they're separate args; mixing
+  `bf16` and `fp8` activations is not — generate two harnesses).
+- One member is the bottleneck (`gpu_pct >> others`) and the others
+  are negligible — the LLM may be distracted by tiny shapes.
 
 ## TraceLens Requirements
 
@@ -301,15 +376,22 @@ specify backends:
   rewrite too. Claude/Codex stay on as fallbacks if GEAK times out or
   rejects; `cursor` is appended when `$CURSOR_API_KEY` is provisioned (auto-
   dropped otherwise to avoid wasted 401 attempts). The kernel type
-  (Triton / HIP-C++ / Python / unknown) does NOT change the ladder; the
-  capability differences are GEAK-side, not Hyperloom-side, so we let GEAK
-  decide what to handle.
+  (Triton / HIP-C++ / FlyDSL / Python / unknown) does NOT change the ladder;
+  the capability differences are GEAK-side, not Hyperloom-side, so we let
+  GEAK decide what to handle.
 - **No-benchmark case**: still attempt GEAK but flag
   `geak_without_benchmark: true` so the KEEP gate downstream knows
   verification confidence is reduced (matches the existing user-specified
   behaviour — the auto-pick now follows the same contract).
 - **Vendor binary / hipBLASLt**: do not rewrite; return reason and
   `NEEDS_REVIEW`. Only case that yields an empty backend list upstream.
+
+FlyDSL kernels (`source_type=flydsl`, detected by content-sniffing
+`@flyc.kernel` / `flydsl.compiler` / `flydsl.expr` markers) are sent to
+GEAK with `kernel_type=flydsl`. GEAK's `task_parser.py` routes that to
+its `skills/flydsl/SKILL.md` (write / optimize / debug workflows for
+`@flyc.kernel` tile programs); Hyperloom does not maintain its own copy
+of the FlyDSL guidance.
 
 Multi-GPU collective kernels (`is_multigpu: True`, e.g. all-reduce / all-gather):
 `parallel_e2e_runner` automatically drops `geak` from the backend list because
@@ -390,10 +472,44 @@ writes:
 - `runs/<session_id>/tracelens/system_findings/`
 - `runs/<session_id>/tracelens/category_findings/`
 - `runs/<session_id>/optimization_attempts.jsonl`
+- `runs/<session_id>/prompts/<attempt_id>.md` (one per attempt; the GEAK/OOB prompt that was actually sent)
+- `runs/<session_id>/optimized/<attempt_id>_stdout.log` (real backend runs; see "Per-attempt stdout file naming" below)
+- `runs/<session_id>/optimized/<attempt_id>_optimized<source_suffix>` (dry-run only; synthetic placeholder for smoke tests)
 - `runs/<session_id>/verification/<kernel_id>.json`
 - `runs/<session_id>/results/<kernel_id>.json`
 - `runs/<session_id>/logs/<tool>/<run_id>.log`
 - `runs/<session_id>/status/<tool>/<run_id>.json`
+
+### Per-attempt stdout file naming
+
+`run_attempt` (in `kernel-agent/tools/kernel_optimization.py`) materialises
+one file per attempt under `runs/<session_id>/optimized/`:
+
+| Mode             | Filename                                                  | Contents                                                                 |
+|------------------|-----------------------------------------------------------|--------------------------------------------------------------------------|
+| Real backend run | `<attempt_id>_stdout.log`                                 | The raw subprocess stdout (mini-swe-agent / OOB / GEAK conversation log) |
+| `--dry-run`      | `<attempt_id>_optimized<source_suffix>` (e.g. `.cu`/`.py`) | A small synthetic placeholder kernel (smoke-test only)                   |
+
+**Backward compatibility note**: prior to 2026-05 the real-backend file was
+also named `<attempt_id>_optimized<source_suffix>` and contained subprocess
+stdout. That caused `_source_text_looks_complete` to false-positive match
+generic English (e.g. transcripts containing `"void "` / `"extern "`) and
+promote the conversation log to `artifact_source = source_file` — observed
+on Qwen3-8B k007 rmsnorm_quant and k013 silu_and_mul. The `.log` rename
+routes the stdout through `_extract_source_block` (which only returns an
+artifact when a real fenced code block is present) and never lets a
+transcript impersonate a `.cu` / `.py` source.
+
+Downstream consumers (`breakdown/collectors.py`, dashboards, etc.) should
+either:
+1. read `attempt["optimized_path"]` from `optimization_attempts.jsonl`
+   (already the canonical pointer — it tracks whichever name was used), or
+2. glob `runs/<session_id>/optimized/<attempt_id>*` to pick up both
+   historical `_optimized.<suffix>` files and the new `_stdout.log`
+   (`breakdown/collectors.py` does this — older session dirs keep working).
+
+Never assume a fixed `_optimized.cu` / `_optimized.py` suffix on
+real-backend runs after 2026-05.
 
 Cross-task GEAK/OOB work artefacts keyed by `kernel_id` live in the
 sibling tree `$USER_DATA_PATH/kernel-agent-workspace/<kernel_id>/`

@@ -4,7 +4,7 @@ An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperlo
 
 <p align="center"><img width="600" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
-Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens-internal/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets.
+Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets. The optional [TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/) extension adds roofline numbers, gains estimates, and MI355/MI455 MAF data on top of the open-source report — opt in by exporting `TRACELENS_INSTALL_INTERNAL=1` before running `local_setup.sh`.
 
 Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. 
 
@@ -19,6 +19,13 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 | **[How the Optimization Loop Works](docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)** | Scoring heuristics, stack mechanics, dynamic branching, and the self-evolving knowledge base |
 | **[GLM-5 — Discovering Optimizations Hard to Spot Manually](docs/CASE_STUDY_GLM5.md)** | Hidden GEMM configs, cross-repo kernel patches, +193% throughput |
 | **[DeepSeek-R1 — Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
+| **[Auth & Environment Guide](docs/ENV_AND_AUTH.md)** | Single authoritative auth/env reference; the inline tables in this README are a convenience excerpt |
+| **[Configuration Reference](docs/CONFIGURATION_REFERENCE.md)** | Every environment variable read by the runtime |
+| **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | How to obtain or skip `INFERENCE_OPTIMIZER_KB_ROOT` and the marathon KB |
+| **[`session_breakdown.json` Integration](docs/INTEGRATION_SESSION_BREAKDOWN.md)** | Stable contract for downstream consumers (`claw-stats-service`, dashboards) |
+| **[Operations & Self-Host Runbook](docs/OPERATIONS.md)** | k8s sizing, `USER_DATA_PATH` backup, disaster recovery |
+| **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Auth-proxy 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
+| **[Upgrading](docs/UPGRADING.md)** | Per-version migration steps (companion to [`CHANGELOG.md`](CHANGELOG.md)) |
 
 ---
 
@@ -241,7 +248,7 @@ Prompt field reference:
 | `Kernel optimization` | `--no-kernel` | Kernel optimization is enabled by default; ask to skip it if you only want parameter/backend search. | enabled |
 | `Resume` | `--resume` | Resume an existing session; requires `manifest.json` and `state.json`. | disabled |
 
-For first-launch errors, see `inference_optimizer/SKILL.md` §"Failure Handling".
+For first-launch errors, see `inference_optimizer/SKILL.md` ┬º"Failure Handling".
 
 > Training and MLPerf-training skills have been retired from this repo. Only inference optimization is supported here.
 
@@ -270,6 +277,34 @@ Hyperloom optimized 4 flagship models for the [InferenceX](https://github.com/Se
 | gpt-oss-120b (120B MoE, mxfp4) | **11,643** | — | **+34% ahead** |
 
 All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**.
+
+## Hosted Tier — Limits & Pricing
+
+The hosted [Hyperloom UI / PrimusClaw](https://core42.primus-safe.amd.com/hyperloom/)
+is operated by AMD on shared infrastructure. Defaults for the public
+PrimusClaw tier:
+
+| Resource                          | Hosted default                                                                 |
+|-----------------------------------|---------------------------------------------------------------------------------|
+| Per-session GPU budget            | 1 ├ù MI300X / MI325X / MI355X for single-node runs; 2–8 GPUs via RayJob for multi-node |
+| Concurrent sessions per account   | 2                                                                               |
+| Session wall-clock                | 24 hours (extensible on request)                                                |
+| `USER_DATA_PATH` quota            | 200 GB per session, with daily snapshots                                        |
+| LLM-gateway request rate          | Bound to your `SAFE_API_KEY` quota (see [LLM Gateway](https://llm.amd.com/))     |
+| Outbound network                  | Allowlisted (model registries, HuggingFace, GitHub)                             |
+
+Pricing for the hosted tier is currently **free for AMD-internal users
+and approved AMD partners** via Primus-SaFE. Public / enterprise
+pricing is under active definition by the BRAIN team; reach out via
+the [Hyperloom support form](https://core42.primus-safe.amd.com/hyperloom/)
+or open an issue if your organization needs a quote.
+
+For higher limits, dedicated capacity, or air-gapped deployment, self-host
+Hyperloom in your own cluster following [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+Self-hosted Hyperloom is Apache-2.0 licensed (see
+[Licensing](#licensing)); there is no per-seat or per-session fee.
+
+---
 
 ## Detailed Skill Documentation
 
@@ -310,6 +345,25 @@ Hyperloom/
 ├── docs/                                 # Architecture docs, case studies, and Mermaid diagrams
 ├── scripts/                              # Repo-level helper scripts
 ├── .env.template                         # Environment variables
+├── CHANGELOG.md                          # Per-release notes
+├── CONTRIBUTING.md                       # Contribution guidelines
+├── LICENSE                               # Apache-2.0
+├── SECURITY.md                           # Vulnerability disclosure policy
 └── README.md
 ```
+
+---
+
+## Licensing
+
+Hyperloom is released under the **Apache License 2.0**. The full
+license text is in [`LICENSE`](LICENSE); the same license is asserted
+in [`pyproject.toml`](pyproject.toml) for PyPI / sdist consumers.
+
+You may use Hyperloom commercially, modify it, and distribute it under
+the terms of Apache-2.0. Patent grants and NOTICE handling follow the
+standard Apache-2.0 rules.
+
+For security-relevant issues, see [`SECURITY.md`](SECURITY.md). For
+contribution conventions, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

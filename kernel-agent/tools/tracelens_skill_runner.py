@@ -40,6 +40,7 @@ UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
     "elementwise": "Elementwise",
     "reduce": "Reduction",
     "triton": "Triton",
+    "flydsl": "FlyDSL",
     "norm": "LayerNorm",
     "norm_fwd": "LayerNorm",
     "norm_bwd": "LayerNorm",
@@ -96,7 +97,11 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
     requested = (requested or "").strip().lower()
     if requested and requested != "default":
         return requested
-    if (framework or "").strip().lower() in {"vllm", "sglang"}:
+    # atom traces share the chrome-trace JSON shape produced by the
+    # torch profiler API used by sglang/vllm, so inference-mode kernel
+    # grouping applies; otherwise atom falls through to generic torch
+    # grouping which obscures per-iteration boundaries.
+    if (framework or "").strip().lower() in {"vllm", "sglang", "atom"}:
         return "inference"
     return requested or "default"
 
@@ -364,6 +369,11 @@ _DATA_TABLE_HEADER_TOKENS = (
     "efficiency",
     "bound",
 )
+# Lowercased set of canonical header tokens, used by `_row_to_candidate`
+# to separate the 9 typed fields from spec-allowed trailing extras.
+_DATA_TABLE_CANONICAL_KEY_SET = frozenset(
+    tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS
+)
 _PITEM_MARKER_RE = re.compile(
     r"<!--\s*impact-begin\s+kind=p_item\s+([^>]*?)-->",
     re.IGNORECASE,
@@ -557,6 +567,16 @@ def _row_to_candidate(
     if len(cells) != len(headers):
         return None
     record = dict(zip(headers, cells))
+    # Trailing extras (TraceLens v0.3 sub_agent_spec.md § Operations Table
+    # Schema: "Agents may append extra columns at the end when needed").
+    # Preserved verbatim under their original header names so downstream
+    # consumers (GEAK / OOB) can opt into category-specific metadata
+    # (e.g. ``Dominant Kernel`` / ``Attention Pattern`` / ``Sub-Category``)
+    # without re-parsing analysis.md.
+    extra_columns = {
+        key: value for key, value in record.items()
+        if key not in _DATA_TABLE_CANONICAL_KEY_SET
+    }
 
     name = record.get("operation", "").strip()
     if not name or name in {"-", "—"}:
@@ -625,6 +645,8 @@ def _row_to_candidate(
         "impact_score_low": impact.get("impact_score_low", 0.0),
         "impact_score_high": impact.get("impact_score_high", 0.0),
     }
+    if extra_columns:
+        candidate["tracelens_extra_columns"] = extra_columns
     if prose:
         # P-item prose is shared across every row in the same Detailed
         # Analysis block; duplicating it onto each candidate keeps the
@@ -756,17 +778,39 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
     headers_canonical = [tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS]
 
     candidates: list[dict[str, Any]] = []
+    canonical_width = len(headers_canonical)
     for rank, title, body in blocks:
         rows = _extract_data_table(body)
         if not rows:
             continue
         header_row = [cell.strip().lower() for cell in rows[0]]
-        if header_row != headers_canonical:
-            # Tolerate trivial rename / reordering only if the canonical token
-            # is a substring of the header cell. Otherwise skip the block —
-            # silent wrong-mapping would be worse than a missed candidate.
+        # TraceLens v0.3 ``sub_agent_spec.md`` § Operations Table Schema
+        # (compute tier) requires the 9 canonical columns in this exact
+        # order, but explicitly permits sub-agents to "append extra
+        # columns at the end when needed (e.g. ``Sub-Category`` in the
+        # generic-op analyzer)". Real production runs do exactly that:
+        # the InferenceAttention analyzer appends ``Dominant Kernel`` +
+        # ``Workload`` + ``Attention Pattern`` (12 columns total) and
+        # the generic-op analyzer appends ``Sub-Category`` (10 columns).
+        #
+        # We therefore validate that the first 9 cells of the header
+        # match the canonical schema (after substring-tolerant
+        # normalization), then forward the FULL header + FULL row to
+        # ``_row_to_candidate``. The canonical 9 fields drive the
+        # structured candidate output; any trailing extras are mapped
+        # by header name into ``tracelens_extra_columns`` on the
+        # candidate so downstream consumers (GEAK / OOB) can opt into
+        # the category-specific metadata without re-parsing analysis.md.
+        # Tables narrower than 9 columns, or with the 9 canonical
+        # columns reordered, are still rejected because silent
+        # wrong-mapping (e.g. swapping Efficiency and Bound) would
+        # corrupt every parsed candidate.
+        if len(header_row) < canonical_width:
+            continue
+        header_prefix = header_row[:canonical_width]
+        if header_prefix != headers_canonical:
             normalized: list[str] = []
-            for cell in header_row:
+            for cell in header_prefix:
                 match = next(
                     (canon for canon in headers_canonical if canon in cell),
                     cell,
@@ -774,7 +818,11 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
                 normalized.append(match)
             if normalized != headers_canonical:
                 continue
-            header_row = normalized
+            header_prefix = normalized
+        # Splice the normalized canonical names back into the full
+        # header (preserving extras verbatim so ``_row_to_candidate``
+        # can map them by their original header text).
+        header_row = header_prefix + header_row[canonical_width:]
         # Pull the matching p_item meta by 1-based rank (P1 → pitems[0]).
         # The orchestrator template guarantees compute-tier P-items are
         # numbered by global rank in the Compute Kernel Optimizations section,
@@ -922,6 +970,28 @@ _FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
         "/usr/local/lib/python3.10/dist-packages",
         "/opt/venv/lib/python3.10/site-packages",
         "/sgl-workspace/vllm",
+    ),
+    # kernel-agent's offline source-file resolver walks this fallback
+    # table when ``import atom`` hasn't run (CSV-only parses, static-
+    # analysis paths). Without it, atom kernels referenced by a
+    # TraceLens CSV under ``/app/ATOM/atom/`` or ``site-packages/atom/``
+    # fall through to the "could not resolve" branch and the kernel-opt
+    # proposal is silently rejected. The roots below mirror the entries
+    # in ``inference_optimizer.orchestrator.kernel_request_handlers
+    # ._REUSABLE_SOURCE_ROOTS`` and
+    # ``kernel-agent/tools/tracelens_analysis._REUSABLE_SOURCE_ROOTS``;
+    # the cross-file sync is pinned by
+    # ``test_framework_paths_units.py::
+    # test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync``.
+    # ``/app/ATOM`` (the editable-install parent) is the canonical-case
+    # root: joining ``atom/model_engine/...`` against it recovers the
+    # on-disk file.
+    "atom": (
+        "/app/ATOM",
+        "/usr/local/lib/python3.12/dist-packages",
+        "/usr/local/lib/python3.10/dist-packages",
+        "/opt/venv/lib/python3.10/site-packages",
+        "/opt/venv/lib/python3.12/site-packages",
     ),
 }
 _FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"

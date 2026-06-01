@@ -8,9 +8,41 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "inference_optimizer" / "scripts" / "local_setup.sh"
 
+# ``local_setup.sh`` honours these env vars when present. The optimizer
+# session shell (and CI runners) routinely export them, pointing at host
+# paths/gateways that have nothing to do with the per-test sandbox — e.g.
+# a host ``INFERENCEX_PATH`` that doesn't exist makes the script ``die``.
+# Strip them from the inherited environment so each test runs hermetically
+# and only sees the variables it explicitly sets via ``env``.
+_HOST_LEAK_VARS = (
+    "REPO_ROOT",
+    "USER_DATA_PATH",
+    "HYPERLOOM_RUNTIME_DIR",
+    "HYPERLOOM_DEPS_ROOT",
+    "LOCAL_SETUP_ENV",
+    "PRIMUS_CLAW_REPO",
+    "INFERENCEX_REPO",
+    "TRACELENS_REPO",
+    "TRACELENS_REF",
+    "OOB_SRC",
+    "INFERENCEX_PATH",
+    "TRACELENS_ROOT",
+    "SAFE_API_KEY",
+    "OPENAI_BASE_URL",
+    "CURSOR_API_KEY",
+)
+
+
+def _clean_base_env() -> dict[str, str]:
+    """Inherited env with all script-consumed vars stripped out."""
+    run_env = os.environ.copy()
+    for var in _HOST_LEAK_VARS:
+        run_env.pop(var, None)
+    return run_env
+
 
 def _run_local_setup(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    run_env = os.environ.copy()
+    run_env = _clean_base_env()
     run_env.update(
         {
             "USER_DATA_PATH": str(tmp_path / "session"),
@@ -69,7 +101,7 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     assert f"export REPO_ROOT='{REPO_ROOT}'" in env_text
     assert f"export OOB_SRC='{tmp_path / 'deps' / 'Primus-Claw' / 'OOB'}'" in env_text
     assert f"export INFERENCEX_PATH='{tmp_path / 'deps' / 'InferenceX'}'" in env_text
-    assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens-internal'}'" in env_text
+    assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
     assert secret not in env_text
 
 
@@ -133,7 +165,7 @@ def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> No
     result = subprocess.run(
         ["bash", str(SCRIPT), "--dry-run", "--session-dir", str(session_dir)],
         cwd=REPO_ROOT,
-        env=os.environ.copy(),
+        env=_clean_base_env(),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -144,4 +176,7 @@ def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr + result.stdout
     assert f"HYPERLOOM_DEPS_ROOT={expected_deps}" in result.stdout
     assert str(expected_deps / "Primus-Claw") in result.stdout
-    assert "release/hyperloom_integration_0.3.1" in result.stdout
+    # Default TraceLens is now the open-source AMD-AGI/TraceLens on ``main``
+    # (PR #668 landed there); the internal release ref is opt-in only.
+    assert str(expected_deps / "TraceLens") in result.stdout
+    assert "checkout main" in result.stdout

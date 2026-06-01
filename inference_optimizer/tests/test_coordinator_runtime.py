@@ -18,7 +18,6 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -45,8 +44,6 @@ from inference_optimizer.orchestrator.coordinator import (
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.sub_agent_runner import (
-    RunnerContext,
-    SubAgentResult,
     SubAgentRunner,
 )
 from inference_optimizer.orchestrator.task_registry import Task, TaskRegistry
@@ -54,7 +51,7 @@ from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from inference_optimizer.paths import db_path_for, make_session_dir
+from inference_optimizer.paths import make_session_dir
 from inference_optimizer.session_paths import target_baseline_json
 from inference_optimizer.storage import SqliteConnection
 
@@ -566,7 +563,7 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = "/tmp/trace-a.json.gz"
-        c.shared_state.last_select_kernels = {}
+        c.shared_state.last_trace_analyze = {}
         c.shared_state.save(session_dir)
 
         await c.tick(1)
@@ -771,12 +768,12 @@ async def test_promote_explore_records_success_attempt(session_dir):
             "status": "succeeded",
             "winners": [{
                 "name": "v1",
-                "extra_sglang_args": "--foo",
+                "extra_server_args": "--foo",
                 "extra_envs": {"K": "1"},
             }],
             "best_variant": {
                 "name": "v1",
-                "extra_sglang_args": "--foo",
+                "extra_server_args": "--foo",
                 "extra_envs": {"K": "1"},
             },
             "output_throughput": 900.0,
@@ -826,12 +823,12 @@ async def test_promote_explore_updates_validated_gain(session_dir):
             "status": "succeeded",
             "winners": [{
                 "name": "kv_fp8",
-                "extra_sglang_args": "--kv-cache-fp8",
+                "extra_server_args": "--kv-cache-fp8",
                 "extra_envs": {},
             }],
             "best_variant": {
                 "name": "kv_fp8",
-                "extra_sglang_args": "--kv-cache-fp8",
+                "extra_server_args": "--kv-cache-fp8",
                 "extra_envs": {},
             },
             "output_throughput": 1100.0,
@@ -939,6 +936,66 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_handle_unpromotable_roofline_increments_failure_streak(
+    session_dir, caplog,
+):
+    """Repro: watermark-roofline failure must increment roofline_failure_streak,
+    eagerly clear auto_roofline_pending_task_id, and emit an Auto-roofline warning.
+
+    Real-world trigger: session Qwen-Qwen3-30B-A3B-Base/20260529T104050Z, task
+    42922ce4 — RooflineExecutor returned {status:failed, error_class:profile_failed}
+    (profile sub-step found no .trace.json.gz files). The result correctly landed
+    in roofline_attempts with decision='no_promote', but roofline_failure_streak
+    stayed at 0 and no warning was logged because _handle_unpromotable_result has
+    no roofline-specific branch — the streak/warning code in
+    _promote_to_shared_state's task_kind=='roofline' else clause is unreachable
+    from the unpromotable path.
+    """
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        task_id = "t-roofline-fail-42922ce4"
+        c.shared_state.auto_roofline_pending_task_id = task_id
+        streak_before = c.shared_state.roofline_failure_streak
+        # Mirror RooflineExecutor._failed("profile", ...) exactly.
+        result = {
+            "status": "failed",
+            "error_class": "profile_failed",
+            "error": "profile sub-step failed",
+            "phase": "profile",
+            "sub_result": {"status": "failed", "error_class": "no_trace_files"},
+        }
+        import logging
+        with caplog.at_level(logging.WARNING,
+                             logger="inference_optimizer.orchestrator.coordinator"):
+            await c._handle_unpromotable_result(
+                _mk_task("roofline", task_id), result,
+            )
+        # (a) audit entry exists (this part already works pre-fix).
+        assert len(c.shared_state.roofline_attempts) == 1
+        attempt = c.shared_state.roofline_attempts[-1]
+        assert attempt["status"] == "failed"
+        assert attempt["decision"] == "no_promote"
+        # (b) failure streak should be +1 so prompt + plateau judge can see it.
+        assert c.shared_state.roofline_failure_streak == streak_before + 1, (
+            "roofline_failure_streak silently stays at 0; LLM + operators have "
+            "no way to know the watermark-driven analysis refresh failed."
+        )
+        # (c) pending gate should be cleared eagerly (mirror promote path 7530/7628).
+        assert c.shared_state.auto_roofline_pending_task_id == "", (
+            "auto_roofline_pending_task_id still points at the failed task; "
+            "subsequent dispatches stay blocked until denial-time lazy clear."
+        )
+        # (d) operator-visible warning must be logged (mirror promote path 7606).
+        assert any(
+            "Auto-roofline" in r.message and "failed" in r.message
+            for r in caplog.records
+        ), "no 'Auto-roofline ... failed' WARNING was logged"
+    finally:
+        await c.stop()
+
+
 # ===========================================================================
 # (formerly test_coordinator_baseline_fingerprint.py)
 # ===========================================================================
@@ -957,7 +1014,7 @@ def _mk_baseline_task(params: dict, *, task_id: str = "t-fp-1") -> Task:
 
 def test_fingerprint_keys_covers_recovery_surface():
     expected = {
-        "benchmark_script", "result_dir", "extra_sglang_args",
+        "benchmark_script", "result_dir", "extra_server_args",
         "extra_envs", "model_path", "gpu_type", "config_path",
         "disable_run_eval",
     }
@@ -975,7 +1032,7 @@ def test_fingerprint_missing_keys_become_none_or_empty():
     fp = _baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
     assert fp["benchmark_script"] == "sglang_mi300x.sh"
     assert fp["result_dir"] is None
-    assert fp["extra_sglang_args"] is None
+    assert fp["extra_server_args"] is None
     assert fp["extra_envs"] == []
     assert fp["model_path"] is None
     fp_with_empty = _baseline_params_fingerprint({
@@ -998,7 +1055,7 @@ def test_fingerprint_different_overrides_produce_different_fingerprints():
     a = _baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
     b = _baseline_params_fingerprint({"benchmark_script": "dsr1_fp8_mi300x.sh"})
     c = _baseline_params_fingerprint({"result_dir": "/workspace"})
-    d = _baseline_params_fingerprint({"extra_sglang_args": "--mem-fraction-static 0.9"})
+    d = _baseline_params_fingerprint({"extra_server_args": "--mem-fraction-static 0.9"})
     encoded = {json.dumps(x, sort_keys=True) for x in (a, b, c, d)}
     assert len(encoded) == 4
 
@@ -1103,7 +1160,7 @@ def test_summarize_failed_variants_projects_expected_keys():
                 "(url=http://10.245.131.67:8888/health, "
                 "last_err=ConnectError: All connection attempts failed)"
             ),
-            "extra_sglang_args": "--max-num-seqs 128",
+            "extra_server_args": "--max-num-seqs 128",
         },
         {
             "name": "max_num_seqs_512",
@@ -1121,7 +1178,7 @@ def test_summarize_failed_variants_projects_expected_keys():
             "(url=http://10.245.131.67:8888/health, "
             "last_err=ConnectError: All connection attempts failed)"
         ),
-        "extra_sglang_args": "--max-num-seqs 128",
+        "extra_server_args": "--max-num-seqs 128",
     }
 
 
@@ -1133,7 +1190,7 @@ def test_summarize_failed_variants_truncates_error_excerpt_at_400_chars():
             "status": "failed",
             "error_class": "ec",
             "error": huge_err,
-            "extra_sglang_args": "",
+            "extra_server_args": "",
         },
     ]
     out = coordinator._summarize_failed_variants(rows)
@@ -1148,7 +1205,7 @@ def test_summarize_failed_variants_caps_max_entries():
             "status": "failed",
             "error_class": "ec",
             "error": "boom",
-            "extra_sglang_args": f"--arg {i}",
+            "extra_server_args": f"--arg {i}",
         }
         for i in range(50)
     ]
@@ -1176,7 +1233,7 @@ def test_summarize_failed_variants_handles_missing_optional_fields():
         "name": "v",
         "error_class": None,
         "error_excerpt": None,
-        "extra_sglang_args": "",
+        "extra_server_args": "",
     }]
 
 

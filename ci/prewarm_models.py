@@ -61,7 +61,6 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Iterable
 
 # huggingface_hub is light + already a transitive dep of vllm/sglang images,
 # but on a bare runner we may need to install it. Workflow installs it

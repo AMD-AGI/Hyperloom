@@ -18,7 +18,6 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator import kernel_request_handlers as krh
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
@@ -70,7 +69,7 @@ async def test_run_optimization_response_records_to_shared_state(
     try:
         c.shared_state.baseline_tput = 800.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
             "reusable_native_kernel_ids": ["k006"],
         }
@@ -136,6 +135,167 @@ async def test_select_kernels_does_not_record_kernel_opt(
         )
         await c._handle_intent("orchestration", intent)
         assert c.shared_state.last_kernel_opt == {}
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_gemm_tuning_response_records_to_shared_state(
+    session_dir, monkeypatch,
+):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        c.shared_state.precision = "fp8"
+        c.shared_state.framework = "sglang"
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_trace_analyze = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "candidates_path": "/tmp/candidates.json",
+        }
+        c.shared_state.save(session_dir)
+
+        from inference_optimizer.orchestrator import kernel_request_handlers
+
+        async def fake(payload, *, session_dir):
+            return {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.2,
+                "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
+            }
+
+        monkeypatch.setitem(
+            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
+            "run_gemm_tuning", fake,
+        )
+        await c._handle_intent("orchestration", Intent(
+            type=IntentType.REQUEST,
+            payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
+        ))
+
+        assert c.shared_state.last_gemm_tuning["status"] == "ok"
+        assert c.shared_state.last_gemm_tuning["best_speedup"] == 1.2
+        assert c.shared_state.gemm_tuning_attempts
+        assert "last_gemm_tuning=" in c.shared_state.to_prompt_summary()
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_denied_until_fp8_gemm_tuning_terminal(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        c.shared_state.precision = "fp8"
+        c.shared_state.framework = "sglang"
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_trace_analyze = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "candidates_path": "/tmp/candidates.json",
+        }
+
+        denied = c._sequence_denial_for_request("kernel", "run_optimization")
+        assert denied is not None
+        assert denied.rule == "execution_order"
+        assert "run_gemm_tuning" in (denied.hint or "")
+
+        c.shared_state.last_gemm_tuning = {"status": "failed"}
+        assert c._sequence_denial_for_request("kernel", "run_optimization") is None
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
+    session_dir, monkeypatch,
+):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        c.shared_state.precision = "fp8"
+        c.shared_state.framework = "sglang"
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_select_kernels = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "candidates_path": "/tmp/candidates.json",
+        }
+        c.shared_state.continue_kernel_after_gemm = False
+        calls: list[dict] = []
+
+        from inference_optimizer.orchestrator import kernel_request_handlers
+
+        async def fake_handler(payload, *, session_dir):
+            calls.append(dict(payload))
+            return {
+                "status": "complete",
+                "decision": "KEEP",
+                "best_speedup": 1.28,
+                "tuned_file": "/tmp/tuned.csv",
+            }
+
+        monkeypatch.setattr(
+            kernel_request_handlers,
+            "run_gemm_tuning_handler",
+            fake_handler,
+        )
+
+        await c._on_enter_kernel(from_phase="EXPLORE")
+
+        assert calls
+        assert c.shared_state.last_gemm_tuning["status"] == "complete"
+        assert c.shared_state.last_gemm_tuning["best_speedup"] == 1.28
+        assert c.shared_state.gemm_tuning_attempts
+        assert c.shared_state.current_best["action"] == "gemm_tuning"
+        assert c.shared_state.current_best["tput"] == 1024.0
+        assert c.shared_state.cumulative_gain == pytest.approx(28.0)
+        assert c.shared_state.cumulative_gain_validated == pytest.approx(28.0)
+        assert c.shared_state.optimization_stack[-1]["action"] == "gemm_tuning"
+        assert c._gemm_tuning_required_before_kernel_opt() is False
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
+    session_dir, monkeypatch,
+):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        c.shared_state.precision = "fp8"
+        c.shared_state.framework = "sglang"
+        c.shared_state.baseline_tput = 800.0
+        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
+        c.shared_state.last_trace_analyze = {
+            "trace_input": "/tmp/profile.trace.json.gz",
+            "candidates_path": "/tmp/candidates.json",
+        }
+        c.shared_state.continue_kernel_after_gemm = True
+        c.shared_state.untried_hot_reusable_kernels = lambda: ["k001"]  # type: ignore[method-assign]
+
+        from inference_optimizer.orchestrator import kernel_request_handlers
+
+        async def fake_gemm(payload, *, session_dir):
+            return {
+                "status": "complete",
+                "decision": "KEEP",
+                "best_speedup": 1.1,
+                "tuned_file": "/tmp/tuned.csv",
+            }
+
+        kernel_calls: list[dict] = []
+
+        async def fake_kernel(payload, *, session_dir, record_partial=None):
+            kernel_calls.append(dict(payload))
+            return {"status": "failed", "batch_mode": True, "batch_results": []}
+
+        monkeypatch.setattr(kernel_request_handlers, "run_gemm_tuning_handler", fake_gemm)
+        monkeypatch.setattr(kernel_request_handlers, "run_optimization_handler", fake_kernel)
+
+        await c._on_enter_kernel(from_phase="EXPLORE")
+
+        assert kernel_calls
+        assert kernel_calls[0]["candidates_path"] == "/tmp/candidates.json"
     finally:
         await c.stop()
 

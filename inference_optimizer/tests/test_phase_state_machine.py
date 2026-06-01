@@ -8,7 +8,8 @@ Covers the additive subset of M2 implemented in this PR:
 * PolicyGate R1 ``phase_incompatible`` (warn-vs-enforce modes).
 * Coordinator initialises ``phase`` to PRELUDE on fresh sessions and
   records a baseline ``phase_entered`` row in ``phase_history``.
-* Coordinator advances PRELUDE → EXPLORE once ``baseline_tput > 0``.
+* Coordinator advances PRELUDE → EXPLORE once ``baseline_tput > 0``
+  (with FRAMEWORK_PR phase opt-out via ``framework_phase_enabled=False``).
 * breakdown.collect_phase_segments groups action events by phase
   window with proper ``elapsed_seconds`` math.
 * PolicyGate adds the new phase fields to ``CORE_STATE_FIELDS``.
@@ -16,7 +17,6 @@ Covers the additive subset of M2 implemented in this PR:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,7 +47,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 # ===========================================================================
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
-        "PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE",
+        "PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE",
     )
     # phase_index strictly increases.
     for i, name in enumerate(phase_state.PHASE_NAMES):
@@ -66,6 +66,8 @@ def test_allowed_actions_disjoint_phases():
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "kernel_opt" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL"]
     assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
+    assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL"]
+    assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
     assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
@@ -133,6 +135,18 @@ def test_exit_normal_prelude_triggers_on_baseline_tput():
     reason, evidence = out
     assert reason == "prelude_done"
     assert evidence["baseline_tput"] == 1234.5
+
+
+def test_exit_normal_prelude_blocked_while_warm_replay_in_flight():
+    """PRELUDE must not advance to FRAMEWORK_PR until warm-replay settles."""
+    state = SimpleNamespace(
+        baseline_tput=1234.5,
+        warm_replay_outcome={"status": "in_flight", "replay_task_id": "abc"},
+    )
+    assert phase_state.exit_normal_prelude(state) is None
+    state.warm_replay_outcome = {"status": "failed"}
+    out = phase_state.exit_normal_prelude(state)
+    assert out is not None and out[0] == "prelude_done"
 
 
 def test_exit_terminal_prelude_after_three_baseline_failures():
@@ -421,8 +435,10 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     # Budget dict populated.
     # EXPLORE budget yielded 0.03 to PRELUDE (0.05 → 0.08) when the
     # initial roofline became a PRELUDE step instead of an EXPLORE
-    # auto-enqueue. Sum across phases remains 1.0.
-    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.57
+    # auto-enqueue, then a further 0.10 to KERNEL (0.25 → 0.35) so
+    # GEAK quick-mode kernel-opt can finish a full cycle. Sum across
+    # phases remains 1.0.
+    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.47
     assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.08
 
 
@@ -432,13 +448,20 @@ async def test_coordinator_advances_to_explore_when_baseline_present(
 ):
     c = coordinator_with_mocks
     try:
+        # Skip the FRAMEWORK_PR phase so the legacy PRELUDE→EXPLORE
+        # contract is what this test exercises (the FRAMEWORK_PR
+        # transition is covered separately in
+        # ``test_phase_state_framework_pr.py``).
+        c.shared_state.framework_phase_enabled = False
         # Simulate baseline KEEP without running the executor: write the
         # SharedState event that triggers the prelude_done condition.
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
         assert c.shared_state.phase == "EXPLORE"
-        # phase_history now has 2 rows: PRELUDE entry + PRELUDE→EXPLORE.
+        # phase_history now has 2 rows: PRELUDE entry + PRELUDE→EXPLORE
+        # (FRAMEWORK_PR is skipped here because the fixture sets
+        # ``framework_phase_enabled=False``).
         assert len(c.shared_state.phase_history) == 2
         last = c.shared_state.phase_history[-1]
         assert last["from_phase"] == "PRELUDE"
@@ -454,6 +477,7 @@ async def test_coordinator_phase_idempotent_within_same_tick(
 ):
     c = coordinator_with_mocks
     try:
+        c.shared_state.framework_phase_enabled = False
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)

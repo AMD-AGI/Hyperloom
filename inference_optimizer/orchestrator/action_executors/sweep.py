@@ -82,7 +82,7 @@ def _build_grid(
             name = f"conc{conc}_isl{isl}_osl{osl}"
             out.append(GridVariant(
                 name=name,
-                extra_sglang_args=base_extra_args,
+                extra_server_args=base_extra_args,
                 extra_envs={
                     "CONC":         str(conc),
                     "ISL":          str(isl),

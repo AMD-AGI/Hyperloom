@@ -27,7 +27,6 @@ from inference_optimizer.orchestrator.action_executors.profile import (
 from inference_optimizer.orchestrator.backends import (
     MockBackend,
     ScriptedPlan,
-    MockTurn,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
@@ -36,7 +35,7 @@ from inference_optimizer.orchestrator.resource_lock import (
     ResourceLockManager, SqliteLeaseBackend,
 )
 from inference_optimizer.orchestrator.sub_agent_runner import (
-    RunnerContext, SubAgentRunner,
+    SubAgentRunner,
 )
 from inference_optimizer.manifest import build_manifest
 from inference_optimizer.paths import make_session_dir
@@ -256,6 +255,7 @@ def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch
     """TP env var must override yaml hardcode (was 1, becomes 8)."""
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -280,6 +280,7 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
     expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices."""
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -310,6 +311,7 @@ def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
     actually sees enough GPUs to start."""
     import yaml
     monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -701,7 +703,6 @@ def test_materialize_profile_kill_switch_default_is_on(
     be invoked so users on TraceLens-patched images get the enhanced
     flags without any opt-in step. Symmetric to the kill-switch test
     above."""
-    import yaml
     _clear_workload_env(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
     counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
@@ -794,6 +795,55 @@ def test_default_baseline_config_falls_back_on_unknown_value(monkeypatch):
     assert _default_baseline_config().name == "baseline_sglang.yaml"
 
 
+def test_default_baseline_config_resolves_atom_when_env_set(monkeypatch):
+    """B1: FRAMEWORK=atom selects baseline_atom.yaml. Single-source-of-truth
+    selector — every executor (baseline/params/sweep/backends) routes through
+    this so an env flip propagates everywhere without per-executor changes."""
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    assert _default_baseline_config().name == "baseline_atom.yaml"
+
+
+def test_server_args_env_name_atom():
+    """B1: atom maps to EXTRA_ATOM_ARGS, matching the env contract consumed
+    by Magpie's atom_mi*x.sh wrapper. Ordering note: the atom branch sits
+    before vllm so a future framework name containing 'vllm' as a substring
+    cannot accidentally win — even though 'atom' itself is not a vllm
+    substring today."""
+    from inference_optimizer.orchestrator.action_executors._grid_runner import (
+        server_args_env_name,
+    )
+    assert server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
+    assert server_args_env_name("ATOM") == "EXTRA_ATOM_ARGS"
+    # Regression: sglang/vllm still resolve correctly after the new branch.
+    assert server_args_env_name("vllm") == "EXTRA_VLLM_ARGS"
+    assert server_args_env_name("sglang") == "EXTRA_SGLANG_ARGS"
+
+
+def test_materialize_config_atom_profile_skips_tracelens_flags(
+    tmp_path, monkeypatch,
+):
+    """B1: PROFILE=1 + framework=atom must NOT inject sglang/vllm-specific
+    profiler CLI flags (--profiler-config.*) into EXTRA_ATOM_ARGS — atom's
+    argparse would reject them. The executor short-circuits before this
+    code path on a real run, but we defend in depth so direct callers
+    (params/sweep) can't accidentally render a broken atom YAML."""
+    import yaml
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    monkeypatch.setenv("PROFILE", "1")
+    src = _default_baseline_config()  # baseline_atom.yaml
+    out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    envs = rendered["benchmark"]["envs"]
+    extra = str(envs.get("EXTRA_ATOM_ARGS", ""))
+    assert "--profiler-config" not in extra, (
+        f"atom EXTRA_ATOM_ARGS leaked sglang/vllm profiler flag: {extra!r}"
+    )
+    # --trust-remote-code from the baseline YAML must survive untouched.
+    assert "--trust-remote-code" in extra, (
+        f"atom EXTRA_ATOM_ARGS lost base --trust-remote-code: {extra!r}"
+    )
+
+
 def test_default_profile_config_tracks_framework(monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     assert _default_profile_config().name == "profile_vllm.yaml"
@@ -818,6 +868,73 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
     pe = ProfileExecutor()
     assert pe.default_config_path is None
     assert pe._resolve_default_config().name == "profile_vllm.yaml"
+
+
+@pytest.mark.asyncio
+async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path):
+    """FRAMEWORK=atom now falls through to the normal profile path.
+
+    The atom Magpie wrapper bridges PROFILE=1 to atom's torch profiler,
+    so the historical structured ``skipped`` short-circuit is retired.
+    """
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    # Anchor session/runs paths under the test tmp dir. Without this the
+    # executor falls back to the ``/workspace/hyperloom`` default, which is
+    # not writable on a clean CI runner (PermissionError on ``/workspace``).
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    pe = ProfileExecutor()
+    # Sentinel-patch the parent __call__ so we can prove the normal path
+    # is reached without launching Magpie in this unit test.
+    called = {"parent": False}
+
+    async def _fake_parent(self, ctx):
+        called["parent"] = True
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
+
+    task = SimpleNamespace(params={}, task_id="t-atom-profile")
+    ctx = SimpleNamespace(task=task, extra=None)
+
+    result = await pe(ctx)
+
+    assert result["status"] == "succeeded"
+    assert called["parent"] is True
+
+
+@pytest.mark.asyncio
+async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
+    """FRAMEWORK=atom now attempts the normal roofline profile sub-step."""
+    from inference_optimizer.orchestrator.action_executors.roofline import (
+        RooflineExecutor,
+    )
+
+    monkeypatch.setenv("FRAMEWORK", "atom")
+    rexec = RooflineExecutor(shared_state=SimpleNamespace())
+
+    # Sentinel: prove the lazy import / sub-step orchestration is reached.
+    import inference_optimizer.orchestrator.action_executors.profile as profile_mod
+
+    async def _explode(_ctx):
+        raise AssertionError("profile_executor must not be invoked under atom")
+
+    monkeypatch.setattr(profile_mod, "profile_executor", _explode)
+
+    task = SimpleNamespace(
+        params={},
+        task_id="t-atom-roofline",
+        idempotency_key="t-atom-roofline",
+        requires_lanes=[],
+        allowed_tools=[],
+        side_effects=[],
+        lease_ttl_sec=0,
+    )
+    ctx = SimpleNamespace(task=task, lease=None, extra=None)
+
+    result = await rexec(ctx)
+    assert result["status"] == "failed"
+    assert result["phase"] == "profile"
+    assert "profile_executor raised" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -1116,8 +1233,8 @@ async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monke
         session_dir=session_dir,
     )
     assert res["candidates_path"] == "/tmp/kernel_candidates.json"
-    assert "--roofline-json" in captured["cmd"]
-    assert "/tmp/roofline.json" in captured["cmd"]
+    assert "--roofline-json" not in captured["cmd"]
+    assert "/tmp/roofline.json" not in captured["cmd"]
     assert "--capture-folder" in captured["cmd"]
     assert "/tmp/capture_traces" in captured["cmd"]
 
@@ -1379,11 +1496,11 @@ async def test_trace_analyze_handler_missing_trace_input(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_select_kernels_handler_requires_kernel_agent_root(session_dir, monkeypatch):
+async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, monkeypatch):
     # N15 made HYPERLOOM_KERNEL_AGENT_ROOT a lazy env read; delenv is
     # the correct way to exercise the "not configured" branch.
     monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
-    res = await krh.select_kernels_handler(
+    res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir)},
         session_dir=session_dir,
     )
@@ -1865,8 +1982,19 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
-def test_optimization_wrapper_timeout_sec_geak_default_90min():
-    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 90 * 60 + 180
+def test_optimization_wrapper_timeout_sec_geak_default_full_mode_130min(monkeypatch):
+    # Default tracks ``$GEAK_RUN_MODE`` (full -> 130 min) so the
+    # orchestrator wrapper agrees with the kernel-agent installer /
+    # driver defaults (PR #301 + matching orchestrator-side fix).
+    monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
+    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 130 * 60 + 180
+
+
+def test_optimization_wrapper_timeout_sec_geak_quick_mode_70min(monkeypatch):
+    monkeypatch.setenv("GEAK_RUN_MODE", "quick")
+    monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
+    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 70 * 60 + 180
 
 
 def test_optimization_wrapper_timeout_sec_oob_default_60min():
@@ -1959,6 +2087,7 @@ def test_handlers_dispatch_table():
     """P2-2 only registered trace_analyze + run_optimization. P2-4
     added apply_patch + integrate (covered in test_p2_4_integrate_report)."""
     assert krh.has_handler("trace_analyze")
+    assert krh.has_handler("run_gemm_tuning")
     assert krh.has_handler("run_optimization")
     assert not krh.has_handler("totally_unknown_kind")
 
@@ -2332,7 +2461,7 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     with patch.object(krh, "_run_kernel_backend_sequence",
                        side_effect=fake_sequence):
         await krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy"},
+            payload={"candidates_path": "/dummy", "max_parallel": 3},
             candidates=candidates,
             session_dir=session_dir,
             record_partial=record_partial,
