@@ -13,7 +13,14 @@ retry-loop branching in ``_retry.run_with_retries``.
 
 from __future__ import annotations
 
-from enum import StrEnum
+try:  # Python 3.11+
+    from enum import StrEnum
+except ImportError:  # Python 3.10 fallback — mirror 3.11 StrEnum semantics
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        def __str__(self) -> str:
+            return str(self.value)
 
 
 class OutcomeId(StrEnum):
