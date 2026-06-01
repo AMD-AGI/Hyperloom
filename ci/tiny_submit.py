@@ -144,8 +144,13 @@ class TinyController:
         self.artifacts_dir = Path(args.artifacts_dir)
         self.manifests_dir = Path(args.output_dir)
         self.summary_out = Path(args.summary_out_dir)
+        # Per-batch webhook manifests live OUTSIDE manifests_dir: build_summary
+        # scans for submission_manifest.json *recursively*, so keeping them under
+        # manifests_dir would make the full-summary build double-count records.
+        self.batch_root = self.manifests_dir.parent / "tiny-batch-reports"
         self.progress_path = self.manifests_dir / "progress.ndjson"
-        for d in (self.artifacts_dir, self.manifests_dir, self.summary_out):
+        for d in (self.artifacts_dir, self.manifests_dir, self.summary_out,
+                  self.batch_root):
             d.mkdir(parents=True, exist_ok=True)
 
         self.records: list[SubmissionRecord] = []
@@ -160,7 +165,8 @@ class TinyController:
         self.stop = threading.Event()
 
         self.completed = 0
-        self.last_report = 0
+        self.last_report = 0      # count of records already webhook-reported
+        self._batch_seq = 0
         self.submitted_ok = 0
         self.succeeded = 0
         self.start_ts = time.time()
@@ -253,36 +259,48 @@ class TinyController:
                 self.volume,
             )
 
-    def _emit_report(self, n_done: int, *, final: bool = False) -> None:
-        """Write a manifest snapshot, rebuild the summary, and push the webhook.
+    def _emit_batch_report(self, seq: int, batch: list[SubmissionRecord]) -> None:
+        """Webhook ONLY this freshly-completed batch (~report_every models),
+        never the cumulative table.
 
-        Uses the exact same build_summary.py + send_webhook.py the existing
-        summarize stage uses, so the Teams card format is identical.
+        build_summary is manifest-driven (it reads submission_manifest.json and
+        looks up artifacts by task_id), so a manifest holding just this batch
+        yields just these rows -> a single 10-row Teams card. The full ranked
+        table is produced separately by _write_full_summary() as the run
+        artifact; it is never pushed to the webhook.
         """
+        if not batch:
+            return
+        if not self.webhook_url:
+            log.info("[batch %d] WEBHOOK_URL unset; %d new rows not sent",
+                     seq, len(batch))
+            return
         with self.emit_lock:
-            tag = "final" if final else f"@{n_done}"
-            log.info("[report %s] building summary from %d records", tag, n_done)
-            self._write_manifest_snapshot()
+            bdir = self.batch_root / f"batch_{seq:05d}"
+            bout = bdir / "out"
+            bout.mkdir(parents=True, exist_ok=True)
+            write_manifest(
+                bdir, batch, self.base_url, self.register_workspace,
+                f"{self.sandbox_workspace}+{self.hyperloom_workspace}",
+                self.volume,
+            )
             try:
                 subprocess.run(
                     [sys.executable, str(_CI_DIR / "build_summary.py"),
                      "--artifacts-dir", str(self.artifacts_dir),
-                     "--manifests-dir", str(self.manifests_dir),
+                     "--manifests-dir", str(bdir),
                      "--target-gpu", self.args.target_gpu,
                      "--isl", str(self.args.isl),
                      "--osl", str(self.args.osl),
-                     "--out-dir", str(self.summary_out)],
-                    check=False, timeout=600,
+                     "--out-dir", str(bout)],
+                    check=False, timeout=300,
                 )
             except Exception as e:
-                log.warning("[report %s] build_summary failed: %s", tag, e)
+                log.warning("[batch %d] build_summary failed: %s", seq, e)
                 return
-            if not self.webhook_url:
-                log.info("[report %s] WEBHOOK_URL unset; summary written, webhook skipped", tag)
-                return
-            summary_json = self.summary_out / "ci_summary.json"
+            summary_json = bout / "ci_summary.json"
             if not summary_json.is_file():
-                log.warning("[report %s] %s missing; webhook skipped", tag, summary_json)
+                log.warning("[batch %d] ci_summary.json missing; webhook skipped", seq)
                 return
             env = os.environ.copy()
             env["WEBHOOK_URL"] = self.webhook_url
@@ -294,14 +312,37 @@ class TinyController:
                      "--summary", str(summary_json),
                      "--url", self.webhook_url,
                      "--rows-per-card", "10"],
-                    check=False, env=env, timeout=300,
+                    check=False, env=env, timeout=180,
                 )
+                log.info("[batch %d] webhook sent: %d new rows", seq, len(batch))
             except Exception as e:
-                log.warning("[report %s] send_webhook failed: %s", tag, e)
+                log.warning("[batch %d] send_webhook failed: %s", seq, e)
+
+    def _write_full_summary(self) -> None:
+        """Build the full ranked ci_summary.{md,json} over ALL records for the
+        run artifact + GHA job summary. Never webhooked — the webhook only ever
+        receives the per-batch increments via _emit_batch_report()."""
+        self._write_manifest_snapshot()
+        try:
+            subprocess.run(
+                [sys.executable, str(_CI_DIR / "build_summary.py"),
+                 "--artifacts-dir", str(self.artifacts_dir),
+                 "--manifests-dir", str(self.manifests_dir),
+                 "--target-gpu", self.args.target_gpu,
+                 "--isl", str(self.args.isl),
+                 "--osl", str(self.args.osl),
+                 "--out-dir", str(self.summary_out)],
+                check=False, timeout=1800,
+            )
+            log.info("[summary] full ranked table (%d records) written to %s",
+                     len(self.records), self.summary_out)
+        except Exception as e:
+            log.warning("[summary] full build_summary failed: %s", e)
 
     def _on_complete(self, rec: SubmissionRecord, pool_label: str) -> None:
         self._append_progress(rec)
-        do_report = False
+        batch: list[SubmissionRecord] | None = None
+        seq = 0
         with self.records_lock:
             self.records.append(rec)
             self.completed += 1
@@ -312,15 +353,19 @@ class TinyController:
                 self.succeeded += 1
             if (self.args.report_every > 0
                     and n - self.last_report >= self.args.report_every):
+                # Only the models completed since the previous report — never
+                # re-send the cumulative table.
+                batch = self.records[self.last_report:n]
                 self.last_report = n
-                do_report = True
+                seq = self._batch_seq
+                self._batch_seq += 1
         elapsed_h = (time.time() - self.start_ts) / 3600.0
         log.info("[progress] %d/%d done (%s) pool=%s model=%s status=%s/%s elapsed=%.1fh",
                  n, self.total_planned,
                  f"submitted_ok={self.submitted_ok} succeeded={self.succeeded}",
                  pool_label, rec.model, rec.status, rec.final_status or "-", elapsed_h)
-        if do_report:
-            self._emit_report(n)
+        if batch:
+            self._emit_batch_report(seq, batch)
 
     # ── per-model work ────────────────────────────────────────────────────────
 
@@ -465,7 +510,7 @@ class TinyController:
         if not pending:
             log.info("nothing to do")
             if self.completed:
-                self._emit_report(self.completed, final=True)
+                self._write_full_summary()
             return 0
 
         if self.args.dry_run:
@@ -506,8 +551,21 @@ class TinyController:
                 t.join(timeout=30)
 
         self.stop.set()
-        # Final summary + webhook over everything collected.
-        self._emit_report(self.completed, final=True)
+        # Flush the last partial batch to the webhook (the < report_every models
+        # finished since the previous batch report), then build the full ranked
+        # table as the run artifact. The full table is NOT webhooked.
+        with self.records_lock:
+            n = self.completed
+            if self.last_report < n:
+                tail = self.records[self.last_report:n]
+                self.last_report = n
+                seq = self._batch_seq
+                self._batch_seq += 1
+            else:
+                tail, seq = None, -1
+        if tail:
+            self._emit_batch_report(seq, tail)
+        self._write_full_summary()
 
         with self.records_lock:
             total = len(self.records)
