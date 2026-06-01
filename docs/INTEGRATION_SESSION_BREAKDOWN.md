@@ -283,7 +283,7 @@ investigation than the breakdown summarises.
     "pid": 12345,
     "session_dir": "/workspace/hyperloom",
     "tick_count": 89,
-    "image": "lmsysorg/sglang:v0.5.11-rocm720-mi30x"
+    "image": "lmsysorg/sglang:v0.5.11-rocm720-mi30x-profilerfix"
   },
 
   "workload": {
