@@ -97,44 +97,27 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    "/opt/venv/lib/python3.12/site-packages/aiter/",
-    "/opt/venv/lib/python3.12/site-packages/sglang/",
-    "/opt/venv/lib/python3.12/site-packages/vllm/",
-    # Production vLLM wheel install layout (system dist-packages). Keep
-    # this in sync with ``kernel-agent/tools/tracelens_analysis.py`` so
-    # both the kernel-agent classifier and the orchestrator-side gate
-    # in ``run_optimization_handler`` agree on what counts as a
-    # reusable framework source.
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-    # atom layout. The editable install lives under ``/app/ATOM/atom/`` on disk but
-    # ``_is_runtime_generated_kernel`` and ``run_optimization_handler``
-    # lower-case their inputs before the ``startswith`` / substring
-    # check, so the prefix below is stored lower-case for the match
-    # to fire. ``framework_paths._DEFAULT_SOURCE_ROOTS`` carries the
-    # canonical-case ``/app/ATOM/atom/`` because PolicyGate's
-    # ``_path_in_allowlist`` is case-sensitive against the real
-    # filesystem path. Keep this block in sync with
-    # ``kernel-agent/tools/tracelens_analysis.py``
-    # ``_REUSABLE_SOURCE_ROOTS`` (cross-cutting guard
-    # ``test_atom_present_in_tracelens_reusable_roots``).
-    "/app/atom/atom/",
-    "/opt/venv/lib/python3.10/site-packages/atom/",
-    "/opt/venv/lib/python3.12/site-packages/atom/",
-    "/usr/local/lib/python3.12/dist-packages/atom/",
-    "/usr/local/lib/python3.10/dist-packages/atom/",
-)
+def _reusable_source_roots() -> tuple[str, ...]:
+    """Framework install roots for patchability checks (dynamic discovery).
+
+    Sourced from :func:`framework_paths.resolve_patch_target_roots` so the
+    orchestrator gate, PolicyGate and ``apply_kernel_patch`` share one set
+    of roots (importlib + glob discovery + static fallbacks, incl. atom).
+    Callers here lower-case the source path before the substring check, so
+    we also emit a lower-case variant of every root (e.g. ``/app/ATOM/atom/``
+    -> ``/app/atom/atom/``) to keep the case-insensitive match working.
+    """
+    from .framework_paths import resolve_patch_target_roots
+
+    roots = resolve_patch_target_roots()
+    out: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        for variant in (root, root.lower()):
+            if variant and variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    return tuple(out)
 _APPLY_TOOL_MODULE: Any | None = None
 # GEAK is FIRST per SKILL.md "high-priority handoff" contract: every kernel
 # Claude/Codex can rewrite, GEAK can rewrite too, and GEAK's GPU-only
@@ -285,7 +268,7 @@ def _is_runtime_generated_kernel(name: str, source_file: str) -> bool:
     if any(marker in lower_file for marker in _RUNTIME_GENERATED_SOURCE_MARKERS):
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
-        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+        return not any(root in lower_file for root in _reusable_source_roots())
     return False
 
 
@@ -508,7 +491,7 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "source_file": source_file,
         }
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+    if not any(root in lower_file for root in _reusable_source_roots()):
         return {
             "status": "failed",
             "error_class": "unstable_source_path",
