@@ -21,7 +21,7 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 1
 lease_ttl_sec: 9000
-description: "Concurrency sweep across a CONC ladder for both baseline and current_best, producing reports/conc_sweep_summary.json + conc_sweep_raw.csv. Discovery-only (never promotes); off by default (--enable-conc-sweep). Total wall-clock capped by --conc-sweep-total-budget-sec (default 2.5h)."
+description: "Post-sweep concurrency comparison: benchmark baseline vs current_best across a CONC ladder. Off by default (--enable-conc-sweep); bounded by --conc-sweep-total-budget-sec (default 2.5h)."
 pipeline_phase: explore
 typical_runtime_min: 30.0
 applicable_when:

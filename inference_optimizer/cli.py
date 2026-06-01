@@ -53,6 +53,7 @@ from .orchestrator.action_executors import (
     baseline_executor,
     explore_executor,
     recover_executor,
+    conc_sweep_executor,
     report_executor,
     session_breakdown_executor,
     sweep_executor,
@@ -1071,9 +1072,41 @@ def _seed_shared_state(
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         explore_roofline_hard_gate=explore_roofline_hard_gate,
+        # SWEEP-phase post-sweep concurrency sweep flags (off by default).
+        # See ``orchestrator/conc_sweep.py`` + coordinator hook
+        # ``_enqueue_internal_conc_sweep_task``.
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", False)),
+        conc_sweep_concs=_parse_conc_sweep_concs(args),
+        conc_sweep_total_budget_sec=int(
+            getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
+        ),
+        conc_sweep_variant_timeout_sec=int(
+            getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
+        ),
     )
     state.save(session_dir)
     return state
+
+
+def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
+    """Parse ``--conc-sweep-concs '1,2,4,8'`` into a list[int]. Drops
+    non-integer tokens with a warning rather than crashing the CLI
+    boot so a typo doesn't take the whole session down. Empty list
+    (e.g. ``--conc-sweep-concs ''``) lets ``SharedState`` default-factory
+    populate the canonical 1..128 ladder."""
+    raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
+    if not raw:
+        return [1, 2, 4, 8, 16, 32, 64, 128]
+    out: list[int] = []
+    for tok in raw.split(","):
+        t = tok.strip()
+        if not t:
+            continue
+        try:
+            out.append(int(t))
+        except ValueError:
+            log.warning("conc_sweep: ignoring non-integer CONC token %r", t)
+    return out or [1, 2, 4, 8, 16, 32, 64, 128]
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
@@ -1161,6 +1194,11 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "profile":           profile_executor,
     "explore":           explore_executor,
     "sweep":             sweep_executor,
+    # Coordinator-internal post-sweep concurrency comparison.
+    # Off by default; enable via ``--enable-conc-sweep``. PolicyGate
+    # denies any LLM-proposed delegate{action_name='conc_sweep'}, so
+    # the only entry is the SWEEP-completion auto-enqueue hook.
+    "conc_sweep":        conc_sweep_executor,
     "report":            report_executor,
     "session_breakdown": session_breakdown_executor,
     # ``recover`` re-enabled in 2026-05 alongside the robustness-agent
@@ -5531,14 +5569,16 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="conc_sweep_total_budget_sec",
         type=int,
         default=int(os.environ.get(
-            "INFERENCE_OPTIMIZER_CONC_SWEEP_TOTAL_BUDGET_SEC", "7200",
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_TOTAL_BUDGET_SEC", "9000",
         )),
         help="Total wall-clock budget (seconds) for the whole conc-sweep "
-             "post-hook, independent of the main session budget. Once "
-             "exhausted, remaining variants are recorded as "
-             "status=skipped error_class=budget_exhausted and the JSON "
-             "envelope carries budget_exhausted=true. Default 7200 (~2h); "
-             "set to 0 to disable.",
+             "action, independent of the per-variant Magpie timeout. "
+             "Once exhausted, remaining variants are recorded as "
+             "status=skipped / error_class=budget_exhausted and the "
+             "JSON envelope carries budget_exhausted=true. Default 9000 "
+             "(~2.5h); set to 0 to disable. Also bounded above by the "
+             "main session wall-clock deadline since conc_sweep runs as "
+             "a SWEEP-phase action.",
     )
     # Retired flags that operator scripts may still pass. We hard-fail
     # at argparse time with a one-line migration hint instead of

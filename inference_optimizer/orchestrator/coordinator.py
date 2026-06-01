@@ -3098,6 +3098,67 @@ class Coordinator:
             auto_sweep_combos=combos,
         )
 
+    async def _enqueue_internal_conc_sweep_task(
+        self, *, reason: str,
+    ) -> Task | None:
+        """Build + enqueue a Coordinator-internal ``conc_sweep`` task.
+
+        Mirrors :meth:`_enqueue_internal_sweep_task` but emits the
+        SWEEP-phase ``conc_sweep`` action (baseline + current_best
+        across a CONC ladder, see
+        ``orchestrator/conc_sweep.py``). Off by default — the caller
+        (typically the sweep-completion hook) must check
+        ``shared_state.conc_sweep_enabled`` first; this method does
+        NOT re-check the flag, so callers wanting to dispatch
+        unconditionally (operator-driven resume scenarios) can do so.
+
+        Idempotency key: ``internal-conc_sweep-<reason>``. PolicyGate's
+        action-singleton rule plus this key together ensure at most
+        one conc_sweep task lands per SWEEP phase.
+
+        Returns the freshly-created (or returned-existing) Task; the
+        caller logs the task_id. Returns None and logs an error if
+        creation raised — conc_sweep is post-sweep gravy, never fatal.
+        """
+        state = self.shared_state
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": str(reason),
+            "concs": list(state.conc_sweep_concs or []),
+            "variant_timeout_sec": int(state.conc_sweep_variant_timeout_sec or 0),
+            "total_budget_sec":    int(state.conc_sweep_total_budget_sec or 0),
+        }
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="conc_sweep",
+                params=params,
+                idempotency_key=f"internal-conc_sweep-{reason}",
+                # Conc_sweep can run for hours (default 2.5h, up to
+                # ``total_budget_sec``); lease_ttl matches so the lease
+                # doesn't expire mid-flight. Coordinator's existing
+                # lease-extension heartbeats keep it alive if a
+                # variant overshoots.
+                lease_ttl_sec=int(state.conc_sweep_total_budget_sec or 9000),
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception(
+                "conc_sweep: failed to enqueue internal task: %r", exc,
+            )
+            return None
+        if was_existing:
+            log.info(
+                "internal-conc_sweep task already exists (idempotent: "
+                "task_id=%s, state=%s)", task.task_id, task.state,
+            )
+        else:
+            log.info(
+                "internal-conc_sweep task enqueued (task_id=%s reason=%s "
+                "concs=%s total_budget_sec=%s)",
+                task.task_id, reason,
+                params["concs"], params["total_budget_sec"],
+            )
+        return task
+
     async def _enqueue_internal_sweep_task(
         self, *, reason: str,
     ) -> Task:
@@ -11474,6 +11535,50 @@ class Coordinator:
             # ``plateau_explore`` for no good reason. The streak field
             # is owned by the ``params`` action lifecycle; sweep MUST
             # NOT mutate it.
+            self.shared_state.save(self.session_dir)
+            # SWEEP-phase post-hook: chain ``conc_sweep`` after a
+            # succeeded sweep when the operator opted in via
+            # ``--enable-conc-sweep``. Wrapped in best-effort because
+            # the post-sweep concurrency comparison is non-critical
+            # (the session has already produced a validated
+            # current_best); failure to enqueue must not block the
+            # SWEEP→CLOSE transition.
+            if getattr(self.shared_state, "conc_sweep_enabled", False) and \
+                    result.get("status") == "succeeded":
+                try:
+                    await self._enqueue_internal_conc_sweep_task(
+                        reason="post_sweep",
+                    )
+                except Exception:  # noqa: BLE001 — never block SWEEP->CLOSE
+                    log.exception(
+                        "conc_sweep: post-sweep enqueue raised (non-fatal)"
+                    )
+            return
+        elif task_kind == "conc_sweep":
+            self.shared_state.record_action_attempt(
+                action="conc_sweep",
+                task_id=getattr(task, "task_id", "") if task is not None else "",
+                status=str(result.get("status") or "succeeded"),
+                decision="discarded",
+                result=result,
+                extras={
+                    "was_skipped":      bool(result.get("was_skipped", False)),
+                    "skip_reason":      result.get("skip_reason"),
+                    "budget_exhausted": bool(result.get("budget_exhausted", False)),
+                    "total_budget_sec": result.get("total_budget_sec"),
+                    "elapsed_sec":      result.get("elapsed_sec"),
+                    "best_speedup":     (
+                        (result.get("summary") or {}).get("best_speedup")
+                    ),
+                    "best_conc":        (
+                        (result.get("summary") or {}).get("best_conc")
+                    ),
+                    "successful_pairs": (
+                        (result.get("summary") or {}).get("successful_pairs")
+                    ),
+                    "report_path":      result.get("report_json_path"),
+                },
+            )
             self.shared_state.save(self.session_dir)
             return
         # Audit trail (kernel-parity) for the 6 non-kernel actions: one

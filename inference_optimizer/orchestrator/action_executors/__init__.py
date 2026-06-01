@@ -25,6 +25,7 @@ from .explore import (
     ExploreExecutor,
     explore_executor,
 )
+from .conc_sweep import ConcSweepExecutor, conc_sweep_executor
 from .framework_pr import FrameworkPrExecutor, framework_pr_executor
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
@@ -40,6 +41,7 @@ from .recover import RecoverExecutor, recover_executor
 __all__ = [
     "BASELINE_DEFAULT_CONFIG",
     "BaselineExecutor",
+    "ConcSweepExecutor",
     "DEFAULT_CONC_VALUES",
     "DEFAULT_ISL_OSL",
     "DEFAULT_KEEP_THRESHOLD_PCT",
@@ -52,6 +54,7 @@ __all__ = [
     "SweepExecutor",
     "TargetAnalysisExecutor",
     "baseline_executor",
+    "conc_sweep_executor",
     "dynamic_action_executor",
     "explore_executor",
     "framework_pr_executor",

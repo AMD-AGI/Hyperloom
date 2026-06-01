@@ -314,6 +314,30 @@ class SharedState:
     # After deterministic FP8 GEMM tuning succeeds, continue into source-level
     # kernel_opt by default. Operators can disable this for a GEMM-only run.
     continue_kernel_after_gemm: bool = True
+    # SWEEP-phase post-sweep concurrency sweep. Off by default;
+    # operator opts in via ``--enable-conc-sweep`` /
+    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=1``. When True, the
+    # Coordinator auto-enqueues a ``conc_sweep`` task right after the
+    # SWEEP-entry sweep task lands (see ``_on_sweep_task_completed``);
+    # the executor runs baseline + current_best across the
+    # ``conc_sweep_concs`` ladder bounded by
+    # ``conc_sweep_total_budget_sec`` total wall-clock.
+    conc_sweep_enabled: bool = False
+    # CONC ladder used by the conc_sweep action. Default mirrors
+    # ``orchestrator.conc_sweep.DEFAULT_CONCS``. Empty list short-
+    # circuits the executor with skip_reason=empty_conc_list.
+    conc_sweep_concs: list[int] = field(
+        default_factory=lambda: [1, 2, 4, 8, 16, 32, 64, 128],
+    )
+    # Total wall-clock budget (seconds) for the whole conc_sweep
+    # action. Default 9000 (~2.5h). 0 disables the gate so the
+    # executor runs every variant until the per-variant timeout
+    # alone caps it.
+    conc_sweep_total_budget_sec: int = 9000
+    # Per-variant Magpie subprocess timeout (seconds). Default 1800
+    # (~30 min). Effective timeout is clamped to the remaining total
+    # budget so the last variant cannot overshoot the deadline.
+    conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
