@@ -70,17 +70,32 @@ _resolve_magpie_python() {
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
-# TraceLens checkout root. MUST point at a checkout of the
-# AMD-AGI/TraceLens-internal repo at tag `Hyperloom_integration_v0.3.1`
-# or newer (release/hyperloom_integration_v0.3.1 branch). The per-version
-# sglang_roofline_patches/sglang_<minor>_<patch>/ layout is required by
-# _server_patcher; pre-v0.3.1 flat checkouts are no longer supported.
+# TraceLens checkout root. Points at a checkout of the open-source
+# AMD-AGI/TraceLens repo (carries the TraceLens.* Python package, the
+# TraceLens_generate_perf_report_* CLIs, the agent skill bundle, and the
+# per-version sglang_roofline_patches/sglang_<minor>_<patch>/ tree under
+# examples/custom_workflows/inference_analysis/ that _server_patcher
+# reads at runtime). ``inference_optimizer/scripts/local_setup.sh``
+# clones this for end users in Local Mode; CI / bundled deployments
+# preset the path via env. Legacy pre-2026-05-18 snapshots of the
+# private TraceLens-internal repo at /wekafs/hyperloom/TraceLens-internal
+# still satisfy the layout, so the default falls back to that location
+# for shops that have not migrated yet.
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 # Writable mirror for TraceLens when $TRACELENS_ROOT is on a read-only mount
 # (e.g. /wekafs/...). Mirrors the OOB pattern: cp -r the read-only source into
-# ${HYPERLOOM_ROOT}/TraceLens-internal once, then pip install -e the mirror so
+# ${HYPERLOOM_ROOT}/TraceLens once, then pip install -e the mirror so
 # editable build artifacts land on a writable filesystem. See ensure_tracelens.
-TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
+TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"
+# Optional TraceLens-internal extension. When set, ensure_tracelens()
+# pip installs the private AMD-AGI/TraceLens-internal package on top of
+# the open-source TraceLens. The internal extension post-processes the
+# generated agent report to add roofline numbers, gains estimates, and
+# MI355/MI455 MAF data. Unset (default) keeps Hyperloom on the
+# open-source-only path (impact score, no roofline, MI300/MI325 MAF only).
+# Provisioned by ``inference_optimizer/scripts/local_setup.sh`` when the
+# operator opts in via TRACELENS_INSTALL_INTERNAL=1.
+TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 
 # Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
 # is missing from env, source $REPO_ROOT/.env (resolved above from this
@@ -625,6 +640,12 @@ PY
 }
 
 ensure_tracelens() {
+  # Legacy bundle fallback: the fully-local image ships either a fresh
+  # ${HYPERLOOM_BUNDLE}/TraceLens checkout (post-2026-05-18 OSS layout)
+  # or, for older bundles, the pre-migration TraceLens-internal mirror.
+  if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens" ]; then
+    TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens"
+  fi
   if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens-internal" ]; then
     TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens-internal"
   fi
@@ -667,6 +688,22 @@ ensure_tracelens() {
   if [ "$CHECK_ONLY" -eq 0 ]; then
     # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
     run sh -c "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
+  fi
+  # Optional TraceLens-internal extension. Opt-in path: operator (or
+  # local_setup.sh) exports TRACELENS_INTERNAL_ROOT pointing at a
+  # checkout of AMD-AGI/TraceLens-internal. When unset, Hyperloom stays
+  # on the open-source-only report (impact score, no roofline).
+  if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+    if [ ! -d "$TRACELENS_INTERNAL_ROOT" ]; then
+      if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+        warn "TRACELENS_INTERNAL_ROOT set but not on disk: $TRACELENS_INTERNAL_ROOT"
+      else
+        die "TRACELENS_INTERNAL_ROOT set but not on disk: $TRACELENS_INTERNAL_ROOT"
+      fi
+    elif [ "$CHECK_ONLY" -eq 0 ]; then
+      log "ensuring TraceLens-internal extension from $TRACELENS_INTERNAL_ROOT"
+      run sh -c "cd '$TRACELENS_INTERNAL_ROOT' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
+    fi
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     # TraceLens #124: only the inference variant is accepted (the correct
@@ -1120,6 +1157,7 @@ write_env_file() {
     # optimize → kernel-agent/tools/tracelens_analysis.py inherit the writable
     # mirror instead of falling back to the read-only /wekafs default.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
+    [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
