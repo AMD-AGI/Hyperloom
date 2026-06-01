@@ -1,14 +1,11 @@
 """Canonical variant fingerprint — v0.8 M3.
 
-A single, content-addressed identity for any explore variant. Replaces
-the legacy-era pair of fingerprint helpers (one inside ``params.py``, one
-inside ``backends.py``) so that:
+A single, content-addressed identity for any explore variant so that:
 
 * the ``explore_search`` ledger has exactly one canonical key per variant,
+  and
 * dedup across specialist / LLM / default_grid proposals collapses to
-  the same row regardless of origin, and
-* v0.6 ``backends_search`` / ``params_search`` ledgers migrate into
-  ``explore_search`` losslessly (same hash for the same content).
+  the same row regardless of origin.
 
 Design rationale
 ----------------
@@ -19,10 +16,9 @@ KB_design §3.4 §4.2 (Inv-4.2) specifies:
                                  + framework + tp + workload_signature)
 
 For M3, we intentionally keep the on-disk fingerprint **content-only**
-(``sorted(extra_args)`` + ``sorted(extra_envs)``) to preserve hash
-identity with v0.6 ``params_search`` / ``backends_search.tested`` keys
-during resume migration. The optional framework / tp / workload
-discriminators are stored as **side metadata** on each ledger entry
+(``sorted(extra_args)`` + ``sorted(extra_envs)``). The optional
+framework / tp / workload discriminators are stored as **side metadata**
+on each ledger entry
 (``framework``, ``tp``, ``workload_signature``) so context is preserved
 without re-hashing the existing universe.
 

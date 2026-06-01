@@ -178,8 +178,8 @@ def test_no_levers_silent_before_min_ticks():
 
 
 def test_no_levers_fires_high_when_quotas_met():
-    """Once exploration has started (any of last_backends/params/sweep/
-    validate_stack rendered as non-(none)) and the elapsed/tick floors
+    """Once exploration has started (any of last_explore/sweep
+    rendered as non-(none)) and the elapsed/tick floors
     are met with stack still empty, fire HIGH so Coordinator can wind
     down. ``explore_started=True`` is the new precondition added by
     the 2026-05-22 PR (cold-start regression in xkk9f turn=7)."""

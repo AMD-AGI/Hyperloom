@@ -4760,40 +4760,6 @@ class Coordinator:
                 "report quotes the validated number, so this is the only "
                 "honest gain."
             )
-        # TODO 5/5 (current_best path): params/backends can advance
-        # ``current_best.tput`` without populating ``optimization_stack``
-        # (e.g. when the executor's best_variant lacks an explicit
-        # variant_name + candidate_args pair, the lift updates tput but
-        # appends nothing to the stack). The final report otherwise
-        # reads ``cumulative_gain_validated=0.0%`` with no validation on
-        # record. Surface a guidance TODO once the per-round gain crosses
-        # a small but meaningful threshold so Orchestration can fire one
-        # validate_stack and put an honest number into the report.
-        # Guidance only — no PolicyGate denial (the explore loop is not
-        # locked) since opt_stack-based unvalidated-KEEP detection still
-        # owns that.
-        _CB_VALIDATE_THRESHOLD_PCT = 0.5
-        cum_gain = float(self.shared_state.cumulative_gain or 0.0)
-        already_validated = bool(
-            self.shared_state.cumulative_gain_validated_ts
-        )
-        if (
-            cum_gain >= _CB_VALIDATE_THRESHOLD_PCT
-            and not self.shared_state.optimization_stack
-            and not already_validated
-        ):
-            cb_action = (self.shared_state.current_best or {}).get(
-                "action", "?",
-            )
-            return (
-                f"TODO 5/5: validate_stack recommended. current_best "
-                f"advanced to +{cum_gain:.2f}% via "
-                f"{cb_action!r} but optimization_stack is empty (no "
-                "kernel-opt KEEPs landed). Emit `validate_stack` so "
-                "cumulative_gain_validated reflects the current "
-                "configuration end-to-end before the final report. "
-                "Guidance only — explore actions remain unlocked."
-            )
         return ""
 
     def _baseline_self_loop_denial(
@@ -4969,9 +4935,8 @@ class Coordinator:
 
         Once optimization_stack has unvalidated KEEPs, the next
         ``explore`` round must carry the inlined stack rebench
-        (PolicyGate rule ``stack_rebench_required``). The legacy
-        ``validate_stack`` standalone action was retired in the legacy release; this
-        function now only enforces the cross-action ordering (target_analysis
+        (PolicyGate rule ``stack_rebench_required``). This function
+        only enforces the cross-action ordering (target_analysis
         before baseline, baseline before everything else, baseline
         self-loop guard, profile/integrate kernel-agent guards).
 
@@ -4982,11 +4947,6 @@ class Coordinator:
         further call-site churn.
         """
         action = str(action_name or "").strip()
-        # the legacy
-        # ``backends`` / ``params`` / ``validate_stack`` names are
-        # already denied by PolicyGate with ``rule='action_deprecated'``
-        # before reaching this function, so they intentionally do not
-        # appear in the sequence-gate allow-list.
         sequence_actions = {
             "target_analysis",
             "baseline", "profile", "roofline",
@@ -5131,9 +5091,7 @@ class Coordinator:
         # ``explore`` action carries an *inlined* per-KEEP stack
         # rebench, so we allow it through
         # alongside ``baseline`` (ad-hoc re-baseline) and ``report``
-        # (the wind-down). ``validate_stack`` itself is now denied at
-        # the PolicyGate boundary with ``rule='action_deprecated'``,
-        # so it can no longer be the recovery action.
+        # (the wind-down).
         if (
             self.shared_state.optimization_stack_has_unvalidated_keeps()
             and action not in {"explore", "baseline", "report"}
@@ -5213,9 +5171,8 @@ class Coordinator:
         # recorded + last_cheap_delta_gain < EPSILON). On this branch
         # the equivalent lives in PolicyGate as
         # ``_validate_gain_driven_kernel_opt`` (F3-5 N19c, reads
-        # ``gain_per_stack_entry`` instead of v0.6
-        # backends_attempts/params_attempts/last_cheap_delta_gain), so
-        # the Coordinator-side gate is intentionally omitted here.
+        # ``gain_per_stack_entry``), so the Coordinator-side gate is
+        # intentionally omitted here.
         return None
 
     @staticmethod

@@ -282,48 +282,6 @@ DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL: str = "kernel"
 
 
 # ---------------------------------------------------------------------------
-# v0.8 M3 / ``action_deprecated`` rule
-#
-# KB_design §3.4 / §3.15 §2.3: v0.8 merged ``backends`` / ``params`` /
-# ``validate_stack`` into a single ``explore`` action (with the per-KEEP
-# stack-rebench inlined). The legacy executors stay in the tree so v0.6
-# resumes that still carry the corresponding ``*_attempts`` ledger
-# fields don't crash on load (Inv-10.1 fact-layer survival), but new
-# Orchestration intents that name one of the deprecated actions must
-# be rejected at the PolicyGate boundary so the LLM gets a structured
-# ``policy_denied{rule='action_deprecated'}`` event and a clear
-# replacement hint.
-#
-# Why this lives in PolicyGate and not just in
-# ``phase_state.PHASE_ALLOWED_ACTIONS``:
-#
-# * ``phase_incompatible`` (R1) denies an action for the wrong reason —
-#   "not in phase=EXPLORE allowed set" hides the *real* cause (the
-#   action is gone, not the phase). The LLM gets a misleading hint to
-#   "wait for the phase to advance".
-# * R1 fires *only when ``strict_phase=True``* (production). Without
-#   ``action_deprecated`` an early-dev / test run with
-#   ``strict_phase=False`` happily accepts ``propose_action='backends'``
-#   and dispatches it; the resulting ``no_executor`` failure surfaces
-#   far later in the dispatcher.
-# * Inv-11.3 orthogonality wants exactly one rule per intent;
-#   ``action_deprecated`` fires *before* R1 so deprecation always wins
-#   over phase-allowed checks.
-# ---------------------------------------------------------------------------
-DEPRECATED_ACTION_NAMES: frozenset[str] = frozenset({
-    "backends",
-    "params",
-    "validate_stack",
-})
-
-DEPRECATED_ACTION_REPLACEMENTS: dict[str, str] = {
-    "backends": "explore",
-    "params":   "explore",
-    "validate_stack": "explore (per-KEEP stack rebench is inlined)",
-}
-
-
-# ---------------------------------------------------------------------------
 # Analysis actions that are Coordinator-internal only
 #
 # ``roofline`` (composite: profile + trace_analyze + analysis.md
@@ -338,9 +296,8 @@ DEPRECATED_ACTION_REPLACEMENTS: dict[str, str] = {
 # / ``integrate_patch``).
 #
 # The denial is symmetric across delegate / propose_action / request:
-# the rule fires *after* ``action_deprecated`` (no overlap today —
-# different name sets) but *before* the kernel-owned + phase + unknown
-# checks, so the canonical hint always wins.
+# the rule fires *before* the kernel-owned + phase + unknown checks, so
+# the canonical hint always wins.
 # ---------------------------------------------------------------------------
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset({
     "roofline",
@@ -689,12 +646,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # explore search ledger.
     # Coordinator's ``apply_explore_search_update`` / ``record_explore_accepted``
     # are the sole writers; LLM ``update_state`` must not rewrite the ledger
-    # directly (would bypass dedup-by-fingerprint + Inv-1). The legacy
-    # ``backends_search`` / ``params_search`` fields remain in the lock list
-    # purely for legacy resume parity — their writer APIs were retired in the legacy release.
+    # directly (would bypass dedup-by-fingerprint + Inv-1).
     "explore_search",
-    "backends_search",
-    "params_search",
     # structured gaps ledger (KB_design §3.3 /
     # §3.5 / §3.9 §6). Coordinator's ``_refresh_gaps`` is the sole
     # writer; LLM agents read via prompt injection. Locking the field
@@ -894,13 +847,6 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
-        # v0.8 M3 / ``action_deprecated`` (KB_design
-        # §3.13 M3 §PR7). Fires *before* the kernel-owned + phase
-        # checks so the LLM gets the canonical "use ``explore``
-        # instead" hint regardless of which other rule would have
-        # fired. Inv-11.3: one deprecated action triggers exactly one
-        # rule.
-        self._validate_action_not_deprecated(action_name, intent_kind="delegate")
         # analysis_action_not_llm_proposable —
         # roofline / profile are Coordinator-internal (PRELUDE bootstrap
         # + watermark-triggered). Block the LLM from racing the auto
@@ -1028,11 +974,6 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        # v0.8 M3 / same ``action_deprecated`` gate
-        # as ``_validate_delegate``. Catches advisory LLM proposals so
-        # the policy_denial event surfaces in the prompt before the
-        # delegate is even attempted.
-        self._validate_action_not_deprecated(action_name, intent_kind="propose_action")
         # analysis_action_not_llm_proposable
         # (propose channel) — same rule, same hint.
         self._validate_action_not_llm_proposable(
@@ -1075,10 +1016,7 @@ class PolicyGate:
         self._validate_fp8_only_action(action_name, intent_kind="propose_action")
         self._validate_gain_driven_kernel_opt(action_name)
         # F3-5: explore-attempt minimum guard — kernel_opt requires at
-        # least one successful explore round on record (replaces the
-        # legacy backends_attempts / params_attempts sequence
-        # denials, which had no writers in the legacy release and would have
-        # permanently locked kernel_opt).
+        # least one successful explore round on record.
         self._validate_explore_minimum_before_kernel_opt(action_name)
         # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
@@ -1176,11 +1114,6 @@ class PolicyGate:
         """F3-5: ``kernel_opt`` requires at least one successful explore
         round on record.
 
-        Replaces v0.6's ``backends_attempts < 1`` / ``params_attempts
-        < 1`` sequence denials, which would lock kernel_opt forever on
-        this branch (no writers exist for those fields — see
-        the retired-features list §1.3).
-
         Successful = at least one entry in ``gain_per_stack_entry``,
         which is appended only when ``optimization_stack`` accepts a
         variant. This is also the same signal Coordinator uses to
@@ -1213,11 +1146,7 @@ class PolicyGate:
             f"length = {accepted}). Run explore + integrate_patch "
             f"before invoking kernel_opt.",
             rule="explore_attempts_minimum_before_kernel_opt",
-            hint=(
-                "propose_action{action_name='explore'} (explore is the "
-                "v0.8 successor to v0.6 backends / params / "
-                "validate_stack — see KB_design §3.4 / KB_gaps Dead-A)."
-            ),
+            hint="propose_action{action_name='explore'} first.",
         )
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
@@ -1265,13 +1194,6 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # v0.8 M3 / ``action_deprecated`` covers the
-        # REQUEST channel too (defense in depth). None of the legacy
-        # request kinds (trace_analyze / kernel_opt / integrate /
-        # ...) collide with the deprecated set today, but an operator
-        # extension that re-uses one of the legacy names via
-        # ``request.kind`` would still be caught here.
-        self._validate_action_not_deprecated(kind, intent_kind="request")
         # analysis_action_not_llm_proposable —
         # defense in depth: nobody REQUESTs roofline/profile today, but
         # an extension that does would race the auto-managed gate.
@@ -1361,54 +1283,6 @@ class PolicyGate:
                 )
 
     # ------------------------------------------------------------------
-    # v0.8 M3 / action_deprecated
-    # ------------------------------------------------------------------
-    def _validate_action_not_deprecated(
-        self,
-        action_name: str,
-        *,
-        intent_kind: str,
-    ) -> None:
-        """Reject a v0.6 action name that v0.8 has replaced.
-
-        The deprecation is *hard* in the legacy release:
-        new sessions cannot use ``backends`` / ``params`` /
-        ``validate_stack`` directly; all three flows merge into
-        ``explore``. The denial carries a structured replacement hint
-        so the LLM can self-correct in one tick.
-
-        ``intent_kind`` is folded into the denial message so the
-        policy_denial event in the prompt names the actual smuggling
-        channel (delegate vs propose_action vs request).
-
-        No-op when ``action_name`` isn't in
-        :data:`DEPRECATED_ACTION_NAMES` — keeps the helper cheap on
-        the hot path. Fires *before* phase / role gates so the
-        deprecation hint always wins over phase_incompatible /
-        unknown_action (Inv-11.3 orthogonality).
-        """
-        if not action_name:
-            return
-        if action_name not in DEPRECATED_ACTION_NAMES:
-            return
-        replacement = DEPRECATED_ACTION_REPLACEMENTS.get(
-            action_name, "explore",
-        )
-        raise PolicyDenied(
-            f"action {action_name!r} is deprecated since the legacy release (M3); "
-            f"use {replacement!r} instead",
-            rule="action_deprecated",
-            hint=(
-                f"intent_kind={intent_kind!r}: emit "
-                f"delegate{{action_name='explore', params={{grid: [...]}}}} "
-                f"or propose_action{{action_name='explore', ...}}. "
-                f"KB_design §3.4 / §3.15 §2.3 — v0.8 merged "
-                f"backends/params/validate_stack into the single "
-                f"explore action with per-KEEP stack rebench inlined."
-            ),
-        )
-
-    # ------------------------------------------------------------------
     # analysis_action_not_llm_proposable —
     # deny LLM proposals of ``roofline`` / ``profile``
     # ------------------------------------------------------------------
@@ -1429,10 +1303,9 @@ class PolicyGate:
         gate and could double-enqueue.
 
         No-op when ``action_name`` isn't in
-        :data:`INTERNAL_ONLY_ACTION_NAMES`. Fires *after*
-        ``action_deprecated`` (the two sets are disjoint today) but
-        *before* the kernel-owned / phase / unknown gates, so the
-        canonical hint always wins.
+        :data:`INTERNAL_ONLY_ACTION_NAMES`. Fires *before* the
+        kernel-owned / phase / unknown gates, so the canonical hint
+        always wins.
         """
         if not action_name:
             return
@@ -2689,8 +2562,6 @@ __all__ = [
     "CORE_STATE_FIELDS",
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
-    "DEPRECATED_ACTION_NAMES",
-    "DEPRECATED_ACTION_REPLACEMENTS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",
