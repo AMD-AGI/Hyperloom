@@ -4642,6 +4642,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 variant_timeout_sec=int(
                     getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
                 ),
+                total_budget_sec=int(
+                    getattr(args, "conc_sweep_total_budget_sec", 7200) or 0,
+                ),
             )
             print(_cs_format(conc_sweep_payload))
         except Exception:  # noqa: BLE001
@@ -5520,7 +5523,22 @@ def _build_parser() -> argparse.ArgumentParser:
             "INFERENCE_OPTIMIZER_CONC_SWEEP_TIMEOUT_SEC", "1800",
         )),
         help="Per-variant timeout (seconds) for --enable-conc-sweep. "
-             "Default 1800 (~30 min). Total budget is 2 × N × timeout.",
+             "Default 1800 (~30 min). Per-variant cap is also clamped "
+             "by the remaining --conc-sweep-total-budget-sec.",
+    )
+    opt.add_argument(
+        "--conc-sweep-total-budget-sec",
+        dest="conc_sweep_total_budget_sec",
+        type=int,
+        default=int(os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_TOTAL_BUDGET_SEC", "7200",
+        )),
+        help="Total wall-clock budget (seconds) for the whole conc-sweep "
+             "post-hook, independent of the main session budget. Once "
+             "exhausted, remaining variants are recorded as "
+             "status=skipped error_class=budget_exhausted and the JSON "
+             "envelope carries budget_exhausted=true. Default 7200 (~2h); "
+             "set to 0 to disable.",
     )
     # Retired flags that operator scripts may still pass. We hard-fail
     # at argparse time with a one-line migration hint instead of

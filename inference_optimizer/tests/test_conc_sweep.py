@@ -31,6 +31,7 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
 )
 from inference_optimizer.orchestrator.conc_sweep import (
     DEFAULT_CONCS,
+    DEFAULT_TOTAL_BUDGET_SEC,
     _build_comparison,
     _build_grid,
     _has_optimization,
@@ -513,7 +514,8 @@ def test_run_conc_sweep_args_only_optimization_triggers_run(
         ))
 
     assert payload["status"] in ("succeeded", "failed")
-    mock_run.assert_called_once()
+    # Per-variant invocation: 2 arms × 2 concs.
+    assert mock_run.call_count == 4
     assert payload["optimized"]["extra_server_args"] == "--enable-torch-compile"
     assert payload["optimized"]["extra_envs"] == {}
 
@@ -552,7 +554,8 @@ def test_run_conc_sweep_envs_only_optimization_triggers_run(
             state, session_dir, concs=[1],
         ))
 
-    mock_run.assert_called_once()
+    # Per-variant invocation: 2 arms × 1 conc.
+    assert mock_run.call_count == 2
     assert payload["optimized"]["extra_envs"] == {"SGLANG_MOE_ENABLE": "1"}
 
 
@@ -627,3 +630,160 @@ def test_format_summary_line_success():
 def test_default_concs_is_powers_of_two():
     """Doc-pin: default ladder is [1,2,4,8,16,32,64,128]."""
     assert DEFAULT_CONCS == [1, 2, 4, 8, 16, 32, 64, 128]
+
+
+def test_default_total_budget_is_two_hours():
+    """Doc-pin: default total wall-clock budget is 2h."""
+    assert DEFAULT_TOTAL_BUDGET_SEC == 7200
+
+
+# ---------------------------------------------------------------------------
+# Total wall-clock budget
+# ---------------------------------------------------------------------------
+
+
+def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
+    session_dir: Path, baseline_yaml: Path,
+):
+    """When the wall-clock budget runs out mid-sweep, the remaining
+    variants are recorded as status=skipped error_class=budget_exhausted
+    and the payload flags ``budget_exhausted=true`` — without losing
+    the variants that already finished."""
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    calls = {"n": 0}
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        # Simulate a per-variant elapsed time roughly equal to 0.6s so
+        # the 1-second total budget covers the first variant cleanly,
+        # the second tips us into the negative-remaining branch on the
+        # next iteration's check.
+        import time as _t
+        _t.sleep(0.6)
+        calls["n"] += 1
+        return [
+            _fake_variant(v.name, throughput=100.0, envs=v.extra_envs)
+            for v in grid
+        ]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with patch(
+        "inference_optimizer.orchestrator.conc_sweep.run_grid",
+        side_effect=_fake_run_grid,
+    ), patch(
+        "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+        side_effect=_fake_materialize,
+    ):
+        payload = asyncio.run(run_conc_sweep(
+            state, session_dir,
+            concs=[1, 4, 16, 64],
+            total_budget_sec=1,
+        ))
+
+    # Some variants ran, some were skipped due to budget.
+    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
+    statuses = [p["status"] for p in all_points]
+    assert "succeeded" in statuses
+    assert "skipped" in statuses
+    skipped_pts = [p for p in all_points if p["status"] == "skipped"]
+    for p in skipped_pts:
+        assert p["error_class"] == "budget_exhausted"
+    assert payload["budget_exhausted"] is True
+    assert payload["total_budget_sec"] == 1
+    # We launched fewer than the full 8 variants because remainder was
+    # short-circuited.
+    assert calls["n"] < 8
+
+
+def test_run_conc_sweep_zero_budget_disables_gate(
+    session_dir: Path, baseline_yaml: Path,
+):
+    """``total_budget_sec <= 0`` disables the wall-clock gate; every
+    variant is launched and the payload's ``budget_exhausted`` is False."""
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [
+            _fake_variant(v.name, throughput=100.0, envs=v.extra_envs)
+            for v in grid
+        ]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with patch(
+        "inference_optimizer.orchestrator.conc_sweep.run_grid",
+        side_effect=_fake_run_grid,
+    ) as mock_run, patch(
+        "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+        side_effect=_fake_materialize,
+    ):
+        payload = asyncio.run(run_conc_sweep(
+            state, session_dir,
+            concs=[1, 4],
+            total_budget_sec=0,
+        ))
+
+    assert payload["budget_exhausted"] is False
+    assert payload["total_budget_sec"] is None
+    # 2 arms × 2 concs = 4 launches, all completed.
+    assert mock_run.call_count == 4
+
+
+def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
+    session_dir: Path, baseline_yaml: Path,
+):
+    """When the per-variant timeout is larger than the remaining budget,
+    we shrink it so we don't blow past the deadline on the final variant."""
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    recorded_timeouts: list[int] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], variant_timeout_sec: int, **_kw):
+        recorded_timeouts.append(variant_timeout_sec)
+        return [
+            _fake_variant(v.name, throughput=100.0, envs=v.extra_envs)
+            for v in grid
+        ]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with patch(
+        "inference_optimizer.orchestrator.conc_sweep.run_grid",
+        side_effect=_fake_run_grid,
+    ), patch(
+        "inference_optimizer.orchestrator.conc_sweep.materialize_config_with_envs",
+        side_effect=_fake_materialize,
+    ):
+        asyncio.run(run_conc_sweep(
+            state, session_dir,
+            concs=[1],
+            variant_timeout_sec=3600,
+            total_budget_sec=120,
+        ))
+
+    # Every recorded per-variant timeout must be <= the total budget.
+    assert all(t <= 120 for t in recorded_timeouts)
+    assert all(t >= 1 for t in recorded_timeouts)
+
+
+def test_format_summary_line_budget_exhausted_suffix():
+    payload = {
+        "status": "succeeded",
+        "budget_exhausted": True,
+        "total_budget_sec": 7200,
+        "summary": {
+            "successful_pairs": 4, "failed_pairs": 0,
+            "best_speedup": 1.20, "best_conc": 8, "median_speedup": 1.15,
+        },
+    }
+    line = format_summary_line(payload)
+    assert "budget_exhausted" in line
+    assert "@7200s" in line

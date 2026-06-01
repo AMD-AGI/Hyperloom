@@ -78,6 +78,15 @@ DEFAULT_NUM_PROMPTS_FACTOR = 5
 # ``--conc-sweep-timeout-sec``.
 DEFAULT_VARIANT_TIMEOUT_SEC = 1800
 
+# Total wall-clock budget (seconds) across the whole conc-sweep
+# post-hook. Independent of the main session budget — this caps how
+# long the post-hook itself may run before stopping the remaining
+# variants and writing whatever data was collected. Default 7200
+# (2h); operator override via ``--conc-sweep-total-budget-sec``.
+# Set to 0 or negative to disable (run unbounded until per-variant
+# timeouts trip).
+DEFAULT_TOTAL_BUDGET_SEC = 7200
+
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
     """Return ``(has_opt, args, envs)`` based on ``state.current_best``.
@@ -125,6 +134,26 @@ def _build_grid(
                 note=f"arm={arm_name} conc={conc} isl={isl} osl={osl}",
             ))
     return out
+
+
+def _budget_skip_result(variant: GridVariant) -> VariantResult:
+    """Synthetic VariantResult for a variant that never ran because the
+    total wall-clock budget was already exhausted. Status ``skipped`` is
+    new in conc_sweep (vs the grid_runner's ``succeeded`` / ``failed``)
+    so the frontend can tell "we ran out of time" apart from "Magpie
+    crashed". Speedup aggregation treats null throughput uniformly."""
+    return VariantResult(
+        name=variant.name,
+        extra_server_args=variant.extra_server_args,
+        extra_envs=dict(variant.extra_envs),
+        status="skipped",
+        output_throughput=None,
+        request_throughput=None,
+        total_token_throughput=None,
+        error="conc_sweep total budget exhausted before this variant ran",
+        error_class="budget_exhausted",
+        note=variant.note,
+    )
 
 
 def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
@@ -298,6 +327,7 @@ async def run_conc_sweep(
     *,
     concs: list[int] | None = None,
     variant_timeout_sec: int = DEFAULT_VARIANT_TIMEOUT_SEC,
+    total_budget_sec: int = DEFAULT_TOTAL_BUDGET_SEC,
     num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
     write_reports: bool = True,
 ) -> dict[str, Any]:
@@ -371,20 +401,55 @@ async def run_conc_sweep(
         optimized_envs=opt_envs,
     )
 
-    log.info(
-        "conc_sweep: launching %d variants (concs=%s isl=%d osl=%d)",
-        len(grid), concs, isl, osl,
-    )
+    # Independent total wall-clock budget for the post-hook itself.
+    # ``<=0`` disables the gate (legacy unbounded behaviour, only
+    # per-variant timeouts trip). We run variants one at a time so we
+    # can stop cleanly the moment the budget is exhausted — cold-start
+    # cost per variant is the same as the underlying sweep executor,
+    # which also relaunches Magpie per (CONC, ISL, OSL) combo.
+    has_budget = total_budget_sec > 0
     started_at = time.time()
-    results = await run_grid(
-        base_yaml_path=base_yaml_path,
-        base_extra_args="",
-        grid=grid,
-        output_root=workspace,
-        variant_timeout_sec=variant_timeout_sec,
-        model_path=resolved_model,
-        gpu_type=resolved_gpu,
+    deadline = started_at + total_budget_sec if has_budget else None
+    log.info(
+        "conc_sweep: launching %d variants (concs=%s isl=%d osl=%d "
+        "total_budget=%s)",
+        len(grid), concs, isl, osl,
+        f"{total_budget_sec}s" if has_budget else "unbounded",
     )
+    results: list[VariantResult] = []
+    budget_exhausted = False
+    for idx, variant in enumerate(grid):
+        remaining = (
+            (deadline - time.time()) if has_budget else None
+        )
+        if has_budget and remaining is not None and remaining <= 0:
+            budget_exhausted = True
+            log.warning(
+                "conc_sweep: total budget exhausted (%ds); marking "
+                "%d remaining variants as skipped",
+                total_budget_sec, len(grid) - idx,
+            )
+            for v in grid[idx:]:
+                results.append(_budget_skip_result(v))
+            break
+
+        # Per-variant cap = min(per-variant timeout, remaining budget),
+        # so the last variant doesn't blow the wall-clock by another
+        # full ``variant_timeout_sec``.
+        effective_timeout = variant_timeout_sec
+        if has_budget and remaining is not None:
+            effective_timeout = max(1, min(variant_timeout_sec, int(remaining)))
+
+        sub_results = await run_grid(
+            base_yaml_path=base_yaml_path,
+            base_extra_args="",
+            grid=[variant],
+            output_root=workspace,
+            variant_timeout_sec=effective_timeout,
+            model_path=resolved_model,
+            gpu_type=resolved_gpu,
+        )
+        results.extend(sub_results)
     elapsed_sec = time.time() - started_at
 
     # Split by arm via the variant name prefix we set in ``_build_grid``.
@@ -422,6 +487,8 @@ async def run_conc_sweep(
         "summary":         summary,
         "workspace":       workspace.as_posix(),
         "elapsed_sec":     round(elapsed_sec, 2),
+        "total_budget_sec":  total_budget_sec if has_budget else None,
+        "budget_exhausted":  budget_exhausted,
     }
 
     if write_reports:
@@ -456,6 +523,10 @@ def format_summary_line(payload: dict[str, Any]) -> str:
     best_speedup = s.get("best_speedup")
     best_conc = s.get("best_conc")
     median = s.get("median_speedup")
+    suffix = ""
+    if payload.get("budget_exhausted"):
+        budget = payload.get("total_budget_sec")
+        suffix = f" [budget_exhausted{f' @{budget}s' if budget else ''}]"
     parts = [
         f"  conc_sweep           : {status} "
         f"(pairs={succ}+{failed}f)"
@@ -464,12 +535,13 @@ def format_summary_line(payload: dict[str, Any]) -> str:
         parts.append(f"best={best_speedup:.2f}x @ conc={best_conc}")
     if isinstance(median, (int, float)):
         parts.append(f"median={median:.2f}x")
-    return " ".join(parts)
+    return " ".join(parts) + suffix
 
 
 __all__ = [
     "DEFAULT_CONCS",
     "DEFAULT_NUM_PROMPTS_FACTOR",
+    "DEFAULT_TOTAL_BUDGET_SEC",
     "DEFAULT_VARIANT_TIMEOUT_SEC",
     "SCHEMA_VERSION",
     "format_summary_line",
