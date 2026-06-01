@@ -2721,6 +2721,15 @@ def main() -> int:
         volume=volume,
         submit_workspaces_pool=submit_workspaces_pool or None,
     )
+    if submit_workspaces_pool and args.pool_index:
+        try:
+            safe._submit_ws_counter = max(int(args.pool_index), 0)
+            log.info(
+                "submit round-robin offset seeded from pool_index=%s",
+                args.pool_index,
+            )
+        except ValueError:
+            log.warning("invalid pool_index=%r; round-robin starts at 0", args.pool_index)
 
     if args.hf_top:
         log.info("fetching HF top-%d (>=%.1fB)", args.hf_top, args.min_params)
