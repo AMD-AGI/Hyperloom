@@ -9093,6 +9093,16 @@ class Coordinator:
             return is_valid_measurement(result)
         if task_kind == "sweep":
             return result.get("status") == "succeeded"
+        # ``replay_warm_recipe`` ALWAYS routes through _promote_to_shared_state
+        # -> _promote_warm_replay, which owns the full succeeded / drift /
+        # FAILED bookkeeping (it clears warm_replay_outcome.status='in_flight'
+        # on every terminal outcome). If a failed replay were sent to
+        # _handle_unpromotable_result instead, the in_flight flag would never
+        # clear and warm_replay_in_flight() would block PRELUDE forever
+        # (env-drift OOM/timeout -- exactly what warm-replay exists to detect
+        # -- would otherwise burn the whole wall-clock budget in PRELUDE).
+        if task_kind == "replay_warm_recipe":
+            return True
         return result.get("status") != "failed"
 
     def _record_intervention_for_task(
@@ -10426,8 +10436,17 @@ class Coordinator:
         if opt_stack:
             last_entry = opt_stack[-1]
             if isinstance(last_entry, dict):
+                # Read the post-rename canonical keys first
+                # (``_lift_to_current_best`` + explore winners write
+                # ``candidate_extra_server_args`` / ``extra_server_args``);
+                # keep the legacy ``*_sglang_args`` keys as a fallback for
+                # pre-migration stack entries. Reading only the legacy keys
+                # here yielded an empty string for every real (renamed)
+                # entry, silently re-breaking the #332 best_config fix.
                 stack_args = str(
-                    last_entry.get("candidate_extra_sglang_args")
+                    last_entry.get("candidate_extra_server_args")
+                    or last_entry.get("extra_server_args")
+                    or last_entry.get("candidate_extra_sglang_args")
                     or last_entry.get("extra_sglang_args")
                     or "",
                 ).strip()
