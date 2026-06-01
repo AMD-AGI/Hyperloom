@@ -206,11 +206,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "plateau_overrides",
     # CLOSE phase sequencer flag.
     "close_sequence_done",
-    # explore search ledger (v0.6 backends/params
-    # search fields retained for resume parity).
+    # unified explore search ledger.
     "explore_search",
-    "backends_search",
-    "params_search",
     # structured gaps ledger.
     "gaps",
     # dynamic_action aggregate view + round counter

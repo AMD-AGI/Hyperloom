@@ -207,10 +207,9 @@ class ProgressDetector:
         # on large-model multi-node runs, during which stack_size==0 +
         # cumulative_gain==0 are by-construction rather than diagnostic.
         # Defer the symptom until any explore family has actually run
-        # (last_explore / last_backends / last_params / last_sweep
-        # populated). Repro: primus-claw-20260522034541-xkk9f turn=7
-        # fired HIGH 12 minutes before backends phase 1 actually
-        # started.
+        # (last_explore / last_sweep populated). Repro:
+        # primus-claw-20260522034541-xkk9f turn=7 fired HIGH 12 minutes
+        # before the explore phase actually started.
         if not snap.explore_started:
             return None
         if snap.elapsed_minutes < cfg.no_levers_min_minutes:
