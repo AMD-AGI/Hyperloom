@@ -338,6 +338,24 @@ def _now_iso() -> str:
     )
 
 
+def _variant_args(variant: dict[str, Any]) -> str:
+    """Read a variant's server-arg string, canonical-first.
+
+    The field was renamed ``extra_sglang_args`` -> ``extra_server_args``
+    (framework-neutral; see compat.payload_aliases). Explore / stack
+    ledger entries now carry the canonical key, so reading only the
+    legacy name would silently classify every param/backend variant as
+    ``KIND_OTHER`` and emit an empty journal ``change`` string. Read
+    canonical first, keep a read-only legacy fallback for any
+    pre-rename caller.
+    """
+    return str(
+        variant.get("extra_server_args")
+        or variant.get("extra_sglang_args")
+        or ""
+    )
+
+
 def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) -> str:
     """Map a task / variant to one of the ``KIND_*`` vocab values.
 
@@ -356,9 +374,9 @@ def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) 
         return KIND_PROFILE
     # explore variants — peek inside to refine.
     if isinstance(variant, dict):
-        if variant.get("extra_envs") and not variant.get("extra_sglang_args"):
+        args = _variant_args(variant)
+        if variant.get("extra_envs") and not args:
             return KIND_ENV
-        args = str(variant.get("extra_sglang_args") or "")
         if "--attention-backend" in args or "kv-cache-dtype" in args:
             return KIND_BACKEND
         if args:
@@ -378,7 +396,7 @@ def summarize_change(
     """
     if isinstance(variant, dict):
         name = str(variant.get("name") or "").strip()
-        args = str(variant.get("extra_sglang_args") or "").strip()
+        args = _variant_args(variant).strip()
         envs = variant.get("extra_envs") or {}
         if envs and isinstance(envs, dict):
             env_str = " ".join(f"{k}={v}" for k, v in envs.items())

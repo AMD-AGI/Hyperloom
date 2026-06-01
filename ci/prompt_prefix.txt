@@ -1,22 +1,13 @@
 Use the inference-optimization skill from a fresh Hyperloom checkout for this model.
 
-CRITICAL — Fresh Source Checkout (REQUIRED, no /wekafs/HyperloomV2 fallback):
-You MUST run the optimizer from a freshly cloned Hyperloom tree. Do NOT fall
-back to /wekafs/HyperloomV2 or /wekafs/hyperloom/Hyperloom under any
-circumstance — those trees drift relative to main and produce results we
-cannot reproduce. CI injects HYPERLOOM_SOURCE_REPO with an embedded GitHub
-token (x-access-token:...@github.com/AMD-AGI/Hyperloom.git, valid for the
-duration of this workflow run) so the clone is authenticated end-to-end.
-If clone fails: ABORT, write ci_metrics.json with gain_pct=0.0 +
-actions_taken=["aborted: source checkout failed"], do NOT silently switch to
-the shared wekafs tree.
+CRITICAL — Fresh Source Checkout (REQUIRED): run the optimizer from a freshly
+cloned Hyperloom tree (CI injects an authenticated HYPERLOOM_SOURCE_REPO). Do
+NOT fall back to /wekafs/HyperloomV2 — those trees drift and are not
+reproducible. If clone fails: ABORT with gain_pct=0.0 and
+actions_taken=["aborted: source checkout failed"].
 
-  # When Claw set USER_DATA_PATH into a wekafs path (Claw-style pods do
-  # this so V2 cli's session_dir + every install.sh side-effect lands on
-  # persistent storage), mirror RESULT_DIR to it. Otherwise V2 cli writes
-  # to wekafs USER_DATA_PATH/<model>/<ts>/ while the agent-written
-  # contract files end up in a SEPARATE sandbox-ephemeral RESULT_DIR, and
-  # the post-pipeline `cp -a $RESULT_DIR ...` step can't reach the V2 tree.
+  # If Claw mounted USER_DATA_PATH on wekafs, align RESULT_DIR to it so the
+  # V2 session_dir and the contract files share one persistent tree.
   case "${USER_DATA_PATH:-}" in
     /hyperloom/*|/wekafs/*)
       : "${RESULT_DIR:=$USER_DATA_PATH}"
@@ -83,11 +74,17 @@ with open(os.path.join(result_dir, "source_commits.json"), "w", encoding="utf-8"
     json.dump(payload, f, indent=2)
 PY
 
-Then use the skill at:
-  $HYPERLOOM_SOURCE_DIR/inference_optimizer/SKILL.md
+Then run the skill at $HYPERLOOM_SOURCE_DIR/inference_optimizer/SKILL.md from
+that directory (cd "$HYPERLOOM_SOURCE_DIR").
 
-Working directory:
-  cd "$HYPERLOOM_SOURCE_DIR"
+Environment (export before launching `inference_optimizer optimize`):
+  export NFS_ROOT=/wekafs
+  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak,claude,codex}"
+  export HYPERLOOM_GEAK_BUDGET_MIN="${HYPERLOOM_GEAK_BUDGET_MIN:-130}"
+  export HYPERLOOM_KERNEL_OPT_GATE_TOP_N="${HYPERLOOM_KERNEL_OPT_GATE_TOP_N:-5}"
+Pass `--max-hours 12` to `inference_optimizer optimize` (do not use the cli
+default). Kernel backend ladder is GEAK first, then Claude, then Codex; do NOT
+request a Claude-only backend unless explicitly told to.
 
 CRITICAL — Required Artifacts (the canonical SaFE success contract):
 At the end of the run, ALWAYS write ALL THREE files to $RESULT_DIR (defaults
@@ -99,75 +96,31 @@ Failed and we cannot recover any data from the sandbox after cleanup.
   $RESULT_DIR/ci_metrics.json
     {"baseline_throughput": <float>, "optimized_throughput": <float>, "gain_pct": <float>, "tok_per_gpu_baseline": <float>, "tok_per_gpu_optimized": <float>, "actions_taken": ["..."]}
   $RESULT_DIR/session_breakdown.json
-    Emitted by inference_optimizer/cli.py's finally block (or, when running
-    the non-cli pipeline, you must write it manually with the same schema
-    keys: session_id, model, framework, precision, gpu_type, tp, ep, isl,
-    osl, conc, baseline_tput, best_tput, gain_pct, winner, phases,
-    wall_clock_minutes, wall_clock_budget_minutes, actions_taken,
-    kernels_optimized_count, kernels_required, kernels_unmet_reason).
-    claw-stats-service prefers this over ci_metrics.json for dashboard
-    rollup, so it is no longer optional.
+    Written by inference_optimizer/cli.py's finally block. Required — the
+    dashboard prefers it over ci_metrics.json.
 
-If the pipeline aborts (kernel apply failed / server failed to start / optimization tooling crash):
-- Set optimized_throughput = baseline_throughput, gain_pct = 0.0.
-- Set actions_taken = ["aborted: <one-line reason>"].
-- Still emit ALL THREE files (use {"phases": [], "winner": "aborted", ...}
-  for session_breakdown.json). A partial report with baseline-only numbers
-  is far more useful than no report at all.
-
-MANUAL FALLBACK (V2 orchestrator stuck in kernel-opt loop — observed pattern):
-If the V2 orchestrator runs past 2.5h without producing
-$RESULT_DIR/ci_metrics.json (it's spinning forever in the kernel-opt
-phase, re-optimizing the same 1-2 kernels every 60min cycle), DO NOT
-wait for it. Manually compose ci_metrics.json + optimization_report.md
-from the measurements you already have on disk:
-  * baseline number: $SESSION_DIR/phase02_baseline/baseline_results.json
-    (output_throughput field — that's tok/s/GPU at TP=1, or total tok/s
-    divided by TP for higher TP)
-  * profile classification: $SESSION_DIR/phase03_profile/profile_results.json
-    + any TraceLens analysis already written
-  * kernel info: $SESSION_DIR/phase05_kernel_opt/*/optimization_summary.json
-  * sweep best: $SESSION_DIR/phase06_sweep/* or run a single
-    `--decode-attention-backend aiter` / `--max-num-batched-tokens N`
-    sweep with the same server config to test ONE param change
-  * If you cannot get an optimized number, set optimized_throughput =
-    baseline_throughput, gain_pct = 0.0 (honest "no headroom" report).
-
-This is the path the Mistral-7B-v0.1 run on 2026-05-13 took
-(run 25795816178) — it produced a clean +0.10% report after the
-orchestrator stalled. Better an honest small-gain row than a missing
-row for a 2-3h run.
+If the pipeline aborts (kernel apply / server start / tooling crash): set
+optimized_throughput = baseline_throughput, gain_pct = 0.0,
+actions_taken = ["aborted: <reason>"], and still emit ALL THREE files. Only
+hand-write ci_metrics.json from on-disk phase results (phase02_baseline/,
+phase06_sweep/) near the END of the 12h budget if the orchestrator is
+genuinely stuck — never bail early on a 12h run.
 
 CRITICAL — vLLM Forbidden Flags (server will crash with "unrecognized arguments"):
 - --num-scheduler-steps   (removed in vLLM v0.4.0)
 - --chunked-prefill-size  (SGLang-only, NOT vLLM)
 - --enable-chunked-prefill (only safe on vLLM >= 0.6.0; check version first)
 
-CRITICAL — Result Directory:
-Before running any skill script (run_baseline.sh, run_sweep.sh, etc.), export:
-  export NFS_ROOT=/wekafs
-  # RESULT_DIR was selected for you above (see [CI_PATH] log line). DO NOT
-  # hard-code /workspace/hyperloom/ here — when Claw set USER_DATA_PATH to
-  # a wekafs path, RESULT_DIR was aligned to it so V2 cli's session_dir
-  # and your ci_metrics.json / optimization_report.md / session_breakdown.json
-  # all land in the SAME persistent tree. Just trust the exported value.
-Otherwise baseline/sweep writes fail silently and the job will hang.
+CRITICAL — Result Directory: RESULT_DIR was selected for you above (see the
+[CI_PATH] log line) and aligned with USER_DATA_PATH so the V2 session_dir and
+all three artifacts land in the same tree. Trust the exported value; never
+hard-code /workspace/hyperloom/.
 
-CRITICAL — POST-PIPELINE PERSIST (paired with Required Artifacts above —
-together they form a single contract; either both succeed or the run is
-considered Failed):
-
-$RESULT_DIR may be either (a) the sandbox-ephemeral /workspace/hyperloom/
-or (b) the wekafs-backed $USER_DATA_PATH that Claw mounted. The fresh-clone
-snippet picked one for you and printed a `[CI_PATH]` line; trust that. In
-case (a) we MUST mirror everything to /hyperloom/users/<uid>/ before the
-pod gets cleaned up; in case (b) the files are ALREADY persistent and a
-cp -a would just be a wekafs→wekafs waste, so we only verify in place.
-
-This is non-optional. As the LAST step of the run (after the three
-Required Artifacts have been written), execute the snippet below and
-verify that `[PERSIST OK]` appears in the output. If you skip it, the
-run will be reported as Failed regardless of what numbers you produced.
+CRITICAL — POST-PIPELINE PERSIST (LAST step; the run is Failed unless
+`[PERSIST OK]` is echoed). RESULT_DIR is either sandbox-ephemeral
+/workspace/hyperloom/ (must be mirrored to /hyperloom/users/<uid>/ before the
+pod is cleaned up) or a wekafs-backed USER_DATA_PATH (already persistent —
+verify in place). Run this snippet after the three artifacts are written:
 
   mkdir -p "$RESULT_DIR"
   case "$RESULT_DIR" in
@@ -191,17 +144,9 @@ run will be reported as Failed regardless of what numbers you produced.
         TASK_TAG="${SAFE_TASK_ID:-$(date +%Y%m%d%H%M%S)}"
         PERSIST_DIR="/hyperloom/users/$UID_HEX/${MODEL_TAG}-${TASK_TAG##*-}-opt"
         mkdir -p "$PERSIST_DIR"
-        # Copy the FULL result tree — not just the three key artifacts — so
-        # logs, kernel candidates/results, sweep outputs, traces, manifest.json,
-        # state.json, every phase*/ dir, and any future audit files survive
-        # sandbox cleanup. This catches:
-        #   * $RESULT_DIR/ci_metrics.json (agent-written, flat top-level)
-        #   * $RESULT_DIR/optimization_report.md (agent-written)
-        #   * $RESULT_DIR/session_breakdown.json (agent-written placeholder
-        #     summary; V2 cli writes the AUTHORITATIVE full version at
-        #     $USER_DATA_PATH/<model>/<ts>/session_breakdown.json which we
-        #     pull in below as session_breakdown_v2.json)
-        #   * $RESULT_DIR/hyperloom_source_commit.txt + source_commits.json
+        # Copy the FULL result tree (logs, phases, kernels, traces, audit
+        # files) so everything survives sandbox cleanup, not just the three
+        # contract files.
         if cp -a "$RESULT_DIR/." "$PERSIST_DIR/"; then
           echo "[PERSIST] cp -a $RESULT_DIR/. -> $PERSIST_DIR/ succeeded"
         else
@@ -211,32 +156,22 @@ run will be reported as Failed regardless of what numbers you produced.
       fi
       ;;
   esac
-  # V2 cli writes its OWN session_breakdown.json (with the full populated
-  # `phases[]` array, 30-50 KB) under
-  #   $USER_DATA_PATH/<model>/<ts>/session_breakdown.json
-  # (see optimize.log line "inference_optimizer.breakdown.exporter [INFO]
-  # session_breakdown: wrote …/session_breakdown.json (NNNNN bytes)").
-  # The PERSIST cp above only moved $RESULT_DIR, which contains the agent-
-  # written compact summary (~1 KB, phases[] empty placeholders). Pull the
-  # V2-written authoritative version too so the GHA artifact zip contains
-  # phase-level detail. Search USER_DATA_PATH first; fall back to the
-  # standard wekafs mount root.
+  # V2 cli writes the authoritative session_breakdown.json (full phases[],
+  # 30-50 KB) under <USER_DATA_PATH>/<model>/<ts>/. Pull it in alongside the
+  # agent's compact copy so the artifact zip has phase-level detail.
   V2_SESSION_ROOTS=()
   [ -n "${USER_DATA_PATH:-}" ] && V2_SESSION_ROOTS+=("$USER_DATA_PATH")
   [ -n "${UID_HEX:-}" ] && V2_SESSION_ROOTS+=("/hyperloom/users/$UID_HEX")
   for _root in "${V2_SESSION_ROOTS[@]}"; do
     [ -d "$_root" ] || continue
-    # V2 cli session dir = <root>/<model>/<ts>/, we want the most recent one
-    # whose session_breakdown.json is non-trivial (> 4 KB rules out the
-    # agent's placeholder). -mmin -720 (12h) guards against picking up an
-    # unrelated old session from a previous run on the same uid.
+    # Pick the most recent non-trivial breakdown (>4 KB rules out the agent
+    # placeholder; -mmin -720 avoids stale sessions from prior runs).
     _v2_bd="$(find "$_root" -mindepth 3 -maxdepth 3 -name session_breakdown.json -size +4k -mmin -720 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)"
     [ -z "$_v2_bd" ] && continue
     _v2_sess="$(dirname "$_v2_bd")"
     echo "[PERSIST V2] found populated breakdown: $_v2_bd ($(stat -c %s "$_v2_bd") bytes)"
-    # Don't clobber agent's session_breakdown.json — keep both: rename V2's
-    # version so post-CI tooling can prefer it but agent's contract file is
-    # still at the canonical path.
+    # Keep both copies: rename V2's version so the agent's contract file
+    # stays at the canonical path.
     cp "$_v2_bd" "$PERSIST_SCAN_DIR/session_breakdown_v2.json" 2>/dev/null \
       && echo "[PERSIST V2] copied to $PERSIST_SCAN_DIR/session_breakdown_v2.json"
     # Also pull manifest.json + state.json + any phase* subdirs if V2
@@ -253,12 +188,9 @@ run will be reported as Failed regardless of what numbers you produced.
   done
   unset _root _v2_bd _v2_sess _f V2_SESSION_ROOTS
 
-  # Verify each Required Artifact appears SOMEWHERE under PERSIST_SCAN_DIR.
-  # We use `find` because session_breakdown.json is nested under
-  # <model>/<ts>/ (V2 cli writes it inside the session dir, not at
-  # RESULT_DIR root). If the file isn't found at all, that's a real
-  # contract violation and the CI summary will route the run to manual
-  # review.
+  # Verify each Required Artifact appears under PERSIST_SCAN_DIR (find,
+  # because V2 nests session_breakdown.json in <model>/<ts>/). A miss is a
+  # contract violation and routes the run to manual review.
   if [ -n "${PERSIST_SCAN_DIR:-}" ]; then
     PERSIST_MISSING=""
     for f in ci_metrics.json optimization_report.md session_breakdown.json; do
@@ -280,10 +212,9 @@ run will be reported as Failed regardless of what numbers you produced.
   fi
   ls -la "$RESULT_DIR/"
 
-The ci_metrics.json values you write here MUST match what the V2
-orchestrator actually measured (proper baseline from phase 1 / best
-from phase 6-8) — do NOT recompute gain_pct from a partial-run
-eager-mode baseline that the orchestrator did not endorse.
+ci_metrics.json values MUST match what the V2 orchestrator measured (phase-1
+baseline / phase 6-8 best) — do NOT recompute gain_pct from a partial-run
+eager-mode baseline.
 
 SAFETY:
 - NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.

@@ -273,7 +273,10 @@ async def test_route_stop_session():
     await Coordinator._route_steward_verdict(
         fake, task=task, done_payload=payload,
     )
-    assert state.stop_reason == "no_more_leverage"
+    # stop_session is now non-terminal: it sets the skip_to_sweep hint
+    # (EXPLORE -> SWEEP -> CLOSE) rather than a terminal stop_reason.
+    assert not state.stop_reason
+    assert state.pending_escalate_hint == "skip_to_sweep"
     assert state.last_remaining_gaps_assessment["recommendation"] == "stop_session"
 
 
@@ -407,8 +410,10 @@ async def test_route_coerces_out_of_vocab():
     await Coordinator._route_steward_verdict(
         fake, task=task, done_payload=payload,
     )
-    # OOV -> coerced to stop_session.
-    assert state.stop_reason == "no_more_leverage"
+    # OOV -> coerced to stop_session, which now sets the (non-terminal)
+    # skip_to_sweep hint rather than a terminal stop_reason.
+    assert not state.stop_reason
+    assert state.pending_escalate_hint == "skip_to_sweep"
     assert state.last_remaining_gaps_assessment["recommendation"] == "stop_session"
 
 

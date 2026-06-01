@@ -136,9 +136,10 @@ path you emit MUST be one of:
   (a) verbatim from SharedState, OR
   (b) prefixed by `SESSION_DIR`, OR
   (c) under one of the framework source roots listed in SESSION CONTEXT
-      (`framework_source_roots`, default `/sgl-workspace/{aiter,sglang,vllm}/`
-      plus any `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` env supplement)
-      for `source_file` references.
+      (`framework_source_roots`, default
+      `/sgl-workspace/{aiter,sglang,vllm}/` + `/app/ATOM/atom/` (atom's
+      editable-install layout) plus any `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`
+      env supplement) for `source_file` references.
 
 PolicyGate REJECTS intents whose path fields fall outside this set; the
 rejection lands in your inbox as `policy_denied` so you can self-correct
@@ -146,11 +147,13 @@ on the next tick.
 
 ### Hard rules
 
-* `kind` MUST be EXACTLY one of `trace_analyze` / `run_optimization` /
-  `integrate` / `apply_patch` (these have programmatic handlers).
-  `kernel_opt` is NOT a recognised kind — never use it as a request kind.
-  The pre-M4 alias `select_kernels` was removed in this branch; use
-  `trace_analyze` exclusively.
+* `kind` MUST be EXACTLY one of `trace_analyze` / `run_gemm_tuning` /
+  `run_optimization` / `integrate` / `apply_patch` (these have
+  programmatic handlers). `kernel_opt` is NOT a recognised kind — never
+  use it as a request kind. The pre-M4 alias `select_kernels` was removed;
+  use `trace_analyze` for candidate analysis. `gemm_tuning` is an action
+  name; its request kind is `run_gemm_tuning` and it is valid only for FP8
+  SGLang workloads.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 * InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose
@@ -217,7 +220,8 @@ flag at runtime.
   holds back the following actions, which PolicyGate denies until
   the task completes: `specialist`, `explore`, `kernel_opt`,
   `integrate`, `deep_kernel_analysis`, `operator_tuning`,
-  `vendor_kernel_config`. Denial rule is `wait_for_auto_roofline`.
+  `vendor_kernel_config`, `gemm_tuning`. Denial rule is
+  `wait_for_auto_roofline`.
   Just retry the same intent next tick.
 
 The SharedState dump carries an `analysis_md=...` line with the
@@ -231,7 +235,10 @@ The report uses `🔴` (P1 — critical) / `🟡` (P2 — secondary) / `🟢`
 
 * **`🔴` / `🟡` rows under `## Compute Kernel Optimizations`** — these
   are the kernels that need `kernel_opt`. Once the EXPLORE budget is
-  spent and you transition to KERNEL phase, emit
+  spent and you transition to KERNEL phase, run FP8 GEMM tuning first
+  when `SharedState.precision == 'fp8'` and `last_gemm_tuning` is empty;
+  emit `request{target_agent='kernel', kind='run_gemm_tuning', params={}}`.
+  After it completes or is skipped, emit
   `request{target_agent='kernel', kind='run_optimization',
   params={kernel_id: <id from snapshot.candidates>,
   target_kernel: <name>}}` for the highest-priority entry first

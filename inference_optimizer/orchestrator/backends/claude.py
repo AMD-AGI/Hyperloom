@@ -36,7 +36,7 @@ from ..intent_parser import (
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import BackendError, BackendTurnResult
+from .base import BackendError, BackendTurnResult, parse_call_timeout_env
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
@@ -70,6 +70,15 @@ If you have nothing to say, call once with intent_type=send_message and
 payload={{"topic":"heartbeat","body_md":"ok"}}.
 ==== END OUTPUT FORMAT ====
 """.strip()
+
+
+# Claude Code built-in tools disallowed in raw_completion mode so the
+# model produces exactly one text turn (no agentic tool loop).
+_RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
+    "Bash", "BashOutput", "KillShell", "Read", "Write", "Edit",
+    "NotebookEdit", "Glob", "Grep", "Task", "WebFetch", "WebSearch",
+    "TodoWrite", "ExitPlanMode", "SlashCommand",
+)
 
 
 def _import_sdk() -> tuple[Any, Any, Any]:
@@ -114,12 +123,31 @@ class ClaudeBackend:
     # Larger = more retries on validation failure but more tokens.
     max_turns_default: int = 4
     enable_mcp_emit_intent: bool = True
+    # Raw single-shot completion mode for callers that drive their own
+    # loop + parse the model's plain text themselves (e.g. the
+    # dynamic_action ReAct runner). When True: the emit_intent MCP
+    # server + output-format suffix are skipped, all tools are
+    # disallowed so the model produces exactly one text turn, and
+    # ``run`` returns ``raw_text`` without requiring an emitted intent.
+    raw_completion: bool = False
     # Wall-clock cap for one ``run()`` call. The claude-agent-sdk shells
     # out to the ``claude`` CLI which talks to the AMD primus-safe
     # gateway; if the gateway is unreachable the subprocess can hang
     # on TCP for minutes, stalling the orchestrator reactor. 120s is
     # well above a normal turn (~10–30s) but bounds the worst case.
-    call_timeout_s: float = 120.0
+    #
+    # Env-var override ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`` lets
+    # operators bump this when opus-class models with a heavy orchestrator
+    # system prompt (~22 KB) and a 4-turn agentic loop consistently exceed
+    # 120 s on the AMD gateway under load. Invalid values fall back to the
+    # 120s default rather than crashing backend construction; backend
+    # boot-time refuses to die for a malformed env-var.
+    call_timeout_s: float = field(
+        default_factory=lambda: parse_call_timeout_env(
+            "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC",
+            default=120.0,
+        )
+    )
 
     # Test seams — set these to bypass SDK import / network calls.
     sdk_query_factory: Callable[..., Any] | None = None
@@ -150,6 +178,8 @@ class ClaudeBackend:
                     self.sdk_module = mod
         if not os.environ.get(self.api_key_env):
             self.calls.append({"warn": f"{self.api_key_env} not set in env"})
+        if self.raw_completion:
+            self.enable_mcp_emit_intent = False
         if self.enable_mcp_emit_intent:
             try:
                 cfg = build_emit_intent_server(
@@ -181,6 +211,13 @@ class ClaudeBackend:
     ) -> BackendTurnResult:
         full_prompt = self._compose_prompt(prompt)
         max_turns_use = max_turns or self.max_turns_default
+        if self.raw_completion:
+            # Claude Code counts the single assistant text message as a
+            # turn and errors when max_turns is reached, so a literal
+            # max_turns=1 trips even on a clean one-shot answer. All
+            # tools are disallowed in raw mode, so the model cannot
+            # loop — generous headroom guarantees the text turn returns.
+            max_turns_use = max(max_turns_use, 8)
         options = self._build_options(
             tools=tools or [],
             max_turns=max_turns_use,
@@ -227,7 +264,7 @@ class ClaudeBackend:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         })
-        if not intents:
+        if not intents and not self.raw_completion:
             raise NoIntentEmitted(
                 f"claude reply contained no parseable emit_intent tool_use "
                 f"blocks (raw_text_len={len(raw_text)}, tool_blocks={tool_block_count})"
@@ -258,6 +295,8 @@ class ClaudeBackend:
     # Internals
     # ------------------------------------------------------------------
     def _compose_prompt(self, prompt: str) -> str:
+        if self.raw_completion:
+            return prompt
         return f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
 
     def _build_options(
@@ -272,6 +311,15 @@ class ClaudeBackend:
             kwargs["model"] = self.model
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
+        if self.raw_completion:
+            # Single text turn: no MCP tools, and every Claude Code
+            # built-in tool disallowed. The caller parses the model's
+            # plain text itself, so any tool use would only burn a
+            # turn and trip the max_turns cap.
+            kwargs["allowed_tools"] = []
+            kwargs["disallowed_tools"] = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
+            kwargs["stderr"] = self._stderr_sink
+            return self.sdk_options_cls(**kwargs)
         # Allowed tools = caller-provided + our MCP-qualified emit_intent.
         # Drop the unqualified short name "emit_intent" — Claude CLI rejects
         # bare tool names that don't match a real registered tool. The MCP
@@ -315,6 +363,7 @@ class ClaudeBackend:
         """
         intents: list[Intent] = []
         text_chunks: list[str] = []
+        result_chunks: list[str] = []
         tool_block_count = 0
         last_usage: dict[str, Any] = {}
         try:
@@ -329,10 +378,14 @@ class ClaudeBackend:
                         txt = self._extract_text(block)
                         if txt:
                             text_chunks.append(txt)
-                # ResultMessage carries .result text in many SDKs
+                # ResultMessage.result is the consolidated final assistant
+                # text — the SAME content already streamed as TextBlocks.
+                # Keep it separate so we don't double-count: the joined
+                # stream and the result would otherwise concatenate into a
+                # duplicated payload (breaks raw_completion JSON parsing).
                 result_text = getattr(message, "result", None)
-                if isinstance(result_text, str):
-                    text_chunks.append(result_text)
+                if isinstance(result_text, str) and result_text:
+                    result_chunks.append(result_text)
                 # N6: ResultMessage carries .usage on terminal messages
                 # (Anthropic Messages API response schema). The SDK
                 # propagates this dict verbatim. We overwrite (not
@@ -363,7 +416,10 @@ class ClaudeBackend:
                     )
             else:
                 raise
-        return intents, "".join(text_chunks), tool_block_count, last_usage
+        # Prefer the consolidated ResultMessage text; fall back to the
+        # streamed TextBlocks only when no result was emitted.
+        raw_text = "".join(result_chunks) or "".join(text_chunks)
+        return intents, raw_text, tool_block_count, last_usage
 
     @staticmethod
     def _iter_blocks(message: Any):

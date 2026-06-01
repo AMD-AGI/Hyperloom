@@ -38,7 +38,7 @@ from typing import Any, Iterable
 # ``compute`` / ``memory`` / ``host_overhead`` / ``comm``.
 #
 # Conservative defaults:
-# * Each entry is a regex against the variant's ``extra_sglang_args`` string.
+# * Each entry is a regex against the variant's ``extra_server_args`` string.
 # * Single-direction entries are high-confidence (e.g. host-only knobs).
 # * Multi-direction entries cover knobs that legitimately affect more than
 #   one direction (e.g. ``--attention-backend`` swaps the kernel **and**
@@ -151,7 +151,7 @@ def categorize_variant(
 @dataclass(frozen=True)
 class _DroppedVariant:
     name: str
-    extra_sglang_args: str
+    extra_server_args: str
     categories: tuple[str, ...]
     saturated_directions: tuple[str, ...]
     reason: str
@@ -167,7 +167,7 @@ def filter_variants_by_roofline(
 
     Args:
         grid: Iterable of ``GridVariant``-shaped objects (anything with
-            ``.name``, ``.extra_sglang_args``, ``.extra_envs`` attributes).
+            ``.name``, ``.extra_server_args``, ``.extra_envs`` attributes).
             We don't import ``GridVariant`` here to keep this module
             decoupled from ``_grid_runner`` and trivially unit-testable.
         saturation_snapshot: Mapping ``direction -> percent`` from the
@@ -196,8 +196,17 @@ def filter_variants_by_roofline(
     kept: list[Any] = []
     dropped: list[dict[str, Any]] = []
     for gv in grid_list:
+        # Field renamed ``extra_sglang_args`` -> ``extra_server_args``
+        # (framework-neutral). Read canonical first, keep a read-only
+        # legacy fallback for any pre-rename caller object. Reading the
+        # stale name alone silently empties the categorization and turns
+        # the whole gate into a no-op (every variant -> uncategorized ->
+        # keep), which is the regression this guards against.
+        variant_args = getattr(gv, "extra_server_args", None)
+        if variant_args is None:
+            variant_args = getattr(gv, "extra_sglang_args", "")
         cats = categorize_variant(
-            getattr(gv, "extra_sglang_args", ""),
+            variant_args,
             getattr(gv, "extra_envs", None),
         )
         # Uncategorized → keep (unknown intent is unknown reward).
@@ -208,7 +217,7 @@ def filter_variants_by_roofline(
         if cats <= saturated:
             dropped.append({
                 "name": getattr(gv, "name", "?"),
-                "extra_sglang_args": getattr(gv, "extra_sglang_args", ""),
+                "extra_server_args": variant_args or "",
                 "categories": sorted(cats),
                 "saturated_directions": sorted(saturated),
                 "reason": "all_target_directions_saturated",
