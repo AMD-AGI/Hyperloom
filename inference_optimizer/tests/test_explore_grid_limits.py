@@ -26,10 +26,18 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _gate() -> PolicyGate:
+def _gate(research_lane_capacity: int = 1) -> PolicyGate:
     s = SharedState()
     s.phase = "EXPLORE"
+    s.research_lane_capacity = research_lane_capacity
     return PolicyGate(role_registry=default_role_registry(), shared_state=s)
+
+
+def _specialist_variants(n: int) -> list[dict]:
+    return [
+        {"name": f"v{i}", "provenance": "specialist:serving_specialist"}
+        for i in range(n)
+    ]
 
 
 def _delegate(grid: list[dict]) -> Intent:
@@ -154,3 +162,45 @@ def test_propose_allows_single_specialist_variant():
         {"name": "a", "provenance": "specialist:serving_specialist"},
     ])
     gate.validate_intent("orchestration", intent)  # no raise
+
+
+# ---------------------------------------------------------------------------
+# Dynamic cap tracking research_lane_capacity
+# ---------------------------------------------------------------------------
+def test_cap_tracks_research_lane_capacity_allows_four():
+    """With research_lane_capacity=4, a 4-specialist grid is permitted."""
+    gate = _gate(research_lane_capacity=4)
+    gate.validate_intent("orchestration", _delegate(_specialist_variants(4)))  # no raise
+
+
+def test_cap_tracks_research_lane_capacity_denies_five():
+    """With research_lane_capacity=4, a 5-specialist grid is denied."""
+    gate = _gate(research_lane_capacity=4)
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", _delegate(_specialist_variants(5)))
+    assert exc.value.rule == "explore_specialist_grid_max_one"
+
+
+def test_cap_clamps_to_max_research_lane_capacity():
+    """Capacity above the hard ceiling clamps to MAX_RESEARCH_LANE_CAPACITY.
+
+    research_lane_capacity=32 -> effective cap 6: a 6-variant grid passes,
+    a 7-variant grid is denied.
+    """
+    gate = _gate(research_lane_capacity=32)
+    gate.validate_intent("orchestration", _delegate(_specialist_variants(6)))  # no raise
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", _delegate(_specialist_variants(7)))
+    assert exc.value.rule == "explore_specialist_grid_max_one"
+
+
+def test_cap_falls_back_to_one_when_capacity_unset():
+    """research_lane_capacity=0 falls back to the hard-1 default."""
+    gate = _gate(research_lane_capacity=0)
+    gate.validate_intent(
+        "orchestration",
+        _delegate(_specialist_variants(1)),
+    )  # no raise
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", _delegate(_specialist_variants(2)))
+    assert exc.value.rule == "explore_specialist_grid_max_one"
