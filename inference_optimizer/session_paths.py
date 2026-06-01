@@ -88,6 +88,12 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     # (``analysis_action_not_llm_proposable``).
     "roofline", "profile",
     "sweep",
+    # SWEEP-phase post-sweep concurrency sweep (off by default via
+    # ``--enable-conc-sweep``). Same workspace shape as ``sweep``
+    # (per-variant Magpie subdirs); pipeline_phase=explore in the
+    # registry so it lands in the registry-derived set, fallback only
+    # matters on registry load failure.
+    "conc_sweep",
     "explore",
     "specialist",
     # PR-A1 (Arbor-into-Hyperloom): ``integrate_patch`` is an

@@ -127,6 +127,7 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "params":                  "exploration",
     "backends":                "exploration",
     "sweep":                   "exploration",
+    "conc_sweep":              "exploration",
     "kernel_opt":              "exploration",
     "gemm_tuning":             "exploration",
     "compiler_tuning":         "exploration",
