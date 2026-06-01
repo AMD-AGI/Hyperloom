@@ -401,6 +401,30 @@ _MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset({
 })
 
 
+_DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
+_ROOFLINE_WATERMARK_RATIO_ENV: str = "HYPERLOOM_ROOFLINE_WATERMARK_RATIO"
+
+
+def _resolve_roofline_watermark_ratio() -> float:
+    """Resolve the roofline watermark ratio (env-tunable, safe default).
+
+    Reads ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` so operators can tune the
+    re-roofline threshold without code edits. Any unparseable or unsafe
+    value (``<= 1.0`` would re-fire on every tick) falls back to the 1.10
+    default so a typo can't melt the analysis pipeline.
+    """
+    raw = (os.environ.get(_ROOFLINE_WATERMARK_RATIO_ENV) or "").strip()
+    if not raw:
+        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
+    if val <= 1.0:
+        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
+    return val
+
+
 def _merge_cumulative_extra_sglang_args(
     base_args: str,
     candidate_args: str,
@@ -2199,7 +2223,7 @@ class Coordinator:
         cur = self._current_tput_from_validated_gain()
         if cur <= 0:
             return False
-        return cur / last_rl >= self._ROOFLINE_WATERMARK_RATIO
+        return cur / last_rl >= _resolve_roofline_watermark_ratio()
 
     async def _maybe_enqueue_watermark_roofline(
         self, *, reason: str,
