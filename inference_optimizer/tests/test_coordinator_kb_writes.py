@@ -356,6 +356,42 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     ), "warm_replay launch flags were dropped by a flagless baseline overwrite"
 
 
+def test_best_config_reads_stack_args_from_canonical_server_key(
+    tmp_path: Path,
+) -> None:
+    """Review #2 repro: the 'prefer last validated stack layer's launch
+    args' correction (fix for #332) must read the post-rename canonical
+    ``candidate_extra_server_args`` / ``extra_server_args`` keys that
+    _lift_to_current_best + explore winners actually write. Reading only
+    the legacy ``*_sglang_args`` keys yields an empty string, silently
+    re-breaking best_config for every real (renamed) stack entry."""
+    coord = _make_coordinator(tmp_path)
+    ss = coord.shared_state
+    # current_best carries a deliberately-corrupted cumulative string so
+    # the stack-layer override is the path under test.
+    ss.current_best = {
+        "name": "tuned",
+        "extra_server_args": "--page-size 16 --page-size 16",  # corrupted dup
+        "tput": 2200.0,
+    }
+    # Real post-rename stack entry: canonical key only.
+    ss.optimization_stack = [{
+        "action": "explore",
+        "variant_name": "page32",
+        "candidate_extra_server_args": "--page-size 32 --schedule-policy lpm",
+        "extra_server_args": "--page-size 32 --schedule-policy lpm",
+    }]
+    ss.cumulative_gain_validated = 10.0
+    attrs = coord._build_recipe_attrs_from_state()
+    assert attrs["best_config"]["extra_sglang_args"] == (
+        "--page-size 32 --schedule-policy lpm"
+    ), (
+        "stack-layer launch args must be read from the canonical "
+        "extra_server_args key; got "
+        f"{attrs['best_config'].get('extra_sglang_args')!r}"
+    )
+
+
 def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     """Counterpart guard: a genuine validated win (non-empty stack, real
     flags, higher tput) DOES update best_config/best_throughput."""
@@ -515,37 +551,3 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
         (d or "") == f"[{_FW}] explore → regress on {_MODEL}/{_HW}"
         for d in descs
     ), descs
-# Regression: recipe write-back must read the renamed canonical
-# ``extra_server_args`` off current_best / optimization_stack (state is
-# migrated on load) and still emit the KB-legacy ``extra_sglang_args``
-# field. Reading the stale name silently dropped the server args and
-# broke warm-replay reproduction in the next session.
-# ===========================================================================
-def test_recipe_attrs_read_canonical_extra_server_args(tmp_path: Path) -> None:
-    coord = _make_coordinator(tmp_path)
-    ss = coord.shared_state
-    ss.current_best = {
-        "action": "explore",
-        "name": "win",
-        "tput": 900.0,
-        # canonical key, as written by _lift_to_current_best post-rename
-        "extra_server_args": "--page-size 16",
-        "extra_envs": {"SGLANG_X": "1"},
-    }
-    ss.optimization_stack = [{
-        "action": "explore",
-        "name": "win",
-        "extra_server_args": "--page-size 16",
-        "extra_envs": {"SGLANG_X": "1"},
-    }]
-    ss.gain_per_stack_entry = [12.5]
-
-    attrs = coord._build_recipe_attrs_from_state()
-
-    # best_config carries the args under the KB-legacy field name, read
-    # from the canonical state key.
-    assert attrs["best_config"]["extra_sglang_args"] == "--page-size 16"
-    # what_worked entries likewise carry the args (not an empty string).
-    assert attrs["what_worked"], "what_worked should not be empty"
-    assert attrs["what_worked"][0]["extra_sglang_args"] == "--page-size 16"
-    assert attrs["what_worked"][0]["gain_pct"] == 12.5
