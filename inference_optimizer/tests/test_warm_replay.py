@@ -48,6 +48,9 @@ class _StubSharedState:
     warm_replay_attempted: bool = False
     warm_replay_outcome: dict = field(default_factory=dict)
     warm_history_injected: bool = False
+    auto_roofline_pending_task_id: str = ""
+    enable_roofline: bool = True
+    last_baseline: dict = field(default_factory=dict)
     explore_search: dict = field(default_factory=dict)
     optimization_stack: list = field(default_factory=list)
     gain_per_stack_entry: list = field(default_factory=list)
@@ -68,7 +71,11 @@ class _StubTaskRegistry:
     def __init__(self):
         self.calls: list[dict] = []
 
-    async def create_or_return_existing(self, *, kind, params, idempotency_key):
+    async def create_or_return_existing(
+        self, *, kind, params, idempotency_key, **kwargs,
+    ):
+        # ``**kwargs`` absorbs newer registry kwargs (e.g. ``requires_lanes``)
+        # so this stub tracks the real signature without per-arg churn.
         self.calls.append({
             "kind": kind, "params": dict(params),
             "idempotency_key": idempotency_key,
@@ -393,9 +400,9 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert coord.shared_state.current_best["tput"] == 738.0
 
 
-def test_promote_warm_replay_drift_does_not_push_stack(tmp_path):
-    """Measured gain below the reproduce threshold → tag as ``drift``
-    but do NOT push onto stack (let EXPLORE start from clean baseline)."""
+def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
+    """Any replay tput above baseline seeds the stack (policy A), even
+    when below the historical reproduce bar."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -404,16 +411,37 @@ def test_promote_warm_replay_drift_does_not_push_stack(tmp_path):
     }
     task = _StubTask(params={
         "extra_sglang_args": "--attention-backend AITER",
+        "baseline_tput_anchor": 600.0,
     })
-    # 10% gain — well below 25% × 0.8 = 20% threshold.
+    # +10% vs baseline; below 25% × 0.8 historical bar but still adopted.
     result = {"status": "succeeded", "output_throughput": 660.0}
     coord._promote_warm_replay(result, task=task)
 
     outcome = coord.shared_state.warm_replay_outcome
-    assert outcome["status"] == "drift"
+    assert outcome["status"] == "reproduced"
     assert outcome["actual_gain_pct"] == 10.0
-    assert "below" in outcome["reason"]
-    # NO stack push.
+    assert outcome.get("below_historical_reproduce_pct") is True
+    assert len(coord.shared_state.optimization_stack) == 1
+    assert coord.shared_state.current_best["action"] == "warm_replay"
+
+
+def test_promote_warm_replay_no_gain_is_drift(tmp_path):
+    """Zero or negative measured gain → ``drift``, no stack push."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "warm_recipe_tier": "exact",
+    }
+    task = _StubTask(params={
+        "extra_sglang_args": "--attention-backend AITER",
+        "baseline_tput_anchor": 600.0,
+    })
+    result = {"status": "succeeded", "output_throughput": 600.0}
+    coord._promote_warm_replay(result, task=task)
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "drift"
     assert coord.shared_state.optimization_stack == []
     assert coord.shared_state.cumulative_gain == 0.0
 
@@ -456,6 +484,111 @@ def test_promote_warm_replay_failed_records_outcome(tmp_path):
     assert "GPU OOM" in outcome["reason"]
     # No stack push on failure.
     assert coord.shared_state.optimization_stack == []
+
+
+# ===========================================================================
+# Routing-gate repro (review #1): a FAILED replay_warm_recipe result must be
+# classified so the dispatcher routes it to _promote_warm_replay (which clears
+# warm_replay_outcome.status='in_flight'). Otherwise it falls to
+# _handle_unpromotable_result, which never clears the flag, and PRELUDE can
+# never exit (warm_replay_in_flight stays True) — burning the whole budget.
+#
+# The previous repro called _promote_warm_replay directly, bypassing the
+# _is_promotable_result gate that actually decides the route in
+# _pump_dispatcher_once; it gave false confidence. These assert the gate.
+# ===========================================================================
+def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    # The replay reuses BaselineExecutor, so a timeout / OOM / nonzero exit
+    # surfaces as status="failed". The routing gate must NOT treat that as
+    # "unpromotable" for replay_warm_recipe, because only the promote path
+    # clears the in_flight flag.
+    assert coord._is_promotable_result(
+        "replay_warm_recipe", {"status": "failed", "error_class": "crash"},
+    ) is True, (
+        "failed replay must route to _promote_warm_replay so the in_flight "
+        "flag is cleared; otherwise PRELUDE never exits"
+    )
+    # A succeeded replay is of course promotable too.
+    assert coord._is_promotable_result(
+        "replay_warm_recipe", {"status": "succeeded", "output_throughput": 700.0},
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_failed_replay_clears_in_flight_via_full_routing(tmp_path):
+    """End-to-end through the dispatcher's promote/unpromotable decision:
+    a failed replay must leave ``warm_replay_in_flight`` False so PRELUDE
+    can exit. Mirrors the real _pump_dispatcher_once gate."""
+    from inference_optimizer.orchestrator.phase_state import (
+        warm_replay_in_flight,
+    )
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-replay-prelude",
+    }
+    assert warm_replay_in_flight(coord.shared_state) is True
+
+    failed = {"status": "failed", "error_class": "timeout", "error": "killed"}
+    task = _StubTask(kind="replay_warm_recipe")
+    # Reproduce the dispatcher decision: kept iff promotable.
+    if coord._is_promotable_result(task.kind, failed):
+        await coord._promote_to_shared_state(task.kind, failed, task=task)
+    else:
+        await coord._handle_unpromotable_result(task, failed)
+
+    assert warm_replay_in_flight(coord.shared_state) is False, (
+        "failed replay left warm_replay_in_flight True → PRELUDE would "
+        "never exit"
+    )
+    assert coord.shared_state.warm_replay_outcome["status"] == "failed"
+
+
+# ===========================================================================
+# PRELUDE bootstrap — serialize warm-replay before initial roofline
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_prelude_initial_analysis_deferred_while_warm_replay_in_flight(
+    tmp_path,
+):
+    """Initial roofline must not enqueue while KB replay is still running."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    assert coord.shared_state.warm_replay_outcome["status"] == "in_flight"
+    assert len(coord.tasks.calls) == 1
+
+    await coord._maybe_enqueue_prelude_initial_analysis_after_baseline(
+        baseline_tput=600.0,
+    )
+    assert len(coord.tasks.calls) == 1
+    assert not coord.shared_state.auto_roofline_pending_task_id
+
+
+@pytest.mark.asyncio
+async def test_prelude_initial_analysis_enqueued_after_warm_replay_finishes(
+    tmp_path,
+):
+    """Deferred initial roofline enqueues once warm-replay outcome settles."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+    coord._promote_warm_replay(
+        {"status": "failed", "error_class": "crash", "error": "killed"},
+        task=_StubTask(),
+    )
+    assert coord.shared_state.warm_replay_outcome["status"] == "failed"
+
+    await coord._maybe_enqueue_prelude_initial_analysis_after_baseline()
+    assert len(coord.tasks.calls) == 2
+    assert coord.tasks.calls[1]["idempotency_key"] == (
+        "internal-analysis-prelude_initial"
+    )
+    assert coord.shared_state.auto_roofline_pending_task_id
 
 
 # ===========================================================================

@@ -141,6 +141,9 @@ _BASELINE_SELF_LOOP_THRESHOLD: int = 2
 _STEWARD_RECS: frozenset[str] = frozenset({
     "continue_explore", "advance_to_kernel", "stop_session",
 })
+# Retries for session_steward subprocess / LLM transport failures only.
+# Empty or malformed *LLM* verdicts still coerce to stop_session.
+_STEWARD_MAX_INFRA_RETRIES: int = 3
 
 # Actions whose output should observe the freshest ``analysis.md`` /
 # ``last_profile_trace`` snapshot. Every dispatch path
@@ -391,6 +394,64 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
     return out
 
 
+# Flags whose argparse consumes multiple bare tokens before the next ``--``.
+_MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset({
+    "--cuda-graph-bs",
+    "--cuda-graph-max-bs",
+})
+
+
+_DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
+_ROOFLINE_WATERMARK_RATIO_ENV: str = "HYPERLOOM_ROOFLINE_WATERMARK_RATIO"
+
+
+def _resolve_roofline_watermark_ratio() -> float:
+    """Resolve the roofline watermark ratio (env-tunable, safe default).
+
+    Reads ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` so operators can tune the
+    re-roofline threshold without code edits. Any unparseable or unsafe
+    value (``<= 1.0`` would re-fire on every tick) falls back to the 1.10
+    default so a typo can't melt the analysis pipeline.
+    """
+    raw = (os.environ.get(_ROOFLINE_WATERMARK_RATIO_ENV) or "").strip()
+    if not raw:
+        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
+    if val <= 1.0:
+        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
+    return val
+
+
+def _merge_cumulative_extra_sglang_args(
+    base_args: str,
+    candidate_args: str,
+    full_args: str,
+) -> str:
+    """Build cumulative launch args for a KEEP without double-stacking.
+
+    Explore variants usually record the *full* cumulative ``extra_sglang_args``
+    for the stack layer being kept. Joining ``base_args + candidate_args`` when
+    both are full stacks duplicates flags; dedupe then corrupts multi-value
+    knobs such as ``--cuda-graph-bs``.
+    """
+    base = str(base_args or "").strip()
+    candidate = str(candidate_args or "").strip()
+    full = str(full_args or "").strip()
+    if full and full != candidate:
+        merged = full
+    elif candidate and base:
+        if candidate.startswith(base) or base in candidate.split():
+            merged = candidate
+        else:
+            merged = f"{base} {candidate}".strip()
+    else:
+        merged = candidate or full or base
+    return _dedupe_extra_server_args(merged)
+
+
 def _dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string.
 
@@ -409,6 +470,10 @@ def _dedupe_extra_server_args(args_str: str) -> str:
     was re-appended verbatim. Dedupe is a sane normalization: keep each
     flag once, with the value of its last occurrence — same semantics
     argparse would have applied at launch.
+
+    Flags in ``_MULTI_VALUE_SGLANG_FLAGS`` (e.g. ``--cuda-graph-bs``) accept
+    multiple values per occurrence; those runs are preserved so dedupe does
+    not leave stray integers between flags.
 
     Bare flags (no value, e.g. ``--enable-prefix-caching``) are also
     deduped (kept once, position preserved by first appearance).
@@ -431,12 +496,16 @@ def _dedupe_extra_server_args(args_str: str) -> str:
         t = tokens[i]
         if t.startswith("--"):
             flag = t
-            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-                pair = [flag, tokens[i + 1]]
-                i += 2
-            else:
-                pair = [flag]
+            i += 1
+            values: list[str] = []
+            if flag in _MULTI_VALUE_SGLANG_FLAGS:
+                while i < len(tokens) and not tokens[i].startswith("--"):
+                    values.append(tokens[i])
+                    i += 1
+            elif i < len(tokens) and not tokens[i].startswith("--"):
+                values = [tokens[i]]
                 i += 1
+            pair = [flag, *values] if values else [flag]
             if flag not in pair_by_flag:
                 order.append(flag)
             pair_by_flag[flag] = pair
@@ -2154,7 +2223,7 @@ class Coordinator:
         cur = self._current_tput_from_validated_gain()
         if cur <= 0:
             return False
-        return cur / last_rl >= self._ROOFLINE_WATERMARK_RATIO
+        return cur / last_rl >= _resolve_roofline_watermark_ratio()
 
     async def _maybe_enqueue_watermark_roofline(
         self, *, reason: str,
@@ -2572,19 +2641,20 @@ class Coordinator:
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
         )
-        # Two acceptance rules:
-        # 1. If the recipe had a recorded historical gain, we want at
-        #    least ``min_reproduce`` of that figure.
-        # 2. If the recipe didn't carry one (expected_gain=0), any
-        #    positive measurement counts (we trust the recipe at face
-        #    value because nothing else to compare to).
-        reproduced = False
-        if expected_gain > 0:
-            reproduced = measured_gain >= (expected_gain * min_reproduce)
-        else:
-            reproduced = measured_gain > 0
+        # Adopt KB best_config whenever replay beats the session baseline
+        # (operator policy: any measured uplift is worth seeding the stack).
+        # ``expected_gain`` / ``min_reproduce`` are retained in the outcome
+        # for audit only — they no longer gate promotion.
+        reproduced = measured_gain > 0
         outcome["actual_gain_pct"] = round(measured_gain, 3)
         outcome["throughput_after"] = tput
+        if expected_gain > 0:
+            historical_bar = expected_gain * min_reproduce
+            if measured_gain > 0 and measured_gain < historical_bar:
+                outcome["below_historical_reproduce_pct"] = True
+                outcome["historical_reproduce_bar_pct"] = round(
+                    historical_bar, 3,
+                )
         if reproduced:
             # R4-4 defense: pushing an empty stack entry (with no
             # extra_sglang_args / extra_envs) corrupts session_breakdown
@@ -2727,6 +2797,50 @@ class Coordinator:
             )
         state.warm_replay_outcome = outcome
         state.save(self.session_dir)
+
+    async def _maybe_enqueue_prelude_initial_analysis_after_baseline(
+        self,
+        *,
+        baseline_tput: float | None = None,
+    ) -> None:
+        """Enqueue the PRELUDE-bootstrap roofline/profile task after baseline.
+
+        Skipped while warm-replay is ``in_flight`` so two Magpie/sglang
+        jobs do not contend for the same GPU/port. Called from the
+        baseline completion hook and again when warm-replay promotion
+        finishes (success, drift, or failure).
+        """
+        state = self.shared_state
+        if _phase_state.warm_replay_in_flight(state):
+            log.info(
+                "PRELUDE: deferring initial %s until warm-replay completes",
+                self._internal_analysis_kind(),
+            )
+            return
+        if baseline_tput is None:
+            try:
+                baseline_tput = float(state.baseline_tput or 0.0)
+            except (TypeError, ValueError):
+                baseline_tput = 0.0
+        if not isinstance(baseline_tput, (int, float)) or baseline_tput <= 0:
+            return
+        if (state.auto_roofline_pending_task_id or "").strip():
+            return
+        try:
+            rl_task = await self._enqueue_internal_analysis_task(
+                reason="prelude_initial",
+            )
+            state.auto_roofline_pending_task_id = rl_task.task_id
+            log.info(
+                "PRELUDE: baseline landed (tput=%.2f); auto-enqueued "
+                "initial %s task=%s",
+                float(baseline_tput), rl_task.kind, rl_task.task_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception(
+                "PRELUDE: failed to enqueue initial analysis task "
+                "after baseline: %r", exc,
+            )
 
     async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
         """Build + enqueue a Coordinator-internal analysis task.
@@ -3385,8 +3499,22 @@ class Coordinator:
             )
         return task
 
+    @staticmethod
+    def _steward_infrastructure_failure(done_payload: dict[str, Any]) -> bool:
+        """True when the steward subprocess failed before a real verdict."""
+        if not isinstance(done_payload, dict):
+            return True
+        reason = str(done_payload.get("reason") or "").strip().lower()
+        if reason.startswith("subprocess_"):
+            return True
+        if bool(done_payload.get("empty")) and not str(
+            done_payload.get("recommendation") or "",
+        ).strip():
+            return True
+        return False
+
     async def _enqueue_internal_steward_task(
-        self, *, reason: str,
+        self, *, reason: str, retry_attempt: int = 0,
     ) -> "Task | None":
         """IR-7 — enqueue a Coordinator-owned session_steward_specialist task.
 
@@ -3414,14 +3542,20 @@ class Coordinator:
             (self.shared_state.explore_search or {}).get("cursor") or 0
         )
         idempotency_key = f"internal-steward-round{round_id}"
+        if retry_attempt > 0:
+            idempotency_key = (
+                f"{idempotency_key}-retry{int(retry_attempt)}"
+            )
         # Avoid re-enqueueing if a steward verdict already landed in
         # this round (paranoia — wants_steward_assessment should have
         # returned False, but defense-in-depth).
         last = self.shared_state.last_remaining_gaps_assessment or {}
         if isinstance(last, dict) and last.get(
             "round_at_assessment"
-        ) == round_id and last.get("recommendation"):
-            return None
+        ) == round_id:
+            last_rec = str(last.get("recommendation") or "").strip().lower()
+            if last_rec in _STEWARD_RECS:
+                return None
         params: dict[str, Any] = {
             "domain": "session_steward_specialist",
             "gap_canonical_id": f"gap.steward.round{round_id}",
@@ -8115,18 +8249,73 @@ class Coordinator:
         ``continue_explore`` is coerced to ``advance_to_kernel`` so
         the EXPLORE→KERNEL transition becomes mandatory.
 
-        Out-of-vocab ``recommendation`` values are coerced to
-        ``stop_session`` (defense in depth — the LLM can write any
-        string, but we only honour the closed enum).
+        Infrastructure failures (stale heartbeat, subprocess timeout, empty
+        synthesis) schedule up to :data:`_STEWARD_MAX_INFRA_RETRIES` fresh
+        steward tasks with a new idempotency key. Only genuine LLM
+        out-of-vocab strings coerce to ``stop_session``.
         """
         raw_rec = str(done_payload.get("recommendation") or "").strip().lower()
         if raw_rec not in _STEWARD_RECS:
-            log.warning(
-                "steward: out-of-vocab recommendation=%r for task=%s; "
-                "coercing to 'stop_session'",
-                raw_rec, task.task_id,
-            )
-            raw_rec = "stop_session"
+            if Coordinator._steward_infrastructure_failure(done_payload):
+                round_at = int(
+                    (self.shared_state.explore_search or {}).get("cursor") or 0
+                )
+                failures = dict(
+                    getattr(
+                        self.shared_state,
+                        "steward_infra_failures_by_round",
+                        None,
+                    ) or {},
+                )
+                round_key = str(round_at)
+                attempt = int(failures.get(round_key, 0) or 0) + 1
+                failures[round_key] = attempt
+                self.shared_state.steward_infra_failures_by_round = failures
+                fail_reason = str(done_payload.get("reason") or "")[:240]
+                self.shared_state.record_steward_assessment(
+                    recommendation="",
+                    next_gap_canonical_id="",
+                    remaining_potential_pct_estimate=0.0,
+                    rationale=(
+                        f"steward infrastructure failure ({fail_reason}); "
+                        f"attempt {attempt}/{_STEWARD_MAX_INFRA_RETRIES}"
+                    ),
+                    task_id=task.task_id,
+                    round_at_assessment=round_at,
+                    source_payload=done_payload,
+                )
+                try:
+                    self.shared_state.save(self.session_dir)
+                except Exception:  # noqa: BLE001
+                    log.exception("steward: save after infra failure failed")
+                if attempt < _STEWARD_MAX_INFRA_RETRIES:
+                    log.warning(
+                        "steward: infrastructure failure (%s) for task=%s; "
+                        "scheduling retry %d/%d",
+                        fail_reason or "unknown",
+                        task.task_id,
+                        attempt,
+                        _STEWARD_MAX_INFRA_RETRIES,
+                    )
+                    await self._enqueue_internal_steward_task(
+                        reason="infra_retry",
+                        retry_attempt=attempt,
+                    )
+                    return
+                log.warning(
+                    "steward: infrastructure retries exhausted for "
+                    "round=%s; defaulting to advance_to_kernel "
+                    "(not stop_session)",
+                    round_at,
+                )
+                raw_rec = "advance_to_kernel"
+            else:
+                log.warning(
+                    "steward: out-of-vocab recommendation=%r for task=%s; "
+                    "coercing to 'stop_session'",
+                    raw_rec, task.task_id,
+                )
+                raw_rec = "stop_session"
         # Antiloop: only one continuation per session.
         if (
             raw_rec == "continue_explore"
@@ -8904,6 +9093,16 @@ class Coordinator:
             return is_valid_measurement(result)
         if task_kind == "sweep":
             return result.get("status") == "succeeded"
+        # ``replay_warm_recipe`` ALWAYS routes through _promote_to_shared_state
+        # -> _promote_warm_replay, which owns the full succeeded / drift /
+        # FAILED bookkeeping (it clears warm_replay_outcome.status='in_flight'
+        # on every terminal outcome). If a failed replay were sent to
+        # _handle_unpromotable_result instead, the in_flight flag would never
+        # clear and warm_replay_in_flight() would block PRELUDE forever
+        # (env-drift OOM/timeout -- exactly what warm-replay exists to detect
+        # -- would otherwise burn the whole wall-clock budget in PRELUDE).
+        if task_kind == "replay_warm_recipe":
+            return True
         return result.get("status") != "failed"
 
     def _record_intervention_for_task(
@@ -9749,11 +9948,20 @@ class Coordinator:
         kind = classify_change_kind(
             task.kind, variant_attrs if isinstance(variant_attrs, dict) else None,
         )
-        change = summarize_change(
-            task.kind,
-            variant_attrs if isinstance(variant_attrs, dict) else {"name": variant_name},
-            None,
-        )
+        # Ensure the change summary is variant-specific. When the variant
+        # dict carries no args/envs/name, summarize_change drops to the bare
+        # task kind ("explore"), so every regressed explore variant would
+        # write an indistinguishable KB pitfall/lesson description. Fall back
+        # to the variant_name (always present) so the row identifies which
+        # variant it was about.
+        change_attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
+        if not (
+            change_attrs.get("extra_sglang_args")
+            or change_attrs.get("extra_envs")
+            or change_attrs.get("name")
+        ) and variant_name:
+            change_attrs["name"] = variant_name
+        change = summarize_change(task.kind, change_attrs, None)
         error_class = None
         reason = None
         if outcome == OUTCOME_REVERT:
@@ -10099,6 +10307,96 @@ class Coordinator:
                     out[k] = v.strip()
         return out
 
+    def _build_kernel_optimizations_from_state(self) -> list[dict[str, Any]]:
+        """Collect KEEP'd kernel optimizations + their E2E verdict.
+
+        Joins two SharedState ledgers by ``kernel_id``:
+
+        * ``kernel_opt_attempts[kid]`` — the micro layer
+          (``last_decision`` / ``last_micro_speedup`` / ``last_artifact_path``
+          / ``source_file``), written by ``record_kernel_opt``.
+        * ``kernel_integrate_attempts[key]`` — the E2E integrate
+          verification (``best_gain_pct`` + the last attempt's ``new_tput``),
+          written by ``record_kernel_integrate_result``.
+
+        Only KEEP'd kernels are emitted. A KEEP'd kernel with no integrate
+        entry surfaces with ``integrated=False`` (micro-only, E2E unknown);
+        one that was integrated carries its real ``e2e_gain_pct`` / ``e2e_tput``
+        even when that gain is ~0 — that "tried, no E2E payoff" conclusion is
+        exactly the warm-start signal we previously dropped. Returns a list of
+        ``schema.KernelOptimization``-shaped dicts (the put_recipe extras
+        channel + ``Recipe.from_dict`` persist them as first-class rows).
+        """
+        ss = self.shared_state
+        opt_attempts = getattr(ss, "kernel_opt_attempts", {}) or {}
+        integ_attempts = getattr(ss, "kernel_integrate_attempts", {}) or {}
+        if not isinstance(opt_attempts, dict):
+            return []
+
+        # Index integrate results by kernel_id (last write wins; the entry
+        # already carries the rolled-up ``best_gain_pct`` across attempts).
+        integ_by_kid: dict[str, dict[str, Any]] = {}
+        if isinstance(integ_attempts, dict):
+            for entry in integ_attempts.values():
+                if not isinstance(entry, dict):
+                    continue
+                kid = str(entry.get("kernel_id") or "")
+                if kid:
+                    integ_by_kid[kid] = entry
+
+        out: list[dict[str, Any]] = []
+        for kid, e in opt_attempts.items():
+            if not isinstance(e, dict):
+                continue
+            if str(e.get("last_decision", "")).upper() != "KEEP":
+                continue
+            try:
+                micro = float(e.get("last_micro_speedup") or 0.0)
+            except (TypeError, ValueError):
+                micro = 0.0
+            integ = integ_by_kid.get(str(kid))
+            e2e_gain = 0.0
+            e2e_tput = 0.0
+            e2e_decision = ""
+            integrated = False
+            if isinstance(integ, dict):
+                integrated = True
+                # Integrate-layer verdict (KEEP / REVERT / NEEDS_REVIEW).
+                # ``decision`` below stays the micro-layer KEEP; this carries
+                # the E2E outcome so warm-start can skip a kernel whose patch
+                # was reverted at integrate (micro win, E2E loss).
+                e2e_decision = str(integ.get("last_decision") or "").upper()
+                try:
+                    e2e_gain = float(integ.get("best_gain_pct") or 0.0)
+                except (TypeError, ValueError):
+                    e2e_gain = 0.0
+                # Last attempt's measured throughput (the E2E re-bench number).
+                for att in reversed(list(integ.get("attempts") or [])):
+                    if isinstance(att, dict) and att.get("new_tput") is not None:
+                        try:
+                            e2e_tput = float(att.get("new_tput") or 0.0)
+                        except (TypeError, ValueError):
+                            e2e_tput = 0.0
+                        break
+            out.append({
+                "kernel_id":     str(kid),
+                # record_kernel_opt persists the source under
+                # ``last_source_file``; ``source_file`` is a legacy
+                # fallback for older ledger snapshots.
+                "source_file":   str(
+                    e.get("last_source_file") or e.get("source_file") or ""
+                ),
+                "artifact_path": str(e.get("last_artifact_path") or ""),
+                "micro_speedup": micro,
+                "decision":      "KEEP",
+                "e2e_gain_pct":  e2e_gain,
+                "e2e_tput":      e2e_tput,
+                "e2e_decision":  e2e_decision,
+                "integrated":    integrated,
+                "ts":            str(e.get("last_ts") or e.get("ts") or ""),
+            })
+        return out
+
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
         """Materialise the recipe-shaped view of :class:`SharedState`.
 
@@ -10133,6 +10431,27 @@ class Coordinator:
             for key in ("extra_envs", "args", "envs", "name", "tput", "accuracy"):
                 if key in current_best:
                     best_config[key] = current_best[key]
+        # Prefer the last validated stack layer for launch args — current_best
+        # can carry a corrupted cumulative string when promote dedupe regressed.
+        if opt_stack:
+            last_entry = opt_stack[-1]
+            if isinstance(last_entry, dict):
+                # Read the post-rename canonical keys first
+                # (``_lift_to_current_best`` + explore winners write
+                # ``candidate_extra_server_args`` / ``extra_server_args``);
+                # keep the legacy ``*_sglang_args`` keys as a fallback for
+                # pre-migration stack entries. Reading only the legacy keys
+                # here yielded an empty string for every real (renamed)
+                # entry, silently re-breaking the #332 best_config fix.
+                stack_args = str(
+                    last_entry.get("candidate_extra_server_args")
+                    or last_entry.get("extra_server_args")
+                    or last_entry.get("candidate_extra_sglang_args")
+                    or last_entry.get("extra_sglang_args")
+                    or "",
+                ).strip()
+                if stack_args:
+                    best_config["extra_sglang_args"] = stack_args
         what_worked: list[dict[str, Any]] = []
         for idx, entry in enumerate(opt_stack):
             if not isinstance(entry, dict):
@@ -10157,6 +10476,7 @@ class Coordinator:
                     "name":  str(failure.get("name") or failure.get("action") or ""),
                     "reason": str(failure.get("reason") or failure.get("error_class") or ""),
                 })
+        kernel_optimizations = self._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
         cumulative_total = float(getattr(ss, "cumulative_gain", 0.0) or 0.0)
         validated_stack_len = int(
@@ -10186,6 +10506,7 @@ class Coordinator:
                                   if isinstance(current_best, dict) else 0.0,
             "what_worked":       what_worked,
             "what_failed":       what_failed,
+            "kernel_optimizations": kernel_optimizations,
             "stack_fingerprint": {"sha": str(stack_fingerprint)} if stack_fingerprint else {},
             "last_profiled":     str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
             "workload":          workload_tags,
@@ -10194,6 +10515,24 @@ class Coordinator:
                                     or self.session_dir.name),
                 "gain_pct":     cumulative_validated or cumulative_total,
                 "stack_len":    validated_stack_len or len(opt_stack),
+                # arbor-shape provenance so the session row is self-describing
+                # (before/after tput + when + which knobs). Previously omitted,
+                # leaving every recipe.json session at 0.0 / "" / [].
+                "throughput_before": float(getattr(ss, "baseline_tput", 0.0) or 0.0),
+                "throughput_after":  (
+                    float(current_best.get("tput", 0.0))
+                    if isinstance(current_best, dict) else 0.0
+                ),
+                "date":          datetime.now(timezone.utc).isoformat(),
+                "actions_taken": [
+                    nm for nm in (
+                        str(
+                            e.get("variant_name") or e.get("name")
+                            or e.get("action") or ""
+                        ).strip()
+                        for e in opt_stack if isinstance(e, dict)
+                    ) if nm
+                ],
             }],
         }
 
@@ -10300,25 +10639,71 @@ class Coordinator:
                         exc,
                     )
 
+            # KEEP'd kernel optimizations (incl. E2E-verified-but-no-gain)
+            # ride the extras channel: put_recipe splats extras into the
+            # payload and Recipe.from_dict parses ``kernel_optimizations``
+            # as a first-class field. Merge with any prior rows on the live
+            # recipe, de-duped by kernel_id (this session's entry wins).
+            kopts_new = list(attrs.get("kernel_optimizations") or [])
+            new_kids = {
+                str((k or {}).get("kernel_id") or "")
+                for k in kopts_new if isinstance(k, dict)
+            }
+            merged_kopts: list[dict[str, Any]] = list(kopts_new)
+            for prior in (existing_row.get("kernel_optimizations") or []):
+                if not isinstance(prior, dict):
+                    continue
+                if str(prior.get("kernel_id") or "") in new_kids:
+                    continue
+                merged_kopts.append(dict(prior))
+
+            extras_payload = dict(workload_tags or {})
+            if merged_kopts:
+                extras_payload["kernel_optimizations"] = merged_kopts
+
             overrides: dict[str, Any] = {
                 "what_worked":   attrs["what_worked"],
                 "what_failed":   attrs["what_failed"],
                 "last_profiled": attrs["last_profiled"],
                 "sessions":      merged_sessions,
-                "extras":        dict(workload_tags or {}),
+                "extras":        extras_payload,
             }
             # Only overwrite best_config / best_throughput when THIS
             # session is an actual improvement (or the row has none).
-            # A CLOSE that ended without a validated win
-            # (best_throughput == 0.0) must NOT clobber a better
-            # historical config. Omitting the keys makes
+            # A CLOSE that ended without a validated win must NOT clobber a
+            # better historical config. Omitting the keys makes
             # ``_kb_amend_recipe`` preserve the live values.
+            #
+            # Two-part guard:
+            #   1. ``has_validated_win`` — this session produced a real
+            #      optimization (non-empty validated stack, positive validated
+            #      gain, OR a current_best that carries launch flags). A bare
+            #      baseline (no stack, gain<=0, no extra args) is NOT a win:
+            #      its tput is cross-workload-incomparable and it carries no
+            #      flags, so overwriting both drops the recipe's launch args
+            #      and clobbers a validated config (repro session
+            #      20260531T144553Z: 2813@isl256 clobbered 2532@isl1024).
+            #   2. ``my_tput > live_tput`` — even a real win must beat the
+            #      stored best before it replaces it.
             my_tput = float(attrs.get("best_throughput") or 0.0)
+            cb_now = getattr(ss, "current_best", {}) or {}
+            cb_args_now = (
+                str(cb_now.get("extra_sglang_args") or "").strip()
+                if isinstance(cb_now, dict) else ""
+            )
+            validated_gain = float(
+                getattr(ss, "cumulative_gain_validated", 0.0) or 0.0
+            )
+            has_validated_win = bool(
+                (getattr(ss, "optimization_stack", []) or [])
+                or validated_gain > 0.0
+                or cb_args_now
+            )
             try:
                 live_tput = float(existing_row.get("best_throughput") or 0.0)
             except (TypeError, ValueError):
                 live_tput = 0.0
-            if my_tput > live_tput:
+            if has_validated_win and my_tput > live_tput:
                 overrides["best_config"] = attrs["best_config"]
                 overrides["best_throughput"] = my_tput
             # Merge stack_fingerprint rather than replace: T0 stamps
@@ -10372,22 +10757,19 @@ class Coordinator:
             ).strip()
         full_args = ""
         if isinstance(bv, dict):
-            full_args = str(bv.get("extra_server_args") or "").strip()
-        if base_args and candidate_args and full_args == candidate_args:
-            full_args = " ".join((base_args, candidate_args))
-        elif not full_args:
-            full_args = " ".join(
-                part for part in (base_args, candidate_args) if part
-            )
-        # Dedupe repeated ``--flag value`` pairs so the cumulative
-        # extra_server_args reflects what argparse will actually honor
-        # (last value wins). Without this, every promote that re-applies
-        # a multi-value combo candidate (e.g.
-        # ``--cuda-graph-max-bs 32 --cuda-graph-max-bs 128 --cuda-graph-max-bs 256``)
-        # leaves multiple copies of the same flag in the final args
-        # string, which breaks reproduce-launch dashboards and the
-        # final.extra_server_args field surfaced by session_breakdown.
-        full_args = _dedupe_extra_server_args(full_args)
+            full_args = str(
+                bv.get("extra_server_args")
+                or bv.get("extra_sglang_args")
+                or ""
+            ).strip()
+        # Build the cumulative launch args without double-stacking a
+        # candidate that already carries the full cumulative string. The
+        # helper also dedupes repeated ``--flag value`` pairs so the final
+        # extra_server_args reflects what argparse honors (last value wins),
+        # which the reproduce-launch dashboards + session_breakdown rely on.
+        full_args = _merge_cumulative_extra_sglang_args(
+            base_args, candidate_args, full_args,
+        )
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
@@ -10546,17 +10928,19 @@ class Coordinator:
             #   Step 1. Inject warm-recipe history into dedup ledger
             #           (so already-tested REVERTs from past sessions
             #            can't be re-proposed). Cheap + KB-disabled-safe.
-            #   Step 2. Enqueue warm-replay (operates on server lifecycle
-            #            lane; reproduces the historical best_config).
-            #   Step 3. Enqueue auto-analysis (operates on profile_lane;
-            #            different lane → runs in parallel with replay).
+            #   Step 2. Enqueue warm-replay (Magpie + sglang on GPU).
+            #   Step 3. Enqueue auto-analysis (roofline/profile) via
+            #            :meth:`_maybe_enqueue_prelude_initial_analysis_after_baseline`.
+            #            Deferred while warm-replay is ``in_flight`` and
+            #            retried when replay promotion finishes.
             #
             # Ordering rationale: history-inject before warm-replay is
             # mandatory (the replay task must inherit the up-to-date
-            # ledger). Warm-replay before analysis is preferred so that
-            # the first cumulative_gain bump and the optimization_stack
-            # seed are recorded BEFORE specialist dispatch (specialist
-            # prompts read state.json at dispatch time).
+            # ledger). Warm-replay must finish before the initial
+            # roofline — both launch Magpie on the same GPU/port even
+            # though their lane keys differ. Stack seed + cumulative_gain
+            # from a reproduced replay must land before FRAMEWORK_PR /
+            # specialist dispatch (prompts read state.json at dispatch).
             #
             # Skip conditions:
             # * baseline tput missing or invalid;
@@ -10583,22 +10967,10 @@ class Coordinator:
                     log.exception(
                         "PRELUDE: failed to enqueue warm-replay task: %r", exc,
                     )
-                # Step 3 — auto-analysis (roofline / profile).
-                try:
-                    rl_task = await self._enqueue_internal_analysis_task(
-                        reason="prelude_initial",
-                    )
-                    self.shared_state.auto_roofline_pending_task_id = rl_task.task_id
-                    log.info(
-                        "PRELUDE: baseline landed (tput=%.2f); auto-enqueued "
-                        "initial %s task=%s",
-                        float(tput), rl_task.kind, rl_task.task_id,
-                    )
-                except Exception as exc:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "PRELUDE: failed to enqueue initial analysis task "
-                        "after baseline: %r", exc,
-                    )
+                # Step 3 — auto-analysis (roofline / profile); may defer.
+                await self._maybe_enqueue_prelude_initial_analysis_after_baseline(
+                    baseline_tput=float(tput),
+                )
         elif task_kind == "replay_warm_recipe":
             # GAP 1 — separate promote path so the replay result does
             # NOT overwrite ``baseline_tput`` / ``current_best`` via
@@ -10608,6 +10980,8 @@ class Coordinator:
                 self._promote_warm_replay(result, task=task)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("warm-replay promote failed")
+            # PRELUDE initial roofline was deferred while replay ran.
+            await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
         elif task_kind == "profile":
             # IR-8 fallback: profile_executor used to short-circuit on
             # FRAMEWORK=atom with status="skipped" + error_class=

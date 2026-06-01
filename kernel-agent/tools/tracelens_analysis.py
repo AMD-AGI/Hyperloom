@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import gzip
 import json
 import os
@@ -683,26 +684,56 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    # Production vLLM wheel install layout (system dist-packages).
-    # Required since vLLM in the current image ships under
-    # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
-    # editable ``/sgl-workspace/vllm/`` checkout the legacy entries
-    # assumed. The python3.10 fallback covers older images where the
-    # interpreter has not yet been bumped.
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-)
+@functools.lru_cache(maxsize=1)
+def _framework_patch_roots() -> tuple[str, ...]:
+    """Framework install roots (shared with PolicyGate / apply_kernel_patch).
+
+    Sourced from ``framework_paths.resolve_patch_target_roots`` (importlib +
+    glob discovery + static fallbacks, incl. atom). Callers below lower-case
+    the source path before the substring check, so we also emit a lower-case
+    variant of every root (``/app/ATOM/atom/`` -> ``/app/atom/atom/``) to keep
+    the case-insensitive match working.
+    """
+    try:
+        from inference_optimizer.orchestrator.framework_paths import (
+            resolve_patch_target_roots,
+        )
+
+        roots = resolve_patch_target_roots()
+    except ImportError:
+        from apply_kernel_patch import known_target_roots
+
+        roots = known_target_roots()
+    out: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        for variant in (root, root.lower()):
+            if variant and variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    return tuple(out)
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_csrc_root() -> str:
+    """aiter's own device-source root (e.g. ``.../aiter_meta/csrc/``),
+    resolved from the installed package. Empty when aiter is not importable.
+    Cached once per process."""
+    try:
+        import aiter.jit.core as _jc  # type: ignore
+    except Exception:
+        return ""
+    raw = (getattr(_jc, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
+    return (raw.rstrip("/") + "/") if raw else ""
+
+
+def _reusable_roots() -> tuple[str, ...]:
+    """Discovered framework roots plus aiter's own (dynamic) csrc root."""
+    roots = _framework_patch_roots()
+    csrc = _aiter_csrc_root()
+    if csrc and csrc not in roots:
+        return roots + (csrc,)
+    return roots
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
 # raw memcpy/copy ops, and PyTorch native copy. Folded from the feature
@@ -738,7 +769,7 @@ def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
         # A stable in-repo SGLang/vLLM Triton source can still be reusable.
-        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+        return not any(root in lower_file for root in _reusable_roots())
     return False
 
 
@@ -787,7 +818,7 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"runtime-generated (torch.compile / Inductor cache): {source_file}"
         )
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+    if not any(root in lower_file for root in _reusable_roots()):
         return False, (
             f"source not under a reusable framework root: {source_file}"
         )
