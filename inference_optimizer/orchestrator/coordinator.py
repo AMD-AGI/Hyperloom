@@ -404,6 +404,12 @@ _MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset({
 _DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 _ROOFLINE_WATERMARK_RATIO_ENV: str = "HYPERLOOM_ROOFLINE_WATERMARK_RATIO"
 
+# Default per-repo candidate cap for ``fa phase-discover`` during the
+# FRAMEWORK_PR phase. Higher than the historical implicit 5 so each batch
+# probes deeper; overridable per session via
+# ``SharedState.framework_pr_max_candidates``.
+DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES: int = 8
+
 
 def _resolve_roofline_watermark_ratio() -> float:
     """Resolve the roofline watermark ratio (env-tunable, safe default).
@@ -1602,6 +1608,86 @@ class Coordinator:
                 return cand
         return None
 
+    def _framework_pr_known_candidate_ids(self) -> set[str]:
+        """All candidate ids already discovered into any prior batch.
+
+        Used by :meth:`_discover_next_framework_pr_batch` to drop PRs that
+        an earlier batch (or a different repo in the same cross-repo scan)
+        already produced, so each new batch only carries genuinely new
+        candidates.
+        """
+        state = self.shared_state
+        ids: set[str] = set()
+        batches = getattr(state, "framework_pr_batches", None) or []
+        if not isinstance(batches, list):
+            return ids
+        for batch in batches:
+            if not isinstance(batch, dict):
+                continue
+            for cand in batch.get("candidates") or []:
+                if not isinstance(cand, dict):
+                    continue
+                cid = str(
+                    cand.get("candidate_id")
+                    or cand.get("pr_url")
+                    or cand.get("ref")
+                    or f"{cand.get('repo','')}-{cand.get('pr_number','')}"
+                )
+                if cid:
+                    ids.add(cid)
+        return ids
+
+    def _framework_pr_tried_refs(self) -> list[str]:
+        """Refs already discovered this phase (fed to ``compose_gap`` so it
+        can bias the gap away from previously-surfaced PR categories)."""
+        refs: list[str] = []
+        for cid in self._framework_pr_known_candidate_ids():
+            if cid:
+                refs.append(cid)
+        return refs
+
+    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
+        """Repo URLs to query for the FRAMEWORK_PR batch.
+
+        The framework's own repo leads (primary), followed by every other
+        repo the ``pr_intel_specialist`` domain tracks (cross-repo top-up).
+        This is the same repo set EXPLORE's pr_intel_specialist surveys, so
+        the two phases share the discovery surface rather than
+        FRAMEWORK_PR owning it privately. Duplicate / empty URLs are
+        dropped while preserving order.
+        """
+        from . import framework_agent_client as _fa_client
+
+        urls: list[str] = []
+
+        def _add(u: str) -> None:
+            u = (u or "").strip()
+            if u and u not in urls:
+                urls.append(u)
+
+        # Primary: the framework's own repo.
+        _add(_fa_client.repo_url_for_framework(framework))
+
+        # Cross-repo: the pr_intel_specialist repo set (owner/name -> URL).
+        try:
+            from .specialist_domains import get_domain
+            domain = get_domain("pr_intel_specialist")
+            for repo in getattr(domain, "pr_repos", ()) or ():
+                repo = str(repo or "").strip()
+                if not repo:
+                    continue
+                if repo.startswith("http"):
+                    _add(repo)
+                elif "/" in repo:
+                    _add(f"https://github.com/{repo}.git")
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+
+        if not urls:
+            # Last-ditch: let phase_discover resolve from framework itself.
+            _add(_fa_client.repo_url_for_framework(framework or "sglang"))
+        return urls
+
     def _record_framework_pr_phase_done(
         self, *, reason: str, failure_count: int,
     ) -> None:
@@ -1643,7 +1729,34 @@ class Coordinator:
         from . import framework_agent_client as _fa_client
 
         state = self.shared_state
-        gaps = []
+        # Directed gap composition: seed the search from the latest
+        # profile bottleneck + workload taxonomy (model_class / precision /
+        # gpu_type) via compose_gap, then merge any structured
+        # ``state.gaps`` rows on top so a fresh batch is re-targeted at the
+        # current bottleneck rather than always re-querying the same
+        # static gap text.
+        framework = ""
+        try:
+            framework = str(getattr(state, "framework", "") or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            framework = ""
+        directed_keywords: list[str] = []
+        directed_gap = ""
+        try:
+            from .action_executors._framework_gap_composer import compose_gap
+            directed_gap, directed_keywords = compose_gap(
+                framework=framework,
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                model_class=str(getattr(state, "model_class", "") or ""),
+                precision=str(getattr(state, "precision", "") or ""),
+                profile_kernel_breakdown_path=getattr(
+                    state, "last_profile_kernel_breakdown", None,
+                ),
+                tried_refs=self._framework_pr_tried_refs(),
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            directed_gap, directed_keywords = "", []
+        gaps: list[dict[str, str]] = []
         try:
             gap_list = getattr(state, "gaps", None) or []
             for g in gap_list:
@@ -1657,32 +1770,81 @@ class Coordinator:
                 })
         except Exception:  # noqa: BLE001 — defensive
             gaps = []
+        if directed_gap:
+            # Prepend the directed gap so fa's search leads with the
+            # bottleneck-aware phrasing; de-dup against any identical
+            # structured gap text already present.
+            existing = {str(g.get("gap_description") or "") for g in gaps}
+            if directed_gap not in existing:
+                gaps.insert(0, {
+                    "gap_canonical_id": "directed",
+                    "gap_description":  directed_gap,
+                })
         if not gaps:
             gaps = [{"gap_canonical_id": "", "gap_description": ""}]
-        framework = ""
-        try:
-            framework = str(getattr(state, "framework", "") or "").strip().lower()
-        except Exception:  # noqa: BLE001
-            framework = ""
         timeout_sec = float(
             getattr(self, "framework_pr_discover_timeout_sec", 0.0)
             or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
         )
-        try:
-            payload = await _fa_client.phase_discover(
-                model=str(getattr(state, "model", "") or ""),
-                framework=framework or "sglang",
-                gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                gaps=gaps,
-                session_dir=self.session_dir,
-                timeout_sec=timeout_sec,
-            )
-        except Exception as exc:  # noqa: BLE001 — defensive
+        max_candidates = int(
+            getattr(state, "framework_pr_max_candidates", 0) or 0
+        ) or DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES
+        # Cross-repo: query every repo the pr_intel_specialist tracks so
+        # FRAMEWORK_PR discovery is not confined to the single framework
+        # repo. The framework's own repo leads the list (primary), the
+        # rest are cross-repo top-ups (aiter / triton / rccl / the other
+        # serving framework). This is the same repo set EXPLORE's
+        # pr_intel_specialist surveys — neither phase owns it privately.
+        repo_urls = self._framework_pr_discover_repo_urls(framework)
+        payload: dict[str, Any] | None = None
+        merged_candidates: list[dict[str, Any]] = []
+        batch_id = ""
+        any_call_ok = False
+        last_exc: Exception | None = None
+        # Spread the phase timeout across the repos so a multi-repo scan
+        # cannot blow the whole budget on the first slow repo.
+        per_repo_timeout = (
+            timeout_sec / float(len(repo_urls)) if repo_urls else timeout_sec
+        )
+        per_repo_timeout = max(per_repo_timeout, 30.0)
+        for repo_url in repo_urls:
+            try:
+                repo_payload = await _fa_client.phase_discover(
+                    model=str(getattr(state, "model", "") or ""),
+                    framework=framework or "sglang",
+                    gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                    gaps=gaps,
+                    session_dir=self.session_dir,
+                    repo_url=repo_url,
+                    keywords=directed_keywords,
+                    max_candidates=max_candidates,
+                    timeout_sec=per_repo_timeout,
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                last_exc = exc
+                log.warning(
+                    "fa phase-discover failed for repo_url=%r: %r",
+                    repo_url, exc,
+                )
+                continue
+            any_call_ok = True
+            if payload is None:
+                payload = repo_payload
+            if not batch_id:
+                batch_id = str((repo_payload or {}).get("batch_id") or "")
+            repo_cands = (repo_payload or {}).get("candidates") or []
+            if isinstance(repo_cands, list):
+                merged_candidates.extend(
+                    c for c in repo_cands if isinstance(c, dict)
+                )
+        if not any_call_ok:
             failures = int(getattr(state, "framework_pr_discover_failures", 0) or 0) + 1
             state.framework_pr_discover_failures = failures
             log.warning(
-                "fa phase-discover failed (attempt %d/%d): %r",
-                failures, _fa_client.DISCOVER_FAILURE_RETRY_LIMIT, exc,
+                "fa phase-discover failed across all %d repo(s) "
+                "(attempt %d/%d): %r",
+                len(repo_urls), failures,
+                _fa_client.DISCOVER_FAILURE_RETRY_LIMIT, last_exc,
             )
             try:
                 history = getattr(state, "phase_history", None)
@@ -1691,7 +1853,7 @@ class Coordinator:
                         "event":   "framework_pr_discover_failed",
                         "attempt": failures,
                         "limit":   _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
-                        "error":   repr(exc),
+                        "error":   repr(last_exc),
                         "ts":      datetime.now(timezone.utc).isoformat(),
                     })
             except Exception:  # noqa: BLE001 — defensive
@@ -1702,25 +1864,36 @@ class Coordinator:
         # the payload contained candidates.
         if int(getattr(state, "framework_pr_discover_failures", 0) or 0) != 0:
             state.framework_pr_discover_failures = 0
-        candidates = (payload or {}).get("candidates") or []
-        if not isinstance(candidates, list) or not candidates:
+        if not merged_candidates:
             return False
         batch_id = str((payload or {}).get("batch_id") or "")
+        # Cross-batch + cross-repo de-dup: a candidate already discovered
+        # in an earlier batch (regardless of which repo surfaced it) is
+        # dropped here so the new batch only carries genuinely new PRs.
+        # Without this, the cross-repo loop or a re-query could re-list a
+        # PR that another repo's serving overlap already produced, padding
+        # the batch with duplicates that the plateau judge then counts.
+        seen_ids = self._framework_pr_known_candidate_ids()
         # Normalise each candidate so the executor's slug helper has
         # consistent fields and the progress ledger has a stable id.
         norm: list[dict[str, Any]] = []
-        for c in candidates:
+        for c in merged_candidates:
             if not isinstance(c, dict):
                 continue
             cand_id = str(
                 c.get("pr_url") or c.get("ref")
                 or f"{c.get('repo','')}-{c.get('pr_number','')}"
             )
+            if cand_id and cand_id in seen_ids:
+                continue
+            seen_ids.add(cand_id)
             norm.append({
                 **c,
                 "candidate_id": cand_id,
                 "batch_id": batch_id,
             })
+        if not norm:
+            return False
         batch_entry = {
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
