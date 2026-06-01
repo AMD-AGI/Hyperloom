@@ -4,7 +4,7 @@ An agentic system that autonomously optimizes LLM inference on AMD GPUs. Hyperlo
 
 <p align="center"><img width="600" alt="HyperLoom Architecture" src="slides/hyperloom_loop.png" /></p>
 
-Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets. Hyperloom installs both the public TraceLens package (`TRACELENS_PKG_ROOT`) and the [TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/) extension (`TRACELENS_ROOT`) for roofline numbers, gains estimates, and MI355/MI455 MAF data; set `TRACELENS_INSTALL_INTERNAL=0` before `local_setup.sh` to skip cloning internal when you only need the open-source report.
+Block 1-3 - Workload understanding and profiling: Submit your workload as the starting point for the agent to understand your codebase, profile using [TraceLens Agentic Analysis](https://github.com/AMD-AGI/TraceLens/) (relies on [Magpie](https://github.com/AMD-AGI/Magpie) for trace collection), capture bottlenecks and roofline targets. Hyperloom installs both the public TraceLens package (`TRACELENS_ROOT`) and the [TraceLens-internal](https://github.com/AMD-AGI/TraceLens-internal/) extension (`TRACELENS_INTERNAL_ROOT`) for roofline numbers, gains estimates, and MI355/MI455 MAF data; set `TRACELENS_INSTALL_INTERNAL=0` before `local_setup.sh` to skip cloning internal when you only need the open-source report.
 
 Block 4 - Code Optimization Loop: The core of Hyperloom. The agent builds a scored tree of candidates — config overrides, code patches, backend switches, kernel rewrites — and explores depth-first, one change at a time: **Think → Implement → Benchmark → Decide**. Each result re-scores the remaining tree. 
 
@@ -109,8 +109,6 @@ cd TraceLens && pip install -e .
 
 git clone https://github.com/AMD-AGI/TraceLens-internal.git
 cd TraceLens-internal && pip install -e .
-
-TraceLens_generate_perf_report_pytorch_inference --help
 ```
 
 Recommended container paths (match the defaults below):
@@ -172,8 +170,8 @@ Edit `.env`:
 ```env
 SAFE_API_KEY=ak-your-safe-apikey
 OPENAI_BASE_URL=https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1
-TRACELENS_PKG_ROOT=/workspace/TraceLens
-TRACELENS_ROOT=/workspace/TraceLens-internal
+TRACELENS_ROOT=/workspace/TraceLens
+TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 # Optional, only set if you want the Cursor kernel-opt backend:
 # CURSOR_API_KEY=crsr_xxxxxxxxxxxx
@@ -184,8 +182,8 @@ TRACELENS_ROOT=/workspace/TraceLens-internal
 |----------|-------------|---------|
 | `SAFE_API_KEY` | LLM gateway auth key | `ak-your-safe-apikey` |
 | `OPENAI_BASE_URL` | LLM gateway endpoint | `https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1` |
-| `TRACELENS_PKG_ROOT` | TraceLens public repo checkout (first `pip install -e .`) | `/workspace/TraceLens` |
-| `TRACELENS_ROOT` | TraceLens-internal repo checkout (second `pip install -e .`; skills, patches, CLI) | `/workspace/TraceLens-internal` |
+| `TRACELENS_ROOT` | TraceLens public repo checkout (`pip install -e .`; skills, patches, CLI, analysis orchestrator) | `/workspace/TraceLens` |
+| `TRACELENS_INTERNAL_ROOT` | TraceLens-internal repo checkout (`pip install -e .`; rehydration module) | `/workspace/TraceLens-internal` |
 | `CURSOR_API_KEY` (optional) | Cursor SDK key for the OOB cursor kernel-opt backend (independent issuer, prefix `crsr_...`). Leave blank to skip cursor and only use claude/codex/geak. | `crsr_xxxxxxxxxxxx` |
 | `CURSOR_DEFAULT_MODEL` (optional) | Override the default Cursor model id | `claude-opus-4-7` |
 

@@ -370,7 +370,7 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     tracelens_root = _resolve_tracelens_root(arg)
     if tracelens_root is None:
         log.info(
-            "_server_patcher: TRACELENS_ROOT unset/missing — skip vLLM patch"
+            "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch"
         )
         return None
 
@@ -427,7 +427,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     tracelens_root = _resolve_tracelens_root(arg)
     if tracelens_root is None:
         log.info(
-            "_server_patcher: TRACELENS_ROOT unset/missing — skip SGLang patch"
+            "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip SGLang patch"
         )
         return None
 

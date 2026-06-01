@@ -278,7 +278,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
 
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
-    # write_reports now requires the upstream TraceLens v0.3 analysis.md
+    # write_reports now requires the upstream TraceLens analysis.md
     # (see #203). Provide a stub so the function reaches the JSON-writing
     # branch we are exercising here.
     analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
@@ -479,7 +479,7 @@ def _make_write_reports_args(trace_path):
 
 def test_write_reports_raises_when_analysis_md_missing(tmp_path):
     """#203: write_reports refuses to fabricate a Markdown when the
-    TraceLens v0.3 SDK orchestrator failed to produce analysis.md.
+    TraceLens SDK orchestrator failed to produce analysis.md.
     The legacy inline bullet-list fallback silently masked upstream
     failures (see #144 mis-resolution chain) and is gone.
     """
@@ -595,6 +595,7 @@ def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
         trace_path=trace,
         output_dir=out,
         tracelens_root=root,
+        tracelens_internal_root=tmp_path / "TraceLens-internal",
         platform="MI300X",
         framework="vllm",
         analysis_mode="default",
@@ -606,6 +607,7 @@ def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
     assert str(out) in prompt
     assert "Analysis mode: inference" in prompt
     assert "Inference execution mode: graph_capture" in prompt
+    assert "Comparison scope: standalone" in prompt
     assert "Do not ask the user" in prompt
 
 
@@ -724,7 +726,7 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
         captured["prompt"] = prompt
         captured["options"] = options.kwargs
         output_dir.mkdir(parents=True, exist_ok=True)
-        # TraceLens v0.3 contract: orchestrator writes ``analysis.md``.
+        # TraceLens contract: orchestrator writes ``analysis.md``.
         # The legacy ``standalone_analysis.md`` fallback was dropped in #203.
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
         yield _Message(content=[_TextBlock("done")])
@@ -734,6 +736,7 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
         trace_path=tmp_path / "trace.json.gz",
         output_dir=output_dir,
         tracelens_root=tmp_path,
+        tracelens_internal_root=tmp_path / "TraceLens-internal",
         platform="MI300X",
         framework="sglang",
         analysis_mode="default",
@@ -791,6 +794,7 @@ def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
         trace_path=tmp_path / "trace.json.gz",
         output_dir=output_dir,
         tracelens_root=tmp_path,
+        tracelens_internal_root=tmp_path / "TraceLens-internal",
         platform="MI300X",
         framework="sglang",
         analysis_mode="default",
@@ -842,6 +846,7 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
             trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
             platform="MI300X",
             framework="sglang",
             analysis_mode="default",
@@ -1134,7 +1139,7 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
 
 
 # ===========================================================================
-# parse_analysis_md — TraceLens v0.3 final-report contract (#155 review)
+# parse_analysis_md — TraceLens final-report contract (#155 review)
 # ===========================================================================
 _FIXTURE_LLAMA70B_ANALYSIS_MD = (
     Path(__file__).resolve().parents[1]
@@ -1143,7 +1148,7 @@ _FIXTURE_LLAMA70B_ANALYSIS_MD = (
 
 
 def test_parse_analysis_md_llama70b_fixture_yields_21_compute_candidates():
-    """Round-trip the TraceLens v0.3 reference fixture for Llama-3 70B.
+    """Round-trip the TraceLens reference fixture for Llama-3 70B.
 
     The fixture (TraceLens-internal ``evals/analysis_tests/e2e_tests/
     llama_70b/analysis_output_ref/analysis.md``) is the official golden
@@ -1856,7 +1861,7 @@ def test_build_audit_summary_handles_empty_input():
 # PR-B §1: source-function aggregation
 # ===========================================================================
 def test_parse_launcher_path_extracts_python_frame():
-    """``<path>(<line>): <fn>`` is the canonical TraceLens v0.3 shape."""
+    """``<path>(<line>): <fn>`` is the canonical TraceLens shape."""
     path, line, func = tlr._parse_launcher_path(
         "aiter/ops/rmsnorm.py(76): rmsnorm",
     )
@@ -2703,7 +2708,7 @@ def test_extract_idle_pct_returns_none_when_file_missing(tmp_path):
 
 
 def test_extract_idle_pct_against_llama70b_fixture():
-    """Real TraceLens v0.3 fixture: Llama 3 70B has Idle % = 0.25% in
+    """Real TraceLens fixture: Llama 3 70B has Idle % = 0.25% in
     its Executive Summary — pin this against drift in the regex."""
     fixture = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
     assert fixture.exists(), f"fixture must be present: {fixture}"

@@ -89,7 +89,8 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
         env={
             "PRIMUS_CLAW_REPO": str(primus),
             "INFERENCEX_REPO": str(inferencex),
-            "TRACELENS_PKG_REPO": str(tracelens_public),
+            "TRACELENS_REPO": str(tracelens_public),
+            "TRACELENS_REF": "HEAD",
             "TRACELENS_INTERNAL_REPO": str(tracelens_internal),
             "TRACELENS_INTERNAL_REF": "HEAD",
             "SAFE_API_KEY": secret,
@@ -103,8 +104,8 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     assert f"export REPO_ROOT='{REPO_ROOT}'" in env_text
     assert f"export OOB_SRC='{tmp_path / 'deps' / 'Primus-Claw' / 'OOB'}'" in env_text
     assert f"export INFERENCEX_PATH='{tmp_path / 'deps' / 'InferenceX'}'" in env_text
-    assert f"export TRACELENS_PKG_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
-    assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens-internal'}'" in env_text
+    assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
+    assert f"export TRACELENS_INTERNAL_ROOT='{tmp_path / 'deps' / 'TraceLens-internal'}'" in env_text
     assert secret not in env_text
 
 
@@ -121,7 +122,8 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
         env={
             "OOB_SRC": str(existing_oob),
             "INFERENCEX_REPO": str(inferencex),
-            "TRACELENS_PKG_REPO": str(tracelens_public),
+            "TRACELENS_REPO": str(tracelens_public),
+            "TRACELENS_REF": "HEAD",
             "TRACELENS_INTERNAL_REPO": str(tracelens_internal),
             "TRACELENS_INTERNAL_REF": "HEAD",
         },
@@ -183,5 +185,4 @@ def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> No
     assert str(expected_deps / "Primus-Claw") in result.stdout
     assert str(expected_deps / "TraceLens") in result.stdout
     assert str(expected_deps / "TraceLens-internal") in result.stdout
-    assert "checkout main" in result.stdout
-    assert "release/hyperloom_integration_0.3.1" in result.stdout
+    assert "release/hyperloom_integration_v0.5.0" in result.stdout

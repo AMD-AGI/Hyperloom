@@ -197,7 +197,7 @@ class KernelAgentToolTests(unittest.TestCase):
             timeout=30,
             env={
                 **os.environ,
-                "TRACELENS_ROOT": str(ROOT / "missing-tracelens"),
+                "TRACELENS_INTERNAL_ROOT": str(ROOT / "missing-tracelens"),
                 "HYPERLOOM_BUNDLE": str(ROOT / "missing-bundle"),
             },
         )
@@ -212,8 +212,8 @@ class KernelAgentToolTests(unittest.TestCase):
         skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
-        self.assertIn('TRACELENS_PKG_ROOT="${TRACELENS_PKG_ROOT:-/workspace/TraceLens}"', install_text)
-        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens-internal}"', install_text)
+        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"', install_text)
+        self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/workspace/TraceLens-internal}"', install_text)
         self.assertIn('GEAK_REF="${GEAK_REF:-v3.2.0}"', install_text)
         self.assertIn("ensure_rocm_torch_for_geak()", install_text)
         self.assertIn("KERNEL_AGENT_SKIP_TORCH_GATE", install_text)
@@ -280,23 +280,23 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('chmod 600 "$env_file"', install_text)
         self.assertIn("GEAK_MEMORY_STORE_PATH", ray_runtime_text)
         self.assertIn("GEAK_SAVE_TO_KNOWLEDGE_BASE", ray_runtime_text)
-        self.assertIn('DEFAULT_TRACELENS_ROOT = "/workspace/TraceLens-internal"', trace_tool_text)
-        self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
+        self.assertIn('DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens"', trace_tool_text)
+        self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens}"', install_text)
+        self.assertNotIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
-        # Read-only TRACELENS_ROOT must trigger a writable mirror under
-        # ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to GEAK / OOB),
-        # and write_env_file() must export the resolved TRACELENS_ROOT so
-        # CLI subprocesses inherit the mirror instead of falling back to
-        # the read-only /wekafs default. Regression guard for the
-        # tracelens-oob-mirror change.
+        # Read-only TRACELENS_INTERNAL_ROOT must trigger a writable mirror
+        # under ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to GEAK / OOB),
+        # and write_env_file() must export the resolved roots so CLI
+        # subprocesses inherit mirrors instead of falling back to the
+        # read-only /wekafs default.
         self.assertIn(
             'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"',
             install_text,
         )
-        self.assertIn('cp -r "$TRACELENS_ROOT" "$TRACELENS_MIRROR_DIR"', install_text)
-        self.assertIn('export TRACELENS_ROOT', install_text)
+        self.assertIn('cp -r "$TRACELENS_INTERNAL_ROOT" "$TRACELENS_MIRROR_DIR"', install_text)
+        self.assertIn('export TRACELENS_INTERNAL_ROOT', install_text)
         self.assertIn(
-            "echo \"export TRACELENS_ROOT='${TRACELENS_ROOT}'\"",
+            "echo \"export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'\"",
             install_text,
         )
         self.assertIn("MAGPIE_PYTHON", install_text)
