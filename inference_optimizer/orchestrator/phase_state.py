@@ -164,9 +164,10 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     }),
     PHASE_SWEEP: frozenset({
         # ``conc_sweep`` is a Coordinator-internal post-sweep action
-        # (PHASE_SWEEP only, off by default via ``--enable-conc-sweep``)
-        # that benchmarks both baseline and ``current_best`` across a
-        # CONC ladder. Like ``sweep`` it is discovery-only and never
+        # (PHASE_SWEEP only, on by default; disable via
+        # ``--no-enable-conc-sweep``) that benchmarks both baseline
+        # and ``current_best`` across a CONC ladder. Like ``sweep``
+        # it is discovery-only and never
         # promotes; PolicyGate denies LLM-proposed
         # ``delegate{action_name='conc_sweep'}`` because the auto-enqueue
         # at sweep-task completion is the sole legitimate entry point.

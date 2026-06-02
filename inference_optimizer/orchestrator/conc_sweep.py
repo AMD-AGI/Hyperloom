@@ -11,9 +11,12 @@ Trigger
 -------
 This is a post-hook invoked from ``cli.py`` after the close-sequence
 report has been written and right before ``_print_final_summary``. It
-is **off by default** (operator opts in via ``--enable-conc-sweep``)
-because each concurrency point relaunches sglang and the full grid
-can take ~30 min on a single 8xMI300 box.
+is **on by default** (operator opts out via ``--no-enable-conc-sweep``
+or ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``); each concurrency point
+relaunches sglang and the full grid can take ~30 min on a single
+8xMI300 box, so the total wall-clock is bounded by
+``--conc-sweep-total-budget-sec`` (default 2.5h) and the remaining
+session deadline.
 
 Skip rules (return ``status="skipped"`` without launching anything):
 

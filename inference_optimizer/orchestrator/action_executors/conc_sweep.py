@@ -8,7 +8,8 @@ can also drive the post-sweep concurrency comparison.
 The Coordinator auto-enqueues exactly one ``conc_sweep`` task per
 SWEEP phase via ``_enqueue_internal_conc_sweep_task`` right after
 the SWEEP-entry sweep task completes (and only when
-``shared_state.conc_sweep_enabled`` is True). LLM-proposed
+``shared_state.conc_sweep_enabled`` is True; this is the default
+since 2026-06, disable via ``--no-enable-conc-sweep``). LLM-proposed
 ``delegate{action_name='conc_sweep'}`` is denied by PolicyGate.
 
 Inputs (``task.params`` populated by the coordinator):

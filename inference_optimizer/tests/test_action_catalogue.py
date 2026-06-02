@@ -58,8 +58,8 @@ EXPECTED_ACTIONS_V06: dict[str, str] = {
     "framework_pr":         "shallow",
     "sweep":                "shallow",
     # SWEEP-phase post-sweep concurrency comparison (Coordinator-
-    # internal auto-enqueue after sweep, off by default via
-    # ``--enable-conc-sweep``). Same family as ``sweep`` — discovery
+    # internal auto-enqueue after sweep, on by default; disable via
+    # ``--no-enable-conc-sweep``). Same family as ``sweep`` — discovery
     # action that benchmarks both arms across a CONC ladder and writes
     # ``reports/conc_sweep_summary.json``; never promotes.
     "conc_sweep":           "shallow",

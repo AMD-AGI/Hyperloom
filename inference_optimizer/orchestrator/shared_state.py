@@ -314,15 +314,15 @@ class SharedState:
     # After deterministic FP8 GEMM tuning succeeds, continue into source-level
     # kernel_opt by default. Operators can disable this for a GEMM-only run.
     continue_kernel_after_gemm: bool = True
-    # SWEEP-phase post-sweep concurrency sweep. Off by default;
-    # operator opts in via ``--enable-conc-sweep`` /
-    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=1``. When True, the
+    # SWEEP-phase post-sweep concurrency sweep. On by default;
+    # operator opts out via ``--no-enable-conc-sweep`` /
+    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``. When True, the
     # Coordinator auto-enqueues a ``conc_sweep`` task right after the
     # SWEEP-entry sweep task lands (see ``_on_sweep_task_completed``);
     # the executor runs baseline + current_best across the
     # ``conc_sweep_concs`` ladder bounded by
     # ``conc_sweep_total_budget_sec`` total wall-clock.
-    conc_sweep_enabled: bool = False
+    conc_sweep_enabled: bool = True
     # CONC ladder used by the conc_sweep action. Default mirrors
     # ``orchestrator.conc_sweep.DEFAULT_CONCS``. Empty list short-
     # circuits the executor with skip_reason=empty_conc_list.

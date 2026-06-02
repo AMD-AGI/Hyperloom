@@ -1072,10 +1072,10 @@ def _seed_shared_state(
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         explore_roofline_hard_gate=explore_roofline_hard_gate,
-        # SWEEP-phase post-sweep concurrency sweep flags (off by default).
+        # SWEEP-phase post-sweep concurrency sweep flags (on by default).
         # See ``orchestrator/conc_sweep.py`` + coordinator hook
         # ``_enqueue_internal_conc_sweep_task``.
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", False)),
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
         conc_sweep_concs=_parse_conc_sweep_concs(args),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
@@ -1195,7 +1195,7 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "explore":           explore_executor,
     "sweep":             sweep_executor,
     # Coordinator-internal post-sweep concurrency comparison.
-    # Off by default; enable via ``--enable-conc-sweep``. PolicyGate
+    # On by default; disable via ``--no-enable-conc-sweep``. PolicyGate
     # denies any LLM-proposed delegate{action_name='conc_sweep'}, so
     # the only entry is the SWEEP-completion auto-enqueue hook.
     "conc_sweep":        conc_sweep_executor,
@@ -5484,7 +5484,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
     )
     # ------------------------------------------------------------------
-    # Post-optimization concurrency sweep (off by default).
+    # Post-optimization concurrency sweep (on by default).
     #
     # Runs an extra "baseline vs optimized" Magpie grid across CONC
     # values after the close-sequence report has been written. The
@@ -5492,10 +5492,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # frontend pairs it with the roofline ceiling to visualise the
     # full curve. See ``orchestrator/conc_sweep.py``.
     #
-    # Costs ~30 min/point on an 8xMI300 box, so this is an explicit
-    # opt-in. Skip conditions (no baseline, no ``current_best``, no
-    # ISL/OSL) short-circuit before any subprocess is launched and
-    # are recorded in the JSON envelope.
+    # Costs ~30 min/point on an 8xMI300 box and is bounded by
+    # ``--conc-sweep-total-budget-sec`` (default 2.5h) plus the
+    # remaining session wall-clock. Skip conditions (no baseline, no
+    # ``current_best``, no ISL/OSL) short-circuit before any subprocess
+    # is launched and are recorded in the JSON envelope. Disable with
+    # ``--no-enable-conc-sweep`` or
+    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``.
     # ------------------------------------------------------------------
     opt.add_argument(
         "--enable-conc-sweep",
@@ -5504,13 +5507,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=(
             os.environ.get(
                 "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP", "",
-            ).strip().lower() in ("1", "true", "yes", "on")
+            ).strip().lower() not in ("0", "false", "no", "off")
         ),
         help="Run a post-optimization concurrency sweep (baseline vs "
              "current_best across CONC) and write "
              "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-             "Off by default; opt in with this flag or "
-             "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=1.",
+             "On by default; disable with --no-enable-conc-sweep or "
+             "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
