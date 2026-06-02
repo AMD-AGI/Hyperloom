@@ -196,13 +196,7 @@ resolve_tracelens() {
     log "TRACELENS_ROOT: ${TRACELENS_ROOT}"
   fi
 
-  local install_internal=0
-  if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then install_internal=1; fi
-  case "${TRACELENS_INSTALL_INTERNAL:-1}" in
-    1|true|TRUE|yes|YES) install_internal=1 ;;
-    0|false|FALSE|no|NO) install_internal=0 ;;
-  esac
-  if [ "$install_internal" -eq 0 ]; then
+  if [ "${TRACELENS_INSTALL_INTERNAL:-1}" = "0" ]; then
     log "TraceLens-internal: skipped (set TRACELENS_INSTALL_INTERNAL=1 to opt in)"
     return 0
   fi
@@ -264,6 +258,7 @@ write_local_env() {
     write_export OOB_SRC "$OOB_SRC"
     write_export INFERENCEX_PATH "$INFERENCEX_PATH"
     write_export TRACELENS_ROOT "$TRACELENS_ROOT"
+    write_export TRACELENS_INSTALL_INTERNAL "$TRACELENS_INSTALL_INTERNAL"
     if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
       write_export TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
     fi

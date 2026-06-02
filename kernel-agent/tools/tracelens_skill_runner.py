@@ -132,7 +132,7 @@ def build_orchestrator_prompt(
     trace_path: Path,
     output_dir: Path,
     tracelens_root: Path,
-    tracelens_internal_root: Path,
+    tracelens_internal_root: Path | None,
     platform: str,
     framework: str,
     analysis_mode: str,
@@ -148,6 +148,15 @@ def build_orchestrator_prompt(
     else:
         exec_mode = "default"
 
+    internal_root_text = (
+        str(tracelens_internal_root) if tracelens_internal_root
+        else "(not installed; OSS-only mode)"
+    )
+    tl_extension_text = (
+        "TraceLens_internal" if tracelens_internal_root
+        else "(unset)"
+    )
+
     comparison_scope = "standalone"
     capture_text = str(capture_folder) if capture_folder else "N/A"
     return f"""You are running TraceLens standalone analysis for Hyperloom.
@@ -161,7 +170,7 @@ questions; proceed with the analysis.
 Execution context:
 - Environment: local
 - TraceLens root: {tracelens_root}
-- TraceLens-internal root: {tracelens_internal_root}
+- TraceLens-internal root: {internal_root_text}
 - Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
 - Trace file path: {trace_path}
 - Output directory: {output_dir}
@@ -171,7 +180,7 @@ Execution context:
 - Analysis mode: {analysis_mode}
 - Inference execution mode: {exec_mode}
 - Capture folder path: {capture_text}
-- TL_EXTENSION: TraceLens_internal
+- TL_EXTENSION: {tl_extension_text}
 
 
 Important requirements:
@@ -218,7 +227,7 @@ async def run_tracelens_skill(
     trace_path: Path,
     output_dir: Path,
     tracelens_root: Path,
-    tracelens_internal_root: Path,
+    tracelens_internal_root: Path | None,
     platform: str,
     framework: str,
     analysis_mode: str,

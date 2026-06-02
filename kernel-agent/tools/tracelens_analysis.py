@@ -2693,17 +2693,24 @@ def main() -> int:
                           log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                           started_at=started_at)
             tl_root = Path(args.tracelens_root)
-            tl_internal_root = Path(args.tracelens_internal_root)
+            tl_internal_root: Path | None = Path(args.tracelens_internal_root)
             if not tl_root.exists():
                 raise FileNotFoundError(
                     f"TraceLens root not found: {tl_root} "
                     "(set TRACELENS_ROOT or pass --tracelens-root)"
                 )
-            if not tl_internal_root.exists():
-                raise FileNotFoundError(
-                    f"TraceLens-internal root not found: {tl_internal_root} "
-                    "(set TRACELENS_INTERNAL_ROOT or pass --tracelens-internal-root)"
-                )
+            if os.environ.get("TRACELENS_INSTALL_INTERNAL", "1") != "0":
+                if not tl_internal_root.exists():
+                    raise FileNotFoundError(
+                        f"TraceLens-internal root not found: {tl_internal_root} "
+                        "(set TRACELENS_INTERNAL_ROOT or pass --tracelens-internal-root)"
+                    )
+            else:
+                append_log(log_path,
+                    "TraceLens-internal: skipped "
+                    f"(TRACELENS_INSTALL_INTERNAL={os.environ.get('TRACELENS_INSTALL_INTERNAL', '1')})")
+                os.environ.pop("TL_EXTENSION", None)
+                tl_internal_root = None
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],
                         cwd=tl_root, log_path=log_path,
                         timeout_s=max(60, int(args.budget_minutes * 60)))

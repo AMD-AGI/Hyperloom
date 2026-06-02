@@ -75,6 +75,7 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 #   2. AMD-AGI/TraceLens-internal -> $TRACELENS_INTERNAL_ROOT (internal: rehydration module)
 TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/workspace/TraceLens-internal}"
+TRACELENS_INSTALL_INTERNAL="${TRACELENS_INSTALL_INTERNAL:-1}"
 # Writable mirrors when source roots are on a read-only mount (e.g. /wekafs/...).
 TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
@@ -639,6 +640,10 @@ _pip_install_editable() {
   return 0
 }
 
+_tracelens_internal_enabled() {
+  [ "${TRACELENS_INSTALL_INTERNAL:-1}" != "0" ]
+}
+
 ensure_tracelens() {
   if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens" ]; then
     TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens"
@@ -673,6 +678,13 @@ ensure_tracelens() {
   _pip_install_editable "$TRACELENS_ROOT" "TraceLens (public)" || {
     [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ] || die "install AMD-AGI/TraceLens at TRACELENS_ROOT=${TRACELENS_ROOT}"
   }
+
+  if ! _tracelens_internal_enabled; then
+    log "TraceLens-internal: skipped (TRACELENS_INSTALL_INTERNAL=${TRACELENS_INSTALL_INTERNAL})"
+    TRACELENS_INTERNAL_ROOT=""
+    export TRACELENS_ROOT
+    return 0
+  fi
 
   if [ ! -d "$TRACELENS_INTERNAL_ROOT" ]; then
     if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
@@ -1164,8 +1176,11 @@ write_env_file() {
     # kernel-agent/tools/tracelens_analysis.py inherit the writable
     # mirrors instead of falling back to the read-only /wekafs defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
-    [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
-    [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && echo "export TL_EXTENSION='TraceLens_internal'"
+    echo "export TRACELENS_INSTALL_INTERNAL='${TRACELENS_INSTALL_INTERNAL}'"
+    if _tracelens_internal_enabled && [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+      echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
+      echo "export TL_EXTENSION='TraceLens_internal'"
+    fi
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
