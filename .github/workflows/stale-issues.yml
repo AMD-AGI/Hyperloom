@@ -21,7 +21,7 @@ jobs:
       issues: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/stale@v9
+      - uses: actions/stale@v10
         with:
           # ---- Scope: issues only, never touch PRs ----
           days-before-pr-stale: -1
