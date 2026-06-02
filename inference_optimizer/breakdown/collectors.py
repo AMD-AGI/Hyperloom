@@ -2737,6 +2737,7 @@ _SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
     "system_specialist",
     "pr_intel_specialist",
     "session_steward_specialist",
+    "research_scout_specialist",
 )
 
 

@@ -232,6 +232,24 @@ def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
     return reports_dir(session_dir) / f"{ts}_final.{suffix}"
 
 
+def research_hints_md(session_dir: Path) -> Path:
+    """``<sd>/research_hints.md`` — human-readable proven-prior hints
+    collected by the research scout."""
+    return Path(session_dir) / "research_hints.md"
+
+
+def research_hints_json(session_dir: Path) -> Path:
+    """``<sd>/research_hints.json`` — structured mirror of the research
+    hints (machine-readable; advisory gap-scoring reads this)."""
+    return Path(session_dir) / "research_hints.json"
+
+
+def competitor_target_json(session_dir: Path) -> Path:
+    """``<sd>/competitor_target.json`` — LLM-authored competitor target
+    numbers (each per-concurrency entry carries its own source)."""
+    return Path(session_dir) / "competitor_target.json"
+
+
 def logs_dir(session_dir: Path) -> Path:
     return Path(session_dir) / "logs"
 
@@ -531,6 +549,7 @@ __all__ = [
     "agent_outbox",
     "agent_persona",
     "agent_prompt_snapshot",
+    "competitor_target_json",
     "cortex_audit_jsonl",
     "cortex_dead_letter_ndjson",
     "cortex_dir",
@@ -558,6 +577,8 @@ __all__ = [
     "patches_dir",
     "report_file",
     "reports_dir",
+    "research_hints_json",
+    "research_hints_md",
     "runs_dir",
     "runs_root",
     "state_path",

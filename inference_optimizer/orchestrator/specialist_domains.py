@@ -153,6 +153,23 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "EXPLORE→KERNEL transition becomes mandatory."
         ),
     ),
+    SpecialistDomain(
+        key="research_scout_specialist",
+        layer="proven-prior research / reference scripts / arch features",
+        kb_anchor="research_scout",
+        pr_repos=("ROCm/aiter", "sgl-project/sglang", "ROCm/vllm",
+                  "triton-lang/triton", "ROCm/rccl", "NVIDIA/TensorRT-LLM"),
+        available_in="M5",
+        description=(
+            "Read-only research collector dispatched at PRELUDE (and "
+            "periodically during EXPLORE). Surveys reference launch "
+            "scripts, model config.json architecture features, and "
+            "cross-framework / NVIDIA PRs+blogs+MLPerf for proven "
+            "optimizations, then writes prioritised research_hints with "
+            "sources. Never benchmarks, applies patches, or decides "
+            "KEEP/REVERT."
+        ),
+    ),
 )
 
 

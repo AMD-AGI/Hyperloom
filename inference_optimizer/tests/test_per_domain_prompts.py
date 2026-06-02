@@ -66,12 +66,13 @@ def test_specialist_domains_m5_covers_all_six():
     logs ``generic prompt template`` notes for M6-only domains.
 
     IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow. We
-    keep the assertion shape (M5 still covers the full catalogue) but
-    bump the expected count.
+    ``session_steward_specialist`` for the honest self-stop flow; the
+    read-only ``research_scout_specialist`` is the 8th. We keep the
+    assertion shape (M5 still covers the full catalogue) but bump the
+    expected count.
     """
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
-    assert len(SPECIALIST_DOMAINS_M5) == 7
+    assert len(SPECIALIST_DOMAINS_M5) == 8
 
 
 # ---------------------------------------------------------------------------
@@ -303,11 +304,12 @@ def _valid_done_payload(
 # ===========================================================================
 def test_specialist_domains_catalogue_has_six_entries():
     """IR-7 (Saturday May 2026) added a 7th domain
-    ``session_steward_specialist`` for the honest self-stop flow.
-    The test name stays for git-blame continuity but the assertion
-    tracks the actual count.
+    ``session_steward_specialist`` for the honest self-stop flow; the
+    read-only ``research_scout_specialist`` is the 8th. The test name
+    stays for git-blame continuity but the assertion tracks the actual
+    count.
     """
-    assert len(SPECIALIST_DOMAINS) == 7
+    assert len(SPECIALIST_DOMAINS) == 8
     assert SPECIALIST_DOMAIN_KEYS == frozenset(
         d.key for d in SPECIALIST_DOMAINS
     )

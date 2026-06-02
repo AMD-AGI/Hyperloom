@@ -379,6 +379,54 @@ def _focus_session_steward_specialist(
     ]
 
 
+def _focus_research_scout_specialist(
+    inp: SpecialistPromptInputs,
+) -> list[str]:
+    return [
+        "You are the **research scout** — a read-only collector of",
+        "*already-proven* priors. You do NOT benchmark, apply patches, or",
+        "decide KEEP/REVERT. Your single deliverable is a prioritised list",
+        "of research hints, each with an explicit source.",
+        "",
+        "**Three research sources (cover all that are reachable)**",
+        "1. **Reference launch scripts** — look under",
+        "   ``$INFERENCEX_PATH/benchmarks/single_node/`` for scripts",
+        "   matching this (model, GPU). Extract every validated env/flag",
+        "   and the throughput it reached. ``$INFERENCEX_PATH`` may be",
+        "   unset — skip this source silently if so.",
+        "2. **Model architecture features** — read the model's",
+        "   ``config.json`` (MTP ``num_nextn_predict_layers``, MoE expert",
+        "   count / routing, attention type MLA/GQA, quantization support)",
+        "   and infer optimizations those features unlock.",
+        "3. **Cross-framework / NVIDIA research** — survey PRs, blogs, and",
+        "   MLPerf results across frameworks and NVIDIA/TRT-LLM via",
+        "   ``WebSearch`` / ``mcp__pr_monitor__*`` for proven wins. Avoid",
+        "   re-listing PRs the FRAMEWORK_PR phase already covered (the",
+        "   Coordinator dedups by PR id, but skip obvious repeats).",
+        "",
+        "**Gap computation** — where you find a reference throughput,",
+        "compute the gap versus our current baseline and let the gap size",
+        "drive each hint's priority.",
+        "",
+        "**Output protocol** — emit ONE ``specialist_done`` carrying a",
+        "``research`` block:",
+        "- ``hints``: list of ``{what, expected_impact, accuracy_risk,",
+        "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog",
+        "  / MLPerf row / reference script path); a hint without a source",
+        "  is dropped.",
+        "- optional ``competitor_target``: ``{gpu, model, framework,",
+        "  precision, per_conc:[{conc, tput_per_gpu, tpot_ms,",
+        "  interactivity, source}], notes}`` — every per-conc number MUST",
+        "  carry its own ``source`` or it is discarded.",
+        "- optional ``prs_fetched`` / ``pr_diffs_read`` / ``nvidia_refs``:",
+        "  ids you actually inspected (feeds exploration-depth tracking).",
+        "",
+        "**Iron rule** — read-only. Never write a patch, never launch a",
+        "benchmark, never recommend a phase transition. Turn proven priors",
+        "into structured hints and stop.",
+    ]
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[
     str, "Callable[[SpecialistPromptInputs], list[str]]"
 ] = {
@@ -389,6 +437,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[
     "system_specialist":    _focus_system_specialist,
     "pr_intel_specialist":  _focus_pr_intel_specialist,
     "session_steward_specialist": _focus_session_steward_specialist,
+    "research_scout_specialist": _focus_research_scout_specialist,
 }
 
 

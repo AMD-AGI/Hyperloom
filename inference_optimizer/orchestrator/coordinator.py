@@ -1290,6 +1290,8 @@ class Coordinator:
             explore_enabled=self._explore_enabled(),
             max_hours=max_hours_arg,
         )
+        if str(state.phase or "").upper() == "EXPLORE":
+            await self._maybe_enqueue_explore_research_scout()
         if next_phase is None:
             # IR-7 — on plateau but no steward verdict yet,
             # compute_next_phase returns None and we enqueue the
@@ -1644,6 +1646,12 @@ class Coordinator:
                 )
                 if cid:
                     ids.add(cid)
+        # Fold in PR ids the research scout already mined so the two
+        # mechanisms never re-process the same PR.
+        for pid in getattr(state, "research_scout_seen_pr_ids", None) or []:
+            pid = str(pid or "").strip()
+            if pid:
+                ids.add(pid)
         return ids
 
     def _framework_pr_tried_refs(self) -> list[str]:
@@ -3797,6 +3805,184 @@ class Coordinator:
             )
         return task
 
+    async def _enqueue_internal_research_scout_task(
+        self, *, reason: str, round_id: int,
+    ) -> "Task | None":
+        """Enqueue a Coordinator-owned research-scout specialist task.
+
+        Read-only collector dispatched without an LLM propose step (same
+        internal-dispatch shape as the steward). Idempotency is keyed by
+        the qualifying round so repeated ticks within one round collapse
+        to a single scout. Returns ``None`` when a task already exists
+        for this round or enqueue fails (fail-soft).
+        """
+        if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
+            return None
+        idempotency_key = f"internal-research-scout-round{int(round_id)}"
+        try:
+            seen = sorted(self._framework_pr_known_candidate_ids())
+        except Exception:  # noqa: BLE001 — defensive
+            seen = list(
+                getattr(self.shared_state, "research_scout_seen_pr_ids", []) or []
+            )
+        params: dict[str, Any] = {
+            "domain": "research_scout_specialist",
+            "gap_canonical_id": f"gap.research_scout.round{int(round_id)}",
+            "gap_symptom": (
+                "Collect proven priors (reference launch scripts, model "
+                "config.json architecture features, cross-framework / "
+                "NVIDIA research) into prioritised research hints with "
+                "sources; do not benchmark or patch."
+            ),
+            "gap_layer": "research",
+            "max_turns": 10,
+            "source": "coordinator_internal",
+            "reason": str(reason),
+            "seen_pr_ids": seen,
+        }
+        await self._warm_specialist_params(params)
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=["research_lane"],
+                allowed_tools=[
+                    "emit_intent", "Read", "Grep", "Glob", "Bash",
+                    "WebSearch", "WebFetch",
+                ],
+                side_effects=["workspace_write"],
+                lease_ttl_sec=1800,
+            )
+        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+            log.exception(
+                "research-scout: enqueue failed (round=%d)", int(round_id),
+            )
+            return None
+        if not was_existing:
+            self.shared_state.bump_research_scout_runs()
+            self.shared_state.research_scout_last_round = int(round_id)
+            self.shared_state.save(self.session_dir)
+            log.info(
+                "research-scout dispatched: task_id=%s round=%d reason=%s "
+                "runs=%d",
+                task.task_id, int(round_id), reason,
+                self.shared_state.research_scout_runs,
+            )
+        return task
+
+    async def _maybe_enqueue_prelude_research_scout(self) -> None:
+        """Force-dispatch the PRELUDE research scout (not LLM-proposable).
+
+        Always writes the ``research_hints.md`` skeleton first so the
+        artifact exists even if the scout produces nothing or is disabled.
+        """
+        try:
+            from . import research_hints as _research_hints
+            _research_hints.write_hints_skeleton(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: hints skeleton write failed")
+        if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
+            return
+        try:
+            await self._enqueue_internal_research_scout_task(
+                reason="prelude_initial", round_id=0,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: PRELUDE dispatch failed")
+
+    async def _maybe_enqueue_explore_research_scout(self) -> None:
+        """Re-dispatch the scout every K EXPLORE rounds (append-only)."""
+        state = self.shared_state
+        if not bool(getattr(state, "research_scout_enabled", True)):
+            return
+        interval = max(1, int(getattr(state, "research_scout_interval", 3) or 3))
+        round_id = int((state.explore_search or {}).get("cursor") or 0)
+        if round_id <= 0 or (round_id % interval) != 0:
+            return
+        if int(getattr(state, "research_scout_last_round", -1)) == round_id:
+            return
+        try:
+            await self._enqueue_internal_research_scout_task(
+                reason="explore_periodic", round_id=round_id,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: EXPLORE re-dispatch failed")
+
+    def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
+        """Persist scout output: hints, competitor target, gap seeds, dedup.
+
+        All steps are fail-soft — a malformed research block degrades to
+        a no-op rather than aborting the specialist-done handler.
+        """
+        from . import research_hints as _research_hints
+
+        block = done_payload.get("research")
+        if not isinstance(block, dict):
+            block = {}
+        hints = block.get("hints") or []
+        try:
+            added, dropped = _research_hints.append_hints(
+                self.session_dir, hints,
+            )
+            if dropped:
+                log.info(
+                    "research-scout: dropped %d sourceless hint(s)", dropped,
+                )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: append_hints failed")
+            added = 0
+        try:
+            _research_hints.write_competitor_target(
+                self.session_dir, block.get("competitor_target"),
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: competitor_target write failed")
+        # Share inspected PR ids with the FRAMEWORK_PR dedup set.
+        pr_ids: list[Any] = []
+        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
+            vals = block.get(key)
+            if isinstance(vals, list):
+                pr_ids.extend(vals)
+        try:
+            self.shared_state.register_seen_pr_ids(pr_ids)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: register_seen_pr_ids failed")
+        # Seed high-priority hints as gaps[] so EXPLORE tries them early.
+        try:
+            self._seed_gaps_from_research_hints()
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: gap seeding failed")
+        log.info(
+            "research-scout harvested: hints_added=%d seen_pr_ids=%d",
+            added, len(self.shared_state.research_scout_seen_pr_ids or []),
+        )
+
+    def _seed_gaps_from_research_hints(self) -> None:
+        """Inject research hints as advisory gaps[] seeds (idempotent)."""
+        from . import research_hints as _research_hints
+
+        hints = _research_hints.load_hints(self.session_dir)
+        for idx, hint in enumerate(hints):
+            what = str(hint.get("what") or "").strip()
+            if not what:
+                continue
+            tags = hint.get("domain_tags") or []
+            cid = f"gap.research_hint.{idx}"
+            try:
+                self.shared_state.upsert_gap({
+                    "canonical_id": cid,
+                    "symptom": what,
+                    "layer": "research_hint",
+                    "severity": "medium",
+                    "domain_hint": str(tags[0]) if tags else "",
+                    "source": "research_scout",
+                })
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "research-scout: upsert_gap failed for %s", cid,
+                )
+
     async def _maybe_enqueue_steward(self) -> None:
         """IR-7 — enqueue a steward task when phase_state says we need one.
 
@@ -4677,6 +4863,17 @@ class Coordinator:
             if gaps_block:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
+            try:
+                from . import research_hints as _research_hints
+                hints_block = _research_hints.summarise_for_prompt(
+                    self.session_dir,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: research_hints summary failed")
+                hints_block = ""
+            if hints_block:
+                sections.append("=== Research hints (advisory) ===")
+                sections.append(hints_block)
             # Advisory multi-model proposal scores (ProposalScorer).
             # One reference among many — parallel to gaps / KB /
             # analysis.md, NOT a ranking directive (Inv-9.1). Section
@@ -8383,6 +8580,17 @@ class Coordinator:
                     task.task_id,
                 )
 
+        # Harvest research-scout output: persist hints + competitor
+        # target, seed advisory gaps, and dedup PR ids against
+        # FRAMEWORK_PR. Fail-soft; never blocks the round.
+        if domain == "research_scout_specialist":
+            try:
+                self._harvest_research_scout(done_payload)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "research-scout harvest failed for task=%s", task.task_id,
+                )
+
         # refresh the gaps ledger after a
         # specialist round closes. The dedupe-by-canonical-id keeps the
         # list bounded; the per-gap attempt log captures the
@@ -11161,6 +11369,8 @@ class Coordinator:
                 await self._maybe_enqueue_prelude_initial_analysis_after_baseline(
                     baseline_tput=float(tput),
                 )
+                # Step 4 — research scout (parallel, read-only, CPU-only).
+                await self._maybe_enqueue_prelude_research_scout()
         elif task_kind == "replay_warm_recipe":
             # GAP 1 — separate promote path so the replay result does
             # NOT overwrite ``baseline_tput`` / ``current_best`` via

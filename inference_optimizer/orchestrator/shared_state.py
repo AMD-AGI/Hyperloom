@@ -906,6 +906,21 @@ class SharedState:
     # change_type is ``config``. Resets to 0 every time a ``code_patch``
     # KEEP lands. Robustness reads this via the per-tick prompt.
     consecutive_config_only_rounds: int = 0
+    # Research scout bookkeeping.
+    #   * ``research_scout_enabled`` — master switch (``--no-research-scout``
+    #     turns the whole feature off).
+    #   * ``research_scout_runs`` — number of scout dispatches so far;
+    #     feeds exploration-depth tracking.
+    #   * ``research_scout_seen_pr_ids`` — PR ids already surfaced by the
+    #     scout or the FRAMEWORK_PR phase, shared so the two never re-mine
+    #     the same PR.
+    research_scout_enabled: bool = True
+    research_scout_interval: int = 3
+    research_scout_runs: int = 0
+    research_scout_seen_pr_ids: list[str] = field(default_factory=list)
+    # Round id at which the scout was last dispatched, so the K-round
+    # re-dispatch fires at most once per qualifying round.
+    research_scout_last_round: int = -1
     # PR-A8 — total specialist dispatches in the current EXPLORE entry.
     # Reset on phase transition into a fresh EXPLORE. Robustness's
     # storm detector fires when this crosses the configured cap
@@ -3042,6 +3057,33 @@ class SharedState:
         EXPLORE entry.
         """
         self.explore_specialist_dispatched_count = 0
+
+    def bump_research_scout_runs(self, n: int = 1) -> int:
+        """Increment the research-scout dispatch counter; return new total."""
+        self.research_scout_runs = int(self.research_scout_runs or 0) + int(n)
+        return self.research_scout_runs
+
+    def register_seen_pr_ids(self, pr_ids: Any) -> int:
+        """Add PR ids to the shared seen-set (scout + FRAMEWORK_PR dedup).
+
+        Ids are normalised to strings; duplicates and blanks are ignored.
+        Returns the number of newly-added ids.
+        """
+        seen = set(self.research_scout_seen_pr_ids or [])
+        added = 0
+        for raw in pr_ids or []:
+            pid = str(raw or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            self.research_scout_seen_pr_ids.append(pid)
+            added += 1
+        return added
+
+    def has_seen_pr_id(self, pr_id: Any) -> bool:
+        """True iff ``pr_id`` was already surfaced by scout / FRAMEWORK_PR."""
+        pid = str(pr_id or "").strip()
+        return bool(pid) and pid in set(self.research_scout_seen_pr_ids or [])
 
     def record_dynamic_action_dispatch(
         self, dyn_id: str, summary: dict[str, Any],

@@ -1161,6 +1161,10 @@ def _seed_shared_state(
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         explore_roofline_hard_gate=explore_roofline_hard_gate,
+        research_scout_enabled=bool(getattr(args, "research_scout", True)),
+        research_scout_interval=max(
+            1, int(getattr(args, "research_scout_interval", 3) or 3)
+        ),
     )
     state.save(session_dir)
     return state
@@ -4307,6 +4311,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     elif no_explore:
         print("Explore phase   : DISABLED (--no-explore); "
               f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}")
+    if bool(getattr(args, "research_scout", True)):
+        print(
+            "Research scout  : ENABLED at PRELUDE (re-dispatch every "
+            f"{max(1, int(getattr(args, 'research_scout_interval', 3) or 3))} "
+            "explore rounds)"
+        )
+    else:
+        print("Research scout  : DISABLED (--no-research-scout)")
 
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
@@ -5519,6 +5531,29 @@ def _build_parser() -> argparse.ArgumentParser:
              "identical (same idempotency keys, same pending-task "
              "dispatch gate, same watermark anchor update). Env: "
              "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
+    )
+    opt.add_argument(
+        "--research-scout",
+        dest="research_scout",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_RESEARCH_SCOUT"),
+        help="Auto-dispatch a read-only research scout at PRELUDE (and "
+             "every --research-scout-interval EXPLORE rounds) that "
+             "collects proven priors — reference launch scripts, model "
+             "config.json architecture features, and cross-framework / "
+             "NVIDIA research — into ``research_hints.md`` and seeds "
+             "high-priority gaps. Default on; pass ``--no-research-scout`` "
+             "to disable the whole feature. Env: "
+             "INFERENCE_OPTIMIZER_RESEARCH_SCOUT=0.",
+    )
+    opt.add_argument(
+        "--research-scout-interval",
+        dest="research_scout_interval",
+        type=int,
+        default=3,
+        help="Re-dispatch the research scout every N EXPLORE rounds with "
+             "the current bottleneck context (append-only). Default 3. "
+             "Ignored when ``--no-research-scout`` is set.",
     )
     # Retired flags that operator scripts may still pass. We hard-fail
     # at argparse time with a one-line migration hint instead of
