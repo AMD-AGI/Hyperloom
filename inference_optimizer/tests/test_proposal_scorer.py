@@ -220,7 +220,7 @@ def test_default_models_constant():
         "claude-opus-4-8",
         "claude-opus-4-7",
         "gpt-5.5",
-        "gpt-5.4",
+        "dvue-aoai-005-Kimi-K2.6",
     )
 
 

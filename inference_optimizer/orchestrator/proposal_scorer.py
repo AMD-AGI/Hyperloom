@@ -53,7 +53,11 @@ DEFAULT_SCORER_MODELS: tuple[str, ...] = (
     "claude-opus-4-8",
     "claude-opus-4-7",
     "gpt-5.5",
-    "gpt-5.4",
+    # Kimi K2.6 is a reasoning model: it spends completion tokens on
+    # internal reasoning before emitting the JSON, so it needs the
+    # larger ``max_completion_tokens`` default below (4096) — at 1200 it
+    # returns finish_reason=length with empty content.
+    "dvue-aoai-005-Kimi-K2.6",
 )
 
 # Soft cap on what we feed each model so a pathological proposal_set
@@ -164,7 +168,10 @@ class ProposalScorer:
     models: tuple[str, ...] = DEFAULT_SCORER_MODELS
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
     base_url_env: str = "OPENAI_BASE_URL"
-    max_completion_tokens: int = 1200
+    # 4096 (not 1200) so reasoning raters (e.g. Kimi K2.6) have room to
+    # finish their internal reasoning AND still emit the scores JSON;
+    # non-reasoning models stop early and never approach the cap.
+    max_completion_tokens: int = 4096
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_PROPOSAL_SCORER_TIMEOUT_SEC",
