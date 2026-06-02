@@ -4645,6 +4645,14 @@ class Coordinator:
             if required_step:
                 sections.append("=== Execution checklist (Coordinator-enforced) ===")
                 sections.append(required_step)
+            try:
+                mix_hint = self.shared_state.to_intervention_mix_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: intervention_mix_summary failed")
+                mix_hint = ""
+            if mix_hint:
+                sections.append("=== Intervention mix (advisory) ===")
+                sections.append(mix_hint)
 
         # Cortex T0 warm-start snapshot + structured
         # gaps[] ledger injected into the Orchestration

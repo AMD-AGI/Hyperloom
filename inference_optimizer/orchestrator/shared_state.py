@@ -2958,6 +2958,72 @@ class SharedState:
         elif ct == "code_patch":
             self.consecutive_config_only_rounds = 0
 
+    def get_intervention_mix(self, *, recent_window: int = 5) -> dict[str, Any]:
+        """Summarise the intervention-mix ledger as derived counts.
+
+        Returns config vs code_patch totals over the whole ledger and
+        the most recent ``recent_window`` entries, plus
+        ``consecutive_config_only`` (length of the trailing config-only
+        run) and ``config_heavy`` (config has dominated and no code
+        patch has landed). Read-only; never raises.
+
+        Entries with an unknown ``change_type`` (e.g. analysis-only
+        rounds) are ignored for the config/code tallies but still break
+        the trailing config-only run.
+        """
+        ledger = [e for e in (self.intervention_mix or []) if isinstance(e, dict)]
+
+        def _ct(entry: dict[str, Any]) -> str:
+            return str(entry.get("change_type") or "").strip().lower()
+
+        total_config = sum(1 for e in ledger if _ct(e) == "config")
+        total_code_patch = sum(1 for e in ledger if _ct(e) == "code_patch")
+        window = ledger[-recent_window:] if recent_window > 0 else ledger
+        recent_config = sum(1 for e in window if _ct(e) == "config")
+        recent_code_patch = sum(1 for e in window if _ct(e) == "code_patch")
+
+        consecutive_config_only = 0
+        for e in reversed(ledger):
+            ct = _ct(e)
+            if ct == "config":
+                consecutive_config_only += 1
+            else:
+                break
+
+        return {
+            "total_config": total_config,
+            "total_code_patch": total_code_patch,
+            "recent_config": recent_config,
+            "recent_code_patch": recent_code_patch,
+            "consecutive_config_only": consecutive_config_only,
+            "config_heavy": total_config >= recent_window and total_code_patch == 0,
+        }
+
+    def to_intervention_mix_summary(
+        self, *, consecutive_threshold: int = 2,
+    ) -> str:
+        """Advisory prompt block nudging the next EXPLORE round toward a
+        code-patch specialist when config tweaks have dominated.
+
+        Returns an empty string when the mix is balanced (so the prompt
+        section is skipped). Advisory only — never gates a round.
+        """
+        mix = self.get_intervention_mix()
+        consecutive = int(mix.get("consecutive_config_only") or 0)
+        config_heavy = bool(mix.get("config_heavy"))
+        if consecutive < consecutive_threshold and not config_heavy:
+            return ""
+        lines = [
+            f"Recent KEEPs are config-only "
+            f"(consecutive config-only={consecutive}, "
+            f"total config={mix.get('total_config')}, "
+            f"total code-patch={mix.get('total_code_patch')}).",
+            "Consider dispatching a specialist that authors a source "
+            "patch next round so exploration reaches the code surface, "
+            "not just server args / envs.",
+        ]
+        return "\n".join(lines)
+
     def bump_specialist_dispatched(self, n: int = 1) -> int:
         """PR-A8: increment the per-EXPLORE specialist dispatch counter.
 

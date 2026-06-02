@@ -190,3 +190,88 @@ def test_coordinator_intervention_hook_skips_integrate_with_non_kept_status():
                     "applied_no_bench", "no_patches"):
         c._record_intervention_for_task(task, {"status": status})
     assert c.shared_state.intervention_mix == []
+
+
+# ---------------------------------------------------------------------------
+# 5. Derived intervention-mix summary
+# ---------------------------------------------------------------------------
+def test_get_intervention_mix_empty_ledger():
+    s = SharedState()
+    mix = s.get_intervention_mix()
+    assert mix == {
+        "total_config": 0,
+        "total_code_patch": 0,
+        "recent_config": 0,
+        "recent_code_patch": 0,
+        "consecutive_config_only": 0,
+        "config_heavy": False,
+    }
+
+
+def test_get_intervention_mix_counts_and_consecutive_tail():
+    s = SharedState()
+    for _ in range(3):
+        s.record_intervention(change_type="config", action="explore")
+    s.record_intervention(change_type="code_patch", action="integrate_patch")
+    s.record_intervention(change_type="config", action="explore")
+    s.record_intervention(change_type="config", action="explore")
+    mix = s.get_intervention_mix()
+    assert mix["total_config"] == 5
+    assert mix["total_code_patch"] == 1
+    # Trailing run is the two config KEEPs after the code patch.
+    assert mix["consecutive_config_only"] == 2
+    assert mix["config_heavy"] is False
+
+
+def test_get_intervention_mix_config_heavy_flag():
+    s = SharedState()
+    for _ in range(5):
+        s.record_intervention(change_type="config", action="explore")
+    mix = s.get_intervention_mix()
+    assert mix["config_heavy"] is True
+    assert mix["consecutive_config_only"] == 5
+
+
+def test_get_intervention_mix_unknown_breaks_consecutive_run():
+    s = SharedState()
+    s.record_intervention(change_type="config", action="explore")
+    s.record_intervention(change_type="other", action="recover")
+    mix = s.get_intervention_mix()
+    # The unknown tail entry breaks the trailing config-only run.
+    assert mix["consecutive_config_only"] == 0
+    assert mix["total_config"] == 1
+    assert mix["total_code_patch"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 6. Advisory intervention-mix prompt summary
+# ---------------------------------------------------------------------------
+def test_intervention_mix_summary_empty_when_balanced():
+    s = SharedState()
+    s.record_intervention(change_type="config", action="explore")
+    s.record_intervention(change_type="code_patch", action="integrate_patch")
+    assert s.to_intervention_mix_summary() == ""
+
+
+def test_intervention_mix_summary_fires_on_two_consecutive_config():
+    s = SharedState()
+    s.record_intervention(change_type="config", action="explore")
+    s.record_intervention(change_type="config", action="explore")
+    hint = s.to_intervention_mix_summary()
+    assert hint
+    assert "config-only" in hint
+    assert "source\n" in hint or "source " in hint or "patch" in hint
+
+
+def test_intervention_mix_summary_fires_on_config_heavy():
+    s = SharedState()
+    for _ in range(5):
+        s.record_intervention(change_type="config", action="explore")
+    assert s.to_intervention_mix_summary() != ""
+
+
+def test_intervention_mix_summary_respects_threshold():
+    s = SharedState()
+    s.record_intervention(change_type="config", action="explore")
+    # One config-only KEEP is below the default threshold of 2.
+    assert s.to_intervention_mix_summary() == ""
