@@ -56,8 +56,8 @@ grid-runner entry):
     propose `explore` (grid from `proposal_set`) or `integrate_patch`
     (from specialist patches).
 
-    **Grid provenance**: every variant MUST carry
-    `provenance='specialist:<domain>'` (derived from a
+    **Grid provenance (PR-A9 — EXPLORE is specialist-first)**: every
+    variant MUST carry `provenance='specialist:<domain>'` (derived from a
     `specialist_done.proposal_set`) OR `provenance='default_grid'`
     (cold-start, no specialist yet). All-llm_direct grids are denied
     (`explore_requires_specialist_provenance`). Per round select up to
