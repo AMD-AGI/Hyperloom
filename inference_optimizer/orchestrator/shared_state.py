@@ -916,6 +916,10 @@ class SharedState:
     #     the same PR.
     research_scout_enabled: bool = True
     research_scout_interval: int = 3
+    # Master switch for the advisory "External target gap" prompt block
+    # (``--no-target-advisory`` turns it off). Advisory only — never gates
+    # Objective / scoring.
+    target_advisory_enabled: bool = True
     research_scout_runs: int = 0
     research_scout_seen_pr_ids: list[str] = field(default_factory=list)
     # Round id at which the scout was last dispatched, so the K-round

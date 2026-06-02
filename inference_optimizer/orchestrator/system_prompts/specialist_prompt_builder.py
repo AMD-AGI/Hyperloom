@@ -464,6 +464,9 @@ class SpecialistPromptInputs:
     hbm_gb: float = 0.0
     peak_tflops: float = 0.0
     arch_notes: str = ""
+    # Advisory competitor target gap block (mirrored from the
+    # Coordinator). Direction hint only; never gates the specialist.
+    target_gap_notes: str = ""
     # Workload context (mirrored from SharedState by
     # Coordinator._warm_specialist_params; renders in section 2 so
     # the specialist sees the actual benchmark workload instead of
@@ -651,6 +654,9 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     if inp.arch_notes:
         rows.append("")
         rows.append(f"Model architecture (advisory): {inp.arch_notes}")
+    if inp.target_gap_notes:
+        rows.append("")
+        rows.append(inp.target_gap_notes)
     return rows
 
 

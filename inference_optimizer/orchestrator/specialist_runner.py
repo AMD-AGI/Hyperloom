@@ -479,6 +479,7 @@ class SpecialistRunner:
                 hbm_gb=float(params.get("hbm_gb") or 0.0),
                 peak_tflops=float(params.get("peak_tflops") or 0.0),
                 arch_notes=str(params.get("arch_notes") or ""),
+                target_gap_notes=str(params.get("target_gap_notes") or ""),
                 # Workload context — populated by
                 # Coordinator._warm_specialist_params from SharedState.
                 # Zero/empty means "Coordinator did not plumb this

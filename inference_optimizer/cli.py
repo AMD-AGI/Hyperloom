@@ -1193,6 +1193,7 @@ def _seed_shared_state(
         research_scout_interval=max(
             1, int(getattr(args, "research_scout_interval", 3) or 3)
         ),
+        target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         depth_gate_thresholds=_parse_depth_gate_thresholds(
             getattr(args, "depth_gate_thresholds", "") or ""
         ),
@@ -4351,6 +4352,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     else:
         print("Research scout  : DISABLED (--no-research-scout)")
+    if bool(getattr(args, "target_advisory", True)):
+        print("Target advisory : ENABLED (External target gap injected into "
+              "prompts; advisory-only)")
+    else:
+        print("Target advisory : DISABLED (--no-target-advisory)")
     if bool(getattr(args, "depth_gate", True)):
         print("Depth gate      : ENABLED (stop/advance blocked while "
               "exploration is too shallow; IR-6 budget overrides)")
@@ -5614,6 +5620,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Re-dispatch the research scout every N EXPLORE rounds with "
              "the current bottleneck context (append-only). Default 3. "
              "Ignored when ``--no-research-scout`` is set.",
+    )
+    opt.add_argument(
+        "--target-advisory",
+        dest="target_advisory",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_TARGET_ADVISORY"),
+        help="Inject an advisory 'External target gap' block (throughput / "
+             "TPOT / interactivity gap vs the LLM-authored competitor "
+             "target) into the orchestration and specialist prompts; when "
+             "the TPOT ratio dominates it nudges toward latency-reducing "
+             "directions. Advisory only — never gates Objective or scoring. "
+             "Default on; pass ``--no-target-advisory`` to disable. Env: "
+             "INFERENCE_OPTIMIZER_TARGET_ADVISORY=0.",
     )
     opt.add_argument(
         "--depth-gate",

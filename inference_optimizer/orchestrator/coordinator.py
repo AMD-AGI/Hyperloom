@@ -4897,6 +4897,14 @@ class Coordinator:
             if hints_block:
                 sections.append("=== Research hints (advisory) ===")
                 sections.append(hints_block)
+            try:
+                gap_block = self._target_gap_advisory_block()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: target gap advisory failed")
+                gap_block = ""
+            if gap_block:
+                sections.append("=== External target gap (advisory) ===")
+                sections.append(gap_block)
             # Advisory multi-model proposal scores (ProposalScorer).
             # One reference among many — parallel to gaps / KB /
             # analysis.md, NOT a ranking directive (Inv-9.1). Section
@@ -8035,6 +8043,15 @@ class Coordinator:
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
 
+        if "target_gap_notes" not in params:
+            try:
+                _gap_notes = self._target_gap_advisory_block()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: specialist target gap advisory failed")
+                _gap_notes = ""
+            if _gap_notes:
+                params["target_gap_notes"] = _gap_notes
+
         # fill gap-specific anchors from the
         # gaps[] ledger. Orchestration carries a ``gap_canonical_id``
         # via ``delegate.params`` (and also as the M5 ``gap`` field);
@@ -8652,6 +8669,44 @@ class Coordinator:
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
             )
+
+    def _target_gap_advisory_block(self) -> str:
+        """Build the advisory "External target gap" prompt block.
+
+        Compares our current-best per-GPU throughput / TPOT against the
+        LLM-authored competitor target and renders a direction hint when
+        the TPOT ratio dominates. Returns an empty string when the
+        feature is disabled, no sourced competitor target exists, or our
+        side has no comparable numbers. Advisory only — never gates.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "target_advisory_enabled", True)):
+            return ""
+        from . import research_hints as _research_hints
+
+        target = _research_hints.load_competitor_target(self.session_dir)
+        if not target:
+            return ""
+        best = getattr(state, "current_best", None)
+        if not isinstance(best, dict):
+            return ""
+        tput = best.get("tput")
+        tpot = best.get("tpot_mean_ms")
+        tp = int(getattr(state, "tp", 0) or 0)
+        our_tput_per_gpu = (
+            float(tput) / tp
+            if isinstance(tput, (int, float)) and tput > 0 and tp > 0
+            else None
+        )
+        our_tpot_ms = float(tpot) if isinstance(tpot, (int, float)) and tpot > 0 else None
+        conc = int(getattr(state, "conc", 0) or 0) or None
+        gap = _research_hints.gap_analysis(
+            target,
+            our_tput_per_gpu=our_tput_per_gpu,
+            our_tpot_ms=our_tpot_ms,
+            conc=conc,
+        )
+        return _research_hints.full_gap_summary(gap)
 
     def _apply_depth_gate_to_verdict(
         self, *, raw_rec: str, next_gap: str, task: "Task",
@@ -9570,6 +9625,7 @@ class Coordinator:
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": result.get("ttft_mean_ms"),
             "e2el_mean_ms": result.get("e2el_mean_ms"),
+            "tpot_mean_ms": result.get("tpot_mean_ms"),
             "workspace": result.get("workspace"),
         }
         if self.shared_state.baseline_tput > 0:
@@ -11331,6 +11387,7 @@ class Coordinator:
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
+            "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
         if self.shared_state.baseline_tput > 0:
@@ -11414,6 +11471,7 @@ class Coordinator:
                 "tput": float(tput) if isinstance(tput, (int, float)) else None,
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
+                "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "workspace": result.get("workspace"),
             }
             changed = True
@@ -11581,6 +11639,7 @@ class Coordinator:
                     "tput": float(tput),
                     "ttft_mean_ms": result.get("ttft_mean_ms"),
                     "e2el_mean_ms": result.get("e2el_mean_ms"),
+                    "tpot_mean_ms": result.get("tpot_mean_ms"),
                     "workspace": result.get("workspace"),
                 }
                 if self.shared_state.baseline_tput > 0:

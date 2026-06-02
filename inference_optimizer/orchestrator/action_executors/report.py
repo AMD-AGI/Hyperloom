@@ -400,7 +400,7 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     if reason == "no_target_gpu_configured":
         lines.append("## External baseline (not requested)")
     else:
-        lines.append("## External baseline (InferenceX, advisory)")
+        lines.append("## External baseline (competitor target, advisory)")
     lines.append("")
     if reason == "no_target_gpu_configured":
         lines.append(
