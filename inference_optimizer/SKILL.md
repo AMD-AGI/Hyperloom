@@ -475,6 +475,41 @@ supply session metadata directly via CLI flags / env vars:
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | `MODEL_CLASS` | drives `orchestrator/scoring.MODEL_CLASS_ACTION_PRIORS`; defaults to `moe_mla` when unset |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
+| Quantization prelude | `--quantize` | — | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
+
+### Step 2b — Optional quantization prelude (`--quantize`)
+
+When the user asks to **quantize the model before optimizing** (e.g. "quantize
+to FP8 then optimize", "run this in MX-FP4"), pass `--quantize "<scheme prompt>"`
+to the same `optimize` command. This runs the **quantization-agent once as a
+prelude**, before any baseline/session work: it drives AMD Quark PTQ from the
+prompt, then rewrites `--model` to the exported quantized model so the entire
+optimization loop runs on the quantized model.
+
+```bash
+inference_optimizer optimize \
+  --model "$MODEL_PATH" \
+  --framework vllm \
+  --quantize "fp8 global scheme, fp8 kv_cache, exclude lm_head; accept up to 5% relative eval gap" \
+  --max-hours 2
+```
+
+- The `--quantize` text is the quantization request only (scheme / kv-cache /
+  excluded layers / acceptable eval gap). **Do not** repeat the model path or
+  export dir — the adapter folds `--model` + a per-model export dir under the
+  workspace root (`<workspace_root>/quantization/<model>/quantized`) into the
+  prompt automatically.
+- Behavior: one-shot, **skipped on `--resume`**. On a failed/unusable
+  quantization the run **hard-stops (`SystemExit(3)`)** — it never silently
+  optimizes the un-quantized source after an explicit `--quantize`.
+- Prerequisites (in addition to the normal Setup): `$QUARK_ROOT` must point at
+  a Quark checkout containing `.claude/skills/quark-torch-*`, and the installed
+  `amd-quark` package version must match that checkout (install editable from
+  `$QUARK_ROOT` to keep them consistent). Claude SDK auth is the same
+  `ANTHROPIC_*` env the rest of the loop uses.
+- After it finishes, the `Quantization prelude: model -> <dir>` line on stdout
+  shows the quantized model path that the rest of the run will use; include it
+  in status reports.
 
 A user request to optimize a model is approval to run Step 1 on a fresh
 node; do not stop for an extra confirmation. After IR-2, smoke-test the
