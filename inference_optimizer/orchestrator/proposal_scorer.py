@@ -49,7 +49,7 @@ from .backends.base import parse_call_timeout_env
 log = logging.getLogger(__name__)
 
 
-DEFAULT_SCORER_MODELS: tuple[str, ...] = ("claude-opus-4-7", "gpt-5.4")
+DEFAULT_SCORER_MODELS: tuple[str, ...] = ("claude-opus-4-8", "gpt-5.5")
 
 # Soft cap on what we feed each model so a pathological proposal_set
 # can't blow up the scoring prompt. proposal_set is already capped

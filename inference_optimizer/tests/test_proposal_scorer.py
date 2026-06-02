@@ -216,7 +216,7 @@ def test_extract_scores_json_bare_and_fenced():
 
 
 def test_default_models_constant():
-    assert DEFAULT_SCORER_MODELS == ("claude-opus-4-7", "gpt-5.4")
+    assert DEFAULT_SCORER_MODELS == ("claude-opus-4-8", "gpt-5.5")
 
 
 # ===========================================================================
