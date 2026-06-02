@@ -46,9 +46,10 @@ _WORKLOAD_ENV_KEYS = (
 
 @pytest.fixture(autouse=True)
 def _clear_workload_env(monkeypatch):
-    """Keep the workload-uid env discovery deterministic across hosts."""
+    """Keep workload-uid + server-url env discovery deterministic."""
     for key in _WORKLOAD_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("ROBUSTNESS_SERVER_URL", raising=False)
 
 
 def _ns(**overrides) -> argparse.Namespace:
@@ -214,8 +215,10 @@ def test_resolve_choice_single_node_explicit_mock_kept():
     assert _resolve_robustness_choice(ns) == "mock"
 
 
-def test_resolve_choice_multi_node_default_downgrades_to_mock(capsys):
-    """``args.nodes >= 2`` with the default agent choice → mock, silently."""
+def test_resolve_choice_multi_node_no_server_default_downgrades_to_mock(capsys):
+    """``nodes >= 2`` + default agent + no robustness-server → mock,
+    silently (no cluster source available, so the agent would fall back
+    to the noisy sandbox-local LocalProbe)."""
     ns = _ns(nodes=2, robustness_backend=None)
     chosen = _resolve_robustness_choice(ns)
     assert chosen == "mock"
@@ -224,10 +227,10 @@ def test_resolve_choice_multi_node_default_downgrades_to_mock(capsys):
     assert "WARN" not in captured.out
 
 
-def test_resolve_choice_multi_node_explicit_agent_downgrades_with_warning(capsys):
-    """``args.nodes >= 2`` with ``--robustness-agent`` explicitly → mock
-    with a WARNING on stderr that points operators at the multi-node
-    SKILL section."""
+def test_resolve_choice_multi_node_no_server_explicit_agent_warns(capsys):
+    """``nodes >= 2`` + explicit ``--robustness-agent`` + no server →
+    mock with a WARNING that points operators at the SKILL section and
+    tells them to configure a server to keep the agent."""
     ns = _ns(nodes=2, robustness_backend="agent")
     chosen = _resolve_robustness_choice(ns)
     assert chosen == "mock"
@@ -235,6 +238,39 @@ def test_resolve_choice_multi_node_explicit_agent_downgrades_with_warning(capsys
     assert "WARN" in captured.err
     assert "auto-downgrad" in captured.err.lower()
     assert "multi_node/SKILL.md" in captured.err
+
+
+def test_resolve_choice_multi_node_with_server_url_keeps_agent(capsys):
+    """``nodes >= 2`` + explicit agent + ``--robustness-server-url`` →
+    stays ``agent``: the cluster source replaces the sandbox-local
+    probes, so no downgrade and no warning."""
+    ns = _ns(
+        nodes=2,
+        robustness_backend="agent",
+        robustness_server_url="http://robustness.svc:8080",
+    )
+    chosen = _resolve_robustness_choice(ns)
+    assert chosen == "agent"
+    captured = capsys.readouterr()
+    assert "WARN" not in captured.err
+
+
+def test_resolve_choice_multi_node_default_with_server_keeps_agent():
+    """``nodes >= 2`` + default backend + configured server → ``agent``."""
+    ns = _ns(
+        nodes=2,
+        robustness_backend=None,
+        robustness_server_url="http://robustness.svc:8080",
+    )
+    assert _resolve_robustness_choice(ns) == "agent"
+
+
+def test_resolve_choice_multi_node_server_via_env_keeps_agent(monkeypatch):
+    """A server configured via ``ROBUSTNESS_SERVER_URL`` env also keeps
+    the agent backend on multi-node."""
+    monkeypatch.setenv("ROBUSTNESS_SERVER_URL", "http://robustness.svc:8080")
+    ns = _ns(nodes=2, robustness_backend="agent")
+    assert _resolve_robustness_choice(ns) == "agent"
 
 
 def test_resolve_choice_multi_node_explicit_mock_no_warning(capsys):
