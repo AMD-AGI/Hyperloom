@@ -409,14 +409,18 @@ PY
 }
 
 # --- 2. Magpie ---
+# The install state is the checkout under $MAGPIE_DIR (default:
+# $USER_DATA_PATH/runtime/Magpie), not whatever `import Magpie` resolves
+# from the driver Python. Editable installs from older sessions can stay
+# importable and otherwise mask a missing per-workspace checkout.
 ensure_magpie() {
   log "ensuring Magpie at ${MAGPIE_DIR}"
-  if "$PYTHON" -c "import Magpie" >/dev/null 2>&1; then
-    log "Magpie already importable"
-    return 0
-  fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "Magpie not importable (check-only mode, skipping clone/install)"
+    if [ -f "$MAGPIE_DIR/setup.py" ] || [ -f "$MAGPIE_DIR/pyproject.toml" ]; then
+      log "Magpie checkout present at ${MAGPIE_DIR}"
+    else
+      warn "Magpie checkout missing at ${MAGPIE_DIR} (check-only mode, skipping clone/install)"
+    fi
     return 0
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
@@ -429,7 +433,7 @@ ensure_magpie() {
   if [ "$DRY_RUN" -eq 0 ]; then
     "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_DIR"
     "$PYTHON" -c "import Magpie" >/dev/null
-    log "Magpie installed OK"
+    log "Magpie installed OK from ${MAGPIE_DIR}"
   fi
 }
 

@@ -34,9 +34,7 @@ guidance:
   incompatible" (already enforced by PolicyGate R1, but `reject`
   closes the loop for the proposer).
 - **EXPLORE**: allowed are `explore`, `specialist`, `recover` (the
-  retired `backends`/`params`/`validate_stack` actions are merged
-  into the single `explore` action; PolicyGate denies the legacy
-  names with `rule='action_deprecated'`).
+  single `explore` action is the grid-runner entry).
   Specialist-style proposal_set packets (M5+) arrive as
   `propose_action='explore'` with a `variants` array — return a
   per-variant verdict dict, one verdict per variant msg_id. Missing

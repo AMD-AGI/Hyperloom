@@ -411,7 +411,7 @@ class RooflineExecutor:
                 )
             # Stamp the result so the recorder / prompt renderer can
             # surface "this snapshot came from N26 auto-retry" to the
-            # LLM (helps it self-document any subsequent re_explore
+            # LLM (helps it self-document any subsequent explore
             # decisions). Stamping is best-effort; field naming is
             # under `n26_auto_retry` to keep it discoverable in
             # SharedState dumps.
