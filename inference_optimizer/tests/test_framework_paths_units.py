@@ -247,6 +247,10 @@ class TestProbeFrameworkSourceRootsForEnv:
             fp, "_DEFAULT_SOURCE_ROOTS", (f"{shared}/",),
         )
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: shared)
+        # Stub the install-package glob so an installed aiter/vllm/sglang
+        # in the test host's dist-packages cannot leak real roots into
+        # the result (matches the sibling test's isolation).
+        monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
         result = fp.probe_framework_source_roots_for_env()
         # Single entry, even though spec lookups all resolved to the same dir.
         assert result == f"{shared}/"
