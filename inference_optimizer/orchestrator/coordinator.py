@@ -1874,6 +1874,7 @@ class Coordinator:
         # PR that another repo's serving overlap already produced, padding
         # the batch with duplicates that the plateau judge then counts.
         seen_ids = self._framework_pr_known_candidate_ids()
+        primary_repo_url = repo_urls[0] if repo_urls else ""
         # Normalise each candidate so the executor's slug helper has
         # consistent fields and the progress ledger has a stable id.
         norm: list[dict[str, Any]] = []
@@ -1887,10 +1888,21 @@ class Coordinator:
             if cand_id and cand_id in seen_ids:
                 continue
             seen_ids.add(cand_id)
+            # Stamp the repo URL the candidate came from so the executor's
+            # checkout-head path knows whether the PR lives in the live
+            # framework_root's origin (same-repo, fetchable) or a foreign
+            # repo (must fall back to diff_url). fa already returns a
+            # ``repo_url`` per candidate when known; otherwise fall back to
+            # the batch's primary repo URL.
+            discovered_repo_url = str(
+                c.get("repo_url") or c.get("discovered_repo_url")
+                or primary_repo_url
+            )
             norm.append({
                 **c,
                 "candidate_id": cand_id,
                 "batch_id": batch_id,
+                "discovered_repo_url": discovered_repo_url,
             })
         if not norm:
             return False
