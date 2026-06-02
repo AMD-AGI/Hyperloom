@@ -942,18 +942,18 @@ def _seed_shared_state(
     *,
     session_id: str,
 ) -> SharedState:
-    # research_lane capacity is locked here for the lifetime
-    # of the session. Clamp to [0, MAX_RESEARCH_LANE_CAPACITY] (M6
-    # ceiling; values above this are silently clamped down). The cap
-    # protects LLM quota and PR Monitor load (§3.14 R-07).
+    # research_lane capacity is locked here for the lifetime of the
+    # session. Clamp to [0, research-lane ceiling], where the ceiling
+    # scales with the visible GPU count (``2 × GPU``). The cap protects
+    # LLM quota and PR Monitor load (§3.14 R-07).
     from inference_optimizer.orchestrator.policy import (
-        MAX_RESEARCH_LANE_CAPACITY,
+        research_lane_ceiling,
     )
     research_lane_capacity = int(
         getattr(args, "research_lane_capacity", 1) or 1
     )
     research_lane_capacity = max(
-        0, min(MAX_RESEARCH_LANE_CAPACITY, research_lane_capacity),
+        0, min(research_lane_ceiling(), research_lane_capacity),
     )
     # collect plateau threshold overrides into a single dict
     #. Only non-None CLI overrides
@@ -5328,10 +5328,9 @@ def _build_parser() -> argparse.ArgumentParser:
     #           for the Orchestration LLM to fan out one specialist per
     #           top-K gap inside one tick (multi-emit shape) and have
     #           the dispatcher actually run them in parallel.
-    #   * 6   → M6 ceiling that matches Arbor's "six specialists across
-    #           domains" pattern; hard upper bound (values above this
-    #           are silently clamped down to 6 — see
-    #           ``MAX_RESEARCH_LANE_CAPACITY`` in
+    #   * The upper bound scales with the visible GPU count
+    #           (``2 × GPU``); operator values above the ceiling are
+    #           silently clamped down (see ``research_lane_ceiling`` in
     #           ``orchestrator/policy.py``).
     # Locked at session start (mirrored into manifest + SharedState);
     # PolicyGate denies mid-flight mutation via CORE_STATE_FIELDS.
@@ -5345,10 +5344,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         help="Max concurrent LLM specialist sub-agents on the "
              "research_lane. 0 disables specialist "
-             "dispatch entirely (degrades to M3 LLM-direct grid); 4 is "
-             "the PR-A3 default (Arbor-into-Hyperloom); 6 is the M6 "
-             "hard cap. Range [0, 6]; values above 6 are silently "
-             "clamped down. Locked at session start.",
+             "dispatch entirely (degrades to LLM-direct grid); 4 is "
+             "the default. The upper bound scales with the visible GPU "
+             "count (2 x GPU); values above it are silently clamped "
+             "down. Locked at session start.",
     )
     # ------------------------------------------------------------------
     # Advisory specialist-proposal scorer (ProposalScorer). Scores each

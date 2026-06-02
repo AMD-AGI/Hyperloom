@@ -1,13 +1,10 @@
-"""Tests for ``explore_specialist_grid_max_one`` and the propose_action
-provenance backstop.
+"""Tests for ``explore_specialist_grid_max_one``.
 
-Covers the new PolicyGate rule that caps ``provenance='specialist:*'``
-variants at 1 per explore round, plus the previously-missing
-``_validate_explore_provenance`` / grid_size mount on the propose_action
-channel. The all-llm_direct and empty-grid happy-paths are exercised
-in test_discard_single_agent_explore.py; this file focuses on the new
-cap and the propose-side backstop.
-"""
+Covers the PolicyGate rule that caps ``provenance='specialist:*'``
+variants per explore round (tracking ``research_lane_capacity`` clamped
+to the GPU-derived ceiling) on both the delegate and propose_action
+channels. All-``llm_direct`` grids are accepted (the specialist-first
+provenance gate was retired)."""
 
 from __future__ import annotations
 
@@ -142,18 +139,15 @@ def test_propose_denies_two_specialist_variants():
     assert exc.value.rule == "explore_specialist_grid_max_one"
 
 
-def test_propose_denies_all_llm_direct_grid():
-    """Without this backstop, an LLM that cannot reach the delegate
-    channel could ship a llm_direct explore via propose_action and
-    have the Coordinator materialise it. PR-A9 enforced on propose."""
+def test_propose_allows_all_llm_direct_grid():
+    """All-``llm_direct`` grids are accepted on the propose channel; the
+    only enforced explore-grid limit is the specialist fan-out cap."""
     gate = _gate()
     intent = _propose([
         {"name": "a", "provenance": "llm_direct"},
         {"name": "b", "provenance": "llm_direct"},
     ])
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "explore_requires_specialist_provenance"
+    gate.validate_intent("orchestration", intent)  # no raise
 
 
 def test_propose_allows_single_specialist_variant():
@@ -167,30 +161,41 @@ def test_propose_allows_single_specialist_variant():
 # ---------------------------------------------------------------------------
 # Dynamic cap tracking research_lane_capacity
 # ---------------------------------------------------------------------------
-def test_cap_tracks_research_lane_capacity_allows_four():
-    """With research_lane_capacity=4, a 4-specialist grid is permitted."""
+def test_cap_tracks_research_lane_capacity_allows_four(monkeypatch):
+    """With research_lane_capacity=4 (ceiling >= 4), a 4-specialist grid
+    is permitted."""
+    from inference_optimizer.orchestrator import policy as policy_mod
+
+    monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     gate = _gate(research_lane_capacity=4)
     gate.validate_intent("orchestration", _delegate(_specialist_variants(4)))  # no raise
 
 
-def test_cap_tracks_research_lane_capacity_denies_five():
+def test_cap_tracks_research_lane_capacity_denies_five(monkeypatch):
     """With research_lane_capacity=4, a 5-specialist grid is denied."""
+    from inference_optimizer.orchestrator import policy as policy_mod
+
+    monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     gate = _gate(research_lane_capacity=4)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", _delegate(_specialist_variants(5)))
     assert exc.value.rule == "explore_specialist_grid_max_one"
 
 
-def test_cap_clamps_to_max_research_lane_capacity():
-    """Capacity above the hard ceiling clamps to MAX_RESEARCH_LANE_CAPACITY.
+def test_cap_clamps_to_research_lane_ceiling(monkeypatch):
+    """Capacity above the GPU-derived ceiling clamps down.
 
-    research_lane_capacity=32 -> effective cap 6: a 6-variant grid passes,
-    a 7-variant grid is denied.
+    With 4 visible GPUs the ceiling is 8: research_lane_capacity=32 ->
+    effective cap 8: an 8-variant grid passes, a 9-variant grid is
+    denied.
     """
+    from inference_optimizer.orchestrator import policy as policy_mod
+
+    monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     gate = _gate(research_lane_capacity=32)
-    gate.validate_intent("orchestration", _delegate(_specialist_variants(6)))  # no raise
+    gate.validate_intent("orchestration", _delegate(_specialist_variants(8)))  # no raise
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", _delegate(_specialist_variants(7)))
+        gate.validate_intent("orchestration", _delegate(_specialist_variants(9)))
     assert exc.value.rule == "explore_specialist_grid_max_one"
 
 

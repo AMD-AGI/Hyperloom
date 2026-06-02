@@ -7638,23 +7638,37 @@ class Coordinator:
         state = self.shared_state
         plane = self.knowledge_plane
 
+        from .specialist_domains import normalize_dispatch_tags
+
         domain = str(params.get("domain") or "").strip()
+        # Knowledge-domain tags drive multi-anchor prompt assembly. A
+        # single ``domain`` is honoured as the legacy single-tag alias.
+        tags = normalize_dispatch_tags(params)
 
         # PR feed (Gap-02 ↔ Gap-01 contract): if the plane is wired and
-        # PR Monitor is enabled, fetch the per-domain warm cache. Any
-        # exception falls back to an empty list + non-fatal warning.
+        # PR Monitor is enabled, fetch the warm cache for each dispatch
+        # domain and merge. Any exception falls back to an empty list +
+        # non-fatal warning.
         if plane is not None and "pr_feed" not in params:
-            try:
-                prs, _warnings = plane.pr_feed_warm(domain=domain)
-                params["pr_feed"] = [
-                    self._pr_summary_to_dict(p) for p in prs
-                ]
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "specialist warmup: pr_feed_warm(domain=%r) failed: %r",
-                    domain, exc,
-                )
-                params.setdefault("pr_feed", [])
+            pr_domains = [domain] if domain else list(tags)
+            merged_prs: list[dict[str, Any]] = []
+            seen_pr_keys: set[str] = set()
+            for pr_dom in pr_domains:
+                try:
+                    prs, _warnings = plane.pr_feed_warm(domain=pr_dom)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "specialist warmup: pr_feed_warm(domain=%r) failed: %r",
+                        pr_dom, exc,
+                    )
+                    continue
+                for p in prs:
+                    pd = self._pr_summary_to_dict(p)
+                    key = str(pd.get("url") or pd.get("title") or id(pd))
+                    if key not in seen_pr_keys:
+                        seen_pr_keys.add(key)
+                        merged_prs.append(pd)
+            params["pr_feed"] = merged_prs
         else:
             params.setdefault("pr_feed", [])
 
@@ -7684,15 +7698,16 @@ class Coordinator:
                     _hw_raw.rsplit("/", 1)[-1].lower()
                     .replace(" ", "_").replace("/", "_")
                 ) if _hw_raw else ""
-                subgraph = plane.select_kb_for_domain(
-                    domain, hw_slug=hw_slug or None,
+                kb_tags = list(tags) or ([domain] if domain else [])
+                subgraph = plane.select_kb_for_domains(
+                    kb_tags, hw_slug=hw_slug or None,
                 )
                 params["kb_subgraph"] = subgraph or {}
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    "specialist warmup: select_kb_for_domain(domain=%r) "
+                    "specialist warmup: select_kb_for_domains(tags=%r) "
                     "failed: %r",
-                    domain, exc,
+                    tags, exc,
                 )
                 params.setdefault("kb_subgraph", {})
         else:
@@ -8609,12 +8624,21 @@ class Coordinator:
             or task.task_id
         )
         truncated_from = done_payload.get("proposals_truncated_from")
+        from .specialist_domains import normalize_dispatch_tags
+
+        # Knowledge-domain tags for breakdown attribution. The reported
+        # ``tags`` (if any) take precedence over the originating dispatch
+        # params; both fall back to the single-domain alias.
+        tags = normalize_dispatch_tags(done_payload)
+        if not tags:
+            tags = normalize_dispatch_tags(task.params or {})
         entry: dict[str, Any] = {
             "round_id":          round_id,
             "task_id":           task.task_id,
             "source":            source or "coordinator",
             "completed_at":      datetime.now(timezone.utc).isoformat(),
             "domain":            str(done_payload.get("domain") or ""),
+            "tags":              list(tags),
             "gap_canonical_id":  str(done_payload.get("gap_canonical_id") or ""),
             "empty":             bool(done_payload.get("empty"))
                                   or len(proposals) == 0,

@@ -251,16 +251,17 @@ def test_cli_default_research_lane_capacity_is_4():
     assert args.research_lane_capacity == 4
 
 
-def test_cli_clamps_research_lane_capacity_above_six(tmp_path):
-    """MAX_RESEARCH_LANE_CAPACITY=6 is a hard cap; operator values
-    above 6 are silently clamped down (no warning). Verifies the
-    SharedState ends up holding the clamped value, not the raw arg."""
+def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):
+    """The research-lane ceiling scales with the visible GPU count
+    (``2 × GPU``); operator values above it are silently clamped down.
+    Verifies the SharedState ends up holding the clamped value, not the
+    raw arg."""
     import argparse
 
     from inference_optimizer.cli import _seed_shared_state
-    from inference_optimizer.orchestrator.policy import (
-        MAX_RESEARCH_LANE_CAPACITY,
-    )
+    from inference_optimizer.orchestrator import policy as policy_mod
+
+    monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
 
     # Minimal Namespace: _seed_shared_state directly accesses model /
     # model_class / target_summary / max_hours (no getattr defaults);
@@ -278,5 +279,5 @@ def test_cli_clamps_research_lane_capacity_above_six(tmp_path):
         args=args,
         session_id="clamp-test",
     )
-    assert MAX_RESEARCH_LANE_CAPACITY == 6
-    assert state.research_lane_capacity == MAX_RESEARCH_LANE_CAPACITY
+    assert policy_mod.research_lane_ceiling() == 8
+    assert state.research_lane_capacity == 8

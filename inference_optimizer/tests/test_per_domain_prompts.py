@@ -400,8 +400,8 @@ def test_R2_unknown_domain_denied(gate):
                 },
             },
         ))
-    assert exc.value.rule == "specialist_dispatch_source"
-    assert "domain" in (exc.value.hint or "")
+    assert exc.value.rule == "specialist_unknown_domain"
+    assert "tag" in (exc.value.hint or "")
 
 
 def test_R2_missing_gap_denied(gate):

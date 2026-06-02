@@ -1398,9 +1398,10 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
                 bucket["rejected"] += int(payload.get("proposals_rejected") or 0)
         else:
             # Round predates ``domain_breakdown``; impute equal share
-            # across the listed domains so the per-domain numbers add
-            # up to the parent row even on legacy rounds.
-            domains = r.get("domains") or []
+            # across the round's knowledge-domain tags (or the legacy
+            # ``domains[]`` list) so the per-domain numbers add up to the
+            # parent row even on legacy rounds.
+            domains = r.get("tags") or r.get("domains") or []
             if isinstance(domains, list) and domains:
                 share_total = int(r.get("proposals_total") or 0) // len(domains)
                 share_kept = int(r.get("proposals_kept") or 0) // len(domains)
@@ -4160,6 +4161,7 @@ def collect_specialist_runs(
             "dispatched_at":     str(raw.get("dispatched_at") or ""),
             "completed_at":      str(raw.get("completed_at") or ""),
             "domains":           list(raw.get("domains") or []),
+            "tags":              list(raw.get("tags") or []),
             "parallelism":       int(raw.get("parallelism") or 0),
             "proposals_total":   int(raw.get("proposals_total") or 0),
             "proposals_kept":    int(raw.get("proposals_kept") or 0),
@@ -4228,9 +4230,10 @@ def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
         v = mapping.get(task_id)
         if isinstance(v, str):
             return v
-    # Fallback: if the round has exactly one domain we can attribute
-    # the task to it without ambiguity.
-    domains = round_entry.get("domains") or []
+    # Fallback: if the round has exactly one knowledge-domain tag (or
+    # one legacy domain) we can attribute the task to it without
+    # ambiguity.
+    domains = round_entry.get("tags") or round_entry.get("domains") or []
     if isinstance(domains, list) and len(domains) == 1:
         return str(domains[0])
     return ""

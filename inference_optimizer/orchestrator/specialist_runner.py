@@ -49,6 +49,7 @@ from .specialist_domains import (
     SPECIALIST_DOMAINS_M5,
     SpecialistDomain,
     get_domain,
+    normalize_dispatch_tags,
 )
 from .specialist_subprocess import (
     SpecialistSubprocessConfig,
@@ -66,6 +67,20 @@ from .system_prompts.specialist_prompt_builder import (
 
 
 log = logging.getLogger(__name__)
+
+
+def _extra_focus_tags(
+    params: dict[str, Any], domain: "SpecialistDomain",
+) -> tuple[str, ...]:
+    """Knowledge-domain tags beyond the primary domain's own anchor.
+
+    Used to append extra per-domain focus blocks for a multi-tag
+    dispatch. The primary domain's anchor is dropped so its focus block
+    is not rendered twice.
+    """
+    tags = normalize_dispatch_tags(params)
+    primary_anchor = (domain.kb_anchor or "").strip()
+    return tuple(t for t in tags if t and t != primary_anchor)
 
 
 # v0.8 §3.11 R4 / R5 — canonical external tool registry lives in
@@ -439,6 +454,7 @@ class SpecialistRunner:
                 # a valid SpecialistPromptInputs.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
                 sub_kind=str(params.get("sub_kind") or ""),
+                extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(
                     params.get("warm_start_pitfalls") or []

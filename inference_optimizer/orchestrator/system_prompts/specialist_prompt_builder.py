@@ -31,6 +31,7 @@ from typing import Any, Callable
 from ..specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     SpecialistDomain,
+    domain_for_tag,
     get_domain,
 )
 
@@ -476,6 +477,12 @@ class SpecialistPromptInputs:
     # branch was retired with the FRAMEWORK_PR phase migration.
     sub_kind: str = ""
 
+    # Additional knowledge-domain tags carried by a multi-tag dispatch.
+    # Each tag contributes its per-domain focus block to Section 1 (the
+    # primary ``domain`` block renders first). Empty for single-tag
+    # dispatch.
+    extra_focus_tags: tuple[str, ...] = ()
+
     # Active server framework name (``sglang`` / ``vllm`` / ``atom``).
     # Mirrored from ``SharedState.framework`` by
     # ``Coordinator._warm_specialist_params``. Empty string means the
@@ -531,12 +538,29 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     # paragraph. Each domain template emphasises the surface area the
     # specialist should reason about + the typical winning techniques
     # (lifted from Arbor's orchestrator.md "agent expertise" table).
+    rendered_focus_keys: set[str] = set()
     focus = _DOMAIN_FOCUS_TEMPLATES.get(inp.domain.key)
     if focus is not None:
         body.append("")
         body.append(f"### Domain focus — {inp.domain.key}")
         body.append("")
         body.extend(focus(inp))
+        rendered_focus_keys.add(inp.domain.key)
+    # Multi-tag dispatch: append the focus block of each additional
+    # knowledge-domain tag (resolved to a representative specialist
+    # key) so a combined-domain specialist sees every relevant surface.
+    for tag in inp.extra_focus_tags:
+        tag_domain = domain_for_tag(tag)
+        if tag_domain is None or tag_domain.key in rendered_focus_keys:
+            continue
+        tag_focus = _DOMAIN_FOCUS_TEMPLATES.get(tag_domain.key)
+        if tag_focus is None:
+            continue
+        body.append("")
+        body.append(f"### Domain focus — {tag_domain.key}")
+        body.append("")
+        body.extend(tag_focus(inp))
+        rendered_focus_keys.add(tag_domain.key)
     return body
 
 
