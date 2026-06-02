@@ -164,14 +164,42 @@ _read_dotenv_var() {
   fi
 }
 
+# .env.template historically used TRACELENS_*=\ as a visual "empty" hint;
+# treat that (and whitespace-only values) as unset so local_setup clones
+# under $HYPERLOOM_DEPS_ROOT instead of dying on a non-existent "\" path.
+_is_placeholder_path_value() {
+  local value="${1:-}"
+  case "$value" in
+    ""|'\'|'\\') return 0 ;;
+  esac
+  local trimmed="${value//[[:space:]]/}"
+  [ -z "$trimmed" ] && return 0
+  [ "$trimmed" = '\' ] && return 0
+  return 1
+}
+
+_normalize_trace_env_roots() {
+  local name value
+  for name in TRACELENS_ROOT TRACELENS_INTERNAL_ROOT; do
+    value="${!name:-}"
+    if [ -n "$value" ] && _is_placeholder_path_value "$value"; then
+      unset "$name"
+    fi
+  done
+}
+
 _resolve_existing_checkout() {
   local var_name="$1"
   local default_root="$2"
   local value=""
 
+  _normalize_trace_env_roots
   value="${!var_name:-}"
   if [ -z "$value" ]; then
     value="$(_read_dotenv_var "$var_name" || true)"
+  fi
+  if _is_placeholder_path_value "$value"; then
+    value=""
   fi
   if [ -z "$value" ] && [ -d "${default_root}/.git" ]; then
     value="${default_root}"
@@ -261,6 +289,7 @@ write_local_env() {
     write_export TRACELENS_INSTALL_INTERNAL "$TRACELENS_INSTALL_INTERNAL"
     if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
       write_export TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
+      write_export TL_EXTENSION "TraceLens_internal"
     fi
   } > "$LOCAL_SETUP_ENV"
   chmod 600 "$LOCAL_SETUP_ENV"
