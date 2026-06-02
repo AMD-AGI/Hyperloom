@@ -373,6 +373,8 @@ def classify_artifact(path: str) -> str:
     lower = path.lower()
     if lower.endswith("ci_metrics.json"):
         return "ci_metrics"
+    if Path(lower).name.startswith("session_breakdown") and lower.endswith(".json"):
+        return "session_breakdown"
     if lower.endswith("baseline_summary.json"):
         return "baseline_summary"
     if lower.endswith("sweep_results.csv"):
@@ -403,6 +405,16 @@ def normalize_task_result(
     warnings: list[str] = []
 
     ci_metrics_path = find_artifact(task_dir, "ci_metrics.json", "hyperloom/ci_metrics.json")
+    session_breakdown_path = find_artifact(
+        task_dir,
+        "session_breakdown.json",
+        "session_breakdown_v2.json",
+    )
+    if session_breakdown_path is None and task_dir.exists():
+        session_breakdown_path = next(
+            (p for p in sorted(task_dir.rglob("session_breakdown*.json")) if p.is_file()),
+            None,
+        )
     baseline_summary_path = find_artifact(task_dir, "results/baseline_summary.json", "baseline_summary.json")
     sweep_path = find_artifact(task_dir, "results/sweep_results.csv", "sweep_results.csv")
     kernel_candidates_path = find_artifact(task_dir, "results/kernel_candidates.json", "kernel_candidates.json")
@@ -410,7 +422,8 @@ def normalize_task_result(
     run_context_path = find_artifact(task_dir, "results/run_context.env", "run_context.env")
     report_path = find_artifact(task_dir, "optimization_report.md")
 
-    ci_metrics = parse_ci_metrics(_read_json(ci_metrics_path, warnings))
+    ci_metrics_source_path = ci_metrics_path or session_breakdown_path
+    ci_metrics = parse_ci_metrics(_read_json(ci_metrics_source_path, warnings))
     baseline = parse_baseline_summary(_read_json(baseline_summary_path, warnings))
     kernel_optimizations, kernel_summary = parse_kernel_results(_read_json(kernel_results_path, warnings))
 
@@ -429,6 +442,9 @@ def normalize_task_result(
             "final_status": manifest_record.get("final_status"),
             "final_phase": manifest_record.get("final_phase"),
             "final_message": manifest_record.get("final_message"),
+            "ci_status": manifest_record.get("ci_status"),
+            "ci_success": manifest_record.get("ci_success"),
+            "delivery_reason": manifest_record.get("delivery_reason"),
             "detected": manifest_record.get("detected"),
             "overrides": manifest_record.get("overrides") or {},
         },
@@ -442,6 +458,7 @@ def normalize_task_result(
         "artifacts": build_artifact_index(task_dir),
         "source_files": {
             "ci_metrics": _relative(ci_metrics_path, task_dir),
+            "session_breakdown": _relative(session_breakdown_path, task_dir),
             "baseline_summary": _relative(baseline_summary_path, task_dir),
             "sweep_results": _relative(sweep_path, task_dir),
             "kernel_candidates": _relative(kernel_candidates_path, task_dir),
