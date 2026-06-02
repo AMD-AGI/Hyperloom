@@ -135,6 +135,17 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "best_throughput": float(recipe.get("best_throughput") or 0.0),
         "validated_gain_pct": float(recipe.get("validated_gain_pct") or 0.0),
     }
+    # Negative-knowledge + provenance lists ride the recipe page so a
+    # gbrain warm-start gets the same anti-priors the local row carries.
+    # Without them ``cortex_t0`` reads empty ``pitfalls`` / ``lessons``
+    # off the warm recipe and the next session loses its "avoid known-
+    # dead knobs" priors. The minimal YAML emitter only handles scalar
+    # lists, so structured list-of-dict fields are stored as JSON strings
+    # (round-tripped by ``GbrainRemoteRecipeClient._json_list`` on read).
+    for _field in ("what_worked", "what_failed", "remaining_gaps", "pitfalls", "lessons"):
+        _value = recipe.get(_field)
+        if _value:
+            attrs[_field] = json.dumps(_value, ensure_ascii=False, default=str)
     tags = [
         "kind:recipe",
         f"model:{_tag_value(model)}",
