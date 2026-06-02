@@ -577,7 +577,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.extend(workload_rows)
     if inp.arch_notes:
         rows.append("")
-        rows.append(f"Architecture notes: {inp.arch_notes}")
+        rows.append(f"Model architecture (advisory): {inp.arch_notes}")
     return rows
 
 
