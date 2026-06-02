@@ -3052,7 +3052,7 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         )
 
 
-def _run_quantization_prelude(args: argparse.Namespace) -> None:
+async def _run_quantization_prelude(args: argparse.Namespace) -> None:
     """Run the quantization-agent once before the optimization loop.
 
     No-op unless ``--quantize "<prompt>"`` was passed. When set, this drives
@@ -3083,9 +3083,13 @@ def _run_quantization_prelude(args: argparse.Namespace) -> None:
 
     # Adapter lives in the orchestrator package; lazy-import so the CLI keeps
     # importing cleanly even in environments without the quantization deps.
-    from .orchestrator.quantization_request_handlers import run_quantization_prelude
+    # _run_optimize already runs under asyncio.run, so await the async form
+    # directly (the sync wrapper would call asyncio.run inside a live loop).
+    from .orchestrator.quantization_request_handlers import (
+        run_quantization_prelude_async,
+    )
 
-    quantized_model_dir = run_quantization_prelude(
+    quantized_model_dir = await run_quantization_prelude_async(
         prompt=prompt,
         source_model=source_model,
         workspace=workspace,
@@ -3519,7 +3523,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Quantization prelude (one-shot, before any session/baseline work):
         # if --quantize was passed, quantize the source model now and rewrite
         # args.model to the exported quantized model. No-op otherwise.
-        _run_quantization_prelude(args)
+        await _run_quantization_prelude(args)
 
         # Resolve framework: --framework > $FRAMEWORK env > "sglang".
         # Session-wide; mixing frameworks in one session is not supported.
