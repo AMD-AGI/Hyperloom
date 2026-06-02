@@ -4357,6 +4357,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     else:
         print("Depth gate      : DISABLED (--no-depth-gate); legacy "
               "single steward continuation")
+    if bool(getattr(args, "allow_empty_kernel_shape", False)):
+        os.environ["HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE"] = "1"
+        print("Kernel shape    : empty-shape dispatch ALLOWED "
+              "(--allow-empty-kernel-shape)")
+    else:
+        os.environ.pop("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", None)
+        print("Kernel shape    : non-empty trace shape REQUIRED for "
+              "kernel-opt dispatch")
 
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
@@ -5554,6 +5562,20 @@ def _build_parser() -> argparse.ArgumentParser:
              "epsilon (0.5%%). Prevents premature deep work while cheap "
              "exploration is still earning. Default off. Env: "
              "INFERENCE_OPTIMIZER_GAIN_DRIVEN_KERNEL_OPT=1.",
+    )
+    opt.add_argument(
+        "--allow-empty-kernel-shape",
+        dest="allow_empty_kernel_shape",
+        action="store_true",
+        default=os.environ.get(
+            "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "0",
+        ).strip().lower() in {"1", "true", "yes", "on"},
+        help="Escape hatch (default off): allow kernel optimization to "
+             "dispatch a candidate with no trace-anchored shape. Normally "
+             "a shapeless candidate is rejected with a structured error so "
+             "the run returns to ``trace_analyze`` instead of burning a "
+             "GEAK / OOB budget on an unanchored kernel. Env: "
+             "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1.",
     )
     opt.add_argument(
         "--enable-roofline",
