@@ -131,8 +131,10 @@ def test_coordinator_intervention_hook_records_config_for_explore():
 
 
 def test_coordinator_intervention_hook_skips_explore_with_no_winners():
-    """Explore round with empty winners + no best_variant is a
-    no-keep round; the counter does NOT advance."""
+    """Explore round with empty winners + no best_variant is a no-keep
+    round: the contiguous config-KEEP counter does NOT advance, but B2
+    records a ``config_attempt`` so repeated fruitless config rounds can
+    still drive the intervention-mix ESCALATION toward a code patch."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.task_registry import Task
 
@@ -144,7 +146,10 @@ def test_coordinator_intervention_hook_skips_explore_with_no_winners():
     )
     result = {"status": "succeeded", "winners": [], "best_variant": None}
     c._record_intervention_for_task(task, result)
-    assert c.shared_state.intervention_mix == []
+    # B2: a no-keep config round is recorded as a config_attempt ...
+    assert len(c.shared_state.intervention_mix) == 1
+    assert c.shared_state.intervention_mix[0]["change_type"] == "config_attempt"
+    # ... but the contiguous config-KEEP counter must NOT advance.
     assert c.shared_state.consecutive_config_only_rounds == 0
 
 
