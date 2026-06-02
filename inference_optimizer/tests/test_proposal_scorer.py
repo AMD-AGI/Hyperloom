@@ -216,7 +216,12 @@ def test_extract_scores_json_bare_and_fenced():
 
 
 def test_default_models_constant():
-    assert DEFAULT_SCORER_MODELS == ("claude-opus-4-8", "gpt-5.5")
+    assert DEFAULT_SCORER_MODELS == (
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "gpt-5.5",
+        "gpt-5.4",
+    )
 
 
 # ===========================================================================
@@ -387,10 +392,15 @@ def test_render_shows_per_model_side_by_side():
     text = st.to_proposal_scores_summary()
     assert "Advisory only" in text
     assert "cuda_graph_bs_512" in text
-    assert "claude-opus-4-7=8.0" in text
-    assert "gpt-5.4=6.5" in text
-    # gpt-5.4 omitted disable_radix → rendered as n/a.
-    assert "gpt-5.4=n/a" in text
+    # Identities are anonymized: real model slugs MUST NOT leak into the
+    # orchestration-facing render. Sorted slugs map claude-opus-4-7 ->
+    # rater_1, gpt-5.4 -> rater_2 (stable within a render).
+    assert "claude-opus-4-7" not in text
+    assert "gpt-5.4" not in text
+    assert "rater_1=8.0" in text
+    assert "rater_2=6.5" in text
+    # rater_2 omitted disable_radix → rendered as n/a.
+    assert "rater_2=n/a" in text
 
 
 def test_render_reports_unavailable_models():
@@ -406,7 +416,55 @@ def test_render_reports_unavailable_models():
         },
     }]
     text = st.to_proposal_scores_summary()
-    assert "models unavailable this round: bad" in text
+    # Anonymized: the failing model slug "bad" must not leak; sorted
+    # slugs map bad -> rater_1, good -> rater_2.
+    assert "bad" not in text
+    assert "raters unavailable this round: rater_1" in text
+
+
+def test_render_rater_labels_stable_across_rounds():
+    """The same model maps to the same rater_N in every rendered round,
+    and no real model slug ever appears in the orchestration text."""
+    st = _real_state()
+    st.specialist_rounds = [
+        {
+            "round_id": "r1",
+            "domain": "serving_specialist",
+            "proposal_set": [{"name": "v1"}],
+            "ensemble_scores": {
+                "scale": "0-10",
+                "models": {
+                    "claude-opus-4-8": {"v1": {"score": 8.0, "reason": "a"}},
+                    "gpt-5.5": {"v1": {"score": 6.0, "reason": "b"}},
+                },
+                "errors": {},
+            },
+        },
+        {
+            "round_id": "r2",
+            "domain": "kernel_switch_specialist",
+            "proposal_set": [{"name": "v2"}],
+            "ensemble_scores": {
+                "scale": "0-10",
+                "models": {
+                    # Deliberately different dict order to prove the label
+                    # is keyed on the slug, not on iteration order.
+                    "gpt-5.5": {"v2": {"score": 5.0, "reason": "c"}},
+                    "claude-opus-4-8": {"v2": {"score": 9.0, "reason": "d"}},
+                },
+                "errors": {},
+            },
+        },
+    ]
+    text = st.to_proposal_scores_summary(max_rounds=2)
+    for slug in ("claude-opus-4-8", "gpt-5.5", "claude", "gpt"):
+        assert slug not in text, f"model slug {slug!r} leaked into prompt"
+    # claude-opus-4-8 sorts before gpt-5.5 → rater_1 / rater_2, stable
+    # across both rounds: rater_1 carries claude's 8.0 then 9.0.
+    assert "rater_1=8.0" in text
+    assert "rater_2=6.0" in text
+    assert "rater_2=5.0" in text
+    assert "rater_1=9.0" in text
 
 
 # ===========================================================================

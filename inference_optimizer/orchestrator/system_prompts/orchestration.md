@@ -72,18 +72,20 @@ grid-runner entry):
 
     **Advisory proposal scores**: after a specialist round, the prompt
     MAY carry a `=== Specialist proposal scores (advisory) ===` block —
-    per proposal, an independent 0-10 likelihood-of-throughput-gain prior
-    from one or more models (e.g. `claude-opus-4-7=8.0 ("…"),
-    gpt-5.4=6.5 ("…")`). These are **one reference among many**: weigh
-    them alongside `gaps[]`, the KB sub-graph, recent winners, and the
-    `analysis.md` 🔴/🟡/🟢 markers, with no more authority than those.
-    They are model *priors*, not measurements, and may be correlated or
-    wrong. Per §3.9 Inv-9.1 there is no system-side scoreboard: the
-    scores do NOT rank or pre-select anything — the at-most-one
-    `provenance='specialist:*'` variant you pick remains YOUR judgment.
-    Cross-model disagreement is itself an uncertainty signal; when scores
-    conflict with the analysis.md markers or KB evidence, prefer the
-    measured / evidence-backed signal.
+    per proposal, independent 0-10 likelihood-of-throughput-gain priors
+    from several **anonymized raters** (e.g. `rater_1=8.0 ("…"),
+    rater_2=6.5 ("…")`). The rater identities are deliberately hidden so
+    you judge each score on its stated reasoning alone, with no brand /
+    model prior — do NOT speculate which model a `rater_N` is. These are
+    **one reference among many**: weigh them alongside `gaps[]`, the KB
+    sub-graph, recent winners, and the `analysis.md` 🔴/🟡/🟢 markers,
+    with no more authority than those. They are priors, not measurements,
+    and may be correlated or wrong. Per §3.9 Inv-9.1 there is no
+    system-side scoreboard: the scores do NOT rank or pre-select anything
+    — the at-most-one `provenance='specialist:*'` variant you pick
+    remains YOUR judgment. Cross-rater disagreement is itself an
+    uncertainty signal; when scores conflict with the analysis.md markers
+    or KB evidence, prefer the measured / evidence-backed signal.
 
     **Self-stop**: when EXPLORE's plateau fires, the Coordinator runs
     a `session_steward_specialist` and routes its
