@@ -214,6 +214,136 @@ def _fetch_diff_to_path(
     return True, ""
 
 
+def _run_git(
+    args: list[str], *, timeout: float = 120.0,
+) -> tuple[bool, str, str]:
+    """Run ``git <args>`` capturing output. Returns ``(ok, stdout, stderr)``.
+    Never raises (spawn / timeout failures map to ``(False, "", reason)``)."""
+    try:
+        cp = subprocess.run(
+            ["git", *args],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return False, "", f"git spawn/timeout failed: {exc!r}"
+    if cp.returncode != 0:
+        return False, cp.stdout or "", (cp.stderr or "").strip()
+    return True, cp.stdout or "", cp.stderr or ""
+
+
+def _materialize_pr_diff_via_worktree(
+    framework_root: Path,
+    candidate: dict[str, Any],
+    dest: Path,
+    *,
+    timeout_sec: float,
+) -> tuple[bool, str]:
+    """checkout-head (diff source) mode.
+
+    Fetches the candidate PR's head into ``framework_root`` (which must be
+    a git repo with a fetchable origin), checks it out into an isolated
+    ``git worktree`` so the live tree's already-KEPT stack is never
+    disturbed, computes the PR's *net* diff against its merge-base, and
+    writes that unified diff to ``dest``. The caller then ``git apply``s
+    ``dest`` onto the live tree and benches it exactly like the
+    ``diff_url`` path — so this mode only changes *where the patch text
+    comes from*, not how it is applied or measured.
+
+    The worktree is always removed in ``finally``. Returns ``(ok, err)``.
+
+    Resolution of the head ref, in order:
+      1. ``candidate.head_sha`` (explicit sha from discovery).
+      2. ``candidate.ref`` (e.g. a branch / tag the origin already has).
+      3. ``refs/pull/<pr_number>/head`` (GitHub PR head ref).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    root = str(framework_root)
+
+    head_sha = str(candidate.get("head_sha") or "").strip()
+    ref = str(candidate.get("ref") or "").strip()
+    pr_number = candidate.get("pr_number")
+
+    # Decide the fetch refspec.
+    fetch_ref = ""
+    if ref:
+        fetch_ref = ref
+    elif pr_number not in (None, "", 0):
+        fetch_ref = f"refs/pull/{int(pr_number)}/head"
+
+    # Fetch the head (skip when we already have an explicit sha that the
+    # local repo can resolve, but try a fetch anyway for completeness).
+    if fetch_ref:
+        ok, _out, err = _run_git(
+            ["-C", root, "fetch", "--no-tags", "origin", fetch_ref],
+            timeout=timeout_sec,
+        )
+        if not ok:
+            return False, f"git fetch {fetch_ref!r} failed: {err}"
+        if not head_sha:
+            # FETCH_HEAD now points at the fetched head.
+            ok2, out2, err2 = _run_git(
+                ["-C", root, "rev-parse", "FETCH_HEAD"], timeout=30.0,
+            )
+            if not ok2 or not out2.strip():
+                return False, f"could not resolve FETCH_HEAD: {err2}"
+            head_sha = out2.strip()
+    if not head_sha:
+        return False, (
+            "checkout-head: no head_sha / ref / pr_number on candidate; "
+            "cannot resolve PR head"
+        )
+
+    # Isolated worktree at the fetched head.
+    wt_dir = dest.parent / f"wt-{_candidate_slug(candidate)}"
+    # Clean any stale worktree dir from a prior crashed run.
+    _run_git(["-C", root, "worktree", "remove", "--force", str(wt_dir)],
+             timeout=60.0)
+    ok, _out, err = _run_git(
+        ["-C", root, "worktree", "add", "--detach", str(wt_dir), head_sha],
+        timeout=timeout_sec,
+    )
+    if not ok:
+        return False, f"git worktree add failed: {err}"
+    try:
+        # Merge-base against the live tree's current HEAD gives the PR's
+        # net change relative to the branch point, so applying it onto the
+        # live tree introduces only the PR's own commits (not the entire
+        # divergence between head and the live HEAD).
+        ok_hb, base_out, _e = _run_git(
+            ["-C", root, "rev-parse", "HEAD"], timeout=30.0,
+        )
+        live_head = base_out.strip() if ok_hb else ""
+        merge_base = ""
+        if live_head:
+            ok_mb, mb_out, _mb_e = _run_git(
+                ["-C", root, "merge-base", live_head, head_sha], timeout=60.0,
+            )
+            if ok_mb and mb_out.strip():
+                merge_base = mb_out.strip()
+        diff_range = f"{merge_base}..{head_sha}" if merge_base else head_sha
+        ok_d, diff_out, err_d = _run_git(
+            ["-C", root, "diff", "--binary", diff_range],
+            timeout=timeout_sec,
+        )
+        if not ok_d:
+            return False, f"git diff {diff_range!r} failed: {err_d}"
+        if not diff_out.strip():
+            return False, (
+                f"checkout-head produced an empty diff for range "
+                f"{diff_range!r} (PR head already merged into live tree?)"
+            )
+        try:
+            dest.write_text(diff_out, encoding="utf-8")
+        except OSError as exc:
+            return False, f"could not write diff to {dest}: {exc!r}"
+        return True, ""
+    finally:
+        _run_git(
+            ["-C", root, "worktree", "remove", "--force", str(wt_dir)],
+            timeout=60.0,
+        )
+
+
 class FrameworkPrExecutor:
     """ActionRunner for the ``framework_pr`` action (FRAMEWORK_PR phase)."""
 
@@ -260,10 +390,39 @@ class FrameworkPrExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
-        # Resolve patch sources.
+        framework_root = _resolve_framework_root(
+            params.get("framework_source_root") or None,
+        )
+        if framework_root is None:
+            return {
+                "status": "apply_failed",
+                "error_class": "no_framework_root",
+                "error": (
+                    "no framework_source_root resolved; cannot apply "
+                    "candidate PR. Configure $INFERENCEX_PATH or pass "
+                    "params.framework_source_root."
+                ),
+                "candidate": candidate,
+                "batch_id": batch_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "workspace": str(output_root),
+            }
+
+        # Resolve patch sources. Three modes, in priority order:
+        #   1. Explicit ``params.patches`` paths (test / smoke).
+        #   2. checkout-head (diff source): extract the PR's net diff from
+        #      an isolated worktree at the PR head. Selected when the
+        #      candidate / params request it, or as a fallback when no
+        #      diff_url is present.
+        #   3. diff_url (default): curl the unified diff GitHub serves.
+        # Modes 2 & 3 both produce a .patch that is applied + benched on
+        # the live tree identically — see Stage 1 below.
         explicit_patches = params.get("patches") or None
         patch_paths: list[Path] = []
+        patch_source_mode = ""
         if isinstance(explicit_patches, list) and explicit_patches:
+            patch_source_mode = "explicit"
             for p in explicit_patches:
                 pp = Path(str(p))
                 if pp.exists():
@@ -292,7 +451,33 @@ class FrameworkPrExecutor:
                 }
         else:
             diff_url = str(candidate.get("diff_url") or "").strip()
-            if not diff_url:
+            apply_mode = str(
+                params.get("apply_mode")
+                or candidate.get("apply_mode")
+                or "",
+            ).strip().lower()
+            prefer_checkout = bool(
+                params.get("prefer_checkout")
+                or candidate.get("prefer_checkout")
+            )
+            # A candidate is checkout-headable only if it carries a head
+            # ref the worktree helper can resolve (head_sha / ref /
+            # pr_number).
+            has_checkout_ref = bool(
+                str(candidate.get("head_sha") or "").strip()
+                or str(candidate.get("ref") or "").strip()
+                or candidate.get("pr_number") not in (None, "", 0)
+            )
+            explicit_checkout = (
+                apply_mode in {"checkout_head", "checkout-head", "checkout"}
+                or prefer_checkout
+            )
+            use_checkout_head = explicit_checkout or (
+                not diff_url and has_checkout_ref
+            )
+            if not diff_url and not use_checkout_head:
+                # No served diff and nothing to check out → genuine
+                # no-patch (preserves the pre-checkout-head contract).
                 return {
                     "status": "no_patch",
                     "candidate": candidate,
@@ -300,47 +485,64 @@ class FrameworkPrExecutor:
                     "patches_applied": [],
                     "patches_reverted": [],
                     "reason": (
-                        "candidate carries no diff_url and no explicit "
-                        "patches were supplied"
+                        "candidate carries no diff_url, no explicit "
+                        "patches, and no head ref to check out"
                     ),
                     "workspace": str(output_root),
                 }
             dest = output_root / f"{slug}.patch"
-            ok, err = _fetch_diff_to_path(
-                diff_url, dest, timeout_sec=self.diff_fetch_timeout_sec,
-            )
-            if not ok:
-                return {
-                    "status": "fetch_failed",
-                    "error_class": "diff_fetch_failed",
-                    "error": err,
-                    "candidate": candidate,
-                    "batch_id": batch_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "reason": f"failed to fetch {diff_url!r}: {err}",
-                    "workspace": str(output_root),
-                }
-            patch_paths.append(dest.resolve())
-
-        framework_root = _resolve_framework_root(
-            params.get("framework_source_root") or None,
-        )
-        if framework_root is None:
-            return {
-                "status": "apply_failed",
-                "error_class": "no_framework_root",
-                "error": (
-                    "no framework_source_root resolved; cannot apply "
-                    "candidate PR. Configure $INFERENCEX_PATH or pass "
-                    "params.framework_source_root."
-                ),
-                "candidate": candidate,
-                "batch_id": batch_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "workspace": str(output_root),
-            }
+            if use_checkout_head:
+                patch_source_mode = "checkout_head"
+                ok, err = _materialize_pr_diff_via_worktree(
+                    framework_root, candidate, dest,
+                    timeout_sec=self.diff_fetch_timeout_sec * 4.0,
+                )
+                if not ok and diff_url:
+                    # Fall back to the served diff_url so a worktree /
+                    # fetch hiccup does not strand an otherwise-applyable
+                    # candidate.
+                    log.warning(
+                        "framework_pr: checkout-head failed (%s); "
+                        "falling back to diff_url", err,
+                    )
+                    patch_source_mode = "diff_url_fallback"
+                    ok, err = _fetch_diff_to_path(
+                        diff_url, dest,
+                        timeout_sec=self.diff_fetch_timeout_sec,
+                    )
+                if not ok:
+                    return {
+                        "status": "fetch_failed",
+                        "error_class": "checkout_head_failed",
+                        "error": err,
+                        "candidate": candidate,
+                        "batch_id": batch_id,
+                        "patches_applied": [],
+                        "patches_reverted": [],
+                        "patch_source_mode": patch_source_mode,
+                        "reason": f"checkout-head diff extraction failed: {err}",
+                        "workspace": str(output_root),
+                    }
+                patch_paths.append(dest.resolve())
+            else:
+                patch_source_mode = "diff_url"
+                ok, err = _fetch_diff_to_path(
+                    diff_url, dest, timeout_sec=self.diff_fetch_timeout_sec,
+                )
+                if not ok:
+                    return {
+                        "status": "fetch_failed",
+                        "error_class": "diff_fetch_failed",
+                        "error": err,
+                        "candidate": candidate,
+                        "batch_id": batch_id,
+                        "patches_applied": [],
+                        "patches_reverted": [],
+                        "patch_source_mode": patch_source_mode,
+                        "reason": f"failed to fetch {diff_url!r}: {err}",
+                        "workspace": str(output_root),
+                    }
+                patch_paths.append(dest.resolve())
 
         # Capture HEAD before any apply so REVERT/REJECT can reset back
         # cleanly. Previously-KEPT candidates in this phase are committed
@@ -388,6 +590,7 @@ class FrameworkPrExecutor:
                 "batch_id": batch_id,
                 "patches_applied": [],
                 "patches_reverted": [str(p) for p in reverted],
+                "patch_source_mode": patch_source_mode,
                 "reason": "git apply failed (see error)",
                 "workspace": str(output_root),
             }
@@ -475,6 +678,7 @@ class FrameworkPrExecutor:
                 "accuracy_pass": accuracy_pass,
                 "base_tput": base_tput,
                 "keep_threshold_pct": keep_threshold_pct,
+                "patch_source_mode": patch_source_mode,
                 "reason": "; ".join(reasons) or "gate failed",
                 "bench_result": bench_result,
                 "workspace": str(output_root),
@@ -522,6 +726,7 @@ class FrameworkPrExecutor:
             "base_tput": base_tput,
             "keep_threshold_pct": keep_threshold_pct,
             "keep_commit_sha": keep_sha,
+            "patch_source_mode": patch_source_mode,
             "reason": (
                 f"throughput delta {delta_pct:+.2f}% >= "
                 f"{keep_threshold_pct:.2f}%"

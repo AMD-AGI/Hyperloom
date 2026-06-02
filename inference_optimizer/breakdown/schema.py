@@ -305,7 +305,7 @@ class KernelLifecycle(TypedDict, total=False):
 # §10 Param search
 # ---------------------------------------------------------------------------
 class ParamSearchEntry(TypedDict, total=False):
-    """One row from params_search.{tested,accepted,rejected}."""
+    """One row from explore_search.{tested,accepted,rejected}."""
     name: str
     fingerprint: str
     extra_server_args: str
