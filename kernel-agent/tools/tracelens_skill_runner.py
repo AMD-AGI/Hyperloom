@@ -34,6 +34,7 @@ UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
     "groupedgemm_bwd": "GEMM",
     "moe_fused": "MoE",
     "moe_unfused": "MoE",
+    "moe_aux": "MoE",
     "sdpa_fwd": "SDPA",
     "sdpa_bwd": "SDPA",
     "inferenceattention": "SDPA",
@@ -47,6 +48,7 @@ UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
     "convolution": "Convolution",
     "conv_fwd": "Convolution",
     "conv_bwd": "Convolution",
+    "customcollective": "Communication",
     "other": "Other",
 }
 
