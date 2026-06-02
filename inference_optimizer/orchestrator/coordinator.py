@@ -9397,6 +9397,14 @@ class Coordinator:
                         self.shared_state.record_kernel_integrate_result(result)
                     decision = str(result.get("decision", "")).upper()
                     if decision == "KEEP":
+                        if isinstance(result, dict) and not result.get(
+                            "gap_canonical_id"
+                        ):
+                            payload_gap = str(
+                                merged_payload.get("gap_canonical_id") or ""
+                            ).strip()
+                            if payload_gap:
+                                result["gap_canonical_id"] = payload_gap
                         await self._record_integrate_keep(result)
                     self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
