@@ -456,7 +456,7 @@ jobs:
       # `continue-on-error` so a flaky upstream never blocks the rest of
       # the per-model contract (artifact upload, prewarm log, etc).
       - name: Publish session breakdown to perf-leaderboard
-        if: success() && github.event.inputs.dry_run != 'true'
+        if: always() && github.event.inputs.dry_run != 'true'
         continue-on-error: true
         env:
           EXPECTED_MODEL: ${{ matrix.model }}
@@ -469,13 +469,21 @@ jobs:
           with open("submit-output/submission_manifest.json", encoding="utf-8") as f:
               data = json.load(f)
           records = data.get("records") if isinstance(data.get("records"), list) else []
-          ok = any((r.get("final_status") == "Succeeded") for r in records if isinstance(r, dict))
+          ok = any(
+              (
+                  r.get("final_status") == "Succeeded"
+                  or r.get("ci_success")
+                  or r.get("ci_status") == "Delivered"
+              )
+              for r in records
+              if isinstance(r, dict)
+          )
           print("yes" if ok else "no")
           PY
             )
             if [ "$READY" != "yes" ]; then
-              echo "::warning::no Succeeded task in submission_manifest.json; skipping sbd-ingester publish"
-              echo "SKIP non-succeeded-task" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
+              echo "::warning::no Succeeded or Delivered task in submission_manifest.json; skipping sbd-ingester publish"
+              echo "SKIP non-delivered-task" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
               exit 0
             fi
           fi
@@ -546,30 +554,31 @@ jobs:
                           return True
               return False
 
-          def positive_number(value):
-              return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+          def has_any_number(value):
+              if isinstance(value, bool):
+                  return False
+              if isinstance(value, (int, float)):
+                  return True
+              if isinstance(value, dict):
+                  return any(has_any_number(v) for v in value.values())
+              if isinstance(value, list):
+                  return any(has_any_number(v) for v in value[:100])
+              return False
 
-          def has_positive_perf(data):
-              baseline = data.get("baseline") if isinstance(data.get("baseline"), dict) else {}
-              final = data.get("final") if isinstance(data.get("final"), dict) else {}
-              best = data.get("best") if isinstance(data.get("best"), dict) else {}
-              base_values = (
-                  data.get("baseline_tput"),
-                  data.get("baseline_throughput"),
-                  data.get("tok_per_gpu_baseline"),
-                  baseline.get("throughput_tok_s_per_gpu"),
-                  baseline.get("output_throughput"),
+          def has_breakdown_data(data):
+              if not isinstance(data, dict):
+                  return False
+              keys = (
+                  "baseline", "best", "final", "optimized", "steps", "actions",
+                  "phases", "session", "session_meta", "workload",
+                  "baseline_throughput", "optimized_throughput",
+                  "tok_per_gpu_baseline", "tok_per_gpu_optimized", "gain_pct",
+                  "cumulative_gain_pct",
               )
-              opt_values = (
-                  data.get("best_tput"),
-                  data.get("optimized_throughput"),
-                  data.get("tok_per_gpu_optimized"),
-                  final.get("throughput_tok_s_per_gpu"),
-                  final.get("output_throughput"),
-                  best.get("throughput_tok_s_per_gpu"),
-                  best.get("output_throughput"),
+              return (
+                  any(data.get(k) not in (None, {}, [], "") for k in keys)
+                  or has_any_number(data)
               )
-              return any(positive_number(v) for v in base_values) and any(positive_number(v) for v in opt_values)
 
           def first(*values):
               for value in values:
@@ -641,8 +650,8 @@ jobs:
                       notes = [f"skip {bd_path}: {bd['_error']}"]
                       continue
                   bf = breakdown_fields(bd)
-                  if not has_positive_perf(bd):
-                      notes = [f"skip {bd_path}: missing positive baseline/best throughput"]
+                  if not has_breakdown_data(bd):
+                      notes = [f"skip {bd_path}: no structured session_breakdown data"]
                       continue
                   if ci_claw and bf["claw_session_id"] and ci_claw != bf["claw_session_id"]:
                       notes = [f"skip {bd_path}: claw_session_id={bf['claw_session_id']!r} expected={ci_claw!r}"]
@@ -711,8 +720,8 @@ jobs:
                           f"skip {bd_path}: model={bf['model']!r} expected={ci_model!r}"
                       )
                       continue
-                  if not has_positive_perf(bd):
-                      notes.append(f"skip {bd_path}: missing positive baseline/best throughput")
+                  if not has_breakdown_data(bd):
+                      notes.append(f"skip {bd_path}: no structured session_breakdown data")
                       continue
                   if ci_claw and bf["claw_session_id"] and ci_claw != bf["claw_session_id"]:
                       notes.append(

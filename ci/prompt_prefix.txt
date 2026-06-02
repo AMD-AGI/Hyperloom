@@ -79,6 +79,7 @@ that directory (cd "$HYPERLOOM_SOURCE_DIR").
 
 Environment (export before launching `inference_optimizer optimize`):
   export NFS_ROOT=/wekafs
+  export CORTEX_KB_URL=https://your-openai-compatible-gateway.example.com/knowledge-base
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak,claude,codex}"
   export HYPERLOOM_GEAK_BUDGET_MIN="${HYPERLOOM_GEAK_BUDGET_MIN:-130}"
   export HYPERLOOM_KERNEL_OPT_GATE_TOP_N="${HYPERLOOM_KERNEL_OPT_GATE_TOP_N:-5}"
