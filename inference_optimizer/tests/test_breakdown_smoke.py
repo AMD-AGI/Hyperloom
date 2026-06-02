@@ -69,15 +69,15 @@ def _build_fixture(sd: Path) -> None:
         "baseline_accuracy": 0.84,
         "baseline_failure_streak": 0,
         "baseline_config_path": "runs/baseline/t1/baseline_config.with_envs.yaml",
-        "current_best":   {"tput": 776.4, "action": "validate_stack",
+        "current_best":   {"tput": 776.4, "action": "explore",
                             "extra_server_args": "--enable-X --nccl-Y",
                             "extra_envs": {"NCCL_DEBUG": "INFO"},
                             "ttft_mean_ms": 110.2, "e2el_mean_ms": 1200.4},
         "optimization_stack": [
-            {"action": "backends",     "variant_name": "flag_X", "gain_pct": 23.4,
+            {"action": "explore",      "variant_name": "flag_X", "gain_pct": 23.4,
              "extra_server_args": "--enable-X",
              "ts": "2026-05-14T07:15:00+00:00"},
-            {"action": "params",       "variant_name": "nccl_Y", "gain_pct":  7.8,
+            {"action": "explore",      "variant_name": "nccl_Y", "gain_pct":  7.8,
              "extra_server_args": "--nccl-Y",
              "ts": "2026-05-14T07:30:00+00:00"},
             {"action": "kernel_opt:k001", "variant_name": "",  "gain_pct": 45.6,
@@ -102,22 +102,18 @@ def _build_fixture(sd: Path) -> None:
             {"ts": "2026-05-14T07:14:00+00:00", "task_id": "p1",
              "status": "succeeded", "decision": "promoted", "key_metric": 421.5},
         ],
-        "backends_attempts": [
+        "explore_attempts": [
             {"ts": "2026-05-14T07:15:00+00:00", "task_id": "b1",
              "status": "succeeded", "decision": "promoted", "key_metric": 23.4},
-        ],
-        "params_attempts": [
             {"ts": "2026-05-14T07:30:00+00:00", "task_id": "pa1",
              "status": "succeeded", "decision": "promoted", "key_metric": 7.8},
+            {"ts": "2026-05-14T08:30:00+00:00", "task_id": "v1",
+             "status": "succeeded", "decision": "promoted", "key_metric": 84.2},
         ],
         "sweep_attempts": [
             {"ts": "2026-05-14T08:20:00+00:00", "task_id": "s1",
              "status": "succeeded", "decision": "promoted",
              "key_metric": 812.0, "workspace": str(sd / "runs/sweep/s1")},
-        ],
-        "validate_stack_attempts": [
-            {"ts": "2026-05-14T08:30:00+00:00", "task_id": "v1",
-             "status": "succeeded", "decision": "promoted", "key_metric": 84.2},
         ],
         "last_trace_analyze": {"hot_kernels_top15": [
             {"kernel_id": "k001", "name": "fused_rmsnorm", "gpu_pct": 18.2,
@@ -165,28 +161,25 @@ def _build_fixture(sd: Path) -> None:
         }},
         "rejected_kernel_patches": [],
         "rejected_kernel_ids": ["k042"],
-        "params_search": {
-            "schema_version": 2,
-            "accepted": [{"name": "nccl_Y", "fingerprint": "f1",
-                           "extra_server_args": "--nccl-Y", "extra_envs": {},
-                           "output_throughput": 454.3, "gain_pct": 7.8,
-                           "ts": "2026-05-14T07:30:00+00:00"}],
+        "explore_search": {
+            "schema_version": 1,
+            "accepted": [
+                {"name": "flag_X", "fingerprint": "g1",
+                 "gain_pct": 23.4,
+                 "ts": "2026-05-14T07:15:00+00:00"},
+                {"name": "nccl_Y", "fingerprint": "f1",
+                 "extra_server_args": "--nccl-Y", "extra_envs": {},
+                 "output_throughput": 454.3, "gain_pct": 7.8,
+                 "ts": "2026-05-14T07:30:00+00:00"},
+            ],
             "rejected": [{"name": "bad_x", "fingerprint": "f2", "gain_pct": -2.5}],
             "tested": {
+                "g1": {"name": "flag_X",  "fingerprint": "g1", "gain_pct": 23.4},
                 "f1": {"name": "nccl_Y",  "fingerprint": "f1", "gain_pct":  7.8},
                 "f2": {"name": "bad_x",   "fingerprint": "f2", "gain_pct": -2.5},
                 "f3": {"name": "neutral", "fingerprint": "f3", "gain_pct":  0.1},
             },
-            "name_index": {}, "cursor": 3,
-        },
-        "backends_search": {
-            "schema_version": 1,
-            "accepted": [{"name": "flag_X", "fingerprint": "g1",
-                           "gain_pct": 23.4,
-                           "ts": "2026-05-14T07:15:00+00:00"}],
-            "rejected": [],
-            "tested": {"g1": {"name": "flag_X", "fingerprint": "g1", "gain_pct": 23.4}},
-            "name_index": {}, "cursor": 1,
+            "name_index": {}, "cursor": 4,
         },
     })
 
@@ -340,11 +333,10 @@ def test_capability_summary(fixture_session: Path) -> None:
     assert cap["oob"]["keeps"] == 1
     assert cap["oob"]["attempts"] == 3
     assert cap["geak"]["status"] == "not_attempted"
-    assert cap["backends"]["status"] == "kept"
-    assert cap["backends"]["best_gain_pct"] == pytest.approx(23.4)
-    assert cap["params"]["status"] == "kept"
+    assert cap["explore"]["status"] == "kept"
+    assert cap["explore"]["best_gain_pct"] == pytest.approx(23.4)
     assert cap["sweep"]["status"] == "completed"
-    assert cap["validate_stack"]["last_validated_gain_pct"] == pytest.approx(84.2)
+    assert cap["explore"]["last_validated_gain_pct"] == pytest.approx(84.2)
 
 
 def test_kernel_lifecycle_five_stages(fixture_session: Path) -> None:
@@ -399,8 +391,7 @@ def test_attribution_kernel_goes_to_oob(fixture_session: Path) -> None:
     sb = attr["source_breakdown"]
     assert sb["oob_pct_of_total"] >= 45.0
     assert sb["geak_pct_of_total"] == 0.0
-    assert sb["backends_pct_of_total"] == pytest.approx(23.4)
-    assert sb["params_pct_of_total"] == pytest.approx(7.8)
+    assert sb["explore_pct_of_total"] == pytest.approx(31.2)
     assert sb["validated_total_pct"] == pytest.approx(84.2)
 
 
@@ -410,16 +401,15 @@ def test_phase_timeline_sorted_by_ts(fixture_session: Path) -> None:
     assert ts_values == sorted(ts_values)
     actions = {e["action"] for e in ts}
     assert "baseline" in actions
-    assert "validate_stack" in actions
+    assert "explore" in actions
     assert "kernel_opt" in actions or "integrate" in actions
 
 
 def test_param_search_summary(fixture_session: Path) -> None:
     ps = build(fixture_session)["param_search"]
-    assert ps["params"]["tested_count"] == 3
-    assert ps["backends"]["tested_count"] == 1
-    assert ps["params"]["accepted"][0]["name"] == "nccl_Y"
-    assert ps["backends"]["accepted"][0]["name"] == "flag_X"
+    assert ps["explore"]["tested_count"] == 4
+    accepted_names = {a["name"] for a in ps["explore"]["accepted"]}
+    assert accepted_names == {"flag_X", "nccl_Y"}
 
 
 def test_missing_state_returns_partial_with_warnings(tmp_path: Path) -> None:
@@ -622,11 +612,11 @@ def test_attribution_framework_pr_surfaces_in_source_breakdown(
     sd = _attribution_fixture(tmp_path, {
         "cumulative_gain_validated": 22.85,
         "optimization_stack": [
-            {"action": "params",       "variant_name": "torch_compile_on", "gain_pct": 0.53},
+            {"action": "explore",      "variant_name": "torch_compile_on", "gain_pct": 0.53},
             {"action": "framework_pr", "variant_name": "PR:26311",         "gain_pct": 22.43},
         ],
         "gain_per_stack_entry": [
-            {"action": "params",       "variant_name": "torch_compile_on",
+            {"action": "explore",      "variant_name": "torch_compile_on",
              "stack_len_before": 0, "stack_len_after": 1,
              "cum_gain_before": 0.0, "cum_gain_after": 0.53,
              "delta_pct": 0.53,
@@ -640,15 +630,14 @@ def test_attribution_framework_pr_surfaces_in_source_breakdown(
     })
     sb = build(sd)["attribution"]["source_breakdown"]
     assert sb["framework_pr_pct_of_total"] == pytest.approx(22.32)
-    assert sb["params_pct_of_total"] == pytest.approx(0.53)
-    # Reconciliation: kernel + backends + params + sweep + framework_pr
+    assert sb["explore_pct_of_total"] == pytest.approx(0.53)
+    # Reconciliation: kernel + explore + sweep + framework_pr
     # ≈ validated_total. The legacy "other" bucket no longer eats
     # framework_pr gain.
     summed = (
         sb["geak_pct_of_total"]
         + sb["oob_pct_of_total"]
-        + sb["backends_pct_of_total"]
-        + sb["params_pct_of_total"]
+        + sb["explore_pct_of_total"]
         + sb["sweep_pct_of_total"]
         + sb["framework_pr_pct_of_total"]
     )
@@ -779,7 +768,7 @@ def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
     # within rounding (no more black-hole ``other`` for gemm_tuning).
     summed = (
         sb["geak_pct_of_total"] + sb["oob_pct_of_total"]
-        + sb["backends_pct_of_total"] + sb["params_pct_of_total"]
+        + sb["explore_pct_of_total"]
         + sb["sweep_pct_of_total"]
         + sb["framework_pr_pct_of_total"]
         + sb["gemm_tuning_pct_of_total"]
