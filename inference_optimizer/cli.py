@@ -450,6 +450,34 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
 _assert_atom_single_node = _apply_atom_auto_tighten
 
 
+_DEPTH_GATE_THRESHOLD_KEYS = frozenset({
+    "scout_runs_min", "prs_fetched_min", "pr_diffs_read_min",
+    "nvidia_refs_min", "code_patches_min", "reverts_to_evaluate",
+})
+
+
+def _parse_depth_gate_thresholds(raw: str) -> dict[str, int]:
+    """Parse ``--depth-gate-thresholds`` (``key=value,...``) into a dict.
+
+    Unknown keys and non-integer values are skipped silently so a typo
+    degrades to the defaults rather than aborting startup.
+    """
+    out: dict[str, int] = {}
+    for token in str(raw or "").split(","):
+        token = token.strip()
+        if not token or "=" not in token:
+            continue
+        key, _, value = token.partition("=")
+        key = key.strip()
+        if key not in _DEPTH_GATE_THRESHOLD_KEYS:
+            continue
+        try:
+            out[key] = int(value.strip())
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _resolve_gpu_type(
     user_specified: str,
     probed: str,
@@ -1165,7 +1193,11 @@ def _seed_shared_state(
         research_scout_interval=max(
             1, int(getattr(args, "research_scout_interval", 3) or 3)
         ),
+        depth_gate_thresholds=_parse_depth_gate_thresholds(
+            getattr(args, "depth_gate_thresholds", "") or ""
+        ),
     )
+    state.set_depth_gate_enabled(bool(getattr(args, "depth_gate", True)))
     state.save(session_dir)
     return state
 
@@ -4319,6 +4351,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     else:
         print("Research scout  : DISABLED (--no-research-scout)")
+    if bool(getattr(args, "depth_gate", True)):
+        print("Depth gate      : ENABLED (stop/advance blocked while "
+              "exploration is too shallow; IR-6 budget overrides)")
+    else:
+        print("Depth gate      : DISABLED (--no-depth-gate); legacy "
+              "single steward continuation")
 
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
@@ -5554,6 +5592,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Re-dispatch the research scout every N EXPLORE rounds with "
              "the current bottleneck context (append-only). Default 3. "
              "Ignored when ``--no-research-scout`` is set.",
+    )
+    opt.add_argument(
+        "--depth-gate",
+        dest="depth_gate",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_DEPTH_GATE"),
+        help="Deterministic exploration-depth guard. When the session "
+             "steward recommends stop / advance-to-kernel but the run "
+             "has not explored deeply enough (too few scout runs, no "
+             "code patch, too few PRs/diffs/NVIDIA refs), the verdict is "
+             "rewritten to continue_explore with a deepening hint — as "
+             "many times as needed, bounded only by the IR-6 budget "
+             "gate. Default on; ``--no-depth-gate`` restores the legacy "
+             "single-continuation steward behaviour. Env: "
+             "INFERENCE_OPTIMIZER_DEPTH_GATE=0.",
+    )
+    opt.add_argument(
+        "--depth-gate-thresholds",
+        dest="depth_gate_thresholds",
+        default="",
+        help="Override depth-gate minimums as comma-separated key=value "
+             "pairs. Keys: scout_runs_min, prs_fetched_min, "
+             "pr_diffs_read_min, nvidia_refs_min, code_patches_min, "
+             "reverts_to_evaluate. Defaults: 2,5,3,2,1 evaluated after "
+             "reverts_to_evaluate=3. Example: "
+             "``--depth-gate-thresholds scout_runs_min=1,code_patches_min=2``.",
     )
     # Retired flags that operator scripts may still pass. We hard-fail
     # at argparse time with a one-line migration hint instead of

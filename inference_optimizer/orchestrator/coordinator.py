@@ -3909,6 +3909,29 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: EXPLORE re-dispatch failed")
 
+    def _aggregate_research_evidence(
+        self, done_payload: dict[str, Any],
+    ) -> None:
+        """De-dup a specialist's reported research evidence into the
+        exploration-depth tracker. No-op when no ``research`` block."""
+        block = done_payload.get("research")
+        if not isinstance(block, dict):
+            return
+
+        def _ids(key: str) -> list[Any]:
+            vals = block.get(key)
+            return list(vals) if isinstance(vals, list) else []
+
+        added = self.shared_state.register_research_evidence(
+            prs_fetched=_ids("prs_fetched"),
+            pr_diffs_read=_ids("pr_diffs_read"),
+            nvidia_refs_compared=_ids("nvidia_refs") or _ids(
+                "nvidia_refs_compared"
+            ),
+        )
+        if any(added.values()):
+            log.info("depth: research evidence added %s", added)
+
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
         """Persist scout output: hints, competitor target, gap seeds, dedup.
 
@@ -8580,6 +8603,18 @@ class Coordinator:
                     task.task_id,
                 )
 
+        # Aggregate any research evidence (PR / diff / NVIDIA refs)
+        # reported by this specialist into the exploration-depth tracker.
+        # Applies to every domain that self-reports a ``research`` block
+        # (pr_intel + research_scout), de-duped across the session.
+        try:
+            self._aggregate_research_evidence(done_payload)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "depth: research-evidence aggregation failed for task=%s",
+                task.task_id,
+            )
+
         # Harvest research-scout output: persist hints + competitor
         # target, seed advisory gaps, and dedup PR ids against
         # FRAMEWORK_PR. Fail-soft; never blocks the round.
@@ -8618,6 +8653,87 @@ class Coordinator:
                 task.task_id,
             )
 
+    def _apply_depth_gate_to_verdict(
+        self, *, raw_rec: str, next_gap: str, task: "Task",
+    ) -> tuple[str, str]:
+        """Rewrite a stop / advance verdict to ``continue_explore`` when
+        exploration depth is insufficient.
+
+        Returns the (possibly rewritten) ``(recommendation, next_gap)``.
+        IR-6 budget exhaustion bypasses the gate entirely; a disabled
+        gate or a satisfied depth check leaves the verdict untouched.
+        """
+        state = self.shared_state
+        try:
+            if not state.depth_gate_enabled():
+                return raw_rec, next_gap
+        except Exception:  # noqa: BLE001 — defensive
+            return raw_rec, next_gap
+
+        # IR-6 is the only thing the depth gate must never override.
+        try:
+            force_exit, _ = _phase_state.should_force_exit_explore(
+                state, budget_pct=self._phase_budget_pct,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            force_exit = False
+        if force_exit:
+            log.info(
+                "depth-gate: IR-6 budget force-exit active; honouring "
+                "steward '%s' (task=%s)", raw_rec, task.task_id,
+            )
+            return raw_rec, next_gap
+
+        try:
+            satisfied, blockers, next_action = _phase_state.depth_gate(
+                state, **self._depth_gate_thresholds(),
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("depth-gate: evaluation failed; honouring steward")
+            return raw_rec, next_gap
+        if satisfied:
+            return raw_rec, next_gap
+
+        # Rewrite to continue and seed a concrete deepening gap.
+        round_id = int((state.explore_search or {}).get("cursor") or 0)
+        gap_cid = f"gap.depth.round{round_id}"
+        symptom = next_action or (
+            "exploration too shallow: " + ", ".join(blockers)
+        )
+        try:
+            state.upsert_gap({
+                "canonical_id": gap_cid,
+                "symptom": symptom,
+                "layer": "exploration_depth",
+                "severity": "high",
+                "source": "depth_gate",
+            })
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("depth-gate: upsert_gap failed")
+        log.info(
+            "depth-gate: rewrote steward '%s' -> 'continue_explore' "
+            "(blockers=%s, next_action=%r, task=%s)",
+            raw_rec, blockers, next_action, task.task_id,
+        )
+        return "continue_explore", gap_cid
+
+    def _depth_gate_thresholds(self) -> dict[str, int]:
+        """Resolve depth-gate thresholds from SharedState overrides,
+        falling back to the phase_state defaults."""
+        overrides = getattr(self.shared_state, "depth_gate_thresholds", None)
+        out: dict[str, int] = {}
+        if isinstance(overrides, dict):
+            for key in (
+                "scout_runs_min", "prs_fetched_min", "pr_diffs_read_min",
+                "nvidia_refs_min", "code_patches_min", "reverts_to_evaluate",
+            ):
+                if overrides.get(key) is not None:
+                    try:
+                        out[key] = int(overrides[key])
+                    except (TypeError, ValueError):
+                        pass
+        return out
+
     async def _route_steward_verdict(
         self, *, task: "Task", done_payload: dict[str, Any],
     ) -> None:
@@ -8632,11 +8748,14 @@ class Coordinator:
         * ``continue_explore`` → append ``next_gap_canonical_id`` to
           ``state.gaps[]``, reset ``params_no_promote_streak`` and
           per-domain empty streak counters, set
-          ``steward_continuation_used=True``.
+          ``steward_continuation_used=True`` (audit marker only).
 
-        Antiloop: only one continuation per session. A second
-        ``continue_explore`` is coerced to ``advance_to_kernel`` so
-        the EXPLORE→KERNEL transition becomes mandatory.
+        A ``stop_session`` / ``advance_to_kernel`` verdict is run through
+        the exploration-depth gate: if the session has not explored
+        deeply enough it is rewritten to ``continue_explore`` with a
+        concrete deepening instruction. This can repeat; the only
+        backstop is the IR-6 budget gate (checked first), which lets the
+        original stop / advance through once budget is exhausted.
 
         Infrastructure failures (stale heartbeat, subprocess timeout, empty
         synthesis) schedule up to :data:`_STEWARD_MAX_INFRA_RETRIES` fresh
@@ -8705,20 +8824,6 @@ class Coordinator:
                     raw_rec, task.task_id,
                 )
                 raw_rec = "stop_session"
-        # Antiloop: only one continuation per session.
-        if (
-            raw_rec == "continue_explore"
-            and bool(getattr(
-                self.shared_state, "steward_continuation_used", False,
-            ))
-        ):
-            log.info(
-                "steward: continue_explore requested but continuation "
-                "already used this session; coercing to "
-                "'advance_to_kernel' (task=%s)",
-                task.task_id,
-            )
-            raw_rec = "advance_to_kernel"
         next_gap = str(
             done_payload.get("next_gap_canonical_id") or ""
         ).strip()
@@ -8729,6 +8834,19 @@ class Coordinator:
                 task.task_id,
             )
             raw_rec = "advance_to_kernel"
+
+        # Exploration-depth gate (deterministic stop guard). When the
+        # steward wants to stop / advance but the session has not
+        # explored deeply enough, rewrite the verdict to
+        # ``continue_explore`` and inject a concrete deepening
+        # instruction. This may fire any number of times — the only
+        # backstop is the IR-6 budget gate, which is checked first:
+        # once the budget is (about to be) exhausted the depth gate is
+        # bypassed and the original stop / advance stands.
+        if raw_rec in ("stop_session", "advance_to_kernel"):
+            raw_rec, next_gap = self._apply_depth_gate_to_verdict(
+                raw_rec=raw_rec, next_gap=next_gap, task=task,
+            )
 
         # Record the assessment unconditionally so the audit trail
         # captures it even when the recommendation was coerced.
@@ -11699,6 +11817,10 @@ class Coordinator:
                     )
                     promoted = True
                     changed = True
+            try:
+                self.shared_state.note_explore_outcome(promoted=promoted)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("depth: note_explore_outcome failed")
             if promoted:
                 # Reset the plateau proxy on a successful KEEP so
                 # the M2 transitional fallback in phase_state stays
