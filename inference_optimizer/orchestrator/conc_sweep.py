@@ -55,6 +55,11 @@ from .action_executors._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
+from .roofline_ceiling import (
+    compute_compute_bound_ceiling_tok_per_sec,
+    compute_theoretical_peak_output_tok_per_sec,
+    load_model_meta,
+)
 from .shared_state import SharedState
 
 
@@ -273,6 +278,131 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
             writer.writerow({k: p.get(k) for k in columns})
 
 
+def _build_roofline_ceiling(
+    state: SharedState,
+    *,
+    concs: list[int],
+    isl: int,
+    osl: int,
+    baseline_points: list[dict[str, Any]],
+    optimized_points: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Per-conc decode roofline alongside the measured curves.
+
+    Reuses :mod:`orchestrator.roofline_ceiling` (the same module that
+    powers ``compute_roofline_breakdown_from_state``) so the ceiling
+    here matches the one already surfaced in the rest of the run
+    (e.g. ``state.history_snapshots``). T_cmp is batch-independent so
+    we compute it once; T_mem and binding are re-derived per CONC.
+
+    MBU% is the headline number: ``measured / T_peak × 100``. Both
+    baseline and optimized arms get one when the corresponding point
+    succeeded; otherwise ``None`` so renderers can show ``"—"``.
+
+    Safe degrade: returns ``None`` when model meta or GPU spec is
+    unavailable so the caller can omit the field, mirroring the rest
+    of the conc_sweep payload's no-placeholder policy.
+    """
+    model_path = str(getattr(state, "model_path", "") or "")
+    precision = str(getattr(state, "precision", "") or "") or "bf16"
+    meta = load_model_meta(model_path, precision_hint=precision)
+    if meta is None:
+        return None
+    gpu_type = str(getattr(state, "gpu_type", "") or "")
+    num_gpus = int(getattr(state, "tp", 0) or 0)
+    if not gpu_type or num_gpus <= 0:
+        return None
+
+    t_cmp = compute_compute_bound_ceiling_tok_per_sec(
+        gpu_type=gpu_type,
+        num_gpus=num_gpus,
+        precision_tag=precision,
+        active_weight_bytes=meta.active_weight_bytes,
+        weight_bytes=meta.weight_bytes,
+        weight_dtype_bytes=meta.weight_dtype_bytes,
+    )
+
+    by_conc_b = {p["conc"]: p for p in baseline_points}
+    by_conc_o = {p["conc"]: p for p in optimized_points}
+
+    rows: list[dict[str, Any]] = []
+    for c in concs:
+        t_mem = compute_theoretical_peak_output_tok_per_sec(
+            gpu_type=gpu_type,
+            num_gpus=num_gpus,
+            weight_bytes=meta.weight_bytes,
+            active_weight_bytes=meta.active_weight_bytes,
+            num_experts=meta.num_experts,
+            experts_per_tok=meta.experts_per_tok,
+            expert_weight_bytes=meta.expert_weight_bytes,
+            num_layers=meta.num_layers,
+            num_kv_heads=meta.num_kv_heads,
+            head_dim=meta.head_dim,
+            kv_dtype_bytes=meta.weight_dtype_bytes,
+            isl=isl,
+            osl=osl,
+            concurrency=c,
+        )
+        # Resolve T_peak / binding — mirrors the branching used by
+        # compute_roofline_breakdown_from_state.
+        if t_mem <= 0 and t_cmp <= 0:
+            bound_kind = "unknown"
+            t_peak = 0.0
+        elif t_cmp <= 0:
+            bound_kind = "memory"
+            t_peak = t_mem
+        elif t_mem <= 0:
+            bound_kind = "compute"
+            t_peak = t_cmp
+        elif t_cmp < t_mem:
+            bound_kind = "compute"
+            t_peak = t_cmp
+        else:
+            bound_kind = "memory"
+            t_peak = t_mem
+
+        def _mbu_pct(measured: Any) -> float | None:
+            if not isinstance(measured, (int, float)) or measured <= 0:
+                return None
+            if t_peak <= 0:
+                return None
+            return round((float(measured) / t_peak) * 100.0, 2)
+
+        bt = (by_conc_b.get(c) or {}).get("output_throughput")
+        ot = (by_conc_o.get(c) or {}).get("output_throughput")
+        rows.append({
+            "conc":              c,
+            "t_mem_tok_s":       round(t_mem, 2),
+            "t_cmp_tok_s":       round(t_cmp, 2),
+            "t_peak_tok_s":      round(t_peak, 2),
+            "bound_kind":        bound_kind,
+            "mbu_baseline_pct":  _mbu_pct(bt),
+            "mbu_optimized_pct": _mbu_pct(ot),
+        })
+
+    return {
+        "schema_version": 1,
+        "source":         "roofline_ceiling.py",
+        "gpu_type":       gpu_type,
+        "precision":      precision,
+        "tp":             num_gpus,
+        "isl":            isl,
+        "osl":            osl,
+        "model_meta": {
+            "weight_bytes":        meta.weight_bytes,
+            "active_weight_bytes": meta.active_weight_bytes,
+            "num_experts":         meta.num_experts,
+            "experts_per_tok":     meta.experts_per_tok,
+            "expert_weight_bytes": meta.expert_weight_bytes,
+            "num_layers":          meta.num_layers,
+            "num_kv_heads":        meta.num_kv_heads,
+            "head_dim":            meta.head_dim,
+            "weight_dtype_bytes":  meta.weight_dtype_bytes,
+        },
+        "rows": rows,
+    }
+
+
 def _skip(reason: str, **extras: Any) -> dict[str, Any]:
     """Build a non-fatal skip envelope. Reason is operator-readable."""
     payload: dict[str, Any] = {
@@ -428,6 +558,15 @@ async def run_conc_sweep(
 
     comparison, summary = _build_comparison(baseline_points, optimized_points)
 
+    ceiling = _build_roofline_ceiling(
+        state,
+        concs=concs,
+        isl=isl,
+        osl=osl,
+        baseline_points=baseline_points,
+        optimized_points=optimized_points,
+    )
+
     payload: dict[str, Any] = {
         "schema_version":   SCHEMA_VERSION,
         "status":           "succeeded" if summary["successful_pairs"] else "failed",
@@ -453,6 +592,8 @@ async def run_conc_sweep(
         "total_budget_sec":  total_budget_sec if has_budget else None,
         "budget_exhausted":  budget_exhausted,
     }
+    if ceiling is not None:
+        payload["roofline_ceiling"] = ceiling
 
     if write_reports:
         rdir = reports_dir(session_dir)
