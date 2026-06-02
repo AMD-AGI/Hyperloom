@@ -48,6 +48,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import sys
@@ -227,8 +228,10 @@ def _proxy() -> str:
 
 def _default_sglang_image() -> str:
     # v0.5.11 (2026-05-05): Spec V2 by default + DFLASH on ROCm + all-reduce/RMSNorm fusion.
-    # Confirmed available at harbor.core42.primus-safe.amd.com/proxy/lmsysorg/sglang.
-    return f"{_proxy()}/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
+    # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures kernels under
+    # HipGraphLaunch (issue #352). Drop the suffix once the fix lands in upstream ROCm.
+    # Pre-profilerfix image (restore when reverting): f"{_proxy()}/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
+    return f"{_proxy()}/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
 
 
 def _default_vllm_image() -> str:
@@ -750,7 +753,32 @@ class SafeOptimizeClient:
             body["promptPrefix"] = prompt_prefix
         if prompt_suffix:
             body["promptSuffix"] = prompt_suffix
-        return self._request("POST", "api/v1/optimization/tasks", body)
+        attempts = 8
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._request("POST", "api/v1/optimization/tasks", body)
+            except RuntimeError as e:
+                msg = str(e)
+                transient = (
+                    "HTTP 500" in msg
+                    or "HTTP 502" in msg
+                    or "HTTP 503" in msg
+                    or "HTTP 504" in msg
+                )
+                if not transient or attempt >= attempts:
+                    raise
+                delay = random.uniform(10, 60)
+                log.warning(
+                    "[submit] transient SaFE/Claw submit failure "
+                    "(attempt %d/%d, workspace=%s); retrying in %.1fs: %s",
+                    attempt,
+                    attempts,
+                    chosen_ws,
+                    delay,
+                    msg,
+                )
+                time.sleep(delay)
+        raise RuntimeError("unreachable submit retry loop exit")
 
     # ── Task lifecycle ──
 
@@ -2721,6 +2749,15 @@ def main() -> int:
         volume=volume,
         submit_workspaces_pool=submit_workspaces_pool or None,
     )
+    if submit_workspaces_pool and args.pool_index:
+        try:
+            safe._submit_ws_counter = max(int(args.pool_index), 0)
+            log.info(
+                "submit round-robin offset seeded from pool_index=%s",
+                args.pool_index,
+            )
+        except ValueError:
+            log.warning("invalid pool_index=%r; round-robin starts at 0", args.pool_index)
 
     if args.hf_top:
         log.info("fetching HF top-%d (>=%.1fB)", args.hf_top, args.min_params)
