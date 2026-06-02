@@ -35,6 +35,7 @@ benchmarks/
 marathon-runs/
 marathon-sessions/
 kernel-agent/runs/
+inference_optimizer/runs/
 .optimization_strategies.md
 optimization_report.md
 bench.py
