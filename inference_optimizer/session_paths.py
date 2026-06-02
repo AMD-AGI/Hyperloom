@@ -1,4 +1,4 @@
-"""Per-session path helpers (DESIGN v0.6.1 §23).
+"""Per-session path helpers ().
 
 Single source of truth for every path *inside* a session directory. The
 skeleton itself is created by :func:`paths.make_session_dir`; this module
@@ -55,20 +55,63 @@ def state_path(session_dir: Path) -> Path:
 # but mission TODOs never cleared. Driving the set from ``pipeline_phase``
 # keeps the four sources aligned automatically.
 _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
-    "measure", "analysis", "explore", "deep", "validate",
+    "measure", "analysis", "explore", "deep", "validate", "support",
 })
 
 # Hardcoded fallback used only when ActionRegistry can't be loaded
 # (broken yaml / partial install / very early bootstrap). MUST stay in
-# sync with the union of actions whose pipeline_phase is in
+# sync with the union of action names whose ``pipeline_phase`` is in
 # ``_RUNS_WORKSPACE_PHASES``; the regression test in
-# ``tests/test_p1_2_full_action_catalogue.py`` enforces this.
+# ``tests/test_p1_2_full_action_catalogue.py`` enforces alignment.
+# ``specialist`` is yaml-less (v0.8 M5, parameterised by
+# ``params.domain``) so it is added explicitly.
+# ``support`` was added in 2026-05 alongside the real ``recover``
+# executor (Change C of the gpu-leak-robustness-fix plan); the legacy
+# stub-action purge (Gap-13) removed the dream / re_explore /
+# comm_optimization / compiler_tuning yamls, so ``recover`` is the
+# only fallback ``support`` entry.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
-    "baseline", "profile", "pmc_roofline",
-    "backends", "params", "sweep",
-    "integrate", "kernel_opt", "deep_kernel_analysis",
+    "baseline",
+    # GAP 1 — Coordinator-internal warm-recipe replay. Same workspace
+    # shape as ``baseline`` (under ``runs/replay_warm_recipe/<task_id>/``);
+    # included so the registry-loader-failure path still pre-mkdirs the
+    # workspace for the replay task that the PRELUDE hook will enqueue.
+    "replay_warm_recipe",
+    # Coordinator-internal analysis actions. Which one runs is chosen
+    # by ``shared_state.enable_roofline`` (``--enable-roofline`` /
+    # ``--no-enable-roofline``, default on): ``roofline`` is the
+    # composite action (profile + trace_analyze + analysis.md
+    # snapshot); ``profile`` is the lighter trace-only fallback. Both
+    # land under ``runs/<kind>/<task_id>/`` so both names need a
+    # fallback entry for the loader-failure path. LLM proposals of
+    # either name are denied by PolicyGate
+    # (``analysis_action_not_llm_proposable``).
+    "roofline", "profile",
+    "sweep",
+    "explore",
+    "specialist",
+    # PR-A1 (Arbor-into-Hyperloom): ``integrate_patch`` is an
+    # EXPLORE-phase deterministic Python executor that consumes
+    # ``runs/specialist/<task_id>/worktree/`` patches; pipeline_phase
+    # ``explore`` already includes it in the registry-derived set, the
+    # fallback only matters when the yaml can't be loaded.
+    "integrate_patch",
+    # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor
+    # mirroring integrate_patch (applies an upstream PR + benches +
+    # KEEP/REVERT). pipeline_phase=explore puts it in the registry-derived
+    # runs/<kind>/ set; the fallback only matters on registry load failure.
+    "framework_pr",
+    # IR-7 (Saturday May 2026): ``assess_remaining_gaps`` is a thin
+    # wrapper that dispatches the ``session_steward_specialist``
+    # domain. Pipeline_phase ``explore`` includes it in the
+    # registry-derived set; fallback covers the rare bootstrap miss.
+    "assess_remaining_gaps",
+    # Cross-domain ReAct sub-agent; owns
+    # ``agents/orchestration/dynamic_actions/<dyn_id>/``.
+    "dynamic_action",
+    "integrate", "kernel_opt", "deep_kernel_analysis", "gemm_tuning",
     "operator_tuning", "vendor_kernel_config",
-    "validate_stack",
+    "recover",
 })
 
 
@@ -90,10 +133,13 @@ def _runs_actions() -> frozenset[str]:
         registry = ActionRegistry().load()
     except Exception:
         return _RUNS_ACTIONS_FALLBACK
+    # ``specialist`` is a synthetic action
+    # with no yaml meta (parameterised by ``params.domain``); the
+    # registry-derived path can't see it, so we always add it explicitly.
     return frozenset(
         a.name for a in registry.all()
         if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
-    )
+    ) | frozenset({"specialist"})
 
 
 def _validate_action(action: str) -> str:
@@ -251,6 +297,58 @@ def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# dynamic_action artefact paths.
+# Layout: ``<session_dir>/agents/orchestration/dynamic_actions/<dyn_id>/``
+# holds ``spec.json``, ``seed_kit.json``, ``sub_agent_journal.md``,
+# ``proposal_set.json``, ``critic_verdict.json``,
+# ``dispatch_history.jsonl``, and ``telemetry.json``.
+# ---------------------------------------------------------------------------
+def dynamic_actions_root(session_dir: Path) -> Path:
+    """Parent dir of every per-``dyn_id`` artefact dir."""
+    return agent_dir(session_dir, "orchestration") / "dynamic_actions"
+
+
+def dynamic_action_artifact_dir(session_dir: Path, dyn_id: str) -> Path:
+    """Per-``dyn_id`` artefact root. Caller mkdir's before writing."""
+    did = str(dyn_id or "").strip() or "unknown"
+    return dynamic_actions_root(session_dir) / did
+
+
+def dynamic_action_spec_path(session_dir: Path, dyn_id: str) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "spec.json"
+
+
+def dynamic_action_seed_kit_path(session_dir: Path, dyn_id: str) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "seed_kit.json"
+
+
+def dynamic_action_dispatch_history_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "dispatch_history.jsonl"
+
+
+def dynamic_action_proposal_set_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "proposal_set.json"
+
+
+def dynamic_action_critic_verdict_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    """Verdict envelope written by the Critic."""
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "critic_verdict.json"
+
+
+def dynamic_action_telemetry_path(
+    session_dir: Path, dyn_id: str,
+) -> Path:
+    """Per-``dyn_id`` terminal-state rollup written on lifecycle exit."""
+    return dynamic_action_artifact_dir(session_dir, dyn_id) / "telemetry.json"
+
+
+# ---------------------------------------------------------------------------
 # External baseline comparison artefacts (DESIGN: target_analysis is report-only)
 # ---------------------------------------------------------------------------
 # These paths sit under a dedicated top-level subdir rather than
@@ -282,6 +380,152 @@ def target_analysis_report_md(session_dir: Path) -> Path:
     return target_analysis_dir(session_dir) / "target_analysis_report.md"
 
 
+# ---------------------------------------------------------------------------
+# Cortex KB integration paths
+# ---------------------------------------------------------------------------
+# Single source of truth for every file under ``<sd>/runtime/cortex/``. The
+# directory itself is created by :func:`paths.make_session_dir`; the helpers
+# below only compute the well-known file names.  Callers MUST go through
+# these helpers (no ad-hoc string concatenation) so the legacy NDJSON
+# protocol stays homogeneous across producers / consumers (CortexKBClient,
+# flusher daemon, breakdown collector, robustness monitor).
+def cortex_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/`` — Cortex KB per-session bookkeeping root."""
+    return Path(session_dir) / "runtime" / "cortex"
+
+
+def cortex_sid_file(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_sid`` — single-line file holding the Cortex
+    session id returned by T0 ``session begin``.
+
+    Used by resume to skip re-begin and continue draining
+    :func:`cortex_pending` / committing the existing session. Absent file
+    means either ``--degraded-kb`` was selected or T0 has not yet run.
+    """
+    return cortex_dir(session_dir) / ".kb_sid"
+
+
+def cortex_warm_json(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_warm.json`` — T0 snapshot of
+    ``find-recipe`` output. Read by §3.5 specialist assembly (M5).
+    """
+    return cortex_dir(session_dir) / ".kb_warm.json"
+
+
+def cortex_pitfalls_json(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_pitfalls.json`` — T0 snapshot of
+    ``traps`` output. Read by §3.5 specialist assembly (M5).
+    """
+    return cortex_dir(session_dir) / ".kb_pitfalls.json"
+
+
+def cortex_pending_ndjson(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_pending.ndjson`` — append-only async write
+    queue for T2 / T3 operations.
+
+    Producers: CortexKBClient enqueue on synchronous CLI failure (or for
+    always-async ops). Consumer: ``cortex_kb_flusher`` daemon (5s / 50 line
+    batch). Drained synchronously at T4 before ``session commit``.
+    """
+    return cortex_dir(session_dir) / ".kb_pending.ndjson"
+
+
+def cortex_flushed_ndjson(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_flushed.ndjson`` — successfully-POSTed
+    rows, kept around for offline audit / breakdown collection.
+    """
+    return cortex_dir(session_dir) / ".kb_flushed.ndjson"
+
+
+def cortex_dead_letter_ndjson(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_dead_letter.ndjson`` — rows that failed
+    permanently (HTTP 4xx business-logic rejects); robustness HIGH alert.
+    """
+    return cortex_dir(session_dir) / ".kb_dead_letter.ndjson"
+
+
+def cortex_audit_jsonl(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_audit.jsonl`` — append-only synchronous
+    audit of every Cortex CLI invocation (success or failure) the
+    Coordinator made directly, independent of NDJSON fan-out. Source of
+    truth for ``breakdown.kb_provenance``.
+    """
+    return cortex_dir(session_dir) / ".kb_audit.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# recipe-snapshot v2 — per-session bookkeeping.
+#
+# Lives under a separate ``runtime/recipe_snapshot/`` subtree (NOT
+# ``runtime/cortex/``) so the v2 dispatcher can stay decoupled from
+# the legacy ``/v1/points`` client during the gradual cutover.
+#
+# History: under the original Phase 1 design this directory also held
+# ``.pending.ndjson`` / ``.flushed.ndjson`` / ``.dead_letter.ndjson``
+# queues for failed central-server writes. Those have been retired —
+# under the local-write design (commit "feat(recipe_kb): local-only
+# recipe-snapshot store with history archival") writes never go to
+# the central server, so the failed-write fan-out has nothing to
+# queue. Only the read-side audit log (``.audit.jsonl``) and the
+# directory itself survive; both are kept for the dispatcher's
+# remote-failure logging path.
+# ---------------------------------------------------------------------------
+def recipe_snapshot_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/`` — dispatcher / remote-client
+    per-session bookkeeping root.
+    """
+    return Path(session_dir) / "runtime" / "recipe_snapshot"
+
+
+def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only
+    synchronous audit of every recipe-snapshot remote READ call
+    (success or failure) the dispatcher made directly. Writes are
+    local-only and don't traverse this audit (the local store has
+    its own atomic write contract).
+    """
+    return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
+
+
+def pr_monitor_status_json(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.pr_monitor_status.json`` — one-shot marker
+    written by ``cli._bootstrap_knowledge_plane`` with
+    the boot-time PR Monitor reachability snapshot. Breakdown collector
+    reads it to emit ``warnings`` entries like ``pr_monitor:disabled``
+    or ``pr_monitor:unreachable`` so dashboards can light up on
+    --degraded-pr / cross-cluster failures without scraping logs.
+
+    Schema (JSON):
+
+    ``{enabled: bool, url: str | None, reachable: bool, mcp_url: str,
+       window_days: int, status_text: str}``
+    """
+    return cortex_dir(session_dir) / ".pr_monitor_status.json"
+
+
+def cortex_flusher_pid(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_flusher.pid`` — flusher daemon pid file
+    (one line). Robustness reads this to detect a dead flusher.
+    """
+    return cortex_dir(session_dir) / ".kb_flusher.pid"
+
+
+def cortex_flusher_status_json(session_dir: Path) -> Path:
+    """``<sd>/runtime/cortex/.kb_flusher_status.json`` — one-shot marker
+    written by ``cli._maybe_spawn_kb_flusher`` with the
+    boot-time flusher spawn decision. Breakdown collector merges this
+    with the live pid-file check to populate
+    ``kb_provenance.flusher_status``.
+
+    Schema (JSON):
+
+    ``{enabled: bool, spawned: bool, pid: int | None, cmd: list[str],
+       cortex_kb_url: str | None, interval_sec: float, batch_size: int,
+       reason: str, ts: str}``
+    """
+    return cortex_dir(session_dir) / ".kb_flusher_status.json"
+
+
 __all__ = [
     "agent_dir",
     "agent_inbox",
@@ -289,6 +533,23 @@ __all__ = [
     "agent_outbox",
     "agent_persona",
     "agent_prompt_snapshot",
+    "cortex_audit_jsonl",
+    "cortex_dead_letter_ndjson",
+    "cortex_dir",
+    "cortex_flushed_ndjson",
+    "cortex_flusher_pid",
+    "cortex_flusher_status_json",
+    "cortex_pending_ndjson",
+    "cortex_pitfalls_json",
+    "cortex_sid_file",
+    "cortex_warm_json",
+    "dynamic_action_artifact_dir",
+    "dynamic_action_critic_verdict_path",
+    "dynamic_action_dispatch_history_path",
+    "dynamic_action_proposal_set_path",
+    "dynamic_action_seed_kit_path",
+    "dynamic_action_spec_path",
+    "dynamic_actions_root",
     "kernel_agent_runs_dir",
     "kernel_workspace",
     "logs_dir",

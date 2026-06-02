@@ -22,7 +22,6 @@ from inference_optimizer.orchestrator.backends import (
 )
 from inference_optimizer.orchestrator.coordinator import (
     Coordinator,
-    _baseline_params_fingerprint,
 )
 from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
 from inference_optimizer.orchestrator.task_registry import Task
@@ -54,7 +53,8 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
-    coordinator.shared_state.action_scores = {}
+    """v0.8 §3.9 — scoreboard retired. No-op back-compat shim."""
+    return None
 
 
 def _seed_target_analysis_marker(sd: Path) -> None:
@@ -248,7 +248,7 @@ async def test_sequence_denial_returns_self_loop_for_baseline(session_dir):
 async def test_sequence_denial_no_self_loop_for_other_actions(session_dir):
     """``backends`` (and other non-baseline kinds) skip the self-loop guard.
 
-    We pre-satisfy the unrelated ``profile``/``select_kernels`` prerequisite
+    We pre-satisfy the unrelated ``profile``/``trace_analyze`` prerequisite
     gates so the only remaining denial source is the self-loop helper —
     which is baseline-only, so a backends proposal must pass cleanly.
     """
@@ -258,9 +258,10 @@ async def test_sequence_denial_no_self_loop_for_other_actions(session_dir):
     try:
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.last_profile_trace = "/tmp/fake-trace"
-        c.shared_state.last_profile_pmc_summary = "/tmp/fake-pmc.json"
-        c.shared_state.last_select_kernels = {
+        c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/fake-trace",
+            # Roofline-v2 N3: backends now requires fresh analysis_md_text.
+            "analysis_md_text": "FAKE_REPORT",
         }
         # Pretend the user tried a backends proposal with the same params
         # as a doomed baseline — self-loop rule must NOT fire on

@@ -1,4 +1,4 @@
-"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude (DESIGN v0.6 §14.2).
+"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude ().
 
 P1-5 implementation:
 
@@ -23,20 +23,20 @@ Out of scope for P1-5:
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 from ..intent_parser import (
     Intent,
-    IntentType,
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import Backend, BackendError, BackendTurnResult
+from .base import BackendError, BackendTurnResult, parse_call_timeout_env
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
@@ -72,10 +72,19 @@ payload={{"topic":"heartbeat","body_md":"ok"}}.
 """.strip()
 
 
+# Claude Code built-in tools disallowed in raw_completion mode so the
+# model produces exactly one text turn (no agentic tool loop).
+_RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
+    "Bash", "BashOutput", "KillShell", "Read", "Write", "Edit",
+    "NotebookEdit", "Glob", "Grep", "Task", "WebFetch", "WebSearch",
+    "TodoWrite", "ExitPlanMode", "SlashCommand",
+)
+
+
 def _import_sdk() -> tuple[Any, Any, Any]:
     """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise.
 
-    Only ``claude_agent_sdk`` is supported in v0.6 — legacy
+    Only ``claude_agent_sdk`` is supported in the legacy release — legacy
     ``claude_code_sdk`` was deprecated upstream.
     """
     try:
@@ -94,7 +103,7 @@ def _import_sdk() -> tuple[Any, Any, Any]:
 
 @dataclass
 class ClaudeBackend:
-    """Production Claude backend (DESIGN v0.6 §14.2). Implements :class:`Backend`.
+    """Production Claude backend (). Implements :class:`Backend`.
 
     Args:
         model: Claude model id (e.g. ``"claude-opus-4-7"``); defaults to
@@ -114,6 +123,31 @@ class ClaudeBackend:
     # Larger = more retries on validation failure but more tokens.
     max_turns_default: int = 4
     enable_mcp_emit_intent: bool = True
+    # Raw single-shot completion mode for callers that drive their own
+    # loop + parse the model's plain text themselves (e.g. the
+    # dynamic_action ReAct runner). When True: the emit_intent MCP
+    # server + output-format suffix are skipped, all tools are
+    # disallowed so the model produces exactly one text turn, and
+    # ``run`` returns ``raw_text`` without requiring an emitted intent.
+    raw_completion: bool = False
+    # Wall-clock cap for one ``run()`` call. The claude-agent-sdk shells
+    # out to the ``claude`` CLI which talks to the AMD primus-safe
+    # gateway; if the gateway is unreachable the subprocess can hang
+    # on TCP for minutes, stalling the orchestrator reactor. 120s is
+    # well above a normal turn (~10–30s) but bounds the worst case.
+    #
+    # Env-var override ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`` lets
+    # operators bump this when opus-class models with a heavy orchestrator
+    # system prompt (~22 KB) and a 4-turn agentic loop consistently exceed
+    # 120 s on the AMD gateway under load. Invalid values fall back to the
+    # 120s default rather than crashing backend construction; backend
+    # boot-time refuses to die for a malformed env-var.
+    call_timeout_s: float = field(
+        default_factory=lambda: parse_call_timeout_env(
+            "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC",
+            default=120.0,
+        )
+    )
 
     # Test seams — set these to bypass SDK import / network calls.
     sdk_query_factory: Callable[..., Any] | None = None
@@ -144,6 +178,8 @@ class ClaudeBackend:
                     self.sdk_module = mod
         if not os.environ.get(self.api_key_env):
             self.calls.append({"warn": f"{self.api_key_env} not set in env"})
+        if self.raw_completion:
+            self.enable_mcp_emit_intent = False
         if self.enable_mcp_emit_intent:
             try:
                 cfg = build_emit_intent_server(
@@ -175,34 +211,92 @@ class ClaudeBackend:
     ) -> BackendTurnResult:
         full_prompt = self._compose_prompt(prompt)
         max_turns_use = max_turns or self.max_turns_default
+        if self.raw_completion:
+            # Claude Code counts the single assistant text message as a
+            # turn and errors when max_turns is reached, so a literal
+            # max_turns=1 trips even on a clean one-shot answer. All
+            # tools are disallowed in raw mode, so the model cannot
+            # loop — generous headroom guarantees the text turn returns.
+            max_turns_use = max(max_turns_use, 8)
         options = self._build_options(
             tools=tools or [],
             max_turns=max_turns_use,
             system_prompt=system_prompt,
         )
-        intents, raw_text, tool_block_count = await self._invoke_and_collect(
-            full_prompt, options
+        # Combine N6 (cache metric extraction via 4-tuple from
+        # _invoke_and_collect) with main's timeout guard (#243 area):
+        # wrap the SDK call in asyncio.wait_for so an upstream proxy
+        # stall doesn't park the reactor indefinitely.
+        try:
+            intents, raw_text, tool_block_count, usage = await asyncio.wait_for(
+                self._invoke_and_collect(full_prompt, options),
+                timeout=self.call_timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            self.calls.append({
+                "warn": (
+                    f"claude SDK call timed out after {self.call_timeout_s:.0f}s; "
+                    "treating as no-intent so the reactor pass can proceed"
+                ),
+            })
+            raise BackendError(
+                f"Claude backend timed out after {self.call_timeout_s:.0f}s "
+                "(likely upstream proxy stall)"
+            ) from exc
+        # N6: stash the per-tick cache metric on backend.calls so the
+        # audit scripts (N7) can compute session-level cache_hit_rate
+        # without needing a separate Coordinator wiring path.
+        cache_creation = self._safe_int(
+            usage.get("cache_creation_input_tokens") if usage else None
         )
+        cache_read = self._safe_int(
+            usage.get("cache_read_input_tokens") if usage else None
+        )
+        input_tokens = self._safe_int(usage.get("input_tokens") if usage else None)
+        output_tokens = self._safe_int(usage.get("output_tokens") if usage else None)
         self.calls.append({
             "prompt_chars": len(full_prompt),
             "tool_blocks": tool_block_count,
             "intents": len(intents),
             "max_turns": max_turns_use,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
         })
-        if not intents:
+        if not intents and not self.raw_completion:
             raise NoIntentEmitted(
                 f"claude reply contained no parseable emit_intent tool_use "
                 f"blocks (raw_text_len={len(raw_text)}, tool_blocks={tool_block_count})"
             )
+        # N6: expose cache metrics on metadata too so a Coordinator-side
+        # post-tick hook (future / N7+) can read them off the
+        # BackendTurnResult without scanning backend.calls.
         return BackendTurnResult(
             intents=intents, raw_text=raw_text,
-            metadata={"tool_blocks": tool_block_count, "model": self.model},
+            metadata={
+                "tool_blocks": tool_block_count,
+                "model": self.model,
+                "cache_creation_input_tokens": cache_creation,
+                "cache_read_input_tokens": cache_read,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
         )
+
+    @staticmethod
+    def _safe_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
     def _compose_prompt(self, prompt: str) -> str:
+        if self.raw_completion:
+            return prompt
         return f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
 
     def _build_options(
@@ -217,6 +311,15 @@ class ClaudeBackend:
             kwargs["model"] = self.model
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
+        if self.raw_completion:
+            # Single text turn: no MCP tools, and every Claude Code
+            # built-in tool disallowed. The caller parses the model's
+            # plain text itself, so any tool use would only burn a
+            # turn and trip the max_turns cap.
+            kwargs["allowed_tools"] = []
+            kwargs["disallowed_tools"] = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
+            kwargs["stderr"] = self._stderr_sink
+            return self.sdk_options_cls(**kwargs)
         # Allowed tools = caller-provided + our MCP-qualified emit_intent.
         # Drop the unqualified short name "emit_intent" — Claude CLI rejects
         # bare tool names that don't match a real registered tool. The MCP
@@ -242,27 +345,81 @@ class ClaudeBackend:
 
     async def _invoke_and_collect(
         self, prompt: str, options: Any
-    ) -> tuple[list[Intent], str, int]:
-        """Stream messages from the SDK, collect intents + raw text + tool counts."""
+    ) -> tuple[list[Intent], str, int, dict[str, Any]]:
+        """Stream messages from the SDK, collect intents + raw text +
+        tool counts + the most recent `ResultMessage.usage` dict.
+
+        Roofline-v2 N6: extract `usage` so the Coordinator (or audit
+        scripts via `backend.calls`) can read
+        `cache_creation_input_tokens` / `cache_read_input_tokens`
+        and measure how effective Claude Code's automatic prompt
+        caching is at hitting our SECTION-A/B stable-prefix design
+        (§5.1, §8.8).
+
+        `usage` mirrors what task_manager.py in Primus-Claw/OOB reads
+        (lines 152-153) — the field shape is fixed by the Anthropic
+        Messages API response and surfaces here because Claude Code
+        forwards it on its terminal `ResultMessage`.
+        """
         intents: list[Intent] = []
         text_chunks: list[str] = []
+        result_chunks: list[str] = []
         tool_block_count = 0
-        async for message in self.sdk_query_factory(prompt=prompt, options=options):
-            for block in self._iter_blocks(message):
-                if self._is_tool_use_for_emit_intent(block):
-                    tool_block_count += 1
-                    intent = self._parse_tool_use_block(block)
-                    if intent is not None:
-                        intents.append(intent)
+        last_usage: dict[str, Any] = {}
+        try:
+            async for message in self.sdk_query_factory(prompt=prompt, options=options):
+                for block in self._iter_blocks(message):
+                    if self._is_tool_use_for_emit_intent(block):
+                        tool_block_count += 1
+                        intent = self._parse_tool_use_block(block)
+                        if intent is not None:
+                            intents.append(intent)
+                    else:
+                        txt = self._extract_text(block)
+                        if txt:
+                            text_chunks.append(txt)
+                # ResultMessage.result is the consolidated final assistant
+                # text — the SAME content already streamed as TextBlocks.
+                # Keep it separate so we don't double-count: the joined
+                # stream and the result would otherwise concatenate into a
+                # duplicated payload (breaks raw_completion JSON parsing).
+                result_text = getattr(message, "result", None)
+                if isinstance(result_text, str) and result_text:
+                    result_chunks.append(result_text)
+                # N6: ResultMessage carries .usage on terminal messages
+                # (Anthropic Messages API response schema). The SDK
+                # propagates this dict verbatim. We overwrite (not
+                # accumulate) because the last message of a multi-turn
+                # session reports the cumulative session usage.
+                msg_usage = getattr(message, "usage", None)
+                if isinstance(msg_usage, dict) and msg_usage:
+                    last_usage = dict(msg_usage)
+        except Exception as exc:
+            # SDK ≥ 0.2.82 / CLI ≥ 2.1.123 may raise "Claude Code returned
+            # an error result: success" when the CLI exits after emitting a
+            # valid result with is_error=True + subtype='success' (max-turns
+            # reached). If we already collected intents, return them rather
+            # than losing the entire turn.
+            err_str = str(exc)
+            if "error result: success" in err_str:
+                if intents:
+                    log.warning(
+                        "claude SDK raised '%s' but %d intents already collected; "
+                        "returning partial results",
+                        err_str, len(intents),
+                    )
                 else:
-                    txt = self._extract_text(block)
-                    if txt:
-                        text_chunks.append(txt)
-            # ResultMessage carries .result text in many SDKs
-            result_text = getattr(message, "result", None)
-            if isinstance(result_text, str):
-                text_chunks.append(result_text)
-        return intents, "".join(text_chunks), tool_block_count
+                    log.warning(
+                        "claude SDK raised '%s' with no intents collected; "
+                        "treating as no-intent turn (will retry next tick)",
+                        err_str,
+                    )
+            else:
+                raise
+        # Prefer the consolidated ResultMessage text; fall back to the
+        # streamed TextBlocks only when no result was emitted.
+        raw_text = "".join(result_chunks) or "".join(text_chunks)
+        return intents, raw_text, tool_block_count, last_usage
 
     @staticmethod
     def _iter_blocks(message: Any):

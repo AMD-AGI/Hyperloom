@@ -1,6 +1,6 @@
-"""CodexBackend — DESIGN v0.6 §7.3 / §14.3.
+"""CodexBackend
 
-Codex roles (only ``critic`` in v0.6) talk to GPT-style models via the
+Codex roles (only ``critic`` in the legacy release) talk to GPT-style models via the
 OpenAI SDK; per DESIGN §5.1.1 they're **no-tools by default**, so the
 intent transport is JSON-in-text:
 
@@ -15,10 +15,12 @@ intent transport is JSON-in-text:
 
 Authentication:
 
-* `ANTHROPIC_BASE_URL` (or `OPENAI_BASE_URL`) — proxy endpoint
+* `OPENAI_BASE_URL` (or `ANTHROPIC_BASE_URL`) — gateway endpoint
 * `ANTHROPIC_AUTH_TOKEN` (or `OPENAI_API_KEY`) — auth token
-  The AMD proxy serves both Claude AND OpenAI models from the same URL,
-  hence we accept the ANTHROPIC_* env vars too.
+  The AMD gateway serves both Claude AND OpenAI models from the same URL,
+  hence we accept the ANTHROPIC_* env vars too. OPENAI_BASE_URL is the
+  canonical (install.sh agrees); ANTHROPIC_BASE_URL is kept as a legacy
+  fallback.
 
 Test seam:
 
@@ -28,23 +30,19 @@ Test seam:
 
 from __future__ import annotations
 
+import asyncio
 import json
-import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from ..intent_parser import (
-    Intent,
     IntentValidationError,
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import Backend, BackendError, BackendTurnResult
-
-
-log = logging.getLogger(__name__)
+from .base import BackendError, BackendTurnResult, parse_call_timeout_env
 
 
 _OUTPUT_INSTRUCTIONS = """
@@ -116,13 +114,32 @@ def _extract_envelope(text: str) -> dict | None:
 
 @dataclass
 class CodexBackend:
-    """Production Codex backend (DESIGN v0.6 §14.3). Implements :class:`Backend`."""
+    """Production Codex backend (). Implements :class:`Backend`."""
 
     model: str = "gpt-5.4"
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
-    base_url_env: str = "ANTHROPIC_BASE_URL"
+    # Canonical LiteLLM env (install.sh agrees). When two base-URL envs
+    # coexist, OPENAI_BASE_URL wins; ANTHROPIC_BASE_URL is the legacy
+    # fallback.
+    base_url_env: str = "OPENAI_BASE_URL"
     max_completion_tokens: int = 2000
     name: str = "codex"
+    # Wall-clock cap for one ``run()`` call. Mirrors ClaudeBackend's
+    # ``call_timeout_s``: the AsyncOpenAI client honours per-request
+    # timeouts internally but a stalled gateway can still block the
+    # ``await create(...)`` for the full TCP timeout. Bounding it at
+    # asyncio level guarantees the orchestrator reactor never sits idle
+    # past this budget.
+    #
+    # Env-var override ``INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC`` mirrors
+    # the claude backend knob; same rationale (heavy critic / kernel prompts
+    # may exceed 120 s on the AMD gateway under load).
+    call_timeout_s: float = field(
+        default_factory=lambda: parse_call_timeout_env(
+            "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",
+            default=120.0,
+        )
+    )
 
     # Test seam — set to bypass real OpenAI client construction.
     client_factory: Callable[[], Any] | None = None
@@ -152,6 +169,7 @@ class CodexBackend:
         base_url = (
             os.environ.get(self.base_url_env)
             or os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("ANTHROPIC_BASE_URL")
         )
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
@@ -174,11 +192,19 @@ class CodexBackend:
         messages.append({"role": "user", "content": full_prompt})
 
         try:
-            resp = await self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_completion_tokens=self.max_completion_tokens,
+            resp = await asyncio.wait_for(
+                self._client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_completion_tokens=self.max_completion_tokens,
+                ),
+                timeout=self.call_timeout_s,
             )
+        except asyncio.TimeoutError as exc:
+            raise BackendError(
+                f"Codex API call timed out after {self.call_timeout_s:.0f}s "
+                "(likely upstream proxy stall)"
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise BackendError(f"Codex API call failed: {exc!r}") from exc
 

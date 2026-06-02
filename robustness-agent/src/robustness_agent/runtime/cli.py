@@ -48,6 +48,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -55,6 +56,7 @@ from typing import Any
 
 from ..config import Config
 from ..factory import build_reactor_components
+from ..finalize.postmortem import finalize_session
 from ..role.envelope import build_envelope_dict
 from ..role.prompt_inputs import (
     ReactorContext,
@@ -159,6 +161,53 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
             config.nodes = max(1, int(options["nodes"]))
         except (TypeError, ValueError):
             pass
+    # Auto-probe knob lets hosts/tests opt out of the default
+    # inference-server health probe without having to configure
+    # ``health_probe_targets`` from scratch. Useful for the heartbeat
+    # tests (which run on hosts with no inference server) and for
+    # sandbox environments that audit health out-of-band.
+    if "auto_probe_inference_server" in options:
+        config.auto_probe_inference_server = bool(
+            options["auto_probe_inference_server"]
+        )
+    # The ``ray status`` probe was introduced in PR #239 and runs on
+    # every tick of the agent backend. Heartbeat tests (and any host
+    # without an in-sandbox Ray head) need to disable it to keep the
+    # default heartbeat envelope clean of false-positive
+    # ``ray_head_dead`` alerts. The Coordinator wiring mirrors
+    # ``auto_probe_*`` above.
+    if "ray_probe_enabled" in options:
+        config.ray_probe_enabled = bool(options["ray_probe_enabled"])
+    # Whole-probe disable for the J ``external_deps`` signal (TraceLens
+    # CLI / WekaFS mount). Heartbeat e2e tests run on inert CI hosts
+    # where neither dependency is provisioned, so the default probe
+    # fires ``tracelens_cli_missing`` + ``wekafs_degraded`` alerts that
+    # otherwise mask the expected ``send_message{heartbeat}`` envelope.
+    if "external_deps_enabled" in options:
+        config.external_deps_enabled = bool(options["external_deps_enabled"])
+    # B3 ``no_levers_found`` floor knobs let hosts override the
+    # default 45 min / 8 tick observation window without forking the
+    # whole Config. Multi-node large-model setups need a longer floor
+    # because sglang cold start + baseline + profile + turnaround
+    # alone consume 35-50 min before any explore family runs;
+    # inference_optimizer's _build_robustness_options injects 60.0
+    # when args.nodes >= 2 (single-node defaults stay at 45.0).
+    if "progress_no_levers_min_minutes" in options:
+        config.progress_no_levers_min_minutes = float(
+            options["progress_no_levers_min_minutes"]
+        )
+    if "progress_no_levers_min_ticks" in options:
+        config.progress_no_levers_min_ticks = int(
+            options["progress_no_levers_min_ticks"]
+        )
+
+    # L4 — advertise our session_dir to co-deployed Critic processes so
+    # their ``prepare-review`` can find ``agents/robustness/findings/
+    # <session>.jsonl`` without explicit configuration. Setdefault keeps
+    # an operator-supplied override intact.
+    os.environ.setdefault(
+        "ROBUSTNESS_AGENT_SESSION_DIR", str(config.session_dir),
+    )
 
     tick_index_raw = context.get("tick_index", 0)
     tick_index = int(tick_index_raw) if isinstance(tick_index_raw, (int, float)) else 0
@@ -209,6 +258,37 @@ def _cmd_tick(args: argparse.Namespace) -> None:
     _emit_json(emit, args.out)
 
 
+def _cmd_finalize(args: argparse.Namespace) -> None:
+    """Run the L1+L2 postmortem finalizer as a one-shot operator tool.
+
+    Use when the reactor never observed ``stop_reason`` going
+    non-empty (e.g. Coordinator killed by SIGKILL before the wind-down
+    intent landed). Idempotent — re-running has no effect once the
+    ``.robustness_finalized`` marker exists, matching the in-reactor
+    behaviour.
+    """
+    session_dir = Path(str(args.session_dir)).expanduser()
+    if not session_dir.is_dir():
+        raise RuntimeAdapterError(
+            f"--session-dir does not point to a directory: {session_dir}"
+        )
+    session_id = (args.session_id or session_dir.name or "default").strip()
+    stop_reason = (args.stop_reason or "manual_finalize").strip()
+    wrote = finalize_session(
+        session_dir,
+        session_id=session_id,
+        stop_reason=stop_reason,
+    )
+    payload = {
+        "session_dir": str(session_dir),
+        "session_id": session_id,
+        "stop_reason": stop_reason,
+        "wrote_new_files": bool(wrote),
+        "reports_dir": str(session_dir / "reports"),
+    }
+    _emit_json(payload, args.out)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="robustness-agent-runtime",
@@ -231,6 +311,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to write the emit JSON (default: stdout).",
     )
     tick.set_defaults(func=_cmd_tick)
+
+    finalize = sub.add_parser(
+        "finalize",
+        help=(
+            "Run the L1+L2 postmortem finalizer post-hoc "
+            "(for sessions whose Coordinator died before stop_reason "
+            "was written)."
+        ),
+    )
+    finalize.add_argument(
+        "--session-dir",
+        required=True,
+        help="Path to the session directory to finalize.",
+    )
+    finalize.add_argument(
+        "--session-id",
+        default="",
+        help="Session id (default: basename of --session-dir).",
+    )
+    finalize.add_argument(
+        "--stop-reason",
+        default="manual_finalize",
+        help="stop_reason to record in the postmortem (default: manual_finalize).",
+    )
+    finalize.add_argument(
+        "--out",
+        default="-",
+        help="Path to write the finalize summary JSON (default: stdout).",
+    )
+    finalize.set_defaults(func=_cmd_finalize)
     return parser
 
 

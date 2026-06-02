@@ -45,6 +45,42 @@ models:
     model_prefix: gptoss
     verified_count: 611
 
-# ── 以下模型 InferenceX 暂无数据 ──
-# GLM 4.7 — InferenceX 上没有
-# Qwen3-Next-80B — InferenceX 上没有
+# ── Models InferenceX has no data for ──
+# GLM 4.7 — not on InferenceX
+# Qwen3-Next-80B — not on InferenceX
+
+# ─── production pool exclusion keywords (substring, case-insensitive) ───────
+#
+# ci/build_production_hf_pool.py reads this section and drops any
+# repo_id whose lower-case form contains one of these keywords. The
+# list covers two categories of models we do NOT want flowing into the
+# Hyperloom 8h production-rerun pool:
+#   1. Families InferenceX already covers in its dedicated long-running
+#      job (so they are not double-spent on GPU here).
+#   2. Customer / roadmap exclusions where the product owner has said
+#      "do not run this in the production_1000 pool".
+# Substring matching also picks up third-party quant variants
+# (unsloth/QuantTrio/cyankiwi/AWQ etc.), which the exact `hf_model`
+# match in the `models:` block above cannot.
+#
+# Rule of thumb: pure substring match against repo_id.lower(). Before
+# adding a new keyword, grep the leaderboard to make sure it does not
+# unintentionally exclude unrelated models.
+production_pool_exclusion_keywords:
+  # InferenceX-owned families (5 families + every third-party variant)
+  - gpt-oss-120b
+  - kimi-k2.5
+  - kimi-k25
+  - qwen3.5-397b
+  - qwen3-5-397b
+  - deepseek-r1-0528
+  - r1-0528
+  - minimax-m2.5
+  - minimax-m25
+
+  # Customer / roadmap "do not run in production pool": GLM-5 (P2,
+  # paused for now); DeepSeek V4 series + GLM-5.1 (all P0 InferenceX
+  # long jobs).
+  - glm-5
+  - glm5
+  - deepseek-v4

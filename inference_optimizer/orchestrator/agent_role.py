@@ -1,4 +1,4 @@
-"""Agent role definitions — DESIGN v0.6 §7.
+"""Agent role definitions
 
 Each :class:`AgentRole` binds:
 
@@ -24,7 +24,7 @@ v0.6 roster — 4 persistent reactors, no mode gating::
     │              │          │ + always-on tick                        │
     └──────────────┴──────────┴─────────────────────────────────────────┘
 
-Removed in v0.6:
+Removed in the legacy release:
     * sage role (KB merged into Critic — §7.3 / ADR-35)
     * robustness role (health monitoring + RCA + recovery — ADR-36)
     * triage role (renamed to robustness — alignment with arch diagram)
@@ -34,18 +34,17 @@ Framework / Comm layer experts (DESIGN §7.7) are **not implemented** in
 v0.6; they're architecturally placeholders.
 
 References:
-    - DESIGN v0.6 §7.1-7.4   Per-role responsibilities
-    - DESIGN v0.6 §7.6       Role × Intent capability matrix
-    - DESIGN v0.6 §14.5      PolicyGate consumes the flags below
+    --7.4   Per-role responsibilities
+    -       Role × Intent capability matrix
+    -      PolicyGate consumes the flags below
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
 
 from ..paths import asset_system_prompts_dir
 from .intent_parser import IntentType
@@ -82,11 +81,19 @@ _BASE_INTENTS: frozenset[IntentType] = frozenset({
 
 # Orchestration — proposes / delegates / requests Kernel; the only role with
 # REQUEST authority (target_agent="kernel" enforced by PolicyGate).
+#
+# Roofline-v2 C3: Orchestration is also granted PRUNE_BRANCH so it can act on
+# the structured ``suggested_prunes`` advice produced by the ``roofline``
+# action (C4 / C5). The intent's per-source allowlist is widened in
+# :mod:`.policy` (``_ROBUSTNESS_ONLY_INTENT_SOURCES``); the other two
+# scheduling-police intents (FORCE_DISPATCH, ESCALATE_STRATEGY_CHANGE) stay
+# robustness-only.
 _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
     IntentType.PROPOSE_ACTION,
     IntentType.DELEGATE,
     IntentType.UPDATE_STATE,
     IntentType.REQUEST,
+    IntentType.PRUNE_BRANCH,
 })
 
 

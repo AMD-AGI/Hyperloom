@@ -1,0 +1,222 @@
+Use the inference-optimization skill from a fresh Hyperloom checkout for this model.
+
+CRITICAL — Fresh Source Checkout (REQUIRED): run the optimizer from a freshly
+cloned Hyperloom tree (CI injects an authenticated HYPERLOOM_SOURCE_REPO). Do
+NOT fall back to /wekafs/HyperloomV2 — those trees drift and are not
+reproducible. If clone fails: ABORT with gain_pct=0.0 and
+actions_taken=["aborted: source checkout failed"].
+
+  # If Claw mounted USER_DATA_PATH on wekafs, align RESULT_DIR to it so the
+  # V2 session_dir and the contract files share one persistent tree.
+  case "${USER_DATA_PATH:-}" in
+    /hyperloom/*|/wekafs/*)
+      : "${RESULT_DIR:=$USER_DATA_PATH}"
+      echo "[CI_PATH] aligned RESULT_DIR=$RESULT_DIR with USER_DATA_PATH (already persistent in wekafs)"
+      ;;
+    *)
+      : "${RESULT_DIR:=/workspace/hyperloom/}"
+      echo "[CI_PATH] RESULT_DIR=$RESULT_DIR is sandbox-ephemeral; PERSIST cp will mirror it later"
+      ;;
+  esac
+  export RESULT_DIR
+  export HYPERLOOM_SOURCE_REPO="${HYPERLOOM_SOURCE_REPO:-https://github.com/AMD-AGI/Hyperloom.git}"
+  export HYPERLOOM_SOURCE_REF="${HYPERLOOM_SOURCE_REF:-main}"
+  # Clone OUTSIDE $RESULT_DIR — otherwise the ~100MB shallow checkout gets
+  # copied into $PERSIST_DIR on every run (waste of wekafs). The audit
+  # files written below (hyperloom_source_commit.txt + source_commits.json)
+  # still live in $RESULT_DIR so they DO get persisted.
+  export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/workspace/Hyperloom-main}"
+  mkdir -p "$RESULT_DIR"
+  mkdir -p "$(dirname "$HYPERLOOM_SOURCE_DIR")"
+  rm -rf "$HYPERLOOM_SOURCE_DIR"
+  # 1) shallow clone main (always works regardless of HYPERLOOM_SOURCE_REF).
+  if ! git clone --depth 1 --branch main "$HYPERLOOM_SOURCE_REPO" "$HYPERLOOM_SOURCE_DIR"; then
+    echo "[FATAL] git clone of Hyperloom failed — refusing to fall back to /wekafs/HyperloomV2" >&2
+    exit 1
+  fi
+  cd "$HYPERLOOM_SOURCE_DIR"
+  # 2) if CI pinned a specific commit, fetch + checkout it. Failure here is
+  #    also fatal — the alternative is silently running the wrong code.
+  if [ "$HYPERLOOM_SOURCE_REF" != "main" ]; then
+    if ! git fetch --depth 1 origin "$HYPERLOOM_SOURCE_REF"; then
+      echo "[FATAL] git fetch of pinned ref $HYPERLOOM_SOURCE_REF failed" >&2
+      exit 1
+    fi
+    git checkout --detach FETCH_HEAD
+  fi
+  HYPERLOOM_SOURCE_COMMIT=$(git rev-parse HEAD)
+  printf '%s\n' "$HYPERLOOM_SOURCE_COMMIT" > "$RESULT_DIR/hyperloom_source_commit.txt"
+  python3 - <<'PY'
+import json, os, subprocess
+def git_out(args):
+    try:
+        return subprocess.check_output(args, text=True).strip()
+    except Exception:
+        return ""
+source_dir = os.environ.get("HYPERLOOM_SOURCE_DIR", "")
+result_dir = os.environ.get("RESULT_DIR", "/workspace/hyperloom/")
+# Strip the embedded token from the remote URL we record (the token is OK
+# inside the sandbox env but should never end up in a persisted artifact).
+def _sanitize(url: str) -> str:
+    import re
+    return re.sub(r"https://[^@]+@", "https://", url or "")
+payload = {
+    "hyperloom": {
+        "repo": _sanitize(os.environ.get("HYPERLOOM_SOURCE_REPO", "")),
+        "ref": os.environ.get("HYPERLOOM_SOURCE_REF", ""),
+        "path": source_dir,
+        "commit": git_out(["git", "-C", source_dir, "rev-parse", "HEAD"]) if source_dir else "",
+        "remote": _sanitize(git_out(["git", "-C", source_dir, "config", "--get", "remote.origin.url"])) if source_dir else "",
+    }
+}
+os.makedirs(result_dir, exist_ok=True)
+with open(os.path.join(result_dir, "source_commits.json"), "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2)
+PY
+
+Then run the skill at $HYPERLOOM_SOURCE_DIR/inference_optimizer/SKILL.md from
+that directory (cd "$HYPERLOOM_SOURCE_DIR").
+
+Environment (export before launching `inference_optimizer optimize`):
+  export NFS_ROOT=/wekafs
+  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak,claude,codex}"
+  export HYPERLOOM_GEAK_BUDGET_MIN="${HYPERLOOM_GEAK_BUDGET_MIN:-130}"
+  export HYPERLOOM_KERNEL_OPT_GATE_TOP_N="${HYPERLOOM_KERNEL_OPT_GATE_TOP_N:-5}"
+Pass `--max-hours 12` to `inference_optimizer optimize` (do not use the cli
+default). Kernel backend ladder is GEAK first, then Claude, then Codex; do NOT
+request a Claude-only backend unless explicitly told to.
+
+CRITICAL — Required Artifacts (the canonical SaFE success contract):
+At the end of the run, ALWAYS write ALL THREE files to $RESULT_DIR (defaults
+to /workspace/hyperloom/). If ANY of them is missing — or if the wekafs
+persist step below does not echo `[PERSIST OK]` — the task is considered
+Failed and we cannot recover any data from the sandbox after cleanup.
+
+  $RESULT_DIR/optimization_report.md
+  $RESULT_DIR/ci_metrics.json
+    {"baseline_throughput": <float>, "optimized_throughput": <float>, "gain_pct": <float>, "tok_per_gpu_baseline": <float>, "tok_per_gpu_optimized": <float>, "actions_taken": ["..."]}
+  $RESULT_DIR/session_breakdown.json
+    Written by inference_optimizer/cli.py's finally block. Required — the
+    dashboard prefers it over ci_metrics.json.
+
+If the pipeline aborts (kernel apply / server start / tooling crash): set
+optimized_throughput = baseline_throughput, gain_pct = 0.0,
+actions_taken = ["aborted: <reason>"], and still emit ALL THREE files. Only
+hand-write ci_metrics.json from on-disk phase results (phase02_baseline/,
+phase06_sweep/) near the END of the 12h budget if the orchestrator is
+genuinely stuck — never bail early on a 12h run.
+
+CRITICAL — vLLM Forbidden Flags (server will crash with "unrecognized arguments"):
+- --num-scheduler-steps   (removed in vLLM v0.4.0)
+- --chunked-prefill-size  (SGLang-only, NOT vLLM)
+- --enable-chunked-prefill (only safe on vLLM >= 0.6.0; check version first)
+
+CRITICAL — Result Directory: RESULT_DIR was selected for you above (see the
+[CI_PATH] log line) and aligned with USER_DATA_PATH so the V2 session_dir and
+all three artifacts land in the same tree. Trust the exported value; never
+hard-code /workspace/hyperloom/.
+
+CRITICAL — POST-PIPELINE PERSIST (LAST step; the run is Failed unless
+`[PERSIST OK]` is echoed). RESULT_DIR is either sandbox-ephemeral
+/workspace/hyperloom/ (must be mirrored to /hyperloom/users/<uid>/ before the
+pod is cleaned up) or a wekafs-backed USER_DATA_PATH (already persistent —
+verify in place). Run this snippet after the three artifacts are written:
+
+  mkdir -p "$RESULT_DIR"
+  case "$RESULT_DIR" in
+    /hyperloom/*|/wekafs/*)
+      # Case (b): RESULT_DIR == USER_DATA_PATH on wekafs. Skip cp -a;
+      # just verify the three contract files exist somewhere under it.
+      # CI's NFS Stage B fallback scans this exact path when artifact
+      # upload fails, so no extra mirroring is needed.
+      echo "[PERSIST] RESULT_DIR=$RESULT_DIR is already wekafs-backed (Claw mode); skipping cp -a"
+      PERSIST_SCAN_DIR="$RESULT_DIR"
+      ;;
+    *)
+      # Case (a): RESULT_DIR is sandbox-ephemeral. Mirror to wekafs.
+      UID_HEX="$(ls /hyperloom/users 2>/dev/null | head -1)"
+      if [ -z "$UID_HEX" ]; then
+        echo "[PERSIST FAIL] /hyperloom/users/<uid>/ not mounted in this sandbox — cannot persist to wekafs" >&2
+        ls -la "$RESULT_DIR/"
+        PERSIST_SCAN_DIR="$RESULT_DIR"
+      else
+        MODEL_TAG="$(echo "${DISPLAYNAME:-task}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/-*$//')"
+        TASK_TAG="${SAFE_TASK_ID:-$(date +%Y%m%d%H%M%S)}"
+        PERSIST_DIR="/hyperloom/users/$UID_HEX/${MODEL_TAG}-${TASK_TAG##*-}-opt"
+        mkdir -p "$PERSIST_DIR"
+        # Copy the FULL result tree (logs, phases, kernels, traces, audit
+        # files) so everything survives sandbox cleanup, not just the three
+        # contract files.
+        if cp -a "$RESULT_DIR/." "$PERSIST_DIR/"; then
+          echo "[PERSIST] cp -a $RESULT_DIR/. -> $PERSIST_DIR/ succeeded"
+        else
+          echo "[PERSIST FAIL] cp -a returned non-zero exit; partial state may exist in $PERSIST_DIR/" >&2
+        fi
+        PERSIST_SCAN_DIR="$PERSIST_DIR"
+      fi
+      ;;
+  esac
+  # V2 cli writes the authoritative session_breakdown.json (full phases[],
+  # 30-50 KB) under <USER_DATA_PATH>/<model>/<ts>/. Pull it in alongside the
+  # agent's compact copy so the artifact zip has phase-level detail.
+  V2_SESSION_ROOTS=()
+  [ -n "${USER_DATA_PATH:-}" ] && V2_SESSION_ROOTS+=("$USER_DATA_PATH")
+  [ -n "${UID_HEX:-}" ] && V2_SESSION_ROOTS+=("/hyperloom/users/$UID_HEX")
+  for _root in "${V2_SESSION_ROOTS[@]}"; do
+    [ -d "$_root" ] || continue
+    # Pick the most recent non-trivial breakdown (>4 KB rules out the agent
+    # placeholder; -mmin -720 avoids stale sessions from prior runs).
+    _v2_bd="$(find "$_root" -mindepth 3 -maxdepth 3 -name session_breakdown.json -size +4k -mmin -720 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)"
+    [ -z "$_v2_bd" ] && continue
+    _v2_sess="$(dirname "$_v2_bd")"
+    echo "[PERSIST V2] found populated breakdown: $_v2_bd ($(stat -c %s "$_v2_bd") bytes)"
+    # Keep both copies: rename V2's version so the agent's contract file
+    # stays at the canonical path.
+    cp "$_v2_bd" "$PERSIST_SCAN_DIR/session_breakdown_v2.json" 2>/dev/null \
+      && echo "[PERSIST V2] copied to $PERSIST_SCAN_DIR/session_breakdown_v2.json"
+    # Also pull manifest.json + state.json + any phase* subdirs if V2
+    # produced them; these only exist when V2 reached its finalize step.
+    for _f in manifest.json state.json optimizer_runs.json; do
+      [ -f "$_v2_sess/$_f" ] && cp "$_v2_sess/$_f" "$PERSIST_SCAN_DIR/$_f" 2>/dev/null \
+        && echo "[PERSIST V2] copied $_f"
+    done
+    # Mirror the full V2 session dir under a sub-folder for forensic depth.
+    mkdir -p "$PERSIST_SCAN_DIR/v2_session"
+    cp -a "$_v2_sess/." "$PERSIST_SCAN_DIR/v2_session/" 2>/dev/null \
+      && echo "[PERSIST V2] mirrored full V2 session dir -> $PERSIST_SCAN_DIR/v2_session/"
+    break
+  done
+  unset _root _v2_bd _v2_sess _f V2_SESSION_ROOTS
+
+  # Verify each Required Artifact appears under PERSIST_SCAN_DIR (find,
+  # because V2 nests session_breakdown.json in <model>/<ts>/). A miss is a
+  # contract violation and routes the run to manual review.
+  if [ -n "${PERSIST_SCAN_DIR:-}" ]; then
+    PERSIST_MISSING=""
+    for f in ci_metrics.json optimization_report.md session_breakdown.json; do
+      hit="$(find "$PERSIST_SCAN_DIR" -name "$f" -type f \! -size 0 2>/dev/null | head -1)"
+      if [ -n "$hit" ]; then
+        echo "[PERSIST] ok: $f -> $hit"
+      else
+        echo "[PERSIST FAIL] missing required artifact: $f (searched $PERSIST_SCAN_DIR)" >&2
+        PERSIST_MISSING="${PERSIST_MISSING} $f"
+      fi
+    done
+    if [ -z "$PERSIST_MISSING" ]; then
+      echo "[PERSIST OK] all three required artifacts present under $PERSIST_SCAN_DIR/"
+    else
+      echo "[PERSIST FAIL] missing required artifact(s):$PERSIST_MISSING" >&2
+      echo "[PERSIST] note: USER_DATA_PATH=${USER_DATA_PATH:-<unset>} RESULT_DIR=$RESULT_DIR — check both for stragglers." >&2
+    fi
+    ls -la "$PERSIST_SCAN_DIR/"
+  fi
+  ls -la "$RESULT_DIR/"
+
+ci_metrics.json values MUST match what the V2 orchestrator measured (phase-1
+baseline / phase 6-8 best) — do NOT recompute gain_pct from a partial-run
+eager-mode baseline.
+
+SAFETY:
+- NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
+- NEVER run `kill -9 $(ps aux | grep ...)` — this kills the sandbox executor itself.
+- Per-bash timeouts must be <= 120s; use short polling loops rather than one long blocking call.

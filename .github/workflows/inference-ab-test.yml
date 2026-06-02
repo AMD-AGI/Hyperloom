@@ -32,6 +32,9 @@ on:
         required: false
         default: ''
 
+permissions:
+  contents: read
+
 env:
   SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
   NFS_ROOT: ${{ secrets.NFS_ROOT }}
@@ -49,7 +52,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Generate matrix
         id: matrix
@@ -72,7 +75,7 @@ jobs:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Run optimization (Group A)
         working-directory: ci
@@ -106,7 +109,7 @@ jobs:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Run optimization (Group B)
         working-directory: ci
@@ -135,7 +138,7 @@ jobs:
     if: always()
     runs-on: hyperloom-mh826
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 

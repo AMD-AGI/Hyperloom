@@ -2,13 +2,22 @@
 """End-to-end Kernel Agent runner for real model/profile/backend testing.
 
 Flow:
-1. Run SGLang baseline/profile for a model to produce a real trace.
+1. Caller supplies a pre-generated trace via ``--trace-path`` (e.g. from a
+   prior ``inference_optimizer optimize`` profile, a Magpie run, or a
+   hand-collected ``torch.profiler`` export).
 2. Analyze the trace and pick a hot kernel.
 3. Launch backend optimization attempts in parallel: backend x replicas.
-4. Summarize attempts and, when safe evidence exists, emit patch/retest status.
+4. Summarize attempts and, when safe evidence exists, emit patch/retest
+   status.
 
 The runner does not fabricate patch effectiveness. If no patchable source or
 valid benchmark harness exists, it records that as the experiment outcome.
+
+The legacy ``run_baseline_profile`` step (which shelled out to an external
+``marathon/skills/scripts/run_baseline.sh``) was removed when Hyperloom
+dropped its marathon dependency. Use ``inference_optimizer optimize`` to
+produce a baseline + profile trace, then pass that trace into this runner
+via ``--trace-path``.
 """
 
 from __future__ import annotations
@@ -16,7 +25,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -27,10 +35,8 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = ROOT.parent
 TRACE_TOOL = ROOT / "tools" / "tracelens_analysis.py"
 OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
-BASELINE_SCRIPT = REPO_ROOT / "marathon/skills/scripts/run_baseline.sh"
 
 # Local sibling import for the collective-name fallback. tools/ is on
 # sys.path when this file is run via `python -m` / direct subprocess from
@@ -60,6 +66,11 @@ def load_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         env[key.strip()] = value.strip().strip('"').strip("'")
+    if "SAFE_API_KEY" in env:
+        env.setdefault("OOB_API_KEY", env["SAFE_API_KEY"])
+        env.setdefault("ANTHROPIC_API_KEY", env["SAFE_API_KEY"])
+        env.setdefault("OPENAI_API_KEY", env["SAFE_API_KEY"])
+        env.setdefault("ANTHROPIC_AUTH_TOKEN", env["SAFE_API_KEY"])
     if "ANTHROPIC_AUTH_TOKEN" in env:
         env.setdefault("ANTHROPIC_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
         env.setdefault("OPENAI_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
@@ -68,7 +79,11 @@ def load_env_file(path: Path) -> dict[str, str]:
         env.setdefault("AMD_LLM_API_KEY", env["AMD_API_KEY"])
         env.setdefault("LLM_API_KEY", env["AMD_API_KEY"])
         env.setdefault("GEAK_API_KEY", env["AMD_API_KEY"])
-    if "ANTHROPIC_BASE_URL" in env:
+    if "OPENAI_BASE_URL" in env:
+        env.setdefault("ANTHROPIC_BASE_URL", env["OPENAI_BASE_URL"])
+        env.setdefault("OOB_BASE_URL", env["OPENAI_BASE_URL"])
+        env.setdefault("LLM_API_BASE", env["OPENAI_BASE_URL"])
+    elif "ANTHROPIC_BASE_URL" in env:
         env.setdefault("OPENAI_BASE_URL", env["ANTHROPIC_BASE_URL"])
         env.setdefault("OOB_BASE_URL", env["ANTHROPIC_BASE_URL"])
         env.setdefault("LLM_API_BASE", env["ANTHROPIC_BASE_URL"])
@@ -128,89 +143,6 @@ def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: P
     if proc.returncode != 0:
         raise RuntimeError(f"command failed: {' '.join(cmd)}; see {log_path}")
     return _extract_trailing_json(proc.stdout or "")
-
-
-def parse_run_context(path: Path) -> dict[str, str]:
-    context: dict[str, str] = {}
-    if not path.exists():
-        return context
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        context[key] = value.strip().strip("'").strip('"')
-    return context
-
-
-def terminate_owned_server(context: dict[str, str], log_path: Path) -> None:
-    pid_s = context.get("SERVER_PID", "")
-    if not pid_s.isdigit():
-        return
-    pid = int(pid_s)
-    with log_path.open("a", encoding="utf-8") as log:
-        log.write(f"Terminating owned SGLang server pid={pid}\n")
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(1)
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-
-
-def run_baseline_profile(args: argparse.Namespace, run_dir: Path, env: dict[str, str]) -> dict[str, Any]:
-    result_dir = run_dir / "baseline"
-    trace_dir = run_dir / "traces"
-    log_path = run_dir / "logs" / "baseline_profile.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd_env = {
-        **env,
-        "MODEL": args.model_path,
-        "TP": str(args.tp),
-        "CONC": str(args.conc),
-        "ISL": str(args.isl),
-        "OSL": str(args.osl),
-        "PORT": str(args.port),
-        "FRAMEWORK": "sglang",
-        "RESULT_DIR": str(result_dir),
-        "TRACE_DIR": str(trace_dir),
-        "INFERENCEX_PATH": args.inferencex_path,
-        "NUM_PROMPTS_MULTIPLIER": str(args.num_prompts_multiplier),
-        "GPU_CHECK_RETRIES": "1",
-        "SGLANG_EXTRA_ARGS": args.sglang_extra_args,
-    }
-    with log_path.open("w", encoding="utf-8") as log:
-        log.write("Starting baseline/profile\n")
-        proc = subprocess.run(
-            ["bash", str(BASELINE_SCRIPT)],
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=cmd_env,
-            timeout=int(args.baseline_timeout_min * 60),
-        )
-        log.write(f"\n[exit_code] {proc.returncode}\n")
-    context = parse_run_context(result_dir / "run_context.env")
-    terminate_owned_server(context, log_path)
-    if proc.returncode != 0:
-        raise RuntimeError(f"baseline/profile failed; see {log_path}")
-    trace_path = context.get("TRACE_FOR_ANALYSIS", "")
-    baseline_json = result_dir / f"baseline_sglang_tp{args.tp}_conc{args.conc}_isl{args.isl}_osl{args.osl}.json"
-    return {
-        "result_dir": str(result_dir),
-        "trace_dir": str(trace_dir),
-        "trace_path": trace_path,
-        "baseline_json": str(baseline_json) if baseline_json.exists() else "",
-        "log_path": str(log_path),
-        "context": context,
-    }
 
 
 def _ensure_ray_via_helper(num_gpus: int, log_path: Path) -> bool:
@@ -351,15 +283,10 @@ def main() -> int:
     )
     parser.add_argument("--session-id", default=f"qwen3-30b-{int(time.time())}")
     parser.add_argument("--env-file", default="/wekafs/xiaofei/AgentKernelArena/.env")
-    parser.add_argument("--inferencex-path", default="/wekafs/fully-local/inference_optimization/InferenceX")
     parser.add_argument("--tp", type=int, default=8)
     parser.add_argument("--conc", type=int, default=4)
     parser.add_argument("--isl", type=int, default=256)
     parser.add_argument("--osl", type=int, default=128)
-    parser.add_argument("--port", type=int, default=8888)
-    parser.add_argument("--num-prompts-multiplier", type=int, default=1)
-    parser.add_argument("--sglang-extra-args", default="")
-    parser.add_argument("--baseline-timeout-min", type=float, default=45)
     parser.add_argument("--backend-budget-min", type=float, default=60,
                         help="Wall-clock budget per backend attempt in minutes "
                              "(default 60). Applies to claude/codex OOB "
@@ -367,12 +294,17 @@ def main() -> int:
                              "soon as they hit >=1.50x with passing correctness; "
                              "otherwise they iterate up to ~85%% of this budget "
                              "and SIGTERM at 100%%.")
-    parser.add_argument("--geak-budget-min", type=float, default=90,
+    # Default tracks $GEAK_RUN_MODE (exported by install.sh / env.sh):
+    # quick -> 70 min, full -> 130 min. Both aligned with yaml
+    # run.budgets.<mode>.total_s + finalize_grace + kill_buffer + safety.
+    _geak_budget_default = 70 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130
+    parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
                         help="Per-attempt wall-clock budget for GEAK only "
-                             "(default 90 min). GEAK runs N sub-agent tasks "
-                             "serially + a select_patch round; 60 min "
-                             "consistently SIGTERMs the select_patch round "
-                             "(observed r38/r39).")
+                             "(default tracks $GEAK_RUN_MODE: full -> 130, "
+                             "quick -> 70; aligned with yaml "
+                             "run.budgets.<mode>.total_s + finalize_grace + "
+                             "kill_buffer + safety so the prompt-quoted "
+                             "budget triggers the matching GEAK mode).")
     parser.add_argument("--replicas-per-backend", type=int, default=2)
     parser.add_argument("--backends", default=None,
                         help="Comma list of agentic backends. Defaults to "
@@ -383,7 +315,19 @@ def main() -> int:
                              "'llm' single-shot backend was removed (max_tokens=2048 "
                              "truncated >4KB kernels).")
     parser.add_argument("--oob-max-turns", type=int, default=100)
-    parser.add_argument("--geak-cost-limit", type=float, default=None)
+    # Mirror kernel_optimization.py's default: 0.0 = unlimited, aligning with
+    # GEAK's geak.yaml `cost_limit: 0.` contract. GEAK's sub-agent fallback
+    # path would otherwise cap each attempt at $3.0 (the dataclass default in
+    # ``minisweagent/agents/default.py``), killing sub-agents after ~50 steps.
+    parser.add_argument(
+        "--geak-cost-limit",
+        type=float,
+        default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0")),
+        help=(
+            "Per-attempt GEAK cost cap in USD; 0 means unlimited (mirrors "
+            "GEAK's geak.yaml). Override via $HYPERLOOM_GEAK_COST_LIMIT."
+        ),
+    )
     parser.add_argument("--num-gpus-override", type=int, default=0,
                         help="If >0, override candidate.num_gpus_recommended for "
                              "every backend task. Use 2 to test the multi-GPU "
@@ -391,8 +335,16 @@ def main() -> int:
     parser.add_argument("--total-gpus", type=int, default=8,
                         help="Total GPUs available on this host; used to cap "
                              "concurrency (default 8 for MI355X box).")
-    parser.add_argument("--trace-path", default="")
-    parser.add_argument("--skip-baseline", action="store_true")
+    parser.add_argument(
+        "--trace-path", required=True,
+        help=(
+            "Path to a pre-generated trace (``.json`` / ``.json.gz``) or a "
+            "torch_trace dir. Use ``inference_optimizer optimize`` to "
+            "produce baseline+profile traces; the legacy auto-baseline "
+            "step that shelled out to marathon/skills/scripts/run_baseline.sh "
+            "was removed."
+        ),
+    )
     parser.add_argument("--kernel-name", default="",
                         help="Pick this exact kernel name from the trace "
                              "(default: first patchable hot kernel).")
@@ -432,14 +384,15 @@ def main() -> int:
         "created_at": utc_now(),
     }
     try:
-        if args.skip_baseline:
-            trace_path = args.trace_path
-            baseline = {"trace_path": trace_path}
-        else:
-            baseline = run_baseline_profile(args, run_dir, env)
-            trace_path = baseline.get("trace_path", "")
+        trace_path = args.trace_path
+        baseline = {"trace_path": trace_path}
         if not trace_path or not Path(trace_path).exists():
-            raise RuntimeError(f"trace path missing after baseline/profile: {trace_path}")
+            raise RuntimeError(
+                f"--trace-path missing or does not exist: {trace_path}. "
+                "Produce a trace with ``inference_optimizer optimize`` first "
+                "(the legacy in-runner auto-baseline step was removed when "
+                "Hyperloom dropped its marathon dependency)."
+            )
         summary["baseline"] = baseline
         summary["trace_path"] = trace_path
 

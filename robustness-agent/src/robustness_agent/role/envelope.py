@@ -48,6 +48,12 @@ class IntentType(str, Enum):
     FORCE_DISPATCH = "force_dispatch"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
+    # specialist sub-agent exit protocol mirror.
+    # Robustness never emits this intent (PolicyGate restricts the
+    # source to specialist sub-agents), but the value belongs in the
+    # mirror so the upstream-contract test stays green and any tooling
+    # that round-trips envelopes does not lose the symbol.
+    SPECIALIST_DONE = "specialist_done"
 
 
 # Per-intent required payload fields. Identical to upstream
@@ -64,11 +70,24 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.RESPONSE: ("in_reply_to", "kind"),
-    IntentType.REVIEW_VERDICT: ("target_proposal_msg_id", "verdict"),
+    # Upstream KB_gaps/Gap-11: the ``verdict``/``verdict_map``
+    # choice is mutually exclusive but at least one of them must be
+    # present. intent_parser only enforces the structural
+    # ``target_proposal_msg_id`` here; the verdict-payload mutual
+    # exclusion lives in ``policy._validate_review_verdict_payload``.
+    # Mirror the same shape so the upstream-sync contract test stays
+    # green.
+    IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.KILL_TASK: ("task_id", "reason"),
     IntentType.FORCE_DISPATCH: ("task_id", "reason"),
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
+    # specialist exit envelope; payload validated by
+    # PolicyGate R3 (``policy._validate_specialist_done``).
+    IntentType.SPECIALIST_DONE: (
+        "gap_canonical_id", "domain",
+        "proposal_set", "empty", "summary",
+    ),
 }
 
 
@@ -112,20 +131,36 @@ KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
 
 # Handle actions the robustness role is allowed to delegate. Upstream
-# documents the trio in ``system_prompts/robustness.md``.
+# documents the quartet in ``system_prompts/robustness.md``.
+#
+# ``report`` is an exception to the "handle action" pattern of the other
+# three: it is the deterministic session-finalize action owned by
+# Orchestration. Robustness is allowed to delegate it ONLY as a
+# last-resort wind-down lever, when the evidence shows the session is
+# locked out from making further progress on the remaining time budget
+# (deadline_imminent with zero validated gain, or recover_failed_finalize
+# after a GPU leak recovery returned needs_review and the leak re-fires).
+# Action-ladder ``_recommend`` is the single source-of-truth for those
+# guard conditions; ``build_delegate`` here only enforces the allowlist.
 ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset({
     "accuracy_gate",
     "recover",
+    "report",
     "server_lifecycle",
 })
 
 
 # Core SharedState fields the robustness role must not write via
-# ``update_state``. Mirrors upstream ``CORE_STATE_FIELDS``.
+# ``update_state``. Mirrors upstream ``policy.CORE_STATE_FIELDS``;
+# kept in lock-step by ``tests/test_role_contract.py``.
 CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "current_best",
     "stop_reason",
     "cumulative_gain",
+    # Coordinator-owned validated cumulative gain trio.
+    "cumulative_gain_validated",
+    "cumulative_gain_validated_ts",
+    "cumulative_gain_validated_stack_len",
     "baseline_tput",
     "baseline_accuracy",
     "session_id",
@@ -134,6 +169,55 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "model_class",
     "start_ts",
     "max_minutes",
+    # fact-layer KEEP ledger (Coordinator-only writer).
+    "optimization_stack",
+    "gain_per_stack_entry",
+    # schema migration breadcrumb.
+    "schema_version",
+    # Cortex KB integration.
+    "cortex_session_id",
+    "cortex_session_summary",
+    "warm_start_recipe",
+    "warm_start_pitfalls",
+    "warm_start_lessons",
+    "warm_start_ts",
+    # GAP 5 KB tag completeness.
+    "stack_fingerprint_meta",
+    "baseline_workload_extra",
+    # GAP 1 warm-recipe replay.
+    "warm_replay_attempted",
+    "warm_replay_outcome",
+    "warm_history_injected",
+    # phase state machine (Coordinator-only writer).
+    "phase",
+    "phase_started_ts",
+    "phase_started_unix",
+    "phase_history",
+    "phase_budget_pct",
+    # specialist sub-agent ledger.
+    "specialist_rounds",
+    "specialist_domain_empty_streak",
+    "last_specialist",
+    "research_lane_capacity",
+    # phase-machine escalation plumbing.
+    "pending_escalate_hint",
+    "last_consumed_escalate_hint",
+    "last_consumed_escalate_hint_ts",
+    "plateau_overrides",
+    # CLOSE phase sequencer flag.
+    "close_sequence_done",
+    # explore search ledger (v0.6 backends/params
+    # search fields retained for resume parity).
+    "explore_search",
+    "backends_search",
+    "params_search",
+    # structured gaps ledger.
+    "gaps",
+    # dynamic_action aggregate view + round counter
+    # (Coordinator-only writer; LLM cannot self-narrate dispatch
+    # outcomes via UPDATE_STATE).
+    "dynamic_actions",
+    "dynamic_action_round_count",
 })
 
 

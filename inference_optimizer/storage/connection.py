@@ -1,9 +1,10 @@
-"""SQLite connection wrapper (DESIGN v0.6 §3.5.4 / §13.1 / ADR-42).
+"""SQLite connection wrapper ().
 
 Design choices:
 
 * Pure stdlib ``sqlite3`` — no extra dependency
-* Mode = WAL with ``synchronous=NORMAL`` and ``busy_timeout=30s``
+* Mode = WAL with ``synchronous=FULL`` and ``busy_timeout=30s``
+  (``FULL`` keeps writes crash-safe across WAL checkpoints; see issue #242)
 * Async surface uses ``asyncio.to_thread`` so the rest of the codebase can
   ``await`` calls without rewiring; SQLite ops are short and IO-bound, so
   the thread-hop is negligible compared to actual I/O
@@ -28,7 +29,7 @@ from .schema import ensure_schema
 
 _PRAGMAS = (
     "PRAGMA journal_mode = WAL",
-    "PRAGMA synchronous = NORMAL",
+    "PRAGMA synchronous = FULL",
     "PRAGMA foreign_keys = ON",
     "PRAGMA busy_timeout = 30000",
     "PRAGMA temp_store = MEMORY",

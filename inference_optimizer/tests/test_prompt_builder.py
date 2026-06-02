@@ -42,7 +42,10 @@ def rules_path() -> Path:
 def test_default_enabled_actions_full_includes_kernel_actions():
     full = default_enabled_actions(no_kernel=False)
     assert set(KERNEL_OWNED_ACTIONS) <= set(full)
-    assert "validate_stack" in full
+    # v0.8 M3 + KB_gaps/Gap-10: ``validate_stack`` is deprecated; the
+    # merged ``explore`` action carries the per-KEEP stack rebench
+    # inline, so the enabled set advertises ``explore`` instead.
+    assert "explore" in full
     assert "report" in full
     assert "baseline" in full
 
@@ -51,7 +54,9 @@ def test_default_enabled_actions_no_kernel_excludes_all_kernel_actions():
     bare = default_enabled_actions(no_kernel=True)
     assert set(KERNEL_OWNED_ACTIONS).isdisjoint(set(bare))
     assert "profile" not in bare  # profile only feeds kernel-opt
-    assert "validate_stack" in bare
+    # v0.8 M3 + KB_gaps/Gap-10: ``explore`` replaces the v0.6
+    # backends/params/validate_stack grid-runner triple.
+    assert "explore" in bare
     assert "baseline" in bare
 
 
@@ -65,25 +70,24 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
         assert registry.get(name) is not None
 
 
-# The 5 noop-prep actions below were removed from the enabled sets so the
-# Orchestration LLM no longer proposes them (see remain_todo.md sections
-# C / I / M for the missing executor work). The metadata yamls still live
-# in actions/_meta so future executors don't need to re-introduce the
-# action names; pin both halves of the contract here.
+# v0.8 KB_gaps/Gap-13 — KB_design §3.15 §2.3 retired these four
+# ``support``-family actions. The yaml meta files are deleted and
+# the registry no longer carries them; the assertions below pin all
+# three halves of the contract (enabled set, no-kernel enabled set,
+# registry membership) so a regression re-adds a stub yaml is loud.
 _REMOVED_NOOP_ACTIONS: tuple[str, ...] = (
     "comm_optimization",
     "compiler_tuning",
     "dream",
     "re_explore",
-    "recover",
 )
 
 
 @pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
 def test_noop_actions_excluded_from_full_enabled(name: str):
     assert name not in FULL_ENABLED_ACTIONS, (
-        f"{name!r} is a noop-prep action and must not be visible to the "
-        "Orchestration LLM until a real executor lands"
+        f"{name!r} was retired in KB_design §3.15 §2.3 and must not "
+        "appear in the Orchestration enabled-action set"
     )
 
 
@@ -93,13 +97,15 @@ def test_noop_actions_excluded_from_no_kernel_enabled(name: str):
 
 
 @pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
-def test_removed_noop_actions_still_have_registry_metadata(registry, name):
-    """We only suppressed the action from the enabled set; the yaml
-    metadata stays in the registry so re-enabling later is a one-line
-    revert in prompt_builder.py."""
-    assert registry.get(name) is not None, (
-        f"action metadata for {name!r} disappeared — re-enabling will be "
-        "harder than expected"
+def test_removed_noop_actions_are_absent_from_registry(registry, name):
+    """v0.8 KB_gaps/Gap-13 — KB_design §3.15 §2.3 retired the four
+    ``support``-family stub actions in favour of specialist sub-agents.
+    The yaml meta files are deleted, so the registry MUST NOT carry
+    them. Re-introducing requires a specialist domain, not a yaml."""
+    assert registry.get(name) is None, (
+        f"action metadata for {name!r} re-appeared in the registry — "
+        "KB_design §3.15 §2.3 retired it; restore via a specialist "
+        "domain instead"
     )
 
 
@@ -119,6 +125,33 @@ def test_removed_noop_actions_absent_from_default_catalogue(registry, rules_path
         )
 
 
+def test_recover_is_enabled_and_has_real_executor(registry):
+    """``recover`` was re-enabled in 2026-05 alongside RecoverExecutor.
+
+    Pin all three legs of the contract so a future drift makes this
+    test fire instead of silently regressing to the old ``no_executor``
+    failure mode:
+
+    * registry metadata still loads (covered by parametrized check).
+    * ``recover`` appears in both enabled-action sets so the
+      Orchestration prompt offers it as a delegatable action.
+    * ``cli._REAL_EXECUTORS_FULL`` binds it to a real callable
+      (:data:`recover_executor`) rather than ``_noop_prep``.
+    """
+    from inference_optimizer.cli import _REAL_EXECUTORS_FULL
+    from inference_optimizer.orchestrator.action_executors.recover import (
+        RecoverExecutor,
+        recover_executor,
+    )
+
+    assert "recover" in FULL_ENABLED_ACTIONS
+    assert "recover" in NO_KERNEL_ENABLED_ACTIONS
+    assert registry.get("recover") is not None
+    assert "recover" in _REAL_EXECUTORS_FULL
+    assert _REAL_EXECUTORS_FULL["recover"] is recover_executor
+    assert isinstance(recover_executor, RecoverExecutor)
+
+
 # ---------------------------------------------------------------------------
 # Output structure
 # ---------------------------------------------------------------------------
@@ -130,6 +163,12 @@ def _section_headers(prompt: str) -> list[str]:
 
 
 def test_full_prompt_has_seven_sections(registry, rules_path):
+    """v0.8 §3.3 — original v0.6 seven-section contract is now eight
+    sections because the PHASE CONTRACT (§3a) is wedged between
+    PIPELINE & TIME BUDGET and ACTIONS YOU MAY USE. The legacy 1-7
+    headers are preserved verbatim so downstream LLM prompts that key
+    on the original numbering keep working.
+    """
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -144,9 +183,20 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 1. MISSION",
         "## 2. SESSION CONTEXT",
         "## 3. PIPELINE & TIME BUDGET",
+        "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "## 4. ACTIONS YOU MAY USE",
         "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
+        # N20-A "BACKENDS GRID CATALOGUE" + "PARAMS GRID CATALOGUE"
+        # sections retired on this branch alongside the v0.6
+        # backends / params executors (KB_design §3.4 / Dead-A).
+        # The v0.8 ``explore`` action covers the same surface
+        # internally; no per-action grid catalogue is rendered.
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
+        # Supplementary EXPLORE channel
+        # declaration sits between the kernel-opt reference and the
+        # rules fragment so the LLM internalises the default
+        # decision flow before reading the §3 supplementary framing.
+        "## 6b. DYNAMIC ACTION (supplementary EXPLORE channel)",
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
     actual_top = [h for h in headers if h.startswith("## ")]
@@ -256,9 +306,11 @@ def test_emit_hints_use_request_for_kernel_actions(registry, rules_path):
         max_minutes=120,
         rules_fragment_path=rules_path,
     )
-    # propose_action hint format for non-kernel
+    # propose_action hint format for non-kernel.
+    # v0.8 M3 + KB_gaps/Gap-10: ``backends`` was deprecated; the
+    # canonical grid-runner is ``explore``.
     assert "propose_action{action_name='baseline'" in text
-    assert "propose_action{action_name='backends'" in text
+    assert "propose_action{action_name='explore'" in text
     # REQUEST hint for kernel-owned
     assert "REQUEST{target_agent='kernel'" in text
 
@@ -329,9 +381,13 @@ def test_explicit_kernel_enabled_override_wins(registry, rules_path):
 # ---------------------------------------------------------------------------
 # Mission / time budget content
 # ---------------------------------------------------------------------------
-def test_mission_section_emphasises_cumulative_gain_and_validate_stack(
+def test_mission_section_emphasises_cumulative_gain_and_stack_rebench(
     registry, rules_path,
 ):
+    """v0.8 M3 + KB_gaps/Gap-10: the mission section emphasises the
+    cumulative gain story; the standalone ``validate_stack`` keyword
+    is gone (the rebench is inlined into ``explore``). We check for
+    the new keyword ``stack rebench`` instead."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -343,7 +399,7 @@ def test_mission_section_emphasises_cumulative_gain_and_validate_stack(
     )
     mission_block = text.split("## 2.")[0]
     assert "cumulative_gain" in mission_block
-    assert "validate_stack" in mission_block
+    assert "stack rebench" in mission_block
 
 
 def test_time_budget_section_lists_all_enabled_phases(registry, rules_path):

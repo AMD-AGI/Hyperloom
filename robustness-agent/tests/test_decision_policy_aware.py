@@ -72,6 +72,30 @@ def test_delegate_passes(policy: PolicyAware):
         policy.assert_payload_complete(build_delegate(action))
 
 
+def test_delegate_recover_gpu_leak_payload_passes(policy: PolicyAware):
+    """``gpu_memory_leaked`` -> delegate(recover) payload regression.
+
+    The ActionLadder branch in :mod:`decision.action_ladder` builds this
+    exact shape; we pin the PolicyAware contract so future schema
+    changes are caught at build time rather than mid-tick.
+    """
+    intent = build_delegate(
+        action_name="recover",
+        params={
+            "reason": "gpu_memory_leaked",
+            "force_gpu_cleanup": True,
+            "evidence": {
+                "consecutive_hits": 2,
+                "per_gpu": [{"gpu_id": 0, "free_mb": 108.0}],
+            },
+        },
+        idempotency_key="recover-gpu-leak-tick-7",
+    )
+    policy.assert_payload_complete(intent)
+    assert intent.payload["params"]["force_gpu_cleanup"] is True
+    assert intent.payload["idempotency_key"] == "recover-gpu-leak-tick-7"
+
+
 def test_update_state_passes(policy: PolicyAware):
     policy.assert_payload_complete(build_update_state({"crash_count": 1}))
 

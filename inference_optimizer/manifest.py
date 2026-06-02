@@ -1,4 +1,4 @@
-"""Session manifest writer (DESIGN v0.6.1 §23).
+"""Session manifest writer ().
 
 The manifest is the **first** file written to a session directory after
 ``make_session_dir()`` runs and is the canonical session-resume tag.
@@ -11,10 +11,10 @@ Why this lives in its own module:
 * Avoids a hard dependency from ``paths`` (called by everything) on
   ``argparse`` and Python version helpers.
 
-Schema v2 (image added)::
+Schema v3 (dependencies added)::
 
     {
-      "schema_version":    2,
+      "schema_version":    3,
       "session_id":        "<UTC_YYYYMMDDTHHMMSSZ>_<uuid8>",
       "claw_session_id":   "<uuid>" or null,   # Primus-Claw session UUID
       "sandbox_user_id":   "<str>"  or null,   # Primus-Claw sandbox user
@@ -23,7 +23,7 @@ Schema v2 (image added)::
       "image":             "<registry>/<repo>:<tag>" or null,
       "model_path":        "...",
       "model_name":        "...",
-      "framework":         "sglang|vllm",
+      "framework":         "sglang|vllm|atom",
       "gpu_type":          "mi300x|mi325x|mi355x|''",
       "tp":                N or null,
       "workload":          {"isl":..., "osl":..., "max_model_len":...,
@@ -32,8 +32,24 @@ Schema v2 (image added)::
                             "value":...},
       "max_minutes":       N,
       "code_revision":     "<git sha or empty>",
+      "dependencies":      {
+        "magpie":     {"path": "...", "commit": "<git sha or empty>",
+                        "remote": "<origin url or empty>"},
+        "inferencex": {"path": "...", "commit": "<git sha or empty>",
+                        "remote": "<origin url or empty>"},
+      },
       "pid":               N
     }
+
+The ``dependencies`` block records the on-disk Magpie / InferenceX
+checkout each session ran against. With install.sh now `git clone`-ing
+a fresh InferenceX per install (rather than scanning a shared `wekafs`
+mirror, see `bugs.md` §C #1 root-cause fix), the commit fields are the
+only reliable provenance for "which upstream did this run actually
+exercise". The block is best-effort: each subfield is empty when the
+path is unset or the directory is not a git checkout. We do **not**
+fail the manifest write on git lookup failures — provenance gaps must
+not block session bring-up.
 
 ``claw_session_id`` / ``sandbox_user_id`` are read from the
 ``CLAW_SESSION_ID`` / ``SANDBOX_USER_ID`` env vars (set by the
@@ -71,24 +87,157 @@ from .session_paths import manifest_path
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+# Schema bumped to 3 in the legacy release to add ``stack_fingerprint`` (rocm / aiter /
+# sglang / vllm versions, mandatory attrs for Cortex KB ``session begin``
+# per KB_design §3.6.5.1 + §3.13 M1) plus the ``dependencies`` provenance
+# block (Magpie / InferenceX commit + remote — bugs.md §C #1). Older v2
+# readers stay compatible because all new fields are additive.
+SCHEMA_VERSION = 3
 
 
 def _utc_now_compact() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+# Environment variables consulted by :func:`_detect_stack_fingerprint`.
+# Operators may pin them ahead of launch when the auto-detect heuristic
+# (importing the framework + reading a marker file) is too slow or runs
+# inside a sandbox that doesn't expose the source tree.
+_STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
+    "rocm":   ("ROCM_VERSION", "HIP_VERSION"),
+    "aiter":  ("AITER_COMMIT", "AITER_VERSION"),
+    "sglang": ("SGLANG_VERSION", "SGL_VERSION"),
+    "vllm":   ("VLLM_VERSION",),
+}
+
+
+def _read_first_line(path: Path) -> str:
+    try:
+        if not path.exists():
+            return ""
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            s = line.strip()
+            if s:
+                return s
+    except OSError:
+        return ""
+    return ""
+
+
+def _detect_stack_fingerprint() -> dict[str, str]:
+    """Best-effort ``stack_fingerprint`` per KB_design §3.6.5.1.
+
+    Resolution order per component (first non-empty wins):
+
+    1. Explicit env var (operator pin / cluster spawn injection).
+    2. ``/opt/rocm/.info/version`` (ROCm only).
+    3. Importing the python package and reading ``__version__`` /
+       ``__commit__`` (best-effort, swallows ImportError).
+
+    Returns a fixed-shape dict where missing components map to the
+    sentinel ``"unknown"``. The dict is JSON-serializable and small, so
+    it's safe to include in manifest.json + Cortex session attrs.
+    """
+    out: dict[str, str] = {}
+    for component, env_vars in _STACK_FINGERPRINT_ENVS.items():
+        val = ""
+        for var in env_vars:
+            candidate = (os.environ.get(var) or "").strip()
+            if candidate:
+                val = candidate
+                break
+        if not val and component == "rocm":
+            for marker in ("/opt/rocm/.info/version", "/opt/rocm/.info/version-utils"):
+                v = _read_first_line(Path(marker))
+                if v:
+                    val = v
+                    break
+        if not val:
+            try:
+                if component == "sglang":
+                    import sglang as _mod  # type: ignore
+                    val = str(getattr(_mod, "__version__", "")).strip()
+                elif component == "vllm":
+                    import vllm as _mod  # type: ignore
+                    val = str(getattr(_mod, "__version__", "")).strip()
+                elif component == "aiter":
+                    import aiter as _mod  # type: ignore
+                    val = str(
+                        getattr(_mod, "__commit__", None)
+                        or getattr(_mod, "__version__", "")
+                    ).strip()
+            except Exception:  # noqa: BLE001 — defensive, missing pkg is normal.
+                val = ""
+        out[component] = val or "unknown"
+    return out
+
+
 def _git_revision() -> str:
     """Best-effort short git SHA of the repo containing this package; empty on failure."""
     here = Path(__file__).resolve().parent
+    return _git_revision_at(here)
+
+
+def _git_revision_at(path: Path) -> str:
+    """Best-effort short git SHA at ``path``; empty when not a checkout."""
     try:
         out = subprocess.run(
-            ["git", "-C", str(here), "rev-parse", "--short", "HEAD"],
+            ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, timeout=2,
         )
+        if out.returncode != 0:
+            return ""
         return out.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         return ""
+
+
+def _git_remote_at(path: Path) -> str:
+    """Best-effort ``origin`` remote URL at ``path``; empty on failure."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(path), "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode != 0:
+            return ""
+        return out.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        return ""
+
+
+def _describe_dep(env_var: str) -> dict[str, str]:
+    """Build a `{path, commit, remote}` provenance dict for one dependency
+    pointed at by ``$env_var``. All fields default to empty string when
+    the env var is unset, the directory is missing, or git is unhappy —
+    we never raise out of here.
+    """
+    raw = (os.environ.get(env_var) or "").strip()
+    if not raw:
+        return {"path": "", "commit": "", "remote": ""}
+    path = Path(raw)
+    if not path.is_dir():
+        return {"path": raw, "commit": "", "remote": ""}
+    return {
+        "path":   raw,
+        "commit": _git_revision_at(path),
+        "remote": _git_remote_at(path),
+    }
+
+
+def _build_dependencies() -> dict[str, dict[str, str]]:
+    """Provenance for the third-party trees this session executes against.
+
+    Magpie / InferenceX are cloned per-install by ``install.sh``
+    (bugs.md §C #1 root-cause fix — see ``ensure_inferencex`` there).
+    Recording the commit SHA + remote URL is how downstream debuggers
+    answer "which upstream did this run hit?" once the clones have
+    moved on.
+    """
+    return {
+        "magpie":     _describe_dep("MAGPIE_DIR"),
+        "inferencex": _describe_dep("INFERENCEX_PATH"),
+    }
 
 
 def _detect_image() -> str | None:
@@ -195,24 +344,60 @@ def build_manifest(
     claw_session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
     sandbox_user_id = (os.environ.get("SANDBOX_USER_ID") or "").strip() or None
     return {
-        "schema_version":  SCHEMA_VERSION,
-        "session_id":      session_id or build_session_id(model_name),
-        "claw_session_id": claw_session_id,
-        "sandbox_user_id": sandbox_user_id,
-        "created_at_utc":  datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "session_dir":     str(session_dir),
-        "model_path":      model_path,
-        "model_name":      model_name,
-        "framework":       framework or "sglang",
-        "gpu_type":        gpu_type,
-        "tp":              tp,
-        "workload":        workload,
-        "objective":       _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
-        "max_minutes":     int((getattr(args, "max_hours", 0) or 0) * 60) if args is not None else 0,
-        "code_revision":   _git_revision(),
-        "pid":             os.getpid(),
-        "host":            platform.node() or socket.gethostname() or "",
-        "image":           _detect_image(),
+        "schema_version":    SCHEMA_VERSION,
+        "session_id":        session_id or build_session_id(model_name),
+        "claw_session_id":   claw_session_id,
+        "sandbox_user_id":   sandbox_user_id,
+        "created_at_utc":    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "session_dir":       str(session_dir),
+        "model_path":        model_path,
+        "model_name":        model_name,
+        "framework":         framework or "sglang",
+        "gpu_type":          gpu_type,
+        "tp":                tp,
+        "workload":          workload,
+        "objective":         _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
+        "max_minutes":       int((getattr(args, "max_hours", 0) or 0) * 60) if args is not None else 0,
+        "code_revision":     _git_revision(),
+        "dependencies":      _build_dependencies(),
+        "pid":               os.getpid(),
+        "host":              platform.node() or socket.gethostname() or "",
+        "image":             _detect_image(),
+        # Cortex KB ``session begin`` requires the stack
+        # fingerprint as a mandatory attribute. We
+        # snapshot it on manifest write so resume-after-redeploy can
+        # detect drift (``--cortex-strict-fingerprint``).
+        "stack_fingerprint": _detect_stack_fingerprint(),
+        # research_lane capacity locked at session start
+        #. Resume reads this back into SharedState
+        # so a mid-session restart can't change concurrency semantics.
+        "research_lane_capacity": int(
+            getattr(args, "research_lane_capacity", 1) or 1
+        ) if args is not None else 1,
+        # IR-3 soft-degrade audit.
+        "kb_degraded_reason": (
+            getattr(args, "kb_degraded_reason", None) if args is not None else None
+        ),
+        "pr_degraded_reason": (
+            getattr(args, "pr_degraded_reason", None) if args is not None else None
+        ),
+        # GAP 1 — Warm-recipe replay flags. Persisted into manifest so
+        # robustness_monitor.sh resume / cross-machine resume picks up
+        # the same gate thresholds rather than reverting to defaults.
+        # The ``warm_replay_enabled`` field is the inverted form of
+        # ``--no-warm-replay`` so the YAML reads more naturally.
+        "warm_replay_enabled": (
+            not bool(getattr(args, "no_warm_replay", False))
+            if args is not None else True
+        ),
+        "warm_replay_min_confidence": (
+            float(getattr(args, "warm_replay_min_confidence", 0.7) or 0.7)
+            if args is not None else 0.7
+        ),
+        "warm_replay_min_reproduce_pct": (
+            float(getattr(args, "warm_replay_min_reproduce_pct", 0.8) or 0.8)
+            if args is not None else 0.8
+        ),
     }
 
 

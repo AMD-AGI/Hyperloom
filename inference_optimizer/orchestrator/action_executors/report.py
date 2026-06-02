@@ -1,4 +1,4 @@
-"""Real ``report`` ActionRunner — DESIGN v0.6 §16 report action.
+"""Real ``report`` ActionRunner report action.
 
 Reads the session's SharedState + bus event log and produces:
 
@@ -47,6 +47,15 @@ def _build_summary_dict(
         "stop_reason":      state.stop_reason,
         "baseline_tput":    state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
+        # IR-7 — steward verdict + history. The final report's section
+        # 9.1 (remaining gaps) reads ``last_remaining_gaps_assessment``
+        # rationale verbatim.
+        "remaining_gaps_assessment": dict(
+            state.last_remaining_gaps_assessment or {}
+        ),
+        "remaining_gaps_assessments_history": list(
+            state.remaining_gaps_assessments or []
+        ),
         "current_best":     state.current_best,
         "cumulative_gain":  state.cumulative_gain,
         # Phase 3 — separate the per-round-sum gain (kept as
@@ -65,6 +74,20 @@ def _build_summary_dict(
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
+    # Roofline Comparison: PR #321 retired the legacy
+    # ``last_trace_analyze_baseline`` baseline-freeze field; we now
+    # walk the append-only ``state.roofline_snapshots`` list, where
+    # entry[0] is the baseline snapshot (PRELUDE bootstrap) and
+    # entry[-1] is the most recent watermark refresh. The block is
+    # only emitted when at least one snapshot was captured so older
+    # sessions (no roofline action ever completed) leave ``final.json``
+    # without a stale empty stub.
+    from ..roofline_snapshot import build_roofline_comparison_from_history
+    cmp = build_roofline_comparison_from_history(
+        getattr(state, "roofline_snapshots", None)
+    )
+    if cmp:
+        summary["roofline_comparison"] = cmp
     return summary
 
 
@@ -139,11 +162,216 @@ def _format_md(summary: dict[str, Any]) -> str:
             )
     lines.append("")
 
+    # IR-7 — steward verdict transcript.
+    lines.extend(_format_steward_section(summary))
+
+    roofline_cmp = summary.get("roofline_comparison")
+    if roofline_cmp:
+        lines.extend(_format_roofline_comparison_section(roofline_cmp))
+
     ext = summary.get("external_baseline")
     if ext:
         lines.extend(_format_external_baseline_section(ext))
 
     return "\n".join(lines)
+
+
+def _format_steward_section(summary: dict[str, Any]) -> list[str]:
+    """IR-7 — render the session_steward verdict + history."""
+    assessment = summary.get("remaining_gaps_assessment") or {}
+    history = summary.get("remaining_gaps_assessments_history") or []
+    if not assessment and not history:
+        return []
+    lines: list[str] = ["## Remaining gaps (steward assessment)", ""]
+    if assessment:
+        rec = assessment.get("recommendation", "")
+        ts = assessment.get("ts", "")
+        potential = assessment.get(
+            "remaining_potential_pct_estimate", 0.0
+        ) or 0.0
+        rationale = (
+            assessment.get("rationale", "") or ""
+        ).strip()
+        next_gap = assessment.get("next_gap_canonical_id", "")
+        lines.append(f"- final verdict: `{rec}` at `{ts}`")
+        lines.append(
+            f"- remaining_potential_pct_estimate: `{potential:.2f}%`"
+        )
+        if next_gap:
+            lines.append(f"- next_gap_canonical_id: `{next_gap}`")
+        if rationale:
+            lines.append("")
+            lines.append("> " + rationale.replace("\n", "\n> "))
+            lines.append("")
+    if len(history) > 1:
+        lines.append(f"- prior assessments: {len(history) - 1}")
+    lines.append("")
+    return lines
+
+
+def _extract_executive_summary(analysis_md_path: str) -> str:
+    """Pull the ``## Executive Summary`` block out of analysis.md.
+
+    TraceLens's analysis.md always starts with a level-1 title then a
+    ``## Executive Summary`` section -- we extract from that heading
+    up to the next level-2 heading (typically ``## Compute Kernel
+    Optimizations`` or the metrics table). Best-effort: returns a
+    short marker string if the file is missing / unparseable rather
+    than crashing the report.
+    """
+    if not analysis_md_path:
+        return "(no analysis.md path recorded)"
+    try:
+        text = Path(analysis_md_path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"(could not read {analysis_md_path}: {exc})"
+    # Strip N11 base64 image data URLs upfront so the report stays
+    # compact even if TraceLens regressed on inline images.
+    import re
+    text = re.sub(
+        r"!\[[^\]]*\]\(data:image/[^)]+\)",
+        "[image stripped]",
+        text,
+    )
+    lines = text.splitlines()
+    start = None
+    end = len(lines)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if start is None and stripped.startswith("## Executive Summary"):
+            start = i
+            continue
+        if start is not None and stripped.startswith("## ") and i > start:
+            end = i
+            break
+    if start is None:
+        return "(analysis.md does not contain a `## Executive Summary` block)"
+    block = "\n".join(lines[start:end]).strip()
+    # Cap the block at ~2KB so a single report doesn't bloat to MBs
+    # if Executive Summary ever grows. The full analysis.md is still
+    # on disk via ``analysis_md_path`` for anyone who wants details.
+    if len(block) > 2048:
+        block = block[:2045] + "..."
+    return block
+
+
+def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
+    """Render the ``## Roofline Comparison`` section.
+
+    ``cmp`` is the dict materialised by
+    :func:`roofline_snapshot.build_roofline_comparison_from_history`
+    from :attr:`SharedState.roofline_snapshots` (the append-only
+    history that survived the PR #321 ``last_trace_analyze_baseline``
+    retirement). Two modes:
+
+    * ``single_snapshot`` — only the PRELUDE bootstrap roofline ran;
+      no +10% watermark crossing fired a refresh. The section shows
+      one Executive Summary plus the compact Base/—/— metric table.
+    * ``before_after`` — at least one watermark refresh produced a
+      distinct snapshot id. The section shows two Executive Summaries
+      side-by-side plus the compact Base/Opt/Δ metric table.
+    """
+    from ..roofline_snapshot import format_roofline_metrics_table
+
+    lines: list[str] = ["## Roofline Comparison", ""]
+    baseline = cmp.get("baseline") or {}
+    latest = cmp.get("latest") or {}
+    base_id = baseline.get("snapshot_id")
+    latest_id = latest.get("snapshot_id")
+    mode = cmp.get("mode") or (
+        "single_snapshot"
+        if (base_id is not None and base_id == latest_id)
+        else "before_after"
+    )
+
+    if not baseline.get("analysis_md_path"):
+        lines.append(
+            "_No roofline snapshot was captured during this session — "
+            "the `roofline` composite action never completed successfully._"
+        )
+        lines.append("")
+        return lines
+
+    if mode == "single_snapshot":
+        lines.append(
+            f"_Only one roofline snapshot was captured this session "
+            f"(snapshot #{base_id}). PR #321 retired the legacy "
+            "close-phase auto-roofline; refreshes are now driven by a "
+            "10% gain watermark over `last_roofline_tput` (see "
+            "`Coordinator._maybe_enqueue_watermark_roofline`). The "
+            "watermark did not cross during this session, so the "
+            "PRELUDE bootstrap snapshot is the only datapoint available "
+            "for the report._"
+        )
+        lines.append("")
+        lines.append(
+            "_The **Theoretical peak** below is the decode "
+            "memory-roofline ceiling derived from the GPU's HBM "
+            "bandwidth and the model's weight + KV-cache traffic per "
+            "token (see `roofline_ceiling.compute_peak_from_state`). "
+            "It is an upper bound: real `output_throughput` always "
+            "stays under it because of comm overhead, kernel "
+            "efficiency < 100%, and KV-cache fragmentation. **Within "
+            "roofline %** = measured / peak; **Gap to roofline %** = "
+            "100 − Within._"
+        )
+        lines.append("")
+        lines.extend(format_roofline_metrics_table(cmp))
+        lines.append(f"### Snapshot #{base_id} — Executive Summary")
+        lines.append("")
+        lines.append(f"`{baseline.get('analysis_md_path')}`")
+        if baseline.get("ts"):
+            lines.append(f"_captured: {baseline.get('ts')}_")
+        lines.append("")
+        lines.append(_extract_executive_summary(
+            str(baseline.get("analysis_md_path") or "")
+        ))
+        lines.append("")
+        return lines
+
+    lines.append(
+        "Before/after comparison of TraceLens Executive Summaries. "
+        "The baseline snapshot was captured at PRELUDE; the latest "
+        "snapshot was captured after a +10% gain watermark refresh "
+        "(see `Coordinator._maybe_enqueue_watermark_roofline`)."
+    )
+    lines.append("")
+    lines.append(
+        "_The **Theoretical peak** below is the decode "
+        "memory-roofline ceiling derived from the GPU's HBM "
+        "bandwidth and the model's weight + KV-cache traffic per "
+        "token (see `roofline_ceiling.compute_peak_from_state`). "
+        "It is an upper bound: real `output_throughput` always "
+        "stays under it because of comm overhead, kernel "
+        "efficiency < 100%, and KV-cache fragmentation. **Within "
+        "roofline %** = measured / peak; **Gap to roofline %** = "
+        "100 − Within. The ceiling is a session-level constant "
+        "(hardware + model + isl/osl don't change), so baseline and "
+        "latest are compared against the same anchor._"
+    )
+    lines.append("")
+    lines.extend(format_roofline_metrics_table(cmp))
+    lines.append(f"### Baseline snapshot #{base_id}")
+    lines.append("")
+    lines.append(f"`{baseline.get('analysis_md_path')}`")
+    if baseline.get("ts"):
+        lines.append(f"_captured: {baseline.get('ts')}_")
+    lines.append("")
+    lines.append(_extract_executive_summary(
+        str(baseline.get("analysis_md_path") or "")
+    ))
+    lines.append("")
+    lines.append(f"### Post-optimization snapshot #{latest_id}")
+    lines.append("")
+    lines.append(f"`{latest.get('analysis_md_path')}`")
+    if latest.get("ts"):
+        lines.append(f"_captured: {latest.get('ts')}_")
+    lines.append("")
+    lines.append(_extract_executive_summary(
+        str(latest.get("analysis_md_path") or "")
+    ))
+    lines.append("")
+    return lines
 
 
 def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:

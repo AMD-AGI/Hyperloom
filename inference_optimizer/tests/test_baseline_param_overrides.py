@@ -1,4 +1,4 @@
-"""Baseline / validate_stack parameter override tests.
+"""Baseline parameter override tests.
 
 Pins the executor-boundary contract for the two Magpie leak-path
 recovery knobs that Orchestration drives via ``task.params``:
@@ -179,6 +179,121 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# TP auto-clamp against visible GPU count (real Qwen3-8B failure regression)
+# ---------------------------------------------------------------------------
+def _write_yaml_with_tp(path: Path, tp: int) -> None:
+    """Like ``_write_yaml`` but lets the test pin the YAML's default TP."""
+    cfg: dict = {
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "precision": "bf16",
+            "run_mode": "local",
+            "envs": {"TP": tp, "CONC": 8, "ISL": 256, "OSL": 256},
+            "timeout_seconds": 600,
+            "profiler": {
+                "torch_profiler": {"enabled": False},
+                "system_profiler": {"enabled": False},
+                "tracelens": {"enabled": False},
+            },
+            "gpu_selection": {"auto": False},
+        }
+    }
+    with path.open("w") as f:
+        yaml.safe_dump(cfg, f)
+
+
+def test_materialize_config_with_envs_clamps_tp_to_visible_gpus(
+    tmp_path, monkeypatch, caplog,
+):
+    """A 4-GPU pod must not launch sglang/vllm with ``TP=8``.
+
+    Regression: the shipped ``baseline_sglang.yaml`` ships with ``TP: 8``
+    (full DGX-style node). On a 4-GPU sandbox the unclamped value caused
+    ``HIP error: invalid device ordinal`` deep inside the subprocess, which
+    looked like a Magpie failure even though the root cause was the
+    operator forgetting to ``export TP=...``. baseline survived because
+    Coordinator-driven recovery layered ``--tp 1`` into
+    ``EXTRA_SGLANG_ARGS``; profile / params / backends did not inherit
+    that recovery and looped forever on TP=8. The materializer is now
+    the single source of truth: clamp TP to the actual visible GPU count.
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml_with_tp(base, tp=8)
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.delenv("TP", raising=False)
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", raising=False)
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._workload_envs._visible_gpu_count",
+        return_value=4,
+    ):
+        materialized = materialize_config_with_envs(base, out)
+
+    cfg = yaml.safe_load(materialized.read_text())
+    assert cfg["benchmark"]["envs"]["TP"] == 4
+    assert cfg["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"] == "0,1,2,3"
+
+
+def test_materialize_config_with_envs_clamp_respects_env_override(
+    tmp_path, monkeypatch,
+):
+    """When the operator explicitly sets ``$TP``, the clamp still fires
+    because the alternative is a subprocess crash. ``DISABLE_TP_CLAMP=1``
+    is the documented bypass for the rare case where a user wants to
+    deliberately force an oversubscribed launch (e.g. running TP=8 on a
+    single MI300X for a controlled OOM repro)."""
+    base = tmp_path / "base.yaml"
+    _write_yaml_with_tp(base, tp=1)
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._workload_envs._visible_gpu_count",
+        return_value=4,
+    ):
+        materialized = materialize_config_with_envs(base, out)
+
+    cfg = yaml.safe_load(materialized.read_text())
+    # Bypass keeps the operator-requested TP=8 even though it will fail.
+    assert cfg["benchmark"]["envs"]["TP"] == 8
+    assert cfg["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
+
+
+def test_materialize_config_with_envs_no_clamp_when_visible_zero(
+    tmp_path, monkeypatch,
+):
+    """``_visible_gpu_count`` returns 0 on CPU-only test boxes / rocm-smi
+    failures. The materializer must NOT clamp to 0 (which would render
+    ROCR_VISIBLE_DEVICES empty and break sglang's CLI parsing); the
+    correct behaviour is to leave the YAML TP intact and let downstream
+    surface the real "no GPU" error."""
+    base = tmp_path / "base.yaml"
+    _write_yaml_with_tp(base, tp=2)
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.delenv("TP", raising=False)
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", raising=False)
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors._workload_envs._visible_gpu_count",
+        return_value=0,
+    ):
+        materialized = materialize_config_with_envs(base, out)
+
+    cfg = yaml.safe_load(materialized.read_text())
+    assert cfg["benchmark"]["envs"]["TP"] == 2
+    # ROCR was unset upstream → derived from TP (no clamp interference).
+    assert cfg["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"] == "0,1"
+
+
+# ---------------------------------------------------------------------------
 # BaselineExecutor.__call__ end-to-end (subprocess mocked)
 # ---------------------------------------------------------------------------
 def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
@@ -246,7 +361,7 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -280,7 +395,7 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -288,6 +403,50 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
     assert result["status"] == "succeeded"
     # Always-on default = the per-task workspace.
     assert captured["env"]["RESULT_DIR"] == str(output_dir)
+
+
+def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
+    """#210 fix (Deval, comment 8): the baseline executor's Magpie
+    subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH``
+    so Magpie's ``_resolve_default_inferencex_dir`` picks the same
+    InferenceX checkout Hyperloom's ``_inferencex_patcher`` patched.
+    Symmetric to the ``_grid_runner._run_magpie`` test in
+    test_p2_3_param_executors — both Magpie invocation sites must
+    set this env."""
+    monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/hyperloom/InferenceX")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    output_dir = tmp_path / "ws"
+    captured: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        captured["env"] = dict(kwargs.get("env") or {})
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == (
+        "/wekafs/hyperloom/InferenceX"
+    ), (
+        "MAGPIE_INFERENCEX_PATH must equal $INFERENCEX_PATH so Magpie "
+        "loads the patched checkout (#210 root cause)"
+    )
 
 
 def test_baseline_executor_rejects_bad_param(tmp_path):
@@ -311,7 +470,7 @@ def test_baseline_executor_rejects_bad_param(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -342,7 +501,7 @@ def test_baseline_executor_rejects_bad_result_dir(tmp_path):
 
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
-        "subprocess.run",
+        "run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))

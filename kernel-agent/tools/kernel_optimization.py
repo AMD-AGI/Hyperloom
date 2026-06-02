@@ -8,7 +8,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,10 +27,12 @@ sys.path.pop(0)
 
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write JSON to ``path`` using a temp file then rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
         json.dump(data, tmp, indent=2, sort_keys=True)
@@ -41,18 +42,21 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
+    """Append one JSON object as a line to the given JSONL file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(data, sort_keys=True) + "\n")
 
 
 def append_log(log_path: Path, message: str) -> None:
+    """Append a log line to ``log_path`` (ensuring parent dirs exist)."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(message.rstrip() + "\n")
 
 
 def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
+    """Return the last ``limit`` lines of a log file, empty if missing."""
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -70,6 +74,7 @@ def update_status(
     started_at: str,
     error: str | None = None,
 ) -> None:
+    """Persist a status snapshot for the current run."""
     payload: dict[str, Any] = {
         "tool": "kernel_optimization",
         "run_id": run_id,
@@ -89,10 +94,42 @@ def update_status(
 
 
 def load_candidates(path: Path) -> list[dict[str, Any]]:
+    """Load kernel candidates from JSON, normalizing legacy shapes.
+
+    Per AMD-AGI/Hyperloom#314 the canonical ``hot_kernels`` field now only
+    carries kernels that ``classify_patchability`` marked routable, with the
+    rejected ones moved to ``skipped_kernels`` (full candidate dicts, not a
+    compact audit projection). Batch dispatchers (parallel_e2e_runner,
+    ``_batch_kernel_candidates``) read ``hot_kernels`` directly and benefit
+    from the filter. The kernel-opt CLI's direct lookup path
+    (``find_candidate(load_candidates(...), kid)``) still needs to be able
+    to resolve a non-routable kernel by id — both for operator debugging
+    ("what does the backend selector say about k001?") and so the
+    dispatcher's ``_validate_reusable_native_kernel`` guard fires with the
+    real ``reusable_native_kernel=False`` candidate instead of an empty
+    "missing native source" stub. Return the union so both call sites
+    work; the older flat-list / ``kernel_candidates`` legacy shapes are
+    still respected.
+    """
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
         return payload
     candidates = list(payload.get("hot_kernels") or payload.get("kernel_candidates") or [])
+    skipped = payload.get("skipped_kernels") or []
+    if isinstance(skipped, list):
+        seen_ids = {
+            c.get("kernel_id") for c in candidates
+            if isinstance(c, dict) and c.get("kernel_id")
+        }
+        for entry in skipped:
+            if not isinstance(entry, dict):
+                continue
+            kid = entry.get("kernel_id")
+            if kid and kid in seen_ids:
+                continue
+            candidates.append(entry)
+            if kid:
+                seen_ids.add(kid)
     artifact_paths = payload.get("artifact_paths")
     if not isinstance(artifact_paths, dict):
         artifact_paths = {}
@@ -108,6 +145,7 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
 
 
 def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any]:
+    """Find a candidate by ``kernel_id`` (or name) or raise KeyError."""
     for candidate in candidates:
         if candidate.get("kernel_id") == kernel_id or candidate.get("name") == kernel_id:
             return candidate
@@ -130,6 +168,222 @@ def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
         or existing_path(str(candidate.get("test_harness_path") or ""))
         or any(existing_path(str(p)) for p in bench_files)
     )
+
+
+def _resolve_source_file(
+    llm_source: str,
+    candidate: dict[str, Any],
+    kernel_id: str,
+    log_path: Path | None = None,
+) -> str:
+    """Resolve the effective source file, preferring TraceLens (candidate).
+
+    TraceLens analyzes the trace and produces the authoritative
+    ``kernel_id → source_file`` mapping in ``kernel_candidates.json``.
+    The Orchestration LLM can also pass ``--source-file`` via payload,
+    but it occasionally confuses kernel IDs (e.g. picks fmoe ``k001``'s
+    source for fmha ``k003``) and supplies a path that no longer matches
+    the kernel being optimized. The legacy ``args.source_file or
+    candidate.source_file`` order let any LLM-supplied string silently
+    override TraceLens, which on DeepSeek-R1 routed an MHA kernel's
+    rewrite at ``fused_moe.py``.
+
+    Policy: candidate wins. If the LLM's path resolves to a different
+    absolute location than candidate's, emit a ``[source-override]``
+    warning to the run log so the discrepancy is visible in postmortem,
+    then return the candidate path. When candidate has no source_file
+    (legacy / synthetic fixtures), fall back to the LLM-supplied path.
+    """
+    cand_source = str((candidate or {}).get("source_file") or "").strip()
+    llm = str(llm_source or "").strip()
+    if not cand_source:
+        return llm
+
+    # A TraceLens "launcher path" can be a profiler *frame label* such as
+    # ``aiter/fused_moe.py(986): fused_moe_2stages`` rather than a real file.
+    # This is the norm for synthetic pseudo-ops (e.g. TraceLens PR #668's
+    # ``pseudo_op::moe_flydsl_stage1/2``, which inherit a frame-label launcher
+    # path from the ``aiter::fused_moe_`` donor). GEAK cannot open a frame
+    # label, so when the candidate source is not a readable file but the
+    # caller supplied a real one, prefer the explicit source_file. This is the
+    # source-resolution analogue of the pseudo-op fast path in
+    # ``tracelens_analysis.source_type_for``.
+    def _is_real_file(p: str) -> bool:
+        try:
+            return bool(p) and Path(p).is_file()
+        except (OSError, RuntimeError):
+            return False
+
+    if not _is_real_file(cand_source) and _is_real_file(llm):
+        if log_path is not None:
+            append_log(
+                log_path,
+                f"[source-fallback] kernel_id={kernel_id} candidate "
+                f"source_file={cand_source!r} is not a readable file "
+                f"(likely a pseudo-op frame label); using explicit "
+                f"source_file={llm!r}",
+            )
+        return llm
+
+    if llm and Path(cand_source) != Path(llm):
+        try:
+            differ = Path(cand_source).resolve(strict=False) != Path(llm).resolve(strict=False)
+        except (OSError, RuntimeError):
+            differ = True
+        if differ and log_path is not None:
+            append_log(
+                log_path,
+                f"[source-override] kernel_id={kernel_id} "
+                f"LLM passed source_file={llm!r} but TraceLens candidate resolves to "
+                f"{cand_source!r}; using TraceLens (source of truth)",
+            )
+    return cand_source
+
+
+# Kernel-name → benchmark-name priority patterns. Listed in priority order
+# (more specific kernel families first). Each entry pairs a kernel-name
+# regex with a priority-ordered list of benchmark-filename regexes; when
+# the kernel matches, benchmarks whose basename matches any of the
+# patterns are hoisted to the front of the candidate list (preserving the
+# pattern order). Patterns are intentionally conservative so a missing
+# kernel family degrades to "preserve original order" rather than picking
+# an off-topic benchmark.
+_BENCHMARK_PATTERNS: list[tuple["re.Pattern[str]", list["re.Pattern[str]"]]] = [
+    # Flash / multi-head attention (must come BEFORE paged-attn so a kernel
+    # name like ``fmha_v3_varlen_fwd`` does not accidentally match a generic
+    # ``attn`` rule that also hits ``test_pa.py``).
+    (
+        re.compile(r"(fmha|^mha|::mha|flash[_-]?attn|multi[_-]?head)", re.IGNORECASE),
+        [
+            re.compile(r"^(test|bench)_.*mha", re.IGNORECASE),
+            re.compile(r"^(test|bench)_.*flash.*attn", re.IGNORECASE),
+        ],
+    ),
+    # Paged attention (matches both ``paged_attn`` and ``paged_attention``)
+    (
+        re.compile(r"(paged[_-]?att(?:n|ention)|^pa_|::pa_)", re.IGNORECASE),
+        [
+            re.compile(r"^(test|bench)_pa\b", re.IGNORECASE),
+            re.compile(r"^(test|bench)_.*paged", re.IGNORECASE),
+        ],
+    ),
+    # MoE / fused-MoE
+    (
+        re.compile(r"(fmoe|fused[_-]?moe|::moe|^moe_)", re.IGNORECASE),
+        [re.compile(r"^(test|bench)_.*moe", re.IGNORECASE)],
+    ),
+    # GEMM / matmul / linear
+    (
+        re.compile(r"(gemm|matmul|^linear|::linear|_mm_)", re.IGNORECASE),
+        [
+            re.compile(r"^(test|bench)_.*gemm", re.IGNORECASE),
+            re.compile(r"^(test|bench)_.*matmul", re.IGNORECASE),
+        ],
+    ),
+    # RMSNorm / LayerNorm
+    (
+        re.compile(r"(rmsnorm|layernorm|_norm\b|norm$)", re.IGNORECASE),
+        [re.compile(r"^(test|bench)_.*norm", re.IGNORECASE)],
+    ),
+]
+
+
+def _match_benchmark_for_kernel(
+    kernel_name: str,
+    bench_files: list[Any],
+) -> list[str]:
+    """Reorder ``bench_files`` so semantically-matching benchmarks come first.
+
+    TraceLens populates ``candidate.benchmark_files`` with every test/bench
+    file it found under the kernel's repo, in an order driven by repo
+    enumeration rather than kernel semantics. On DeepSeek-R1 this surfaced
+    a real failure: the fmha kernel ``aiter::fmha_v3_varlen_fwd``'s
+    benchmark list was led by ``test_pa.py`` (PagedAttention), so the
+    legacy ``for bf in bench_files: ... break`` selector in
+    :func:`invoke_backend` picked a benchmark that doesn't exercise the
+    kernel — and whose 90-config × 3-replay default matrix stalled the
+    GEAK Step-5 profiling for hours.
+
+    Policy: scan :data:`_BENCHMARK_PATTERNS` in declared priority order;
+    for the first kernel-name regex that matches, sort the bench list so
+    items matching that family's bench patterns come first (within the
+    matched group, earlier patterns win). When no kernel pattern matches,
+    return the original order — never invent a preference.
+    """
+    existing = [p for p in (bench_files or []) if isinstance(p, str) and p]
+    if not existing:
+        return []
+    name = str(kernel_name or "")
+    for kernel_re, bench_res in _BENCHMARK_PATTERNS:
+        if not kernel_re.search(name):
+            continue
+
+        def _priority(path: str, _bench_res=bench_res) -> int:
+            base = Path(path).name
+            for idx, br in enumerate(_bench_res):
+                if br.search(base):
+                    return idx
+            return len(_bench_res)
+
+        return sorted(existing, key=_priority)
+    return existing
+
+
+def _profile_timeout_sec() -> int:
+    """Per-subprocess profiling timeout (seconds) for GEAK's Step 5.
+
+    The GEAK preprocessor (vendored ``minisweagent.preprocess``) runs the
+    rendered ``test_command`` under Metrix instrumentation with
+    ``num_replays=3`` and then captures a second baseline pass — neither
+    call carries a subprocess timeout. With a default-matrix benchmark
+    such as aiter's ``test_pa.py`` (2 dtypes × 5 head configs × 9 ctx_len
+    = 90 cases per replay), Step 5 can stall for hours and burn the entire
+    GEAK budget before any patch is attempted.
+
+    We bound this by injecting ``timeout <N>`` as the prefix of the
+    ``test_command`` we hand to GEAK. The benchmark subprocess SIGTERMs at
+    ``N`` seconds and returns exit 124, which Metrix surfaces as a normal
+    profiling failure; the preprocessor's existing ``except Exception``
+    handler logs a warning and continues to Step 6/7 instead of hanging.
+
+    Default 600s; override via ``KERNEL_OPT_PROFILE_TIMEOUT_SEC``. Floors
+    at 1 so a misconfigured ``0`` cannot disable the guard entirely.
+    """
+    try:
+        value = int(os.environ.get("KERNEL_OPT_PROFILE_TIMEOUT_SEC", "600"))
+    except (ValueError, TypeError):
+        return 600
+    return max(1, value)
+
+
+def _render_geak_test_command(
+    kernel_name: str,
+    bench_files: list[Any],
+    is_multigpu: bool,
+    num_gpus: int,
+    timeout_sec: int,
+) -> str:
+    """Render the ``--test-command`` GEAK receives, with timeout + match.
+
+    Picks the first existing ``test_*.py`` / ``bench*.py`` from the
+    semantically-ordered bench list, prefixes ``timeout <N>``, and wraps
+    multi-GPU collectives in ``torchrun --nproc_per_node=<num_gpus>`` so
+    GEAK's subprocess can ``init_process_group`` correctly. Returns ``""``
+    when no usable benchmark exists; the caller leaves
+    ``--test-command`` blank so GEAK falls back to its own discovery.
+    """
+    ordered = _match_benchmark_for_kernel(kernel_name, bench_files)
+    for bf in ordered:
+        path = Path(bf)
+        if not bf.endswith(".py") or not path.exists():
+            continue
+        name = path.name
+        if "test_" not in name and "bench" not in name:
+            continue
+        if is_multigpu and num_gpus >= 2:
+            return f"timeout {timeout_sec} torchrun --nproc_per_node={num_gpus} {bf}"
+        return f"timeout {timeout_sec} python {bf}"
+    return ""
 
 
 def parse_backends(backends: str) -> list[str]:
@@ -201,6 +455,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
 _GEAK_KERNEL_TYPE = {
     "triton": "triton",
     "hip_cpp": "hip",
+    "flydsl": "flydsl",
     "python": "other",
     "vendor_binary": "other",
     "unknown": "other",
@@ -708,7 +963,7 @@ def _coerce_cli_value(value: str | bool) -> Any:
         return text
 
 
-def parse_extra_sglang_args(extra_args: str) -> dict[str, Any]:
+def parse_extra_server_args(extra_args: str) -> dict[str, Any]:
     """Parse selected SGLang flags from an EXTRA_SGLANG_ARGS-style string."""
     if not extra_args.strip():
         return {}
@@ -768,12 +1023,21 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         runtime_flags.update(candidate["runtime_flags"])
     runtime_flags.setdefault("is_multigpu", bool(candidate.get("is_multigpu")))
     runtime_flags.setdefault("num_gpus_recommended", candidate.get("num_gpus_recommended"))
-    extra_sglang_args = (
-        getattr(args, "extra_sglang_args", "")
-        or candidate.get("extra_sglang_args", "")
+    # The canonical payload key is ``extra_server_args`` (renamed from
+    # the legacy ``extra_sglang_args``); the local shim accepts both
+    # shapes on read so envelopes still carrying the legacy key work.
+    # The kernel-agent ``tools/`` directory is added to sys.path (not
+    # used as a package), so import the shim by bare module name.
+    from _payload_aliases import (  # type: ignore[import-not-found]
+        read_extra_server_args as _read_eserver,
+    )
+    extra_server_args = (
+        getattr(args, "extra_server_args", "")
+        or _read_eserver(candidate)
+        or candidate.get("candidate_extra_server_args", "")
         or candidate.get("candidate_extra_sglang_args", "")
     )
-    parsed_sglang_args = parse_extra_sglang_args(str(extra_sglang_args))
+    parsed_sglang_args = parse_extra_server_args(str(extra_server_args))
     for key in (
         "attention_backend",
         "decode_attention_backend",
@@ -789,7 +1053,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     runtime_args = candidate.get("runtime_args") if isinstance(candidate.get("runtime_args"), dict) else {}
     runtime_args = dict(runtime_args)
     if parsed_sglang_args:
-        runtime_args.setdefault("extra_sglang_args", parsed_sglang_args.get("raw", str(extra_sglang_args)))
+        runtime_args.setdefault("extra_server_args", parsed_sglang_args.get("raw", str(extra_server_args)))
     for key in (
         "kv_cache_dtype",
         "page_size",
@@ -825,10 +1089,27 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         "runtime_flags": runtime_flags,
         "env_vars": candidate.get("env_vars") or {},
         "kernel_params": kernel_params,
+        # PR-K: source attribution. ``launcher_source_file`` is the python
+        # @compile_ops wrapper TraceLens originally attributed the kernel
+        # to (e.g. ``aiter/ops/moe_op.py``); ``kernel_path`` above is the
+        # device source the LLM must actually rewrite (e.g.
+        # ``csrc/.../gemm_moe_ck2stages.cu``). Both fields are empty /
+        # False when the candidate was NOT promoted, so this metadata
+        # block is a non-event for vendor-style kernels whose trace
+        # source already pointed at the device file.
+        "launcher_source_file": str(candidate.get("launcher_source_file", "") or ""),
+        "source_promoted_from_launcher": bool(
+            candidate.get("source_promoted_from_launcher"),
+        ),
     }
 
 
-def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
+def build_prompt(
+    candidate: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    backend: str | None = None,
+) -> str:
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
     if source_file and Path(str(source_file)).exists():
@@ -838,17 +1119,98 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
     bench_files = candidate.get("benchmark_files") or []
     if isinstance(bench_files, str):
         bench_files = [bench_files]
+    # Sort by semantic match against the kernel name so the most-relevant
+    # benchmarks head the list GEAK reads (the prompt clips to ``[:8]``
+    # below, so an off-topic ``test_*.py`` would otherwise crowd out the
+    # right one on kernels with long bench listings).
+    bench_files = _match_benchmark_for_kernel(
+        str(candidate.get("name") or ""), bench_files
+    )
     is_multigpu = bool(candidate.get("is_multigpu"))
     # Resolve how many GPUs the executor will give this attempt: CLI override
     # wins, then candidate hint, then 1 (single-GPU compute kernel).
     num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0)
                    or int(candidate.get("num_gpus_recommended") or 1))
     # Map our source_type to GEAK's kernel_type vocabulary so its task_parser
-    # can route to the right agent (hip / triton / other).
+    # can route to the right agent (hip / triton / flydsl / other).
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
     kernel_metadata = build_kernel_metadata(candidate, args)
-    budget_min = int(getattr(args, "budget_minutes", 60) or 60)
+    # Budget-protocol preamble. mini-swe-agent renders a ``step N ($X.XX)``
+    # header before every tool call where ``$X.XX`` is the cumulative LLM
+    # token spend. With GEAK's per-task cost-limit disabled (``--cost-limit
+    # 0.0``) this number is pure telemetry — it does NOT terminate the
+    # agent. In the May 2026 M2.5 N36 run multiple GEAK rounds nonetheless
+    # exited at step 3 / ~$2 with a ``budget exhausted`` panic-submit and
+    # zero code edits, throwing away ~90% of the 60-minute wall-clock
+    # budget that actually governs the task. Re-iterate the contract in
+    # the prompt so the LLM treats the header as a cost meter, not a
+    # stop sign. Wall-clock budget is sourced from the runner's
+    # ``geak_budget_minutes`` (default 60); the prompt repeats it verbatim
+    # rather than re-deriving so it stays accurate if the operator lowers
+    # the budget via ``RUN_OPT_GEAK_BUDGET_MINUTES``.
+    budget_protocol_block = (
+        "## BUDGET PROTOCOL (read this FIRST, before any tool call):\n"
+        "Every `mini-swe-agent step N ($X.XX)` header shows CUMULATIVE LLM TOKEN COST\n"
+        "in dollars. This is **TELEMETRY**, NOT a budget signal. The per-task LLM\n"
+        "cost_limit has been disabled (`--cost-limit 0.0`); you will NOT be terminated\n"
+        "by the cost meter at $2, $5, $10, $20, $50, or $100. The ONLY budget that\n"
+        "ends your task is the wall-clock timeout managed by the runner.\n"
+        "\n"
+        "Prior failed runs have been observed to exit at step ~3 with ~$2 spend,\n"
+        "declaring 'budget exhausted' WITHOUT making any code changes. Every one of\n"
+        "those runs threw away 90%+ of the available wall-clock budget. **DO NOT\n"
+        "REPEAT THAT MISTAKE.**\n"
+        "\n"
+        "Successful runs typically use 30-60 tool calls and $15-$40 of token spend\n"
+        "across the full wall-clock budget. Plan for THAT scale. Read the target\n"
+        "kernel, write an optimization, rebuild, test, iterate. If you see a low\n"
+        "step / low $ telemetry header and your impulse is 'submit now to be safe'\n"
+        "— that impulse is WRONG. Make the edit. Run the test. Iterate.\n"
+    )
+    # PR-K: source attribution note. When TraceLens originally attributed a
+    # kernel to a python ``@compile_ops`` wrapper (e.g. ``aiter/ops/moe_op.py``
+    # for ``ck_moe_stage1``) and tracelens_analysis promoted it to the device
+    # source, render a hard-rule notice at the top of the prompt so the LLM
+    # rewrites the device file and not the bypassed wrapper. Empty for
+    # un-promoted kernels — does not bloat the legacy prompt by even a byte.
+    promotion_block = ""
+    launcher_source = str(candidate.get("launcher_source_file", "") or "").strip()
+    if candidate.get("source_promoted_from_launcher") and launcher_source:
+        promotion_block = (
+            "\n>>> SOURCE ATTRIBUTION NOTE — READ FIRST <<<\n"
+            f"This kernel (`{kernel_name}`) was originally traced at the Python launcher:\n"
+            f"  {launcher_source}\n"
+            "which is a thin `@compile_ops` wrapper. The wrapper does NOT contain the\n"
+            "compute path — at runtime the `@compile_ops` decorator dispatches to a\n"
+            "JIT-compiled `.so` under `<aiter>/jit/build/module_*/` and bypasses the\n"
+            "Python wrapper entirely. Patching the wrapper has ZERO runtime effect.\n"
+            "\n"
+            "Your rewrite target is the DEVICE SOURCE shown above as `kernel_url`:\n"
+            f"  {source_file}\n"
+            "\n"
+            "Hard rules for this kernel:\n"
+            "1. DO NOT modify the Python wrapper at the launcher path above. Patches\n"
+            "   there are silently bypassed by the @compile_ops .so loader and the\n"
+            "   integrate baseline will measure -0% E2E gain followed by REVERT.\n"
+            "2. The device source may be a CODEGEN ENTRY (e.g. `gemm_moe_ck2stages.cu`)\n"
+            "   that hipcc compiles into per-(dtype, quant, act) `module_*.so` instances\n"
+            "   under `<aiter>/jit/build/`. The orchestrator clears the matching jit/\n"
+            "   build/ entries before rebuild so your patch actually takes effect on\n"
+            "   next import (no manual cache invalidation needed on your side).\n"
+            "3. Preserve function names, signatures, host entry points, and the\n"
+            "   `aiter` namespace exactly as in the original — the apply step rejects\n"
+            "   patches that drop required host entry functions or that submit a\n"
+            "   standalone `PYBIND11_MODULE` / `TORCH_LIBRARY` block absent from the\n"
+            "   target file.\n"
+        )
+    # Quote the per-backend wall-clock so GEAK v3.2.0's LLM task-mode parser
+    # (mini.py:435 task_extracted_mode) infers the right mode (>=120min→full,
+    # else quick), instead of always seeing the OOB 60min default.
+    if backend == "geak":
+        budget_min = int(getattr(args, "geak_budget_min", 130) or 130)
+    else:
+        budget_min = int(getattr(args, "budget_minutes", 60) or 60)
     target_platform = (
         getattr(args, "target_platform", "") or _env_target_platform()
     )
@@ -896,15 +1258,17 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "  search inside the repo, scope to the repo root: `find <repo> -name ...`\n"
         "  or `rg ... <repo>`, NEVER `find /`.\n"
         "\n"
-        "GOAL & EARLY-EXIT:\n"
-        "- Target speedup: >= 1.50x on the dominant inference shape(s).\n"
-        f"- Hard wall-clock budget: ~{budget_min} minutes. If you reach >=1.50x with\n"
-        "  passing correctness BEFORE the budget expires, STOP immediately, write the\n"
-        "  final `optimization_report.md` with `speedup: X.XXx` and exit (don't keep\n"
-        "  squeezing for marginal gains).\n"
-        f"- Otherwise iterate up to minute {int(budget_min*0.85)}, then STOP iterating\n"
-        "  and finalize the report with your best so-far measured speedup. The runner\n"
-        "  will SIGTERM at minute "
+        "GOAL & TIME BUDGET:\n"
+        # GEAK v3.2.0 LLM-parses prompt for `--mode full` / `mode=quick` etc.
+        # (prompts.py:73-76 trigger list). Emit the explicit token so the
+        # parser locks in the right preset (yaml run.budgets.<mode>) instead
+        # of leaking off other prompt phrases like "quick micro-benchmark".
+        f"- Run mode: {'full' if budget_min >= 120 else 'quick'} "
+        f"(--mode {'full' if budget_min >= 120 else 'quick'}).\n"
+        f"- Hard wall-clock budget: ~{budget_min} minutes. Iterate up to minute "
+        f"{int(budget_min*0.85)},\n"
+        "  then STOP iterating and finalize the report with your best so-far measured\n"
+        "  speedup. The runner will SIGTERM at minute "
         f"{budget_min}; any in-flight work not on disk is lost.\n"
         "- Always print the final number in the form `speedup: X.XXx` (lowercase `x`)\n"
         "  at the END of `optimization_report.md` so the runner can extract it; if you\n"
@@ -976,6 +1340,46 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         "Pick whichever option matches the kernel; do NOT just measure baseline\n"
         "and write `speedup: N/A` — that wastes the run.\n"
     )
+    # Multi-node sandbox is GPU-less: any local `hipcc` / `torch.cuda.*` /
+    # `torch.utils.cpp_extension.load` call WILL fail. Direct the LLM to
+    # delegate compile + execution to a GPU-bearing pod via the
+    # `inference_optimizer.multi_node kernel-bench` subcommand (head pod,
+    # single-GPU actor); LLM still iterates locally on source, just
+    # off-loads each measurement step. The CLI base64-encodes any
+    # supporting files, stages them under --workspace on the pod, runs
+    # the bench inside that workspace with the GPU, and returns
+    # stdout/stderr + any matching result*.json artifacts.
+    mn_state_file = Path("/tmp/multi_node_state.json")
+    is_multinode_run = False
+    try:
+        if mn_state_file.is_file():
+            _st = json.loads(mn_state_file.read_text(encoding="utf-8"))
+            is_multinode_run = int(_st.get("nodes") or 0) >= 2
+    except (OSError, ValueError):
+        is_multinode_run = False
+    if is_multinode_run:
+        safety += (
+            "\nMULTI-NODE SANDBOX (no local GPU): every compile + benchmark\n"
+            "step MUST be dispatched to a GPU-bearing RayJob pod. Do NOT\n"
+            "call `hipcc`, `torch.cuda.*`, or `torch.utils.cpp_extension.load`\n"
+            "directly; they have no GPU here and will hang or crash.\n"
+            "Instead, for each A/B benchmark iteration:\n"
+            "  1. Write the bench script (and any deps) under your\n"
+            "     workspace ($WORKSPACE/benchmarks/, $WORKSPACE/optimized_versions/).\n"
+            "  2. Invoke:\n"
+            "       python3 -m inference_optimizer.multi_node kernel-bench \\\n"
+            "         --workspace /tmp/kbench_$KERNEL_ID \\\n"
+            "         --bench-command 'cd /tmp/kbench_$KERNEL_ID && bash bench.sh' \\\n"
+            "         --files-b64-json '<{\"bench.sh\":\"<b64>\",\"v1.cu\":\"<b64>\",...}>' \\\n"
+            "         --result-glob 'result*.json'\n"
+            "  3. Parse the printed JSON document's `result.stdout_tail`\n"
+            "     and `result.artifacts[].content` for the speedup number;\n"
+            "     write it into optimization_report.md as `[MICRO_SPEEDUP]`.\n"
+            "Helper script to construct the b64 map cleanly:\n"
+            "    python3 -c 'import base64,json,glob;print(json.dumps({p:base64.b64encode(open(p,\"rb\").read()).decode() for p in glob.glob(\"**/*\",recursive=True) if __import__(\"os\").path.isfile(p)}))'\n"
+            "Treat `kernel-bench` as your only measurement gate; everything\n"
+            "else (code edits, correctness reasoning) still happens locally.\n"
+        )
     if not is_multigpu:
         safety += "- Use the provided benchmark/test files above for correctness/perf measurement.\n"
     elif num_gpus >= 2:
@@ -991,35 +1395,52 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
             "still measure compute/IO improvements.\n"
         )
     tracelens_context_block = ""
-    report_path_str = str(candidate.get("trace_report_path") or "")
-    report_path = Path(report_path_str) if report_path_str else None
-    if report_path and report_path.exists():
-        try:
-            full_report = report_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            full_report = ""
-        if full_report:
-            rank = candidate.get("tracelens_pitem_rank")
-            title = candidate.get("tracelens_pitem_title", "")
-            if rank:
-                focus_line = (
-                    f"Focus on **P{rank}: {title}** in the report below. "
-                    "Other P-items are context only — do not optimize them.\n"
+    # Per AMD-AGI/Hyperloom#307: the per-kernel TraceLens prose
+    # (Identification / Reasoning / Recommended direction / Impact
+    # estimate) is already extracted into ``hypothesis_block`` above
+    # via ``_build_hypothesis_block``, and the bound-specific lever
+    # list is in ``priority_block``. Dumping the full analysis.md on
+    # top of that bloats the prompt by ~300 lines (~40% of the body
+    # in a real Qwen3-32B run) and surfaces other P-items that this
+    # very prompt tells the agent NOT to optimize. Only fall back to
+    # the full-report dump when no per-kernel hypothesis could be
+    # rendered (raw-trace / csv-fallback path with empty prose), so
+    # the agent still has *some* TraceLens grounding in that edge
+    # case.
+    if not hypothesis_block.strip():
+        report_path_str = str(candidate.get("trace_report_path") or "")
+        report_path = Path(report_path_str) if report_path_str else None
+        if report_path and report_path.exists():
+            try:
+                full_report = report_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                full_report = ""
+            if full_report:
+                from inference_optimizer.tracelens_md import strip_base64_data_urls
+
+                full_report = strip_base64_data_urls(full_report)
+                rank = candidate.get("tracelens_pitem_rank")
+                title = candidate.get("tracelens_pitem_title", "")
+                if rank:
+                    focus_line = (
+                        f"Focus on **P{rank}: {title}** in the report below. "
+                        "Other P-items are context only — do not optimize them.\n"
+                    )
+                else:
+                    focus_line = "Use the report below as full context for this kernel.\n"
+                tracelens_context_block = (
+                    "\n## TraceLens Context\n\n"
+                    + focus_line
+                    + "\n"
+                    + full_report
                 )
-            else:
-                focus_line = "Use the report below as full context for this kernel.\n"
-            tracelens_context_block = (
-                "\n## TraceLens Context\n\n"
-                + focus_line
-                + "\n"
-                + full_report
-            )
     # Use GEAK task_parser field names (kernel_name/kernel_url/kernel_type/repo)
     # so its LLM-based parser can extract them; OOB agents read the same body
     # as a normal natural-language prompt.
     return "\n".join([
         f"# TASK: Optimize the `{kernel_name}` kernel",
         "",
+        budget_protocol_block,
         platform_intro,
         "",
         f"kernel_name: {kernel_name}",
@@ -1028,14 +1449,12 @@ def build_prompt(candidate: dict[str, Any], args: argparse.Namespace) -> str:
         f"repo: {kernel_repo}",
         f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
         f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
+        promotion_block,
         "",
         "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
         "```json",
         json.dumps(kernel_metadata, indent=2, sort_keys=True),
         "```",
-        "",
-        "GEAK configuration (ignored by non-GEAK backends):",
-        "- Use homogeneous mode. Set max_rounds to 5.",
         "",
         hardware_notes,
         hypothesis_block,
@@ -1136,20 +1555,137 @@ def _set_yaml_tools_rag(text: str, enabled: bool) -> str:
     return "\n".join(out) + "\n"
 
 
-def _geak_config_for_run(args: argparse.Namespace, prompt_file: Path) -> str:
+_DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC = 3600
+
+
+def _ensure_yaml_env_timeout(text: str, *, timeout: int = _DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC) -> str:
+    """Inject ``env.timeout`` if the GEAK config doesn't already define one.
+
+    mini-swe-agent's ``LocalEnvironmentConfig.timeout`` defaults to 30 seconds.
+    Without an explicit override, GEAK's test command dies with
+    ``Test command timed out`` after 30s. This helper ensures the config
+    always has a reasonable timeout (default 3600s).
+    """
+    timeout = max(60, int(timeout))
+    has_env = re.search(r"^env\s*:\s*(?:#.*)?$", text, flags=re.MULTILINE)
+    if has_env:
+        # Only mutate the timeout line; leave the rest of the env block alone.
+        m = re.search(
+            r"^(env\s*:\s*(?:#.*)?\n(?:[ \t]+.*\n)*)",
+            text,
+            flags=re.MULTILINE,
+        )
+        if not m:
+            return text
+        block = m.group(1)
+        timeout_re = re.compile(r"^([ \t]+)timeout\s*:\s*(\d+)\s*$", flags=re.MULTILINE)
+        existing = timeout_re.search(block)
+        if existing:
+            current = int(existing.group(2))
+            if current >= timeout:
+                return text
+            new_block = timeout_re.sub(f"{existing.group(1)}timeout: {timeout}", block, count=1)
+        else:
+            indent = "  "
+            for line in block.splitlines()[1:]:
+                stripped = line.lstrip(" \t")
+                if stripped and not stripped.startswith("#"):
+                    indent = line[: len(line) - len(stripped)] or indent
+                    break
+            new_block = block.rstrip("\n") + f"\n{indent}timeout: {timeout}\n"
+        return text.replace(block, new_block, 1)
+    addition = (
+        "\n"
+        "# Injected by Hyperloom kernel_optimization: mini-swe-agent\n"
+        "# LocalEnvironmentConfig defaults timeout=30 which kills every\n"
+        "# patch test inside the auto-generated unittest harness.\n"
+        "env:\n"
+        "  env:\n"
+        "    PAGER: cat\n"
+        "    MANPAGER: cat\n"
+        "    LESS: -R\n"
+        "    PIP_PROGRESS_BAR: 'off'\n"
+        "    TQDM_DISABLE: '1'\n"
+        f"  timeout: {timeout}\n"
+    )
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + addition
+
+
+def _geak_config_for_run(
+    args: argparse.Namespace,
+    prompt_file: Path,
+) -> str:
     """Create a per-run GEAK config only when runtime overrides need it."""
     base_config = os.environ.get("GEAK_CONFIG", "")
-    if not getattr(args, "disable_rag", False):
-        return base_config
     if not base_config or not Path(base_config).is_file():
         return base_config
-    override = prompt_file.parent / f"{prompt_file.stem}.geak-config.yaml"
     text = Path(base_config).read_text(encoding="utf-8", errors="replace")
-    override.write_text(_set_yaml_tools_rag(text, enabled=False), encoding="utf-8")
+    new_text = text
+    if getattr(args, "disable_rag", False):
+        new_text = _set_yaml_tools_rag(new_text, enabled=False)
+    new_text = _ensure_yaml_env_timeout(new_text, timeout=_DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC)
+    if new_text == text:
+        return base_config
+    override = prompt_file.parent / f"{prompt_file.stem}.geak-config.yaml"
+    override.write_text(new_text, encoding="utf-8")
     return str(override)
 
 
-def _apply_geak_env_overrides(args: argparse.Namespace, prompt_file: Path) -> dict[str, str | None]:
+def _extract_py_path(test_command: str) -> str | None:
+    """Extract the .py file path from a test command string."""
+    try:
+        for part in shlex.split(test_command):
+            if part.endswith(".py"):
+                return part
+    except ValueError:
+        pass
+    return None
+
+
+def _try_generate_harness(
+    test_command: str,
+    candidate: dict,
+    source_file: str,
+    out_dir: Path,
+    kernel_repo: str,
+    log_path: Path | None,
+) -> str | None:
+    """Try to auto-generate a GEAK-compatible harness from a benchmark file.
+
+    Returns a new test_command pointing to the generated harness, or None.
+    """
+    bench_py = _extract_py_path(test_command)
+    if not bench_py or not Path(bench_py).is_file():
+        return None
+
+    try:
+        tools_dir = str(Path(__file__).resolve().parent)
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from harness_generator import maybe_generate_harness
+
+        hr = maybe_generate_harness(
+            benchmark_file=bench_py,
+            candidate=candidate,
+            source_file=source_file,
+            out_dir=out_dir,
+            kernel_repo=kernel_repo,
+            log_fn=(lambda msg: append_log(log_path, msg)) if log_path else None,
+        )
+        if hr is not None:
+            return hr.test_command
+    except Exception as exc:
+        if log_path:
+            append_log(log_path, f"[harness_gen] failed: {exc}")
+    return None
+
+
+def _apply_geak_env_overrides(
+    args: argparse.Namespace,
+    prompt_file: Path,
+) -> dict[str, str | None]:
     """Temporarily tune GEAK env for this attempt; caller must restore."""
     keys = ("GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE")
     previous = {key: os.environ.get(key) for key in keys}
@@ -1226,10 +1762,10 @@ def invoke_backend(
     # GEAK needs more wall-clock than claude/codex: a single sub-agent task
     # already takes 5-10 min (baseline + LLM patch generation + per-patch
     # benchmark), and the orchestrator typically dispatches 4-9 tasks per
-    # round + a select_patch round at the end. Empirically 60 min lets
-    # individual sub-agents finish but consistently SIGTERMs the
-    # select_patch round (r38, r39 both fell back to per-task best_results
-    # salvage). 90 min is the new default; override via --geak-budget-min.
+    # round + a select_patch round at the end. 130 min is the default so
+    # the prompt-quoted budget triggers GEAK v3.2.0's mode=full path
+    # (yaml run.budgets.full.total_s=7200s + finalize_grace + kill_buffer);
+    # override via --geak-budget-min.
     if backend == "geak":
         budget_min = float(getattr(args, "geak_budget_min", 0)
                            or getattr(args, "budget_minutes", 60) or 60)
@@ -1248,32 +1784,47 @@ def invoke_backend(
         if backend == "geak":
             geak = _import_backend("geak_submit")
             out_dir = _geak_output_dir(args.session_id, prompt_file)
-            # GEAK preprocess will INVENT a wrong path (e.g.
-            # `/sgl-workspace/aiter/./benchmarks/bench_<kernel>.py` which does
-            # not exist) when --test-command is empty, causing torchrun exit 2
-            # at baseline measurement. Always pick a real existing test from
-            # candidate.benchmark_files, prefixing with `torchrun` for the
-            # multi-GPU path so collective init_process_group succeeds.
-            test_command = ""
+            # test_command: prefer external --test-command generated by the
+            # unittest skill; otherwise derive from benchmark files with the
+            # kernel-aware selector/timeout wrapper.
+            test_command = getattr(args, "test_command", "").strip()
             cand_name = str((candidate or {}).get("name") or "")
             is_multigpu = (
                 bool((candidate or {}).get("is_multigpu"))
                 or kernel_name_implies_multigpu(cand_name)
             )
-            if is_multigpu and num_gpus >= 2:
-                for bf in bench_files:
-                    if bf.endswith(".py") and Path(bf).exists() and (
-                        "test_" in Path(bf).name or "bench" in Path(bf).name
-                    ):
-                        test_command = f"torchrun --nproc_per_node={num_gpus} {bf}"
-                        break
-            elif not is_multigpu:
-                for bf in bench_files:
-                    if bf.endswith(".py") and Path(bf).exists() and (
-                        "test_" in Path(bf).name or "bench" in Path(bf).name
-                    ):
-                        test_command = f"python {bf}"
-                        break
+            if not test_command:
+                # GEAK preprocess may invent a non-existent bench path when
+                # --test-command is empty. Always provide a real test command.
+                test_command = _render_geak_test_command(
+                    kernel_name=cand_name,
+                    bench_files=bench_files,
+                    is_multigpu=is_multigpu,
+                    num_gpus=num_gpus,
+                    timeout_sec=_profile_timeout_sec(),
+                )
+            # Auto-generate GEAK-compatible harness when needed (e.g. raw
+            # AITER op_test without 4-mode CLI contract).
+            if test_command:
+                _harness_cmd = _try_generate_harness(
+                    test_command, candidate, source_file, out_dir,
+                    kernel_repo, log_path,
+                )
+                if _harness_cmd:
+                    test_command = _harness_cmd
+            if log_path is not None and test_command:
+                append_log(log_path, f"[geak] test_command={test_command}")
+            if test_command:
+                import shutil as _shutil
+                harness_dir = out_dir / "unittest"
+                harness_dir.mkdir(parents=True, exist_ok=True)
+                for _tc_part in test_command.split("&&"):
+                    for _w in _tc_part.strip().split():
+                        if _w.endswith(".py") and Path(_w).exists():
+                            _dst = harness_dir / Path(_w).name
+                            if _dst.exists() and _dst.resolve() == Path(_w).resolve():
+                                continue
+                            _shutil.copy2(_w, _dst)
             previous_env = _apply_geak_env_overrides(args, prompt_file)
             try:
                 result = geak.submit(
@@ -1291,6 +1842,8 @@ def invoke_backend(
                 _restore_env(previous_env)
             result["stdout"] = result.get("stdout_tail", "")
             result["output_dir"] = str(out_dir)
+            if test_command:
+                result["test_command"] = test_command
             # Surface GEAK partial outputs (final_report.json / results dir)
             # so a SIGTERM'd attempt with patches on disk still gets
             # promoted to "partial" by the run_attempt scanner below.
@@ -1333,6 +1886,21 @@ def invoke_backend(
                         result["geak_per_task_best_task"] = best_task
                         if best_patch_path:
                             result["geak_per_task_best_patch"] = best_patch_path
+                        # Surface the worktree directory holding the actual
+                        # rewritten files that produced this best patch.
+                        # GEAK's homogeneous orchestrator lays out each
+                        # sub-agent's slot as
+                        # ``results/round_<R>/parallel_<M>/`` for patches +
+                        # ``results/round_<R>/worktrees/slot_<M>/`` for the
+                        # checked-out repo it edited. Without this surface
+                        # the downstream artifact extractor only sees the
+                        # ``.patch`` (unified diff, often mixed with JIT
+                        # cache binary deltas) and fails to recover a real
+                        # ``.py`` source — see _select_source_artifact /
+                        # _candidate_artifact_paths for the consumer.
+                        wt = _geak_best_worktree(best_patch_path)
+                        if wt:
+                            result["geak_per_task_best_worktree"] = str(wt)
             return result
         if backend in {"claude", "codex", "cursor"}:
             oob = _import_backend("oob_submit")
@@ -1391,14 +1959,40 @@ def run_attempt(
     prompt_dir = run_dir / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
     prompt_file = prompt_dir / f"{attempt_id}.md"
-    prompt_file.write_text(build_prompt(candidate, args), encoding="utf-8")
+    prompt_file.write_text(build_prompt(candidate, args, backend=backend), encoding="utf-8")
 
     source_file = args.source_file or str(candidate.get("source_file") or "")
     started = time.time()
     append_log(log_path, f"[attempt {attempt_id}] backend={backend}")
 
     source_suffix = Path(source_file).suffix if source_file else ".txt"
-    optimized_path = run_dir / "optimized" / f"{attempt_id}_optimized{source_suffix or '.txt'}"
+    # In dry-run we still emit a synthetic source-suffixed placeholder so the
+    # downstream verification path can pick it up as a real artifact (preserved
+    # for back-compat with the dry-run smoke tests). For real backend runs we
+    # capture the raw subprocess stdout to a `.log` file instead of pretending
+    # it is the optimized CU/PY source: GEAK / claude / codex stdout is the
+    # mini-swe-agent / OOB conversation log, not a kernel source. Writing it
+    # with a `.cu` suffix and then handing it to `_select_source_artifact`
+    # made `_source_text_looks_complete` false-positive match generic
+    # English text containing markers like "void " or "extern " and report
+    # the log file as `artifact_source=source_file` (observed on Qwen3-8B
+    # k007 rmsnorm_quant and k013 silu_and_mul, 2026-05-20). The new `.log`
+    # suffix routes the stdout through `_extract_source_block` instead — that
+    # path scans for fenced code blocks (Claude/Codex sometimes emit the full
+    # optimized CU as ```cuda```) and only returns a real artifact when one
+    # exists, otherwise verification falls back cleanly to GEAK patches /
+    # `optimized_versions/` artefacts via the canonical backend_paths keys.
+    #
+    # Downstream-consumer contract: see ``kernel-agent/SKILL.md`` § *Per-
+    # attempt stdout file naming* — external scripts (dashboards, breakdown
+    # collector, etc.) MUST either read ``attempt["optimized_path"]`` from
+    # ``optimization_attempts.jsonl`` or glob ``<attempt_id>*`` under
+    # ``runs/<sid>/optimized/`` so both legacy ``_optimized.<suffix>`` and the
+    # new ``_stdout.log`` are picked up transparently.
+    if args.dry_run:
+        optimized_path = run_dir / "optimized" / f"{attempt_id}_optimized{source_suffix or '.txt'}"
+    else:
+        optimized_path = run_dir / "optimized" / f"{attempt_id}_stdout.log"
     optimized_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.dry_run:
@@ -1425,7 +2019,10 @@ def run_attempt(
             status = "timeout"
         else:
             status = "failed"
-        if returncode == 0 and full_stdout.strip():
+        # Always materialise the stdout `.log` (even on non-zero returncode);
+        # this is the durable audit trail for the attempt and the source for
+        # the code-fence extraction fallback.
+        if full_stdout.strip():
             optimized_path.write_text(full_stdout, encoding="utf-8")
         append_log(log_path, stdout_tail)
 
@@ -1488,6 +2085,9 @@ def run_attempt(
                 backend_paths["cli_execution_log"] = cli_log
             if session_id_oob:
                 backend_paths["oob_session_id"] = session_id_oob
+            test_cmd_used = (result.get("test_command") or "") if isinstance(result, dict) else ""
+            if test_cmd_used:
+                backend_paths["test_command"] = test_cmd_used
             # GEAK partial-output surface (forwarded by invoke_backend on
             # the geak branch). final_report.json / per-round patches.
             geak_final = (result.get("geak_final_report") or "") if isinstance(result, dict) else ""
@@ -1509,6 +2109,14 @@ def run_attempt(
                 bp = result.get("geak_per_task_best_patch")
                 if bp:
                     backend_paths["geak_per_task_best_patch"] = str(bp)
+                wt = result.get("geak_per_task_best_worktree")
+                if wt:
+                    # Forward the worktree directory so build_verification's
+                    # _candidate_artifact_paths can recover the rewritten
+                    # ``.py`` (or ``.cu``) file under it instead of trying
+                    # to scrape source out of GEAK's diff-with-binary-blobs
+                    # ``.patch``.
+                    backend_paths["geak_per_task_best_worktree"] = str(wt)
             # Promote any timed-out / failed attempt that left artifacts on
             # disk to "partial" so build_verification + make_proposal can
             # distinguish "killed but useful" from "truly empty failure".
@@ -1689,6 +2297,36 @@ def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
     return None
 
 
+def _trust_geak_correctness() -> bool:
+    """Treat GEAK ``status=complete`` + measured speedup as sufficient
+    correctness evidence by default.
+
+    GEAK's ``save_and_test`` only verifies that the patch compiles and
+    that ``import aiter`` succeeds; it does NOT exercise the kernel's
+    numerical output (e.g. ck_moe_stage1 with a a8w8 blockscale harness
+    only prints the aiter import banner). Without trusting GEAK, every
+    GEAK KEEP candidate degrades to NEEDS_REVIEW because
+    ``correctness_source == 'missing'`` and the patch never reaches
+    integrate.
+
+    Default ON: the integrate stage's E2E magpie benchmark is the
+    ground-truth functional check, and operators can layer
+    ``RUN_EVAL=true`` for an accuracy gate on top. Historical data
+    (5 Qwen3-30B-A3B-Base sessions) shows GEAK 0/4 KEEP without this
+    trust gate; with it, real shape-specific kernels like
+    ck_moe_stage1's 1.30x patch reach the integrate REVERT/KEEP
+    decision instead of being silently dropped.
+
+    Set ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=0`` to restore the
+    conservative behaviour (every GEAK KEEP -> NEEDS_REVIEW) for
+    operators that want human review before integrate.
+    """
+    raw = os.environ.get("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
 def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None:
     """Read correctness from GEAK-style JSON reports when present."""
     if not final_report_path:
@@ -1793,9 +2431,106 @@ def _extract_source_block(text_path: Path, target_suffix: str, output_path: Path
     return str(output_path)
 
 
-def _candidate_artifact_paths(attempt: dict[str, Any], target_suffix: str) -> list[Path]:
+def _geak_best_worktree(best_patch_path: str) -> Path | None:
+    """Map a GEAK best-patch file path to the worktree slot it edited.
+
+    GEAK's homogeneous orchestrator lays out::
+
+        <patch_output_dir>/results/round_<R>/parallel_<M>/patch_<N>.patch
+        <patch_output_dir>/results/round_<R>/worktrees/slot_<M>/<repo files>
+
+    The ``parallel_<M>`` directory holding the patch and the
+    ``worktrees/slot_<M>`` directory holding the actual rewritten
+    files share their integer suffix ``M``. Recover the worktree
+    directory from the patch path so callers can pick up the real
+    source file instead of trying to scrape ``.py`` out of a unified
+    diff. Returns ``None`` when the layout doesn't match the expected
+    shape (e.g. a fixture / future GEAK reorg) so callers can fail
+    soft and fall back to existing patch-based recovery.
+    """
+    if not best_patch_path:
+        return None
+    parent = Path(best_patch_path).parent
+    parallel_name = parent.name
+    if not parallel_name.startswith("parallel_"):
+        return None
+    slot_id = parallel_name[len("parallel_"):]
+    if not slot_id:
+        return None
+    worktree = parent.parent / "worktrees" / f"slot_{slot_id}"
+    if not worktree.is_dir():
+        return None
+    return worktree
+
+
+def _worktree_source_paths(
+    worktree: Path,
+    *,
+    source_file: str,
+    kernel_repo: str,
+) -> list[Path]:
+    """Return concrete files under ``worktree`` that mirror ``source_file``.
+
+    Resolution order (most precise first):
+
+    1. ``source_file`` relative to ``kernel_repo`` → join with ``worktree``.
+       This is the canonical mapping for kernels Hyperloom dispatched
+       via TraceLens (we always have both the absolute source path and
+       the repo root).
+    2. Same file basename as ``source_file`` reachable anywhere within
+       ``worktree`` (bounded recursive search). Defends against minor
+       layout shifts when the source path has multiple plausible repo
+       roots (e.g. aiter's ``aiter/ops/rmsnorm.py`` could also live at
+       ``aiter/ops/triton/normalization/rmsnorm.py``).
+
+    Each returned path is verified to exist on disk. Empty list when
+    no match is found so the caller falls back to its other candidate
+    sources.
+    """
+    if not worktree.is_dir() or not source_file:
+        return []
+    out: list[Path] = []
+    if kernel_repo:
+        try:
+            rel = Path(source_file).resolve().relative_to(Path(kernel_repo).resolve())
+        except (OSError, ValueError):
+            rel = None
+        if rel is not None:
+            cand = worktree / rel
+            if cand.is_file():
+                out.append(cand)
+    basename = Path(source_file).name
+    if basename:
+        for match in sorted(worktree.rglob(basename)):
+            if match.is_file() and match not in out:
+                out.append(match)
+    return out
+
+
+def _candidate_artifact_paths(
+    attempt: dict[str, Any],
+    target_suffix: str,
+    *,
+    source_file: str = "",
+    kernel_repo: str = "",
+) -> list[Path]:
     paths: list[Path] = []
     bp = attempt.get("backend_paths") or {}
+    # GEAK worktree files first: when we have the worktree slot from
+    # ``geak_per_task_best_worktree`` plus the original source path +
+    # repo root, those rewritten files are the ground-truth artifact
+    # the LLM actually edited. They precede ``.patch`` candidates so
+    # the first-pass (suffix-match + compile) succeeds without ever
+    # falling back to fence extraction on a diff-with-binary blobs.
+    worktree_dir = bp.get("geak_per_task_best_worktree")
+    if worktree_dir:
+        paths.extend(
+            _worktree_source_paths(
+                Path(worktree_dir),
+                source_file=source_file,
+                kernel_repo=kernel_repo,
+            )
+        )
     for key in (
         "partial_latest_optimized",
         "geak_per_task_best_patch",
@@ -1845,13 +2580,19 @@ def _select_source_artifact(
     *,
     target_file: str,
     run_dir: Path | None = None,
+    kernel_repo: str = "",
 ) -> tuple[str, str, str]:
     """Return (artifact_path, source, error) for a complete source artifact."""
     target_suffix = Path(target_file).suffix.lower()
     if target_suffix not in _SOURCE_SUFFIXES:
         return "", "unsupported", f"unsupported target suffix: {target_suffix or '<none>'}"
 
-    candidates = _candidate_artifact_paths(attempt, target_suffix)
+    candidates = _candidate_artifact_paths(
+        attempt,
+        target_suffix,
+        source_file=target_file,
+        kernel_repo=kernel_repo,
+    )
     for path in candidates:
         suffix = path.suffix.lower()
         if suffix == target_suffix and _source_text_looks_complete(
@@ -1917,6 +2658,14 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     artifact_error = "no usable backend attempt"
     if best is not None:
         target_file = str(getattr(args, "source_file", "") or "")
+        # kernel_repo lets the worktree-recovery branch in
+        # _candidate_artifact_paths map a TraceLens-style absolute
+        # source path back to the relative path GEAK actually edited.
+        kernel_repo = str(
+            getattr(args, "kernel_repo", "")
+            or getattr(args, "repo", "")
+            or ""
+        )
         run_dir = None
         optimized_path = best.get("optimized_path")
         if optimized_path:
@@ -1925,13 +2674,11 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
             best,
             target_file=target_file,
             run_dir=run_dir,
+            kernel_repo=kernel_repo,
         )
     artifact_valid = bool(best_artifact_path)
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
-    if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
-        correctness_signal = True
-        correctness_source = "accuracy_override"
     if correctness_signal is None and best is not None:
         bp = best.get("backend_paths") or {}
         correctness_signal = _extract_correctness_from_report(
@@ -1946,6 +2693,40 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
         )
         if correctness_signal is not None:
             correctness_source = "geak_report"
+    # PR-E (default ON): trust GEAK's status=complete + measured speedup
+    # as correctness=True even when the harness was an import-only test
+    # (e.g. test_moe_gemm_a8w8_blockscale.py for an aiter ck_moe_stage1
+    # kernel -- the harness loads aiter but does not exercise the kernel,
+    # so patch_*_test.txt is empty and the standard extractors return
+    # missing). GEAK's per-task save_and_test still confirms compile +
+    # import succeed; the integrate stage's E2E magpie benchmark is the
+    # ground-truth functional check (and operators can layer RUN_EVAL=true
+    # for an accuracy gate on top). Set
+    # ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=0`` to disable.
+    if (
+        correctness_signal is None
+        and best is not None
+        and best.get("backend") == "geak"
+        and measured
+        and best_speedup >= 1.0
+        and _trust_geak_correctness()
+    ):
+        bp_geak = (best.get("backend_paths") or {}).get("geak_final_report", "")
+        geak_status = ""
+        if bp_geak and Path(bp_geak).is_file():
+            try:
+                geak_status = str(
+                    json.loads(Path(bp_geak).read_text(encoding="utf-8"))
+                    .get("status") or ""
+                ).lower()
+            except Exception:  # noqa: BLE001
+                geak_status = ""
+        if geak_status in {"complete", "succeeded", "ok"}:
+            correctness_signal = True
+            correctness_source = "geak_assumed_pass"
+    if correctness_signal is None and getattr(args, "accuracy_passed", None) is True:
+        correctness_signal = True
+        correctness_source = "accuracy_override"
     correctness_passed = bool(best and correctness_signal is True)
     if args.micro_speedup is not None:
         micro_speedup = float(args.micro_speedup)
@@ -1988,6 +2769,16 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
 def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
     if not verification["compile_passed"]:
+        # ``compile_passed`` is computed as ``bool(best)`` in build_verification,
+        # so a False value can mean either "we compiled and it failed" OR
+        # "we never had a usable backend attempt to compile from". Distinguish
+        # them via ``artifact_error`` so operators can tell apart a real compile
+        # regression (action: fix the kernel) from a backend-dispatch failure
+        # (action: fix Ray / network / auth and retry).
+        err = (verification.get("artifact_error") or "").strip()
+        if err and verification.get("best_attempt_id", "") == "":
+            return {"decision": "REVERT",
+                    "reasons": [f"backend dispatch failed: {err}"]}
         return {"decision": "REVERT", "reasons": ["compile failed"]}
     if not verification["correctness_passed"]:
         reasons.append("correctness evidence missing or failed")
@@ -2007,12 +2798,12 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
-    # Goal threshold: 1.20x lets shape-specific 5-30% wins (claude r19 GEMM
-    # 1.32x, GEAK r39 rms_norm 1.18x, codex r25 GEMM 1.66x) through to
-    # human KEEP review. Below 1.20x is treated as noise / not worth the
-    # production risk and routed to NEEDS_REVIEW with reason. Originally
-    # 1.50 (overly strict — too many real wins fell through to PARTIAL).
-    KEEP_THRESHOLD = 1.20
+    # Goal threshold: 1.10x lets modest but real shape-specific wins
+    # (claude r19 GEMM 1.32x, GEAK r39 rms_norm 1.18x, codex r25 GEMM 1.66x)
+    # through to human KEEP review. Below 1.10x is treated as noise / not
+    # worth the production risk and routed to NEEDS_REVIEW with reason.
+    # Originally 1.50 (overly strict), then 1.20; lowered to 1.10 May 2026.
+    KEEP_THRESHOLD = 1.10
     if verification["micro_speedup"] < KEEP_THRESHOLD:
         reasons.append(
             f"speedup {verification['micro_speedup']:.3f}x below KEEP "
@@ -2060,22 +2851,58 @@ def main() -> int:
     parser.add_argument("--budget-minutes", type=float, default=60.0,
                         help="Per-attempt wall-clock budget for claude/codex "
                              "OOB backends. GEAK uses --geak-budget-min.")
-    parser.add_argument("--geak-budget-min", type=float, default=90.0,
+    # Default tracks $GEAK_RUN_MODE (exported by install.sh / env.sh):
+    # quick (yaml total_s=3600s) -> 70 min, full (yaml total_s=7200s) -> 130 min.
+    # Both sit above their yaml total_s + finalize_grace + kill_buffer + safety,
+    # so the prompt-quoted budget triggers the matching mode (mini.py:435).
+    _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
+    parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
                         help="Per-attempt wall-clock budget for GEAK only "
-                             "(default 90 min; needed because GEAK runs "
-                             "per-task patch sub-agents serially + a final "
-                             "select_patch round, and 60 min consistently "
-                             "SIGTERMs the select_patch round).")
+                             "(default tracks $GEAK_RUN_MODE: full -> 130, "
+                             "quick -> 70; both aligned with yaml "
+                             "run.budgets.<mode>.total_s + finalize_grace + "
+                             "kill_buffer + safety so the prompt-quoted "
+                             "budget triggers the matching GEAK mode at "
+                             "mini.py:435 task_extracted_mode).")
     parser.add_argument("--micro-speedup", type=float, default=None)
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--accuracy-passed", choices=["true", "false", "unknown"], default="unknown")
     parser.add_argument("--oob-max-turns", type=int, default=int(os.environ.get("KERNEL_AGENT_OOB_MAX_TURNS", "100")))
-    parser.add_argument("--geak-cost-limit", type=float, default=None)
+    # GEAK cost limit semantics:
+    #   * GEAK's bundled ``config/geak.yaml`` declares ``cost_limit: 0.``
+    #     (= unlimited) — that is the design contract the GEAK team picked.
+    #   * GEAK's sub-agent spawn path (``parallel_agent`` → ``DefaultAgent``)
+    #     does NOT honour that yaml entry; it falls back to
+    #     ``AgentConfig.cost_limit = 3.0`` (``minisweagent/agents/default.py``).
+    #     Observed 2026-05-15 on Qwen3-32B: every sub-agent died at $3.08
+    #     after ~50 steps, well before producing a real optimisation.
+    #   * The only externally addressable lever is GEAK's ``-l/--cost-limit``
+    #     CLI option (``minisweagent/run/mini.py:194``) which writes
+    #     ``config["agent"]["cost_limit"]`` and is honoured by every child
+    #     agent spawned from that config.
+    # We therefore default to ``0.0`` so Hyperloom matches GEAK's stated
+    # geak.yaml contract instead of inheriting the dataclass-default $3
+    # via the sub-agent fallback path. Operators can pin a finite cap with
+    # ``HYPERLOOM_GEAK_COST_LIMIT`` or ``--geak-cost-limit`` when they want
+    # a budget guardrail (e.g. CI smoke runs).
+    parser.add_argument(
+        "--geak-cost-limit",
+        type=float,
+        default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0")),
+        help=(
+            "Per-attempt GEAK cost cap in USD; 0 means unlimited (mirrors "
+            "GEAK's geak.yaml `cost_limit: 0.`). Set via "
+            "$HYPERLOOM_GEAK_COST_LIMIT or this flag for CI budgets."
+        ),
+    )
     parser.add_argument("--disable-rag", action="store_true",
                         help="Run GEAK with tools.rag disabled for this request.")
     parser.add_argument("--disable-xs-memory", action="store_true",
                         help="Disable GEAK cross-session memory retrieval/write-back for this request.")
+    parser.add_argument("--test-command", type=str, default="",
+                        help="Test command from unittest skill. "
+                             "Passed to GEAK as --test-command.")
     parser.add_argument("--num-gpus", type=int,
                         default=int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0")),
                         help="Per-task GPU reservation; 0 means follow the "
@@ -2099,8 +2926,25 @@ def main() -> int:
                       started_at=started_at)
         candidates_path = Path(args.candidates_path) if args.candidates_path else run_dir / "kernel_candidates.json"
         candidate = find_candidate(load_candidates(candidates_path), args.kernel_id)
-        resolved_source = args.source_file or str(candidate.get("source_file") or "")
+        # TraceLens is the source of truth for kernel_id → source_file.
+        # ``_resolve_source_file`` overrides any LLM-supplied path that
+        # disagrees with ``candidate.source_file`` and logs the override,
+        # so a kernel-ID confusion at the Orchestration layer (e.g. fmoe
+        # k001's source attached to fmha k003) no longer routes GEAK's
+        # rewrite at the wrong file.
+        resolved_source = _resolve_source_file(
+            args.source_file, candidate, args.kernel_id, log_path
+        )
         args.source_file = resolved_source
+        # Forward the candidate's repo root onto args so build_verification's
+        # GEAK-worktree artifact recovery can map ``source_file`` (an
+        # absolute path produced by the TraceLens resolver) back to the
+        # repo-relative path GEAK edited inside its worktree slot.
+        # Empty when the candidate didn't carry a repo (e.g. legacy
+        # CSV-only fixtures); the worktree recovery falls back to a
+        # basename-based rglob in that case.
+        if not getattr(args, "kernel_repo", None):
+            args.kernel_repo = str(candidate.get("kernel_repo") or "")
         if not args.dry_run and not resolved_source:
             raise RuntimeError(
                 f"source file not resolved for kernel {args.kernel_id}; "

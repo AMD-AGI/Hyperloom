@@ -15,8 +15,8 @@ name: SaFE Optimize Submit
 #                                    register, so download is overlapped
 #                                    with the rest of the batch (no serial
 #                                    prewarm stage that blocks optimize).
-#                                    max-parallel capped by `max_parallel`
-#                                    input (sandbox has 128 GPU available).
+#                                    default max_parallel=60 so the whole
+#                                    scheduled batch can dispatch at once.
 #   3. summarize  (hyperloom-4hhzn) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
 #                                    Gain% desc, with medals), publish the
@@ -26,16 +26,13 @@ name: SaFE Optimize Submit
 #
 # How to dispatch:
 #   • Single/few models      : `-f models='Qwen/Qwen2.5-7B-Instruct ...'`
-#   • Reproducible batch run : `-f candidates_file=ci/candidates/top600_2026-05-12.json
+#   • Reproducible batch run : `-f candidates_file=ci/candidates/production_1000_from_hf_2026-05-25.json
 #                              -f batch_index=0 -f batch_size=130`
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  schedule:
-    # Keep the runner pool warm overnight. Cron uses the top2000 candidate
-    # file, excludes models already present in model-leaderboard, and also
-    # excludes models queued/running in other optimize-submit runs.
-    - cron: '0 */8 * * *'
+  # Cron is intentionally disabled while optimize-thunder runs the full
+  # 3B-12B pool. Keep manual dispatch for targeted submit runs.
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > hf_top) ──────
@@ -44,7 +41,7 @@ on:
         required: false
         default: ''
       candidates_file:
-        description: 'Path to a build_candidates.py JSON (e.g. ci/candidates/top600_2026-05-12.json). Used when models is empty.'
+        description: 'Path to a candidates JSON built by ci/build_production_hf_pool.py (e.g. ci/candidates/production_1000_from_hf_2026-05-25.json). Used when models is empty.'
         required: false
         default: ''
       batch_index:
@@ -74,9 +71,9 @@ on:
         required: false
         default: '7'
       max_parallel:
-        description: 'Max parallel optimize jobs (sandbox has 128 GPU; safe ceiling is ~128)'
+        description: 'Max parallel optimize jobs (default 60 = scheduled batch size)'
         required: false
-        default: '20'
+        default: '60'
       submit_workspaces:
         # Comma-separated round-robin pool. Empty = use single
         # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret (current behavior =
@@ -105,147 +102,33 @@ on:
         required: false
         default: ''
       inferencex_path:
-        description: 'InferenceX checkout path inside the sandbox. Leave empty to use script default (/wekafs/InferenceX for core42).'
+        description: 'InferenceX checkout path inside the sandbox. Leave empty to use script default (/wekafs/hyperloom/InferenceX for core42).'
         required: false
         default: ''
-      prompt_prefix:
-        # Prepended verbatim to the SaFE-generated Hyperloom prompt
-        # (PromptPrefix field on CreateTaskRequest, added in
-        # apiserver/pkg/handlers/optimization/types.go).
-        #
-        # Default carries the entire "always do / never do" preamble we
-        # want the agent to see *before* the auto-generated Configuration
-        # block. The contents mirror the preventive instructions in
-        # /wekafs/HyperloomV2/ci/prompt_template.md, which we
-        # cannot inline directly because that file lives in a peer repo
-        # the SaFE backend does not read. Keeping the rules here means
-        # one place to update when a new failure mode shows up in the
-        # batch reports.
-        #
-        # Critical rules below address the failure modes we hit in
-        # batch=10 (2026-05-12) — partial-report-on-abort, vLLM
-        # forbidden flags, RESULT_DIR-not-exported writes-silently,
-        # find / hangs.
-        description: 'Free-form prompt prefix prepended to the SaFE-generated Hyperloom prompt. Default carries HyperloomV2 skill pointer + partial-report-on-abort + vLLM forbidden flags + safety rules.'
+      kernel_opt_backends:
+        description: 'Kernel optimization backends forwarded to SaFE (GEAK first by default).'
         required: false
-        default: |
-          Use the skill at /wekafs/HyperloomV2/inference_optimizer/SKILL.md to optimize this model.
-          Working directory: cd /wekafs/HyperloomV2 before running any skill commands.
-
-          CRITICAL — Required Artifacts (the canonical SaFE success contract):
-          At the end of the run, ALWAYS write both files to $RESULT_DIR (defaults to /workspace/hyperloom/).
-          If these files are missing, SaFE marks the task Failed regardless of whether the skill made real progress.
-
-            $RESULT_DIR/optimization_report.md
-            $RESULT_DIR/ci_metrics.json
-              {"baseline_throughput": <float>, "optimized_throughput": <float>, "gain_pct": <float>, "tok_per_gpu_baseline": <float>, "tok_per_gpu_optimized": <float>, "actions_taken": ["..."]}
-
-          If the pipeline aborts (kernel apply failed / server failed to start / optimization tooling crash):
-          - Set optimized_throughput = baseline_throughput, gain_pct = 0.0.
-          - Set actions_taken = ["aborted: <one-line reason>"].
-          - Still emit BOTH files. A partial report with baseline-only numbers is far more useful than no report at all.
-
-          MANUAL FALLBACK (V2 orchestrator stuck in kernel-opt loop — observed pattern):
-          If the V2 orchestrator runs past 2.5h without producing
-          $RESULT_DIR/ci_metrics.json (it's spinning forever in the kernel-opt
-          phase, re-optimizing the same 1-2 kernels every 60min cycle), DO NOT
-          wait for it. Manually compose ci_metrics.json + optimization_report.md
-          from the measurements you already have on disk:
-            * baseline number: $SESSION_DIR/phase02_baseline/baseline_results.json
-              (output_throughput field — that's tok/s/GPU at TP=1, or total tok/s
-              divided by TP for higher TP)
-            * profile classification: $SESSION_DIR/phase03_profile/profile_results.json
-              + any TraceLens analysis already written
-            * kernel info: $SESSION_DIR/phase05_kernel_opt/*/optimization_summary.json
-            * sweep best: $SESSION_DIR/phase06_sweep/* or run a single
-              `--decode-attention-backend aiter` / `--max-num-batched-tokens N`
-              sweep with the same server config to test ONE param change
-            * If you cannot get an optimized number, set optimized_throughput =
-              baseline_throughput, gain_pct = 0.0 (honest "no headroom" report).
-
-          This is the path the Mistral-7B-v0.1 run on 2026-05-13 took
-          (run 25795816178) — it produced a clean +0.10% report after the
-          orchestrator stalled. Better an honest small-gain row than a missing
-          row for a 2-3h run.
-
-          CRITICAL — vLLM Forbidden Flags (server will crash with "unrecognized arguments"):
-          - --num-scheduler-steps   (removed in vLLM v0.4.0)
-          - --chunked-prefill-size  (SGLang-only, NOT vLLM)
-          - --enable-chunked-prefill (only safe on vLLM >= 0.6.0; check version first)
-
-          CRITICAL — Result Directory:
-          Before running any skill script (run_baseline.sh, run_sweep.sh, etc.), export:
-            export NFS_ROOT=/wekafs
-            export RESULT_DIR=/workspace/hyperloom/
-          Otherwise baseline/sweep writes fail silently and the job will hang.
-
-          CRITICAL — POST-PIPELINE PERSIST (the most common reason a successful run shows up Failed):
-          $RESULT_DIR (=/workspace/hyperloom/) lives inside the sandbox
-          container's ephemeral storage. When SaFE marks the task Failed
-          (or times out) the pod gets cleaned up and EVERYTHING under
-          /workspace is lost — including the ci_metrics.json and
-          optimization_report.md you just spent 2-3h producing. Even
-          when SaFE marks the task Succeeded it only collects /workspace
-          for a short window before deletion, and the CI side has no
-          kubectl-exec access to read it back.
-
-          To survive any of this you MUST copy the two artifacts to a
-          persistent location under /hyperloom/users/<your-safe-uuid>/
-          (which is the wekafs RW mount inside the sandbox — the
-          CI / NFS Stage B fallback scans this path). Run this AFTER
-          you have written the final ci_metrics.json + optimization_report.md:
-
-            mkdir -p $RESULT_DIR
-            # Persist to wekafs so it survives sandbox shutdown and CI
-            # can collect via NFS fallback even when SaFE artifact upload
-            # fails (Failed status, timeout, etc.).
-            UID_HEX=$(ls /hyperloom/users 2>/dev/null | head -1)
-            if [ -n "$UID_HEX" ]; then
-              # Use a unique session name that won't collide with prior runs
-              # (display_name + task_id last 8 chars).
-              MODEL_TAG=$(echo "${DISPLAYNAME:-task}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/-*$//')
-              TASK_TAG="${SAFE_TASK_ID:-$(date +%Y%m%d%H%M%S)}"
-              PERSIST_DIR="/hyperloom/users/$UID_HEX/${MODEL_TAG}-${TASK_TAG##*-}-opt"
-              mkdir -p "$PERSIST_DIR"
-              cp -f "$RESULT_DIR/ci_metrics.json"          "$PERSIST_DIR/ci_metrics.json"         2>/dev/null && echo "[PERSIST] $PERSIST_DIR/ci_metrics.json"
-              cp -f "$RESULT_DIR/optimization_report.md"  "$PERSIST_DIR/optimization_report.md"  2>/dev/null && echo "[PERSIST] $PERSIST_DIR/optimization_report.md"
-              ls -la "$PERSIST_DIR/"
-            else
-              echo "[ERR] /hyperloom/users/<uid>/ not mounted — cannot persist to wekafs"
-            fi
-
-            # Legacy back-fill direction: when the V2 orchestrator writes
-            # into /wekafs/users/<uid>/<sess>/ (older skill versions did
-            # this), the snippet below pulls it into $RESULT_DIR so SaFE
-            # sees the canonical files. Kept for backward compat — when
-            # we already wrote $RESULT_DIR ourselves above this is a no-op.
-            CI=$(ls -t /wekafs/users/*/*/ci_metrics.json \
-                       /wekafs/users/*/*/phase10_report/ci_metrics.json \
-                       /wekafs/users/*/*/results/ci_metrics.json \
-                       2>/dev/null | head -1)
-            REPORT=$(ls -t /wekafs/users/*/*/optimization_report.md \
-                           /wekafs/users/*/*/phase10_report/optimization_report.md \
-                           /wekafs/users/*/*/reports/final.md \
-                           2>/dev/null | head -1)
-            if [ -n "$CI" ] && [ ! -s "$RESULT_DIR/ci_metrics.json" ]; then
-              cp -f "$CI" $RESULT_DIR/ci_metrics.json
-              echo "[BACKFILL] $CI -> $RESULT_DIR/ci_metrics.json"
-            fi
-            if [ -n "$REPORT" ] && [ ! -s "$RESULT_DIR/optimization_report.md" ]; then
-              cp -f "$REPORT" $RESULT_DIR/optimization_report.md
-              echo "[BACKFILL] $REPORT -> $RESULT_DIR/optimization_report.md"
-            fi
-            ls -la $RESULT_DIR/
-
-          The ci_metrics.json values you write here MUST match what the V2
-          orchestrator actually measured (proper baseline from phase 1 / best
-          from phase 6-8) — do NOT recompute gain_pct from a partial-run
-          eager-mode baseline that the orchestrator did not endorse.
-
-          SAFETY:
-          - NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
-          - NEVER run `kill -9 $(ps aux | grep ...)` — this kills the sandbox executor itself.
-          - Per-bash timeouts must be <= 120s; use short polling loops rather than one long blocking call.
+        default: 'geak,claude,codex'
+      prompt_prefix:
+        # Canonical prompt prefix lives in ci/prompt_prefix.txt (single
+        # source of truth, used by ALL trigger sources: schedule, dispatch,
+        # workflow_call, and direct CLI invocations of optimize_submit.py).
+        #
+        # We deliberately leave this input's `default:` empty because the
+        # YAML `default:` is ONLY substituted on `workflow_dispatch` — on
+        # `schedule` trigger `github.event.inputs.prompt_prefix` is always
+        # the empty string, which previously dropped the prefix silently
+        # and shipped tasks to SaFE with promptPrefix="" (root-causing
+        # most "scheduled run produced no artifacts" failures).
+        #
+        # The Submit step reads ci/prompt_prefix.txt as the hard fallback
+        # whenever this input is empty, and refuses to submit if neither
+        # is set — so the SaFE promptPrefix field is GUARANTEED non-empty.
+        # Override here only when you intentionally want different
+        # instructions for a one-off dispatch.
+        description: 'Override prompt prefix for this run. Leave empty to use ci/prompt_prefix.txt (recommended; same prefix for schedule + dispatch).'
+        required: false
+        default: ''
       target_gpu:
         description: 'Reference GPU for InferenceX comparison in the summary table'
         required: false
@@ -263,9 +146,13 @@ on:
         required: false
         default: true
       task_timeout_min:
-        description: 'Per-task wait timeout in minutes (default 480 = 8h)'
+        description: 'Per-task wait timeout in minutes (default 720 = 12h)'
         required: false
-        default: '480'
+        default: '720'
+      max_hours:
+        description: 'Per-task optimizer budget in hours (default 12)'
+        required: false
+        default: '12'
       all_artifacts:
         description: 'Download every artifact (default off — only optimization_report + ci_metrics)'
         type: boolean
@@ -293,17 +180,28 @@ jobs:
     env:
       HF_TOKEN:              ${{ secrets.HF_TOKEN }}
       INPUT_MODELS:          ${{ github.event.inputs.models }}
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/top2000_2026-05-15.json' || github.event.inputs.candidates_file }}
+      # Production cron rotates over a fixed pool of models that already have
+      # real leaderboard data, so we can compare week-over-week. The file is
+      # generated manually via ci/build_production_leaderboard_pool.py and
+      # refreshed only when we want to bring in newly-published models.
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/production_1000_from_hf_2026-05-25.json' || github.event.inputs.candidates_file }}
       INPUT_BATCH_INDEX:     ${{ github.event.inputs.batch_index }}
       INPUT_BATCH_SIZE:      ${{ github.event_name == 'schedule' && '60' || github.event.inputs.batch_size }}
       INPUT_HF_TOP:          ${{ github.event.inputs.hf_top }}
       INPUT_MIN_PARAMS:      ${{ github.event.inputs.min_params }}
-      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_leaderboard }}
+      # Schedule no longer excludes leaderboard-known models — that was for
+      # the discovery cron. We now WANT to re-run the production pool.
+      # Batch index for schedule is computed by generate_hf_matrix.py from the
+      # UTC 00:00/12:00 half-day slot, not GITHUB_RUN_NUMBER, so manual
+      # dispatches do not perturb cron rotation. We still exclude active
+      # workflows so cron does not double-submit a model already running.
+      INPUT_EXCLUDE_LEADERBOARD:      ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.exclude_leaderboard }}
       INPUT_EXCLUDE_ACTIVE_WORKFLOWS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.exclude_active_workflows }}
       GITHUB_TOKEN:          ${{ github.token }}
+      GITHUB_RUN_NUMBER:     ${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: Install requests
@@ -319,11 +217,11 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
-    # 8h per-task timeout + buffer for register/wait/collect.
-    timeout-minutes: 600
+    # 12h per-task wait timeout + buffer for register/wait/collect.
+    timeout-minutes: 780
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(github.event.inputs.max_parallel || '20') }}
+      max-parallel: ${{ fromJson(github.event.inputs.max_parallel || '60') }}
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       CLAW_API_KEY:                     ${{ secrets.CLAW_API_KEY }}
@@ -334,7 +232,7 @@ jobs:
       SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
       SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         working-directory: ci
@@ -380,16 +278,33 @@ jobs:
           INPUT_MODE:             ${{ github.event.inputs.mode }}
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_INFERENCEX_PATH:  ${{ github.event.inputs.inferencex_path }}
+          INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
           SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event.inputs.submit_workspaces }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
-          INPUT_ALL_ARTIFACTS:    ${{ github.event.inputs.all_artifacts }}
+          INPUT_MAX_HOURS:        ${{ github.event.inputs.max_hours }}
+          # Cron rotates through the production pool — operators can't go
+          # back and re-fetch sandbox state after the fact, so force
+          # `--all-artifacts=true` on schedule. workflow_dispatch keeps
+          # the user-provided value so manual runs can still pull only
+          # the three contract files when they want a faster batch.
+          INPUT_ALL_ARTIFACTS:    ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.all_artifacts }}
           INPUT_DRY_RUN:          ${{ github.event.inputs.dry_run }}
+          MATRIX_POOL_ID:         ${{ matrix.pool_id }}
+          MATRIX_POOL_INDEX:      ${{ matrix.pool_index }}
+          MATRIX_BATCH_INDEX:     ${{ matrix.batch_index }}
+          MATRIX_BATCH_SIZE:      ${{ matrix.batch_size }}
+          MATRIX_SOURCE_TASK_ID:  ${{ matrix.task_id }}
           OUTPUT_DIR:             ${{ github.workspace }}/submit-output
           ARTIFACTS_DIR:          ${{ github.workspace }}/task-artifacts
+          # GitHub-issued, repo-scoped, 7-day token. We embed it into the
+          # HYPERLOOM_SOURCE_REPO URL handed to the sandbox so `git clone`
+          # can authenticate against the private Hyperloom repo. Renamed
+          # from GITHUB_TOKEN to avoid clobbering actions/checkout's env.
+          HYPERLOOM_GIT_TOKEN:    ${{ github.token }}
         run: |
           set -euo pipefail
           ARGS=(--model "${MODEL_REPO}")
@@ -401,9 +316,45 @@ jobs:
           if [ -n "${INPUT_INFERENCEX_PATH:-}" ]; then
             ARGS+=(--inferencex-path "${INPUT_INFERENCEX_PATH}")
           fi
-          if [ -n "${INPUT_PROMPT_PREFIX:-}" ]; then
-            ARGS+=(--prompt-prefix "${INPUT_PROMPT_PREFIX}")
+          if [ -n "${INPUT_KERNEL_OPT_BACKENDS:-}" ]; then
+            ARGS+=(--kernel-opt-backends "${INPUT_KERNEL_OPT_BACKENDS}")
           fi
+          # Code-level contract: do not rely on natural-language prompt text
+          # for these two critical values. SaFE consumes them and renders the
+          # generated prompt tail consistently with the CI prefix.
+          ARGS+=(--max-hours "${INPUT_MAX_HOURS:-12}")
+          ARGS+=(--results-path '$RESULT_DIR')
+          # Hard guarantee: SaFE promptPrefix MUST be non-empty. Workflow
+          # input is only populated on workflow_dispatch — for schedule
+          # trigger we fall back to ci/prompt_prefix.txt (single source of
+          # truth). If both are missing the run aborts before submit so we
+          # never ship a task with empty promptPrefix again.
+          # (working-directory is `ci`, so the file is referenced directly.)
+          PROMPT_PREFIX_VALUE="${INPUT_PROMPT_PREFIX:-}"
+          if [ -z "$PROMPT_PREFIX_VALUE" ] && [ -f "prompt_prefix.txt" ]; then
+            PROMPT_PREFIX_VALUE="$(cat prompt_prefix.txt)"
+            echo "[prompt_prefix] loaded fallback from ci/prompt_prefix.txt ($(wc -c < prompt_prefix.txt) bytes)"
+          fi
+          if [ -z "$PROMPT_PREFIX_VALUE" ]; then
+            echo "::error::prompt_prefix is empty and ci/prompt_prefix.txt is missing — refusing to submit to SaFE with empty promptPrefix"
+            exit 1
+          fi
+          if [ -n "${GITHUB_SHA:-}" ]; then
+            # The sandbox needs git credentials to clone the private Hyperloom
+            # repo. We embed the workflow-scoped, 7-day `github.token` directly
+            # into the clone URL (same pattern that actions/checkout uses
+            # internally). This expands at submit time so the agent sees a
+            # ready-to-use URL — it must NOT be echoed back into the GHA log.
+            if [ -z "${HYPERLOOM_GIT_TOKEN:-}" ]; then
+              echo "::error::HYPERLOOM_GIT_TOKEN not set; cannot pin sandbox checkout to a private repo"
+              exit 1
+            fi
+            REPO_URL_AUTH="https://x-access-token:${HYPERLOOM_GIT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            PROMPT_PREFIX_VALUE="CI SOURCE PIN:"$'\n'"  export HYPERLOOM_SOURCE_REF=\"${GITHUB_SHA}\""$'\n'"  export HYPERLOOM_SOURCE_REPO=\"${REPO_URL_AUTH}\""$'\n\n'"${PROMPT_PREFIX_VALUE}"
+            # Log the SHA only — never the URL (it contains the token).
+            echo "[prompt_prefix] pinned sandbox Hyperloom checkout to ${GITHUB_SHA} (token-authenticated clone URL injected)"
+          fi
+          ARGS+=(--prompt-prefix "$PROMPT_PREFIX_VALUE")
           if [ "${INPUT_WAIT:-true}" = "false" ]; then
             ARGS+=(--no-wait-for-completion)
           fi
@@ -416,7 +367,22 @@ jobs:
           if [ "${INPUT_DRY_RUN:-false}" = "true" ]; then
             ARGS+=(--dry-run)
           fi
-          ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-480}")
+          if [ -n "${MATRIX_POOL_ID:-}" ]; then
+            ARGS+=(--pool-id "${MATRIX_POOL_ID}")
+          fi
+          if [ -n "${MATRIX_POOL_INDEX:-}" ]; then
+            ARGS+=(--pool-index "${MATRIX_POOL_INDEX}")
+          fi
+          if [ -n "${MATRIX_BATCH_INDEX:-}" ]; then
+            ARGS+=(--pool-batch-index "${MATRIX_BATCH_INDEX}")
+          fi
+          if [ -n "${MATRIX_BATCH_SIZE:-}" ]; then
+            ARGS+=(--pool-batch-size "${MATRIX_BATCH_SIZE}")
+          fi
+          if [ -n "${MATRIX_SOURCE_TASK_ID:-}" ]; then
+            ARGS+=(--pool-source-task-id "${MATRIX_SOURCE_TASK_ID}")
+          fi
+          ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-720}")
           ARGS+=(--output-dir "${OUTPUT_DIR}")
           ARGS+=(--artifacts-dir "${ARTIFACTS_DIR}")
           python3 optimize_submit.py "${ARGS[@]}"
@@ -430,39 +396,467 @@ jobs:
             echo "_No manifest produced for ${{ matrix.model }}._" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Publish per-model result to model-leaderboard
-        # Publish each matrix row as soon as it finishes so the leaderboard
-        # updates continuously instead of waiting for the whole 60-model batch.
-        # The final summary job still publishes the full batch as an idempotent
-        # upsert by run_id/task_id, so this does not create duplicate rows.
-        if: always() && github.event.inputs.dry_run != 'true'
+      # ─── DISABLED 2026-05-25 ─────────────────────────────────────────
+      # Per-model publish to model-leaderboard is disabled per user request.
+      # Reason: we no longer want optimize-submit cron runs to push entries
+      # into the live leaderboard (leaderboard data is now curated through
+      # the manual production-pool refresh path).
+      # The Teams completion webhook (below) is still active.
+      # To re-enable: uncomment the whole `Publish per-model result …` step.
+      # - name: Publish per-model result to model-leaderboard
+      #   # Publish each matrix row as soon as it finishes so the leaderboard
+      #   # updates continuously instead of waiting for the whole 60-model batch.
+      #   # The final summary job still publishes the full batch as an idempotent
+      #   # upsert by run_id/task_id, so this does not create duplicate rows.
+      #   if: always() && github.event.inputs.dry_run != 'true'
+      #   continue-on-error: true
+      #   working-directory: ci
+      #   env:
+      #     HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
+      #     HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
+      #     INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
+      #     INPUT_ISL:        ${{ github.event.inputs.isl }}
+      #     INPUT_OSL:        ${{ github.event.inputs.osl }}
+      #   run: |
+      #     set -euo pipefail
+      #     if [ ! -f "${{ github.workspace }}/submit-output/submission_manifest.json" ]; then
+      #       echo "No submission_manifest.json for ${{ matrix.model }}; skipping per-model publish"
+      #       exit 0
+      #     fi
+      #     mkdir -p "${{ github.workspace }}/single-summary"
+      #     python3 build_summary.py \
+      #       --artifacts-dir "${{ github.workspace }}/task-artifacts" \
+      #       --manifests-dir "${{ github.workspace }}/submit-output" \
+      #       --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
+      #       --isl           "${INPUT_ISL:-1024}" \
+      #       --osl           "${INPUT_OSL:-1024}" \
+      #       --out-dir       "${{ github.workspace }}/single-summary"
+      #     if [ ! -f "${{ github.workspace }}/single-summary/normalized_results.json" ]; then
+      #       echo "normalized_results.json not produced for ${{ matrix.model }}; skipping publish"
+      #       exit 0
+      #     fi
+      #     python3 publish_results.py --input "${{ github.workspace }}/single-summary/normalized_results.json"
+
+      # Per-model perf-leaderboard publish. Fires AS SOON AS this matrix job
+      # finishes its single model, so the dashboard updates continuously
+      # instead of waiting for the whole 60-model batch to settle. The
+      # post_perf_runs.py script idempotently upserts by unique_key, so a
+      # re-dispatched model just refreshes its row instead of creating a dup.
+      #
+      # Schema-aware: post_perf_runs.py auto-detects V2 (with phase_timeline),
+      # V1-flat, and universal schemas via import_session_breakdown's
+      # `looks_like_*` predicates and transforms them with
+      # transform_to_session_summary_v2 before POSTing.
+      #
+      # Endpoint default = dev (perf-leaderboard-dev). Override at the
+      # workflow / org level with the PERF_API_ENDPOINT secret for prod.
+      # The dev token is baked into the script's DEFAULT_TOKEN; override
+      # with PERF_API_TOKEN secret for prod.
+      #
+      # `continue-on-error` so a flaky upstream never blocks the rest of
+      # the per-model contract (artifact upload, prewarm log, etc).
+      - name: Publish session breakdown to perf-leaderboard
+        if: success() && github.event.inputs.dry_run != 'true'
         continue-on-error: true
-        working-directory: ci
         env:
-          HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
-          HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
-          INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
-          INPUT_ISL:        ${{ github.event.inputs.isl }}
-          INPUT_OSL:        ${{ github.event.inputs.osl }}
+          EXPECTED_MODEL: ${{ matrix.model }}
         run: |
           set -euo pipefail
-          if [ ! -f "${{ github.workspace }}/submit-output/submission_manifest.json" ]; then
-            echo "No submission_manifest.json for ${{ matrix.model }}; skipping per-model publish"
+          mkdir -p task-artifacts
+          if [ -f submit-output/submission_manifest.json ]; then
+            READY=$(python3 - <<'PY'
+          import json
+          with open("submit-output/submission_manifest.json", encoding="utf-8") as f:
+              data = json.load(f)
+          records = data.get("records") if isinstance(data.get("records"), list) else []
+          ok = any((r.get("final_status") == "Succeeded") for r in records if isinstance(r, dict))
+          print("yes" if ok else "no")
+          PY
+            )
+            if [ "$READY" != "yes" ]; then
+              echo "::warning::no Succeeded task in submission_manifest.json; skipping sbd-ingester publish"
+              echo "SKIP non-succeeded-task" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
+              exit 0
+            fi
+          fi
+          # Select only within this matrix job's collected task directory. The
+          # flat task-artifacts/<task_id>/ci_metrics.json is backfilled by
+          # optimize_submit.py with current task/model metadata; nested
+          # session/ci_metrics.json files may be raw sandbox copies and can be
+          # missing claw_session_id. Model equality is the primary guard; when
+          # both sides have claw_session_id, it must match as an extra guard.
+          python3 <<'PY' > task-artifacts/sbd_publish_selection.json
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path("task-artifacts")
+          expected_model = os.environ.get("EXPECTED_MODEL", "")
+
+          def load_json(path):
+              try:
+                  with open(path, encoding="utf-8") as f:
+                      data = json.load(f)
+                  return data if isinstance(data, dict) else {}
+              except Exception as exc:
+                  return {"_error": f"{type(exc).__name__}: {exc}"}
+
+          def norm_token(value):
+              return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+          def norm_model(value):
+              raw = str(value or "").strip().rstrip("/\\")
+              if not raw:
+                  return ""
+              base = re.split(r"[\\/]", raw)[-1]
+              return norm_token(base)
+
+          def model_matches(expected, observed):
+              """Accept repo basename/org+basename plus known config suffixes.
+
+              Examples accepted:
+                openai/gpt-oss-20b == openai-gpt-oss-20b
+                deepseek-ai/DeepSeek-V3.2 == deepseek-v3.2-fp8-sglang-mi300x
+
+              Examples rejected:
+                Qwen/Qwen3-32B != squaredcuber-Cybus-Qwen3-32B-v2-agentic
+                nvidia/Nemotron... != trohrbaugh-NVIDIA-Nemotron...-heretic-v2
+              """
+              exp_base = norm_model(expected)
+              exp_full = norm_token(str(expected or "").replace("/", "-"))
+              obs = norm_token(observed)
+              if not exp_base or not obs:
+                  return True
+              for prefix in (exp_base, exp_full):
+                  if not prefix:
+                      continue
+                  if obs == prefix:
+                      return True
+                  if obs.startswith(prefix):
+                      suffix = obs[len(prefix):]
+                      # Only allow our runtime/config suffixes after the model
+                      # identity. This prevents accepting third-party variants
+                      # with arbitrary prefixes/suffixes as the same model.
+                      if suffix.startswith((
+                          "fp8", "fp4", "bf16", "fp16", "int8", "int4",
+                          "sglang", "vllm", "mi300x", "mi325x", "mi355x",
+                          "tp", "ep",
+                      )):
+                          return True
+              return False
+
+          def positive_number(value):
+              return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+          def has_positive_perf(data):
+              baseline = data.get("baseline") if isinstance(data.get("baseline"), dict) else {}
+              final = data.get("final") if isinstance(data.get("final"), dict) else {}
+              best = data.get("best") if isinstance(data.get("best"), dict) else {}
+              base_values = (
+                  data.get("baseline_tput"),
+                  data.get("baseline_throughput"),
+                  data.get("tok_per_gpu_baseline"),
+                  baseline.get("throughput_tok_s_per_gpu"),
+                  baseline.get("output_throughput"),
+              )
+              opt_values = (
+                  data.get("best_tput"),
+                  data.get("optimized_throughput"),
+                  data.get("tok_per_gpu_optimized"),
+                  final.get("throughput_tok_s_per_gpu"),
+                  final.get("output_throughput"),
+                  best.get("throughput_tok_s_per_gpu"),
+                  best.get("output_throughput"),
+              )
+              return any(positive_number(v) for v in base_values) and any(positive_number(v) for v in opt_values)
+
+          def first(*values):
+              for value in values:
+                  if value not in (None, ""):
+                      return str(value)
+              return ""
+
+          def breakdown_fields(data):
+              workload = data.get("workload") if isinstance(data.get("workload"), dict) else {}
+              session = data.get("session") if isinstance(data.get("session"), dict) else {}
+              meta = data.get("session_meta") if isinstance(data.get("session_meta"), dict) else {}
+              return {
+                  "model": first(
+                      workload.get("model_name"),
+                      workload.get("model"),
+                      data.get("model_name"),
+                      data.get("model"),
+                      session.get("model"),
+                      meta.get("model"),
+                  ),
+                  "claw_session_id": first(
+                      session.get("claw_session_id"),
+                      meta.get("claw_session_id"),
+                      data.get("claw_session_id"),
+                  ),
+                  "session_id": first(session.get("session_id"), meta.get("session_id")),
+                  "schema_version": first(data.get("schema_version")),
+              }
+
+          def ci_fields(task_dir):
+              ci_path = task_dir / "ci_metrics.json"
+              ci = load_json(ci_path) if ci_path.is_file() else {}
+              return ci_path, ci, first(ci.get("model"), ci.get("model_name")), first(ci.get("claw_session_id")), first(ci.get("image"))
+
+          def source_local_path(entry):
+              raw = str(entry.get("local_path") or "")
+              if not raw:
+                  return None
+              p = Path(raw)
+              if p.is_file():
+                  return p
+              # Older manifests may store paths relative to the task dir.
+              alt = root / raw
+              return alt if alt.is_file() else None
+
+          expected_norm = norm_model(expected_model)
+          for meta_path in sorted(root.glob("*/artifact_sources.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+              meta = load_json(meta_path)
+              task_dir = meta_path.parent
+              ci_path, ci, ci_model, ci_claw, ci_image = ci_fields(task_dir)
+              ci_norm = norm_model(ci_model)
+              if expected_norm and ci_norm and ci_norm != expected_norm:
+                  continue
+              files = meta.get("files") if isinstance(meta.get("files"), list) else []
+              candidates = []
+              for entry in files:
+                  if not isinstance(entry, dict):
+                      continue
+                  p = source_local_path(entry)
+                  if p and p.name.startswith("session_breakdown") and p.suffix == ".json":
+                      candidates.append((0, p, entry))
+              for p in sorted(task_dir.glob("**/session_breakdown*.json")):
+                  if p.is_file() and all(p != c[1] for c in candidates):
+                      candidates.append((1, p, {"source_type": "task_dir_scan"}))
+
+              for nesting, bd_path, source in candidates:
+                  bd = load_json(bd_path)
+                  if "_error" in bd:
+                      notes = [f"skip {bd_path}: {bd['_error']}"]
+                      continue
+                  bf = breakdown_fields(bd)
+                  if not has_positive_perf(bd):
+                      notes = [f"skip {bd_path}: missing positive baseline/best throughput"]
+                      continue
+                  if ci_claw and bf["claw_session_id"] and ci_claw != bf["claw_session_id"]:
+                      notes = [f"skip {bd_path}: claw_session_id={bf['claw_session_id']!r} expected={ci_claw!r}"]
+                      continue
+                  print(json.dumps({
+                      "bd": str(bd_path),
+                      "ci": str(ci_path) if ci_path.is_file() else "",
+                      "task_dir": str(task_dir),
+                      "task_id": first(meta.get("task_id"), ci.get("task_id"), task_dir.name),
+                      "ci_model": ci_model,
+                      "expected_model": expected_model,
+                      "ci_claw_session_id": first(meta.get("claw_session_id"), ci_claw),
+                      "ci_image": ci_image,
+                      "source_type": source.get("source_type", ""),
+                      "source_path": source.get("source_path", ""),
+                      "remote_path": source.get("remote_path", ""),
+                      **bf,
+                      "score": 200 - nesting,
+                      "notes": [],
+                  }, indent=2))
+                  raise SystemExit(0)
+
+          ci_paths = sorted(
+              [p for p in root.glob("*/ci_metrics.json") if p.is_file()],
+              key=lambda p: p.stat().st_mtime,
+              reverse=True,
+          )
+          notes = []
+          best = None
+
+          for ci_path in ci_paths:
+              ci = load_json(ci_path)
+              ci_model = first(ci.get("model"), ci.get("model_name"))
+              ci_norm = norm_model(ci_model)
+              if expected_norm and ci_norm and ci_norm != expected_norm:
+                  notes.append(f"skip ci {ci_path}: model={ci_model!r} expected={expected_model!r}")
+                  continue
+
+              task_dir = ci_path.parent
+              task_id = first(ci.get("task_id"), task_dir.name)
+              ci_claw = first(ci.get("claw_session_id"))
+              ci_image = first(ci.get("image"))
+              candidates = []
+              for name in ("session_breakdown.json", "session_breakdown_v2.json"):
+                  p = task_dir / name
+                  if p.is_file():
+                      candidates.append((0, p))
+              for p in sorted(task_dir.glob("*/session_breakdown*.json")):
+                  if p.is_file():
+                      candidates.append((1, p))
+
+              if not candidates:
+                  notes.append(f"skip task {task_dir}: no session_breakdown*.json")
+                  continue
+
+              for nesting, bd_path in candidates:
+                  bd = load_json(bd_path)
+                  if "_error" in bd:
+                      notes.append(f"skip {bd_path}: {bd['_error']}")
+                      continue
+                  bf = breakdown_fields(bd)
+                  # If the breakdown names a model, require identity match with
+                  # only known runtime suffixes allowed.
+                  if bf["model"] and ci_model and not model_matches(ci_model, bf["model"]):
+                      notes.append(
+                          f"skip {bd_path}: model={bf['model']!r} expected={ci_model!r}"
+                      )
+                      continue
+                  if not has_positive_perf(bd):
+                      notes.append(f"skip {bd_path}: missing positive baseline/best throughput")
+                      continue
+                  if ci_claw and bf["claw_session_id"] and ci_claw != bf["claw_session_id"]:
+                      notes.append(
+                          f"skip {bd_path}: claw_session_id={bf['claw_session_id']!r} "
+                          f"expected={ci_claw!r}"
+                      )
+                      continue
+                  score = 100 - nesting
+                  if bf["claw_session_id"] and ci_claw == bf["claw_session_id"]:
+                      score += 20
+                  if bf["model"] and ci_model and model_matches(ci_model, bf["model"]):
+                      score += 10
+                  row = {
+                      "bd": str(bd_path),
+                      "ci": str(ci_path),
+                      "task_dir": str(task_dir),
+                      "task_id": task_id,
+                      "ci_model": ci_model,
+                      "expected_model": expected_model,
+                      "ci_claw_session_id": ci_claw,
+                      "ci_image": ci_image,
+                      **bf,
+                      "score": score,
+                      "notes": notes[-20:],
+                  }
+                  if best is None or row["score"] > best["score"]:
+                      best = row
+
+          if best is None:
+              best = {
+                  "bd": "",
+                  "reason": "no matching session_breakdown for current task/model",
+                  "expected_model": expected_model,
+                  "notes": notes[-50:],
+              }
+          print(json.dumps(best, indent=2))
+          PY
+          cat task-artifacts/sbd_publish_selection.json
+          BD=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('bd') or '')" task-artifacts/sbd_publish_selection.json)
+          if [ -z "$BD" ] || [ ! -f "$BD" ]; then
+            REASON=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('reason') or 'no matching session_breakdown')" task-artifacts/sbd_publish_selection.json)
+            echo "::warning::$REASON; skipping sbd-ingester publish"
+            echo "SKIP $REASON" > task-artifacts/perf_publish_marker.txt 2>/dev/null || true
             exit 0
           fi
-          mkdir -p "${{ github.workspace }}/single-summary"
-          python3 build_summary.py \
-            --artifacts-dir "${{ github.workspace }}/task-artifacts" \
-            --manifests-dir "${{ github.workspace }}/submit-output" \
-            --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
-            --isl           "${INPUT_ISL:-1024}" \
-            --osl           "${INPUT_OSL:-1024}" \
-            --out-dir       "${{ github.workspace }}/single-summary"
-          if [ ! -f "${{ github.workspace }}/single-summary/normalized_results.json" ]; then
-            echo "normalized_results.json not produced for ${{ matrix.model }}; skipping publish"
+          CS_CIM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('ci_claw_session_id') or '')" task-artifacts/sbd_publish_selection.json)
+          echo "[sbd-ingester] selected session_breakdown: $BD (ci_claw_session_id='${CS_CIM:-}')"
+          BD_SIZE=$(stat -c %s "$BD")
+          # Publish to sbd-ingester instead of posting straight to perf_runs_dev.
+          # The ingester cleans fields, upserts into the dev table, and reports
+          # missing/warning fields. Its schema allowlist currently accepts only
+          # v1.1, so we relabel schema_version -> v1.1 before sending (the v2
+          # payload is structurally compatible — verified). Once the service
+          # adds v2 to its allowlist, drop the relabel line below.
+          SBD_SEND="${BD%.json}.sbd.json"
+          PERF_DIR=$(dirname "$BD")
+          set +e
+          python3 - "$BD" "$SBD_SEND" task-artifacts/sbd_publish_selection.json <<'PY'
+          import json
+          import sys
+
+          src, dst, selection_path = sys.argv[1:4]
+          with open(src, encoding="utf-8") as f:
+              data = json.load(f)
+          with open(selection_path, encoding="utf-8") as f:
+              selection = json.load(f)
+
+          sys.path.insert(0, "ci")
+          try:
+              import import_session_breakdown as isb
+          except Exception:
+              isb = None
+
+          if isb is not None:
+              if isb.looks_like_v1_flat_schema(data):
+                  data = isb.migrate_v1_to_v2(data)
+              elif isb.looks_like_universal_schema(data) and not (
+                  isinstance(data.get("workload"), dict)
+                  and isinstance(data.get("baseline"), dict)
+                  and isinstance(data.get("final"), dict)
+              ):
+                  migrated = isb.migrate_universal_to_v2(data)
+                  if migrated:
+                      data = migrated
+
+          data["schema_version"] = "hyperloom.session_breakdown.v1.1"
+          task_id = selection.get("task_id") or ""
+          claw_session_id = selection.get("ci_claw_session_id") or ""
+          image = selection.get("ci_image") or ""
+
+          session_meta = data.setdefault("session_meta", {})
+          session = data.setdefault("session", {})
+          for obj in (data, session_meta, session):
+              if task_id:
+                  obj.setdefault("task_id", task_id)
+              if claw_session_id:
+                  obj.setdefault("claw_session_id", claw_session_id)
+              if image:
+                  obj.setdefault("image", image)
+          if claw_session_id:
+              session.setdefault("session_id", claw_session_id)
+              session_meta.setdefault("session_id", claw_session_id)
+
+          with open(dst, "w", encoding="utf-8") as f:
+              json.dump(data, f)
+          PY
+          RELABEL_RC=$?
+          set -e
+          if [ "$RELABEL_RC" -ne 0 ] || [ ! -s "$SBD_SEND" ]; then
+            echo "::warning::failed to relabel session_breakdown schema_version for sbd-ingester (rc=$RELABEL_RC); skipping publish"
+            echo "FAIL relabel rc=$RELABEL_RC" > "$PERF_DIR/perf_publish_marker.txt"
+            rm -f "$SBD_SEND"
             exit 0
           fi
-          python3 publish_results.py --input "${{ github.workspace }}/single-summary/normalized_results.json"
+          # Endpoint + token: prefer GitHub secrets; fall back to the dev
+          # endpoint/token so the pipeline runs out-of-the-box. SET
+          # SBD_INGESTER_TOKEN as a secret for prod and rotate the dev token.
+          SBD_EP='${{ secrets.SBD_INGESTER_ENDPOINT }}'
+          SBD_TK='${{ secrets.SBD_INGESTER_TOKEN }}'
+          [ -n "$SBD_EP" ] || SBD_EP='https://core42.primus-safe.amd.com/sbd-ingester/api/v1/session-breakdowns'
+          if [ -z "$SBD_TK" ]; then
+            echo "::warning::SBD_INGESTER_TOKEN secret not set — skipping sbd-ingester publish (add it under repo Settings > Secrets and variables > Actions)"
+            echo "SKIP no-token" > "$(dirname "$BD")/perf_publish_marker.txt"
+            exit 0
+          fi
+          echo "publishing $BD (${BD_SIZE} bytes, relabeled->v1.1) -> sbd-ingester"
+          set +e
+          SBD_RESP=$(curl -sS -k -m 90 -w $'\n%{http_code}' -X POST "$SBD_EP" -H "Authorization: Bearer $SBD_TK" -H 'Content-Type: application/json' --data-binary @"$SBD_SEND" 2>&1)
+          CURL_RC=$?
+          SBD_CODE=$(printf '%s' "$SBD_RESP" | tail -n1)
+          echo "[sbd-ingester] curl_rc=$CURL_RC http=$SBD_CODE"
+          printf '%s\n' "$SBD_RESP" | head -5
+          if [ "$CURL_RC" -eq 0 ] && printf '%s' "$SBD_CODE" | grep -q '^2'; then PERF_RC=0; else PERF_RC=1; fi
+          rm -f "$SBD_SEND"
+          set -e
+          # Marker file the summarize job globs to count "X/N sent to
+          # perf-leaderboard" for the Teams webhook footer.
+          if [ "$PERF_RC" -eq 0 ]; then
+            echo OK > "$PERF_DIR/perf_publish_marker.txt"
+            echo "[perf-publish] OK"
+          else
+            echo "FAIL rc=$PERF_RC" > "$PERF_DIR/perf_publish_marker.txt"
+            echo "[perf-publish] FAIL (rc=$PERF_RC) — continue-on-error keeps the matrix job green"
+          fi
 
       - name: Upload per-model manifest
         if: always()
@@ -508,7 +902,7 @@ jobs:
     runs-on: hyperloom-4hhzn
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         # No setup-python on the self-hosted runner — it has system python3
@@ -518,14 +912,14 @@ jobs:
         run: pip install --quiet requests pyyaml
 
       - name: Download all submission manifests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ github.workspace }}/manifests
           pattern: submission-manifest-*
           merge-multiple: false
 
       - name: Download all task artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ github.workspace }}/task-artifacts-merged
           pattern: task-artifacts-*
@@ -548,32 +942,41 @@ jobs:
             --osl           "${INPUT_OSL:-1024}" \
             --out-dir       "${{ github.workspace }}/summary-out"
 
-      - name: Publish results to model-leaderboard
-        # POST normalized_results.json to {HYPERLOOM_RESULTS_SERVICE_URL}/api/import.
-        # publish_results.py exits 0 with a log line if the URL env is unset,
-        # so this step is a no-op for runs that don't have the secret configured.
-        # Mirrors the same step in optimize-batch.yml so both workflows feed the
-        # results dashboard the same way.
-        #
-        # continue-on-error: the publish endpoint has known intermittent 500s
-        # when its postgres pod crashloops (luochen has been pinged). Even
-        # with the in-script retry loop, persistent service downtime should
-        # not block the webhook from being sent — that is the user's main
-        # signal that a batch finished. The summary artifact + GHA logs still
-        # carry the full data for re-publish later.
-        if: always()
-        continue-on-error: true
-        working-directory: ci
-        env:
-          HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
-          HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
-        run: |
-          INPUT="${{ github.workspace }}/summary-out/normalized_results.json"
-          if [ ! -f "$INPUT" ]; then
-            echo "normalized_results.json not produced — skipping publish"
-            exit 0
-          fi
-          python3 publish_results.py --input "$INPUT"
+      # ─── DISABLED 2026-05-25 ─────────────────────────────────────────
+      # Final batch publish to model-leaderboard is disabled per user request
+      # (paired with the per-model publish step in the optimize matrix).
+      # Reason: cron runs should no longer push results into the live
+      # leaderboard; the Teams completion webhook below stays on for batch
+      # completion notification, and ci_summary / normalized_results.json
+      # are still uploaded as artifacts so a manual republish via
+      # .harvest/republish_from_artifact.py is always possible.
+      # To re-enable: uncomment the whole `Publish results to model-leaderboard` step.
+      # - name: Publish results to model-leaderboard
+      #   # POST normalized_results.json to {HYPERLOOM_RESULTS_SERVICE_URL}/api/import.
+      #   # publish_results.py exits 0 with a log line if the URL env is unset,
+      #   # so this step is a no-op for runs that don't have the secret configured.
+      #   # Mirrors the same step in optimize-batch.yml so both workflows feed the
+      #   # results dashboard the same way.
+      #   #
+      #   # continue-on-error: the publish endpoint has known intermittent 500s
+      #   # when its postgres pod crashloops (luochen has been pinged). Even
+      #   # with the in-script retry loop, persistent service downtime should
+      #   # not block the webhook from being sent — that is the user's main
+      #   # signal that a batch finished. The summary artifact + GHA logs still
+      #   # carry the full data for re-publish later.
+      #   if: always()
+      #   continue-on-error: true
+      #   working-directory: ci
+      #   env:
+      #     HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
+      #     HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
+      #   run: |
+      #     INPUT="${{ github.workspace }}/summary-out/normalized_results.json"
+      #     if [ ! -f "$INPUT" ]; then
+      #       echo "normalized_results.json not produced — skipping publish"
+      #       exit 0
+      #     fi
+      #     python3 publish_results.py --input "$INPUT"
 
       - name: Render summary to job summary
         if: always()
@@ -593,6 +996,37 @@ jobs:
           retention-days: 45
           if-no-files-found: warn
 
+      - name: Count perf-leaderboard publish status
+        # Walk the merged task-artifacts/ tree for the per-matrix-job
+        # `perf_publish_marker.txt` files written by the publish step.
+        # Each marker is exactly one line: "OK" on success or "FAIL rc=<n>"
+        # otherwise. Counts feed the Teams webhook footer so reviewers can
+        # see at a glance how many models made it into perf-leaderboard
+        # without digging into individual matrix job logs.
+        if: always()
+        id: perf_publish_count
+        run: |
+          set -euo pipefail
+          ROOT="${{ github.workspace }}/task-artifacts-merged"
+          if [ ! -d "$ROOT" ]; then
+            echo "no merged task-artifacts/ dir; skip count"
+            echo "ok=0"    >> "$GITHUB_OUTPUT"
+            echo "total=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # find returns the absolute paths of every marker; -size +0c filters
+          # out the rare zero-byte file (would happen if cat into the file failed).
+          mapfile -t MARKERS < <(find "$ROOT" -name perf_publish_marker.txt -size +0c 2>/dev/null)
+          TOTAL=${#MARKERS[@]}
+          OK=0
+          for m in "${MARKERS[@]:-}"; do
+            [ -z "$m" ] && continue
+            if [ "$(head -c 2 "$m")" = "OK" ]; then OK=$((OK+1)); fi
+          done
+          echo "perf-publish markers found: ok=$OK total=$TOTAL"
+          echo "ok=$OK"        >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL"  >> "$GITHUB_OUTPUT"
+
       - name: Send webhook (completion notification)
         # Push the ranked summary into the Teams webhook. Format MUST be a
         # Power Automate Workflows Adaptive Card payload — the legacy Teams
@@ -608,6 +1042,11 @@ jobs:
           DASHBOARD_URL:  ${{ secrets.HYPERLOOM_DASHBOARD_URL }}
           INPUT_MODELS:   ${{ github.event.inputs.models }}
           INPUT_HF_TOP:   ${{ github.event.inputs.hf_top }}
+          # Perf-leaderboard publish counts (from the previous step) so
+          # send_webhook.py can render "X/N sent to perf-leaderboard" in
+          # the card footer.
+          PERF_PUBLISH_OK:    ${{ steps.perf_publish_count.outputs.ok }}
+          PERF_PUBLISH_TOTAL: ${{ steps.perf_publish_count.outputs.total }}
         run: |
           # Power Automate / Teams reliably renders Adaptive Card Table when
           # each card is small. send_webhook.py splits the summary into

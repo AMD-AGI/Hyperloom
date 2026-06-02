@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from pathlib import Path
 
@@ -135,11 +134,25 @@ async def test_local_probe_unavailable_when_no_data(monkeypatch, tmp_path: Path)
         disk_mountpoints=(),
         process_patterns=(),
         server_log_path=None,
+        # All optional probes neutralised so we exercise the
+        # SourceUnavailable path with no data anywhere. Each new probe
+        # generation has to be added here as it's introduced.
+        ray_probe_enabled=False,
+        fd_probe_enabled=False,
+        decision_audit_enabled=False,
+        preflight_enabled=False,
+        critic_health_enabled=False,
+        state_integrity_enabled=False,
+        external_deps_enabled=False,
     )
 
-    # Force GPU sampler to return empty
+    # Force samplers that read the local host to return empty.
     monkeypatch.setattr(
         "robustness_agent.sources.local_probe._sample_gpu", lambda: {}
+    )
+    monkeypatch.setattr(
+        "robustness_agent.sources.local_probe._sample_aiter_jit",
+        lambda _jit_dir: {},
     )
 
     probe = LocalProbeSource(cfg)
@@ -353,6 +366,15 @@ async def test_local_probe_runs_health_probes(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
 
+    # Isolate from host shell pollution: a configured ``$OPENAI_BASE_URL``
+    # would otherwise make the external-deps sub-probe fire an extra
+    # ``/models`` gateway request through the same mock transport, inflating
+    # ``seen`` and breaking the exact-count assertion below. This test only
+    # exercises ``_probe_local_servers``, so unset the gateway env vars and
+    # disable the orthogonal external-deps probe.
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+
     cfg = lp.LocalProbeConfig(
         session_dir=None,
         disk_mountpoints=(str(tmp_path),),
@@ -363,6 +385,7 @@ async def test_local_probe_runs_health_probes(monkeypatch, tmp_path: Path):
             "http://localhost:30002/dead",
         ),
         health_probe_timeout_s=1.0,
+        external_deps_enabled=False,
     )
     data = await lp.LocalProbeSource(cfg).fetch(ctx=None)
     by_url = {entry["url"]: entry for entry in data.local_server_health}

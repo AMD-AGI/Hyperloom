@@ -15,7 +15,7 @@ End-to-end flow this exercises:
           baseline_executor runs Magpie SGLang baseline.
   tick 2: Orchestration sees baseline_tput > 0, decides next step. The
           system prompt nudges it toward REQUEST{target_agent="kernel",
-          kind="select_kernels"} so the Kernel agent (real Claude) is
+          kind="trace_analyze"} so the Kernel agent (real Claude) is
           actually exercised, not just heartbeating.
   tick 3: Kernel (real Claude) reads inbox, sees the request, emits a
           real RESPONSE intent. Coordinator routes back to Orchestration.
@@ -72,10 +72,10 @@ _ORCH_PROMPT = (
     "   DONE in this smoke run — do NOT propose them.\n"
     "2. After baseline succeeds (you'll see `baseline_tput > 0`), emit\n"
     "   ONE intent:\n"
-    "     request {target_agent: 'kernel', kind: 'select_kernels',\n"
+    "     request {target_agent: 'kernel', kind: 'trace_analyze',\n"
     "              params: {top_k: 5}, reason: 'kick off Plan A kernel-opt'}\n"
     "3. After you see a `response` from kernel in your inbox (status='ok',\n"
-    "   kind='select_kernels_done'), the smoke run is complete — emit ONE\n"
+    "   kind='trace_analyze_done'), the smoke run is complete — emit ONE\n"
     "     send_message {topic: 'heartbeat', body_md: 'smoke-run-done'}\n"
     "   and do NOT propose anything else.\n\n"
     "OUTPUT: every turn MUST emit at least one `emit_intent` tool call. "
@@ -93,7 +93,7 @@ _CRITIC_PROMPT = (
     "the most recent un-reviewed proposal.\n\n"
     "Decision rule (smoke run — keep it simple):\n"
     "  * If the proposed action_name is in {baseline, profile, classify, "
-    "    setup, target_analysis, report, dream}, verdict = 'approve'.\n"
+    "    setup, target_analysis, report}, verdict = 'approve'.\n"
     "  * If predicted_gain_pct is 0 and accuracy_risk is 0, verdict = 'approve'.\n"
     "  * If you can't tell, verdict = 'approve' with reasoning='conservative ok'.\n"
     "  * Reject only if the action_name is unknown or obviously dangerous.\n\n"
@@ -110,7 +110,7 @@ _KERNEL_PROMPT = (
     "For every un-answered request you see, emit ONE `response` intent:\n"
     "  intent_type=response, payload={\n"
     "    in_reply_to: <the request's msg_id from inbox>,\n"
-    "    kind:        '<request.kind>_done',  # e.g. 'select_kernels_done'\n"
+    "    kind:        '<request.kind>_done',  # e.g. 'trace_analyze_done'\n"
     "    status:      'ok',\n"
     "    result:      {\n"
     "      'source': 'mock', 'chosen_kernels': ['attn_fused_v1', 'gemm_v2']\n"

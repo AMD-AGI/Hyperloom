@@ -23,7 +23,7 @@ Design notes:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from .base import REGISTRY, RenderedSection
 from .cross_section import GlobalFacts, build_global_facts
@@ -41,12 +41,17 @@ from ._renderers import (   # noqa: F401  (side-effect imports)
     capability_summary as _r_capability_summary,
     phase_timeline as _r_phase_timeline,
     kernel_lifecycle as _r_kernel_lifecycle,
+    kernel_profiling as _r_kernel_profiling,
+    kernel_decision_path as _r_kernel_decision_path,
+    roofline as _r_roofline,
     invocations as _r_invocations,
     param_search as _r_param_search,
+    decision_journal as _r_decision_journal,
     sweep as _r_sweep,
     critic_robustness as _r_critic_robustness,
     attribution as _r_attribution,
     source_files as _r_source_files,
+    data_provenance as _r_data_provenance,
 )
 
 
@@ -61,15 +66,24 @@ from ._renderers import (   # noqa: F401  (side-effect imports)
 # monitor data has been consistently broken on real wekafs sessions.
 SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ("Session & Workload",          ["session", "workload"]),
-    ("Performance Results",          ["baseline", "final", "attribution"]),
+    ("Performance Results",          ["baseline", "final", "roofline", "attribution"]),
     ("Capability Search",            ["capability_summary",
-                                      "param_search", "sweep"]),
+                                      "param_search",
+                                      "decision_journal",
+                                      "sweep"]),
     ("Kernel Optimization",          ["kernel_lifecycle",
+                                      "kernel_profiling",
+                                      "kernel_decision_path",
                                       "geak_invocations",
                                       "oob_invocations",
                                       "critic_robustness"]),
     ("Run Trace",                    ["phase_timeline"]),
-    ("Source Artifacts",             ["source_files"]),
+    # ``source_files`` lists the artifacts the breakdown was synthesized
+    # from; ``data_provenance`` (right after) explains, per section,
+    # which of those source artifacts the collector actually saw —
+    # making it trivial to diagnose "why is X empty?" without leaving
+    # the report.
+    ("Source Artifacts",             ["source_files", "data_provenance"]),
 ]
 
 __all__ = [

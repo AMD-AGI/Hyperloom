@@ -9,13 +9,12 @@ local validation without requiring TraceLens to be installed.
 from __future__ import annotations
 
 import argparse
-import ast
 import asyncio
+import functools
 import gzip
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,11 +27,416 @@ from typing import Any
 from tracelens_skill_runner import (
     aggregate_by_source_function,
     discover_capture_folder,
+    extract_idle_pct_from_analysis_md,
     normalize_upstream_category,
     parse_analysis_md,
-    raw_candidates_from_priority_data,
     run_tracelens_skill,
 )
+
+
+HIGH_IDLE_PCT_THRESHOLD_DEFAULT = 80.0
+HIGH_IDLE_PCT_THRESHOLD_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
+
+
+def _resolve_idle_pct_threshold() -> float:
+    """Return the idle-percent gate threshold (default 80.0%).
+
+    Report_Interfacing.docx §2 (idle-gate sanity check) lists ``<10-20%``
+    as a *rough* target. We initially picked the upper edge (20%) of
+    that band as the gate. Empirically every production-scale run we
+    measured on Qwen3-32B (formal cases A–D in
+    issue_bak/tracelens-profile-debug-20260516) reports
+    ``Idle % ∈ [48%, 60%]``, so the 20% gate suppressed kernel
+    rewriting on every real workload and the whole TraceLens →
+    GEAK pipeline never reached ``run_optimization``. After confirming
+    with the TraceLens team that this idle floor is structural to
+    SGLang inference traces (host-side scheduling + JIT/launch
+    overhead that the docx envisioned at GEMM-microbench scale never
+    accounts for), the gate is relaxed to **80%** — kernel rewriting
+    is still suppressed when the GPU is essentially never on
+    (``Idle % > 80%``), but realistic ``Idle % ≈ 50–60%`` traces are
+    no longer treated as fatally host-bound. Operators with workloads
+    that need the original conservative gate can pin it via the
+    ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD`` environment variable;
+    an unparseable or negative value falls back to the default.
+    """
+    raw = os.environ.get(HIGH_IDLE_PCT_THRESHOLD_ENV, "").strip()
+    if not raw:
+        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    if value < 0.0:
+        return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    return value
+
+
+def _build_high_idle_warning(
+    *, idle_pct: float, threshold_pct: float, report_path: Path,
+) -> dict[str, Any]:
+    """Build the structured ``trace_health_warnings[]`` entry for a high-idle trace.
+
+    The entry is consumed by ``kernel_request_handlers.trace_analyze_handler``
+    (T4) which uses it to route to parameter optimization instead of
+    GEAK kernel rewriting. The shape is deliberately minimal and
+    JSON-serializable so it can be written verbatim into the audit
+    summary, the orchestrator result, and any operator-facing surfaces.
+    """
+    return {
+        "code": "high_gpu_idle_pct",
+        "severity": "warning",
+        "idle_pct": round(idle_pct, 2),
+        "threshold_pct": round(threshold_pct, 2),
+        "source": str(report_path),
+        "message": (
+            f"GPU was idle {idle_pct:.2f}% of trace wall time (threshold "
+            f"{threshold_pct:.2f}%). Per Report_Interfacing.docx §2 "
+            "(idle-gate sanity check in Possible Approach (Hyperloom v3)), "
+            "kernel-level rewriting is unlikely to improve end-to-end "
+            "latency in this regime — recommend parameter optimization "
+            "(batch size, KV-cache shape, prefill/decode split) over "
+            "per-kernel rewrites. Hyperloom is suppressing the hot-kernel "
+            "candidate list and surfacing this warning so the Coordinator "
+            "can route to params/backends."
+        ),
+    }
+
+
+def _build_trace_split_warning(
+    *, trace_input: Path, split_dir: Path, split_rc: int,
+    mixed_count: int, decode_count: int, prefilldecode_count: int,
+) -> dict[str, Any]:
+    return {
+        "code": "trace_split_no_steady_state",
+        "severity": "warning",
+        "trace_input": str(trace_input),
+        "split_dir": str(split_dir),
+        "split_returncode": split_rc,
+        "mixed_count": mixed_count,
+        "decode_only_count": decode_count,
+        "prefilldecode_count": prefilldecode_count,
+        "message": (
+            "TraceLens splitter produced no steady-state chunks; refusing "
+            "to analyze the raw trace because that can report misleading "
+            "high idle and suppress valid kernel opportunities. Verify the "
+            "profile request used TraceLens-compatible annotations and enough "
+            "NUM_PROMPTS to reach the requested start_step/num_steps window."
+        ),
+    }
+
+
+def _check_selected_chunk_has_gpu_events(
+    *,
+    split_dir: Path,
+    selected_chunk: Path,
+    mode: str,
+    available_modes: "dict[str, tuple[str, list[Path]]]",
+) -> "dict[str, Any] | None":
+    """Verify the splitter-produced chunk selected by ``--steady-state-mode``
+    actually contains GPU events.
+
+    The TraceLens splitter writes one row per produced chunk to
+    ``execution_details.csv`` with the columns ``output_path``,
+    ``num_gpu_events``, ``gpu_duration``, ``gpu_busy_duration`` (see
+    ``TraceLens/TraceUtils/split_inference_trace_annotation.py:1324-1331``).
+    Returns ``None`` when the row says the chunk carries real GPU work,
+    otherwise returns a ``steady_state_chunk_empty`` warning dict the
+    caller should ``trace_health_warnings.append`` and raise on.
+
+    This is a data-validity gate, not a heuristic chunk-reordering rule:
+    TraceLens analysis is only meaningful when the chunk has events to
+    analyze. Falling back to a different mode is the OPERATOR's call
+    (re-issue with a different ``--steady-state-mode`` after seeing the
+    warning); we never silently swap.
+
+    The empirical case that drove this gate is SOLAR-10.7B TP=1 BF16,
+    where:
+      - mixed_steady_state_*: num_gpu_events=160, gpu_busy_duration=1,428 us
+        out of gpu_duration=1,118,730 us (0.13% busy) -- 96 sampler kernels
+        only, forward fully inside CUDA graph + rocprofiler-sdk emits no
+        Dispatch Task aggregate without TP-multi-stream sync;
+      - prefilldecode_steady_state_*: num_gpu_events=2,790,
+        gpu_busy_duration=2,723,452 us out of 4,538,984 us (60% busy) --
+        480 Tensile GEMM + 240 paged_attention + 480 add_rmsnorm_quant
+        (the real workload).
+    Pre-N25 we silently consumed the mixed chunk and produced an
+    Executive Summary saying "Compute %=0.18%, Idle %=99.77%" that
+    misled the LLM into selecting host-bound params variants. N25 hard-
+    fails here and the coordinator re-issues with
+    ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE=prefilldecode``.
+    """
+    import csv
+
+    details_path = split_dir / "execution_details.csv"
+    if not details_path.is_file():
+        # Splitter didn't emit the CSV (older TraceLens?) -- cannot
+        # validate; let the chunk through and hope for the best. The
+        # downstream Executive Summary idle gate (T3) still catches
+        # high-idle traces, just less specifically.
+        return None
+    try:
+        with details_path.open("r", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+    except (OSError, csv.Error):
+        return None
+
+    selected_resolved = str(selected_chunk.resolve())
+    selected_row: dict[str, str] | None = None
+    for row in rows:
+        out_path = row.get("output_path", "")
+        if not out_path:
+            continue
+        try:
+            if str(Path(out_path).resolve()) == selected_resolved:
+                selected_row = row
+                break
+        except (OSError, ValueError):
+            continue
+    if selected_row is None:
+        return None
+
+    def _f(name: str) -> float:
+        try:
+            return float(selected_row.get(name) or "0") or 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    num_gpu_events = int(_f("num_gpu_events"))
+    gpu_busy_duration = _f("gpu_busy_duration")
+    if num_gpu_events > 0 and gpu_busy_duration > 0.0:
+        return None  # chunk carries real GPU work -- proceed.
+
+    # Selected chunk is empty. Surface which OTHER modes' chunks DO have
+    # gpu events so the coordinator / operator knows what to re-issue
+    # with.
+    non_empty_modes: list[str] = []
+    for other_mode, (label, chunks) in available_modes.items():
+        if other_mode == mode or not chunks:
+            continue
+        other_resolved = str(chunks[0].resolve())
+        for row in rows:
+            try:
+                if str(Path(row.get("output_path", "")).resolve()) != other_resolved:
+                    continue
+            except (OSError, ValueError):
+                continue
+            try:
+                other_events = int(float(row.get("num_gpu_events") or "0"))
+                other_busy = float(row.get("gpu_busy_duration") or "0")
+            except (TypeError, ValueError):
+                other_events, other_busy = 0, 0.0
+            if other_events > 0 and other_busy > 0.0:
+                non_empty_modes.append(other_mode)
+            break
+
+    return {
+        "code": "steady_state_chunk_empty",
+        "severity": "blocking",
+        "requested_mode": mode,
+        "selected_chunk": str(selected_chunk),
+        "num_gpu_events": num_gpu_events,
+        "gpu_busy_duration": gpu_busy_duration,
+        "non_empty_modes": non_empty_modes,
+        "remediation": (
+            "Re-issue roofline with env "
+            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
+            f"{non_empty_modes or ['(none of the splitter outputs has GPU events; re-profile required)']}. "
+            "Most common cause: short / batched workload (e.g. "
+            "NUM_PROMPTS<=CONC*OSL/2) where prefill is burst-shaped so "
+            "the mixed window degenerates to PD=0; switching to "
+            "'prefilldecode' picks up the real GEMM/attention region."
+        ),
+        "message": (
+            f"TraceLens splitter selected chunk ({mode}) has "
+            f"num_gpu_events={num_gpu_events}, "
+            f"gpu_busy_duration={gpu_busy_duration:.1f}us -- structurally "
+            "empty. Refusing to feed it into TraceLens analysis (would "
+            "produce a misleading high-idle Executive Summary). The "
+            "coordinator should re-issue roofline with a different "
+            "--steady-state-mode per the 'remediation' field."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# N36 — chunk-quality gate (busy_ratio threshold + alternate-mode lookup)
+# ---------------------------------------------------------------------------
+# Background: N25 deliberately stays a STRUCTURAL gate (num_gpu_events>0 AND
+# gpu_busy_duration>0). The DSR1-0528 (671B FP8 MoE) TP=8 10k/1k production
+# run on 2026-05-21 exposed a gap: TraceLens' splitter happily produced a
+# ``mixed_steady_state`` chunk with 160 events / 2053us busy out of 3.26s
+# (0.063% busy) -- structurally non-empty so N25 passed -- but
+# substantively garbage. Downstream analysis.md reported "Compute %=0.09%
+# / Idle %=99.90%" with ``reusable_native_kernel_ids=[]`` and the LLM
+# was left with nothing to feed GEAK with.
+#
+# Root cause: the profile window calibration in ``_workload_envs``
+# computes ``delay_iters = OSL * (R+1) * 3 - max_iters/2`` -- it only
+# considers OSL, so a 10k/1k workload (10x ISL prefill) lands at the
+# same ``start_step=6016`` as a 1k/1k workload. With CONC=64, by step
+# 6016 every batch has finished its single prefill iter and the
+# profiler captures only decode iters where the 8x MI300X is sparse.
+#
+# N36 closes that gap: this helper checks busy_ratio AND looks for an
+# alternate mode with materially higher busy_ratio. When such an
+# alternate exists we emit ``steady_state_chunk_low_quality`` (in the
+# N26 retry allowlist) so the coordinator re-issues trace_analyze
+# automatically. When NO mode is better we return ``None`` -- emitting
+# a retry-warning would spin the same bad trace forever; the
+# ``roofline_failure_streak`` path handles that case (N27 fallback).
+_DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
+# Alternate mode must beat the requested mode by at least this margin
+# for the auto-retry to be worth it. Otherwise we'd thrash between
+# equally-bad modes.
+_CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
+
+
+def _resolve_min_busy_ratio() -> float:
+    raw = os.environ.get(
+        "INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO", "",
+    ).strip()
+    if not raw:
+        return _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
+    try:
+        v = float(raw)
+        return v if 0.0 <= v <= 1.0 else _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
+    except ValueError:
+        return _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
+
+
+def _busy_ratio(num_events: float, busy_us: float, dur_us: float) -> float | None:
+    """Return ``busy_us / dur_us`` or ``None`` when undefined (zero
+    duration). Caller treats ``None`` as "no signal, defer to N25".
+    """
+    if dur_us <= 0.0 or num_events <= 0:
+        return None
+    return max(0.0, min(1.0, busy_us / dur_us))
+
+
+def _check_selected_chunk_has_gpu_events_quality(
+    *,
+    split_dir: "Path",
+    selected_chunk: "Path",
+    mode: str,
+    available_modes: "dict[str, tuple[str, list[Path]]]",
+) -> "dict[str, Any] | None":
+    """Quality gate that complements N25's structural gate.
+
+    Returns ``None`` when the selected chunk is acceptable (busy_ratio
+    >= threshold) OR no alternate mode is materially better OR the CSV
+    is missing / row not found. Returns a structured warning dict
+    (``code=steady_state_chunk_low_quality``, same shape as N25 for
+    drop-in compatibility with the N26 retry path) when an alternate
+    mode with materially higher busy_ratio exists.
+
+    See module-level N36 comment for the empirical case + design.
+    """
+    import csv as _csv
+
+    details_path = split_dir / "execution_details.csv"
+    if not details_path.is_file():
+        return None
+    try:
+        with details_path.open("r", encoding="utf-8") as fh:
+            rows = list(_csv.DictReader(fh))
+    except (OSError, _csv.Error):
+        return None
+
+    def _row_for(chunk_path: "Path") -> "dict[str, str] | None":
+        resolved = str(chunk_path.resolve())
+        for row in rows:
+            out_path = row.get("output_path", "")
+            if not out_path:
+                continue
+            try:
+                if str(Path(out_path).resolve()) == resolved:
+                    return row
+            except (OSError, ValueError):
+                continue
+        return None
+
+    def _stats(row: "dict[str, str] | None") -> "tuple[int, float, float]":
+        if row is None:
+            return 0, 0.0, 0.0
+        def _f(k: str) -> float:
+            try:
+                return float(row.get(k) or "0") or 0.0
+            except (TypeError, ValueError):
+                return 0.0
+        return int(_f("num_gpu_events")), _f("gpu_busy_duration"), _f("gpu_duration")
+
+    selected_row = _row_for(selected_chunk)
+    if selected_row is None:
+        return None
+    sel_events, sel_busy, sel_dur = _stats(selected_row)
+    sel_ratio = _busy_ratio(sel_events, sel_busy, sel_dur)
+    if sel_ratio is None:
+        # Can't measure ratio; N25 already covers the structural empty
+        # case. Defer.
+        return None
+    threshold = _resolve_min_busy_ratio()
+    if sel_ratio >= threshold:
+        return None
+
+    # Selected chunk is below threshold. Look for an alternate mode
+    # whose chunk has materially higher busy_ratio (otherwise retrying
+    # is pointless).
+    alternates: list[tuple[str, float]] = []
+    for other_mode, (_label, chunks) in available_modes.items():
+        if other_mode == mode or not chunks:
+            continue
+        other_row = _row_for(chunks[0])
+        if other_row is None:
+            continue
+        oth_events, oth_busy, oth_dur = _stats(other_row)
+        oth_ratio = _busy_ratio(oth_events, oth_busy, oth_dur)
+        if oth_ratio is None:
+            continue
+        if oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
+            alternates.append((other_mode, oth_ratio))
+    if not alternates:
+        return None  # No better mode exists; let roofline_failure_streak path handle.
+
+    # Sort by descending busy_ratio so the best alternate is first --
+    # roofline._extract_steady_state_retry_mode picks the head of the
+    # non_empty_modes list.
+    alternates.sort(key=lambda mr: -mr[1])
+    non_empty_modes = [m for m, _r in alternates]
+    return {
+        "code": "steady_state_chunk_low_quality",
+        "severity": "blocking",
+        "requested_mode": mode,
+        "selected_chunk": str(selected_chunk),
+        "num_gpu_events": sel_events,
+        "gpu_busy_duration": sel_busy,
+        "gpu_duration": sel_dur,
+        "busy_ratio": sel_ratio,
+        "threshold": threshold,
+        "non_empty_modes": non_empty_modes,
+        "alternate_busy_ratios": dict(alternates),
+        "remediation": (
+            "Re-issue roofline with env "
+            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
+            f"{non_empty_modes}. The TraceLens splitter chunk for the "
+            f"requested mode '{mode}' is {sel_ratio*100:.2f}% busy "
+            f"(threshold {threshold*100:.0f}%) -- non-empty but "
+            "substantively garbage. Most common cause for prefill-"
+            "heavy workloads: profile window misalignment "
+            "(_workload_envs.delay_iters formula only considers OSL, "
+            "so high-ISL workloads land in pure-decode windows)."
+        ),
+        "message": (
+            f"TraceLens splitter selected chunk ({mode}) busy_ratio="
+            f"{sel_ratio*100:.3f}% (events={sel_events}, "
+            f"busy={sel_busy:.1f}us / dur={sel_dur:.1f}us) -- below "
+            f"the {threshold*100:.0f}% threshold and alternate "
+            f"modes have higher busy_ratio. Refusing to feed it into "
+            "TraceLens analysis (would produce a misleading analysis.md "
+            "with reusable_native_kernel_ids=[] and stall the "
+            "optimization loop, per DSR1-0528 10k/1k case)."
+        ),
+    }
 
 
 KERNEL_HINTS = (
@@ -53,16 +457,6 @@ RUNTIME_API_NAMES = {
     "cudastreamsynchronize",
 }
 DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
-
-# TraceLens ships two perf-report CLIs:
-#   - `..._inference` is the correct entry for vLLM/SGLang inference traces
-#     (issue #124 Bug 1). It assumes graph-replay execution and emits the
-#     fields that downstream fusion / roofline analysis expects.
-#   - `..._pytorch` is the legacy / training default. We keep it as a
-#     fallback so older TraceLens installs (without the inference variant)
-#     still work.
-INFERENCE_PERF_CLI = "TraceLens_generate_perf_report_pytorch_inference"
-LEGACY_PERF_CLI = "TraceLens_generate_perf_report_pytorch"
 
 
 def utc_now() -> str:
@@ -102,6 +496,7 @@ def update_status(
     started_at: str,
     error: str | None = None,
 ) -> None:
+    updated_at = utc_now()
     payload: dict[str, Any] = {
         "tool": "tracelens_analysis",
         "run_id": run_id,
@@ -109,12 +504,33 @@ def update_status(
         "current_step": current_step,
         "pid": os.getpid(),
         "started_at": started_at,
-        "updated_at": utc_now(),
+        "updated_at": updated_at,
         "log_path": str(log_path),
         "artifact_paths": artifact_paths,
         "offset_bytes": log_path.stat().st_size if log_path.exists() else 0,
         "last_lines": read_last_lines(log_path),
     }
+    # Hyperloom P2-3: emit ``ended_at`` + ``duration_seconds`` once the
+    # run reaches a terminal state so the session_breakdown collector
+    # can fill the ``tracelens_analysis`` timeline event with a real
+    # wall-clock duration (previously always None). Both fields are
+    # purely additive — older callers/readers that don't know about
+    # them ignore the keys, preserving back-compat with status JSONs
+    # written by previous kernel-agent revisions.
+    if state in ("succeeded", "failed", "aborted", "cancelled"):
+        payload["ended_at"] = updated_at
+        try:
+            start_dt = datetime.fromisoformat(started_at)
+            end_dt = datetime.fromisoformat(updated_at)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            payload["duration_seconds"] = max(
+                0.0, (end_dt - start_dt).total_seconds(),
+            )
+        except (ValueError, TypeError):
+            payload["duration_seconds"] = None
     if error:
         payload["error"] = error
     atomic_write_json(status_path, payload)
@@ -157,6 +573,24 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     return count
 
 
+def _trace_input_sort_key(path: Path) -> tuple[int, str]:
+    """Prefer TraceLens-friendly traces when a directory is supplied.
+
+    Magpie/SGLang profile directories contain rank/phase shards such as
+    `TP-0-DECODE.trace.json.gz` as well as a `merged-*.trace.json.gz`.
+    TraceLens's splitter expects the large annotated trace; feeding the first
+    lexicographic shard gives it a tiny single-rank decode slice. Explicit file
+    inputs remain honoured by the caller; this ordering only affects directory
+    discovery.
+    """
+    name = path.name
+    if name.startswith("merged-"):
+        return (0, name)
+    if re.search(r"TP-\d+-DECODE\.trace\.json(?:\.gz)?$", name):
+        return (2, name)
+    return (1, name)
+
+
 def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
     if trace_input.is_file():
         return "file", [trace_input]
@@ -173,6 +607,7 @@ def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
         if trace not in seen:
             seen.add(trace)
             unique.append(trace)
+    unique.sort(key=_trace_input_sort_key)
     if not unique:
         raise FileNotFoundError(f"no trace files found under capture directory: {trace_input}")
     return "capture_dir", unique
@@ -219,15 +654,61 @@ def extract_source_file(event: dict[str, Any]) -> str:
     return ""
 
 
+_FLYDSL_SOURCE_MARKERS = (
+    "import flydsl",
+    "from flydsl",
+    "@flyc.kernel",
+    "@flyc.jit",
+    "flydsl.compiler",
+    "flydsl.expr",
+)
+_FLYDSL_SCAN_BYTES = 4096
+
+
+def _looks_like_flydsl_source(source_file: str) -> bool:
+    """Return True when ``source_file`` is a FlyDSL kernel source.
+
+    Detection is content-based: FlyDSL kernels are plain ``.py`` files
+    so neither extension nor path is reliable. Sniff the first 4 KiB
+    for FlyDSL import / decorator markers — same signals GEAK's
+    ``task_generator._infer_kernel_type`` uses upstream.
+    """
+    if not source_file or not source_file.endswith(".py"):
+        return False
+    try:
+        with open(source_file, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(_FLYDSL_SCAN_BYTES)
+    except OSError:
+        return False
+    return any(marker in head for marker in _FLYDSL_SOURCE_MARKERS)
+
+
+_FLYDSL_PSEUDO_OP_NAME_MARKERS = (
+    "pseudo_op::moe_flydsl_",
+    "pseudo_op::flydsl_",
+)
+
+
 def source_type_for(name: str, source_file: str) -> str:
     lower_name = name.lower()
     lower_file = source_file.lower()
+    # PR #668 (TraceLens) injects ``pseudo_op::moe_flydsl_stage1`` /
+    # ``pseudo_op::moe_flydsl_stage2`` above ``aiter::fused_moe_`` events
+    # whose subtree contains FlyDSL stage markers. The pseudo-op carries
+    # no source_file (it is synthetic) so content sniffing returns
+    # ``unknown``. Match the upstream pseudo-op name prefix directly so
+    # the candidate gets ``source_type=flydsl`` without needing a
+    # resolvable .py path.
+    if any(marker in lower_name for marker in _FLYDSL_PSEUDO_OP_NAME_MARKERS):
+        return "flydsl"
     if is_runtime_generated_kernel(name, source_file):
         return "runtime_generated"
     if source_file.endswith((".cu", ".cuh", ".hip", ".cpp", ".h", ".hpp")):
         return "hip_cpp"
     if "triton" in lower_name and source_file.endswith(".py"):
         return "triton"
+    if _looks_like_flydsl_source(source_file):
+        return "flydsl"
     if source_file.endswith(".py"):
         return "python"
     if "hipblas" in lower_name or "rocblas" in lower_name:
@@ -249,14 +730,81 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-)
+@functools.lru_cache(maxsize=1)
+def _framework_patch_roots() -> tuple[str, ...]:
+    """Framework install roots (shared with PolicyGate / apply_kernel_patch).
+
+    Sourced from ``framework_paths.resolve_patch_target_roots`` (importlib +
+    glob discovery + static fallbacks, incl. atom). Callers below lower-case
+    the source path before the substring check, so we also emit a lower-case
+    variant of every root (``/app/ATOM/atom/`` -> ``/app/atom/atom/``) to keep
+    the case-insensitive match working.
+    """
+    try:
+        from inference_optimizer.orchestrator.framework_paths import (
+            resolve_patch_target_roots,
+        )
+
+        roots = resolve_patch_target_roots()
+    except ImportError:
+        from apply_kernel_patch import known_target_roots
+
+        roots = known_target_roots()
+    out: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        for variant in (root, root.lower()):
+            if variant and variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    return tuple(out)
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_csrc_root() -> str:
+    """aiter's own device-source root (e.g. ``.../aiter_meta/csrc/``),
+    resolved from the installed package. Empty when aiter is not importable.
+    Cached once per process."""
+    try:
+        import aiter.jit.core as _jc  # type: ignore
+    except Exception:
+        return ""
+    raw = (getattr(_jc, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
+    return (raw.rstrip("/") + "/") if raw else ""
+
+
+def _flydsl_reusable_roots() -> tuple[str, ...]:
+    """FlyDSL kernel checkout root(s) for PR #668 moe_flydsl pseudo-ops.
+
+    The real rewritable source for ``pseudo_op::moe_flydsl_*`` lives under
+    ``$DSL2_ROOT/kernels/`` (e.g. moe_gemm_2stage.py). The dynamic
+    framework-root discovery does not know about the FlyDSL checkout, so
+    without this the candidate is rejected "source not under a reusable
+    framework root" and never reaches GEAK. Lower-cased because
+    classify_patchability matches against ``lower_file``. ``$DSL2_ROOT`` /
+    ``$FLYDSL_ROOT`` take precedence; the WekaFS checkout is the default.
+    """
+    out: list[str] = []
+    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
+        val = (os.environ.get(env_key, "") or "").strip()
+        if val:
+            out.append((val.rstrip("/") + "/").lower())
+    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+        if default not in out:
+            out.append(default)
+    return tuple(out)
+
+
+def _reusable_roots() -> tuple[str, ...]:
+    """Discovered framework roots + aiter csrc + FlyDSL checkout (dynamic)."""
+    roots = _framework_patch_roots()
+    csrc = _aiter_csrc_root()
+    if csrc and csrc not in roots:
+        roots = roots + (csrc,)
+    for fly in _flydsl_reusable_roots():
+        if fly not in roots:
+            roots = roots + (fly,)
+    return roots
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
 # raw memcpy/copy ops, and PyTorch native copy. Folded from the feature
@@ -292,7 +840,7 @@ def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
         # A stable in-repo SGLang/vLLM Triton source can still be reusable.
-        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+        return not any(root in lower_file for root in _reusable_roots())
     return False
 
 
@@ -341,14 +889,14 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"runtime-generated (torch.compile / Inductor cache): {source_file}"
         )
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+    if not any(root in lower_file for root in _reusable_roots()):
         return False, (
             f"source not under a reusable framework root: {source_file}"
         )
     source_type = candidate.get("source_type")
-    if source_type not in {"hip_cpp", "triton", "python"}:
+    if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (
-            f"source_type={source_type!r} not in {{hip_cpp, triton, python}}"
+            f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}"
         )
     return True, ""
 
@@ -727,6 +1275,119 @@ def _is_pybind_shim(source_file: str) -> bool:
     return "PYBIND11_MODULE" in text or "pybind11" in text
 
 
+# ---------------------------------------------------------------------------
+# PR-K: aiter @compile_ops launcher → device source promotion.
+#
+# aiter ships ``@compile_ops("module_<x>", gen_func=...)`` decorators on its
+# top-level Python wrappers under ``aiter/ops/`` (e.g. ``aiter/ops/moe_op.py``
+# for the ``ck_moe_stage1/2`` family). Trace events name the wrapper as the
+# call-site, so torch.profiler / TraceLens propagate ``aiter/ops/moe_op.py``
+# as the kernel's ``source_file`` — but the actual compute lives in
+# ``csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu`` (codegen entry
+# that hipcc compiles into ``module_moe_ck2stages_*.so`` under
+# ``<aiter>/jit/build/``). Rewriting the wrapper is a no-op at runtime
+# because the compiled .so bypasses the wrapper via the @compile_ops
+# dispatch path. Hyperloom Qwen3-30B-A3B-Base sessions burned 5+ rounds on
+# wrapper rewrites that GEAK/Codex correctly compiled but had zero E2E
+# effect (REVERT @-2.66%); the fix is to promote the wrapper to the
+# device-source ``.cu`` BEFORE handing the candidate to the LLM.
+#
+# Scope is intentionally narrow: only kernels whose name matches one of the
+# entries in :data:`_AITER_COMPILE_OPS_PROMOTIONS` get promoted, and only
+# when the corresponding ``.cu`` exists on disk under the resolved
+# ``kernel_repo``. Anything else falls through with the wrapper unchanged
+# (LLM still gets the original signal — better than a fabricated guess).
+# ---------------------------------------------------------------------------
+# Each entry: (kernel_name_substring_lowercase, ordered_csrc_relpaths_to_try).
+# First on-disk match wins. Order matters when a kernel name matches multiple
+# patterns or when several ``.cu`` files implement variants of the same op.
+_AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # ck_moe_stage1 / ck_moe_stage2 — @compile_ops("module_moe_ck2stages",
+    # gen_func=cmdGenFunc_ck_moe_stage). The ``.cu`` here is the codegen
+    # entry; hipcc compiles per-(dtype, quant, act) instances into
+    # module_moe_ck2stages_*.so under <aiter>/jit/build/. PR-K's
+    # apply_kernel_patch invalidates that jit/build/ before rebuild so the
+    # patched .cu actually takes effect on the next import.
+    ("ck_moe_stage", (
+        "csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
+    )),
+    # topk_softmax decode kernels.
+    ("topk_softmax_group", ("csrc/kernels/topk_softmax_kernels_group.cu",)),
+    ("topk_softmax", ("csrc/kernels/topk_softmax_kernels.cu",)),
+    # moe_align_block_size — pre-GEMM expert routing prep.
+    ("moe_align_block_size", ("csrc/kernels/moe_align_block_size_kernels.cu",)),
+    # moe_fused_gate — gating + top-k in fused form.
+    ("moe_fused_gate", ("csrc/kernels/moe_fused_gate.cu",)),
+)
+
+# Fallback aiter editable-checkout root for cases where ``find_repo_root``
+# cannot resolve from the wrapper path (e.g. wrapper is at
+# ``/usr/local/lib/python3.12/dist-packages/aiter/ops/moe_op.py`` from a
+# wheel install — wheel layouts strip ``csrc/`` so we have to look at the
+# co-located editable repo). Keep aligned with ``KNOWN_SEARCH_ROOTS``.
+_AITER_FALLBACK_REPO = "/sgl-workspace/aiter"
+
+
+def upgrade_aiter_compile_ops_launcher(
+    source_file: str, kernel_name: str, kernel_repo: str,
+) -> str:
+    """Promote an aiter ``@compile_ops`` Python wrapper to the device ``.cu``.
+
+    Returns the promoted absolute path when:
+      * ``source_file`` is a Python file under any ``aiter/ops/`` tree
+        (matches both editable-checkout and dist-packages layouts);
+      * ``kernel_name`` lowercased contains one of the
+        :data:`_AITER_COMPILE_OPS_PROMOTIONS` substring patterns;
+      * the corresponding ``.cu`` exists on disk under ``kernel_repo``
+        (or under :data:`_AITER_FALLBACK_REPO` when the wrapper lives in
+        a wheel install whose layout has no ``csrc/``).
+
+    Otherwise returns ``source_file`` unchanged so the LLM still gets a
+    valid (if suboptimal) signal — the caller will note the promotion
+    miss in ``optimization_notes`` so operators can audit it.
+    """
+    if not source_file or not kernel_name:
+        return source_file
+    s = source_file.replace(os.sep, "/")
+    if "/aiter/ops/" not in s or not s.endswith(".py"):
+        return source_file
+
+    name_lower = kernel_name.lower()
+    matched_pattern: str | None = None
+    matched_relpaths: tuple[str, ...] = ()
+    for pattern, relpaths in _AITER_COMPILE_OPS_PROMOTIONS:
+        if pattern in name_lower:
+            matched_pattern = pattern
+            matched_relpaths = relpaths
+            break
+    if matched_pattern is None:
+        return source_file
+
+    candidate_repos: list[str] = []
+    if kernel_repo:
+        candidate_repos.append(kernel_repo)
+    elif source_file:
+        derived = find_repo_root(source_file)
+        if derived:
+            candidate_repos.append(derived)
+    if _AITER_FALLBACK_REPO not in candidate_repos:
+        candidate_repos.append(_AITER_FALLBACK_REPO)
+
+    seen: set[str] = set()
+    for repo_str in candidate_repos:
+        if not repo_str or repo_str in seen:
+            continue
+        seen.add(repo_str)
+        repo = Path(repo_str)
+        if not repo.is_dir():
+            continue
+        for relpath in matched_relpaths:
+            candidate = repo / relpath
+            if candidate.is_file():
+                return str(candidate)
+    return source_file
+
+
 def upgrade_pybind_shim_source(source_file: str, kernel_name: str,
                                kernel_repo: str) -> str:
     """If `source_file` is a tiny pybind11 registration TU, walk the repo to
@@ -771,153 +1432,6 @@ def upgrade_pybind_shim_source(source_file: str, kernel_name: str,
     return source_file
 
 
-# ---------------------------------------------------------------------------
-# B path: prefer TraceLens-generated kernel_summary csv
-# ---------------------------------------------------------------------------
-# TraceLens already does the right thing — it uses the cuda graph parent +
-# hipGraphLaunch parent_cpu_op join to count REAL device time per kernel
-# launch (and skips the host-side `cuda::synchronize` python-frame events
-# that confused our raw parser). Reading TraceLens's own csv output is
-# both (a) more accurate and (b) auto-tracks future TraceLens improvements.
-# Schema (from `--enable_kernel_summary --output_csvs_dir <dir>`):
-#   columns: Parent op category | Parent cpu_op | Kernel name |
-#            Kernel stream | Kernel duration (µs)_sum |
-#            Kernel duration (µs)_count | Kernel duration (µs)_mean | ...
-# We pick top_k by sum-duration and aggregate variants whose names
-# differ only by template parameters (Cijk_*MT256x16x64 vs Cijk_*MT16x16x512
-# stay separate — they ARE different rocBLAS variants — but the same
-# bf16 add_rmsnorm_quant_kernel called from 2 stream_ids merges).
-
-_TRACELENS_REQUIRED_COLS = (
-    "Kernel name",
-    "Kernel duration (\u00b5s)_sum",
-    "Kernel duration (\u00b5s)_count",
-)
-
-
-def parse_tracelens_kernel_summary(
-    csv_path: Path, top_k: int,
-) -> list[dict[str, Any]] | None:
-    """Read TraceLens's ``kernel_summary.csv`` → wrapper schema (top_k).
-
-    Returns ``None`` if the csv doesn't exist, is missing required columns,
-    or contains zero kernel rows — the caller falls back to the raw parser.
-    """
-    import csv as _csv  # localised; we don't want a hard import at module load
-    if not csv_path.exists():
-        return None
-    try:
-        with csv_path.open(encoding="utf-8") as f:
-            rdr = _csv.DictReader(f)
-            field_lookup = {h.lower(): h for h in (rdr.fieldnames or [])}
-            for required in _TRACELENS_REQUIRED_COLS:
-                if required.lower() not in field_lookup:
-                    return None
-            name_col = field_lookup["kernel name"]
-            sum_col = field_lookup["kernel duration (\u00b5s)_sum"]
-            count_col = field_lookup["kernel duration (\u00b5s)_count"]
-            # #125: Parent op category column is optional — older TraceLens
-            # builds may not emit it; we degrade gracefully when missing.
-            cat_col = field_lookup.get("parent op category")
-            rows = []
-            for r in rdr:
-                name = (r.get(name_col) or "").strip()
-                if not name:
-                    continue
-                try:
-                    dur = float(r.get(sum_col) or 0)
-                except ValueError:
-                    continue
-                try:
-                    cnt = int(float(r.get(count_col) or 0))
-                except ValueError:
-                    cnt = 0
-                if dur <= 0:
-                    continue
-                row = {"name": name, "duration_us": dur, "call_count": cnt,
-                       "tracelens_category": ""}
-                if cat_col:
-                    row["tracelens_category"] = (r.get(cat_col) or "").strip()
-                rows.append(row)
-    except Exception:
-        return None
-    if not rows:
-        return None
-    # Aggregate same-name rows (same kernel launched on multiple streams).
-    agg: dict[str, dict[str, Any]] = {}
-    for r in rows:
-        bucket = agg.setdefault(
-            r["name"],
-            {"name": r["name"], "duration_us": 0.0, "call_count": 0,
-             "source_file": "", "source_type": "unknown", "shapes": [],
-             "tracelens_category": ""},
-        )
-        bucket["duration_us"] += r["duration_us"]
-        bucket["call_count"] += r["call_count"]
-        # First non-empty category wins (variants of same kernel rarely
-        # straddle different framework-side categories).
-        if not bucket["tracelens_category"] and r.get("tracelens_category"):
-            bucket["tracelens_category"] = r["tracelens_category"]
-    total_dur = sum(c["duration_us"] for c in agg.values())
-    top = sorted(agg.values(), key=lambda x: x["duration_us"], reverse=True)[:top_k]
-    return _finalize_candidates(top, total_dur=total_dur)
-
-
-def _safe_literal(value: Any) -> Any:
-    if value in (None, ""):
-        return None
-    try:
-        return ast.literal_eval(str(value))
-    except (SyntaxError, ValueError):
-        return None
-
-
-def _shape_to_jsonable(value: Any) -> Any:
-    if isinstance(value, tuple):
-        return [_shape_to_jsonable(v) for v in value]
-    if isinstance(value, list):
-        return [_shape_to_jsonable(v) for v in value]
-    return value
-
-
-def _non_scalar_shapes(input_dims: Any) -> list[Any]:
-    parsed = _safe_literal(input_dims)
-    if parsed is None:
-        return []
-    if not isinstance(parsed, (list, tuple)):
-        parsed = (parsed,)
-    shapes: list[Any] = []
-    for dim in parsed:
-        if dim in (None, "", (), []):
-            continue
-        shape = _shape_to_jsonable(dim)
-        if shape not in shapes:
-            shapes.append(shape)
-    return shapes
-
-
-def _non_scalar_dtypes(input_types: Any) -> list[str]:
-    parsed = _safe_literal(input_types)
-    if parsed is None:
-        return []
-    if not isinstance(parsed, (list, tuple)):
-        parsed = (parsed,)
-    dtypes: list[str] = []
-    for dtype in parsed:
-        text = str(dtype or "").strip()
-        if not text or text.lower() == "scalar":
-            continue
-        if text not in dtypes:
-            dtypes.append(text)
-    return dtypes
-
-
-def _append_unique_list(target: list[Any], values: list[Any]) -> None:
-    for value in values:
-        if value not in target:
-            target.append(value)
-
-
 def _coerce_count(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -929,46 +1443,6 @@ def _coerce_count(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return count if count > 0 else None
-
-
-def _kernel_detail_call_count(details: Any, kernel_name: str) -> int | None:
-    parsed = _safe_literal(details)
-    if isinstance(parsed, list):
-        total = 0
-        for entry in parsed:
-            if not isinstance(entry, dict) or entry.get("name") != kernel_name:
-                continue
-            count = _coerce_count(entry.get("count") or entry.get("call_count"))
-            if count:
-                total += count
-        return total or None
-
-    text = str(details or "")
-    if kernel_name not in text:
-        return None
-    pattern = re.compile(
-        r"\{[^{}]*['\"]name['\"]\s*:\s*['\"]"
-        + re.escape(kernel_name)
-        + r"['\"][^{}]*['\"]count['\"]\s*:\s*([^,}]+)"
-    )
-    total = 0
-    for match in pattern.finditer(text):
-        count = _coerce_count(match.group(1))
-        if count:
-            total += count
-    return total or None
-
-
-def _row_call_count(row: dict[str, Any], details_col: str, name: str,
-                    operation_count_col: str | None) -> int:
-    detail_count = _kernel_detail_call_count(row.get(details_col), name)
-    if detail_count:
-        return detail_count
-    if operation_count_col:
-        op_count = _coerce_count(row.get(operation_count_col))
-        if op_count:
-            return op_count
-    return 1
 
 
 def _merge_shape_call(target: list[Any], shape: Any, call_num: int) -> None:
@@ -997,330 +1471,12 @@ def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any
     return entries
 
 
-def _materialized_output_stride(perf_params: dict[str, Any]) -> bool:
-    stride = perf_params.get("stride_output")
-    return stride not in (None, "", (), [])
-
-
-def _output_shapes_from_perf_params(perf_params: Any) -> list[Any]:
-    parsed = _safe_literal(perf_params)
-    if not isinstance(parsed, dict):
-        return []
-
-    shapes: list[Any] = []
-
-    def add_shape(value: Any) -> None:
-        if value in (None, "", (), []):
-            return
-        shape = _shape_to_jsonable(value)
-        if shape in (None, "", [], ()):
-            return
-        if shape not in shapes:
-            shapes.append(shape)
-
-    for key in ("shape_out", "output_shape"):
-        add_shape(parsed.get(key))
-
-    output_shapes = parsed.get("output_shapes")
-    if isinstance(output_shapes, (list, tuple)):
-        jsonable_output_shapes = _shape_to_jsonable(output_shapes)
-        if (
-            isinstance(jsonable_output_shapes, list)
-            and jsonable_output_shapes
-            and all(isinstance(shape, list) for shape in jsonable_output_shapes)
-        ):
-            for shape in output_shapes:
-                add_shape(shape)
-        else:
-            add_shape(output_shapes)
-
-    if _materialized_output_stride(parsed):
-        add_shape(parsed.get("op_shape"))
-
-    return shapes
-
-
-def _output_dtypes_from_perf_params(perf_params: Any) -> list[str]:
-    parsed = _safe_literal(perf_params)
-    if not isinstance(parsed, dict):
-        return []
-
-    dtypes: list[str] = []
-
-    def add_dtype(value: Any) -> None:
-        text = str(value or "").strip()
-        if not text or text.lower() in {"none", "scalar"}:
-            return
-        if text not in dtypes:
-            dtypes.append(text)
-
-    for key in ("dtype_out", "output_dtype", "output_type"):
-        add_dtype(parsed.get(key))
-
-    for key in ("dtype_in_out", "dtype_in1_in2_out"):
-        value = parsed.get(key)
-        if isinstance(value, (list, tuple)) and value:
-            add_dtype(value[-1])
-
-    return dtypes
-
-
-def augment_csv_candidates_with_unified_perf_summary(
-    candidates: list[dict[str, Any]], csv_path: Path,
-) -> None:
-    """Backfill TraceLens shapes/dtypes from unified_perf_summary.csv."""
-    import csv as _csv
-    if not candidates or not csv_path.exists():
-        return
-    by_name = {str(c.get("name") or ""): c for c in candidates if c.get("name")}
-    if not by_name:
-        return
-    try:
-        with csv_path.open(encoding="utf-8") as f:
-            rdr = _csv.DictReader(f)
-            field_lookup = {h.lower(): h for h in (rdr.fieldnames or [])}
-            details_col = field_lookup.get("kernel_details_summary")
-            dims_col = field_lookup.get("input dims")
-            type_col = field_lookup.get("input type")
-            perf_params_col = field_lookup.get("perf_params")
-            operation_count_col = field_lookup.get("operation_count")
-            op_col = field_lookup.get("name")
-            if not details_col or not dims_col or not type_col:
-                return
-            for row in rdr:
-                details = str(row.get(details_col) or "")
-                if not details:
-                    continue
-                for name, candidate in by_name.items():
-                    if name not in details:
-                        continue
-                    shapes = _non_scalar_shapes(row.get(dims_col))
-                    dtypes = _non_scalar_dtypes(row.get(type_col))
-                    output_shapes = _output_shapes_from_perf_params(
-                        row.get(perf_params_col) if perf_params_col else None
-                    )
-                    output_dtypes = _output_dtypes_from_perf_params(
-                        row.get(perf_params_col) if perf_params_col else None
-                    )
-                    if shapes:
-                        input_shapes = candidate.setdefault("input_shapes", [])
-                        if isinstance(input_shapes, list):
-                            call_count = _row_call_count(
-                                row, details_col, name, operation_count_col,
-                            )
-                            for shape in shapes:
-                                _merge_shape_call(input_shapes, shape, call_count)
-                        legacy_shapes = candidate.setdefault("shapes", [])
-                        if isinstance(legacy_shapes, list):
-                            _append_unique_list(legacy_shapes, shapes)
-                    if dtypes:
-                        existing_dtypes = candidate.setdefault("input_dtypes", [])
-                        if isinstance(existing_dtypes, list):
-                            _append_unique_list(existing_dtypes, dtypes)
-                    if output_shapes:
-                        existing_output_shapes = candidate.setdefault("output_shapes", [])
-                        if isinstance(existing_output_shapes, list):
-                            _append_unique_list(existing_output_shapes, output_shapes)
-                    if output_dtypes:
-                        existing_output_dtypes = candidate.setdefault("output_dtypes", [])
-                        if isinstance(existing_output_dtypes, list):
-                            _append_unique_list(existing_output_dtypes, output_dtypes)
-                    runtime_args = candidate.setdefault("runtime_args", {})
-                    if isinstance(runtime_args, dict):
-                        args_rows = runtime_args.setdefault("tracelens_args", [])
-                        if isinstance(args_rows, list):
-                            item = {
-                                "op": str(row.get(op_col) or ""),
-                                "input_dims": row.get(dims_col) or "",
-                                "input_types": row.get(type_col) or "",
-                            }
-                            if item not in args_rows:
-                                args_rows.append(item)
-    except Exception:
-        return
-
-
-# ---------------------------------------------------------------------------
-# #125: TraceLens orchestrator structured outputs (category_data/*.json)
-# ---------------------------------------------------------------------------
-# When the analysis-orchestrator skill runs (Step 5+), TraceLens
-# emits per-category JSON files carrying the GEAK-required triple
-# (kernel_category, kernel_shape, kernel_path) directly. We consume them
-# when present; otherwise we fall back to the kernel_summary.csv parser
-# (with shape backfill from raw trace) or, as a last resort, the legacy
-# raw-trace parser.
-#
-# The schema is still being negotiated with the TraceLens team
-# (traceLens-issue.md §3.4.5 / §7.2). We accept three observed layouts:
-#
-#   (1) {"category": "GEMM", "kernels": [{name, duration_us, shape,
-#                                          source_path, ...}, ...]}
-#   (2) {"name": "GEMM", "items": [...]}                # alt key names
-#   (3) {"GEMM": [...], "SDPA": [...]}                  # flat dict-of-lists
-
-
-def _extract_category_kernels(payload: Any) -> list[dict[str, Any]]:
-    """Best-effort kernel list extractor for category_data layouts."""
-    out: list[dict[str, Any]] = []
-    if isinstance(payload, dict):
-        cat = (payload.get("category") or payload.get("name") or "").strip()
-        kernels = payload.get("kernels") or payload.get("items") or payload.get("entries")
-        if isinstance(kernels, list):
-            for k in kernels:
-                if isinstance(k, dict):
-                    item = dict(k)
-                    if cat and not item.get("category"):
-                        item["category"] = cat
-                    out.append(item)
-            return out
-        # Flat dict-of-lists layout.
-        for k, v in payload.items():
-            if isinstance(v, list):
-                for entry in v:
-                    if isinstance(entry, dict):
-                        item = dict(entry)
-                        item.setdefault("category", k)
-                        out.append(item)
-    elif isinstance(payload, list):
-        for entry in payload:
-            if isinstance(entry, dict):
-                out.append(entry)
-    return out
-
-
-def parse_tracelens_category_data(
-    category_dir: Path, top_k: int,
-) -> list[dict[str, Any]] | None:
-    """Read TraceLens ``category_data/*.json`` → candidates with the GEAK
-    (kernel_category, shape, source_path) triple (#125).
-
-    Returns ``None`` when the directory doesn't exist, is empty, or yields
-    no parseable kernels. Caller falls back to the csv parser.
-    """
-    if not category_dir.exists() or not category_dir.is_dir():
-        return None
-
-    rows: list[dict[str, Any]] = []
-    for jp in sorted(category_dir.glob("*.json")):
-        try:
-            payload = json.loads(jp.read_text(encoding="utf-8", errors="replace"))
-        except Exception:
-            continue
-        for entry in _extract_category_kernels(payload):
-            name = str(entry.get("name") or entry.get("kernel_name") or "").strip()
-            if not name:
-                continue
-            try:
-                dur = float(
-                    entry.get("duration_us")
-                    or entry.get("duration")
-                    or entry.get("sum_duration_us")
-                    or 0
-                )
-            except (TypeError, ValueError):
-                continue
-            if dur <= 0:
-                continue
-            try:
-                cnt = int(float(entry.get("call_count") or entry.get("count") or 0))
-            except (TypeError, ValueError):
-                cnt = 0
-            shape = entry.get("shape") or entry.get("input_shape") or entry.get("shapes")
-            shapes_field: list[Any] = []
-            if isinstance(shape, list):
-                shapes_field = [shape] if shape and not isinstance(shape[0], (list, dict)) else list(shape)
-            elif shape:
-                shapes_field = [shape]
-            source_path = str(
-                entry.get("source_path") or entry.get("source_file")
-                or entry.get("path") or ""
-            ).strip()
-            rows.append({
-                "name": name,
-                "duration_us": dur,
-                "call_count": cnt,
-                "tracelens_category": str(entry.get("category") or "").strip(),
-                "shapes": shapes_field,
-                "source_file": source_path,
-            })
-
-    if not rows:
-        return None
-
-    # Aggregate same-name rows (rare across category files but defensive).
-    agg: dict[str, dict[str, Any]] = {}
-    for r in rows:
-        bucket = agg.setdefault(
-            r["name"],
-            {"name": r["name"], "duration_us": 0.0, "call_count": 0,
-             "source_file": r["source_file"],
-             "source_type": "unknown",
-             "shapes": [],
-             "tracelens_category": r["tracelens_category"]},
-        )
-        bucket["duration_us"] += r["duration_us"]
-        bucket["call_count"] += r["call_count"]
-        for sh in r["shapes"]:
-            if sh not in bucket["shapes"]:
-                bucket["shapes"].append(sh)
-        if not bucket["source_file"] and r["source_file"]:
-            bucket["source_file"] = r["source_file"]
-        if not bucket["tracelens_category"] and r["tracelens_category"]:
-            bucket["tracelens_category"] = r["tracelens_category"]
-
-    total_dur = sum(c["duration_us"] for c in agg.values())
-    top = sorted(agg.values(), key=lambda x: x["duration_us"], reverse=True)[:top_k]
-    return _finalize_candidates(top, total_dur=total_dur)
-
-
-def augment_csv_candidates_with_raw_shapes(
-    candidates: list[dict[str, Any]], trace_files: list[Path],
-) -> None:
-    """Best-effort shape backfill for csv-only candidates (#125).
-
-    The csv parser doesn't carry shape info because ``kernel_summary.csv``
-    aggregates by kernel name and drops per-launch ``Input Dims``. We mine
-    the raw trace once for any candidate whose ``shapes`` list is still
-    empty. Failures are silent — this is enrichment, not a hard requirement.
-    """
-    needs_shape = [c for c in candidates if not c.get("shapes")]
-    if not needs_shape:
-        return
-    name_set = {c["name"] for c in needs_shape}
-    found: dict[str, list[Any]] = {}
-    for tf in trace_files:
-        try:
-            payload = open_json(tf)
-        except Exception:
-            continue
-        events = payload.get("traceEvents") if isinstance(payload, dict) else None
-        if not isinstance(events, list):
-            continue
-        for ev in events:
-            if not isinstance(ev, dict) or not is_kernel_event(ev):
-                continue
-            ename = str(ev.get("kernel_name") or ev.get("name") or "")
-            if ename not in name_set:
-                continue
-            shape = extract_shape(ev)
-            if not shape:
-                continue
-            bucket = found.setdefault(ename, [])
-            if shape not in bucket:
-                bucket.append(shape)
-    for cand in needs_shape:
-        sh = found.get(cand["name"])
-        if sh:
-            cand["shapes"] = sh
-
-
 def derive_kernel_category(candidate: dict[str, Any]) -> str:
     """Map a candidate to its GEAK-facing kernel category (#125).
 
     Priority:
       1. Explicit category from TraceLens (the ``analysis.md`` 9-column table
-         in the Detailed Analysis section, or the legacy
-         ``priority_data.findings[].category`` / category_data ``category``).
+         in the Detailed Analysis section).
          Mapped via the upstream ``CATEGORY_SKILL_MAP`` keyset
          (``orchestrator_prepare.py``) — see PR #155 review comment from
          @tsrikris (TraceLens team).
@@ -1332,6 +1488,8 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
     cat = (candidate.get("tracelens_category") or "").strip()
     if cat:
         return normalize_upstream_category(cat)
+    if candidate.get("source_type") == "flydsl":
+        return "FlyDSL"
     name = str(candidate.get("name") or "").lower()
     if any(t in name for t in ("gemm", "matmul", "rocblas", "hipblas",
                                 "cijk", "sgemm", "hgemm")):
@@ -1424,9 +1582,7 @@ def _finalize_candidates(
 ) -> list[dict[str, Any]]:
     """Apply source resolution / pybind upgrade / backend recommend / notes.
 
-    Shared post-processing for both the raw-trace parser
-    (``analyze_trace_files``) and the TraceLens csv parser
-    (``parse_tracelens_kernel_summary``). Mutates ``top`` in place.
+    Shared post-processing for parsed candidate rows. Mutates ``top`` in place.
     """
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
@@ -1436,7 +1592,7 @@ def _finalize_candidates(
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
         item["kernel_id"] = f"k{idx:03d}"
-        # Honour pre-computed gpu_pct (B path), else compute now.
+        # Honour pre-computed gpu_pct when present, else compute now.
         if not item.get("gpu_pct"):
             item["gpu_pct"] = round(item["duration_us"] / sum_dur * 100.0, 3)
         item["duration_us"] = round(item["duration_us"], 3)
@@ -1449,10 +1605,46 @@ def _finalize_candidates(
         item["source_file"] = upgrade_pybind_shim_source(
             item.get("source_file", ""), item["name"], item.get("kernel_repo", "")
         )
+        # PR-K: aiter @compile_ops launcher → device source promotion.
+        # Capture the wrapper path BEFORE the upgrade so the LLM prompt
+        # builder can render BOTH (device source as the rewrite target +
+        # python launcher as call-site context). Only set
+        # ``launcher_source_file`` when promotion actually changed the
+        # path — otherwise the field would carry the same value as
+        # ``source_file`` and add nothing to the prompt. ``tracelens_
+        # launcher_path`` (the verbatim TraceLens kernel-path string) is
+        # set elsewhere in tracelens_skill_runner._row_to_candidate and
+        # is preserved through this pass for AST-grouping consumers.
+        wrapper_before_promotion = item.get("source_file", "")
+        item["source_file"] = upgrade_aiter_compile_ops_launcher(
+            wrapper_before_promotion, item["name"], item.get("kernel_repo", "")
+        )
+        if item["source_file"] != wrapper_before_promotion:
+            item["launcher_source_file"] = wrapper_before_promotion
+            item["source_promoted_from_launcher"] = True
         # Re-resolve repo in case the upgraded path lives in a different repo
         # (rare, but defensive).
         item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
         item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
+        # PR #668 FlyDSL pseudo-ops (pseudo_op::moe_flydsl_stage{1,2}) are
+        # synthetic and carry no source_file, so classify_patchability below
+        # would reject them ("source file not resolved") and kernel-opt would
+        # see zero reusable-native candidates. Inject the real FlyDSL MoE
+        # kernel source BEFORE the patchability gate so FlyDSL routes to GEAK.
+        # FlyDSL pseudo-ops either carry no source_file or a profiler frame
+        # label like ``aiter/fused_moe.py(986): fused_moe_2stages`` that is
+        # not a real rewritable path under a reusable framework root. In both
+        # cases inject the real FlyDSL MoE kernel source.
+        if item["source_type"] == "flydsl":
+            _sf = str(item.get("source_file") or "").strip()
+            if (not _sf) or (not os.path.isfile(_sf)):
+                _fb = _resolve_flydsl_source_fallback()
+                if _fb:
+                    item["source_file"] = _fb
+                    item["kernel_repo"] = (
+                        find_repo_root(_fb) or item.get("kernel_repo", "")
+                    )
+                    item["flydsl_source_from_fallback"] = True
         # Re-classify thin vendor / dispatch wrappers (the .so/.co loader
         # shims that have no rewritable kernel body). Even when the file
         # extension is .cu/.py and source_type would otherwise be hip_cpp/
@@ -1483,9 +1675,9 @@ def _finalize_candidates(
         item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
         item["recommended_backends"] = recommend_backends(item)
         item["optimization_notes"] = build_notes(item)
-        # #125: surface a stable kernel_category for GEAK to dispatch on,
-        # plus source_path mirror for parity with TraceLens category_data.
-        # shape is already populated in `shapes`.
+        # Surface a stable kernel_category for GEAK to dispatch on, plus a
+        # source_path mirror for downstream prompt/report consumers. Shape is
+        # already populated in `shapes`.
         item["kernel_category"] = derive_kernel_category(item)
         item.setdefault("source_path", item.get("source_file", ""))
     return top
@@ -1540,31 +1732,6 @@ def build_notes(candidate: dict[str, Any]) -> str:
     if not candidate.get("reusable_native_kernel", is_reusable_native_kernel(candidate)):
         return "not a reusable native source; kernel-opt disabled"
     return f"resolved source: {candidate['source_file']}"
-
-
-def select_perf_report_cli(log_path: Path) -> str:
-    """Pick the TraceLens perf-report CLI for the current install (#124).
-
-    Prefers ``TraceLens_generate_perf_report_pytorch_inference`` (the correct
-    entry for vLLM/SGLang inference traces) and falls back to the legacy
-    ``TraceLens_generate_perf_report_pytorch`` when only an older TraceLens
-    build is on PATH. Raises if neither is available.
-    """
-    if shutil.which(INFERENCE_PERF_CLI):
-        append_log(log_path, f"perf report CLI: {INFERENCE_PERF_CLI} (TraceLens #124)")
-        return INFERENCE_PERF_CLI
-    if shutil.which(LEGACY_PERF_CLI):
-        append_log(
-            log_path,
-            f"WARNING: {INFERENCE_PERF_CLI} not on PATH; falling back to "
-            f"{LEGACY_PERF_CLI} (legacy TraceLens build)",
-        )
-        return LEGACY_PERF_CLI
-    raise RuntimeError(
-        f"No TraceLens perf-report CLI found on PATH. "
-        f"Looked for {INFERENCE_PERF_CLI!r} (preferred, #124) and "
-        f"{LEGACY_PERF_CLI!r} (legacy fallback)."
-    )
 
 
 def run_command(cmd: list[str], *, cwd: Path | None, log_path: Path, timeout_s: int) -> int:
@@ -1649,9 +1816,120 @@ def merge_roofline_into_candidates(
         else:
             item.setdefault("bottleneck", "unknown")
             item.setdefault("arithmetic_intensity", None)
-            item.setdefault("compute_utilization_pct", 0.0)
-            item.setdefault("bandwidth_utilization_pct", 0.0)
+            item.setdefault("compute_utilization_pct", None)
+            item.setdefault("bandwidth_utilization_pct", None)
             item.setdefault("recommended_actions", [])
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Project one hot-kernel candidate into the kernel-roofline view."""
+    arithmetic_intensity = _first_non_empty(
+        candidate.get("arithmetic_intensity"),
+        candidate.get("flops_per_byte"),
+    )
+    return {
+        "kernel_id": candidate.get("kernel_id"),
+        "name": candidate.get("name"),
+        "gpu_pct": candidate.get("gpu_pct"),
+        "duration_us": candidate.get("duration_us"),
+        "call_count": candidate.get("call_count"),
+        "kernel_category": candidate.get("kernel_category"),
+        "source_file": candidate.get("source_file"),
+        "bottleneck": _first_non_empty(
+            candidate.get("bottleneck"),
+            candidate.get("bound_type"),
+        ),
+        "bound_type": candidate.get("bound_type"),
+        "arithmetic_intensity": arithmetic_intensity,
+        "flops_per_byte": candidate.get("flops_per_byte"),
+        "efficiency_percent": candidate.get("efficiency_percent"),
+        "compute_utilization_pct": candidate.get("compute_utilization_pct"),
+        "bandwidth_utilization_pct": candidate.get("bandwidth_utilization_pct"),
+        "suggestion": candidate.get("suggestion") or "",
+        "roofline_name": candidate.get("roofline_name"),
+        "recommended_actions": list(candidate.get("recommended_actions") or []),
+        "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
+    }
+
+
+def build_kernel_roofline_payload(
+    *,
+    trace_input: str,
+    trace_input_type: str,
+    analysis_md_path: str,
+    kernel_candidates_path: str,
+    roofline_json_path: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the structured per-kernel roofline sidecar.
+
+    This sidecar is a view over TraceLens candidates plus optional
+    ``--roofline-json`` enrichment. It does not invent missing
+    utilization counters: absent compute/bandwidth utilization stays
+    ``null`` in JSON.
+    """
+    rows = [
+        _kernel_roofline_row(candidate)
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    ]
+    return {
+        "schema_version": 1,
+        "source": "tracelens_analysis",
+        "trace_input": trace_input,
+        "trace_input_type": trace_input_type,
+        "analysis_md_path": analysis_md_path,
+        "kernel_candidates_path": kernel_candidates_path,
+        "roofline_json_path": roofline_json_path,
+        "kernels": rows,
+    }
+
+
+def kernel_roofline_path_for_run(run_dir: Path) -> Path:
+    """Return the session-level kernel roofline report path (latest pointer).
+
+    PR-C: ``run_dir`` is now ``.../runs/<session_id>/<ts>_<run_id>/`` so
+    we walk one extra level up to reach the kernel-agent root.
+    Pre-PR-C layout (``.../runs/<session_id>/``) is still supported via
+    the fallback branch in case a caller invokes this with an old-shape
+    path.
+
+    The session-level path remains the dashboard's stable entry point
+    (one path, always the latest). Per-snapshot analysis.md /
+    kernel_candidates.json etc. live under the per-invocation run_dir
+    and are stamped into ``roofline_snapshots[i].analysis_md_path``
+    so historical snapshots survive intact.
+    """
+    try:
+        # PR-C layout: .../runs/<session_id>/<ts>_<run_id>/
+        session_sub = run_dir.parent
+        runs_dir = session_sub.parent
+        kernel_agent_dir = runs_dir.parent
+    except (IndexError, AttributeError):
+        return run_dir / "reports" / "kernel_roofline.json"
+    if runs_dir.name == "runs" and kernel_agent_dir.name == "kernel-agent":
+        session_dir = kernel_agent_dir.parent
+        return session_dir / "reports" / "kernel_roofline.json"
+    # Backward-compat: pre-PR-C layout (.../runs/<session_id>/)
+    try:
+        runs_dir_legacy = run_dir.parent
+        kernel_agent_dir_legacy = runs_dir_legacy.parent
+    except (IndexError, AttributeError):
+        return run_dir / "reports" / "kernel_roofline.json"
+    if (
+        runs_dir_legacy.name == "runs"
+        and kernel_agent_dir_legacy.name == "kernel-agent"
+    ):
+        session_dir = kernel_agent_dir_legacy.parent
+        return session_dir / "reports" / "kernel_roofline.json"
+    return run_dir / "reports" / "kernel_roofline.json"
 
 
 def _candidate_model_config_paths(model_name: str) -> list[Path]:
@@ -1714,16 +1992,89 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
     return {}
 
 
+_FLYDSL_TARGET_ARCH_BY_PLATFORM = {
+    "mi300x": "gfx942",
+    "mi325x": "gfx942",
+    "mi355x": "gfx950",
+}
+_FLYDSL_SMEM_MARKERS = ("SmemAllocator", "SmemPtr", "smem_alloc")
+_FLYDSL_BUFFER_LOAD_MARKERS = (
+    "make_buffer_tensor", "BufferCopy", "rocdl", "buffer_load",
+)
+
+
+def _resolve_flydsl_source_fallback() -> str:
+    """Resolve the real FlyDSL MoE kernel source for pseudo-op candidates.
+
+    PR #668 pseudo-ops (``pseudo_op::moe_flydsl_stage{1,2}``) are synthetic
+    and carry no ``source_file``, so :func:`classify_patchability` would
+    reject them ("source file not resolved") and the kernel-opt routing
+    would see zero reusable-native candidates. The real rewritable source
+    is FlyDSL's 2-stage MoE GEMM kernel under ``$DSL2_ROOT/kernels/``.
+    Returns the first existing path, else "".
+    """
+    roots = [
+        os.environ.get("DSL2_ROOT", "").strip(),
+        os.environ.get("FLYDSL_ROOT", "").strip(),
+        "/wekafs/yunkai/FlyDSL",
+        "/sgl-workspace/flydsl",
+    ]
+    for root in roots:
+        if not root:
+            continue
+        cand = os.path.join(root, "kernels", "moe_gemm_2stage.py")
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _flydsl_kernel_params(
+    source_file: str, target_platform: str,
+) -> dict[str, Any]:
+    """Return FlyDSL-specific kernel_params for prompt construction.
+
+    Mirrors the metadata GEAK's ``skills/flydsl/`` cheatsheet keys off:
+    JIT cache state, MLIR target arch, and whether the source uses
+    SmemAllocator / buffer-load intrinsics. Best-effort — missing fields
+    just omit; never raise.
+    """
+    params: dict[str, Any] = {}
+    arch = _FLYDSL_TARGET_ARCH_BY_PLATFORM.get(
+        (target_platform or "").strip().lower(),
+    )
+    if arch:
+        params["FLYDSL_TARGET_ARCH"] = arch
+    cache_dir = os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", "").strip()
+    if cache_dir:
+        params["FLYDSL_AUTOTUNE_CACHE_DIR"] = cache_dir
+    enable_cache = os.environ.get("FLYDSL_RUNTIME_ENABLE_CACHE", "").strip()
+    if enable_cache:
+        params["FLYDSL_RUNTIME_ENABLE_CACHE"] = enable_cache
+    if source_file:
+        try:
+            with open(source_file, "r", encoding="utf-8", errors="replace") as fh:
+                head = fh.read(_FLYDSL_SCAN_BYTES)
+        except OSError:
+            head = ""
+        if head:
+            if any(m in head for m in _FLYDSL_SMEM_MARKERS):
+                params["FLYDSL_USES_SMEM"] = True
+            if any(m in head for m in _FLYDSL_BUFFER_LOAD_MARKERS):
+                params["FLYDSL_USES_BUFFER_LOAD"] = True
+    return params
+
+
 def enrich_candidates_with_runtime_metadata(
     candidates: list[dict[str, Any]], args: argparse.Namespace,
 ) -> None:
     """Attach stable runtime metadata fields before GEAK prompt generation."""
     framework = str(getattr(args, "framework", "") or "").strip()
     model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
+    target_platform = str(getattr(args, "target_platform", "") or "")
     runtime_flags = {
         "analysis_mode": getattr(args, "analysis_mode", ""),
         "runtime_env": getattr(args, "runtime_env", ""),
-        "target_platform": getattr(args, "target_platform", ""),
+        "target_platform": target_platform,
     }
     for item in candidates:
         if not isinstance(item, dict):
@@ -1745,6 +2096,22 @@ def enrich_candidates_with_runtime_metadata(
             params = item["kernel_params"]
             if isinstance(params, dict):
                 for key, value in model_params.items():
+                    params.setdefault(key, value)
+        if item.get("source_type") == "flydsl":
+            # PR #668 pseudo-ops carry no source_file (or a non-file frame
+            # label). Inject the real FlyDSL MoE kernel source so GEAK has a
+            # file to rewrite.
+            _sf2 = str(item.get("source_file") or "").strip()
+            if (not _sf2) or (not os.path.isfile(_sf2)):
+                fb = _resolve_flydsl_source_fallback()
+                if fb:
+                    item["source_file"] = fb
+            flydsl_params = _flydsl_kernel_params(
+                str(item.get("source_file") or ""), target_platform,
+            )
+            params = item["kernel_params"]
+            if isinstance(params, dict):
+                for key, value in flydsl_params.items():
                     params.setdefault(key, value)
         flags = item.get("runtime_flags")
         if not isinstance(flags, dict):
@@ -1792,6 +2159,7 @@ def build_audit_summary(
     framework: str = "",
     target_platform: str = "",
     task_groups: list[dict[str, Any]] | None = None,
+    trace_health_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the ``tracelens/summary.json`` payload from finalized candidates.
 
@@ -1866,6 +2234,12 @@ def build_audit_summary(
         "tasks":           tasks,
         "skipped":         skipped,
         "task_groups":     group_entries,
+        # T3: trace-quality findings (e.g. high GPU idle, future:
+        # exposed-comm spikes, allocator contention). An empty list is
+        # the steady-state signal; non-empty entries explain to the
+        # operator why ``tasks`` may be empty even though the trace
+        # parsed cleanly.
+        "trace_health_warnings": list(trace_health_warnings or []),
     }
 
 
@@ -1877,6 +2251,7 @@ def write_reports(
     candidates: list[dict[str, Any]],
     args: argparse.Namespace,
     existing_report_path: Path | None = None,
+    trace_health_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
     """Write Hyperloom-owned sidecar JSONs and surface the upstream Markdown.
 
@@ -1933,9 +2308,39 @@ def write_reports(
     }
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
+    kernel_candidates_path = run_dir / "kernel_candidates.json"
+    # Per AMD-AGI/Hyperloom#314: ``kernel_candidates.json::hot_kernels``
+    # is the dispatch payload consumed by the kernel-opt path
+    # (``kernel_optimization.load_candidates``, ``parallel_e2e_runner``,
+    # ``kernel_request_handlers``). Filter it down to candidates that
+    # ``classify_patchability`` actually marked routable so downstream
+    # batch dispatchers no longer have to re-apply the same filter and
+    # so ``num_hot_kernels`` accounting reflects what we will really
+    # send to a backend. The full unfiltered list stays available in
+    # ``tracelens/tracelens_report.json`` for audit, and the routable
+    # vs. skipped split is also surfaced in ``tracelens/summary.json``
+    # (``tasks[]`` / ``skipped[]``). ``skipped_kernels[]`` carries the
+    # FULL candidate dicts (not just an audit projection) so direct
+    # lookup paths (``kernel_optimization.load_candidates``, the CLI's
+    # ``find_candidate``) can still resolve a non-routable kernel by
+    # id; the dispatcher's ``_validate_reusable_native_kernel`` guard
+    # is what blocks them from reaching a backend.
+    routable_candidates = [
+        c for c in candidates
+        if isinstance(c, dict) and c.get("reusable_native_kernel") is True
+    ]
+    skipped_kernels = [
+        c for c in candidates
+        if isinstance(c, dict) and c.get("reusable_native_kernel") is not True
+    ]
     atomic_write_json(
-        run_dir / "kernel_candidates.json",
-        {"hot_kernels": candidates, "task_groups": task_groups, **report},
+        kernel_candidates_path,
+        {
+            **report,
+            "hot_kernels": routable_candidates,
+            "skipped_kernels": skipped_kernels,
+            "task_groups": task_groups,
+        },
     )
 
     # PR-A §3: per-run audit sidecar listing which TraceLens hot kernels
@@ -1953,40 +2358,74 @@ def write_reports(
         framework=str(args.framework or ""),
         target_platform=str(args.target_platform or ""),
         task_groups=task_groups,
+        trace_health_warnings=trace_health_warnings,
     )
     summary_path = tracelens_dir / "summary.json"
     atomic_write_json(summary_path, summary)
 
-    if existing_report_path is None or not existing_report_path.exists():
+    missing_trace_report = (
+        existing_report_path is None or not existing_report_path.exists()
+    )
+    trace_quality_blocked = any(
+        isinstance(w, dict) and w.get("code") == "trace_split_no_steady_state"
+        for w in (trace_health_warnings or [])
+    )
+    if missing_trace_report:
         if not getattr(args, "dry_run", False):
-            raise RuntimeError(
-                "TraceLens SDK orchestrator did not produce analysis.md "
-                f"(expected at {existing_report_path}); refusing to "
-                "fabricate a Markdown report. Inspect the TraceLens skill "
-                "log and report upstream if this is reproducible."
+            if trace_quality_blocked:
+                # No TraceLens SDK report exists because we intentionally
+                # refused to run it on a raw/non-steady trace. Keep the
+                # structured JSON sidecars and leave trace_report_path empty
+                # rather than fabricating a misleading analysis.md.
+                existing_report_path = None
+            else:
+                raise RuntimeError(
+                    "TraceLens SDK orchestrator did not produce analysis.md "
+                    f"(expected at {existing_report_path}); refusing to "
+                    "fabricate a Markdown report. Inspect the TraceLens skill "
+                    "log and report upstream if this is reproducible."
+                )
+        else:
+            # ``--dry-run``: synthesize a tiny stub so test wiring that
+            # checks ``trace_report_path`` existence still passes. Never
+            # taken on a real (non-test) invocation.
+            stub_md = tracelens_dir / "analysis.md"
+            stub_md.write_text(
+                "# TraceLens dry-run stub (no SDK orchestrator output)\n",
+                encoding="utf-8",
             )
-        # ``--dry-run``: synthesize a tiny stub so test wiring that
-        # checks ``trace_report_path`` existence still passes. Never
-        # taken on a real (non-test) invocation.
-        stub_md = tracelens_dir / "analysis.md"
-        stub_md.write_text(
-            "# TraceLens dry-run stub (no SDK orchestrator output)\n",
-            encoding="utf-8",
-        )
-        existing_report_path = stub_md
+            existing_report_path = stub_md
 
-    return {
+    kernel_roofline_path = kernel_roofline_path_for_run(run_dir)
+    kernel_roofline_payload = build_kernel_roofline_payload(
+        trace_input=str(Path(args.trace_input).resolve()),
+        trace_input_type=trace_input_type,
+        analysis_md_path=(
+            str(existing_report_path) if existing_report_path else ""
+        ),
+        kernel_candidates_path=str(kernel_candidates_path),
+        roofline_json_path=(
+            str(Path(args.roofline_json).expanduser())
+            if getattr(args, "roofline_json", "") else ""
+        ),
+        candidates=candidates,
+    )
+    atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
+
+    artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
-        "kernel_candidates": str(run_dir / "kernel_candidates.json"),
+        "kernel_candidates": str(kernel_candidates_path),
+        "kernel_roofline": str(kernel_roofline_path),
         "tracelens_report_json": str(tracelens_dir / "tracelens_report.json"),
         # Post-#203 (PR #217): the canonical Markdown exit IS the
         # upstream SDK orchestrator's analysis.md surfaced via
         # ``existing_report_path``; Hyperloom no longer aliases or
         # copies it. PR-A §3 adds the ``summary.json`` audit sidecar
         # alongside (separate file, not a Markdown alias).
-        "trace_report_path": str(existing_report_path),
+        "trace_report_path": str(existing_report_path) if existing_report_path else "",
         "tracelens_summary": str(summary_path),
     }
+    return artifact_paths
 
 
 def _default_workspace_path() -> str:
@@ -2088,7 +2527,11 @@ def main() -> int:
         "--no-llm-orchestrator",
         dest="use_llm_orchestrator",
         action="store_false",
-        help="Disable the Claude SDK TraceLens skill runner and use inline parsing only.",
+        help=(
+            "Disable the Claude SDK TraceLens skill runner. Production runs "
+            "will fail rather than falling back to intermediate/CSV candidate "
+            "parsers; --dry-run still uses the test-only raw parser."
+        ),
     )
     parser.add_argument(
         "--skip-split",
@@ -2140,20 +2583,73 @@ def main() -> int:
             "the splitter fall back to its built-in heuristic."
         ),
     )
+    parser.add_argument(
+        "--steady-state-mode",
+        choices=("mixed", "decode_only", "prefilldecode"),
+        default=(
+            os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip()
+            or "mixed"
+        ),
+        help=(
+            "Which of TraceLens splitter's three steady-state chunks to "
+            "consume for the perf report (see docs/Inference_analysis.md "
+            "in TraceLens-internal). The splitter always produces all "
+            "three (mixed / decode_only / prefilldecode); this flag picks "
+            "ONE per TraceLens's design that the chunks are parallel "
+            "view-of-the-same-trace, not a fallback ladder. "
+            "Defaults to 'mixed' (representative DO:PD mix at ~max "
+            "concurrency) which matches roofline-v2's default profiling "
+            "intent. Switch to 'prefilldecode' when the workload is "
+            "short / batched (NUM_PROMPTS << CONC*OSL) so prefill is "
+            "burst-shaped and the mixed window degenerates to PD=0 -- "
+            "TP=1 + CUDA-graph traces frequently hit this corner case "
+            "because the decode region's GPU work is fully inside the "
+            "graph replay and rocprofiler-sdk doesn't emit aggregate "
+            "Dispatch Task events outside TP-multi-stream contexts, so "
+            "the mixed chunk looks 99%% idle while the prefilldecode "
+            "chunk carries the real GEMM / attention kernels. "
+            "Switch to 'decode_only' when you specifically want the "
+            "longest pure-decode region (decode-perf comparison runs). "
+            "May also be set via env "
+            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE so the coordinator "
+            "can re-issue roofline with a different mode after a "
+            "steady_state_chunk_empty warning lands."
+        ),
+    )
     args = parser.parse_args()
 
     session_id = args.session_id or uuid.uuid4().hex[:12]
     run_id = f"tl-{uuid.uuid4().hex[:8]}"
     started_at = utc_now()
+    # PR-C: per-tracelens-invocation sub-directory so PRELUDE + every
+    # watermark refresh keeps its own analysis.md / kernel_candidates /
+    # trace_split / etc. instead of overwriting the previous run's
+    # files. Format ``<compact_timestamp>_<run_id>`` — sorts
+    # chronologically, run_id keeps uniqueness across same-second
+    # invocations. Pre-PR-C readers walking ``.../runs/<session_id>/``
+    # directly will need to descend one more level; ``kernel_roofline_
+    # path_for_run`` has been updated to handle both layouts.
+    ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0]
+    if not ts_compact.endswith("Z"):
+        ts_compact = ts_compact + "Z"
+    sub_dir = f"{ts_compact}_{run_id}"
     root = Path(args.workspace_path) / "kernel-agent"
-    run_dir = root / "runs" / session_id
+    run_dir = root / "runs" / session_id / sub_dir
     log_path = run_dir / "logs" / "tracelens_analysis" / f"{run_id}.log"
     status_path = run_dir / "status" / "tracelens_analysis" / f"{run_id}.json"
     artifacts: dict[str, str] = {}
     agent_candidates: list[dict[str, Any]] | None = None
     agent_report_path: Path | None = None
+    allow_empty_candidates = False
     orchestrator_mode = "inline"
     orchestrator_error = ""
+    # T3: structured trace-health findings that the handler surfaces to
+    # the Coordinator / GEAK. Populated from the Executive Summary's
+    # ``Idle %`` row (extracted via ``extract_idle_pct_from_analysis_md``)
+    # and any future trace-quality gates we add here. Stays empty in the
+    # inline / non-SDK paths because raw-trace mode never produces an
+    # ``analysis.md`` Executive Summary to interrogate.
+    trace_health_warnings: list[dict[str, Any]] = []
 
     try:
         update_status(status_path, state="running", current_step="discover_trace_input",
@@ -2200,11 +2696,6 @@ def main() -> int:
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],
                         cwd=tl_root, log_path=log_path,
                         timeout_s=max(60, int(args.budget_minutes * 60)))
-            perf_cli = select_perf_report_cli(log_path)
-            rc = run_command([perf_cli, "--help"],
-                             cwd=tl_root, log_path=log_path, timeout_s=60)
-            if rc != 0:
-                raise RuntimeError(f"{perf_cli} --help failed")
             # TraceLens-internal v0.3 (#148): the standalone analysis skill
             # lives under TraceLens/Agent/Analysis/ with the shorter file name
             # `analysis-orchestrator.md` (renamed from
@@ -2213,7 +2704,9 @@ def main() -> int:
             # TRACELENS_ROOT / --tracelens-root for older release branches.
             skill = tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
             if not skill.exists():
-                raise FileNotFoundError(f"TraceLens standalone skill not found: {skill}")
+                skill = tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
+            if not skill.exists():
+                raise FileNotFoundError(f"TraceLens standalone skill not found (tried Agent/Analysis and AgenticMode/Standalone paths): {skill}")
             append_log(log_path, f"TraceLens skill: {skill}")
 
             tracelens_dir = run_dir / "tracelens"
@@ -2229,6 +2722,7 @@ def main() -> int:
             # if the splitter is unavailable or produces no output, fall back
             # to the original filtered trace (legacy behaviour).
             cli_trace_path = trace_files[0]
+            trace_split_blocked = False
             if not args.skip_split:
                 update_status(status_path, state="running", current_step="split_trace",
                               log_path=log_path, artifact_paths=artifacts, run_id=run_id,
@@ -2285,9 +2779,27 @@ def main() -> int:
                     log_path=log_path,
                     timeout_s=max(60, int(args.budget_minutes * 60)),
                 )
-                # Splitter writes <type>_steady_state_*.json[.gz]; accept any of
-                # the three windows (mixed first, then decode_only, then
-                # prefilldecode) and prefer mixed for perf-report consumption.
+                # TraceLens splitter writes three parallel views of the same
+                # steady-state region:
+                #   - mixed_steady_state_*        (representative DO:PD mix)
+                #   - decode_only_steady_state_*  (longest pure-decode run)
+                #   - prefilldecode_steady_state_*(longest pure-PD run)
+                # Per TraceLens docs/Inference_analysis.md these are three
+                # parallel view-of-the-same-trace, NOT a fallback ladder
+                # (TraceLens itself has no internal preference between them).
+                # The consumer (us) picks ONE per the configured intent.
+                #
+                # Pre-N25 behaviour was an implicit `mixed or decode_only or
+                # prefilldecode` chain that auto-fell-through silently. This
+                # broke for the SOLAR-10.7B TP=1 case where the mixed window
+                # degenerated to gpu_busy=0.13% (all forward in CUDA graph
+                # + rocprofiler-sdk emits no Dispatch Task aggregate without
+                # TP-multi-stream sync) while the prefilldecode chunk carried
+                # 60% busy + 480 GEMM + 240 paged_attention. Implicit
+                # fall-through hid the issue. N25 makes the mode explicit
+                # (--steady-state-mode flag, default 'mixed') and hard-fails
+                # when the selected chunk doesn't exist or is empty so the
+                # operator can re-issue roofline with a different mode.
                 def _collect(prefix: str) -> list[Path]:
                     out: list[Path] = []
                     for ext in ("trace.json.gz", "json.gz", "trace.json", "json"):
@@ -2297,29 +2809,175 @@ def main() -> int:
                 mixed_chunks = _collect("mixed")
                 decode_chunks = _collect("decode_only")
                 prefill_chunks = _collect("prefilldecode")
-                steady_chunks = mixed_chunks or decode_chunks or prefill_chunks
-                if split_rc == 0 and steady_chunks:
-                    cli_trace_path = steady_chunks[0]
-                    artifacts["tracelens_trace_split_dir"] = str(split_dir)
-                    artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
-                    append_log(
-                        log_path,
-                        f"trace split OK: mixed={len(mixed_chunks)} "
-                        f"decode_only={len(decode_chunks)} "
-                        f"prefilldecode={len(prefill_chunks)}; "
-                        f"using {cli_trace_path.name} for perf report",
+                # Splitter produced nothing at all -> existing
+                # trace_split_no_steady_state failure (treated as unrecoverable
+                # at the action layer; operator must re-profile).
+                if split_rc != 0 or not (mixed_chunks or decode_chunks or prefill_chunks):
+                    warning = _build_trace_split_warning(
+                        trace_input=trace_files[0],
+                        split_dir=split_dir,
+                        split_rc=split_rc,
+                        mixed_count=len(mixed_chunks),
+                        decode_count=len(decode_chunks),
+                        prefilldecode_count=len(prefill_chunks),
                     )
-                else:
+                    trace_health_warnings.append(warning)
                     append_log(
                         log_path,
                         f"WARNING: trace split unavailable "
                         f"(rc={split_rc}, mixed={len(mixed_chunks)}, "
                         f"decode_only={len(decode_chunks)}, "
                         f"prefilldecode={len(prefill_chunks)}); "
-                        f"falling back to filtered trace {trace_files[0].name}",
+                        "refusing raw-trace fallback and returning "
+                        "trace_split_no_steady_state warning",
+                    )
+                    raise RuntimeError(
+                        "trace_split_no_steady_state: TraceLens splitter "
+                        "produced no steady-state chunks; refusing to run "
+                        "TraceLens analysis on the raw trace"
                     )
 
-            if args.use_llm_orchestrator:
+                _mode_to_chunks = {
+                    "mixed": ("mixed_steady_state", mixed_chunks),
+                    "decode_only": ("decode_only_steady_state", decode_chunks),
+                    "prefilldecode": ("prefilldecode_steady_state", prefill_chunks),
+                }
+                chunk_label, selected_chunks = _mode_to_chunks[args.steady_state_mode]
+                if not selected_chunks:
+                    # Requested mode produced no chunk; the OTHER two may have
+                    # produced chunks but per TraceLens design we don't pick
+                    # them as a silent fallback -- emit a structured warning
+                    # so the coordinator can re-issue roofline with a
+                    # different --steady-state-mode (N25 contract).
+                    warning = {
+                        "code": "steady_state_chunk_missing",
+                        "severity": "blocking",
+                        "requested_mode": args.steady_state_mode,
+                        "requested_chunk_label": chunk_label,
+                        "available_modes": [
+                            m for m, (_, ch) in _mode_to_chunks.items() if ch
+                        ],
+                        "remediation": (
+                            "Re-issue roofline with env "
+                            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one "
+                            "of the available_modes (or pass --steady-state-mode "
+                            "directly when invoking tracelens_analysis.py)."
+                        ),
+                        "trace_input": str(trace_files[0]),
+                        "split_dir": str(split_dir),
+                    }
+                    trace_health_warnings.append(warning)
+                    append_log(
+                        log_path,
+                        f"ERROR: --steady-state-mode={args.steady_state_mode} "
+                        f"requested but no {chunk_label}_*.json[.gz] in "
+                        f"{split_dir} (mixed={len(mixed_chunks)}, "
+                        f"decode_only={len(decode_chunks)}, "
+                        f"prefilldecode={len(prefill_chunks)}); refusing "
+                        "silent fallback per TraceLens parallel-chunk design",
+                    )
+                    raise RuntimeError(
+                        f"steady_state_chunk_missing: requested "
+                        f"--steady-state-mode={args.steady_state_mode} but "
+                        f"splitter produced no matching chunk under "
+                        f"{split_dir}"
+                    )
+
+                # Sanity check: the selected chunk must have observable GPU
+                # work. Splitter's execution_details.csv carries
+                # `num_gpu_events` per chunk -- when it's 0 (or
+                # gpu_busy_duration == 0) the chunk is structurally empty
+                # (e.g. SOLAR-10.7B TP=1 mixed = pure-decode region with all
+                # forward inside CUDA graph + no Dispatch Task aggregate).
+                # Running TraceLens on such a chunk yields the misleading
+                # "Compute %=0.18%, Idle %=99.77%, kernel_count=0" report.
+                # This is NOT a heuristic chunk-reordering rule; it's a
+                # data-validity gate: TraceLens analysis only makes sense
+                # when the chunk has GPU events to analyze. The remediation
+                # is the same as `_chunk_missing`: re-issue with a different
+                # --steady-state-mode (the other two chunks may carry the
+                # real workload).
+                cli_trace_path = selected_chunks[0]
+                empty_chunk_warning = _check_selected_chunk_has_gpu_events(
+                    split_dir=split_dir,
+                    selected_chunk=cli_trace_path,
+                    mode=args.steady_state_mode,
+                    available_modes=_mode_to_chunks,
+                )
+                if empty_chunk_warning is not None:
+                    trace_health_warnings.append(empty_chunk_warning)
+                    append_log(
+                        log_path,
+                        f"ERROR: --steady-state-mode={args.steady_state_mode} "
+                        f"selected chunk {cli_trace_path.name} has "
+                        f"num_gpu_events={empty_chunk_warning['num_gpu_events']} "
+                        f"/ gpu_busy_duration={empty_chunk_warning['gpu_busy_duration']}"
+                        f"; refusing to feed an empty chunk to TraceLens "
+                        "analysis (would produce misleading "
+                        "'Compute %=~0, Idle %=~100' Executive Summary)",
+                    )
+                    raise RuntimeError(
+                        f"steady_state_chunk_empty: requested "
+                        f"--steady-state-mode={args.steady_state_mode} but the "
+                        f"selected chunk has zero GPU events; available "
+                        f"non-empty modes: "
+                        f"{empty_chunk_warning['non_empty_modes']}"
+                    )
+
+                # N36 (May 2026) — quality gate on busy_ratio. N25
+                # only catches structurally empty chunks (events==0
+                # OR busy==0); a chunk like the DSR1-0528 10k/1k case
+                # (160 events / 2ms busy / 3.26s duration = 0.06%
+                # busy) passes N25 but is substantively garbage. The
+                # quality gate looks for an alternate mode with
+                # materially higher busy_ratio and emits a
+                # ``steady_state_chunk_low_quality`` warning the
+                # coordinator's N26 retry path consumes -- same
+                # remediation flow as the empty-chunk case, no
+                # additional wiring required. See N36 module-level
+                # comment + test_n36_chunk_quality_gate.py.
+                low_quality_warning = _check_selected_chunk_has_gpu_events_quality(
+                    split_dir=split_dir,
+                    selected_chunk=cli_trace_path,
+                    mode=args.steady_state_mode,
+                    available_modes=_mode_to_chunks,
+                )
+                if low_quality_warning is not None:
+                    trace_health_warnings.append(low_quality_warning)
+                    append_log(
+                        log_path,
+                        f"ERROR: --steady-state-mode={args.steady_state_mode} "
+                        f"selected chunk {cli_trace_path.name} is "
+                        f"non-empty but low-quality: busy_ratio="
+                        f"{low_quality_warning['busy_ratio']*100:.3f}% "
+                        f"(threshold "
+                        f"{low_quality_warning['threshold']*100:.0f}%); "
+                        f"alternate modes with higher busy_ratio: "
+                        f"{low_quality_warning['non_empty_modes']}. "
+                        "Refusing to analyze (would yield misleading "
+                        "high-idle Executive Summary).",
+                    )
+                    raise RuntimeError(
+                        f"steady_state_chunk_low_quality: requested "
+                        f"--steady-state-mode={args.steady_state_mode} chunk "
+                        f"busy_ratio="
+                        f"{low_quality_warning['busy_ratio']*100:.3f}%; "
+                        f"better alternates: "
+                        f"{low_quality_warning['non_empty_modes']}"
+                    )
+
+                artifacts["tracelens_trace_split_dir"] = str(split_dir)
+                artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
+                append_log(
+                    log_path,
+                    f"trace split OK: mixed={len(mixed_chunks)} "
+                    f"decode_only={len(decode_chunks)} "
+                    f"prefilldecode={len(prefill_chunks)}; "
+                    f"--steady-state-mode={args.steady_state_mode} -> "
+                    f"using {cli_trace_path.name} for perf report",
+                )
+
+            if args.use_llm_orchestrator and not trace_split_blocked:
                 update_status(status_path, state="running",
                               current_step="run_tracelens_sdk_orchestrator",
                               log_path=log_path, artifact_paths=artifacts,
@@ -2348,33 +3006,83 @@ def main() -> int:
                     agent_report_path = skill_result.report_path
                     orchestrator_mode = "claude_agent_sdk"
 
-                    # Per PR #155 review (TraceLens team @tsrikris):
-                    # the final ``analysis.md`` report is the contracted exit
-                    # point; intermediate ``priority_data.json`` /
-                    # ``category_data/*.json`` are sub-agent inputs and should
-                    # not be the primary source. Try the report first; only if
-                    # the report has no Detailed Analysis blocks do we fall
-                    # back to ``priority_data.json`` (legacy path).
+                    # Per TraceLens_Report_Interfacing.docx §2, the final
+                    # ``analysis.md`` report is the contracted exit point.
+                    # Intermediate sidecars / CSVs are not a production
+                    # fallback because they can hide malformed TraceLens
+                    # reports or incorrect profiling.
+                    #
+                    # T3 (this PR): before consuming any candidates, gate on
+                    # the Executive Summary's ``Idle %``. When idle time
+                    # dominates wall-clock, kernel rewrites cannot improve
+                    # end-to-end latency (Report_Interfacing.docx §2 idle-gate
+                    # sanity check), so we
+                    # short-circuit to empty hot_kernels[] and surface a
+                    # ``trace_health_warnings`` entry that the handler (T4)
+                    # uses to route to parameter optimization.
                     raw_agent_candidates = []
                     report_source = ""
-                    report_cands = parse_analysis_md(
-                        skill_result.report_path, args.top_k,
+                    idle_pct_value = extract_idle_pct_from_analysis_md(
+                        skill_result.report_path,
                     )
-                    if report_cands:
-                        raw_agent_candidates = report_cands
-                        report_source = "analysis.md"
-                    else:
-                        legacy_cands = raw_candidates_from_priority_data(
-                            skill_result.priority_data_path, args.top_k,
+                    idle_pct_threshold = _resolve_idle_pct_threshold()
+                    high_idle_detected = (
+                        idle_pct_value is not None
+                        and idle_pct_value > idle_pct_threshold
+                    )
+                    if high_idle_detected:
+                        # idle_pct_value is known to be a float here because
+                        # high_idle_detected required it to be not None.
+                        assert idle_pct_value is not None
+                        agent_candidates = []
+                        allow_empty_candidates = True
+                        trace_health_warnings.append(
+                            _build_high_idle_warning(
+                                idle_pct=idle_pct_value,
+                                threshold_pct=idle_pct_threshold,
+                                report_path=skill_result.report_path,
+                            )
                         )
-                        if legacy_cands:
-                            raw_agent_candidates = legacy_cands
-                            report_source = "priority_data.json"
+                        report_source = "skipped:high_gpu_idle_pct"
+                        append_log(
+                            log_path,
+                            f"TraceLens Executive Summary reports "
+                            f"Idle % = {idle_pct_value:.2f}% (threshold "
+                            f"{idle_pct_threshold:.2f}%); suppressing "
+                            "hot_kernels[] — kernel rewriting cannot move "
+                            "end-to-end latency in the high-idle regime. "
+                            "Coordinator will see this in "
+                            "trace_health_warnings[] and route to "
+                            "parameter optimization.",
+                        )
+                    else:
+                        if idle_pct_value is not None:
+                            append_log(
+                                log_path,
+                                f"TraceLens Executive Summary: "
+                                f"Idle % = {idle_pct_value:.2f}% "
+                                f"(threshold {idle_pct_threshold:.2f}%) — "
+                                "below gate, continuing with kernel "
+                                "candidate extraction",
+                            )
+                        report_cands = parse_analysis_md(
+                            skill_result.report_path, args.top_k,
+                        )
+                        if report_cands:
+                            raw_agent_candidates = report_cands
+                            report_source = "analysis.md"
+                        else:
+                            agent_candidates = []
+                            allow_empty_candidates = True
                             append_log(
                                 log_path,
                                 "TraceLens analysis.md had no Detailed "
-                                "Analysis blocks; falling back to "
-                                "priority_data.json",
+                                "Analysis compute candidate blocks "
+                                "(v0.3 contract: analysis.md is the single "
+                                "source of truth)."
+                                " Producing empty hot_kernels[] — "
+                                "downstream Coordinator will route to "
+                                "params/backends.",
                             )
 
                     if raw_agent_candidates:
@@ -2392,133 +3100,74 @@ def main() -> int:
                             f"{len(agent_candidates)} hot kernels "
                             f"(source={report_source})",
                         )
-                    else:
-                        orchestrator_mode = "claude_agent_sdk_with_inline_candidates"
-                        append_log(
-                            log_path,
-                            "WARNING: TraceLens SDK orchestrator produced no "
-                            "priority candidates; using inline parser for "
-                            "hot-kernel candidate extraction",
-                        )
                 except Exception as exc:  # noqa: BLE001
                     orchestrator_error = f"{type(exc).__name__}: {exc}"
                     append_log(
                         log_path,
                         f"WARNING: TraceLens SDK orchestrator failed; "
-                        f"falling back to inline parser: {type(exc).__name__}: {exc}",
+                        f"not falling back to intermediate/CSV candidate "
+                        f"parsers: {type(exc).__name__}: {exc}",
                     )
 
             if agent_candidates is None:
-                update_status(status_path, state="running", current_step="run_tracelens_cli",
-                              log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                              started_at=started_at)
-                csv_dir = tracelens_dir / "csvs"
-                xlsx_path = tracelens_dir / "perf_report.xlsx"
-                perf_cmd = [
-                    perf_cli,
-                    "--profile_json_path", str(cli_trace_path),
-                    "--output_xlsx_path", str(xlsx_path),
-                    "--output_csvs_dir", str(csv_dir),
-                    "--gpu_arch_json_path",
-                    str(tl_root / "TraceLens/Agent/Analysis/utils/arch" / f"{args.target_platform}.json"),
-                    "--include_unlinked_kernels",
-                    "--group_by_parent_module",
-                    "--enable_pseudo_ops",
-                    "--enable_kernel_summary",
-                    "--group_by_num_kernels",
-                ]
-                explicit_capture_folder = (
-                    Path(args.capture_folder).expanduser().resolve()
-                    if args.capture_folder else
-                    discover_capture_folder(Path(args.trace_input).expanduser().resolve(), trace_files)
+                raise RuntimeError(
+                    "TraceLens analysis.md was not produced; refusing to "
+                    "fall back to priority_data/category_data/CSV candidate "
+                    "parsers because analysis.md is the single source of truth."
                 )
-                if explicit_capture_folder:
-                    perf_cmd += ["--capture_folder", str(explicit_capture_folder)]
-                rc = run_command(perf_cmd, cwd=None, log_path=log_path,
-                    timeout_s=max(60, int(args.budget_minutes * 60)))
-                if rc != 0:
-                    append_log(log_path, "WARNING: TraceLens report CLI failed; falling back to raw trace parser")
-                else:
-                    artifacts["tracelens_xlsx"] = str(xlsx_path)
-                    artifacts["tracelens_csv_dir"] = str(csv_dir)
         else:
             append_log(log_path, "[dry-run] skipping TraceLens install and external CLI")
 
         update_status(status_path, state="running", current_step="extract_hot_kernels",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at)
-        # Hot-kernel extraction priority (#125):
-        #   1. TraceLens orchestrator's category_data/*.json — the GEAK
-        #      (kernel_category, shape, source_path) triple is on disk
-        #   2. TraceLens kernel_summary.csv — name + duration + framework
-        #      category; we backfill shape from the raw trace
-        #   3. Raw-trace parser — last-resort legacy path
+        # Production candidate extraction is analysis.md-only. Intermediate
+        # sidecars / CSVs are not parsed as fallbacks.
         candidates = agent_candidates
         if candidates:
             append_log(
                 log_path,
                 f"hot kernels from TraceLens SDK orchestrator ({len(candidates)})",
             )
-        tl_csv_dir_local = artifacts.get("tracelens_csv_dir")
-        if not candidates and tl_csv_dir_local:
-            # category_data may sit peer-of-csv or inside-csv depending on
-            # the TraceLens release; probe both.
-            for cat_dir_candidate in (
-                Path(tl_csv_dir_local).parent / "category_data",
-                Path(tl_csv_dir_local) / "category_data",
-            ):
-                if cat_dir_candidate.exists() and cat_dir_candidate.is_dir():
-                    cat_candidates = parse_tracelens_category_data(
-                        cat_dir_candidate, args.top_k,
-                    )
-                    if cat_candidates:
-                        candidates = cat_candidates
-                        artifacts["tracelens_category_dir"] = str(cat_dir_candidate)
-                        append_log(
-                            log_path,
-                            f"hot kernels from TraceLens category_data "
-                            f"({len(candidates)}, src={cat_dir_candidate})",
-                        )
-                        break
-        if not candidates and tl_csv_dir_local:
-            tl_csv = Path(tl_csv_dir_local) / "kernel_summary.csv"
-            candidates = parse_tracelens_kernel_summary(tl_csv, args.top_k)
-            if candidates:
-                augment_csv_candidates_with_unified_perf_summary(
-                    candidates,
-                    Path(tl_csv_dir_local) / "unified_perf_summary.csv",
-                )
-                # #125: csv has no shape info; mine raw trace as best-effort.
-                augment_csv_candidates_with_raw_shapes(candidates, trace_files)
-                append_log(log_path,
-                           f"hot kernels from TraceLens csv "
-                           f"({len(candidates)}, src={tl_csv}); "
-                           f"shape backfill from raw trace")
         if not candidates:
-            if not args.dry_run:
+            if allow_empty_candidates:
+                # Hyperloom routing signal (high idle from docx §2 idle-gate
+                # sanity check / TraceLens permanent failure per Hyperloom
+                # T4 design — docx does not define this fallback):
+                # keep ``candidates`` empty and let the Coordinator pivot to
+                # ``params`` / ``backends`` based on the
+                # ``trace_health_warnings`` we already populated. NEVER
+                # fall through to ``analyze_trace_files`` here — that would
+                # re-populate hot_kernels from the raw trace and silently
+                # undo the idle-gate / TraceLens-failure suppression.
+                candidates = []
+                append_log(
+                    log_path,
+                    "TraceLens produced no kernel candidates; returning "
+                    "empty hot_kernels[] without fallback so params/backends "
+                    "optimization can continue.",
+                )
+            elif args.dry_run:
+                # ``--dry-run`` is the test-only path that bypasses
+                # TraceLens install / CLI / SDK orchestrator entirely. It
+                # still parses the raw trace so unit tests can exercise
+                # hot-kernel extraction and downstream wiring without a
+                # real TraceLens run. Production code never sets
+                # ``--dry-run``.
+                append_log(
+                    log_path,
+                    "dry-run: parsing raw trace for hot kernels "
+                    "(production code path raises here — see #203)",
+                )
+                candidates = analyze_trace_files(trace_files, args.top_k)
+            else:
                 raise RuntimeError(
                     "No hot-kernel candidates produced by any TraceLens "
-                    "path: SDK orchestrator returned no Detailed-Analysis "
-                    "P-items AND perf-report CLI yielded neither "
-                    "category_data nor kernel_summary.csv usable rows. "
-                    "The legacy raw-trace parser fallback was removed in "
-                    "#203 because it silently papered over TraceLens-side "
-                    "failures with low-quality grep-based source "
-                    "resolution. Inspect the TraceLens skill log at the "
-                    "path above and file an upstream issue if "
-                    "reproducible."
+                    "analysis.md path. Refusing intermediate/CSV/raw-trace "
+                    "fallbacks because analysis.md is the single source of "
+                    "truth. Inspect the TraceLens skill log and report "
+                    "upstream if reproducible."
                 )
-            # ``--dry-run`` is the test-only path that bypasses TraceLens
-            # install / CLI / SDK orchestrator entirely. It still parses
-            # the raw trace so unit tests can exercise hot-kernel
-            # extraction and downstream wiring without a real TraceLens
-            # run. Production code never sets ``--dry-run``.
-            append_log(
-                log_path,
-                "dry-run: parsing raw trace for hot kernels "
-                "(production code path raises here — see #203)",
-            )
-            candidates = analyze_trace_files(trace_files, args.top_k)
         roofline_by_name = load_roofline_results(args.roofline_json)
         if roofline_by_name:
             append_log(log_path, f"merged roofline results: {len(roofline_by_name)} kernels")
@@ -2526,7 +3175,8 @@ def main() -> int:
         artifacts.update(write_reports(run_dir, trace_input_type=trace_input_type,
                                        trace_files=trace_files, candidates=candidates,
                                        args=args,
-                                       existing_report_path=agent_report_path))
+                                       existing_report_path=agent_report_path,
+                                       trace_health_warnings=trace_health_warnings))
         if args.roofline_json:
             artifacts["roofline_json"] = str(Path(args.roofline_json).expanduser())
         artifacts["cli_log_path"] = str(log_path)
@@ -2557,6 +3207,12 @@ def main() -> int:
             "artifact_paths": artifacts,
             "orchestrator_mode": orchestrator_mode,
             "orchestrator_error": orchestrator_error,
+            # T3: structured trace-quality findings (high GPU idle, …) that
+            # the handler (``trace_analyze_handler``, T4) surfaces upward
+            # so the Coordinator can decide between kernel-rewrite and
+            # parameter-optimization routes. Empty list is the steady-state
+            # ("nothing wrong") signal.
+            "trace_health_warnings": trace_health_warnings,
         }
         atomic_write_json(run_dir / "session_state.json", {
             "session_id": session_id,
@@ -2576,6 +3232,13 @@ def main() -> int:
         update_status(status_path, state="failed", current_step="failed",
                       log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                       started_at=started_at, error=f"{type(exc).__name__}: {exc}")
+        # N26: include any trace_health_warnings accumulated before the
+        # exception fired so the handler / Coordinator can auto-recover
+        # (e.g. re-issue with a different --steady-state-mode when a
+        # steady_state_chunk_empty warning carries non_empty_modes).
+        # Pre-N26 the failure JSON dropped warnings on the floor, so
+        # the RooflineExecutor saw `status=failed` without the structured
+        # hint it needed to decide between hard-fail and auto-retry.
         print(json.dumps({
             "tool": "tracelens_analysis",
             "session_id": session_id,
@@ -2584,6 +3247,7 @@ def main() -> int:
             "error": f"{type(exc).__name__}: {exc}",
             "cli_log_path": str(log_path),
             "status_path": str(status_path),
+            "trace_health_warnings": trace_health_warnings,
         }, indent=2, sort_keys=True))
         return 1
 

@@ -72,6 +72,71 @@ class SourceData:
     local_log_tail: list[str] = field(default_factory=list)
     local_log_errors: list[dict[str, Any]] = field(default_factory=list)
     local_server_health: list[dict[str, Any]] = field(default_factory=list)
+    # 2026-05-18 LocalProbe extras (A5 / A6 / A7).
+    # ``local_ray`` carries ``{"healthy": bool, "reason": str, "stderr": str,
+    # "returncode": int}`` from :func:`local_probe._probe_ray_head`.
+    # ``local_fd`` carries ``{"pid": int, "used": int, "limit": int,
+    # "used_pct": float}`` from :func:`local_probe._sample_fd_usage`.
+    # ``local_aiter_jit`` carries ``{"jit_dir": str, "so_count": int,
+    # "build_count": int}`` from :func:`local_probe._sample_aiter_jit`;
+    # the cross-tick regression detector reads it.
+    local_ray: dict[str, Any] = field(default_factory=dict)
+    local_fd: dict[str, Any] = field(default_factory=dict)
+    local_aiter_jit: dict[str, Any] = field(default_factory=dict)
+    # G-section decision-audit probe (2026-05-18). Carries persisted
+    # decision artefacts:
+    #   ``recent_integrate`` — last N integrate result.json entries
+    #     (decision/gain_pct/patch_path/patch_size_bytes/base_tput/new_tput/
+    #      kernel_id/dispatched_count/ts).
+    #   ``ci_metrics`` — most recent ci_metrics{,_final}.json content as-is
+    #     (or ``{}`` when absent — the file is produced by an external
+    #     report_back system, not Hyperloom proper).
+    #   ``oob_attempts`` — tail of optimization_attempts.jsonl entries
+    #     (kernel_id / backend / report_text / microbench_speedup).
+    local_decision_audit: dict[str, Any] = field(default_factory=dict)
+    # C-section preflight inputs (2026-05-19). The two slots are read by
+    # ``signals/preflight.py`` to detect impossible model-GPU configs,
+    # low Amdahl ceilings for kernel optimization, and cold-start vs
+    # remaining-budget mismatches.
+    #
+    # ``local_manifest`` is the raw ``manifest.json`` dict written by
+    # ``inference_optimizer/manifest.py`` at session boot — empty when
+    # absent (resume from broken session, or non-Hyperloom host).
+    #
+    # ``local_kernel_breakdown`` aggregates
+    # ``<session>/profiles/kernel_breakdown.json`` into the projection
+    # ``{tier_pcts: {T1_TRITON, T2_AITER_CK, ...}, total_kernels,
+    # total_gpu_pct, mtime}``. Empty when the profile action has not
+    # produced a breakdown yet.
+    local_manifest: dict[str, Any] = field(default_factory=dict)
+    local_kernel_breakdown: dict[str, Any] = field(default_factory=dict)
+    # E-section critic health (2026-05-19). Carries:
+    #   ``recent_judges`` — last N ``critic-workdir/<turn>/judge_bundle.json``
+    #     entries projected to ``{turn_dir, kb_read_skipped_reason,
+    #     proposal_count, mtime}``.
+    #   ``workdir_count`` — total ``<turn>/`` subdirs under ``critic-workdir/``
+    #     (used by E4 ``critic_prune_stuck``).
+    local_critic_health: dict[str, Any] = field(default_factory=dict)
+    # I-section state-integrity probe (2026-05-19). Aggregates the
+    # five C-side state slots into one payload so a single LocalProbe
+    # tick scans them all without re-doing IO per signal:
+    #   ``state_json`` — ``{valid, size_bytes, mtime, error}`` for state.json.
+    #   ``wal``        — ``{wal_bytes, db_bytes, db_path}`` for coordinator.db-wal.
+    #   ``leases``     — list of ``{task_id, holder_pid, alive, ts}`` rows
+    #                    (cross-referenced against ``os.kill(pid, 0)``).
+    #   ``agents``     — ``{<role>: {inbox_bytes, outbox_bytes}}``.
+    #   ``coordinator``— ``{recorded_pid, alive, pid_file}`` (from
+    #                    ``optimizer_runs/run_*.pid``).
+    local_state_integrity: dict[str, Any] = field(default_factory=dict)
+    # J-section external-deps probe (2026-05-19). Carries:
+    #   ``gateway``    — ``{url, reachable, status_code, error}`` for
+    #                    ``OPENAI_BASE_URL/models``.
+    #   ``mounts``     — list of ``{path, latency_ms, ok, error}`` for
+    #                    ``$TRACELENS_ROOT`` / ``$INFERENCEX_PATH`` /
+    #                    ``$OOB_SRC``.
+    #   ``tracelens_cli`` — ``{cli_inference, cli_legacy}`` — whether
+    #                    each CLI name is found via ``shutil.which``.
+    local_external_deps: dict[str, Any] = field(default_factory=dict)
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
     sources_used: list[str] = field(default_factory=list)
     degraded_reason: str | None = None
@@ -100,6 +165,15 @@ class SourceData:
             "session_summary",
             "local_gpu",
             "local_disk",
+            "local_ray",
+            "local_fd",
+            "local_aiter_jit",
+            "local_decision_audit",
+            "local_manifest",
+            "local_kernel_breakdown",
+            "local_critic_health",
+            "local_state_integrity",
+            "local_external_deps",
         ):
             if not getattr(self, slot):
                 setattr(self, slot, dict(getattr(other, slot)))

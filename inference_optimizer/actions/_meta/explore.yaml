@@ -1,0 +1,58 @@
+name: explore
+family: shallow
+cost_minutes_p50: 12.0
+cost_minutes_p75: 25.0
+expected_gain_pct: [2.0, 12.0]
+accuracy_risk: 0.0
+crash_risk: 0.10
+prerequisites:
+  - baseline
+requires_lanes:
+  - server_lifecycle
+  - benchmark_lane
+allowed_tools:
+  - emit_intent
+  - Read
+  - Bash
+side_effects:
+  - launches_server
+  - reads_server
+  - writes_results
+preferred_backend: claude
+preferred_model: claude-opus-4-7
+max_turns: 30
+lease_ttl_sec: 7200
+description: "Apply a batch of N candidate variants serially; KEEP/REVERT each, stack onto optimization_stack. Per-KEEP stack rebench inlined (replaces backends/params/validate_stack)."
+pipeline_phase: explore
+typical_runtime_min: 12.0
+applicable_when:
+  - "baseline_tput > 0"
+# Descriptive — variants inherit these knobs across the whole batch.
+# See KB_design/3.4_explore_consolidation/README.md for the full design
+# (Inv-4.1 single ledger, Inv-4.2 canonical fingerprint uniqueness).
+params_schema:
+  grid:
+    type: list
+    description: |
+      Required. List of variant dicts. Each variant has at least:
+        - name: str (unique within the round)
+        - extra_args / extra_server_args: str (sglang/vllm CLI flags)
+        - extra_envs: dict[str,str]
+        - provenance: "default_grid" | "llm_direct" | "specialist:<domain>"
+        - kb_evidence / pr_evidence / source_evidence: optional list
+  base_extra_args:
+    type: string
+    description: |
+      Current stack-accumulated baseline args. ExploreExecutor merges
+      this into each variant's effective server_args. Coordinator
+      derives from ``current_best.extra_server_args`` when omitted.
+  benchmark_script:
+    type: string
+    description: |
+      Bare *.sh file name. Force-pin Magpie script for every variant in
+      this explore round; same semantics as baseline.params_schema.benchmark_script.
+  result_dir:
+    type: string
+    description: |
+      Absolute or workspace-relative path forwarded as $RESULT_DIR for
+      every variant.

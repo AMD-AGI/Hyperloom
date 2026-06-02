@@ -19,10 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.cli import (
-    _build_orchestration_prompt,
-    _load_critic_prompt,
-)
+from inference_optimizer.cli import _build_orchestration_prompt
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
 from inference_optimizer.orchestrator.objective import (
     TargetGainObjective,
@@ -61,10 +58,32 @@ def test_orchestration_no_kernel_md_was_removed():
     )
 
 
-def test_critic_md_exists_on_disk():
+def test_critic_md_is_rules_fragment():
+    """``critic.md`` is a concise rules fragment, not a full system prompt.
+
+    v0.8 §3.3 added a per-phase review-contract section; issue #170 added
+    the optional Web verification block. The line cap tracks both bumps.
+    """
     p = asset_system_prompts_dir() / "critic.md"
-    assert p.is_file(), f"missing critic prompt: {p}"
-    assert "Critic" in p.read_text(encoding="utf-8")
+    assert p.is_file(), f"missing critic rules fragment: {p}"
+    text = p.read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    # Cap bumped 30 → 45 by N35 (structured carve-out bullets), then
+    # 45 → 65 by N38 (the "primary per-proposal rule" section that
+    # introduces the action_verdict_policy lookup as the canonical
+    # source of truth), then 65 → 75 to absorb F-phase v0.8 carve-out
+    # bullets that overlap with N38's text, then 75 → 95 by issue #170
+    # (Web verification), then 95 → 160 by the cross-domain review
+    # block that fires when ``review_constraints.cross_domain=true``.
+    # Future bumps require equivalent justification (new mechanism,
+    # not just more action names).
+    assert len(lines) <= 160, (
+        f"critic.md should be a concise fragment, got {len(lines)} non-empty lines"
+    )
+    assert "judge_bundle" in text
+    assert "Hard rules" in text
+    assert "target_proposal_msg_id" not in text
+    assert "baseline / profile / target_analysis" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +113,8 @@ def test_build_full_prompt_contains_kernel_opt_pipeline(registry):
     # Section 6 payload-template markers (one per kernel-owned action).
     # These are the unique request shapes the builder emits in section 6;
     # the rules fragment uses a different surface form ("kind MUST be
-    # EXACTLY one of select_kernels / ...") so it won't false-positive.
-    assert "kind: 'select_kernels'" in text
+    # EXACTLY one of trace_analyze / ...") so it won't false-positive.
+    assert "kind: 'trace_analyze'" in text
     assert "kind: 'run_optimization'" in text
     assert "kind: 'integrate'" in text
     # Action catalogue includes the kernel-owned actions
@@ -125,7 +144,7 @@ def test_build_no_kernel_prompt_drops_kernel_pipeline_and_actions(registry):
     # Kernel-opt request-reference block must be absent (builder skipped
     # section 6 because no kernel-owned actions are enabled).
     assert "## 6. KERNEL-OPT REQUEST REFERENCE" not in text
-    assert "kind: 'select_kernels'" not in text
+    assert "kind: 'trace_analyze'" not in text
     assert "kind: 'run_optimization'" not in text
     # Kernel-owned action names must NOT appear as catalogue bullets
     # (the bare word may still appear inside the rules fragment, e.g.
@@ -178,8 +197,11 @@ def test_build_is_deterministic(registry):
     assert a == b
 
 
-def test_build_includes_validate_stack_in_both_modes(registry):
-    """validate_stack must be advertised in both kernel-on and no-kernel runs."""
+def test_build_includes_explore_action_in_both_modes(registry):
+    """v0.8 M3 + KB_gaps/Gap-10: ``explore`` is the canonical
+    grid-runner advertised in both kernel-on and no-kernel runs.
+    The v0.6 standalone ``validate_stack`` action / phase header
+    has been retired (the rebench is inlined into ``explore``)."""
     for no_kernel in (False, True):
         text = _build_orchestration_prompt(
             no_kernel=no_kernel,
@@ -188,16 +210,12 @@ def test_build_includes_validate_stack_in_both_modes(registry):
             max_minutes=60,
             action_registry=registry,
         )
-        assert "validate_stack" in text, (
-            f"validate_stack missing in prompt (no_kernel={no_kernel})"
+        assert "explore" in text, (
+            f"explore missing in prompt (no_kernel={no_kernel})"
         )
-        assert "### validate" in text, (
-            f"validate phase header missing (no_kernel={no_kernel})"
+        # The deprecated ``validate_stack`` action must not appear as
+        # an enabled catalogue entry — only as historical / DEPRECATED
+        # tag references inside the v0.8 transition explainer.
+        assert "### validate" not in text, (
+            f"unexpected validate phase header (no_kernel={no_kernel})"
         )
-
-
-def test_critic_loader_contains_payload_contract():
-    text = _load_critic_prompt()
-    assert "Critic" in text
-    assert "review_verdict" in text or "verdict" in text
-    assert "target_proposal_msg_id" in text

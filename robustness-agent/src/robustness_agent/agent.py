@@ -24,7 +24,7 @@ from .checks.event_check import EventCheck
 from .checks.stall_check import StallCheck
 from .conductor import ConductorReader, IntentEmitter
 from .config import Config
-from .models import Alert, Severity
+from .models import Alert
 from .monitors.gpu_monitor import GpuMonitor
 from .monitors.log_tailer import LogTailer
 from .monitors.process_monitor import ProcessMonitor
@@ -50,6 +50,7 @@ class RobustnessAgent:
         self._tasks: list[asyncio.Task[Any]] = []
 
     async def start(self) -> None:
+        """Initialize monitors/checks and spawn monitoring tasks."""
         log.info("Robustness Agent starting (session_dir=%s)", self.config.session_dir)
 
         self._provider = await create_provider(self.config)
@@ -80,6 +81,7 @@ class RobustnessAgent:
         log.info("Robustness Agent started with %d monitoring tasks", len(self._tasks))
 
     async def stop(self) -> None:
+        """Stop all tasks and close Conductor connections."""
         log.info("Robustness Agent stopping")
         self._running = False
         for task in self._tasks:
@@ -90,6 +92,7 @@ class RobustnessAgent:
         log.info("Robustness Agent stopped")
 
     async def run_forever(self) -> None:
+        """Start the agent and run until cancelled."""
         await self.start()
         try:
             await asyncio.gather(*self._tasks)
@@ -101,6 +104,7 @@ class RobustnessAgent:
     # -- monitoring loops --
 
     async def _loop_process_check(self) -> None:
+        """Poll process health and emit alerts at configured cadence."""
         while self._running:
             try:
                 alerts = await self._process_monitor.check()
@@ -110,6 +114,7 @@ class RobustnessAgent:
             await asyncio.sleep(self.config.process_check_interval)
 
     async def _loop_gpu_check(self) -> None:
+        """Poll GPU health and emit alerts at configured cadence."""
         while self._running:
             try:
                 alerts = await self._gpu_monitor.check()
@@ -119,6 +124,7 @@ class RobustnessAgent:
             await asyncio.sleep(self.config.gpu_check_interval)
 
     async def _loop_health_check(self) -> None:
+        """Poll server health endpoints and emit alerts."""
         while self._running:
             try:
                 _, alerts = await self._server_health.check()
@@ -128,6 +134,7 @@ class RobustnessAgent:
             await asyncio.sleep(self.config.health_check_interval)
 
     async def _loop_log_check(self) -> None:
+        """Tail logs for errors and emit alerts."""
         while self._running:
             try:
                 alerts = await self._log_tailer.check()
@@ -137,6 +144,7 @@ class RobustnessAgent:
             await asyncio.sleep(5.0)
 
     async def _loop_disk_check(self) -> None:
+        """Monitor disk usage and emit alerts."""
         while self._running:
             try:
                 alerts = await self._disk_check.check()
@@ -146,6 +154,7 @@ class RobustnessAgent:
             await asyncio.sleep(self.config.disk_check_interval)
 
     async def _loop_event_poll(self) -> None:
+        """Poll Conductor events and turn them into alerts."""
         while self._running:
             try:
                 events = self._conductor_reader.poll_events()
@@ -157,6 +166,7 @@ class RobustnessAgent:
             await asyncio.sleep(self.config.event_poll_interval)
 
     async def _loop_stall_check(self) -> None:
+        """Detect orchestration stalls via Conductor state."""
         while self._running:
             try:
                 alerts = await self._stall_check.check()
@@ -166,6 +176,7 @@ class RobustnessAgent:
             await asyncio.sleep(60.0)
 
     async def _loop_rca(self) -> None:
+        """Trigger RCA when thresholds are met and execute actions."""
         while self._running:
             try:
                 if self._rca_engine.should_trigger():
@@ -183,6 +194,7 @@ class RobustnessAgent:
             await asyncio.sleep(30.0)
 
     async def _loop_heartbeat(self) -> None:
+        """Emit periodic heartbeat events for liveness tracking."""
         while self._running:
             self._intent_emitter._write_event("send_message", {
                 "topic": "heartbeat",
@@ -193,6 +205,7 @@ class RobustnessAgent:
     # -- alert handling --
 
     def _handle_alerts(self, alerts: list[Alert]) -> None:
+        """Persist and forward alerts to Coordinator and RCA engine."""
         for alert in alerts:
             self._alert_history.append(alert)
             log.warning("[%s] %s: %s", alert.severity.value, alert.check_name, alert.summary)

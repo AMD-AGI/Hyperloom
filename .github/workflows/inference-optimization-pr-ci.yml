@@ -23,6 +23,9 @@ on:
   pull_request_review:
     types: [submitted]
 
+permissions:
+  contents: read
+
 env:
   SAFE_BASE_URL: ${{ secrets.SAFE_BASE_URL }}
   NFS_ROOT: ${{ secrets.NFS_ROOT }}
@@ -42,7 +45,7 @@ env:
   #     approval — neither is a viable supply-chain.
   #   * GITHUB_TOKEN dies with the workflow run, so a SaFE-side leak
   #     has a bounded blast radius (vs. a 30-day PAT).
-  # actions/checkout@v4 already authenticates against the same token in
+  # actions/checkout@v6 already authenticates against the same token in
   # the job below; we are just propagating the same capability into the
   # sandbox.
   HYPERLOOM_PR_CI_GH_TOKEN: ${{ github.token }}
@@ -75,7 +78,7 @@ jobs:
         key: [dsr1-fp8-mi300x-sglang]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Default checkout uses PR *base* on pull_request_review;
           # we want PR head so the orchestrator + prompt template files

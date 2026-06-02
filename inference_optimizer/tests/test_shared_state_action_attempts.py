@@ -24,11 +24,9 @@ from inference_optimizer.orchestrator.shared_state import (
     "action,metric_key,metric_kind",
     [
         ("baseline", "output_throughput", "output_throughput"),
-        ("profile", "output_throughput", "output_throughput"),
-        ("backends", "gain_pct", "gain_pct"),
-        ("params", "gain_pct", "gain_pct"),
-        ("sweep", "output_throughput", "output_throughput"),
-        ("validate_stack", "gain_pct", "validated_gain_pct"),
+        ("profile",  "output_throughput", "output_throughput"),
+        ("sweep",    "output_throughput", "output_throughput"),
+        ("explore",  "best_gain_pct",     "gain_pct"),
     ],
 )
 def test_record_action_attempt_succeeded_populates_last_and_history(
@@ -86,13 +84,13 @@ def test_attempts_history_caps_at_default():
     s = SharedState()
     for i in range(_DEFAULT_ATTEMPTS_HISTORY + 5):
         s.record_action_attempt(
-            action="backends",
+            action="explore",
             task_id=f"t-{i}",
             status="succeeded",
             decision="discarded",
-            result={"gain_pct": float(i)},
+            result={"best_gain_pct": float(i)},
         )
-    history = s.backends_attempts
+    history = s.explore_attempts
     assert len(history) == _DEFAULT_ATTEMPTS_HISTORY
     # newest survives, oldest dropped
     assert history[-1]["task_id"] == f"t-{_DEFAULT_ATTEMPTS_HISTORY + 4}"
@@ -125,7 +123,7 @@ def test_to_prompt_summary_renders_new_lines():
         result={"output_throughput": 1761.6, "workspace": "/ws"},
     )
     s.record_action_attempt(
-        action="backends",
+        action="explore",
         task_id="t-2",
         status="failed",
         decision="no_promote",
@@ -134,13 +132,11 @@ def test_to_prompt_summary_renders_new_lines():
     txt = s.to_prompt_summary()
     assert "last_baseline=" in txt
     assert "last_profile=" in txt
-    assert "last_backends=" in txt
-    assert "last_params=" in txt
-    assert "last_validate_stack=" in txt
+    assert "last_explore=" in txt
+    assert "last_sweep=" in txt
     assert "attempts_history=" in txt
-    # baseline:1(s1,f0) backends:1(s0,f1) somewhere in the line
     assert "baseline:1(s1,f0)" in txt
-    assert "backends:1(s0,f1)" in txt
+    assert "explore:1(s0,f1)" in txt
 
 
 def test_save_load_round_trips_new_fields(tmp_path):

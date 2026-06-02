@@ -20,7 +20,6 @@ real ``$TRACELENS_ROOT`` or any real ``site-packages``.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 import textwrap
 import threading
@@ -45,12 +44,21 @@ _FAKE_SGLANG_VERSION = "0.5.9"  # must match one of _SGLANG_SUPPORTED_VERSIONS
 
 def _make_fake_tracelens(tmp_path: Path) -> Path:
     """Build the ``<root>/examples/custom_workflows/inference_analysis/``
-    skeleton the patcher expects to find patches under."""
+    skeleton the patcher expects to find patches under. v0.3.1+ layout:
+    SGLang patches live under per-version subdirs (``sglang_0_5_9/``)."""
     root = tmp_path / "TraceLens-internal"
     base = root / "examples" / "custom_workflows" / "inference_analysis"
     (base / "vllm_patches").mkdir(parents=True)
-    (base / "sglang_roofline_patches").mkdir(parents=True)
+    (
+        base / "sglang_roofline_patches"
+        / _versioned_subdir_for_fake_sglang()
+    ).mkdir(parents=True)
     return root
+
+
+def _versioned_subdir_for_fake_sglang() -> str:
+    """Subdir name TraceLens v0.3.1 ships for ``_FAKE_SGLANG_VERSION``."""
+    return _server_patcher._versioned_patches_subdir_name(_FAKE_SGLANG_VERSION) or ""
 
 
 def _make_fake_vllm_install(tmp_path: Path) -> Path:
@@ -160,7 +168,7 @@ def _make_fake_sglang_install(tmp_path: Path) -> Path:
 def _write_fake_sglang_patches(
     tracelens_root: Path, *, count: int = 1, include_new_file: bool = True,
 ) -> list[Path]:
-    """Write ``count`` minimal patches into the sglang patches dir.
+    """Write ``count`` minimal patches into the v0.3.1 per-version subdir.
 
     The first patch always creates ``kernel_shape_profiler.py``
     (matching the real patch set's sentinel file). Additional patches
@@ -170,6 +178,7 @@ def _write_fake_sglang_patches(
     base = (
         tracelens_root / "examples" / "custom_workflows"
         / "inference_analysis" / "sglang_roofline_patches"
+        / _versioned_subdir_for_fake_sglang()
     )
     patches: list[Path] = []
     if include_new_file:
@@ -421,10 +430,12 @@ def test_sglang_precheck_failure_skips_all(tmp_path, monkeypatch):
     # First patch is fine.
     _write_fake_sglang_patches(tracelens_root, count=1)
     # Add a corrupt patch that won't apply (refers to a file that
-    # doesn't exist in our fake install).
+    # doesn't exist in our fake install). Land it in the per-version
+    # subdir so the simplified resolver sees it.
     bad = (
         tracelens_root / "examples" / "custom_workflows"
-        / "inference_analysis" / "sglang_roofline_patches" / "zzz_bad.patch"
+        / "inference_analysis" / "sglang_roofline_patches"
+        / _versioned_subdir_for_fake_sglang() / "zzz_bad.patch"
     )
     bad.write_text(
         textwrap.dedent(
@@ -731,69 +742,75 @@ def test_fuzz_fallback_tolerates_offset_slippage(fake_vllm_world):
 # ===========================================================================
 # PR-C §2: SGLang minor-version allowlist (was: exact-version pin)
 # ===========================================================================
-def test_sglang_version_accepted_default_minor_covers_059(monkeypatch):
-    """Default allowlist must still accept the original exact pin so
-    pre-PR-C behaviour is preserved on the current deployment."""
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
-    assert _server_patcher._sglang_version_accepted("0.5.9") is True
+@pytest.mark.parametrize(
+    "env, version, expected",
+    [
+        # PR-C §2: default minor allowlist preserves the original exact pin.
+        pytest.param({}, "0.5.9", True, id="default_minor_covers_059"),
+        # Freshly bumped point releases reach the fuzzy fallback layer.
+        pytest.param({}, "0.5.10", True, id="default_minor_covers_0510"),
+        pytest.param({}, "0.5.11", True, id="default_minor_covers_0511"),
+        # 0.5.x allowlist must NOT accept other minors (bigger surface change
+        # than fuzzy contextual drift can tolerate).
+        pytest.param({}, "0.6.0", False, id="default_rejects_06x"),
+        pytest.param({}, "0.4.9", False, id="default_rejects_04x"),
+        # Edge case: 0.50.0 must not match the 0.5 prefix — guard against
+        # naive ``startswith``.
+        pytest.param({}, "0.50.0", False, id="default_rejects_naive_prefix"),
+        # Exact-pin env narrows the default minor allowlist.
+        pytest.param(
+            {"HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS": "0.5.9"},
+            "0.5.9",
+            True,
+            id="exact_pin_accepts_pinned",
+        ),
+        pytest.param(
+            {"HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS": "0.5.9"},
+            "0.5.10",
+            False,
+            id="exact_pin_rejects_default_minor",
+        ),
+        # Minor allowlist env extends the default.
+        pytest.param(
+            {"HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS": "0.5,0.6"},
+            "0.5.9",
+            True,
+            id="minor_env_keeps_default",
+        ),
+        pytest.param(
+            {"HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS": "0.5,0.6"},
+            "0.6.0",
+            True,
+            id="minor_env_adds_06",
+        ),
+        pytest.param(
+            {"HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS": "0.5,0.6"},
+            "0.7.0",
+            False,
+            id="minor_env_still_rejects_07",
+        ),
+        # Empty / whitespace version must not silently pass.
+        pytest.param({}, "", False, id="empty_version_rejected"),
+        pytest.param({}, "   ", False, id="whitespace_version_rejected"),
+    ],
+)
+def test_sglang_version_accepted(monkeypatch, env, version, expected):
+    """Minor-version allowlist (PR-C §2) and operator overrides.
 
-
-def test_sglang_version_accepted_default_minor_covers_0510(monkeypatch):
-    """Default allowlist accepts a freshly bumped point release —
-    the whole point of PR-C is to let 0.5.10 / 0.5.11 reach the
-    fuzzy fallback layer (which can still reject if the patch
-    fundamentally conflicts)."""
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
-    assert _server_patcher._sglang_version_accepted("0.5.10") is True
-    assert _server_patcher._sglang_version_accepted("0.5.11") is True
-
-
-def test_sglang_version_accepted_default_minor_rejects_different_minor(monkeypatch):
-    """0.5.x allowlist must NOT accept 0.6.x or 0.4.x — those are
-    minor-version bumps with bigger surface change than fuzzy patch
-    contextual drift can tolerate."""
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
-    assert _server_patcher._sglang_version_accepted("0.6.0") is False
-    assert _server_patcher._sglang_version_accepted("0.4.9") is False
-    # Edge case: 0.50.0 must not match the 0.5 prefix — guard against
-    # naive ``startswith``.
-    assert _server_patcher._sglang_version_accepted("0.50.0") is False
-
-
-def test_sglang_version_accepted_exact_pin_env_overrides_minor(monkeypatch):
-    """Operators who want to lock down to a known-good list can set
-    ``HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` — exact pins win over
-    the minor allowlist for the duration of the run."""
-    monkeypatch.setenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", "0.5.9")
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
-    assert _server_patcher._sglang_version_accepted("0.5.9") is True
-    # 0.5.10 IS in the default minor allowlist, but the exact-pin env
-    # narrows it back to just 0.5.9.
-    assert _server_patcher._sglang_version_accepted("0.5.10") is False
-
-
-def test_sglang_version_accepted_minor_env_extends_default(monkeypatch):
-    """``HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS=0.5,0.6`` lets operators
-    extend the default allowlist when TraceLens promises a coming
-    patch set for the next minor."""
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
-    monkeypatch.setenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", "0.5,0.6")
-    assert _server_patcher._sglang_version_accepted("0.5.9") is True
-    assert _server_patcher._sglang_version_accepted("0.6.0") is True
-    assert _server_patcher._sglang_version_accepted("0.7.0") is False
-
-
-def test_sglang_version_accepted_empty_version_rejected(monkeypatch):
-    """Empty / whitespace ``sglang.__version__`` must not silently
-    pass — the patcher needs a real version to pick the right patch
-    set."""
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
-    monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
-    assert _server_patcher._sglang_version_accepted("") is False
-    assert _server_patcher._sglang_version_accepted("   ") is False
+    The default allowlist accepts the original 0.5.x exact pin plus a
+    fuzzy band for new point releases. Operators can narrow via
+    ``HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` (exact-pin wins) or
+    extend via ``HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS`` (additional
+    minor families).
+    """
+    for key in (
+        "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS",
+        "HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert _server_patcher._sglang_version_accepted(version) is expected
 
 
 # ===========================================================================
@@ -1017,15 +1034,19 @@ def test_sglang_plan_keeps_single_marker_sentinel(fake_sglang_world):
 # the decoupling intent of the #194 §5 follow-up recommendation.
 # ===========================================================================
 def _write_sglang_versions_manifest(
-    tracelens_root: Path, body: str, *, filename: str = "SUPPORTED_VERSIONS.txt",
+    tracelens_root: Path, body: str, *,
+    version: str = _FAKE_SGLANG_VERSION,
+    filename: str = "SUPPORTED_VERSIONS.txt",
 ) -> Path:
-    """Write a TraceLens-style version manifest into the SGLang patches
-    dir. Tests use this fixture to simulate TraceLens shipping the
-    decoupling manifest before it actually does."""
+    """Write a TraceLens-style version manifest into the per-version
+    SGLang patches subdir (v0.3.1 layout). The TraceLens-shipped
+    manifest is consulted by ``_sglang_version_accepted``."""
+    subdir = _server_patcher._versioned_patches_subdir_name(version) or ""
     patches_dir = (
         tracelens_root / "examples" / "custom_workflows"
-        / "inference_analysis" / "sglang_roofline_patches"
+        / "inference_analysis" / "sglang_roofline_patches" / subdir
     )
+    patches_dir.mkdir(parents=True, exist_ok=True)
     manifest = patches_dir / filename
     manifest.write_text(body, encoding="utf-8")
     return manifest
@@ -1227,8 +1248,8 @@ def test_sglang_e2e_manifest_admits_version_outside_default_allowlist(
     # injected module and the on-disk __init__.py.
     sgl_init = apply_root / "python" / "sglang" / "__init__.py"
     sgl_init.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
-    _write_fake_sglang_patches(tracelens_root, count=1)
-    _write_sglang_versions_manifest(tracelens_root, "0.7.0\n")
+    _write_versioned_sglang_patches(tracelens_root, "sglang_0_7_0", count=1)
+    _write_sglang_versions_manifest(tracelens_root, "0.7.0\n", version="0.7.0")
 
     fake_mod = types.ModuleType("sglang")
     fake_mod.__version__ = "0.7.0"  # type: ignore[attr-defined]
@@ -1245,3 +1266,161 @@ def test_sglang_e2e_manifest_admits_version_outside_default_allowlist(
         "0.7.0 should have been patched because the manifest admits it — "
         "the default 0.5.x allowlist alone would have rejected"
     )
+
+
+# ===========================================================================
+# TraceLens Hyperloom_integration_v0.3.1: per-version patch subdirs
+# (sglang_0_5_9/, sglang_0_5_11/, ...) are the only layout Hyperloom
+# supports. The previous flat sglang_roofline_patches/*.patch v0.3
+# layout has been retired together with its legacy optional_missing
+# shim; the per-version subdir is authored against the matching sglang
+# release, so every patch in it is required.
+# ===========================================================================
+def _write_versioned_sglang_patches(
+    tracelens_root: Path, subdir: str, *, count: int = 1,
+) -> list[Path]:
+    """Write minimal v0.3.1-style patches into a per-version subdir.
+    Reuses the flat-layout fixture body but lands under
+    ``sglang_roofline_patches/<subdir>/`` rather than the root."""
+    base = (
+        tracelens_root / "examples" / "custom_workflows"
+        / "inference_analysis" / "sglang_roofline_patches" / subdir
+    )
+    base.mkdir(parents=True, exist_ok=True)
+    patches: list[Path] = []
+    p1 = base / "kernel_shape_profiler.patch"
+    p1.write_text(
+        textwrap.dedent(
+            """\
+            diff --git a/python/sglang/srt/utils/kernel_shape_profiler.py b/python/sglang/srt/utils/kernel_shape_profiler.py
+            new file mode 100644
+            index 000000000..1111111
+            --- /dev/null
+            +++ b/python/sglang/srt/utils/kernel_shape_profiler.py
+            @@ -0,0 +1,3 @@
+            +# kernel_shape_profiler stub — TraceLens patch fixture.
+            +def hello():
+            +    return "kernel_shape_profiler"
+            """
+        ),
+        encoding="utf-8",
+    )
+    patches.append(p1)
+    for i in range(len(patches), count):
+        p = base / f"misc_{i}.patch"
+        target = f"python/sglang/srt/utils/extra_{i}.py"
+        p.write_text(
+            textwrap.dedent(
+                f"""\
+                diff --git a/{target} b/{target}
+                new file mode 100644
+                index 000000000..2222222
+                --- /dev/null
+                +++ b/{target}
+                @@ -0,0 +1 @@
+                +# extra_{i} stub
+                """
+            ),
+            encoding="utf-8",
+        )
+        patches.append(p)
+    return patches
+
+
+def test_versioned_patches_subdir_name_helper():
+    """Dotted numeric versions map to ``sglang_<underscored>`` subdir
+    names; non-numeric or empty inputs return None so the caller
+    fail-softs to the flat layout."""
+    assert _server_patcher._versioned_patches_subdir_name("0.5.11") == "sglang_0_5_11"
+    assert _server_patcher._versioned_patches_subdir_name("0.5.9") == "sglang_0_5_9"
+    assert _server_patcher._versioned_patches_subdir_name("1.2.3.4") == "sglang_1_2_3_4"
+    # Dev / rc / local suffixes are stripped to the numeric head.
+    assert _server_patcher._versioned_patches_subdir_name("0.5.11-rc1") == "sglang_0_5_11"
+    assert _server_patcher._versioned_patches_subdir_name("0.5.11+local") == "sglang_0_5_11"
+    # Bad input → None (caller falls back to flat).
+    assert _server_patcher._versioned_patches_subdir_name("") is None
+    assert _server_patcher._versioned_patches_subdir_name("not-a-version") is None
+    assert _server_patcher._versioned_patches_subdir_name(None) is None  # type: ignore[arg-type]
+
+
+def test_resolve_sglang_patches_dir_returns_versioned_subdir(tmp_path):
+    """The resolver returns the per-version subdir when it exists AND
+    contains at least one ``*.patch`` file."""
+    root = tmp_path / "sglang_roofline_patches"
+    root.mkdir()
+    subdir = root / "sglang_0_5_11"
+    subdir.mkdir()
+    (subdir / "kernel_shape_profiler.patch").write_text("p\n", encoding="utf-8")
+    assert (
+        _server_patcher._resolve_sglang_patches_dir(root, "0.5.11") == subdir
+    )
+
+
+def test_resolve_sglang_patches_dir_returns_none_when_subdir_missing(tmp_path):
+    """No ``sglang_0_5_11/`` subdir → ``None`` (flat layout is no longer
+    supported; users must upgrade to Hyperloom_integration_v0.3.1+)."""
+    root = tmp_path / "sglang_roofline_patches"
+    root.mkdir()
+    # Even with a flat *.patch present, the simplified resolver ignores
+    # it and reports no patches available.
+    (root / "decoy.patch").write_text("placeholder\n", encoding="utf-8")
+    assert _server_patcher._resolve_sglang_patches_dir(root, "0.5.11") is None
+
+
+def test_resolve_sglang_patches_dir_returns_none_when_subdir_empty(tmp_path):
+    """An empty ``sglang_0_5_11/`` is not a valid patch set."""
+    root = tmp_path / "sglang_roofline_patches"
+    root.mkdir()
+    (root / "sglang_0_5_11").mkdir()
+    assert _server_patcher._resolve_sglang_patches_dir(root, "0.5.11") is None
+
+
+@_REQUIRES_GIT
+def test_sglang_e2e_versioned_layout_applies_from_subdir(tmp_path, monkeypatch):
+    """End-to-end: sglang 0.5.11 + a TraceLens checkout that ships
+    ``sglang_roofline_patches/sglang_0_5_11/``. The patcher must
+    resolve the per-version subdir and apply every patch in it."""
+    tracelens_root = _make_fake_tracelens(tmp_path)
+    apply_root = _make_fake_sglang_install(tmp_path)
+    sgl_init = apply_root / "python" / "sglang" / "__init__.py"
+    sgl_init.write_text('__version__ = "0.5.11"\n', encoding="utf-8")
+    _write_versioned_sglang_patches(tracelens_root, "sglang_0_5_11", count=1)
+
+    fake_mod = types.ModuleType("sglang")
+    fake_mod.__version__ = "0.5.11"  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(sgl_init)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
+
+    assert ensure_sglang_patched_for_tracelens() is True
+    sentinel = (
+        apply_root / "python" / "sglang" / "srt" / "utils"
+        / "kernel_shape_profiler.py"
+    )
+    assert sentinel.exists(), (
+        "0.5.11 should pick sglang_0_5_11/ subdir and apply its patches"
+    )
+
+
+def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
+    """The discovered ``_PatchPlan``'s patches must point inside the
+    per-version subdir — guards against any regression that would
+    resolve patches outside ``sglang_<minor>_<patch>/``."""
+    tracelens_root = _make_fake_tracelens(tmp_path)
+    apply_root = _make_fake_sglang_install(tmp_path)
+    sgl_init = apply_root / "python" / "sglang" / "__init__.py"
+    sgl_init.write_text('__version__ = "0.5.11"\n', encoding="utf-8")
+    _write_versioned_sglang_patches(tracelens_root, "sglang_0_5_11", count=1)
+
+    fake_mod = types.ModuleType("sglang")
+    fake_mod.__version__ = "0.5.11"  # type: ignore[attr-defined]
+    fake_mod.__file__ = str(sgl_init)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang", fake_mod)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
+
+    plan = _server_patcher._discover_sglang_plan(None)
+    assert plan is not None
+    for p in plan.patches:
+        assert "sglang_0_5_11" in p.parts, (
+            f"versioned layout should be selected, got patch path {p}"
+        )

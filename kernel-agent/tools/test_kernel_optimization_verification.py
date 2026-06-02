@@ -59,13 +59,20 @@ def test_benchmark_available_alone_does_not_pass_correctness(tmp_path):
 
 
 def test_report_correctness_passes_when_explicit(tmp_path):
+    """Report-scan correctness must light up on its own — without relying
+    on the CLI `accuracy_passed` flag — so the report's own "Correctness
+    passed" prose is recognised as evidence. We deliberately do NOT pass
+    `accuracy_passed=True` here: that would short-circuit to
+    `accuracy_override` (which is the higher-precedence path tested
+    separately in `test_cli_correctness_override`) and mask whether the
+    report scanner itself is wired up."""
     report = tmp_path / "optimization_report.md"
     report.write_text(
         "Correctness passed\nSpeedup: 1.32x\n",
         encoding="utf-8",
     )
     verification = ko.build_verification(
-        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        _args(e2e_gain_pct=1.0),
         [_attempt(report)],
         benchmark_available=True,
     )
@@ -82,13 +89,108 @@ def test_report_correctness_passes_with_machine_marker(tmp_path):
         encoding="utf-8",
     )
     verification = ko.build_verification(
-        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        _args(e2e_gain_pct=1.0),
         [_attempt(report)],
         benchmark_available=True,
     )
     assert verification["correctness_passed"] is True
     assert verification["correctness_source"] == "report_scan"
     assert verification["micro_speedup"] == 1.28
+
+
+def _geak_attempt(tmp_path: Path, *, status: str = "complete", speedup: float = 1.3):
+    """Build a GEAK-shaped attempt with a final_report.json on disk."""
+    final = tmp_path / "geak_final_report.json"
+    final.write_text(json.dumps({
+        "status": status,
+        "best_patch": str(tmp_path / "patch_1.patch"),
+        "best_speedup": speedup,
+        "summary": "import-only harness, no kernel exercised",
+    }), encoding="utf-8")
+    artifact = tmp_path / "worktree" / "moe_op.py"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("import torch\ndef ck_moe_stage1_fwd(*a, **k): pass\n", encoding="utf-8")
+    return {
+        "status": "completed",
+        "attempt_id": "geak-aaa",
+        "backend": "geak",
+        "optimized_path": str(artifact),
+        "backend_paths": {
+            "geak_final_report": str(final),
+            "geak_per_task_best_speedup": str(speedup),
+            "geak_per_task_best_patch": str(tmp_path / "patch_1.patch"),
+            "geak_per_task_best_worktree": str(artifact.parent.parent),
+        },
+    }
+
+
+def test_geak_correctness_trusted_by_default(tmp_path):
+    """PR-E default ON: GEAK status=complete + measured-speedup is
+    auto-promoted to KEEP. The integrate stage's E2E magpie benchmark
+    remains the ground-truth functional check; this default short-
+    circuits the missing correctness gate so GEAK patches actually
+    reach integrate (without this trust default, historical Qwen3-30B-
+    A3B-Base sessions ran GEAK 0/4 KEEP and dropped real 1.3x patches
+    like ck_moe_stage1)."""
+    verification = ko.build_verification(
+        _args(source_file="/tmp/moe_op.py"),
+        [_geak_attempt(tmp_path, status="complete", speedup=1.3)],
+        benchmark_available=True,
+    )
+    assert verification["micro_speedup"] == 1.3
+    assert verification["correctness_passed"] is True
+    assert verification["correctness_source"] == "geak_assumed_pass"
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "KEEP", proposal
+
+
+def test_geak_correctness_can_be_disabled_via_env(tmp_path, monkeypatch):
+    """Operators that want human review can opt out via
+    HYPERLOOM_TRUST_GEAK_CORRECTNESS=0 -- restores the pre-PR-E
+    conservative behaviour (NEEDS_REVIEW because correctness missing)."""
+    monkeypatch.setenv("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "0")
+    verification = ko.build_verification(
+        _args(source_file="/tmp/moe_op.py"),
+        [_geak_attempt(tmp_path, status="complete", speedup=1.3)],
+        benchmark_available=True,
+    )
+    assert verification["micro_speedup"] == 1.3
+    assert verification["correctness_passed"] is False
+    assert verification["correctness_source"] == "missing"
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "NEEDS_REVIEW"
+
+
+def test_geak_correctness_trust_requires_nonzero_speedup(tmp_path):
+    """Trust default must not promote a 0.0/1.0 'unmeasured' result.
+    The geak_per_task_best_speedup must be > 0 for the trust gate to
+    fire, otherwise we'd silently KEEP a no-op patch."""
+    # speedup=0 simulates GEAK status=complete but no per-task best
+    attempt = _geak_attempt(tmp_path, status="complete", speedup=0.0)
+    # Wipe the per-task speedup so build_verification's measured branch
+    # cannot rescue it.
+    attempt["backend_paths"]["geak_per_task_best_speedup"] = "0"
+    verification = ko.build_verification(
+        _args(),
+        [attempt],
+        benchmark_available=True,
+    )
+    # No measured speedup -> trust gate does not fire even with default trust.
+    assert verification["correctness_passed"] is False
+    assert verification["correctness_source"] == "missing"
+
+
+def test_geak_correctness_trust_requires_complete_status(tmp_path):
+    """Trust default must not promote status=failed / no-patch attempts.
+    GEAK reports status='complete_no_patch' when select_patch found
+    nothing worth keeping; that must NOT be auto-promoted to KEEP."""
+    verification = ko.build_verification(
+        _args(),
+        [_geak_attempt(tmp_path, status="complete_no_patch", speedup=1.3)],
+        benchmark_available=True,
+    )
+    assert verification["correctness_passed"] is False
+    assert verification["correctness_source"] == "missing"
 
 
 def test_report_correctness_passes_with_reference_language(tmp_path):
@@ -99,7 +201,7 @@ def test_report_correctness_passes_with_reference_language(tmp_path):
         encoding="utf-8",
     )
     verification = ko.build_verification(
-        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        _args(e2e_gain_pct=1.0),
         [_attempt(report)],
         benchmark_available=True,
     )
@@ -150,13 +252,18 @@ def test_complete_kernel_artifact_can_integrate_without_e2e_yet(tmp_path):
 
 
 def test_report_correctness_failure_blocks_keep(tmp_path):
+    """Explicit "Correctness failed" in the report must block KEEP. We
+    intentionally omit `accuracy_passed=True` here — that flag forces
+    `correctness_source=accuracy_override` and would mask the
+    report-level failure (a real safety regression). The CLI override
+    path is exercised separately in `test_cli_correctness_override`."""
     report = tmp_path / "optimization_report.md"
     report.write_text(
         "Correctness failed: assert_close failed\nSpeedup: 2.0x\n",
         encoding="utf-8",
     )
     verification = ko.build_verification(
-        _args(e2e_gain_pct=1.0, accuracy_passed=True),
+        _args(e2e_gain_pct=1.0),
         [_attempt(report)],
         benchmark_available=True,
     )
@@ -178,6 +285,310 @@ def test_cli_correctness_override(tmp_path):
     assert ko.make_proposal(verification)["decision"] == "KEEP"
 
 
+# ---------------------------------------------------------------------------
+# GEAK worktree artifact recovery (TraceLens-resolver follow-up).
+#
+# Background: GEAK's homogeneous orchestrator lays out per-sub-agent
+# artifacts as
+#
+#   <patch_output_dir>/results/round_<R>/parallel_<M>/patch_<N>.patch
+#   <patch_output_dir>/results/round_<R>/worktrees/slot_<M>/<repo files>
+#
+# The ``.patch`` file is a unified diff that frequently includes
+# multi-MB binary deltas from the aiter JIT cache, so the existing
+# fence-extraction fallback in ``_select_source_artifact`` cannot
+# recover a real ``.py``. The actual rewritten source lives in the
+# worktree slot directory; this set of tests pins the path-mapping
+# helper, the worktree-aware candidate collector, and the end-to-end
+# ``build_verification`` path so future GEAK reorgs surface as a
+# concrete unit-test failure.
+# ---------------------------------------------------------------------------
+
+
+def test_geak_best_worktree_maps_parallel_slot(tmp_path):
+    """``parallel_<M>/patch.patch`` MUST resolve to
+    ``worktrees/slot_<M>/`` under the same round dir."""
+    round_dir = tmp_path / "results" / "round_1"
+    slot_dir = round_dir / "worktrees" / "slot_3"
+    slot_dir.mkdir(parents=True)
+    patch = round_dir / "parallel_3" / "patch_1.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+
+    assert ko._geak_best_worktree(str(patch)) == slot_dir
+
+
+def test_geak_best_worktree_returns_none_for_unexpected_layout(tmp_path):
+    """Layouts that don't match the ``parallel_<M>`` convention must
+    fail soft so the caller falls back to ``.patch``-based recovery
+    instead of fabricating a worktree path."""
+    other = tmp_path / "results" / "round_1" / "weird_dir" / "patch.patch"
+    other.parent.mkdir(parents=True)
+    other.write_text("", encoding="utf-8")
+    assert ko._geak_best_worktree(str(other)) is None
+    assert ko._geak_best_worktree("") is None
+
+
+def test_geak_best_worktree_returns_none_when_slot_dir_missing(tmp_path):
+    """Even with a correct ``parallel_<M>`` parent, when the matching
+    ``worktrees/slot_<M>/`` doesn't exist on disk the helper refuses to
+    return a non-existent path (avoids handing GEAK an invalid dir to
+    rglob into)."""
+    parallel = tmp_path / "results" / "round_1" / "parallel_0"
+    parallel.mkdir(parents=True)
+    patch = parallel / "patch_0.patch"
+    patch.write_text("", encoding="utf-8")
+    assert ko._geak_best_worktree(str(patch)) is None
+
+
+def test_worktree_source_paths_prefers_repo_relative_join(tmp_path):
+    """When ``kernel_repo`` is set, the helper MUST resolve via
+    ``source_file - kernel_repo`` first (the canonical mapping for
+    TraceLens-resolved candidates) before falling back to basename
+    rglob. This guards against an editable checkout shipping a
+    same-named stub at multiple paths (e.g. aiter's ``ops/rmsnorm.py``
+    vs ``ops/triton/normalization/rmsnorm.py``)."""
+    repo = tmp_path / "repo"
+    src = repo / "aiter" / "ops" / "rmsnorm.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def f(): pass\n", encoding="utf-8")
+
+    worktree = tmp_path / "worktree"
+    canonical = worktree / "aiter" / "ops" / "rmsnorm.py"
+    decoy = worktree / "aiter" / "ops" / "triton" / "normalization" / "rmsnorm.py"
+    canonical.parent.mkdir(parents=True)
+    decoy.parent.mkdir(parents=True)
+    canonical.write_text("def f(): return 'canonical'\n", encoding="utf-8")
+    decoy.write_text("def f(): return 'decoy'\n", encoding="utf-8")
+
+    paths = ko._worktree_source_paths(
+        worktree, source_file=str(src), kernel_repo=str(repo),
+    )
+    assert paths
+    # Canonical mapping fires first; the decoy is also collected (for
+    # broader retrieval) but never as the primary candidate.
+    assert paths[0] == canonical
+
+
+def test_worktree_source_paths_falls_back_to_basename_when_no_repo(tmp_path):
+    """When ``kernel_repo`` is empty the canonical join can't fire;
+    the helper must still return matching files via bounded
+    ``worktree.rglob(basename)`` so the recovery path still works in
+    legacy CSV-only fixtures that don't carry ``kernel_repo`` on the
+    candidate."""
+    worktree = tmp_path / "worktree"
+    hit = worktree / "deep" / "nested" / "rmsnorm.py"
+    hit.parent.mkdir(parents=True)
+    hit.write_text("def f(): pass\n", encoding="utf-8")
+
+    paths = ko._worktree_source_paths(
+        worktree, source_file="/anywhere/rmsnorm.py", kernel_repo="",
+    )
+    assert paths == [hit]
+
+
+def test_candidate_artifact_paths_prefers_worktree_over_patch(tmp_path):
+    """When both a worktree ``.py`` AND a ``.patch`` are advertised,
+    the worktree file MUST appear first in the candidate list so
+    ``_select_source_artifact``'s first-pass suffix check picks it up
+    instead of falling back to fence extraction on a unified diff
+    (the regression this PR is fixing — GEAK ``.patch`` files routinely
+    embed binary JIT-cache deltas, so the fallback fails)."""
+    repo = tmp_path / "repo"
+    src = repo / "aiter" / "ops" / "rmsnorm.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def f(): pass\n", encoding="utf-8")
+
+    worktree = tmp_path / "results" / "round_1" / "worktrees" / "slot_0"
+    wt_file = worktree / "aiter" / "ops" / "rmsnorm.py"
+    wt_file.parent.mkdir(parents=True)
+    wt_file.write_text("def f(): return 'patched'\n", encoding="utf-8")
+
+    patch = tmp_path / "results" / "round_1" / "parallel_0" / "patch_0.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak0",
+        "backend": "geak",
+        "optimized_path": str(patch),
+        "backend_paths": {
+            "geak_per_task_best_patch": str(patch),
+            "geak_per_task_best_worktree": str(worktree),
+        },
+    }
+    paths = ko._candidate_artifact_paths(
+        attempt, ".py",
+        source_file=str(src),
+        kernel_repo=str(repo),
+    )
+    assert paths
+    assert paths[0] == wt_file
+    # The patch is still in the candidate list as a defense-in-depth
+    # fallback — just not first.
+    assert any(p == patch for p in paths)
+
+
+def test_build_verification_recovers_py_from_worktree(tmp_path):
+    """Pin the end-to-end fix: a GEAK attempt that left ``.patch`` +
+    a worktree slot containing a real ``.py`` must produce
+    ``artifact_valid=True`` with ``artifact_source='source_file'`` —
+    not the historical ``artifact_source='missing'`` that resulted
+    from only seeing the patch."""
+    repo = tmp_path / "repo"
+    src = repo / "aiter" / "ops" / "rmsnorm.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def rmsnorm2d_fwd():\n    pass\n", encoding="utf-8")
+
+    worktree = tmp_path / "results" / "round_1" / "worktrees" / "slot_0"
+    wt_file = worktree / "aiter" / "ops" / "rmsnorm.py"
+    wt_file.parent.mkdir(parents=True)
+    wt_file.write_text(
+        "def rmsnorm2d_fwd():\n    return 'optimized'\n", encoding="utf-8",
+    )
+
+    patch = tmp_path / "results" / "round_1" / "parallel_0" / "patch_1.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text(
+        "diff --git a/aiter/ops/rmsnorm.py b/aiter/ops/rmsnorm.py\n",
+        encoding="utf-8",
+    )
+
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak0",
+        "backend": "geak",
+        "optimized_path": str(patch),
+        "backend_paths": {
+            "geak_per_task_best_patch": str(patch),
+            "geak_per_task_best_worktree": str(worktree),
+        },
+    }
+    verification = ko.build_verification(
+        _args(source_file=str(src), kernel_repo=str(repo)),
+        [attempt],
+        benchmark_available=True,
+    )
+    assert verification["artifact_valid"] is True
+    assert verification["artifact_source"] == "source_file"
+    assert verification["best_artifact_path"] == str(wt_file)
+
+
+# ---------------------------------------------------------------------------
+# GEAK prompt yaml patcher.
+#
+# Hyperloom installs GEAK (which carries the bundled ``minisweagent``
+# package). One of the system-prompt YAMLs ships a hard-coded
+# ``task_runner.py performance`` example that mislead the sub-agent
+# LLM into running ``find /`` for a non-existent file (burning the
+# entire kernel-opt budget on WekaFS scans). The patcher rewrites
+# those three lines to abstract placeholders. Pin the idempotency +
+# fail-soft behaviour so a GEAK upstream wording change shows up as a
+# real test failure instead of silently mis-patching the YAML.
+# ---------------------------------------------------------------------------
+
+
+def _seed_yaml(tmp_path):
+    """Create a minimal copy of the relevant block from the real
+    upstream YAML so the patcher has something concrete to work on
+    even when the test interpreter doesn't have minisweagent
+    installed."""
+    yaml = tmp_path / "config" / "mini_kernel_strategy_list.yaml"
+    yaml.parent.mkdir(parents=True)
+    yaml.write_text(
+        "system_prompt: |\n"
+        "    profile_kernel:\n"
+        "    - Forbidden in `command`: `&&`, `cd`\n"
+        '    - Good example: `command="python3 scripts/task_runner.py performance",'
+        ' workdir="/path/to/project"`\n'
+        '    - Also ok: `command="python3 /absolute/path/to/scripts/task_runner.py'
+        ' performance"`\n'
+        '    - Bad example: `command="cd /path && python3 scripts/task_runner.py'
+        ' performance"`\n'
+        "    other_tool:\n"
+        "    - keep\n",
+        encoding="utf-8",
+    )
+    return yaml
+
+
+def test_geak_prompt_patcher_replaces_misleading_example(tmp_path, monkeypatch):
+    import geak_prompt_patcher as gpp
+
+    yaml = _seed_yaml(tmp_path)
+    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
+
+    ok, msg = gpp.ensure_geak_prompt_patched()
+    assert ok is True
+    assert "patched" in msg
+    text = yaml.read_text(encoding="utf-8")
+    assert "task_runner.py performance" not in text
+    assert "<your_benchmark.py>" in text
+    # Forbidden-rules / other tool sections must not be touched.
+    assert "Forbidden in `command`" in text
+    assert "other_tool" in text
+
+
+def test_geak_prompt_patcher_idempotent(tmp_path, monkeypatch):
+    import geak_prompt_patcher as gpp
+
+    yaml = _seed_yaml(tmp_path)
+    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
+
+    ok1, _ = gpp.ensure_geak_prompt_patched()
+    text1 = yaml.read_text(encoding="utf-8")
+    assert ok1 is True
+
+    ok2, msg2 = gpp.ensure_geak_prompt_patched()
+    text2 = yaml.read_text(encoding="utf-8")
+    assert ok2 is True
+    assert "already patched" in msg2
+    # Bit-for-bit identical: idempotent rerun must not touch the file.
+    assert text1 == text2
+
+
+def test_geak_prompt_patcher_fails_soft_when_yaml_missing(tmp_path, monkeypatch):
+    """The patcher is a UX hardening, not a correctness gate; when
+    the YAML is missing (e.g. install ran with check-only and skipped
+    the GEAK pip install) ``ensure_geak_prompt_patched`` returns
+    ``(False, …)`` so the install script can continue. The
+    ``HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED`` knob is the operator's
+    opt-in for treating this as fatal — covered separately in the CLI
+    entrypoint test."""
+    import geak_prompt_patcher as gpp
+
+    monkeypatch.setenv(
+        "HYPERLOOM_GEAK_PROMPT_YAML", str(tmp_path / "does_not_exist.yaml"),
+    )
+    ok, msg = gpp.ensure_geak_prompt_patched()
+    assert ok is False
+    assert "minisweagent not installed" in msg
+
+
+def test_geak_prompt_patcher_refuses_to_guess_on_drift(tmp_path, monkeypatch):
+    """When upstream changes the example wording the patcher MUST
+    refuse rather than partially-match and garble the YAML. Pin this
+    so a GEAK upgrade that renames the example surfaces as a clear
+    failure, not a half-patched file."""
+    import geak_prompt_patcher as gpp
+
+    yaml = tmp_path / "drifted.yaml"
+    yaml.write_text(
+        "system_prompt: |\n"
+        "    profile_kernel:\n"
+        '    - Good example: `command="python3 different_runner.py", workdir="/x"`\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
+
+    ok, msg = gpp.ensure_geak_prompt_patched()
+    assert ok is False
+    assert "upstream example block changed" in msg
+    # File was NOT touched.
+    assert "different_runner.py" in yaml.read_text(encoding="utf-8")
+
+
 def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     bench = tmp_path / "bench.py"
     bench.write_text("print('ok')\n", encoding="utf-8")
@@ -185,6 +596,242 @@ def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     args.benchmark_file = ""
     args.test_harness_path = ""
     assert ko.has_benchmark(args, {"benchmark_files": [str(bench)]}) is True
+
+
+# ---------------------------------------------------------------------------
+# Regression: backend stdout must never be promoted to `source_file` artifact.
+#
+# Before the fix, `run_attempt` wrote the raw subprocess stdout to a
+# `<attempt_id>_optimized<source_suffix>` file (e.g. `.cu` / `.py`). The
+# mini-swe-agent / OOB log emitted by GEAK / claude / codex routinely
+# contains generic English words like "void ", "int ", "float ", or
+# fragments of the optimization-trajectory transcript that include patch
+# excerpts. `_source_text_looks_complete` only checks for the presence of
+# those markers (it does not parse C++), so it false-positive matched the
+# log as a real CUDA source file. The verification block then reported
+# `artifact_source: source_file` and pointed `best_artifact_path` at a
+# transcript log — observed on Qwen3-8B k007 rmsnorm_quant (2026-05-20),
+# where `geak-b9e23625_optimized.cu` was a 55-line minisweagent log with
+# 3 generic-marker hits, but was still reported as a valid source artifact.
+#
+# After the fix, stdout is written to `<attempt_id>_stdout.log` instead.
+# The `.log` suffix routes the file through the fenced-code-block
+# extraction path in `_select_source_artifact` (where it belongs — Claude
+# / Codex sometimes emit the full optimized CU inside a fenced block),
+# but never lets a raw log impersonate a real source artifact.
+# ---------------------------------------------------------------------------
+
+
+def test_geak_stdout_log_must_not_false_positive_as_source_file(tmp_path):
+    """If the only artifact a backend produced is its own stdout log
+    (no patch_*.patch, no optimized_versions/*.cu, no extractable code
+    fence), verification must report ``artifact_source == "missing"``
+    — NOT pretend the log is the optimized source. This is the exact
+    failure mode observed on Qwen3-8B k007 (2026-05-20)."""
+    log_path = tmp_path / "geak-deadbeef_stdout.log"
+    log_path.write_text(
+        "minisweagent.agents.parallel_agent: INFO: [running 12.0min] Sub-agents working\n"
+        "2 total patches (task_0: 2)\n"
+        # The next line embeds words like "void", "int", "float" that the
+        # pre-fix `_source_text_looks_complete` heuristic would happily
+        # accept as a complete CUDA source.
+        "Trajectory note: convert the int loop, drop the void wrapper, use float.\n"
+        "Best patch: patch_1 (agent 0)\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak-deadbeef",
+        "backend": "geak",
+        "optimized_path": str(log_path),
+        "backend_paths": {},
+    }
+
+    artifact_path, source, error = ko._select_source_artifact(
+        attempt,
+        target_file="/tmp/source.cu",
+        run_dir=tmp_path,
+    )
+
+    assert artifact_path == ""
+    assert source == "missing"
+    assert ".cu source artifact found" in error
+
+
+def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
+    """If the backend stdout *does* embed the full optimized CU inside a
+    fenced code block (the Claude / Codex happy path), the `.log` route
+    must still surface it — labelled ``extracted_code_block``, not
+    ``source_file`` (so consumers know it came from a transcript, not a
+    first-class artifact)."""
+    log_path = tmp_path / "claude-c0ffee_stdout.log"
+    log_path.write_text(
+        "Here is the final optimized kernel:\n"
+        "```cuda\n"
+        "#include <hip/hip_runtime.h>\n"
+        "extern \"C\" __global__ void optimized_kernel(float* out, const float* in) {\n"
+        "  int idx = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        "  out[idx] = in[idx] * 2.0f;\n"
+        "}\n"
+        "```\n"
+        "Done.\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed",
+        "attempt_id": "claude-c0ffee",
+        "backend": "claude",
+        "optimized_path": str(log_path),
+        "backend_paths": {},
+    }
+
+    artifact_path, source, error = ko._select_source_artifact(
+        attempt,
+        target_file="/tmp/source.cu",
+        run_dir=tmp_path,
+    )
+
+    assert error == ""
+    assert source == "extracted_code_block"
+    assert artifact_path.endswith("_extracted.cu")
+    body = Path(artifact_path).read_text(encoding="utf-8")
+    assert "extern \"C\" __global__ void optimized_kernel" in body
+    # The extraction must drop the surrounding prose / fence markers.
+    assert "```" not in body
+    assert "Here is the final" not in body
+
+
+def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
+    """When both a real GEAK patch AND a stdout log are present, the
+    patch wins. The log is only a fallback for the all-else-failed
+    case. The patch itself isn't a `.cu`, so it goes through fenced
+    extraction — but that fails (a unified diff has no fenced code
+    blocks), so we correctly return `missing` rather than promoting
+    the stdout log. Documents the precedence order in
+    `_candidate_artifact_paths`."""
+    patch_path = tmp_path / "patch_1.patch"
+    patch_path.write_text(
+        "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "geak-cafebabe_stdout.log"
+    log_path.write_text(
+        "void int float extern __global__ #include\n",  # marker-rich noise
+        encoding="utf-8",
+    )
+    attempt = {
+        "status": "completed",
+        "attempt_id": "geak-cafebabe",
+        "backend": "geak",
+        "optimized_path": str(log_path),
+        "backend_paths": {
+            "geak_per_task_best_patch": str(patch_path),
+            "geak_latest_patch": str(patch_path),
+        },
+    }
+
+    artifact_path, source, error = ko._select_source_artifact(
+        attempt,
+        target_file="/tmp/source.cu",
+        run_dir=tmp_path,
+    )
+
+    # Neither path yields a complete CU: patch is a diff (no fenced
+    # block), log is just marker-noise (no fenced block either). The
+    # crucial assertion is that the log is NOT silently promoted to
+    # `source_file` — that was the pre-fix bug.
+    assert source == "missing"
+    assert artifact_path == ""
+
+
+# ---------------------------------------------------------------------------
+# Downstream-consumer contract for the optimized/ directory naming.
+#
+# `run_attempt` writes one file per attempt under `runs/<sid>/optimized/`:
+#   * real backend runs:  `<attempt_id>_stdout.log`
+#   * dry-run smoke tests: `<attempt_id>_optimized<source_suffix>`
+#
+# The breakdown collector (`inference_optimizer/breakdown/collectors.py`)
+# discovers these via `glob(f"{attempt_id}*")`, which by design picks up
+# BOTH the legacy name (older sessions on disk) and the new name. The
+# regression below pins that contract so anyone tightening the glob to
+# a fixed suffix breaks the test (and re-introduces the historical
+# `geak-b9e23625_optimized.cu == 55-line minisweagent log` false-positive
+# documented in `test_geak_stdout_log_must_not_false_positive_as_source_file`
+# above — see also `kernel-agent/SKILL.md` § *Per-attempt stdout file naming*).
+# ---------------------------------------------------------------------------
+
+
+def test_optimized_dir_glob_picks_up_both_legacy_and_new_attempt_files(tmp_path):
+    """Lock the `glob("{attempt_id}*")` contract that the breakdown
+    collector relies on. Both names must surface for the same attempt id
+    so downstream consumers transparently work across old + new sessions.
+    """
+    opt_dir = tmp_path / "optimized"
+    opt_dir.mkdir()
+
+    legacy = opt_dir / "geak-deadbeef_optimized.cu"
+    legacy.write_text("// historical dry-run / pre-2026-05 layout\n", encoding="utf-8")
+
+    new = opt_dir / "geak-deadbeef_stdout.log"
+    new.write_text("real backend stdout transcript\n", encoding="utf-8")
+
+    unrelated = opt_dir / "geak-cafebabe_stdout.log"
+    unrelated.write_text("different attempt; must not leak in\n", encoding="utf-8")
+
+    matched = sorted(opt_dir.glob("geak-deadbeef*"))
+
+    assert {p.name for p in matched} == {
+        "geak-deadbeef_optimized.cu",
+        "geak-deadbeef_stdout.log",
+    }, (
+        "breakdown/collectors.py uses `glob(f\"{attempt_id}*\")` to discover "
+        "per-attempt artefacts — both the legacy `_optimized.<suffix>` and "
+        "the post-2026-05 `_stdout.log` names must remain discoverable so "
+        "older session dirs and new ones render identically in the breakdown."
+    )
+
+
+def test_run_attempt_dry_run_emits_optimized_suffix_file(tmp_path):
+    """Dry-run mode is a public smoke-test surface: it must keep the
+    historical `<attempt_id>_optimized<source_suffix>` filename so existing
+    smoke scripts and dry-run CI shards keep working unchanged. (Real
+    backend runs deliberately diverged to `_stdout.log` — see the comment
+    block above.)"""
+    import argparse
+
+    run_dir = tmp_path / "runs" / "sess001"
+    args = argparse.Namespace(
+        dry_run=True,
+        source_file="/tmp/k.cu",
+        session_id="sess001",
+        geak_budget_min=120,
+        budget_minutes=60,
+        disable_rag=False,
+        disable_xs_memory=False,
+        num_gpus=1,
+        target_platform="",
+        test_command="",
+        kernel_id="k001",
+    )
+    log_path = tmp_path / "run.log"
+    log_path.write_text("", encoding="utf-8")
+
+    result = ko.run_attempt(
+        "claude",
+        args=args,
+        candidate={"kernel_id": "k001", "name": "k", "source_file": "/tmp/k.cu"},
+        run_dir=run_dir,
+        log_path=log_path,
+    )
+
+    optimized_path = Path(result["optimized_path"])
+    assert optimized_path.exists(), "dry-run must materialise the placeholder"
+    assert optimized_path.name.endswith("_optimized.cu"), (
+        "dry-run filename must remain `<attempt_id>_optimized<source_suffix>` "
+        "for smoke-test back-compat; got " + optimized_path.name
+    )
+    assert optimized_path.parent.name == "optimized"
 
 
 def _metadata_from_prompt(prompt: str) -> dict:
@@ -298,6 +945,43 @@ def test_build_prompt_includes_geak_runtime_metadata():
     assert metadata["kernel_params"]["HEAD_SIZE"] == 128
 
 
+def test_build_prompt_includes_budget_protocol_warning():
+    args = _args(source_file="")
+    args.kernel_id = "budget_kernel"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+
+    prompt = ko.build_prompt(
+        {"name": "budget_kernel", "source_type": "hip"},
+        args,
+    )
+
+    assert "BUDGET PROTOCOL" in prompt
+    assert "--cost-limit 0.0" in prompt
+    assert "TELEMETRY" in prompt
+    assert prompt.index("BUDGET PROTOCOL") < prompt.index("kernel_name:")
+
+
+def test_build_prompt_budget_protocol_precedes_source_attribution():
+    args = _args(source_file="/tmp/device.cu")
+    args.kernel_id = "promoted_kernel"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+    candidate = {
+        "name": "promoted_kernel",
+        "source_file": "/tmp/device.cu",
+        "source_type": "hip",
+        "source_promoted_from_launcher": True,
+        "launcher_source_file": "/tmp/wrapper.py",
+    }
+
+    prompt = ko.build_prompt(candidate, args)
+
+    assert "BUDGET PROTOCOL" in prompt
+    assert "SOURCE ATTRIBUTION NOTE" in prompt
+    assert prompt.index("BUDGET PROTOCOL") < prompt.index("SOURCE ATTRIBUTION NOTE")
+
+
 def test_build_prompt_metadata_is_backward_compatible():
     args = _args(source_file="")
     args.kernel_id = "legacy"
@@ -328,10 +1012,10 @@ def test_build_prompt_metadata_is_backward_compatible():
     }
 
 
-def test_build_prompt_metadata_extracts_extra_sglang_args():
+def test_build_prompt_metadata_extracts_extra_server_args():
     args = _args(
         source_file="",
-        extra_sglang_args=(
+        extra_server_args=(
             "--kv-cache-dtype fp8 --page-size 16 --attention-backend aiter "
             "--decode-attention-backend aiter --disable-cuda-graph "
             "--cuda-graph-max-bs 128 --num-continuous-decode-steps 4"
@@ -397,6 +1081,34 @@ def test_build_prompt_includes_tracelens_context_from_trace_report_path(tmp_path
 
     assert "## TraceLens Context" in prompt
     assert "P1: paged attention" in prompt
+
+
+def test_build_prompt_strips_base64_images_from_tracelens_context(tmp_path):
+    big_b64 = "A" * 5000
+    report = tmp_path / "analysis.md"
+    report.write_text(
+        "# TraceLens Analysis\n\n"
+        f"![Performance Improvement](data:image/png;base64,{big_b64})\n\n"
+        "## Detailed Analysis\nP2: rmsnorm tuning\n",
+        encoding="utf-8",
+    )
+    args = _args(source_file="")
+    args.kernel_id = "k009"
+    args.num_gpus = 0
+    args.budget_minutes = 60
+    candidate = {
+        "name": "aiter::rmsnorm",
+        "source_file": "/tmp/rmsnorm.py",
+        "source_type": "python",
+        "trace_report_path": str(report),
+    }
+
+    prompt = ko.build_prompt(candidate, args)
+
+    assert "data:image/png;base64" not in prompt
+    assert big_b64 not in prompt
+    assert "<<stripped: base64 image — Performance Improvement>>" in prompt
+    assert "P2: rmsnorm tuning" in prompt
 
 
 # ============================================================================
@@ -796,3 +1508,77 @@ def test_build_prompt_omits_priority_block_for_legacy_candidates():
         _prompt_args("mi300x"),
     )
     assert "## Optimization priorities" not in prompt
+
+
+# ============================================================================
+# Defect 1 regression: make_proposal must surface ``artifact_error`` instead of
+# the misleading "compile failed" string when zero backend attempts ever
+# produced a usable result (e.g. wedged Ray cluster -> ConnectionError on every
+# submit). Without this, an infra failure looks like a real compile regression
+# in state.json:last_kernel_opt.reasons. See:
+#   /home/sapmajum/hyperloom_work/logs/geak_dispatch_audit.md Defect 1
+# ============================================================================
+def test_make_proposal_surfaces_backend_dispatch_failure():
+    """When every backend dispatch failed and ``best`` is None, the REVERT
+    reason must call out the real cause (no usable backend attempt) so
+    operators don't chase a phantom compile regression."""
+    verification = {
+        "compile_passed": False,
+        "correctness_passed": False,
+        "artifact_valid": False,
+        "artifact_error": "no usable backend attempt",
+        "best_attempt_id": "",
+        "best_backend": "",
+        "best_artifact_path": "",
+        "micro_speedup": 0.0,
+        "micro_speedup_source": "default_unmeasured",
+    }
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "REVERT"
+    assert len(proposal["reasons"]) == 1
+    assert "backend dispatch failed" in proposal["reasons"][0]
+    assert "no usable backend attempt" in proposal["reasons"][0]
+    # The misleading legacy string must NOT appear when we know the real cause.
+    assert "compile failed" not in proposal["reasons"][0]
+
+
+def test_make_proposal_keeps_legacy_compile_failed_when_artifact_lookup_failed():
+    """Real compile-side regression path: an attempt produced output but the
+    artifact resolution failed (best_attempt_id non-empty, artifact_error
+    describes the lookup failure). Decision must still be REVERT with the
+    legacy 'compile failed' reason — only the *dispatch-side* path is rewritten.
+    """
+    verification = {
+        "compile_passed": False,
+        "correctness_passed": False,
+        "artifact_valid": False,
+        "artifact_error": "no complete .hip source artifact found; tried: x.hip",
+        "best_attempt_id": "geak-abc",
+        "best_backend": "geak",
+        "best_artifact_path": "",
+        "micro_speedup": 0.0,
+        "micro_speedup_source": "default_unmeasured",
+    }
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "REVERT"
+    assert proposal["reasons"] == ["compile failed"]
+
+
+def test_make_proposal_empty_artifact_error_falls_back_to_compile_failed():
+    """Belt-and-braces: if compile_passed=False and artifact_error is empty
+    (shouldn't happen given build_verification's default, but guard against
+    future refactors), we must not crash and must keep the legacy reason."""
+    verification = {
+        "compile_passed": False,
+        "correctness_passed": False,
+        "artifact_valid": False,
+        "artifact_error": "",
+        "best_attempt_id": "",
+        "best_backend": "",
+        "best_artifact_path": "",
+        "micro_speedup": 0.0,
+        "micro_speedup_source": "default_unmeasured",
+    }
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "REVERT"
+    assert proposal["reasons"] == ["compile failed"]

@@ -14,7 +14,6 @@ Discovery strategy:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
@@ -130,13 +129,214 @@ class Config:
     # / log visibility only.
     nodes: int = 1
 
+    # -- gpu_memory_leaked signal (2026-05) --
+    # Trip thresholds: a GPU is "full" when EITHER util_mem_pct exceeds
+    # ``gpu_leak_util_mem_pct_threshold`` OR free MiB falls below
+    # ``gpu_leak_free_mb_threshold``. The detector fires only after the
+    # whole-pod condition holds for ``gpu_leak_min_consecutive_ticks``
+    # back-to-back ticks (anti-flap against baseline cold-start).
+    gpu_leak_util_mem_pct_threshold: float = 99.0
+    gpu_leak_free_mb_threshold: float = 500.0
+    gpu_leak_min_consecutive_ticks: int = 2
+
+    # -- deadline_imminent / budget_burn_no_gain signals --
+    # ``budget_warn_pct`` and ``budget_imminent_pct`` express how much of
+    # the wall-clock budget the run has consumed before the medium /
+    # high ladder rungs fire. ``budget_min_minutes`` is the smallest
+    # session length the budget signal will trip on (avoids accusing a
+    # 2 min smoke test of running out of time). ``budget_productive_gain_pct``
+    # is the validated-gain cliff above which we consider the run worth
+    # letting finish naturally; below it Robustness winds the session
+    # down with ``delegate(report)``.
+    budget_warn_pct: float = 0.70
+    budget_imminent_pct: float = 0.85
+    budget_min_minutes: float = 30.0
+    budget_productive_gain_pct: float = 0.5
+    # -- H1 / H2 budget signal extensions (2026-05-18) --
+    # ``budget_strategy_drift_pct`` is the earliest %-based gate (default
+    # 50%). It fires a MEDIUM alert when the run is half-burnt with no
+    # validated gain — well before the existing warn/imminent gates.
+    # The two absolute-time thresholds back-stop sessions whose budgets
+    # are so long that 85% still leaves hours of wall time, where the
+    # percentage-based gates fire too late to matter.
+    budget_strategy_drift_pct: float = 0.5
+    budget_deadline_warning_minutes: float = 30.0
+    budget_deadline_hard_cutoff_minutes: float = 5.0
+
+    # -- same_payload_loop signal (B1, 2026-05-18) --
+    # ``repeated_payload_streak_threshold`` is the number of consecutive
+    # identical-payload failures that must precede the signal fire. The
+    # 2026-05-18 GPU-leak run hit 11 attempts before the deadline;
+    # default = 3 catches the loop one tick earlier than the third
+    # failure would surface in human triage.
+    repeated_payload_streak_threshold: int = 3
+    repeated_payload_lookback_events: int = 80
+
+    # -- aiter_jit_regressed signal (A7, 2026-05-18) --
+    aiter_jit_cold_so_count: int = 20
+    aiter_jit_regression_ratio: float = 0.8
+    aiter_jit_stale_build_threshold: int = 1
+    aiter_jit_stale_build_persist_ticks: int = 5
+
+    # -- gain_plateau / no_levers_found signals (B2 / B3, 2026-05-18) --
+    progress_gain_window_ticks: int = 6
+    progress_gain_epsilon_pct: float = 0.5
+    progress_no_levers_min_minutes: float = 45.0
+    progress_no_levers_min_ticks: int = 8
+
+    # -- A3 / A4 disk / shm signals (2026-05-18) --
+    disk_used_warn_pct: float = 85.0
+    disk_used_crit_pct: float = 95.0
+    shm_used_warn_pct: float = 75.0
+    shm_used_crit_pct: float = 90.0
+
+    # -- A5 fd_pressure signal (2026-05-18) --
+    fd_warn_used_pct: float = 80.0
+    fd_crit_used_pct: float = 95.0
+    fd_probe_enabled: bool = True
+    fd_probe_pid: int | None = None
+
+    # -- A6 ray_head_dead signal (2026-05-18) --
+    ray_probe_enabled: bool = True
+    ray_probe_timeout_s: float = 5.0
+
+    # -- B4 idempotency_replay signal (2026-05-18) --
+    idempotency_replay_threshold: int = 2
+
+    # -- G decision-audit signals (2026-05-18) --
+    # ``decision_audit_enabled`` turns the whole LocalProbe sub-probe
+    # off — useful for hosts whose ``runs/`` tree is on read-only or
+    # remote storage that we don't want stat'd every tick.
+    decision_audit_enabled: bool = True
+    decision_audit_max_integrate: int = 20
+    decision_audit_max_oob_attempts: int = 50
+    # ``min_keep_gain_pct`` is the noise-floor cliff for G2. Upstream
+    # executors will sometimes use 1.0% as the keep threshold; mirroring
+    # it here keeps the rule from going crazy on default-configured
+    # sessions.
+    decision_audit_min_keep_gain_pct: float = 1.0
+    decision_audit_dispatch_bypass_epsilon_pct: float = 0.5
+
+    # -- C preflight signals (2026-05-19) --
+    # ``preflight_enabled`` disables the manifest + kernel_breakdown
+    # probes (and therefore C1/C2). C3 ``cold_start_budget_exhausted``
+    # is gated separately by the aiter JIT probe.
+    preflight_enabled: bool = True
+    # C1 — fire when projected HBM headroom < ``min_headroom_pct``.
+    # 5% is a single-digit conservative floor: the projection itself
+    # over-estimates required HBM by ~5% (param overhead) so below 5%
+    # actual headroom is effectively zero.
+    preflight_min_headroom_pct: float = 5.0
+    preflight_activation_buf_gib: float = 8.0
+    # C2 — Amdahl kernel ceiling. Pessimistic single-kernel speedup
+    # of 1.5x reflects the 2026-05 GEAK average; min_e2e_ceiling_pct
+    # of 5% mirrors the SKILL noise-floor convention.
+    preflight_amdahl_single_kernel_speedup: float = 1.5
+    preflight_amdahl_min_e2e_ceiling_pct: float = 5.0
+    # C3 — cold-start vs budget. ``preflight_cold_start_minutes=None``
+    # makes the detector read ``$INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC``
+    # (default 3600s).
+    preflight_cold_start_so_count: int = 20
+    preflight_cold_start_minutes: float | None = None
+
+    # -- D2 multi-source server logs (2026-05-19) --
+    # ``server_log_extra_globs`` is a colon-separated string operators
+    # can supply via env to add additional log globs alongside the
+    # ``runs/*/*/server.log`` defaults that already cover Hyperloom grid
+    # variants. Set ``server_log_extra_globs=""`` to disable extras.
+    server_log_extra_globs: str = ""
+    # Max number of extra log files scanned per tick.
+    server_log_max_extra: int = 5
+
+    # -- E critic-health signals (2026-05-19) --
+    critic_health_enabled: bool = True
+    critic_health_max_judge_bundles: int = 20
+    critic_health_min_outage_judges: int = 3
+    critic_health_min_unavailable_verdicts: int = 3
+    critic_health_max_workdir_count: int = 100
+
+    # -- F kernel-pipeline signals (2026-05-19) --
+    # F1
+    kernel_pipeline_pending_count_threshold: int = 1
+    kernel_pipeline_min_pending_ticks: int = 3
+    # F2
+    kernel_pipeline_min_geak_sigterm_attempts: int = 2
+    # F4
+    kernel_pipeline_min_cursor_401_hits: int = 3
+    # F5
+    kernel_pipeline_min_kernels_with_no_progress: int = 3
+    # Auto-append the local inference server health URL to
+    # ``health_probe_targets``. Without this default, B1 testing showed
+    # that sglang SIGSTOP fires no symptom because operators must
+    # remember to put the URL into ``health_probe_targets`` manually.
+    # 127.0.0.1:8888 is the Hyperloom Magpie wrapper default; if the
+    # operator runs on a different port they can override via Config
+    # without touching factory wiring.
+    auto_probe_inference_server: bool = True
+    inference_server_health_url: str = "http://127.0.0.1:8888/health"
+
+    # -- I state-integrity signals (2026-05-19) --
+    state_integrity_enabled: bool = True
+    state_wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024     # 1 GiB
+    state_wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
+    state_stale_lease_min_age_s: float = 60.0
+    state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024     # 100 MiB
+    state_inbox_bloat_critical_bytes: int = 500 * 1024 * 1024  # 500 MiB
+
+    # -- J external-deps signals (2026-05-19) --
+    # Whole-probe disable for hosts that audit gateway / mounts
+    # externally (e.g. Primus-SaFE built-in health monitoring).
+    external_deps_enabled: bool = True
+    external_mount_stat_timeout_s: float = 5.0
+    external_gateway_probe_url: str = ""  # empty → derive from OPENAI_BASE_URL
+    external_mount_latency_warn_ms: float = 5000.0
+    external_mount_latency_critical_ms: float = 15000.0
+
+    # -- L1 + L2 postmortem finalizer (2026-05-19) --
+    # ``finalize_enabled=False`` disables the L1 flashpoint + L2
+    # decision_trace writers entirely; useful for smoke tests and for
+    # external operators who own their own postmortem flow.
+    finalize_enabled: bool = True
+    finalize_reports_subdir: str = "reports"
+    finalize_max_findings_in_report: int = 20
+    finalize_max_tasks_per_action: int = 50
+
+    # -- cross-tick state persistence (2026-05-19) --
+    # M1 transport spawns a fresh subprocess per Coordinator tick, so
+    # any consecutive-tick rule (``gpu_memory_leaked`` ≥2 ticks,
+    # ``ray_pending_starvation`` ≥3 ticks, ``gain_plateau`` 6-tick
+    # window, ladder cooldown, RCA per-key cooldown, ...) is broken
+    # without disk-backed state. ``state_store_enabled=False`` reverts
+    # to in-memory only (for unit tests / single-process drivers).
+    state_store_enabled: bool = True
+
     # -- ring buffer (local mode only) --
     local_metrics_history_s: int = 3600
     local_metrics_sample_interval: int = 5
 
     # -- server process patterns --
+    # Default patterns mirror ``local_probe._DEFAULT_PROCESS_PATTERNS``
+    # so the gpu_memory_leaked detector's "no live owner" check matches
+    # every legitimate VRAM-holding process. The 2026-05-18 vLLM v1 / Ray /
+    # aiter JIT additions are critical: without them the leak detector
+    # would see ``EngineCore-`` children as "not a server" and false-fire.
     server_process_patterns: list[str] = field(default_factory=lambda: [
-        "sglang.srt", "vllm.entrypoints", "vllm serve",
+        # SGLang
+        "sglang.srt",
+        "sglang.launch_server",
+        # vLLM
+        "vllm.entrypoints",
+        "vllm serve",
+        "vllm.v1.engine.core",
+        "vllm.engine.async_llm_engine",
+        "EngineCore",
+        # Magpie / InferenceX
+        "Magpie",
+        "inferencex",
+        # Ray + JIT compilation
+        "ray::IDLE",
+        "raylet",
+        "hipcc",
     ])
     benchmark_process_patterns: list[str] = field(default_factory=lambda: [
         "benchmark_serving",

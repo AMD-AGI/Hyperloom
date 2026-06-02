@@ -1,6 +1,7 @@
 """Regression tests for the kernel-agent tracelens_analysis filter fixes.
 
-Locks two related fixes uncovered by the resume3/resume4 1h validation:
+Locks the raw trace filtering fix uncovered by the resume3/resume4 1h
+validation:
 
 * **A path** ``is_kernel_event`` previously did fuzzy substring matching
   on `KERNEL_HINTS=("kernel","triton","hip","cuda",...)` against both the
@@ -9,15 +10,13 @@ Locks two related fixes uncovered by the resume3/resume4 1h validation:
   accumulates the entire wrapped GPU duration) to be the #1 hot kernel —
   88ms attributed to a CPU sync. Fix: require ``cat == 'kernel'`` strictly.
 
-* **B path** the wrapper now reads TraceLens's own ``kernel_summary.csv``
-  output first; falls back to the (fixed) raw parser only when the csv
-  is missing.  TraceLens already filters host-side events correctly via
-  ``Parent cpu_op == hipGraphLaunch`` joins, so reading its csv is both
-  more accurate and self-tracking when TraceLens schema improves.
+The production TraceLens interface now consumes only ``analysis.md``. Legacy
+``priority_data`` / ``category_data`` / CSV fallbacks are intentionally gone.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -114,69 +113,6 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
     # No sync poison left
     for n in kept_names:
         assert "synchronize" not in n.lower()
-
-
-# ===========================================================================
-# B path — parse_tracelens_kernel_summary
-# ===========================================================================
-@pytest.fixture
-def tl_csv(tmp_path: Path) -> Path:
-    """Write a kernel_summary.csv shaped like real TraceLens output."""
-    csv_path = tmp_path / "kernel_summary.csv"
-    # \u00b5 == µ (micro sign as TraceLens emits)
-    csv_path.write_text(
-        "Parent op category,Parent cpu_op,Kernel name,Kernel stream,"
-        "Kernel duration (\u00b5s)_sum,Kernel duration (\u00b5s)_count,"
-        "Kernel duration (\u00b5s)_mean,Kernel duration (\u00b5s)_min\n"
-        "graph,hipGraphLaunch,Cijk_Alik_Bljk_*MT256x16x64,3,5077.217,37,137.22,121.4\n"
-        "graph,hipGraphLaunch,Cijk_Alik_Bljk_*MT16x16x512,3,2084.107,72,28.94,16.6\n"
-        "graph,hipGraphLaunch,_ZN5aiter24add_rmsnorm_quant_kernel<bf16>,3,466.586,72,6.48,5.9\n"
-        "graph,hipGraphLaunch,_ZN5aiter24add_rmsnorm_quant_kernel<bf16>,5,442.089,72,6.14,5.1\n"
-        "graph,hipGraphLaunch,paged_attention_ll4mi_QKV_mfma16_kernel<...>,3,889.104,36,24.69,21.6\n"
-        "graph,hipGraphLaunch,_ZN7sgl_hip10activation18act_and_mul_kernel<bf16>,3,380.188,36,10.56,9.8\n",
-        encoding="utf-8",
-    )
-    return csv_path
-
-
-def test_b_parses_tracelens_csv(tl_csv):
-    out = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
-    assert out is not None
-    assert len(out) == 5  # 6 csv rows but 2 add_rmsnorm rows aggregate by name
-    # Top-1 should be the GEMM with biggest sum-duration
-    top = out[0]
-    assert top["name"].startswith("Cijk_Alik_Bljk_*MT256x16x64")
-    assert top["duration_us"] == pytest.approx(5077.217, rel=1e-3)
-    assert top["call_count"] == 37
-    assert top["kernel_id"] == "k001"
-    # Check aggregation: add_rmsnorm appears once with summed duration
-    add_rmsnorm = [k for k in out if "add_rmsnorm_quant" in k["name"]]
-    assert len(add_rmsnorm) == 1
-    assert add_rmsnorm[0]["duration_us"] == pytest.approx(466.586 + 442.089, rel=1e-3)
-    assert add_rmsnorm[0]["call_count"] == 144
-    # gpu_pct is computed against total
-    total = sum(k["duration_us"] for k in out)
-    assert sum(k["gpu_pct"] for k in out) == pytest.approx(100.0, abs=0.5)
-
-
-def test_b_returns_none_when_csv_missing(tmp_path):
-    out = tla.parse_tracelens_kernel_summary(tmp_path / "nonexistent.csv", top_k=10)
-    assert out is None
-
-
-def test_b_returns_none_when_csv_missing_required_columns(tmp_path):
-    bad = tmp_path / "kernel_summary.csv"
-    bad.write_text("foo,bar\n1,2\n", encoding="utf-8")
-    assert tla.parse_tracelens_kernel_summary(bad, top_k=10) is None
-
-
-def test_b_returns_none_when_csv_has_zero_kernels(tmp_path):
-    empty = tmp_path / "kernel_summary.csv"
-    empty.write_text(
-        "Kernel name,Kernel duration (\u00b5s)_sum,Kernel duration (\u00b5s)_count\n",
-        encoding="utf-8",
-    )
-    assert tla.parse_tracelens_kernel_summary(empty, top_k=10) is None
 
 
 # ===========================================================================
@@ -292,22 +228,6 @@ def test_known_rmsnorm_harness_is_registered_without_repo_root():
     assert any("rmsnorm" in path.lower() for path in files)
 
 
-# ===========================================================================
-# #125 — TraceLens structured output consumption
-# (kernel_category / shape / source_path triple for GEAK)
-# ===========================================================================
-
-
-def test_125_csv_extracts_parent_op_category(tl_csv):
-    """csv parser surfaces 'Parent op category' as tracelens_category."""
-    out = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
-    assert out is not None
-    for cand in out:
-        assert cand.get("tracelens_category") == "graph", (
-            f"missing/wrong tracelens_category on {cand['name']}: {cand}"
-        )
-
-
 def test_125_finalize_adds_kernel_category_for_attention():
     cand = {"name": "paged_attention_ll4mi_QKV_mfma16_kernel<bf16>"}
     assert tla.derive_kernel_category(cand) == "SDPA"
@@ -335,217 +255,6 @@ def test_125_derive_category_normalizations():
     ]
     for name, expected in cases:
         assert tla.derive_kernel_category({"name": name}) == expected, name
-
-
-@pytest.fixture
-def tl_category_data(tmp_path: Path) -> Path:
-    """Mock TraceLens orchestrator category_data/ directory."""
-    cd = tmp_path / "category_data"
-    cd.mkdir()
-    (cd / "GEMM.json").write_text(
-        '{"category": "GEMM", "kernels": ['
-        '{"name": "Cijk_Alik_Bljk_MT256x16x64", "duration_us": 5077.2, '
-        '"call_count": 37, "shape": [16, 64, 64], "source_path": '
-        '"/sgl-workspace/aiter/csrc/kernels/gemm.cu"},'
-        '{"name": "rocblas_dgemm_kernel", "duration_us": 1200.0, '
-        '"call_count": 10, "shape": [16, 16, 512]}'
-        ']}'
-    )
-    (cd / "SDPA.json").write_text(
-        '{"name": "SDPA", "items": ['
-        '{"name": "paged_attention_ll4mi_QKV_mfma16_kernel<bf16>", '
-        '"duration_us": 889.1, "call_count": 36, '
-        '"input_shape": [1, 2048, 64], "path": '
-        '"/sgl-workspace/sglang/csrc/attention.cu"}'
-        ']}'
-    )
-    return cd
-
-
-def test_125_parses_category_data_with_full_triple(tl_category_data):
-    out = tla.parse_tracelens_category_data(tl_category_data, top_k=10)
-    assert out is not None
-    assert len(out) == 3, f"expected 3 kernels, got {len(out)}"
-    by_name = {c["name"]: c for c in out}
-
-    gemm = by_name["Cijk_Alik_Bljk_MT256x16x64"]
-    assert gemm["kernel_category"] == "GEMM"
-    assert gemm["shapes"]
-    assert gemm["source_file"] == "/sgl-workspace/aiter/csrc/kernels/gemm.cu"
-    assert gemm["source_path"] == gemm["source_file"]
-    assert gemm["duration_us"] == pytest.approx(5077.2, rel=1e-3)
-
-    sdpa = by_name["paged_attention_ll4mi_QKV_mfma16_kernel<bf16>"]
-    assert sdpa["kernel_category"] == "SDPA"
-    assert sdpa["source_file"] == "/sgl-workspace/sglang/csrc/attention.cu"
-
-
-def test_125_category_data_returns_none_when_dir_missing(tmp_path):
-    out = tla.parse_tracelens_category_data(tmp_path / "nope", top_k=10)
-    assert out is None
-
-
-def test_125_category_data_returns_none_when_dir_empty(tmp_path):
-    cd = tmp_path / "category_data"
-    cd.mkdir()
-    out = tla.parse_tracelens_category_data(cd, top_k=10)
-    assert out is None
-
-
-def test_125_category_data_handles_flat_dict_layout(tmp_path):
-    cd = tmp_path / "category_data"
-    cd.mkdir()
-    (cd / "all.json").write_text(
-        '{"GEMM": [{"name": "k1", "duration_us": 10, "shape": [1,2]}],'
-        ' "SDPA": [{"name": "k2", "duration_us": 20}]}'
-    )
-    out = tla.parse_tracelens_category_data(cd, top_k=10)
-    assert out is not None
-    assert len(out) == 2
-    by_name = {c["name"]: c for c in out}
-    assert by_name["k1"]["kernel_category"] == "GEMM"
-    assert by_name["k2"]["kernel_category"] == "SDPA"
-
-
-def test_125_category_data_skips_invalid_json(tmp_path):
-    cd = tmp_path / "category_data"
-    cd.mkdir()
-    (cd / "bad.json").write_text("not valid json{")
-    (cd / "good.json").write_text(
-        '{"category": "GEMM", "kernels": [{"name": "k1", "duration_us": 10}]}'
-    )
-    out = tla.parse_tracelens_category_data(cd, top_k=10)
-    assert out is not None
-    assert len(out) == 1
-    assert out[0]["name"] == "k1"
-
-
-def test_125_csv_carries_category_through_to_finalize(tl_csv):
-    out = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
-    assert out is not None
-    for cand in out:
-        assert cand["tracelens_category"] == "graph"
-        assert cand["kernel_category"]
-
-
-def test_125_augment_csv_with_raw_shapes(tmp_path: Path, tl_csv):
-    """augment_csv_candidates_with_raw_shapes pulls shape from raw trace."""
-    import gzip
-    import json as _json
-
-    raw = tmp_path / "raw.json.gz"
-    with gzip.open(raw, "wt") as f:
-        _json.dump({
-            "traceEvents": [
-                {
-                    "name": "Cijk_Alik_Bljk_*MT256x16x64",
-                    "cat": "kernel",
-                    "dur": 137.22,
-                    "ts": 1,
-                    "args": {"shape": [[256, 16, 64]]},
-                },
-            ]
-        }, f)
-
-    candidates = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
-    gemm = next(c for c in candidates if c["name"].startswith("Cijk_Alik_Bljk_*MT256x16x64"))
-    assert gemm.get("shapes") == [], "csv path should produce empty shapes pre-augment"
-
-    tla.augment_csv_candidates_with_raw_shapes(candidates, [raw])
-
-    gemm = next(c for c in candidates if c["name"].startswith("Cijk_Alik_Bljk_*MT256x16x64"))
-    assert gemm["shapes"], f"expected shape backfilled, got {gemm['shapes']}"
-
-
-def test_125_augment_csv_with_unified_perf_summary_shape_dtype(tmp_path: Path, tl_csv):
-    """unified_perf_summary carries TraceLens Input Dims/Input type."""
-    unified = tmp_path / "unified_perf_summary.csv"
-    kernel_name = "Cijk_Alik_Bljk_*MT256x16x64"
-    unclear_kernel_name = "unclear_elementwise_kernel"
-    unified.write_text(
-        "name,Input Dims,Input type,kernel_details_summary,perf_params\n"
-        "aten::mm,\"((24576,8192), (8192,28672), (24576,28672))\","
-        "\"('c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16')\","
-        f"\"[{{'name': '{kernel_name}', 'stream': 3, 'count': 4}}]\","
-        "\"{'shape_out': (24576, 28672), 'output_dtype': 'c10::BFloat16'}\"\n"
-        "aten::mm,\"((24576,8192), (8192,28672), (24576,28672))\","
-        "\"('c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16')\","
-        f"\"[{{'name': '{kernel_name}', 'stream': 4, 'count': 3}}]\","
-        "\"{'shape_out': (24576, 28672), 'output_dtype': 'c10::BFloat16'}\"\n"
-        "aten::add,\"((1,), (), ())\","
-        "\"('long int', 'long int', 'Scalar')\","
-        f"\"[{{'name': '{unclear_kernel_name}', 'stream': 3}}]\","
-        "\"{'shape_in1': (1,), 'shape_in2': (), "
-        "'dtype_in1_in2_out': ('long int', 'long int', None), "
-        "'stride_output': None}\"\n",
-        encoding="utf-8",
-    )
-    candidates = tla.parse_tracelens_kernel_summary(tl_csv, top_k=10)
-    candidates.append({"name": unclear_kernel_name})
-    gemm = next(c for c in candidates if c["name"] == kernel_name)
-    assert "input_shapes" not in gemm or gemm["input_shapes"] == []
-
-    tla.augment_csv_candidates_with_unified_perf_summary(candidates, unified)
-
-    gemm = next(c for c in candidates if c["name"] == kernel_name)
-    assert gemm["input_shapes"] == [
-        {"call_num": 7, "shape": [24576, 8192]},
-        {"call_num": 7, "shape": [8192, 28672]},
-        {"call_num": 7, "shape": [24576, 28672]},
-    ]
-    assert gemm["input_dtypes"] == ["c10::BFloat16"]
-    assert gemm["output_shapes"] == [[24576, 28672]]
-    assert gemm["output_dtypes"] == ["c10::BFloat16"]
-    assert gemm["runtime_args"]["tracelens_args"] == [
-        {
-            "op": "aten::mm",
-            "input_dims": "((24576,8192), (8192,28672), (24576,28672))",
-            "input_types": "('c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16')",
-        }
-    ]
-    unclear = next(c for c in candidates if c["name"] == unclear_kernel_name)
-    assert unclear.get("output_shapes", []) == []
-    assert unclear.get("output_dtypes", []) == []
-
-
-def test_125_csv_no_parent_op_category_column_degrades_gracefully(tmp_path):
-    """Older TraceLens builds lack 'Parent op category' — must not crash."""
-    csv = tmp_path / "kernel_summary.csv"
-    csv.write_text(
-        "Kernel name,Kernel duration (\u00b5s)_sum,Kernel duration (\u00b5s)_count\n"
-        "my_kernel,100.0,5\n",
-        encoding="utf-8",
-    )
-    out = tla.parse_tracelens_kernel_summary(csv, top_k=10)
-    assert out is not None
-    assert len(out) == 1
-    assert out[0].get("tracelens_category", "") == ""  # field absent or empty
-    assert "kernel_category" in out[0]
-
-
-def test_125_extract_category_kernels_layouts():
-    """_extract_category_kernels handles all three observed layouts."""
-    # Layout 1: kernels array
-    out1 = tla._extract_category_kernels(
-        {"category": "GEMM", "kernels": [{"name": "k1"}]}
-    )
-    assert len(out1) == 1 and out1[0]["category"] == "GEMM"
-
-    # Layout 2: items array (alt key)
-    out2 = tla._extract_category_kernels(
-        {"name": "SDPA", "items": [{"name": "k2"}]}
-    )
-    assert len(out2) == 1 and out2[0]["category"] == "SDPA"
-
-    # Layout 3: flat dict-of-lists
-    out3 = tla._extract_category_kernels(
-        {"GEMM": [{"name": "k1"}], "SDPA": [{"name": "k2"}]}
-    )
-    assert {e["category"] for e in out3} == {"GEMM", "SDPA"}
-
-    # Layout 4: bare list
-    out4 = tla._extract_category_kernels([{"name": "k", "category": "X"}])
-    assert len(out4) == 1
 
 
 def test_125_finalize_outputs_source_path_field():
@@ -581,10 +290,19 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         "duration_us": 100.0,
         "call_count": 2,
         "gpu_pct": 10.0,
-        "source_file": "/tmp/paged_attention.py",
+        "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
         "is_multigpu": False,
         "num_gpus_recommended": 1,
+        # Per AMD-AGI/Hyperloom#314, ``kernel_candidates.json::hot_kernels``
+        # now only carries candidates that ``classify_patchability`` marked
+        # routable. In production this field is set by
+        # ``_finalize_candidates`` before ``write_reports`` runs; this
+        # unit test bypasses ``_finalize_candidates`` and passes a raw
+        # candidate straight into ``write_reports``, so set the routing
+        # marker explicitly to mirror the production fixture and keep
+        # the downstream assertions on ``hot_kernels[0]`` valid.
+        "reusable_native_kernel": True,
     }
     args = Namespace(
         trace_input=str(trace),
@@ -713,8 +431,10 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         "duration_us": 100.0,
         "call_count": 2,
         "gpu_pct": 10.0,
-        "source_file": "/tmp/paged_attention.py",
+        "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
+        # Per AMD-AGI/Hyperloom#314, see twin fixture above.
+        "reusable_native_kernel": True,
     }
     args = Namespace(
         trace_input=str(trace),
@@ -889,42 +609,6 @@ def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
     assert "Do not ask the user" in prompt
 
 
-def test_124_priority_data_members_convert_to_raw_candidates(tmp_path):
-    import json as _json
-
-    priority = tmp_path / "priority_data.json"
-    priority.write_text(_json.dumps({
-        "findings": [{
-            "category": "gemm",
-            "impact_score": 4.2,
-            "library": "hipBLASLt",
-            "members": [{
-                "operation": "Cijk_Alik_Bljk_MT256",
-                "time_ms": 5.5,
-                "impact_score": 3.1,
-                "library": "hipBLASLt",
-                "bound_type": "compute",
-            }],
-        }],
-    }), encoding="utf-8")
-
-    rows = tlr.raw_candidates_from_priority_data(priority, top_k=10)
-    assert rows == [{
-        "name": "Cijk_Alik_Bljk_MT256",
-        "duration_us": 5500.0,
-        "call_count": 1,
-        "source_file": "",
-        "source_type": "unknown",
-        "shapes": [],
-        "tracelens_category": "gemm",
-        "impact_score": 3.1,
-        "impact_score_low": 0.0,
-        "impact_score_high": 0.0,
-        "library": "hipBLASLt",
-        "bound_type": "compute",
-    }]
-
-
 def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path):
     import gzip, json as _json
     cpu_only = tmp_path / "cpu_only.json.gz"
@@ -981,9 +665,6 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
         captured.append(list(cmd))
         return _Result()
 
-    def fake_which(name):
-        return f"/usr/bin/{name}"
-
     argv = [
         "tracelens_analysis.py",
         "--trace-input", str(trace),
@@ -998,7 +679,6 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     env_backup = dict(_os.environ)
     try:
         with patch.object(tla.subprocess, "run", side_effect=fake_run), \
-             patch.object(tla.shutil, "which", side_effect=fake_which), \
              patch.object(tla.sys, "argv", argv):
             try:
                 rc = tla.main()
@@ -1022,7 +702,6 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
 
 def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     import asyncio
-    import json as _json
     from dataclasses import dataclass
     from typing import Any
 
@@ -1048,10 +727,6 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
         # TraceLens v0.3 contract: orchestrator writes ``analysis.md``.
         # The legacy ``standalone_analysis.md`` fallback was dropped in #203.
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
-        (output_dir / "priority_data.json").write_text(
-            _json.dumps({"findings": [], "priorities": []}),
-            encoding="utf-8",
-        )
         yield _Message(content=[_TextBlock("done")])
 
     res = asyncio.run(tlr.run_tracelens_skill(
@@ -1069,10 +744,112 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     ))
 
     assert res.report_path.exists()
-    assert res.priority_data_path.exists()
+    assert res.artifact_paths["tracelens_agent_report"] == str(res.report_path)
     assert "analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
     assert "Bash" in captured["options"]["allowed_tools"]
     assert "Task" in captured["options"]["allowed_tools"]
+
+
+# ===========================================================================
+# T2 — analysis.md is the only contracted TraceLens output.
+# ===========================================================================
+def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
+    """SDK orchestrator sidecars must not be surfaced as Hyperloom inputs."""
+    import asyncio
+    import json as _json
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        (output_dir / "priority_data.json").write_text(
+            _json.dumps({"findings": []}), encoding="utf-8",
+        )
+        (output_dir / "category_data").mkdir(parents=True, exist_ok=True)
+        (output_dir / "category_data" / "category_manifest.json").write_text(
+            _json.dumps({"categories": []}), encoding="utf-8",
+        )
+        yield _Message(content=[_TextBlock("done — sidecars ignored")])
+
+    res = asyncio.run(tlr.run_tracelens_skill(
+        skill_path=tmp_path / "skill.md",
+        trace_path=tmp_path / "trace.json.gz",
+        output_dir=output_dir,
+        tracelens_root=tmp_path,
+        platform="MI300X",
+        framework="sglang",
+        analysis_mode="default",
+        capture_folder=None,
+        budget_minutes=1,
+        sdk_query_factory=_fake_query,
+        sdk_options_cls=_FakeOptions,
+    ))
+
+    assert res.report_path.exists(), "analysis.md is the single source of truth and must exist"
+    assert "tracelens_agent_report" in res.artifact_paths
+    assert "tracelens_priority_data" not in res.artifact_paths
+    assert "tracelens_category_manifest" not in res.artifact_paths
+
+
+def test_t2_missing_analysis_md_still_raises(tmp_path):
+    """Negative control: ``analysis.md`` itself is still the contracted
+    single source of truth, so its absence is still a hard error. T2
+    only relaxes the sidecars, not the report."""
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Deliberately write ONLY a sidecar (no analysis.md). The wrapper
+        # must still fail loudly because analysis.md is the contracted
+        # report (docx §2 "single source of truth").
+        (output_dir / "priority_data.json").write_text("{}", encoding="utf-8")
+        yield _Message(content=[_TextBlock("done")])
+
+    with pytest.raises(RuntimeError, match="analysis.md"):
+        asyncio.run(tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            platform="MI300X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        ))
 
 
 # ===========================================================================
@@ -1081,7 +858,25 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
 # -o/--output-dir, --find-steady-state). The previous --input/--platform
 # form failed at runtime against a real Magpie/SGLang trace.
 # ===========================================================================
-def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_path):
+def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    tp0_decode = trace_dir / "177-TP-0-DECODE.trace.json.gz"
+    tp0_decode.write_text("{}", encoding="utf-8")
+    merged = trace_dir / "merged-177.trace.json.gz"
+    merged.write_text("{}", encoding="utf-8")
+    tp1_extend = trace_dir / "177-TP-1-EXTEND.trace.json.gz"
+    tp1_extend.write_text("{}", encoding="utf-8")
+
+    kind, traces = tla.discover_trace_inputs(trace_dir)
+    assert kind == "capture_dir"
+    assert traces[0] == merged
+    assert traces[-1] == tp0_decode
+
+
+def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
+    tmp_path, capsys,
+):
     """The end-to-end split path must call the real splitter interface,
     not the broken --input/--platform form. Drives a mock subprocess.run
     and asserts argv shape."""
@@ -1089,8 +884,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     import json as _json
     from unittest.mock import patch
 
-    # Pretend TraceLens root + perf-report CLI are present so the run
-    # reaches the splitter step.
+    # Pretend TraceLens root is present so the run reaches the splitter step.
     tl_root = tmp_path / "TraceLens-internal"
     skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills"
     skill_dir.mkdir(parents=True)
@@ -1116,11 +910,8 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
 
     def fake_run(cmd, *args, **kwargs):
         captured.append(list(cmd))
-        # Make the perf-report CLI probe + actual run + pip install all succeed.
+        # Make pip install and splitter invocations succeed.
         return _Result(returncode=0, stdout="ok")
-
-    def fake_which(name):
-        return f"/usr/bin/{name}"
 
     argv = [
         "tracelens_analysis.py",
@@ -1139,16 +930,13 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     env_backup = dict(_os.environ)
     try:
         with patch.object(tla.subprocess, "run", side_effect=fake_run), \
-             patch.object(tla.shutil, "which", side_effect=fake_which), \
              patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
             except SystemExit as exc:
-                # tla.main() may CLI-exit via sys.exit() depending on the
-                # mocked perf-report CLI's rc. Either a clean exit code (0 /
-                # None) or a soft-fallback non-zero is acceptable here — the
-                # test asserts the splitter command shape further down, not
-                # the program's overall exit status.
+                # tla.main() may CLI-exit because the mocked run does not
+                # produce analysis.md. The test asserts the splitter command
+                # shape below, not the program's overall exit status.
                 _ = exc
     finally:
         _os.environ.clear()
@@ -1176,19 +964,21 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(tmp_p
     assert "--CONC" in splitter_cmd and "8" in splitter_cmd, splitter_cmd
     assert "--OSL" in splitter_cmd and "1024" in splitter_cmd, splitter_cmd
 
-    perf_cmd = next(
-        (c for c in captured
-         if c
-         and "TraceLens_generate_perf_report_pytorch_inference" in str(c[0])
-         and "--profile_json_path" in c),
-        None,
+    assert all(
+        not (
+            c
+            and "TraceLens_generate_perf_report_pytorch_inference" in str(c[0])
+            and "--profile_json_path" in c
+        )
+        for c in captured
+    ), (
+        "perf-report CSV fallback must not run; analysis.md is the single "
+        f"source of truth. cmds={captured}"
     )
-    assert perf_cmd is not None, f"perf-report CLI never invoked; cmds={captured}"
-    assert "--group_by_parent_module" in perf_cmd, perf_cmd
-    assert "--enable_pseudo_ops" in perf_cmd, perf_cmd
-    assert "--group_by_num_kernels" in perf_cmd, perf_cmd
-    assert "--gpu_arch_json_path" in perf_cmd, perf_cmd
-    assert "--capture_folder" in perf_cmd and str(capture) in perf_cmd, perf_cmd
+    out = capsys.readouterr().out
+    result = _json.loads(out)
+    assert result["status"] == "failed"
+    assert "trace_split_no_steady_state" in result["error"]
 
 
 # ===========================================================================
@@ -1256,7 +1046,6 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
             else:
                 _os.environ[k] = v
         with patch.object(tla.subprocess, "run", side_effect=fake_run), \
-             patch.object(tla.shutil, "which", side_effect=lambda n: f"/usr/bin/{n}"), \
              patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
@@ -1433,6 +1222,93 @@ def test_parse_analysis_md_top_k_caps_total_rows(tmp_path):
     assert len(cands) == 5
     # First 5 rows of the fixture are all P1 GEMMs.
     assert all(c["tracelens_pitem_rank"] == 1 for c in cands)
+
+
+# ===========================================================================
+# docx §2 Recommended Interfacing Approach — Filter for GEAK based on
+# budget (Higher P-item, Lower Efficiency)
+# ===========================================================================
+def _write_two_pitem_analysis_md(md: Path) -> None:
+    md.write_text(
+        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
+        "<!-- impact-begin kind=p_item category=sdpa_fwd mid=1.5 low=0.5 high=3.0 -->\n"
+        "\n"
+        "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### 🔴 P1: GEMM cluster (Tensile)\n\n"
+        "**Identification:** stub identification\n"
+        "**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Efficiency | Bound |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| high_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "80% of 708 TFLOPS | compute-bound |\n"
+        "| low_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "5% of 708 TFLOPS | compute-bound |\n"
+        "| unknown_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        " | compute-bound |\n"
+        "| mid_eff_gemm | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "40% of 708 TFLOPS | compute-bound |\n"
+        "**Reasoning for Slowdown:** stub reasoning\n"
+        "**Resolution:** stub resolution\n"
+        "**Impact estimate:**\n"
+        "Low end: 1.0 ms savings (0.1% E2E)\n"
+        "High end: 2.0 ms savings (0.2% E2E)\n"
+        "\n"
+        "<!-- reasoning-candidate tier=compute rank=2 -->\n"
+        "#### 🟡 P2: SDPA (CK)\n\n"
+        "**Identification:** stub identification\n"
+        "**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Efficiency | Bound |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| p2_sdpa | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "10% of 708 TFLOPS | compute-bound |\n"
+        "**Reasoning for Slowdown:** stub reasoning\n"
+        "**Resolution:** stub resolution\n"
+        "**Impact estimate:**\n"
+        "Low end: 1.0 ms savings (0.1% E2E)\n"
+        "High end: 2.0 ms savings (0.2% E2E)\n",
+        encoding="utf-8",
+    )
+
+
+def test_parse_analysis_md_sorts_within_pitem_by_lower_efficiency(tmp_path):
+    """docx §2 Recommended Interfacing Approach: ``Filter for GEAK based
+    on budget (Higher P-item, Lower Efficiency)``. Within a P-item, rows
+    with lower efficiency must come first so they survive the ``top_k``
+    budget cap. Cross-P-item order is still rank-based (P1 before P2)."""
+    md = tmp_path / "analysis.md"
+    _write_two_pitem_analysis_md(md)
+
+    cands = tlr.parse_analysis_md(md, top_k=10)
+    names = [c["name"] for c in cands]
+    assert names == [
+        # P1 rows sorted ascending by efficiency:
+        "low_eff_gemm",
+        "mid_eff_gemm",
+        "high_eff_gemm",
+        # Unknown / 0.0 efficiency lands last within the P-item:
+        "unknown_eff_gemm",
+        # P2 still after every P1 row regardless of efficiency:
+        "p2_sdpa",
+    ]
+
+
+def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
+    """docx §2 budget cap: after sorting by efficiency within a P-item,
+    the ``top_k`` slice must keep the lowest-efficiency rows. Without
+    the sort, a budget of 2 would drop the kernel with the most
+    headroom — exactly the regression docx §2 calls out."""
+    md = tmp_path / "analysis.md"
+    _write_two_pitem_analysis_md(md)
+
+    cands = tlr.parse_analysis_md(md, top_k=2)
+    names = [c["name"] for c in cands]
+    assert names == ["low_eff_gemm", "mid_eff_gemm"], (
+        "top_k=2 must keep the two lowest-efficiency P1 rows; the "
+        "high-efficiency / unknown rows must be dropped before any P2 row"
+    )
 
 
 # ===========================================================================
@@ -1622,6 +1498,188 @@ def test_parse_analysis_md_attaches_prose_from_fixture():
     assert any(
         "wave-occupancy" in c["resolution"] for c in p1_rows
     ), "P1 resolution should mention wave-occupancy tuning (from fixture)"
+
+
+# ===========================================================================
+# parse_analysis_md — TraceLens v0.3 spec § Operations Table Schema
+# tolerance for trailing category-specific extra columns.
+#
+# The spec at TraceLens-internal/.../utils/templates/sub_agent_spec.md
+# (Operations Table Schema, compute tier) explicitly allows sub-agents to
+# "append extra columns at the end when needed (e.g. Sub-Category in the
+# generic-op analyzer)" as long as the first 9 canonical columns are
+# present in order. Real TraceLens runs on attention-bound models append
+# 3 extras (Dominant Kernel / Workload / Attention Pattern) for the
+# inferenceattention category; generic-op-analyzer appends 1 extra
+# (Sub-Category). The parser must accept those rows verbatim, not skip
+# them silently.
+# ===========================================================================
+_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD = (
+    Path(__file__).resolve().parents[1]
+    / "tests"
+    / "fixtures"
+    / "tracelens_v03_qwen3_moe_attention_analysis.md"
+)
+
+
+def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
+    """Real-world reproducer: Qwen3-30B MoE inferenceattention P-item.
+
+    TraceLens emitted a 12-column ``**Data:**`` table for the attention
+    category (canonical 9 + ``Dominant Kernel`` + ``Workload`` +
+    ``Attention Pattern``). The previous strict-equality header check
+    skipped the block entirely, returning ``hot_kernels=[]`` and
+    starving a 1.5h KERNEL phase of any candidate to optimize. Per
+    ``sub_agent_spec.md`` (Operations Table Schema, compute tier),
+    appending extra columns at the end is spec-compliant, so the parser
+    must consume the row using only the first 9 cells.
+    """
+    cands = tlr.parse_analysis_md(_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD, top_k=10)
+    assert len(cands) == 1, (
+        f"expected 1 attention candidate from the 12-column fixture; got "
+        f"{len(cands)}"
+    )
+    c = cands[0]
+    assert c["name"] == "vllm::unified_attention_with_output"
+    assert c["tracelens_category"] == "inferenceattention"
+    assert c["tracelens_pitem_rank"] == 1
+    assert c["bound_type"] == "memory-bound"
+    # Time (ms) -> duration_us; row is 45.862 ms.
+    assert abs(c["duration_us"] - 45862.0) < 1.0
+    assert c["call_count"] == 48
+    assert abs(c["percent_of_total"] - 2.61) < 0.001
+    assert abs(c["efficiency_percent"] - 3.69) < 0.001
+    assert c["efficiency_peak_value"] == 8.0
+    assert "TB/s" in c["efficiency_peak_unit"]
+    # impact_score is the mid value carried by the p_item marker.
+    assert c["impact_score"] == 2.2
+    # Kernel Path is a real launcher string (not "—"), so source_file
+    # must round-trip the relative path (resolution happens downstream).
+    assert "qwen3_moe.py" in c["source_file"]
+    # The three trailing extra cells (Dominant Kernel / Workload /
+    # Attention Pattern) are SPEC-allowed extras (sub_agent_spec.md
+    # § Operations Table Schema: "Agents may append extra columns at
+    # the end when needed"). The parser preserves them verbatim under
+    # ``tracelens_extra_columns`` so downstream consumers (GEAK / OOB)
+    # have programmatic access to category-specific metadata without
+    # re-parsing analysis.md.
+    extras = c.get("tracelens_extra_columns")
+    assert extras is not None, "tracelens_extra_columns missing for 12-col row"
+    assert extras.get("dominant kernel") == "`_fwd_kernel` (93.61%)"
+    assert extras.get("workload") == "unknown"
+    assert extras.get("attention pattern") == "GQA (8:1)"
+    # Canonical fields must NOT leak into extras (they belong on the
+    # candidate top-level as typed fields).
+    for canonical_key in (
+        "operation", "args", "kernel path", "time (ms)", "%e2e",
+        "count", "flops/byte", "efficiency", "bound",
+    ):
+        assert canonical_key not in extras
+
+
+def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_path):
+    """The generic-op analyzer appends a ``Sub-Category`` column for
+    uncategorized ops (`other` category). The parser must accept the
+    row using only the first 9 cells, dropping the Sub-Category cell
+    as expected.
+    """
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "<!-- impact-begin kind=p_item category=other mid=4.0 low=2.0 high=8.0 -->\n"
+        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### 🔴 P1: Generic op cluster (Triton)\n\n"
+        "**Identification:** stub identification\n"
+        "**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Efficiency | Bound | Sub-Category |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| custom_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "40% of 708 TFLOPS | compute-bound | scatter_gather |\n"
+        "**Reasoning for Slowdown:** stub reasoning\n"
+        "**Resolution:** stub resolution\n",
+        encoding="utf-8",
+    )
+    cands = tlr.parse_analysis_md(md, top_k=10)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["name"] == "custom_op"
+    assert c["tracelens_category"] == "other"
+    assert c["bound_type"] == "compute-bound"
+    assert c["call_count"] == 10
+    # ``Sub-Category`` is preserved verbatim for downstream GEAK / OOB
+    # access; it never leaks into the candidate top-level.
+    extras = c.get("tracelens_extra_columns")
+    assert extras is not None
+    assert extras.get("sub-category") == "scatter_gather"
+    assert "sub-category" not in c
+
+
+def test_parse_analysis_md_canonical_9_column_table_has_no_extras_key():
+    """Regression guard: candidates parsed from a canonical 9-column
+    table (the Llama70B fixture) must NOT carry the
+    ``tracelens_extra_columns`` field. Adding the key with an empty
+    dict would force downstream consumers to special-case "extras
+    present but empty" vs "extras absent".
+    """
+    cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
+    assert cands, "Llama70B fixture must produce candidates"
+    for c in cands:
+        assert "tracelens_extra_columns" not in c, (
+            f"canonical 9-col candidate {c.get('name')!r} unexpectedly "
+            f"carries tracelens_extra_columns={c.get('tracelens_extra_columns')!r}"
+        )
+
+
+def test_parse_analysis_md_rejects_fewer_than_canonical_columns(tmp_path):
+    """Regression guard: a table missing any of the 9 canonical columns
+    must still be skipped — silent wrong-mapping would be worse than a
+    missed candidate. Here ``Bound`` is dropped (8 columns total).
+    """
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
+        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### 🔴 P1: Missing column (Tensile)\n\n"
+        "**Identification:** stub identification\n"
+        "**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Efficiency |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "40% of 708 TFLOPS |\n"
+        "**Reasoning for Slowdown:** stub reasoning\n"
+        "**Resolution:** stub resolution\n",
+        encoding="utf-8",
+    )
+    assert tlr.parse_analysis_md(md, top_k=10) == []
+
+
+def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
+    """Regression guard: spec requires the 9 canonical columns ``in this
+    order``. Swapping any two breaks the row→field mapping silently, so
+    the parser must skip the block instead of producing rows whose
+    ``efficiency`` / ``bound`` are misread.
+    """
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "<!-- impact-begin kind=p_item category=gemm mid=4.0 low=2.0 high=8.0 -->\n"
+        "\n## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### 🔴 P1: Reordered columns (Tensile)\n\n"
+        "**Identification:** stub identification\n"
+        "**Data:**\n"
+        "| Operation | Args | Kernel Path | Time (ms) | %E2E | Count | "
+        "FLOPS/Byte | Bound | Efficiency |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| stub_op | (1,2) bf16 | — | 1.0 | 5 | 10 | 1000 | "
+        "compute-bound | 40% of 708 TFLOPS |\n"
+        "**Reasoning for Slowdown:** stub reasoning\n"
+        "**Resolution:** stub resolution\n",
+        encoding="utf-8",
+    )
+    assert tlr.parse_analysis_md(md, top_k=10) == []
 
 
 # ===========================================================================
@@ -1834,6 +1892,264 @@ def test_parse_launcher_path_returns_none_for_empty_and_garbage():
     assert path == "just/a/path.py"
     assert line is None
     assert func is None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_launcher_to_abs_source — TraceLens launcher path → absolute file.
+#
+# torch.profiler strips ``sys.path`` prefixes from ``__file__`` before
+# writing Python frame names, so TraceLens forwards strings like
+# ``aiter/ops/rmsnorm.py(62): rmsnorm2d_fwd``. Without resolution the
+# patchability gate rejects every row as ``source not under a reusable
+# framework root``. These tests pin the three production-image
+# resolution paths (importlib spec, env override, hardcoded fallback)
+# plus the placeholder and absolute-path no-op cases.
+# ---------------------------------------------------------------------------
+
+
+def _seed_pkg(tmp_path, pkg: str, relpath: str, funcs: tuple[str, ...] = ()) -> Path:
+    """Create ``<tmp_path>/<pkg>/<relpath>`` and return the absolute file.
+
+    ``funcs`` lets a test declare top-level ``def`` names that resolver
+    AST validation expects to find. Empty by default for non-Python
+    fixtures (``.cu`` etc.) where AST is intentionally skipped.
+    """
+    target = tmp_path / pkg / relpath
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = ["# stub for resolver tests\n"]
+    for fn in funcs:
+        body.append(f"def {fn}(*args, **kwargs):\n    pass\n")
+    target.write_text("".join(body), encoding="utf-8")
+    return target
+
+
+def test_resolve_launcher_via_env_override(tmp_path, monkeypatch):
+    """``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` is the highest-priority
+    resolver source. Operator can pre-stage any framework root layout
+    without needing the package to be importable in the current
+    interpreter."""
+    target = _seed_pkg(
+        tmp_path, "aiter", "ops/rmsnorm.py", funcs=("rmsnorm2d_fwd",),
+    )
+    monkeypatch.setenv(
+        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
+        f"aiter={tmp_path}",
+    )
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "aiter/ops/rmsnorm.py(62): rmsnorm2d_fwd",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(target)
+    assert line == 62
+    assert func == "rmsnorm2d_fwd"
+
+
+def test_resolve_launcher_via_importlib_spec(monkeypatch):
+    """When no env override is set, ``importlib.util.find_spec`` walks
+    the live ``sys.path`` and returns the absolute origin. This is the
+    path that should fire on a regular production pod (aiter / sglang
+    are editable installs at /sgl-workspace, vllm sits under
+    dist-packages).
+
+    ``unittest`` is shipped with every CPython interpreter (no
+    production deps needed), and ``unittest/case.py`` always defines
+    the ``expectedFailure`` decorator — perfect for pinning the
+    find_spec branch AND the AST-symbol guard without depending on
+    aiter/sglang/vllm being installed in the test env."""
+    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "unittest/case.py(1): expectedFailure",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert os.path.isabs(abs_path) and abs_path.endswith("unittest/case.py")
+    assert line == 1
+    assert func == "expectedFailure"
+
+
+def test_resolve_launcher_via_hardcoded_fallback(tmp_path, monkeypatch):
+    """When the package isn't importable but a hardcoded fallback root
+    holds the file on disk, the resolver still succeeds. This is the
+    safety net for static-analysis paths that parse CSVs without
+    actually importing ``aiter`` / ``sglang`` / ``vllm``."""
+    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
+
+    # Seed a fake aiter checkout under tmp_path and force the fallback
+    # table to point at it. The package is NOT made importable, so the
+    # ``find_spec`` branch must miss and the resolver must fall through
+    # to the hardcoded table.
+    _seed_pkg(
+        tmp_path,
+        "aiter_pinned_xfx",
+        "ops/rmsnorm.py",
+        funcs=("rmsnorm2d_fwd_with_add",),
+    )
+    monkeypatch.setattr(
+        tlr,
+        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
+        {"aiter_pinned_xfx": (str(tmp_path),)},
+    )
+    # Force find_spec to return None so the test exercises the
+    # fallback table even if some operator pre-installed a real
+    # ``aiter_pinned_xfx`` package.
+    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "aiter_pinned_xfx/ops/rmsnorm.py(76): rmsnorm2d_fwd_with_add",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(tmp_path / "aiter_pinned_xfx" / "ops" / "rmsnorm.py")
+    assert line == 76
+    assert func == "rmsnorm2d_fwd_with_add"
+
+
+def test_resolve_launcher_returns_none_for_absolute_path():
+    """Already-absolute launcher paths are returned as None so the
+    caller preserves the original string verbatim — there's nothing
+    to rewrite, and pretending we resolved would silently swallow
+    paths the operator deliberately set to a non-package location."""
+    assert (
+        tlr._resolve_launcher_to_abs_source(
+            "/sgl-workspace/aiter/aiter/ops/rmsnorm.py(62): fn",
+        )
+        is None
+    )
+
+
+def test_resolve_launcher_returns_none_for_placeholders_and_misses():
+    """Placeholders, empty strings, and unresolvable packages must
+    collapse to None so the patchability gate emits its normal
+    ``source file not resolved`` / ``source not under a reusable
+    framework root`` rejection (vs. a fabricated path)."""
+    assert tlr._resolve_launcher_to_abs_source("") is None
+    assert tlr._resolve_launcher_to_abs_source("—") is None
+    # Package doesn't exist anywhere → resolver gives up; caller falls
+    # back to the verbatim launcher string.
+    assert (
+        tlr._resolve_launcher_to_abs_source(
+            "definitely_not_a_real_pkg_8x9z/foo.py(1): fn",
+        )
+        is None
+    )
+
+
+def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatch):
+    """AST validation guard: when the resolved ``.py`` exists but does
+    NOT define the launcher's function, the resolver MUST refuse the
+    path. This catches two real failure modes — ``sys.path`` shadowing
+    (find_spec returns the wrong same-named package) and operator
+    misconfiguration of ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` pointing
+    at a stub/snapshot tree. Without this check GEAK would receive a
+    real-on-disk source path that doesn't host the kernel."""
+    # Seed a real .py file under tmp_path but DO NOT define
+    # rmsnorm2d_fwd in it.
+    target = tmp_path / "aiter_shadowed_xyz" / "ops" / "rmsnorm.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "def some_other_function():\n    pass\n", encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
+        f"aiter_shadowed_xyz={tmp_path}",
+    )
+    # No fallback paths should rescue this — we want to assert the
+    # bad-symbol path is rejected outright.
+    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
+    monkeypatch.setattr(tlr, "_FRAMEWORK_PKG_FALLBACK_ROOTS", {})
+
+    assert (
+        tlr._resolve_launcher_to_abs_source(
+            "aiter_shadowed_xyz/ops/rmsnorm.py(62): rmsnorm2d_fwd",
+        )
+        is None
+    )
+
+
+def test_resolve_launcher_ast_check_falls_through_to_next_root(tmp_path, monkeypatch):
+    """When the first candidate root holds a stub that fails AST
+    validation, the resolver MUST keep walking the candidate list
+    instead of short-circuiting — otherwise a single bad spec
+    (shadowed pkg / stale wheel) permanently masks the real source on
+    the fallback path."""
+    bad_root = tmp_path / "bad"
+    good_root = tmp_path / "good"
+    bad_target = bad_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
+    bad_target.parent.mkdir(parents=True, exist_ok=True)
+    bad_target.write_text("def not_it():\n    pass\n", encoding="utf-8")
+    good_target = good_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
+    good_target.parent.mkdir(parents=True, exist_ok=True)
+    good_target.write_text(
+        "def rmsnorm2d_fwd(x):\n    return x\n", encoding="utf-8",
+    )
+
+    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
+    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
+    monkeypatch.setattr(
+        tlr,
+        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
+        {"aiter_pinned_qrs": (str(bad_root), str(good_root))},
+    )
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "aiter_pinned_qrs/ops/rmsnorm.py(76): rmsnorm2d_fwd",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(good_target)
+    assert line == 76
+    assert func == "rmsnorm2d_fwd"
+
+
+def test_resolve_launcher_skips_ast_check_for_non_py_sources(tmp_path, monkeypatch):
+    """AST validation only applies to Python sources. HIP/CUDA refs
+    (``<path>#L<line>`` shape) and bare ``.cu`` paths must pass
+    existence-only validation since ``ast.parse`` cannot walk them.
+    Pin this so we don't accidentally regress HIP kernel resolution
+    when the gate hardens."""
+    target = tmp_path / "aiter_hipxyz" / "csrc" / "rms_hip.cu"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("// device code\n", encoding="utf-8")
+    monkeypatch.setenv(
+        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
+        f"aiter_hipxyz={tmp_path}",
+    )
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "aiter_hipxyz/csrc/rms_hip.cu#L42",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(target)
+    assert line == 42
+    assert func is None
+
+
+def test_resolve_launcher_skips_unparseable_env_entries(tmp_path, monkeypatch):
+    """Malformed ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` entries are
+    silently skipped — a single bad export must not poison the whole
+    resolver."""
+    target = _seed_pkg(
+        tmp_path,
+        "vllm",
+        "model_executor/models/qwen.py",
+        funcs=("forward",),
+    )
+    monkeypatch.setenv(
+        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
+        # First entry has no '=' (skipped); second is malformed (no key);
+        # third is the only valid one and must win.
+        f"junk_without_equals,=/just/value,vllm={tmp_path}",
+    )
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "vllm/model_executor/models/qwen.py(10): forward",
+    )
+    assert resolved is not None
+    abs_path, _, _ = resolved
+    assert abs_path == str(target)
 
 
 def test_function_line_from_ast_finds_def_lineno(tmp_path):
@@ -2304,3 +2620,269 @@ def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch
     monkeypatch.setenv("USER_DATA_PATH", "")
     monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
     assert tla._default_workspace_path() == "/legacy/workspace"
+
+
+# ===========================================================================
+# T3 — Idle-% sanity gate on the Executive Summary
+# ===========================================================================
+# Per Report_Interfacing.docx §1 (Executive Summary schema) and §2
+# (idle-gate sanity check), the Executive Summary table reports
+# ``Idle %`` (e.g. ``| Idle % | 0.25% |``). When idle time dominates wall
+# clock, kernel-level rewriting cannot improve end-to-end latency — the
+# operator should pivot to parameter optimization (batch size, KV cache
+# shape, prefill/decode split). The default threshold is 80% (raised
+# from the docx-suggested 20% after observing every production
+# Qwen3-32B trace land in the 48–60% band; see
+# ``HIGH_IDLE_PCT_THRESHOLD_DEFAULT`` docstring), overridable via
+# ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD``.
+
+_EXEC_SUMMARY_LOW_IDLE = """\
+# Workload Analysis
+
+## Executive Summary
+
+A single-rank trace.
+
+| Metric | Value |
+|--------|-------|
+| Total Time | 1234.5 ms |
+| Compute % | 99.30% |
+| Idle % | 0.25% |
+| Exposed Communication % | 0.42% |
+"""
+
+_EXEC_SUMMARY_HIGH_IDLE = """\
+# Workload Analysis
+
+## Executive Summary
+
+A single-rank trace that's mostly waiting on the host.
+
+| Metric | Value |
+|--------|-------|
+| Total Time | 9999.9 ms |
+| Compute % | 30.00% |
+| Idle % | 60.50% |
+| Exposed Communication % | 9.50% |
+"""
+
+_EXEC_SUMMARY_NO_IDLE_ROW = """\
+# Workload Analysis
+
+## Executive Summary
+
+| Metric | Value |
+|--------|-------|
+| Total Time | 1234.5 ms |
+| Compute % | 99.30% |
+"""
+
+
+def test_extract_idle_pct_parses_low_idle_row(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text(_EXEC_SUMMARY_LOW_IDLE, encoding="utf-8")
+    assert tlr.extract_idle_pct_from_analysis_md(md) == pytest.approx(0.25)
+
+
+def test_extract_idle_pct_parses_high_idle_row(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text(_EXEC_SUMMARY_HIGH_IDLE, encoding="utf-8")
+    assert tlr.extract_idle_pct_from_analysis_md(md) == pytest.approx(60.5)
+
+
+def test_extract_idle_pct_returns_none_when_no_idle_row(tmp_path):
+    """Older / partial reports without an Idle % row degrade gracefully
+    to ``None`` so the runtime gate skips rather than failing the run."""
+    md = tmp_path / "analysis.md"
+    md.write_text(_EXEC_SUMMARY_NO_IDLE_ROW, encoding="utf-8")
+    assert tlr.extract_idle_pct_from_analysis_md(md) is None
+
+
+def test_extract_idle_pct_returns_none_when_file_missing(tmp_path):
+    assert tlr.extract_idle_pct_from_analysis_md(tmp_path / "nope.md") is None
+
+
+def test_extract_idle_pct_against_llama70b_fixture():
+    """Real TraceLens v0.3 fixture: Llama 3 70B has Idle % = 0.25% in
+    its Executive Summary — pin this against drift in the regex."""
+    fixture = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
+    assert fixture.exists(), f"fixture must be present: {fixture}"
+    assert tlr.extract_idle_pct_from_analysis_md(fixture) == pytest.approx(0.25)
+
+
+def test_resolve_idle_pct_threshold_uses_default_when_env_unset(monkeypatch):
+    monkeypatch.delenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
+    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+
+
+def test_resolve_idle_pct_threshold_honours_env_override(monkeypatch):
+    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "35.5")
+    assert tla._resolve_idle_pct_threshold() == pytest.approx(35.5)
+
+
+def test_resolve_idle_pct_threshold_rejects_nonsense_env_value(monkeypatch):
+    """Operators who paste garbage into the env var should get the default,
+    not a crash. The shape of this code defends against silent failure
+    by validating ``float()`` and the non-negative guard."""
+    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "not-a-float")
+    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "-5")
+    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "")
+    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+
+
+def test_build_high_idle_warning_shape(tmp_path):
+    """The structured warning is the contract between
+    ``tracelens_analysis`` and ``trace_analyze_handler`` (T4). Pin the
+    shape: code, severity, idle_pct (rounded), threshold_pct (rounded),
+    source path, and a human-readable message that names both numbers."""
+    report = tmp_path / "analysis.md"
+    report.write_text("# noop\n", encoding="utf-8")
+    # 42.567 → round-to-2 = 42.57 (unambiguous, avoids banker's-rounding
+    # ties that bite e.g. 42.345 → 42.34 on Python's round()).
+    w = tla._build_high_idle_warning(
+        idle_pct=42.567, threshold_pct=20.0, report_path=report,
+    )
+    assert w["code"] == "high_gpu_idle_pct"
+    assert w["severity"] == "warning"
+    assert w["idle_pct"] == pytest.approx(42.57)
+    assert w["threshold_pct"] == pytest.approx(20.0)
+    assert w["source"] == str(report)
+    # The pre-rounded value (3 d.p.) shows up in the message via :.2f
+    # formatting → "42.57%", and the threshold uses the same formatter.
+    assert "42.57%" in w["message"]
+    assert "20.00%" in w["message"]
+    assert "parameter optimization" in w["message"]
+
+
+def test_build_audit_summary_propagates_trace_health_warnings():
+    """``summary.json`` (the audit sidecar) must surface the same
+    structured warnings as the JSON-RPC ``result`` so an operator
+    inspecting the on-disk artefact and the live response see the same
+    findings."""
+    warnings = [
+        {
+            "code": "high_gpu_idle_pct",
+            "severity": "warning",
+            "idle_pct": 35.0,
+            "threshold_pct": 20.0,
+            "source": "/tmp/x/analysis.md",
+            "message": "test",
+        }
+    ]
+    summary = tla.build_audit_summary(
+        [],
+        trace_input="/tmp/trace.json.gz",
+        framework="sglang",
+        target_platform="MI300X",
+        task_groups=[],
+        trace_health_warnings=warnings,
+    )
+    assert summary["trace_health_warnings"] == warnings
+    assert summary["task_count"] == 0
+    assert summary["skipped_count"] == 0
+
+
+def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
+    """Steady-state (no findings) is the empty list — never ``None`` —
+    so downstream consumers can ``for w in summary[...]`` without a
+    ``None`` guard."""
+    summary = tla.build_audit_summary(
+        [],
+        trace_input="/tmp/trace.json.gz",
+        framework="sglang",
+        target_platform="MI300X",
+        task_groups=[],
+    )
+    assert summary["trace_health_warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# atom maps to ``inference`` analysis mode
+# ---------------------------------------------------------------------------
+def test_infer_analysis_mode_atom_returns_inference():
+    """atom traces share the inference-mode kernel grouping with
+    sglang/vllm; without this they would fall through to ``default``
+    and get generic torch grouping.
+    """
+    assert tlr.infer_analysis_mode("atom", "") == "inference"
+    assert tlr.infer_analysis_mode("ATOM", "default") == "inference"
+    assert tlr.infer_analysis_mode("  atom  ", "default") == "inference"
+
+
+def test_infer_analysis_mode_sglang_vllm_unchanged():
+    """Regression guard: sglang / vllm remain ``inference``.
+    """
+    assert tlr.infer_analysis_mode("sglang", "") == "inference"
+    assert tlr.infer_analysis_mode("vllm", "default") == "inference"
+
+
+def test_infer_analysis_mode_explicit_request_wins():
+    """Caller-supplied non-default mode bypasses the framework default
+    for every framework (atom included)."""
+    assert tlr.infer_analysis_mode("atom", "training") == "training"
+    assert tlr.infer_analysis_mode("sglang", "training") == "training"
+    assert tlr.infer_analysis_mode("unknown", "training") == "training"
+
+
+def test_infer_analysis_mode_unknown_framework_stays_default():
+    """Frameworks outside the canonical set fall back to ``default``;
+    they don't get the inference-mode upgrade automatically.
+    """
+    assert tlr.infer_analysis_mode("trtllm", "") == "default"
+    assert tlr.infer_analysis_mode("", "") == "default"
+
+
+# ---------------------------------------------------------------------------
+# atom entries present in _FRAMEWORK_PKG_FALLBACK_ROOTS
+# ---------------------------------------------------------------------------
+def test_framework_pkg_fallback_roots_has_atom_entry():
+    """The offline source resolver must accept atom kernel sources; the
+    atom entry must include at least the editable-install parent
+    ``/app/ATOM`` so a relative ``atom/model_engine/...`` path in a
+    TraceLens CSV can be joined against it.
+    """
+    table = tlr._FRAMEWORK_PKG_FALLBACK_ROOTS
+    assert "atom" in table, (
+        "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS"
+    )
+    roots = table["atom"]
+    assert "/app/ATOM" in roots
+    # Site-packages variants for production wheels.
+    assert any("site-packages" in r or "dist-packages" in r for r in roots), (
+        f"atom fallback roots lack a site-packages entry: {roots!r}"
+    )
+
+
+def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
+    """End-to-end: when ``import atom`` doesn't fire (CSV-only
+    static-analysis path), the resolver still resolves a relative
+    ``atom/model_engine/model_runner.py`` against the synthetic atom
+    fallback root and returns the absolute path.
+    """
+    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
+    _seed_pkg(
+        tmp_path,
+        "atom",
+        "model_engine/model_runner.py",
+        funcs=("forward",),
+    )
+    monkeypatch.setattr(
+        tlr,
+        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
+        {"atom": (str(tmp_path),)},
+    )
+    # Force find_spec to miss so the test exercises the fallback path.
+    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
+
+    resolved = tlr._resolve_launcher_to_abs_source(
+        "atom/model_engine/model_runner.py(125): forward",
+    )
+    assert resolved is not None
+    abs_path, line, func = resolved
+    assert abs_path == str(
+        tmp_path / "atom" / "model_engine" / "model_runner.py"
+    )
+    assert line == 125
+    assert func == "forward"

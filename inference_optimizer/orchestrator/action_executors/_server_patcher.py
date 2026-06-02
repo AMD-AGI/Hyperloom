@@ -230,6 +230,54 @@ def _sglang_version_accepted(
 _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
 
 
+def _versioned_patches_subdir_name(version: str) -> str | None:
+    """Map ``sglang.__version__`` to the per-version patch subdir name
+    TraceLens ``Hyperloom_integration_v0.3.1`` introduced (e.g.
+    ``0.5.11`` -> ``sglang_0_5_11``). Returns ``None`` when ``version``
+    has no recognisable dotted numeric head (so the caller fail-softs
+    to the legacy flat layout)."""
+    text = (version or "").strip()
+    if not text:
+        return None
+    # Strip dev/local suffixes (e.g. ``0.5.11-rc1`` -> ``0.5.11``) so
+    # point-release tags still resolve to a versioned subdir.
+    head = text.split("-", 1)[0].split("+", 1)[0]
+    parts = head.split(".") if head else []
+    # Keep the LEADING run of purely-numeric components; stop at the first
+    # non-numeric part (e.g. ``0.5.10.dev4`` -> ``0.5.10`` -> sglang_0_5_10).
+    numeric: list[str] = []
+    for p in parts:
+        if p.isdigit():
+            numeric.append(p)
+        else:
+            break
+    if len(numeric) < 2:
+        return None
+    return "sglang_" + "_".join(numeric)
+
+
+def _resolve_sglang_patches_dir(
+    patches_root: Path, version: str,
+) -> Path | None:
+    """Locate the SGLang patches dir for the running ``sglang`` version.
+
+    TraceLens ``Hyperloom_integration_v0.3.1`` split the previously-flat
+    ``sglang_roofline_patches/`` into per-version subdirs
+    (``sglang_0_5_9/``, ``sglang_0_5_11/``, ...). Hyperloom requires
+    this layout; the flat v0.3 layout is no longer supported.
+
+    Returns the versioned subdir when it exists AND contains at least
+    one ``*.patch`` file, else ``None`` (caller fail-softs).
+    """
+    subdir_name = _versioned_patches_subdir_name(version)
+    if subdir_name is None:
+        return None
+    candidate = patches_root / subdir_name
+    if candidate.is_dir() and any(candidate.glob("*.patch")):
+        return candidate
+    return None
+
+
 # ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
@@ -286,6 +334,11 @@ class _PatchPlan:
     # which the TraceLens patch always adds together but upstream has
     # no reason to merge as a co-occurring pair.
     sentinel_text: tuple[str, ...]
+    # Additional file-local markers required for a multi-file patch set to
+    # count as complete. SGLang can partially patch (or skip optional files)
+    # while leaving the single historical sentinel present; require the actual
+    # execution-step annotation sites too.
+    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = ()
     # PR-D §1: per-plan ``-p<N>`` strip count. Editable SGLang layouts
     # and the vLLM patch set both use ``-p1`` (default); wheel-install
     # SGLang uses ``-p3`` so the ``a/python/sglang/`` prefix is
@@ -388,12 +441,26 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     # Resolve the patches dir BEFORE the version check so the gate
     # can consult the TraceLens-shipped manifest (PR-D §5). If the
-    # patches dir itself is missing, no point checking the version.
-    patches_dir = _patch_tree(tracelens_root, "sglang_roofline_patches")
-    if not patches_dir.is_dir():
+    # patches root itself is missing, no point checking the version.
+    patches_root = _patch_tree(tracelens_root, "sglang_roofline_patches")
+    if not patches_root.is_dir():
         log.info(
-            "_server_patcher: SGLang patches directory missing (%s); skip",
-            patches_dir,
+            "_server_patcher: SGLang patches root missing (%s); skip",
+            patches_root,
+        )
+        return None
+
+    # TraceLens v0.3.1+ ships per-version subdirs (sglang_0_5_11/, ...);
+    # Hyperloom requires this layout. Pre-v0.3.1 flat checkouts must
+    # be upgraded — see README "Prepare Source Trees".
+    patches_dir = _resolve_sglang_patches_dir(patches_root, version)
+    if patches_dir is None:
+        log.info(
+            "_server_patcher: no SGLang patches found under %s/%s/ for "
+            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+",
+            patches_root,
+            _versioned_patches_subdir_name(version) or "<unknown>",
+            version,
         )
         return None
 
@@ -424,10 +491,14 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     #   modified in place — no symlinks, no tmpdirs, no copies, so
     #   ``git apply``'s symlink-safety check never trips.
     sglang_module = Path(sglang.__file__).resolve()
-    resolution = _resolve_sglang_apply_root(sglang_module)
-    if resolution is None:
+    apply_resolution = _resolve_sglang_apply_root(sglang_module)
+    if apply_resolution is None:
         return None
-    apply_root, apply_strip = resolution
+    apply_root, apply_strip = apply_resolution
+
+    # v0.3.1+ per-version subdirs ship a complete patch set authored
+    # against that exact sglang release; every patch must apply.
+    filtered_patches: list[Path] = list(patches)
 
     # Sentinel: the kernel_shape_profiler patch creates an entirely
     # new file. In both layouts it lands at the wheel-side path
@@ -435,17 +506,46 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     # parent of sglang/), so we resolve the absolute path off
     # ``sglang_module`` itself to keep both branches symmetric.
     sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
+    sglang_pkg = sglang_module.parent
+    filtered_names = {p.name for p in filtered_patches}
+    core_annotation_patch_names = {
+        "scheduler.patch",
+        "scheduler_profiler_mixin.patch",
+        "io_struct.patch",
+        "http_server.patch",
+    }
+    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = ()
+    if core_annotation_patch_names.issubset(filtered_names):
+        extra_sentinels = (
+            (
+                sglang_pkg / "srt" / "managers" / "scheduler.py",
+                ("_build_profile_annotation", "profile_annotation"),
+            ),
+            (
+                sglang_pkg / "srt" / "managers" / "scheduler_profiler_mixin.py",
+                ("roofline_annotations", "execute_", "torch.profiler.record_function"),
+            ),
+            (
+                sglang_pkg / "srt" / "managers" / "io_struct.py",
+                ("shape_discovery", "roofline_annotations"),
+            ),
+            (
+                sglang_pkg / "srt" / "entrypoints" / "http_server.py",
+                ("shape_discovery", "roofline_annotations"),
+            ),
+        )
     return _PatchPlan(
         framework="sglang",
         version=version,
         apply_root=apply_root,
-        patches=patches,
+        patches=tuple(filtered_patches),
         sentinel_file=sentinel,
-        # The SGLang sentinel file ``kernel_shape_profiler.py`` is
-        # *created* by the patch — its mere existence + a unique
-        # internal identifier is already a robust signal. Kept as a
-        # 1-tuple for type uniformity with vLLM (PR-D §4).
+        # The SGLang sentinel file is necessary but not sufficient: if an
+        # earlier run partially applied only the shape-profiler patch, the old
+        # one-file check would return true while scheduler.py still emitted no
+        # execute_* annotations. Require the actual annotation pipeline too.
         sentinel_text=("kernel_shape_profiler",),
+        extra_sentinels=extra_sentinels,
         apply_strip=apply_strip,
     )
 
@@ -504,7 +604,15 @@ def _is_patched(plan: _PatchPlan) -> bool:
         content = plan.sentinel_file.read_text(
             encoding="utf-8", errors="replace",
         )
-        return all(marker in content for marker in plan.sentinel_text)
+        if not all(marker in content for marker in plan.sentinel_text):
+            return False
+        for path, markers in plan.extra_sentinels:
+            if not path.exists():
+                return False
+            extra = path.read_text(encoding="utf-8", errors="replace")
+            if not all(marker in extra for marker in markers):
+                return False
+        return True
     except OSError:
         return False
 

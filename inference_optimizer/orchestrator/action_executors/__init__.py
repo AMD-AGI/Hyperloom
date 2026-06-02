@@ -1,45 +1,31 @@
-"""Concrete ActionRunner implementations (DESIGN v0.6 §15.2).
+"""Concrete ActionRunner implementations.
 
-Each runner is an `async def fn(RunnerContext) -> dict` that the
+Each runner is an ``async def fn(RunnerContext) -> dict`` that the
 SubAgentRunner dispatches when a queued task's ``kind`` matches its
 registered name.
 
-Executors shipped:
-
-* :func:`baseline_executor` — Magpie SGLang baseline benchmark.
-* :func:`profile_executor`  — Magpie SGLang baseline + torch profiler
-  (writes ``torch_trace/`` for the Kernel agent to analyze).
+v0.8 M3 + KB_gaps/Dead-A consolidated the legacy ``backends`` /
+``params`` / ``validate_stack`` executors into the merged
+:class:`ExploreExecutor`. Their modules and yamls have been
+physically deleted; the legacy dataclass fields (``backends_search`` /
+``params_search`` / ``last_validate_stack`` / ``*_attempts``) stay on
+:class:`SharedState` for resume parity (Inv-10.1) but no executor
+backs them in fresh sessions.
 """
 
-from .backends import (
-    DEFAULT_BACKENDS_GRID,
-    DEFAULT_SGLANG_SERVER_ARGS,
-    DEFAULT_VLLM_ARG_UTILS,
-    DEFAULT_VLLM_BACKENDS_GRID,
-    SYNERGY_GROUPS,
-    BackendsExecutor,
-    backends_executor,
-    discover_backend_flags,
-    discover_vllm_backend_flags,
-)
 from .baseline import (
     BASELINE_DEFAULT_CONFIG,
     BaselineExecutor,
     baseline_executor,
 )
-from .params import (
-    DEFAULT_NCCL_GRID,
-    DEFAULT_PARAMS_GRID,
-    ParamsExecutor,
-    discover_param_flags,
-    params_executor,
+from .dynamic_action import dynamic_action_executor
+from .explore import (
+    DEFAULT_KEEP_THRESHOLD_PCT,
+    DEFAULT_STACK_STABLE_PCT,
+    ExploreExecutor,
+    explore_executor,
 )
-from .profile import (
-    PROFILE_DEFAULT_CONFIG,
-    ProfileExecutor,
-    profile_executor,
-)
-from .pmc_roofline import PMCRooflineExecutor, pmc_roofline_executor
+from .framework_pr import FrameworkPrExecutor, framework_pr_executor
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .sweep import (
@@ -49,45 +35,28 @@ from .sweep import (
     sweep_executor,
 )
 from .target_analysis import TargetAnalysisExecutor
-from .validate_stack import (
-    ValidateStackExecutor,
-    combine_optimization_stack,
-    validate_stack_executor,
-)
+from .recover import RecoverExecutor, recover_executor
 
 __all__ = [
     "BASELINE_DEFAULT_CONFIG",
-    "BackendsExecutor",
     "BaselineExecutor",
-    "DEFAULT_BACKENDS_GRID",
     "DEFAULT_CONC_VALUES",
     "DEFAULT_ISL_OSL",
-    "DEFAULT_NCCL_GRID",
-    "DEFAULT_PARAMS_GRID",
-    "DEFAULT_SGLANG_SERVER_ARGS",
-    "DEFAULT_VLLM_ARG_UTILS",
-    "DEFAULT_VLLM_BACKENDS_GRID",
-    "PROFILE_DEFAULT_CONFIG",
-    "ParamsExecutor",
-    "PMCRooflineExecutor",
-    "ProfileExecutor",
+    "DEFAULT_KEEP_THRESHOLD_PCT",
+    "DEFAULT_STACK_STABLE_PCT",
+    "ExploreExecutor",
+    "FrameworkPrExecutor",
+    "RecoverExecutor",
     "ReportExecutor",
-    "SYNERGY_GROUPS",
     "SessionBreakdownExecutor",
     "SweepExecutor",
     "TargetAnalysisExecutor",
-    "ValidateStackExecutor",
-    "backends_executor",
     "baseline_executor",
-    "combine_optimization_stack",
-    "discover_backend_flags",
-    "discover_param_flags",
-    "discover_vllm_backend_flags",
-    "params_executor",
-    "pmc_roofline_executor",
-    "profile_executor",
+    "dynamic_action_executor",
+    "explore_executor",
+    "framework_pr_executor",
+    "recover_executor",
     "report_executor",
     "session_breakdown_executor",
     "sweep_executor",
-    "validate_stack_executor",
 ]

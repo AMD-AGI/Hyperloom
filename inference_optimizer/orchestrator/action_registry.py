@@ -1,4 +1,4 @@
-"""ActionRegistry — DESIGN v0.6 §16.
+"""ActionRegistry
 
 Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per
 action). The corresponding markdown body at ``actions/<name>.md`` is
@@ -33,7 +33,7 @@ v0.6 schema (DESIGN §16.2)::
     max_turns:           int
     lease_ttl_sec:       int
     applicable_when:     list[str]    # free-form predicates
-    # v0.6.2 (Phase 1) prompt-builder additions:
+    # prompt-builder additions:
     description:         str          # 1-line action brief consumed by
                                       # prompt_builder; defaults to name
                                       # when missing.
@@ -52,9 +52,9 @@ v0.6 vs v0.5 schema:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..paths import asset_actions_dir
 
@@ -66,21 +66,96 @@ VALID_FAMILIES: frozenset[str] = frozenset({
 
 VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex"})
 
-# Phase 1 (prompt_builder) — coarse-grained pipeline phase used to group
-# actions inside the Orchestration system prompt (e.g. "Run prep actions
-# first, then move to explore..."). Kept intentionally small; map onto the
+# Coarse-grained pipeline phase used by prompt_builder to group actions
+# inside the Orchestration system prompt (e.g. "Run prep actions first,
+# then move to explore..."). Kept intentionally small; map onto the
 # DESIGN §11 timeline rather than the family taxonomy because family is
 # scheduler-oriented (prep/analysis/...) while phases are LLM-oriented.
 VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
     "prep",        # setup / classify / target_analysis / baseline
     "measure",     # baseline (gates explore)
     "explore",     # backends / params / sweep
-    "analysis",    # profile / pmc_roofline / deep_kernel_analysis
+    "analysis",    # profile / roofline / deep_kernel_analysis
     "deep",        # kernel_opt / integrate / operator_tuning / vendor_kernel_config
     "validate",    # validate_stack — apply optimization_stack + rebench
     "finalize",    # report
-    "support",     # dream / re_explore / recover / comm_optimization / compiler_tuning
+    "support",     # recover (v0.8 KB_design §3.15 §2.3 retired the rest)
 })
+
+# N38 (May 2026) — per-action verdict policy class. Drives the
+# Critic's primary per-proposal rule via the ``action_verdict_policy``
+# entry in ``judge_bundle.review_constraints`` (built by
+# CriticAgentBackend from this registry). Replaces the hard-coded
+# carve-out lists that N33/N35/N37 had to patch into ``critic.md``
+# every time a new action class got introduced.
+#
+# * ``archival`` — transcribes existing state to disk; introduces
+#   NO new measurements. Always approve: refusing forces the run
+#   to idle until the wall-clock deadline auto-enqueues the same
+#   action. (Examples: report / session_breakdown / target_analysis.)
+# * ``exploration`` — runs benchmarks / variants to GENERATE the
+#   before/after data the gate would otherwise demand as input.
+#   Approve when the proposal is the natural next TODO per
+#   orchestration's sequencing rules. The measurement IS the
+#   evidence. (Examples: baseline / profile / roofline / params /
+#   backends / sweep / kernel_opt / validate_stack / ...)
+# * ``promotion`` — MUTATES ``optimization_stack`` by appending a
+#   KEEP'd entry with an E2E gain claim. Genuinely requires
+#   before/after benchmark + accuracy gate + rollback evidence to
+#   approve. Currently the sole member is ``integrate``.
+VALID_VERDICT_CLASSES: frozenset[str] = frozenset({
+    "archival", "exploration", "promotion",
+})
+
+# Default classifier — exhaustive map for every action shipped today.
+# A yaml file may override its action's class by setting the
+# ``verdict_class`` field; otherwise the loader looks up the action
+# name in this table. Unknown names fall back to ``"exploration"``
+# (the safest non-deadlocking default: it only blocks the rare
+# integrate-shaped action that genuinely needs evidence).
+_DEFAULT_VERDICT_CLASS: dict[str, str] = {
+    # archival — transcribe state, no new measurement
+    "report":                  "archival",
+    "session_breakdown":       "archival",
+    "target_analysis":         "archival",
+    # promotion — mutate optimization_stack + claim gain
+    "integrate":               "promotion",
+    # exploration — everything else (run benchmarks / variants /
+    # diagnostics to GENERATE data)
+    "baseline":                "exploration",
+    "roofline":                "exploration",
+    "params":                  "exploration",
+    "backends":                "exploration",
+    "sweep":                   "exploration",
+    "kernel_opt":              "exploration",
+    "gemm_tuning":             "exploration",
+    "compiler_tuning":         "exploration",
+    "comm_optimization":       "exploration",
+    "operator_tuning":         "exploration",
+    "vendor_kernel_config":    "exploration",
+    "deep_kernel_analysis":    "exploration",
+    "recover":                 "exploration",
+    "validate_stack":          "exploration",
+    "dream":                   "exploration",
+    "re_explore":              "exploration",
+    # dynamic_action — multi-turn ReAct sub-agent that explores a
+    # cross-domain patch combination (dynamic_action.MD P1).
+    "dynamic_action":          "exploration",
+}
+_DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
+
+
+def default_verdict_class_for(action_name: str) -> str:
+    """Look up the default ``verdict_class`` for ``action_name``.
+
+    Returns the registered class if known, else falls back to
+    ``"exploration"`` (safe default: only ``integrate`` semantics
+    deadlock when treated as exploration; everything else is fine).
+    """
+    return _DEFAULT_VERDICT_CLASS.get(
+        action_name, _DEFAULT_VERDICT_CLASS_FALLBACK,
+    )
+
 
 _REQUIRED_FIELDS: tuple[str, ...] = (
     "name", "family", "cost_minutes_p50", "cost_minutes_p75",
@@ -112,10 +187,15 @@ class ActionMetadata:
     max_turns: int = 30
     lease_ttl_sec: int = 1800
     applicable_when: tuple[str, ...] = ()
-    # Phase 1 prompt-builder fields — see module docstring.
+    # prompt-builder fields — see module docstring.
     description: str = ""
     pipeline_phase: str = "explore"
     typical_runtime_min: float = 0.0
+    # N38 (May 2026) — per-action verdict policy class. Drives Critic's
+    # ``action_verdict_policy`` lookup (see ``VALID_VERDICT_CLASSES``).
+    # Defaults inferred from ``default_verdict_class_for(name)`` when
+    # the yaml omits the field.
+    verdict_class: str = ""
 
     @classmethod
     def from_yaml_dict(cls, data: dict[str, Any], expected_name: str) -> "ActionMetadata":
@@ -151,7 +231,7 @@ class ActionMetadata:
                 f"action {expected_name!r}: preferred_backend={backend!r} not in "
                 f"{sorted(VALID_BACKENDS)!r}"
             )
-        # Phase 1 prompt-builder fields. All optional; missing values fall back
+        # prompt-builder fields. All optional; missing values fall back
         # to safe defaults so old yaml files keep parsing while new ones can
         # opt into richer prompts.
         cost_p50 = float(data["cost_minutes_p50"])
@@ -179,6 +259,21 @@ class ActionMetadata:
                 f"action {expected_name!r}: typical_runtime_min must be >= 0, "
                 f"got {typical_runtime_min}"
             )
+        # N38 verdict_class — explicit yaml override wins; otherwise
+        # the loader fills in the default from the table. Validate
+        # whichever resolved value against the allowlist so a typo in
+        # the yaml fails loudly at boot rather than silently producing
+        # an unknown class the critic doesn't know how to interpret.
+        verdict_class = str(
+            data.get("verdict_class") or "",
+        ).strip().lower()
+        if not verdict_class:
+            verdict_class = default_verdict_class_for(expected_name)
+        if verdict_class not in VALID_VERDICT_CLASSES:
+            raise ActionRegistryError(
+                f"action {expected_name!r}: verdict_class={verdict_class!r} "
+                f"not in {sorted(VALID_VERDICT_CLASSES)!r}"
+            )
         return cls(
             name=str(data["name"]),
             family=str(data["family"]),
@@ -199,6 +294,7 @@ class ActionMetadata:
             description=description or str(data["name"]),
             pipeline_phase=pipeline_phase,
             typical_runtime_min=typical_runtime_min,
+            verdict_class=verdict_class,
         )
 
 
@@ -271,4 +367,6 @@ __all__ = [
     "VALID_BACKENDS",
     "VALID_FAMILIES",
     "VALID_PIPELINE_PHASES",
+    "VALID_VERDICT_CLASSES",
+    "default_verdict_class_for",
 ]

@@ -3,6 +3,7 @@
 *.env
 !*.env.template
 kernel-agent/env.sh
+framework-agent/scripts/env.sh
 
 # Python
 __pycache__/
@@ -20,8 +21,13 @@ venv/
 trace_rank*.json
 .rocprofv3/
 
-# Optimization run artifacts
-optimizer_runs/
+# Optimization run artifacts (runtime per-session output; ignored). One
+# tracked exception: the .example template SKILL.md tells operators to
+# `cp` from at session start. Use ``optimizer_runs/*`` (not the bare
+# ``optimizer_runs/`` directory) so git still recurses into the dir
+# and the negation pattern below can re-include the .example file.
+optimizer_runs/*
+!optimizer_runs/robustness_monitor.sh.example
 optimization_logs/
 optimization_reports/
 optimized_versions/
@@ -52,3 +58,21 @@ Thumbs.db
 # Local working notes
 inference_optimizer/remain_todo.md
 inference_optimizer/remain_issue.md
+inference_optimizer/remain_robustness_todo.md
+
+# PR description scratchpad. Tools (gh CLI, codex) sometimes drop a
+# pr.md at the repo root when drafting a pull request; the
+# description belongs in the PR body, not in the tree.
+pr.md
+
+# F0/F1 integration: keep test baselines, dry-run merge maps, and
+# archived regression sweeps tracked.
+!docs/test-baselines/*.log
+!docs/integration/*.log
+!docs/integration/logs/*.log
+
+# claude files
+*.claude
+CLAUDE.md
+boost_trap_files
+atom_boost_tutorials.md

@@ -66,7 +66,7 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "validated_at_stack_len": 1,
             "validated_ts": "2026-05-12T11:54:00Z",
             "stack_changed_after_validation": False,
-            "extra_sglang_args": "",
+            "extra_server_args": "",
             "action_path": ["backends:vllm_kv_fp8"],
         },
         "phase_timeline": [],
@@ -119,9 +119,13 @@ def test_all_renderers_register_in_stable_order() -> None:
     expected = [
         "session", "workload", "baseline", "final",
         "capability_summary", "phase_timeline", "kernel_lifecycle",
+        "kernel_profiling", "kernel_decision_path",
+        "roofline",
         "geak_invocations", "oob_invocations",
-        "param_search", "sweep", "critic_robustness",
+        "param_search", "decision_journal",
+        "sweep", "critic_robustness",
         "attribution", "source_files",
+        "data_provenance",
     ]
     assert [sid for sid, _ in REGISTRY] == expected
 

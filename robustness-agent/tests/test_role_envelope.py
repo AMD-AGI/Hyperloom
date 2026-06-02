@@ -19,7 +19,6 @@ import pytest
 from robustness_agent.role.envelope import (
     ALERT_SEVERITIES,
     BackendTurnResult,
-    Intent,
     IntentType,
     KILL_TASK_ALLOWED_SCOPES,
     PAYLOAD_REQUIRED,
@@ -182,6 +181,25 @@ def test_delegate_accepts_only_handle_actions():
     for action in ROBUSTNESS_DELEGATE_ACTIONS:
         intent = build_delegate(action)
         assert intent.payload["action_name"] == action
+
+
+def test_delegate_allowlist_includes_report_wind_down():
+    """``report`` is the wind-down lever for ``deadline_imminent`` /
+    ``recover_unsuccessful``. If this asserts trips check whether you
+    are intentionally narrowing the allowlist; the ladder relies on
+    ``build_delegate('report')`` not raising.
+    """
+    assert "report" in ROBUSTNESS_DELEGATE_ACTIONS
+    intent = build_delegate(
+        "report",
+        params={"reason": "deadline_imminent"},
+        idempotency_key="report-deadline-imminent-tick-7",
+    )
+    assert intent.payload == {
+        "action_name": "report",
+        "params": {"reason": "deadline_imminent"},
+        "idempotency_key": "report-deadline-imminent-tick-7",
+    }
 
 
 def test_update_state_rejects_core_fields():

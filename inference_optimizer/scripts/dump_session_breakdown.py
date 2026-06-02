@@ -81,6 +81,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also print the full JSON to stdout (useful for piping).",
     )
     parser.add_argument(
+        "--include-transcripts",
+        action="store_true",
+        help=(
+            "Inline specialist transcript bodies under "
+            "specialist_runs[i].transcripts[j].body. Mirrors "
+            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1."
+        ),
+    )
+    parser.add_argument(
         "--verbose", "-v", action="count", default=0,
         help="-v INFO, -vv DEBUG.",
     )
@@ -108,6 +117,8 @@ def _summary_line(breakdown: dict) -> str:
     lifecycle = breakdown.get("kernel_lifecycle") or {}
     sweep = breakdown.get("sweep") or {}
     warnings = breakdown.get("warnings") or []
+    dj_n = len(breakdown.get("decision_journal") or [])
+    kp_n = len(breakdown.get("kernel_profiling") or [])
     return (
         f"session_id={sess.get('session_id', '?')}  "
         f"claw_session_id={sess.get('claw_session_id') or '(none)'}  "
@@ -117,6 +128,7 @@ def _summary_line(breakdown: dict) -> str:
         f"detected={len(lifecycle.get('detected') or [])}  "
         f"adopted={len(lifecycle.get('adopted') or [])}  "
         f"sweep={len(sweep.get('all_variants') or [])}  "
+        f"decision_journal={dj_n}  kernel_profiling={kp_n}  "
         f"warnings={len(warnings)}"
     )
 
@@ -133,20 +145,24 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.dry_run:
-        breakdown = build(sd)
+        breakdown = build(sd, include_transcripts=args.include_transcripts)
         print(_summary_line(breakdown))
         if args.print_json:
             print(json.dumps(breakdown, indent=2, sort_keys=True))
         return 0
 
     try:
-        out_path = write_breakdown_json(sd, output_path=args.output)
+        out_path = write_breakdown_json(
+            sd,
+            output_path=args.output,
+            include_transcripts=args.include_transcripts,
+        )
     except Exception as exc:  # noqa: BLE001
         log.exception("write_breakdown_json failed")
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
-    breakdown = build(sd)  # cheap rebuild for summary printing
+    breakdown = build(sd, include_transcripts=args.include_transcripts)
     print(f"Wrote {out_path}")
     print(_summary_line(breakdown))
     if args.print_json:

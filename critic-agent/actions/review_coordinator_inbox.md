@@ -21,18 +21,41 @@ python -m runtime.cli prepare-review \
   `framework`) are still missing; if so, see Step 2.
 - `proposals` — only proposals not yet reviewed in this session.
 - `kb_priors_by_proposal` — array per `msg_id` (cache-aware).
-- `review_constraints` — current allowed verdicts and approve checklist.
+- `review_constraints` — allowed verdicts, action-class-scoped approve
+  checklists (`approve_requires_by_class`), and a `{msg_id: class}`
+  map in `proposal_action_classes` so you can apply the right per-
+  proposal bar in a heterogeneous batch.
 
 ## Step 2 — Reason
 
-For each proposal in `proposals`, decide a verdict using:
+For each proposal in `proposals`:
 
-- The Approve Standard from `SKILL.md`.
-- [references/risk_rules.md](../references/risk_rules.md) for blocker /
-  major / minor categorisation.
-- [references/verdict_schema.md](../references/verdict_schema.md) for
-  the per-verdict required fields.
-- Any `kb_priors_by_proposal[<msg_id>]` returned in Step 1.
+1. Look up its class via
+   `review_constraints.proposal_action_classes[<msg_id>]` →
+   `patch_landing` / `evidence_producer` / `framework_op`.
+2. Apply the **per-class** Approve Standard from `SKILL.md`. The
+   bundle-level `review_constraints.approve_requires` is the strictest
+   class present in the batch (a fallback for callers that do not look
+   at `proposal_action_classes`); always prefer the per-proposal class
+   when emitting verdicts.
+3. Cross-reference with
+   [references/risk_rules.md](../references/risk_rules.md) for
+   blocker / major / minor categorisation,
+   [references/verdict_schema.md](../references/verdict_schema.md) for
+   per-verdict required fields, and any
+   `kb_priors_by_proposal[<msg_id>]` returned in Step 1.
+
+Default behavior summary:
+
+- `evidence_producer` proposal + empty / silent KB priors → **approve**
+  (the action's whole purpose is to produce the missing benchmarks).
+- `evidence_producer` proposal + a contradicting KB prior (e.g. variant
+  tried 3x and failed) → `reject` with the prior cited in `kb_evidence`.
+- `patch_landing` proposal without comparable benchmark + accuracy
+  gate → `needs_review` (or `reject` if the packet itself shows a
+  regression).
+- `framework_op` proposal → approve by default; only block when
+  structurally malformed.
 
 Special cases:
 

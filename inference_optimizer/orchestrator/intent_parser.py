@@ -1,4 +1,4 @@
-"""Structured-intent transport (DESIGN v0.6 §14).
+"""Structured-intent transport ().
 
 Two transports share the same envelope schema:
 
@@ -18,7 +18,6 @@ v0.6 changes vs v0.5:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -46,6 +45,12 @@ class IntentType(str, Enum):
     FORCE_DISPATCH = "force_dispatch"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
+    # specialist sub-agent exit protocol.
+    # specialist tasks (LLM sub-agents on the research_lane) close their
+    # lifecycle with exactly one SPECIALIST_DONE intent. PolicyGate R3
+    # checks from_agent prefix + gap/domain match + payload schema; see
+    # ``policy._validate_specialist_done`` for the full contract.
+    SPECIALIST_DONE = "specialist_done"
 
 
 _ALL_INTENT_VALUES: tuple[str, ...] = tuple(t.value for t in IntentType)
@@ -106,11 +111,26 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.ALERT:           ("severity", "summary"),
     IntentType.REQUEST:         ("target_agent", "kind"),
     IntentType.RESPONSE:        ("in_reply_to", "kind"),
-    IntentType.REVIEW_VERDICT:  ("target_proposal_msg_id", "verdict"),
+    # v0.8 KB_gaps/Gap-11: the
+    # ``verdict`` / ``verdict_map`` choice is mutually exclusive but
+    # one of them must be present. We require only the structural
+    # ``target_proposal_msg_id`` field here; the
+    # ``verdict``/``verdict_map`` mutual exclusion is enforced by
+    # :func:`_validate_review_verdict_payload` below (called from
+    # :func:`validate_envelope`) so the per-variant variant_name
+    # schema can be validated in one place alongside the legacy single-
+    # verdict shape.
+    IntentType.REVIEW_VERDICT:  ("target_proposal_msg_id",),
     IntentType.KILL_TASK:       ("task_id", "reason"),
     IntentType.FORCE_DISPATCH:  ("task_id", "reason"),
     IntentType.PRUNE_BRANCH:    ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
+    # specialist exit envelope. ``proposal_set`` is a list (may
+    # be empty when ``empty=true``); per-variant schema is enforced by
+    # PolicyGate R3 (``policy._validate_specialist_done``) since the
+    # intent_parser sees only the envelope skeleton.
+    IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain",
+                                  "proposal_set", "empty", "summary"),
 }
 
 
@@ -144,9 +164,17 @@ EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
                     "reason?}; response: {in_reply_to, kind, status?, "
                     "result?}; review_verdict: {target_proposal_msg_id, "
                     "verdict ∈ approve/reject/redirect/advise/needs_review, "
-                    "reasoning, kb_evidence?} — Critic-only; "
+                    "reasoning, kb_evidence?} for single-proposal review, "
+                    "OR {target_proposal_msg_id, verdict_map: "
+                    "{variant_name: {verdict, rationale?}}} for batch "
+                    "explore review (v0.8 KB_gaps/Gap-11); the two "
+                    "shapes are mutually exclusive — Critic-only; "
                     "kill_task / force_dispatch / prune_branch / "
-                    "escalate_strategy_change — Robustness-only (PolicyGate)."
+                    "escalate_strategy_change — Robustness-only (PolicyGate); "
+                    "specialist_done: {gap_canonical_id, domain, "
+                    "proposal_set: [variant...], empty, summary, "
+                    "confidence?, new_findings?, residual_questions?} — "
+                    "specialist-only, exactly one per task."
                 ),
             },
         },
@@ -213,33 +241,72 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
                     f"intents[{i}] (type={it.value}) missing required "
                     f"payload field: {required!r}"
                 )
+        # REVIEW_VERDICT shape branch.
+        if it is IntentType.REVIEW_VERDICT:
+            _validate_review_verdict_payload(payload, index=i)
         validated.append(Intent(type=it, payload=dict(payload)))
     return validated
 
 
-def parse_codex_validated_json(raw: str) -> list[Intent]:
-    """Codex transport — single JSON object containing one envelope."""
-    try:
-        envelope = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise IntentValidationError(f"codex json parse error: {exc}", raw=raw) from exc
-    return validate_envelope(envelope)
+def _validate_review_verdict_payload(
+    payload: dict[str, Any], *, index: int,
+) -> None:
+    """Enforce the legacy REVIEW_VERDICT envelope schema.
 
+    KB_design §3.5 §5 / M5 §5 step 5 — Critic Review returns one of:
 
-def parse_claude_tool_calls(tool_uses: list[dict[str, Any]]) -> list[Intent]:
-    """Claude transport — gather every ``emit_intent`` tool_use into intents."""
-    items: list[dict[str, Any]] = []
-    for use in tool_uses:
-        if use.get("name") != EMIT_INTENT_TOOL_SCHEMA["name"]:
-            continue
-        inp = use.get("input") or {}
-        items.append({
-            "intent_type": inp.get("intent_type"),
-            "payload": inp.get("payload") or {},
-        })
-    if not items:
-        raise NoIntentEmitted("no emit_intent tool_use blocks in Claude reply")
-    return validate_envelope({"intents": items})
+    * ``verdict``: legacy single-verdict shape for one-proposal
+      reviews (kernel_opt / integrate / report / specialist dispatch
+      etc.). Free-form string; PolicyGate later checks it against
+      :data:`policy.REVIEW_VERDICTS`.
+    * ``verdict_map``: v0.8 batch shape — ``{variant_name:
+      {verdict: ..., rationale?: ...}}``. Required when the parent
+      proposal is a multi-variant ``explore`` grid (KB_gaps/Gap-11
+      §5.2). Per-variant verdict strings are also vetted by
+      PolicyGate.
+
+    The two fields are mutually exclusive; exactly one must be
+    present. PolicyGate handles the *content* validation (verdict
+    string vocab, variant_name vs original grid). This validator
+    only enforces structural shape so callers downstream (resume
+    rebuild + policy) can rely on at-most-one-present.
+    """
+    has_single = "verdict" in payload
+    has_map = "verdict_map" in payload
+    if not has_single and not has_map:
+        raise IntentValidationError(
+            f"intents[{index}] (type=review_verdict) must include either "
+            f"'verdict' (single) or 'verdict_map' (per-variant); both missing"
+        )
+    if has_single and has_map:
+        raise IntentValidationError(
+            f"intents[{index}] (type=review_verdict): 'verdict' and "
+            f"'verdict_map' are mutually exclusive"
+        )
+    if has_map:
+        vm = payload["verdict_map"]
+        if not isinstance(vm, dict) or not vm:
+            raise IntentValidationError(
+                f"intents[{index}] (type=review_verdict).verdict_map must "
+                f"be a non-empty object keyed by variant_name"
+            )
+        for vname, entry in vm.items():
+            if not isinstance(vname, str) or not vname.strip():
+                raise IntentValidationError(
+                    f"intents[{index}] (type=review_verdict).verdict_map "
+                    f"keys must be non-empty variant names, got {vname!r}"
+                )
+            if not isinstance(entry, dict):
+                raise IntentValidationError(
+                    f"intents[{index}] (type=review_verdict).verdict_map"
+                    f"[{vname!r}] must be an object with at least a "
+                    f"'verdict' key, got {type(entry).__name__}"
+                )
+            if "verdict" not in entry:
+                raise IntentValidationError(
+                    f"intents[{index}] (type=review_verdict).verdict_map"
+                    f"[{vname!r}] missing required 'verdict' key"
+                )
 
 
 __all__ = [
@@ -249,7 +316,5 @@ __all__ = [
     "IntentType",
     "IntentValidationError",
     "NoIntentEmitted",
-    "parse_claude_tool_calls",
-    "parse_codex_validated_json",
     "validate_envelope",
 ]

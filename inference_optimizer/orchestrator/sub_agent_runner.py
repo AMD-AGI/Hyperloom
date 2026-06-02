@@ -1,4 +1,4 @@
-"""SubAgentRunner — DESIGN v0.6 §15.
+"""SubAgentRunner
 
 Receives ``delegate{action_name, params}`` intents (after PolicyGate),
 materializes them into ``tasks`` rows, and dispatches the work.
@@ -17,14 +17,17 @@ in P0-6+.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
+import logging
+
 from ..session_paths import _runs_actions, runs_dir
 from .resource_lock import Lease, ResourceLockManager
-from .task_registry import Task, TaskRegistry
+from .task_registry import Task, TaskNotFound, TaskRegistry
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -87,30 +90,87 @@ class SubAgentRunner:
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
-    async def run_task(self, task: Task) -> SubAgentResult:
+    async def _transition_resilient(
+        self,
+        task_id: str,
+        new_state: str,
+        *,
+        evidence: dict | None = None,
+        context: str,
+    ) -> bool:
+        """Transition a task to ``new_state`` but tolerate ``TaskNotFound``.
+
+        Bug-fix (N34, May 2026): empirically the ``tasks`` row for a
+        long-running grid task can disappear from the SQLite registry
+        between the moment the dispatcher pulls it out of
+        ``tasks.queued()`` and the moment the executor's terminal
+        transition runs. The transition then raises ``TaskNotFound``,
+        the dispatcher's ``except Exception ... continue`` drops the
+        executor's result on the floor, and downstream gates never
+        fire — the whole optimization loop silently stalls. Treat
+        ``TaskNotFound`` on a terminal transition as a warning so the
+        rest of the dispatcher pipeline (bus event + promotion to
+        SharedState) still runs. Returns ``True`` on a successful
+        transition, ``False`` on the swallowed-TaskNotFound branch.
+        """
+        try:
+            await self.tasks.transition(task_id, new_state, evidence=evidence or {})
+            return True
+        except TaskNotFound:
+            log.warning(
+                "sub_agent_runner: tasks row for task_id=%s vanished before "
+                "transition→%s (context=%s); continuing so the executor "
+                "result is not lost. See sub_agent_runner._transition_"
+                "resilient docstring for the disappearing-row hypothesis.",
+                task_id, new_state, context,
+            )
+            return False
+
+    async def run_task(
+        self,
+        task: Task,
+        *,
+        prebound_lease: Lease | None = None,
+    ) -> SubAgentResult:
         """Acquire required lanes, transition queued→running, execute, transition out.
 
         Note: task state machine only allows ``queued → running`` then
         ``running → failed/succeeded/...``, so we always transition to
         ``running`` first — even on the "no runner" failure path —
         otherwise IllegalTransition fires.
+
+        v0.8 M6: when the Coordinator's concurrent
+        dispatcher pre-acquires the lease via ``try_acquire_many``
+        (non-blocking), it passes the resulting :class:`Lease` via
+        ``prebound_lease`` and the runner skips its own acquire step.
+        The runner still owns the release in its finally block — so
+        the dispatcher doesn't have to thread the release path.
         """
-        # queued → running first (state machine constraint)
-        await self.tasks.transition(task.task_id, "running")
+        # queued → running first (state machine constraint). Use the
+        # resilient variant so a missing row doesn't kill the runner
+        # before the executor has even started -- see
+        # _transition_resilient for the rationale (Bug N34 #1/#2).
+        await self._transition_resilient(
+            task.task_id, "running", context="enter_running",
+        )
 
         runner = self.executor_registry.get(task.kind)
         if runner is None:
-            await self.tasks.transition(
+            await self._transition_resilient(
                 task.task_id, "failed",
                 evidence={"reason": "no_executor", "kind": task.kind},
+                context="no_executor",
             )
+            if prebound_lease is not None:
+                await self.locks.release(prebound_lease)
             return SubAgentResult(
                 task_id=task.task_id, state="failed",
                 result={}, error=f"no runner registered for kind={task.kind!r}",
             )
 
-        lease: Lease | None = None
-        if task.requires_lanes:
+        lease: Lease | None = prebound_lease
+        owned_lease = prebound_lease is None
+        if owned_lease and task.requires_lanes:
             lease = await self.locks.acquire_many(
                 list(task.requires_lanes),
                 holder_id=task.task_id,
@@ -129,20 +189,27 @@ class SubAgentRunner:
             try:
                 result_payload = await runner(ctx)
             except Exception as exc:  # noqa: BLE001 — surface to task.history
-                await self.tasks.transition(
-                    task.task_id, "failed", evidence={"error": repr(exc)},
+                await self._transition_resilient(
+                    task.task_id, "failed",
+                    evidence={"error": repr(exc)},
+                    context="executor_exception",
                 )
                 return SubAgentResult(
                     task_id=task.task_id, state="failed",
                     result={}, error=repr(exc),
                 )
-            await self.tasks.transition(
-                task.task_id, "succeeded", evidence={"result_keys": sorted(result_payload.keys())},
+            await self._transition_resilient(
+                task.task_id, "succeeded",
+                evidence={"result_keys": sorted(result_payload.keys())},
+                context="executor_success",
             )
             return SubAgentResult(
                 task_id=task.task_id, state="succeeded", result=result_payload,
             )
         finally:
+            # Always release whoever acquired the lease — pre-bound or
+            # owned. The dispatcher passes the lease in but trusts the
+            # runner's finally to release it (Inv-7.3 atomic release).
             if lease is not None:
                 await self.locks.release(lease)
 

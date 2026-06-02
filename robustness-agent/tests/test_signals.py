@@ -182,6 +182,191 @@ def test_repeated_failure_groups_by_family():
     assert sym.evidence["count"] == 2
 
 
+def test_recover_unsuccessful_fires_on_needs_review_with_gpu_unhealthy_error():
+    coord_events = [
+        {
+            "topic": "delegated_result",
+            "agent": "coordinator",
+            "payload": {
+                "task_id": "tsk-9",
+                "kind": "recover",
+                "state": "needs_review",
+                "error_class": "gpu_unhealthy_after_gpureset",
+                "force_gpu_cleanup": True,
+                "gpureset_attempted": True,
+                "post_free_mb_per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
+            },
+        },
+    ]
+    data = SourceData(coordinator_events=coord_events)
+    out = evaluate_event_signals(_ctx(), data)
+    sym = next((s for s in out if s.name == "recover_unsuccessful"), None)
+    assert sym is not None
+    assert sym.severity is SymptomSeverity.HIGH
+    assert sym.evidence["error_class"] == "gpu_unhealthy_after_gpureset"
+    assert sym.evidence["task_id"] == "tsk-9"
+    assert sym.evidence["post_free_mb_per_gpu"][0]["free_mb"] == 12.0
+
+
+def test_recover_unsuccessful_silent_when_recover_succeeded():
+    coord_events = [
+        {
+            "topic": "delegated_result",
+            "agent": "coordinator",
+            "payload": {
+                "task_id": "tsk-10",
+                "kind": "recover",
+                "state": "succeeded",
+                "force_gpu_cleanup": True,
+                "gpureset_attempted": False,
+            },
+        },
+    ]
+    data = SourceData(coordinator_events=coord_events)
+    out = evaluate_event_signals(_ctx(), data)
+    assert all(s.name != "recover_unsuccessful" for s in out)
+
+
+def test_recover_unsuccessful_uses_latest_result_when_multiple_recovers():
+    # Old recover succeeded; newer recover failed → fire on the newer.
+    coord_events = [
+        {
+            "topic": "delegated_result",
+            "agent": "coordinator",
+            "payload": {
+                "task_id": "tsk-old",
+                "kind": "recover",
+                "state": "succeeded",
+                "force_gpu_cleanup": True,
+                "gpureset_attempted": False,
+            },
+        },
+        {
+            "topic": "delegated_result",
+            "agent": "coordinator",
+            "payload": {
+                "task_id": "tsk-new",
+                "kind": "recover",
+                "state": "needs_review",
+                "error_class": "gpu_unhealthy_after_soft_cleanup",
+                "force_gpu_cleanup": True,
+                "gpureset_attempted": False,
+            },
+        },
+    ]
+    data = SourceData(coordinator_events=coord_events)
+    out = evaluate_event_signals(_ctx(), data)
+    sym = next((s for s in out if s.name == "recover_unsuccessful"), None)
+    assert sym is not None
+    assert sym.evidence["task_id"] == "tsk-new"
+
+
+def test_idempotency_replay_fires_when_same_payload_distinct_keys():
+    """B4: distinct idempotency_keys + same payload hash → MEDIUM alert."""
+    inbox = [
+        InboxItem(
+            seq=1, msg_id="m1", from_agent="orchestration",
+            topic="proposal",
+            payload={
+                "action_name": "validate_stack",
+                "params": {"optimization_stack": [{"a": "v"}]},
+                "idempotency_key": "k-alpha",
+            },
+        ),
+        InboxItem(
+            seq=2, msg_id="m2", from_agent="orchestration",
+            topic="proposal",
+            payload={
+                "action_name": "validate_stack",
+                "params": {"optimization_stack": [{"a": "v"}]},
+                "idempotency_key": "k-beta",
+            },
+        ),
+    ]
+    ctx = _ctx(inbox=inbox)
+    out = evaluate_event_signals(
+        ctx, SourceData(),
+        config=EventConfig(idempotency_replay_threshold=2),
+    )
+    sym = next(s for s in out if s.name == "idempotency_replay")
+    assert sym.severity is SymptomSeverity.MEDIUM
+    assert sym.evidence["action_name"] == "validate_stack"
+    assert set(sym.evidence["distinct_keys"]) == {"k-alpha", "k-beta"}
+
+
+def test_idempotency_replay_silent_when_payloads_differ():
+    inbox = [
+        InboxItem(
+            seq=1, msg_id="m1", from_agent="orchestration",
+            topic="proposal",
+            payload={
+                "action_name": "validate_stack",
+                "params": {"optimization_stack": [{"a": "v1"}]},
+                "idempotency_key": "k-alpha",
+            },
+        ),
+        InboxItem(
+            seq=2, msg_id="m2", from_agent="orchestration",
+            topic="proposal",
+            payload={
+                "action_name": "validate_stack",
+                "params": {"optimization_stack": [{"a": "v2"}]},
+                "idempotency_key": "k-beta",
+            },
+        ),
+    ]
+    ctx = _ctx(inbox=inbox)
+    out = evaluate_event_signals(ctx, SourceData())
+    assert all(s.name != "idempotency_replay" for s in out)
+
+
+def test_idempotency_replay_silent_when_no_key():
+    """No idempotency_key at all → not a key-bypass attempt, skip."""
+    inbox = [
+        InboxItem(
+            seq=1, msg_id="m1", from_agent="orchestration",
+            topic="proposal",
+            payload={
+                "action_name": "validate_stack",
+                "params": {"x": 1},
+            },
+        ),
+        InboxItem(
+            seq=2, msg_id="m2", from_agent="orchestration",
+            topic="proposal",
+            payload={
+                "action_name": "validate_stack",
+                "params": {"x": 1},
+            },
+        ),
+    ]
+    ctx = _ctx(inbox=inbox)
+    out = evaluate_event_signals(ctx, SourceData())
+    assert all(s.name != "idempotency_replay" for s in out)
+
+
+def test_recover_unsuccessful_detected_via_signature_when_kind_missing():
+    # Coordinator forwarded the executor result.json fields but elided
+    # the ``kind`` tag — we still recognise it as recover via the
+    # ``force_gpu_cleanup`` + ``gpureset_attempted`` signature.
+    coord_events = [
+        {
+            "topic": "delegated_result",
+            "agent": "coordinator",
+            "payload": {
+                "task_id": "tsk-11",
+                "state": "needs_review",
+                "error_class": "gpu_unhealthy_after_soft_cleanup",
+                "force_gpu_cleanup": True,
+                "gpureset_attempted": False,
+            },
+        },
+    ]
+    data = SourceData(coordinator_events=coord_events)
+    out = evaluate_event_signals(_ctx(), data)
+    assert any(s.name == "recover_unsuccessful" for s in out)
+
+
 def test_event_handles_combined_inbox_and_coordinator_events():
     inbox = [
         InboxItem(

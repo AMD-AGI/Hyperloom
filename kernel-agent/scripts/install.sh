@@ -10,6 +10,12 @@
 
 set -euo pipefail
 
+# Ray/K8s subprocesses may inherit a minimal PATH; git/apt/node live under
+# /usr/bin even when callers only prepend /opt/venv/bin. Prepend the
+# standard system bins so multi-node RayJob children resolve them.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+export PATH="/opt/venv/bin:$PATH"
+
 # Default every writable artefact location under $USER_DATA_PATH so a single
 # session-dir move relocates Magpie / source mirrors / GEAK config / the
 # kernel-agent env file. Operators can still pin individual paths via env
@@ -64,12 +70,32 @@ _resolve_magpie_python() {
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
 PYTHONPATH="${MAGPIE_DIR}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
+# TraceLens checkout root. Points at a checkout of the open-source
+# AMD-AGI/TraceLens repo (carries the TraceLens.* Python package, the
+# TraceLens_generate_perf_report_* CLIs, the agent skill bundle, and the
+# per-version sglang_roofline_patches/sglang_<minor>_<patch>/ tree under
+# examples/custom_workflows/inference_analysis/ that _server_patcher
+# reads at runtime). ``inference_optimizer/scripts/local_setup.sh``
+# clones this for end users in Local Mode; CI / bundled deployments
+# preset the path via env. Legacy pre-2026-05-18 snapshots of the
+# private TraceLens-internal repo at /wekafs/hyperloom/TraceLens-internal
+# still satisfy the layout, so the default falls back to that location
+# for shops that have not migrated yet.
 TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
 # Writable mirror for TraceLens when $TRACELENS_ROOT is on a read-only mount
 # (e.g. /wekafs/...). Mirrors the OOB pattern: cp -r the read-only source into
-# ${HYPERLOOM_ROOT}/TraceLens-internal once, then pip install -e the mirror so
+# ${HYPERLOOM_ROOT}/TraceLens once, then pip install -e the mirror so
 # editable build artifacts land on a writable filesystem. See ensure_tracelens.
-TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"
+TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"
+# Optional TraceLens-internal extension. When set, ensure_tracelens()
+# pip installs the private AMD-AGI/TraceLens-internal package on top of
+# the open-source TraceLens. The internal extension post-processes the
+# generated agent report to add roofline numbers, gains estimates, and
+# MI355/MI455 MAF data. Unset (default) keeps Hyperloom on the
+# open-source-only path (impact score, no roofline, MI300/MI325 MAF only).
+# Provisioned by ``inference_optimizer/scripts/local_setup.sh`` when the
+# operator opts in via TRACELENS_INSTALL_INTERNAL=1.
+TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 
 # Credentials fallback: env always wins. If SAFE_API_KEY or OPENAI_BASE_URL
 # is missing from env, source $REPO_ROOT/.env (resolved above from this
@@ -93,14 +119,52 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
   fi
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-# Pin GEAK to the first release that ships RAG MCP retrieval and cross-session
-# memory together. Keep this overridable so future GEAK fixes can move Hyperloom
-# forward without reworking the installer contract.
-GEAK_REF="${GEAK_REF:-v3.1.0}"
+# Pin GEAK to the save-and-test-diff-fallthrough fix tip
+# (https://github.com/AMD-AGI/GEAK/pull/244, not yet released as a tag).
+# We pin to the *commit SHA* of the branch tip, NOT the branch name, so a
+# future force-push / rebase upstream cannot silently change what every
+# fresh install gets.
+# TODO(post-GEAK-PR-244): once PR #244 lands and ships in a new GEAK tag,
+# revert this pin to the tag (e.g. v3.2.1) for stronger discoverability.
+# Operators can override with GEAK_REF=<tag|branch|sha>.
+GEAK_REF="${GEAK_REF:-ec61bdbdb151904ec187a8d89518afb969c53737}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
-# Pass GEAK_MODEL_NAME through unchanged; GEAK owns provider-specific routing.
-GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+# GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
+# endpoint.  Force the LiteLLM provider prefix to `openai/` for bare Claude
+# model names so LiteLLM uses the OpenAI-compatible transformer instead of the
+# Anthropic /v1/messages transformer.  Without this, GEAK gets
+# Primus.00009 / NotFound on the same key+URL that works through
+# /chat/completions.
+GEAK_MODEL_NAME_RAW="${GEAK_MODEL_NAME:-claude-opus-4-7}"
+case "${GEAK_MODEL_NAME_RAW}" in
+  openai/*|anthropic/*|gpt-*|o1-*|o3-*|o4-*)
+    GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
+    ;;
+  claude-*)
+    GEAK_MODEL_NAME_VAL="openai/${GEAK_MODEL_NAME_RAW}"
+    ;;
+  *)
+    GEAK_MODEL_NAME_VAL="${GEAK_MODEL_NAME_RAW}"
+    ;;
+esac
+# Run mode for the GEAK CLI. Drives ``run.mode`` in the generated
+# ``$GEAK_CONFIG`` yaml: ``full`` (default) selects the 2 h / 5-round preset
+# at ``run.budgets.full`` and ``run.presets.full``; ``quick`` selects the
+# 1 h / 2-round preset for smoke tests. GEAK's ``mini.py:435`` mode
+# precedence still honours later overrides (CLI ``--mode`` or
+# LLM-parsed task hints), but this is the yaml-default operators can set
+# at install time without hand-editing $GEAK_CONFIG.
+GEAK_RUN_MODE_VAL="${GEAK_RUN_MODE:-full}"
+# Validate inline (the ``die`` helper is defined further down; calling it
+# from this top-level scope would error with "die: command not found").
+case "$GEAK_RUN_MODE_VAL" in
+  quick|full) ;;
+  *)
+    echo "[kernel-agent ERROR] GEAK_RUN_MODE must be 'quick' or 'full'; got '$GEAK_RUN_MODE_VAL'" >&2
+    exit 1
+    ;;
+esac
 RAG_INDEX_DIR="${HOME}/.cache/amd-ai-devtool/semantic-index"
 # RAG index build device. Resolution:
 #   1. If $GEAK_RAG_INDEX_DEVICE is set explicitly, honor it verbatim
@@ -124,6 +188,16 @@ if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then
 else
   GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"
 fi
+# When 1, ensure_rag_index runs GEAK scripts/build_index.py after GEAK
+# install. Defaults to 1 so GEAK kernel-opt gets RAG-augmented retrieval
+# out of the box on the canonical GPU-pod path (cuda auto-detect, BGE-
+# large embedding ~1min). Callers that don't want this — e.g. claude-only
+# kernel-opt, CPU-only sandbox where BGE-large takes ~1.5h, or any path
+# where install.sh latency matters more than RAG quality — should set
+# `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=0` in the launching env (Brain
+# propagates Environment block vars from the prompt into sandbox env, so
+# operators can flip this per-task without editing this script).
+KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-1}"
 GEAK_MEMORY_STORE_PATH_VAL="${GEAK_MEMORY_STORE_PATH:-/wekafs/hyperloom/geak-memory/memory.db}"
 GEAK_SAVE_TO_KNOWLEDGE_BASE_VAL="${GEAK_SAVE_TO_KNOWLEDGE_BASE:-1}"
 GEAK_MEMORY_MIN_SPEEDUP_VAL="${GEAK_MEMORY_MIN_SPEEDUP:-1.20}"
@@ -133,13 +207,12 @@ CODEX_MODEL_VAL="${CODEX_MODEL:-gpt-5.4}"
 GEAK_API_KEY_VAL="${GEAK_API_KEY:-${SAFE_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-${OPENAI_API_KEY:-}}}}}}}"
 GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
 # LiteLLM provider-specific base_url normalisation:
-#   * Anthropic client appends /v1/messages itself; leaving /v1 here yields
-#     /v1/v1/messages → 404. Strip /v1 when GEAK is on a claude model.
-#   * OpenAI client tolerates both shapes (verified), so for gpt-* models
-#     leave the original base_url alone to stay compatible with operators
-#     who set OPENAI_BASE_URL with the trailing /v1.
+#   * openai/* models require the OpenAI-compatible base URL, which in our
+#     gateway includes the trailing /v1.  Preserve it.
+#   * anthropic/* models use /v1/messages internally; strip a trailing /v1
+#     only when the operator explicitly selects an anthropic provider.
 case "${GEAK_MODEL_NAME_VAL}" in
-  claude-*|anthropic/claude-*)
+  anthropic/claude-*)
     GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/v1}"
     GEAK_BASE_URL_VAL="${GEAK_BASE_URL_VAL%/}"
     ;;
@@ -154,10 +227,10 @@ CURSOR_API_KEY_VAL="${CURSOR_API_KEY:-}"
 CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh}"
 
 # Install everything by default. The previous lazy `--with-geak / --with-oob`
-# scheme caused recurring "OOB proxy not running, request errored, found
-# the missing service after the fact" issues — when the resident skill
-# triggered a kernel-opt that needed claude/codex but install.sh had only
-# brought up GEAK, the auth-proxy was missing and every CLI request 401'd.
+# scheme caused recurring "missing dependency discovered at request time"
+# issues — when the resident skill triggered a kernel-opt that needed
+# claude/codex but install.sh had only brought up GEAK, the CLI auth files
+# were missing and every request 401'd.
 # Per user direction: "kernel-agent skills do not differentiate, just install everything". The
 # old --with-* / --all-backends / --backend flags are accepted but no-op
 # for backwards compatibility with existing call sites.
@@ -174,13 +247,18 @@ Usage: install.sh [options]
 Always installs (no --with-* selectivity any more):
   ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
   Node.js/npm, GEAK CLI/config, OOB + claude/codex CLI auth,
-  LLM proxy env/auth, and the OOB auth-proxy on :4002
-  (via ensure_auth_proxy.sh).
+  and LLM gateway env/auth (claude/codex CLIs talk to the gateway
+  directly; the legacy auth-proxy on :4002 has been retired).
 
 Options:
   --check-only       Verify current environment, do not install
   --dry-run          Print actions without running installs
   -h, --help         Show this help
+
+Environment (optional):
+  KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
+                                        Set 0 to skip — useful for claude-only kernel-opt or CPU-only
+                                        sandboxes where BGE-large embedding takes ~1.5h.
 
 Legacy options (accepted but no-op, kept for backwards compat):
   --with-geak / --with-oob / --with-llm / --all-backends / --backend NAME
@@ -219,6 +297,58 @@ verify_die() {
   if [ "$CHECK_ONLY" -eq 1 ]; then warn "$1"; else die "$1"; fi
 }
 
+# Preflight credential validation. The env+.env fallback loader above
+# (lines 89-105) only LOADS missing keys; it does not VALIDATE that they
+# were actually provided. Without this gate, a missing SAFE_API_KEY or
+# OPENAI_BASE_URL would slip past pip install / GEAK clone / aiter JIT
+# (~10-20 minutes of work) and only blow up at the final
+# generate_geak_litellm_config step (line ~670). Fail fast here so the
+# operator can fix .env / export before any expensive work happens.
+#
+# Strict mode by design: no bypass env var. The chained installer
+# steps (GEAK config, OOB CLI auth) all need real credentials, so an
+# install without them cannot finish anyway. The only downgrade path
+# is --check-only / --dry-run, which is for introspection only and
+# does not actually install.
+preflight_validate_credentials() {
+  local missing=()
+  [ -z "${SAFE_API_KEY:-}" ]    && missing+=("SAFE_API_KEY")
+  [ -z "${OPENAI_BASE_URL:-}" ] && missing+=("OPENAI_BASE_URL")
+  if [ "${#missing[@]}" -eq 0 ]; then
+    log "credentials preflight: SAFE_API_KEY + OPENAI_BASE_URL present"
+    return 0
+  fi
+  local env_file_status
+  if [ -f "$REPO_ROOT/.env" ]; then
+    env_file_status="present"
+  else
+    env_file_status="not found"
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
+         "continuing because --check-only / --dry-run is active. GEAK " \
+         "config generation will still fail later unless these are set " \
+         "before a real install."
+    return 0
+  fi
+  cat >&2 <<EOF
+[kernel-agent ERROR] Missing required credential(s): ${missing[*]}
+
+Tried loading from:
+  - shell environment
+  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+
+Fix one of:
+  1. Copy .env from a working worktree into this one:
+       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
+  2. Export directly into the shell before re-running:
+       export SAFE_API_KEY=sk-xxxxx
+       export OPENAI_BASE_URL=https://gateway.example.com/v1
+EOF
+  exit 2
+}
+preflight_validate_credentials
+
 run() {
   log "$*"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -229,6 +359,70 @@ run() {
 ensure_python() {
   python3 --version >/dev/null || die "python3 is required"
   python3 -m pip --version >/dev/null || die "pip is required"
+}
+
+# Pip constraint file emitted by ensure_rocm_torch_for_geak() that pins the
+# on-disk torch so GEAK pip installs cannot swap ROCm torch for PyPI CUDA torch.
+GEAK_PIP_CONSTRAINT_FILE=""
+
+ensure_rocm_torch_for_geak() {
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if [ "${KERNEL_AGENT_SKIP_TORCH_GATE:-0}" = "1" ]; then
+    warn "KERNEL_AGENT_SKIP_TORCH_GATE=1 set; not pinning torch for GEAK install"
+    return 0
+  fi
+  # Gate on rocm-smi: only enforce torch hygiene on actual ROCm pods.
+  # Non-ROCm hosts (CI/dev) get no interference, no pin.
+  if ! command -v rocm-smi >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! rocm-smi --showid >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Probe torch via importlib.metadata so the pinned version matches the
+  # dist-info string pip uses (torch.__version__ may drop local segments).
+  local probe status torch_version hip cuda_str
+  probe="$(python3 - <<'PY' 2>/dev/null || true
+import importlib.metadata as _m
+try:
+    import torch
+except Exception as exc:
+    print("import_error|||" + type(exc).__name__ + ": " + str(exc)[:160])
+else:
+    try:
+        ver = _m.version("torch")
+    except Exception:
+        ver = getattr(torch, "__version__", "")
+    print("|".join([
+        "ok",
+        ver,
+        getattr(torch.version, "hip", None) or "",
+        getattr(torch.version, "cuda", None) or "",
+    ]))
+PY
+)"
+  IFS='|' read -r status torch_version hip cuda_str <<< "$probe"
+  if [ "$status" != "ok" ]; then
+    warn "torch not importable from python3 on ROCm pod"
+    warn "GEAK rag-mcp would pull torch from PyPI (= NVIDIA CUDA wheel) and corrupt the ROCm stack"
+    warn "Fix: use the canonical ROCm Python (usually /opt/venv/bin/python3) or install ROCm torch first"
+    warn "Override (NOT recommended): KERNEL_AGENT_SKIP_TORCH_GATE=1"
+    die "refusing GEAK install on ROCm pod without an importable torch"
+  fi
+
+  # Pin the exact dist-info version (incl. +rocm... local segment) so GEAK
+  # transitive deps cannot silently swap the on-disk torch for PyPI CUDA torch.
+  GEAK_PIP_CONSTRAINT_FILE="${HYPERLOOM_RUNTIME_DIR}/geak_pip_constraints.txt"
+  mkdir -p "$(dirname "$GEAK_PIP_CONSTRAINT_FILE")"
+  printf 'torch==%s\n' "${torch_version}" > "$GEAK_PIP_CONSTRAINT_FILE"
+  if [ -z "$hip" ]; then
+    warn "torch=${torch_version} on ROCm pod is not a ROCm build (hip=none, cuda=${cuda_str:-none}); pinning to block replacement but ROCm stack may be broken"
+  else
+    log "pinned torch==${torch_version} (hip=${hip}) via ${GEAK_PIP_CONSTRAINT_FILE}"
+  fi
 }
 
 # PR-D §3: pin `git` and `patch` so the TraceLens server patcher has the
@@ -290,6 +484,52 @@ ensure_patch_tools() {
   command -v patch >/dev/null 2>&1 || warn "patch still missing after apt-get install"
 }
 
+# Pin `ts` (from the `moreutils` Debian/Ubuntu package) so timestamp-prefixed
+# logging in downstream benchmark wrappers (Magpie's `*_mi*.sh` and any
+# `cmd 2>&1 | ts '[%H:%M:%S]'` shim the optimizer fork-execs) doesn't blow
+# up with `ts: command not found`.
+#
+# Background: stripped runtime images (e.g. `lmsysorg/sglang:v0.5.9-rocm700-mi30x`
+# and the minimal vLLM serving images) ship without moreutils. When a wrapper
+# pipes its stdout/stderr through `ts` for per-line timestamps and `ts` is
+# missing, bash propagates exit code 127 up through the pipeline. The driving
+# inference_optimizer validate_stack executor sees `subprocess_nonzero`,
+# classifies the run as a baseline failure, and loops — burning minutes per
+# iteration on a one-line apt fix. moreutils itself is a tiny perl-only
+# package (<1 MB with deps), so this is a strict win over the retry cost.
+#
+# Same shape as ensure_patch_tools(): cheap apt-install with dry-run /
+# check-only / no-apt-get fail-soft semantics. fail-soft on install error
+# rather than die so that operators on truly air-gapped hosts can still get
+# the rest of the toolchain up (the wrapper's `| ts` is a logging nicety,
+# not a correctness requirement; the run itself can still produce results).
+ensure_moreutils() {
+  log "ensuring moreutils (provides \`ts\`; required by benchmark wrappers' timestamped logging shims)"
+  if command -v ts >/dev/null 2>&1; then
+    log "ts: $(command -v ts)"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "ts missing; benchmark wrappers that pipe through \`| ts\` will fail with exit 127 (\`ts: command not found\`)"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would apt-get install moreutils because ts is missing"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    warn "ts missing and apt-get unavailable; install \`moreutils\` manually (apt-get install moreutils, or distro equivalent)"
+    return 0
+  fi
+  log "apt-get installing: moreutils"
+  apt-get update >/dev/null 2>&1 || warn "apt-get update failed; install may pull stale package indices"
+  if ! apt-get -y install moreutils >/dev/null; then
+    warn "apt-get install of moreutils failed; benchmark wrappers' \`| ts\` timestamping will fail-soft on this host"
+    return 0
+  fi
+  command -v ts >/dev/null 2>&1 || warn "ts still missing after apt-get install moreutils"
+}
+
 ensure_node() {
   log "ensuring Node.js/npm for claude/codex CLIs and @cursor/sdk"
   if command -v node >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
@@ -318,7 +558,18 @@ ensure_node() {
 
   log "installing Node.js 20 from NodeSource"
   apt-get -y purge libnode-dev libnode72 nodejs nodejs-doc npm >/dev/null 2>&1 || true
-  if ! curl -fsSL https://deb.nodesource.com/setup_20.x 2>/dev/null | bash - >/dev/null 2>&1; then
+  local ns_url="https://deb.nodesource.com/setup_20.x"
+  local ns_sha="2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be"
+  local ns_script="/tmp/nodesource_setup_20.x"
+  if ! curl -fsSL "$ns_url" -o "$ns_script"; then
+    verify_die "NodeSource setup download failed; cannot install Node.js/npm for claude/codex CLIs"
+    return 0
+  fi
+  if ! echo "${ns_sha}  ${ns_script}" | sha256sum -c - >/dev/null 2>&1; then
+    verify_die "NodeSource setup SHA256 mismatch; aborting Node.js/npm install"
+    return 0
+  fi
+  if ! bash "$ns_script" >/dev/null 2>&1; then
     verify_die "NodeSource setup failed; cannot install Node.js/npm for claude/codex CLIs"
     return 0
   fi
@@ -333,7 +584,7 @@ ensure_node() {
 ensure_ray() {
   log "ensuring ray[default]==2.44.1 and click<8.3.0"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install --quiet --no-cache-dir "click<8.3.0" "ray[default]==2.44.1"
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "click<8.3.0" "ray[default]==2.44.1"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     python3 - <<'PY'
@@ -389,6 +640,12 @@ PY
 }
 
 ensure_tracelens() {
+  # Legacy bundle fallback: the fully-local image ships either a fresh
+  # ${HYPERLOOM_BUNDLE}/TraceLens checkout (post-2026-05-18 OSS layout)
+  # or, for older bundles, the pre-migration TraceLens-internal mirror.
+  if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens" ]; then
+    TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens"
+  fi
   if [ ! -d "$TRACELENS_ROOT" ] && [ -d "${HYPERLOOM_BUNDLE}/TraceLens-internal" ]; then
     TRACELENS_ROOT="${HYPERLOOM_BUNDLE}/TraceLens-internal"
   fi
@@ -403,7 +660,7 @@ ensure_tracelens() {
   # $TRACELENS_ROOT is on a read-only mount (the WekaFS default), pip
   # install -e fails because it must write *.egg-info into the source
   # tree, and at runtime tools/tracelens_analysis.py re-runs the same
-  # editable install in a subprocess on every select_kernels request,
+  # editable install in a subprocess on every trace_analyze request,
   # producing a tight failure loop. Detecting unwritable source up front
   # and mirroring to ${HYPERLOOM_ROOT}/TraceLens-internal (parallel to
   # ${HYPERLOOM_ROOT}/geak / ${HYPERLOOM_ROOT}/OOB/oob_cli) lets both
@@ -416,6 +673,7 @@ ensure_tracelens() {
       log "TraceLens root not writable ($TRACELENS_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
       mkdir -p "$(dirname "$TRACELENS_MIRROR_DIR")"
       if [ ! -d "$TRACELENS_MIRROR_DIR" ]; then
+        log "mirroring TraceLens to writable dir (large tree; may take minutes): $TRACELENS_ROOT -> $TRACELENS_MIRROR_DIR"
         run cp -r "$TRACELENS_ROOT" "$TRACELENS_MIRROR_DIR"
       else
         log "TraceLens mirror already present: $TRACELENS_MIRROR_DIR"
@@ -428,19 +686,35 @@ ensure_tracelens() {
   fi
   log "ensuring TraceLens CLI from $TRACELENS_ROOT"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run bash -lc "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir -e ."
+    # Do not use bash -lc: login profiles reset PATH (drops venv) and break pip.
+    run sh -c "cd '$TRACELENS_ROOT' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
+  fi
+  # Optional TraceLens-internal extension. Opt-in path: operator (or
+  # local_setup.sh) exports TRACELENS_INTERNAL_ROOT pointing at a
+  # checkout of AMD-AGI/TraceLens-internal. When unset, Hyperloom stays
+  # on the open-source-only report (impact score, no roofline).
+  if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
+    if [ ! -d "$TRACELENS_INTERNAL_ROOT" ]; then
+      if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+        warn "TRACELENS_INTERNAL_ROOT set but not on disk: $TRACELENS_INTERNAL_ROOT"
+      else
+        die "TRACELENS_INTERNAL_ROOT set but not on disk: $TRACELENS_INTERNAL_ROOT"
+      fi
+    elif [ "$CHECK_ONLY" -eq 0 ]; then
+      log "ensuring TraceLens-internal extension from $TRACELENS_INTERNAL_ROOT"
+      run sh -c "cd '$TRACELENS_INTERNAL_ROOT' && python3 -m pip install -q --no-cache-dir --break-system-packages -e ."
+    fi
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    # TraceLens #124: prefer the inference variant (correct entry for
-    # vLLM/SGLang traces). Fall back to the legacy CLI for older builds.
+    # TraceLens #124: only the inference variant is accepted (the correct
+    # entry for vLLM/SGLang traces). Hyperloom is inference-only since
+    # v0.4; the legacy training-mode CLI was removed to keep install /
+    # runtime in lockstep.
     if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
       TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
       log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
-    elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
-      TraceLens_generate_perf_report_pytorch --help >/dev/null
-      warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch"
     else
-      verify_die "Neither TraceLens_generate_perf_report_pytorch_inference nor TraceLens_generate_perf_report_pytorch found after install"
+      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; bump TraceLens-internal)"
     fi
   fi
 }
@@ -451,15 +725,65 @@ ensure_geak() {
     mkdir -p "${HYPERLOOM_ROOT}" "$(dirname "$GEAK_CONFIG")" "$(dirname "$GEAK_MEMORY_STORE_PATH_VAL")"
   fi
   if [ ! -d "${HYPERLOOM_ROOT}/geak/.git" ]; then
-    run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
+    # ``git clone --branch`` only accepts tags / branches, not SHAs. Detect
+    # a 7-40 hex char SHA and use a fetch-checkout dance instead so the
+    # SHA pin above stays shallow. GitHub serves shallow SHA fetches
+    # (uploadpack.allowReachableSHA1InWant=true).
+    if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      run git init -q "${HYPERLOOM_ROOT}/geak"
+      run git -C "${HYPERLOOM_ROOT}/geak" remote add origin "$GEAK_REPO"
+      run git -C "${HYPERLOOM_ROOT}/geak" fetch --depth 1 origin "$GEAK_REF"
+      run git -C "${HYPERLOOM_ROOT}/geak" checkout -q FETCH_HEAD
+    else
+      run git clone --depth 1 --branch "$GEAK_REF" "$GEAK_REPO" "${HYPERLOOM_ROOT}/geak"
+    fi
   else
     log "GEAK checkout already present: ${HYPERLOOM_ROOT}/geak"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak"
-    run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/geak/mcp_tools/rag-mcp"
+    # Pin the pip flag set so we work in both venv installs (main upstream
+    # assumption) and sandbox / system-python installs (multi-node feature
+    # branch needs --break-system-packages; pip in a venv treats it as a
+    # no-op so the flag is safe to keep unconditionally).
+    _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
+    ensure_rocm_torch_for_geak
+    _PIP_CONSTRAINT_ARGS=""
+    if [ -n "${GEAK_PIP_CONSTRAINT_FILE:-}" ] && [ -f "${GEAK_PIP_CONSTRAINT_FILE}" ]; then
+      _PIP_CONSTRAINT_ARGS="--constraint ${GEAK_PIP_CONSTRAINT_FILE}"
+    fi
+    run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${HYPERLOOM_ROOT}/geak"
+    # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
+    # by the bundled ``minisweagent`` at preprocess time:
+    #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
+    #   * profiler-mcp               — Metrix-backed instrumented profiling
+    #                                  (preprocessor.py import); Metrix is now
+    #                                  a PyPI dep declared in its pyproject,
+    #                                  not a separate mcp_tools/ folder.
+    #   * cross-session-memory-mcp   — GEAK_MEMORY_STORE_PATH retriever
+    #   * automated-test-discovery   — pre-fills eval_command harness
+    # v3.1.0 -> v3.2.0 change: ``metrix-mcp`` folder was removed and the
+    # metrix runtime is now consumed transitively via profiler-mcp's
+    # ``dependencies = ["metrix>=0.1.0"]``. Listing it here again would
+    # break install with "File ... does not exist".
+    for _geak_mcp in rag-mcp profiler-mcp \
+                    cross-session-memory-mcp automated-test-discovery; do
+      run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \
+        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"
+    done
+    # Patch GEAK's bundled prompt YAML to remove the misleading
+    # ``task_runner.py performance`` example that causes sub-agent
+    # LLMs to burn budget on ``find /`` for a non-existent script.
+    # Idempotent and fail-soft — see kernel-agent/tools/geak_prompt_patcher.py
+    # for the full rationale. Always best-effort; only blocking when
+    # the operator explicitly opts in via HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED=1.
+    _geak_patcher="${KERNEL_AGENT_ROOT}/tools/geak_prompt_patcher.py"
+    if [ -f "$_geak_patcher" ]; then
+      run python3 "$_geak_patcher"
+    else
+      warn "geak prompt patcher missing at $_geak_patcher; skip"
+    fi
   else
-    log "check-only: skipping GEAK and rag-mcp installation"
+    log "check-only: skipping GEAK and mcp_tools installation"
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
     if [ "$DRY_RUN" -eq 0 ]; then
@@ -476,6 +800,36 @@ model:
     max_tokens: 16384
 tools:
   rag: true
+run:
+  mode: ${GEAK_RUN_MODE_VAL}
+  budgets:
+    quick:
+      total_s: 3600
+      preprocess_soft_cap_s: 900
+      preprocess_hard_cap_fraction: 0.5
+      finalize_grace_s: 300
+      kill_buffer_s: 60
+    full:
+      total_s: 7200
+      preprocess_soft_cap_s: 900
+      preprocess_hard_cap_fraction: 0.5
+      finalize_grace_s: 300
+      kill_buffer_s: 60
+  presets:
+    quick:
+      orchestrator:
+        max_rounds: 2
+    full:
+      orchestrator:
+        max_rounds: 5
+env:
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  timeout: 3600
 EOF
       chmod 600 "$GEAK_CONFIG"
       grep -Eq '^[[:space:]]*model_class:[[:space:]]*litellm[[:space:]]*$' "$GEAK_CONFIG" \
@@ -502,9 +856,151 @@ EOF
   if [ "$DRY_RUN" -eq 0 ]; then
     command -v geak >/dev/null 2>&1 || verify_die "geak CLI not found"
   fi
+  patch_geak_minisweagent_runtime
+}
+
+patch_geak_minisweagent_runtime() {
+  # Hyperloom runtime patch for GEAK-v3 / mini-swe-agent 1.14.4.
+  #
+  # Two issues were observed during Qwen3-8B GEAK runs:
+  #   1. minisweagent.models.litellm_model converted tool schemas to
+  #      function.input_schema. LiteLLM's OpenAI-shape Anthropic mapper reads
+  #      function.parameters, so every tool reached Claude with an empty schema
+  #      and Claude repeatedly emitted bash{}.
+  #   2. Bare claude-* model names made LiteLLM choose Anthropic /v1/messages,
+  #      while our gateway is OpenAI-compatible /chat/completions. The config
+  #      generation above now rewrites bare claude-* to openai/claude-* and
+  #      preserves the /v1 base_url.
+  #
+  # This patch is intentionally idempotent and applies both to the writable GEAK
+  # source mirror and to the installed site-packages copy used by the current
+  # pod. Keeping it here makes Hyperloom's source tree the durable owner of the
+  # workaround; direct runtime edits are only a validation artefact.
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+paths: list[Path] = []
+
+mirror = Path(os.environ.get("HYPERLOOM_ROOT", "")) / "geak" / "src" / "minisweagent"
+if mirror.exists():
+    paths.append(mirror)
+
+try:
+    import minisweagent  # type: ignore
+    paths.append(Path(minisweagent.__file__).resolve().parent)
+except Exception:
+    pass
+
+seen: set[Path] = set()
+for root in paths:
+    root = root.resolve()
+    if root in seen:
+        continue
+    seen.add(root)
+
+    litellm_model = root / "models" / "litellm_model.py"
+    if litellm_model.exists():
+        text = litellm_model.read_text()
+        old = '''        function: dict[str, Any] = {
+            "name": name,
+            "description": func.get("description", ""),
+            "input_schema": func.get(
+                "parameters",
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            ),
+        }'''
+        new = '''        schema = func.get("parameters") or func.get(
+            "input_schema",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        )
+        function: dict[str, Any] = {
+            "name": name,
+            "description": func.get("description", ""),
+            "parameters": schema,
+        }'''
+        if old in text:
+            litellm_model.write_text(text.replace(old, new, 1))
+            print(f"[kernel-agent] patched LiteLLM tool schema: {litellm_model}")
+        elif '"parameters": schema' in text:
+            print(f"[kernel-agent] LiteLLM tool schema already patched: {litellm_model}")
+        else:
+            print(f"[kernel-agent WARN] LiteLLM schema patch pattern not found: {litellm_model}")
+
+    cfg = root / "config" / "mini_kernel_strategy_list.yaml"
+    if cfg.exists():
+        text = cfg.read_text()
+        marker = "Never call `bash` with `{}` or an empty command."
+        if marker not in text:
+            needle = (
+                "    Your response must contain exactly ONE tool call.\n"
+                "    Include a THOUGHT section before your tool call where you explain your reasoning process.\n"
+            )
+            repl = needle + (
+                "    If you choose the `bash` tool, its arguments MUST include a non-empty\n"
+                "    `command` string, for example:\n"
+                "    {\"command\": \"python3 scripts/task_runner.py correctness\"}.\n"
+                "    Never call `bash` with `{}` or an empty command.\n"
+            )
+            if needle in text:
+                cfg.write_text(text.replace(needle, repl, 1))
+                print(f"[kernel-agent] patched bash prompt guidance: {cfg}")
+            else:
+                print(f"[kernel-agent WARN] bash prompt guidance pattern not found: {cfg}")
+        else:
+            print(f"[kernel-agent] bash prompt guidance already patched: {cfg}")
+
+    tools_json = root / "tools" / "tools.json"
+    if tools_json.exists():
+        data = json.loads(tools_json.read_text())
+        changed = False
+        for tool in data:
+            if tool.get("name") == "bash":
+                desc = (
+                    "Execute shell commands directly in bash. REQUIRED: pass a "
+                    "non-empty `command` string in the arguments object. Never "
+                    "call bash with `{}`."
+                )
+                cmd_desc = "The non-empty bash command to execute, e.g. `ls -la /tmp`."
+                if tool.get("description") != desc:
+                    tool["description"] = desc
+                    changed = True
+                params = tool.setdefault("parameters", {})
+                params.setdefault("type", "object")
+                params.setdefault("properties", {}).setdefault("command", {})["type"] = "string"
+                if params["properties"]["command"].get("description") != cmd_desc:
+                    params["properties"]["command"]["description"] = cmd_desc
+                    changed = True
+                if params.get("required") != ["command"]:
+                    params["required"] = ["command"]
+                    changed = True
+        if changed:
+            tools_json.write_text(json.dumps(data, indent=2) + "\n")
+            print(f"[kernel-agent] patched bash tool schema docs: {tools_json}")
+        else:
+            print(f"[kernel-agent] bash tool schema docs already patched: {tools_json}")
+PY
 }
 
 ensure_rag_index() {
+  case "$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL" in
+    0|false|FALSE|no|NO|off|OFF)
+      log "skipping GEAK RAG index build (KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=$KERNEL_AGENT_BUILD_GEAK_RAG_INDEX_VAL)"
+      return 0
+      ;;
+  esac
   if [ -d "$RAG_INDEX_DIR" ] && [ -n "$(ls -A "$RAG_INDEX_DIR" 2>/dev/null)" ]; then
     log "RAG index already present at $RAG_INDEX_DIR"
     return
@@ -514,7 +1010,7 @@ ensure_rag_index() {
     return
   fi
   log "building RAG index at $RAG_INDEX_DIR on device=${GEAK_RAG_INDEX_DEVICE_VAL} (first run downloads ~1.3 GB embedding model)"
-  run bash -lc "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
+  run sh -c "cd '${HYPERLOOM_ROOT}/geak' && python3 scripts/build_index.py --force --device '${GEAK_RAG_INDEX_DEVICE_VAL}'"
 }
 
 ensure_oob() {
@@ -528,9 +1024,9 @@ ensure_oob() {
         run cp -r "$OOB_SRC" "${HYPERLOOM_ROOT}/OOB/oob_cli"
       fi
       if [ -f "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt" ]; then
-        run python3 -m pip install -q --no-cache-dir -r "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt"
+        run python3 -m pip install -q --no-cache-dir --break-system-packages -r "${HYPERLOOM_ROOT}/OOB/oob_cli/requirements.txt"
       fi
-      run python3 -m pip install -q --no-cache-dir "${HYPERLOOM_ROOT}/OOB/oob_cli"
+      run python3 -m pip install -q --no-cache-dir --break-system-packages "${HYPERLOOM_ROOT}/OOB/oob_cli"
     else
       warn "OOB source not found: $OOB_SRC"
     fi
@@ -582,81 +1078,48 @@ ensure_llm_auth_files() {
     return
   fi
   mkdir -p /root/.claude /root/.codex
+  # The Anthropic SDK appends /v1 itself, so strip a trailing /v1 from
+  # the OpenAI-style upstream URL when writing customApiUrl.
+  local _anthropic_url="${OOB_BASE_URL_VAL%/}"
+  _anthropic_url="${_anthropic_url%/v1}"
   cat > /root/.claude/config.json <<EOF
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
   "primaryApiKey": "${OOB_API_KEY_VAL}",
-  "customApiUrl": "${OOB_BASE_URL_VAL}"
+  "customApiUrl": "${_anthropic_url}"
 }
 EOF
   chmod 600 /root/.claude/config.json
-  # Codex 0.100.0 won't send Authorization to non-openai.com endpoints; the
-  # 4002 auth-proxy injects PROXY_AUTH_TOKEN instead. Writing OPENAI_API_KEY
-  # here would survive that injection but the gateway still rejects with
-  # "token not present" because codex never actually transmits the value.
-  # Keep the field empty so codex stays in apikey-mode without leaking the
-  # SaFE key into any client header.
+  # Codex 0.100.0 reads ~/.codex/auth.json before env and does not fall
+  # back when OPENAI_API_KEY is empty; write the real key for direct auth.
   cat > /root/.codex/auth.json <<EOF
 {
   "auth_mode": "apikey",
-  "OPENAI_API_KEY": ""
+  "OPENAI_API_KEY": "${OOB_API_KEY_VAL}"
 }
 EOF
   chmod 600 /root/.codex/auth.json
 }
 
-# Delegate to the standalone idempotent supervisor script. It handles the
-# port probe + curl probe + stuck-proxy restart cases. Sourcing it lets us
-# pick up its PROXY_*_BASE_URL exports for write_env_file.
-ensure_auth_proxy() {
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    return 0
-  fi
-  local script
-  script="$(dirname "$0")/ensure_auth_proxy.sh"
-  if [ ! -f "$script" ]; then
-    warn "ensure_auth_proxy.sh not found at $script"
-    return 0
-  fi
-  # Re-export the env vars the helper expects, then capture its KEY=VALUE
-  # output and source it back so PROXY_*_BASE_URL land in this shell.
-  local out
-  if ! out=$(
-    HYPERLOOM_ROOT="$HYPERLOOM_ROOT" \
-    OOB_BASE_URL="$OOB_BASE_URL_VAL" \
-    OOB_API_KEY="$OOB_API_KEY_VAL" \
-    bash "$script" 2>&1
-  ); then
-    warn "ensure_auth_proxy.sh failed; OOB requests may 401"
-    echo "$out" | sed 's/^/  /' >&2
-    return 0
-  fi
-  echo "$out" | sed 's/^/[ensure-auth-proxy] /'
-  while IFS='=' read -r key value; do
-    case "$key" in
-      PROXY_ANTHROPIC_BASE_URL) PROXY_ANTHROPIC_BASE_URL="$value" ;;
-      PROXY_OPENAI_BASE_URL)    PROXY_OPENAI_BASE_URL="$value" ;;
-    esac
-  done <<<"$out"
-}
-
 # Write a pod-local kernel-agent env file users should source so subsequent CLI calls
-# (and Ray workers via runtime_env) pick up the proxy-rewritten URLs.
+# (and Ray workers via runtime_env) pick up the upstream gateway URLs.
 write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
-  # ensure_auth_proxy.sh now always emits PROXY_*_BASE_URL on success
-  # (both the just-started and the healthy-noop branches). If we still don't
-  # have them, the supervisor either failed or OOB_BASE_URL was empty —
-  # either way the kernel-agent env would silently lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL,
-  # which is the exact failure mode that lets externally-preset upstream
-  # URLs leak into Claude/Codex CLIs and 401-hang the SDK. Warn loudly so
-  # the install operator notices instead of debugging at runtime.
-  if [ -z "${PROXY_ANTHROPIC_BASE_URL:-}" ] || [ -z "${PROXY_OPENAI_BASE_URL:-}" ]; then
-    warn "PROXY_*_BASE_URL not captured from ensure_auth_proxy.sh; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
-    warn "This means an externally-preset ANTHROPIC_BASE_URL will reach Claude CLI directly and hang on gateway 401"
+  # Warn loudly if OOB_BASE_URL is empty — kernel-agent env would silently
+  # lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL and CLIs would resort to whatever
+  # was in the operator's shell rc, defeating the point of this file.
+  if [ -z "${OOB_BASE_URL_VAL:-}" ]; then
+    warn "OOB_BASE_URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
+  fi
+  # Anthropic SDK appends /v1 itself, so strip a trailing /v1 from the
+  # OpenAI-style upstream URL when exporting ANTHROPIC_BASE_URL.
+  local _anthropic_url=""
+  if [ -n "${OOB_BASE_URL_VAL:-}" ]; then
+    _anthropic_url="${OOB_BASE_URL_VAL%/}"
+    _anthropic_url="${_anthropic_url%/v1}"
   fi
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
@@ -672,8 +1135,8 @@ write_env_file() {
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
-    [ -n "${PROXY_ANTHROPIC_BASE_URL:-}" ] && echo "export ANTHROPIC_BASE_URL='${PROXY_ANTHROPIC_BASE_URL}'"
-    [ -n "${PROXY_OPENAI_BASE_URL:-}" ] && echo "export OPENAI_BASE_URL='${PROXY_OPENAI_BASE_URL}'"
+    [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
+    [ -n "${OOB_BASE_URL_VAL:-}" ] && echo "export OPENAI_BASE_URL='${OOB_BASE_URL_VAL}'"
     [ -n "${OOB_API_KEY_VAL}" ] && {
       echo "export SAFE_API_KEY='${OOB_API_KEY_VAL}'"
       echo "export ANTHROPIC_API_KEY='${OOB_API_KEY_VAL}'"
@@ -694,7 +1157,9 @@ write_env_file() {
     # optimize → kernel-agent/tools/tracelens_analysis.py inherit the writable
     # mirror instead of falling back to the read-only /wekafs default.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
+    [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
+    [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
     [ -n "${GEAK_MODEL_NAME_VAL}" ] && echo "export GEAK_MODEL_NAME='${GEAK_MODEL_NAME_VAL}'"
     [ -n "${GEAK_API_KEY_VAL}" ] && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
     [ -n "${GEAK_BASE_URL_VAL}" ] && echo "export GEAK_BASE_URL='${GEAK_BASE_URL_VAL}'"
@@ -717,15 +1182,14 @@ except Exception:
     raise SystemExit(1)
 PY
 )"
-  # TraceLens perf-report CLI: report whichever variant is available
-  # (#124 prefers the _inference suffix; the legacy CLI is acceptable as
-  # a fallback, the dispatcher in tools/tracelens_analysis.py picks at runtime).
+  # TraceLens perf-report CLI: only the inference variant is accepted
+  # (#124). Hyperloom is inference-only since v0.4; the legacy
+  # training-mode CLI was removed because its output shape silently
+  # breaks downstream fusion / roofline analysis.
   if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
     log "found TraceLens_generate_perf_report_pytorch_inference: $(command -v TraceLens_generate_perf_report_pytorch_inference)"
-  elif command -v TraceLens_generate_perf_report_pytorch >/dev/null 2>&1; then
-    warn "TraceLens_generate_perf_report_pytorch_inference not found; using legacy TraceLens_generate_perf_report_pytorch: $(command -v TraceLens_generate_perf_report_pytorch)"
   else
-    warn "TraceLens perf-report CLI not found (looked for both _inference and legacy)"
+    warn "TraceLens_generate_perf_report_pytorch_inference not found (Hyperloom is inference-only since v0.4)"
   fi
   for tool in geak oob claude codex; do
     if command -v "$tool" >/dev/null 2>&1; then
@@ -789,6 +1253,7 @@ main() {
   ensure_python
   ensure_node
   ensure_patch_tools
+  ensure_moreutils
   ensure_ray
   ensure_ray_started
   ensure_tracelens
@@ -797,7 +1262,6 @@ main() {
   ensure_geak
   ensure_rag_index
   ensure_oob
-  ensure_auth_proxy
   write_env_file
 
   report_status

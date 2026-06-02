@@ -9,7 +9,8 @@ isolated and easy to test.
 from __future__ import annotations
 
 import ast
-import json
+import importlib.util
+import os
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
     "elementwise": "Elementwise",
     "reduce": "Reduction",
     "triton": "Triton",
+    "flydsl": "FlyDSL",
     "norm": "LayerNorm",
     "norm_fwd": "LayerNorm",
     "norm_bwd": "LayerNorm",
@@ -61,11 +63,15 @@ def normalize_upstream_category(raw: str) -> str:
 
 @dataclass
 class TraceLensSkillRunResult:
-    """Artifacts produced by one TraceLens skill run."""
+    """Artifacts produced by one TraceLens skill run.
+
+    Per ``TraceLens_Report_Interfacing.docx`` §2, ``analysis.md`` is the
+    single source of truth. Intermediate JSON sidecars are intentionally not
+    surfaced as Hyperloom inputs.
+    """
 
     output_dir: Path
     report_path: Path
-    priority_data_path: Path
     artifact_paths: dict[str, str] = field(default_factory=dict)
     raw_text: str = ""
 
@@ -91,7 +97,11 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
     requested = (requested or "").strip().lower()
     if requested and requested != "default":
         return requested
-    if (framework or "").strip().lower() in {"vllm", "sglang"}:
+    # atom traces share the chrome-trace JSON shape produced by the
+    # torch profiler API used by sglang/vllm, so inference-mode kernel
+    # grouping applies; otherwise atom falls through to generic torch
+    # grouping which obscures per-iteration boundaries.
+    if (framework or "").strip().lower() in {"vllm", "sglang", "atom"}:
         return "inference"
     return requested or "default"
 
@@ -164,10 +174,8 @@ Important requirements:
 3. If analysis_mode is inference and execution mode is graph_capture, pass the
    capture folder to the inference perf-report CLI exactly as the skill says.
 4. Write all TraceLens outputs under the output directory above.
-5. At minimum, ensure these files exist before you finish:
-   - {output_dir / "analysis.md"}  (TraceLens v0.3 final report)
-   - {output_dir / "priority_data.json"}
-   - {output_dir / "category_data" / "category_manifest.json"}
+5. Ensure this file exists before you finish:
+   - {output_dir / "analysis.md"}  (TraceLens v0.3 final report; REQUIRED)
 6. Do not run GEAK, OOB kernel optimization, or modify model/framework source.
 
 When complete, respond with a short summary of the artifacts you wrote.
@@ -289,24 +297,20 @@ async def run_tracelens_skill(
     # Hyperloom-fabricated bullet list from a prior run. The v0.3 layout
     # has been the contract since #148, so any miss here is a real
     # upstream failure that should surface to the operator.
+    #
+    # Per ``TraceLens_Report_Interfacing.docx`` §2, ``analysis.md`` is
+    # the single source of truth. Do not surface intermediate sidecars as
+    # Hyperloom inputs; the caller parses only the final report.
     report_path = output_dir / "analysis.md"
-    priority_data_path = output_dir / "priority_data.json"
     if not report_path.exists():
         if sdk_error:
             raise RuntimeError(
                 f"TraceLens SDK runner failed before writing {report_path}: {sdk_error}"
             )
         raise RuntimeError(f"TraceLens SDK runner did not write {report_path}")
-    if not priority_data_path.exists():
-        if sdk_error:
-            raise RuntimeError(
-                f"TraceLens SDK runner failed before writing {priority_data_path}: {sdk_error}"
-            )
-        raise RuntimeError(f"TraceLens SDK runner did not write {priority_data_path}")
 
     artifact_paths = {
         "tracelens_agent_report": str(report_path),
-        "tracelens_priority_data": str(priority_data_path),
         "tracelens_cmd_prefix": str(prefix_path),
     }
     if sdk_error:
@@ -315,7 +319,6 @@ async def run_tracelens_skill(
     return TraceLensSkillRunResult(
         output_dir=output_dir,
         report_path=report_path,
-        priority_data_path=priority_data_path,
         raw_text="\n".join(chunks),
         artifact_paths=artifact_paths,
     )
@@ -352,10 +355,9 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 #        Operation | Args | Kernel Path | Time (ms) | %E2E | Count |
 #                  FLOPS/Byte | Efficiency | Bound
 #
-# This parser is the only place in Hyperloom that reads ``analysis.md``; it
-# never consumes intermediate files (``priority_data.json``,
-# ``category_data/*.json``) — those remain available via the legacy fallback in
-# ``tracelens_analysis.py`` for the non-orchestrator path.
+# This parser is the only place in Hyperloom that reads TraceLens candidate
+# data; intermediate files (``priority_data.json``, ``category_data/*.json``)
+# are intentionally ignored.
 _DATA_TABLE_HEADER_TOKENS = (
     "operation",
     "args",
@@ -366,6 +368,11 @@ _DATA_TABLE_HEADER_TOKENS = (
     "flops/byte",
     "efficiency",
     "bound",
+)
+# Lowercased set of canonical header tokens, used by `_row_to_candidate`
+# to separate the 9 typed fields from spec-allowed trailing extras.
+_DATA_TABLE_CANONICAL_KEY_SET = frozenset(
+    tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS
 )
 _PITEM_MARKER_RE = re.compile(
     r"<!--\s*impact-begin\s+kind=p_item\s+([^>]*?)-->",
@@ -560,6 +567,16 @@ def _row_to_candidate(
     if len(cells) != len(headers):
         return None
     record = dict(zip(headers, cells))
+    # Trailing extras (TraceLens v0.3 sub_agent_spec.md § Operations Table
+    # Schema: "Agents may append extra columns at the end when needed").
+    # Preserved verbatim under their original header names so downstream
+    # consumers (GEAK / OOB) can opt into category-specific metadata
+    # (e.g. ``Dominant Kernel`` / ``Attention Pattern`` / ``Sub-Category``)
+    # without re-parsing analysis.md.
+    extra_columns = {
+        key: value for key, value in record.items()
+        if key not in _DATA_TABLE_CANONICAL_KEY_SET
+    }
 
     name = record.get("operation", "").strip()
     if not name or name in {"-", "—"}:
@@ -569,6 +586,21 @@ def _row_to_candidate(
     kernel_path = record.get("kernel path", "").strip()
     if kernel_path in {"-", "—"}:
         kernel_path = ""
+    # PR: when TraceLens reports a launcher path relative to a known
+    # framework package (``aiter/...`` / ``sglang/...`` / ``vllm/...``)
+    # — that's what torch.profiler emits after stripping ``sys.path``
+    # prefixes — promote it to the absolute on-disk source file so the
+    # downstream patchability gate stops emitting ``source not under a
+    # reusable framework root`` and GEAK can target real reusable
+    # kernels (e.g. ``/sgl-workspace/aiter/aiter/ops/rmsnorm.py``).
+    # The verbatim launcher string is preserved on
+    # ``tracelens_launcher_path`` below so AST-based source-function
+    # aggregation still works.
+    resolved_source_file = kernel_path
+    if kernel_path:
+        resolved = _resolve_launcher_to_abs_source(kernel_path)
+        if resolved is not None:
+            resolved_source_file, _resolved_line, _resolved_func = resolved
     time_ms = _safe_float(record.get("time (ms)"))
     percent_e2e = _safe_float(record.get("%e2e"))
     count_val = _safe_float(record.get("count"), 1.0)
@@ -589,7 +621,7 @@ def _row_to_candidate(
         "name": name,
         "duration_us": time_ms * 1000.0,
         "call_count": int(count_val) if count_val else 0,
-        "source_file": kernel_path,
+        "source_file": resolved_source_file,
         # PR-B §1: preserve the raw Kernel Path string verbatim so
         # ``aggregate_by_source_function`` can run AFTER
         # ``_finalize_candidates`` (which overwrites ``source_file``
@@ -613,6 +645,8 @@ def _row_to_candidate(
         "impact_score_low": impact.get("impact_score_low", 0.0),
         "impact_score_high": impact.get("impact_score_high", 0.0),
     }
+    if extra_columns:
+        candidate["tracelens_extra_columns"] = extra_columns
     if prose:
         # P-item prose is shared across every row in the same Detailed
         # Analysis block; duplicating it onto each candidate keeps the
@@ -633,17 +667,99 @@ def _row_to_candidate(
     return candidate
 
 
+_IDLE_PCT_TABLE_RE = re.compile(
+    r"^\|\s*Idle\s*%\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\|",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
+    """Extract ``Idle %`` from the Executive Summary table in ``analysis.md``.
+
+    The TraceLens v0.3 ``analysis_template.md`` always emits an Executive
+    Summary table whose rows are ``| Metric | Value |``; the row of
+    interest looks exactly like ``| Idle % | 0.25% |``. Per
+    ``Report_Interfacing.docx`` §1 (Executive Summary schema) and §2
+    (idle-gate sanity check in Possible Approach (Hyperloom v3)), the
+    Executive Summary is the workload-level health snapshot that should
+    gate any kernel-level optimization recommendation: a high idle
+    percentage means the GPU
+    spent most of the trace waiting (host stalls, sync, allocator
+    contention, …), so per-kernel speedups will not move end-to-end
+    latency and the operator should reach for parameter optimization
+    (batch size, KV cache shape, prefill/decode split) instead.
+
+    Returns the idle percentage as a float (e.g. ``0.25`` for ``0.25%``),
+    or ``None`` when:
+      * the file doesn't exist or can't be decoded
+      * the Executive Summary table has no ``Idle %`` row (older
+        TraceLens templates, or a partial / malformed report)
+      * the value is not numerically parseable
+
+    Returning ``None`` rather than raising lets callers downgrade
+    gracefully to "skip the idle-gate check" rather than failing the
+    whole run on a TraceLens template drift. The runtime gate in
+    ``tracelens_analysis.py`` treats ``None`` as "don't warn".
+    """
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    match = _IDLE_PCT_TABLE_RE.search(text)
+    if not match:
+        return None
+
+    raw = match.group(1)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
+    """Per-row sort key for the ``Lower Efficiency`` budget filter.
+
+    ``TraceLens_Report_Interfacing.docx`` §2 Recommended Interfacing
+    Approach → Possible Approach (Hyperloom v3):
+
+      > Filter for GEAK based on budget (Higher P-item, Lower Efficiency)
+
+    P-item rank is the outer order, so this key only orders rows *within*
+    one P-item. Rows where TraceLens did not report an efficiency value
+    (``_row_to_candidate`` defaulted ``efficiency_percent`` to ``0.0``)
+    are demoted to last so they don't outrank rows TraceLens actually
+    measured. Python's sort is stable, so true-zero / equal-efficiency
+    rows preserve TraceLens's original ``Data:`` row order.
+    """
+    eff = candidate.get("efficiency_percent")
+    try:
+        value = float(eff)
+    except (TypeError, ValueError):
+        return float("inf")
+    if value <= 0.0:
+        return float("inf")
+    return value
+
+
 def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
     """Parse the TraceLens v0.3 ``analysis.md`` final report into hot-kernels.
 
-    This is the reviewer-preferred exit interface: only the final report is
-    consumed, not intermediate per-category JSON. The returned list mirrors
-    the priority order of ``priority_data.findings`` (P1 first, P2 next, …)
-    and, within a P-item, preserves the ``Operation`` rows of the 9-column
-    Data table.
+    This is the only place in Hyperloom that reads TraceLens candidate
+    data. The returned list follows the priority order required by
+    ``TraceLens_Report_Interfacing.docx`` §2 Recommended Interfacing
+    Approach ("Filter for GEAK based on budget (Higher P-item,
+    Lower Efficiency)"):
 
-    Empty / non-existent reports return an empty list so callers can fall
-    back to the legacy ``priority_data.json`` parser.
+    1. **Higher P-item first** — rank=1 rows before rank=2 rows, etc.
+    2. **Lower Efficiency first** within the same P-item, so rows with
+       more optimization headroom survive the ``top_k`` budget cap.
+       Rows with no efficiency value land last (see
+       :func:`_efficiency_sort_key`).
+
+    Empty / non-existent reports return an empty list so callers can
+    surface that signal upstream (Hyperloom does not fall back to
+    intermediate sidecars per docx §2).
     """
 
     if not md_path.exists():
@@ -662,17 +778,39 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
     headers_canonical = [tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS]
 
     candidates: list[dict[str, Any]] = []
+    canonical_width = len(headers_canonical)
     for rank, title, body in blocks:
         rows = _extract_data_table(body)
         if not rows:
             continue
         header_row = [cell.strip().lower() for cell in rows[0]]
-        if header_row != headers_canonical:
-            # Tolerate trivial rename / reordering only if the canonical token
-            # is a substring of the header cell. Otherwise skip the block —
-            # silent wrong-mapping would be worse than a missed candidate.
+        # TraceLens v0.3 ``sub_agent_spec.md`` § Operations Table Schema
+        # (compute tier) requires the 9 canonical columns in this exact
+        # order, but explicitly permits sub-agents to "append extra
+        # columns at the end when needed (e.g. ``Sub-Category`` in the
+        # generic-op analyzer)". Real production runs do exactly that:
+        # the InferenceAttention analyzer appends ``Dominant Kernel`` +
+        # ``Workload`` + ``Attention Pattern`` (12 columns total) and
+        # the generic-op analyzer appends ``Sub-Category`` (10 columns).
+        #
+        # We therefore validate that the first 9 cells of the header
+        # match the canonical schema (after substring-tolerant
+        # normalization), then forward the FULL header + FULL row to
+        # ``_row_to_candidate``. The canonical 9 fields drive the
+        # structured candidate output; any trailing extras are mapped
+        # by header name into ``tracelens_extra_columns`` on the
+        # candidate so downstream consumers (GEAK / OOB) can opt into
+        # the category-specific metadata without re-parsing analysis.md.
+        # Tables narrower than 9 columns, or with the 9 canonical
+        # columns reordered, are still rejected because silent
+        # wrong-mapping (e.g. swapping Efficiency and Bound) would
+        # corrupt every parsed candidate.
+        if len(header_row) < canonical_width:
+            continue
+        header_prefix = header_row[:canonical_width]
+        if header_prefix != headers_canonical:
             normalized: list[str] = []
-            for cell in header_row:
+            for cell in header_prefix:
                 match = next(
                     (canon for canon in headers_canonical if canon in cell),
                     cell,
@@ -680,7 +818,11 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
                 normalized.append(match)
             if normalized != headers_canonical:
                 continue
-            header_row = normalized
+            header_prefix = normalized
+        # Splice the normalized canonical names back into the full
+        # header (preserving extras verbatim so ``_row_to_candidate``
+        # can map them by their original header text).
+        header_row = header_prefix + header_row[canonical_width:]
         # Pull the matching p_item meta by 1-based rank (P1 → pitems[0]).
         # The orchestrator template guarantees compute-tier P-items are
         # numbered by global rank in the Compute Kernel Optimizations section,
@@ -695,6 +837,7 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
             "impact_score_high": pitem_meta.get("impact_score_high", 0.0),
         }
         prose = _extract_pitem_prose(body)
+        pitem_candidates: list[dict[str, Any]] = []
         for cells in rows[1:]:
             cand = _row_to_candidate(
                 header_row,
@@ -708,6 +851,9 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
             )
             if cand is None:
                 continue
+            pitem_candidates.append(cand)
+        pitem_candidates.sort(key=_efficiency_sort_key)
+        for cand in pitem_candidates:
             candidates.append(cand)
             if len(candidates) >= top_k:
                 return candidates
@@ -786,6 +932,197 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     if fragment.isdigit():
         return path.strip(), int(fragment), None
     return text, None, None
+
+
+# ---------------------------------------------------------------------------
+# Launcher path → absolute source file resolver.
+#
+# PyTorch profiler records Python frames with ``__file__`` already made
+# relative to ``sys.path`` entries — e.g. ``aiter/ops/rmsnorm.py(62):
+# rmsnorm2d_fwd``. TraceLens forwards that string verbatim as the
+# ``Kernel Path`` column. Without resolution the downstream patchability
+# gate rejects every row with ``source not under a reusable framework
+# root`` because the relative segment never matches an absolute
+# allowlist prefix, and GEAK never gets to rewrite real reusable
+# kernels (e.g. ``/sgl-workspace/aiter/aiter/ops/rmsnorm.py``).
+#
+# Resolution strategy (most-specific first):
+#   1. ``HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` env override, format
+#      ``pkg=/abs/parent[,pkg=/abs/parent...]``. Per-package operator
+#      escape hatch when the install layout deviates from defaults.
+#   2. ``importlib.util.find_spec(pkg)`` walks the live ``sys.path``
+#      and returns the absolute origin. Robust to editable installs,
+#      wheel installs, and dist-packages layouts alike.
+#   3. Hardcoded fallback table for the production image when the
+#      package is not yet imported. Keeps the gate working from
+#      static-analysis paths where ``import aiter`` might not have run
+#      (e.g. CSV-only parses).
+#
+# Returns the absolute source path when it exists on disk; ``None``
+# otherwise so the caller falls back to the original relative string
+# and downstream gates emit their normal ``source file not resolved``
+# rejection.
+_FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
+    "aiter": ("/sgl-workspace/aiter",),
+    "sglang": ("/sgl-workspace/sglang/python", "/sgl-workspace/sglang"),
+    "vllm": (
+        "/usr/local/lib/python3.12/dist-packages",
+        "/usr/local/lib/python3.10/dist-packages",
+        "/opt/venv/lib/python3.10/site-packages",
+        "/sgl-workspace/vllm",
+    ),
+    # kernel-agent's offline source-file resolver walks this fallback
+    # table when ``import atom`` hasn't run (CSV-only parses, static-
+    # analysis paths). Without it, atom kernels referenced by a
+    # TraceLens CSV under ``/app/ATOM/atom/`` or ``site-packages/atom/``
+    # fall through to the "could not resolve" branch and the kernel-opt
+    # proposal is silently rejected. The roots below mirror the entries
+    # in ``inference_optimizer.orchestrator.kernel_request_handlers
+    # ._REUSABLE_SOURCE_ROOTS`` and
+    # ``kernel-agent/tools/tracelens_analysis._REUSABLE_SOURCE_ROOTS``;
+    # the cross-file sync is pinned by
+    # ``test_framework_paths_units.py::
+    # test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync``.
+    # ``/app/ATOM`` (the editable-install parent) is the canonical-case
+    # root: joining ``atom/model_engine/...`` against it recovers the
+    # on-disk file.
+    "atom": (
+        "/app/ATOM",
+        "/usr/local/lib/python3.12/dist-packages",
+        "/usr/local/lib/python3.10/dist-packages",
+        "/opt/venv/lib/python3.10/site-packages",
+        "/opt/venv/lib/python3.12/site-packages",
+    ),
+}
+_FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"
+
+
+def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
+    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` into ``{pkg: (root,...)}``.
+
+    Format: comma-separated ``pkg=/abs/parent`` entries. Empty / unparseable
+    entries are skipped silently so a malformed export doesn't poison
+    the whole resolver. Values are not validated for existence here —
+    that's the caller's job, so the operator can pre-stage paths.
+    """
+    raw = os.environ.get(_FRAMEWORK_SOURCE_ROOTS_ENV, "").strip()
+    if not raw:
+        return {}
+    out: dict[str, list[str]] = {}
+    for chunk in raw.split(","):
+        if "=" not in chunk:
+            continue
+        key, sep, value = chunk.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if not key or not value:
+            continue
+        out.setdefault(key, []).append(value)
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def _package_root_parent(pkg: str) -> str | None:
+    """Return the directory that contains ``pkg/`` on the live ``sys.path``.
+
+    ``importlib.util.find_spec`` is used so editable installs (``aiter``
+    at ``/sgl-workspace/aiter/aiter/__init__.py``), wheel installs
+    (``vllm`` at ``/usr/local/lib/python3.12/dist-packages/vllm/...``),
+    and namespace packages all resolve correctly without hardcoding.
+    Returns ``None`` when the package isn't importable in the current
+    interpreter.
+    """
+    try:
+        spec = importlib.util.find_spec(pkg)
+    except (ImportError, ValueError):
+        return None
+    if spec is None:
+        return None
+    if spec.submodule_search_locations:
+        # Regular or namespace package: the first search location is the
+        # package directory; its parent is what we want to prepend to
+        # ``pkg/rest/of/path``.
+        loc = list(spec.submodule_search_locations)[0]
+        return os.path.dirname(loc)
+    if spec.origin and spec.origin.endswith(".py"):
+        # Single-file module (rare for frameworks but kept for safety).
+        return os.path.dirname(os.path.dirname(spec.origin))
+    return None
+
+
+def _resolve_launcher_to_abs_source(
+    kernel_path: str,
+) -> tuple[str, int | None, str | None] | None:
+    """Resolve a TraceLens launcher-path string to an absolute file path.
+
+    Returns ``(abs_file, line, function_name)`` when resolution succeeds
+    AND the resolved file exists on disk. Returns ``None`` when:
+
+    * the launcher path is empty / a placeholder / has no path component;
+    * the path is already absolute (caller can use it verbatim — the
+      caller takes care of preserving the original string);
+    * no candidate root yields an existing file.
+
+    The resolver is deliberately conservative: a non-existent absolute
+    path is treated as a miss so the caller can fall back to the
+    grep-based locator in ``tracelens_analysis._finalize_candidates``
+    instead of producing a fabricated absolute path that downstream
+    consumers would treat as authoritative.
+    """
+    raw_path, line, func = _parse_launcher_path(kernel_path)
+    if not raw_path:
+        return None
+    if os.path.isabs(raw_path):
+        # Already absolute — caller can use ``raw_path`` directly; the
+        # resolver returns None to signal "no rewrite needed" (preserves
+        # the original string verbatim in ``source_file``).
+        return None
+    # Pick the leading path segment as the candidate package.
+    head = raw_path.split("/", 1)[0]
+    if not head or head.startswith("."):
+        return None
+
+    candidate_roots: list[str] = []
+    env_roots = _env_framework_source_roots()
+    candidate_roots.extend(env_roots.get(head, ()))
+    pkg_parent = _package_root_parent(head)
+    if pkg_parent:
+        candidate_roots.append(pkg_parent)
+    candidate_roots.extend(_FRAMEWORK_PKG_FALLBACK_ROOTS.get(head, ()))
+
+    seen: set[str] = set()
+    for root in candidate_roots:
+        if not root or root in seen:
+            continue
+        seen.add(root)
+        abs_path = os.path.join(root, raw_path)
+        if not os.path.isfile(abs_path):
+            continue
+        # Validate the resolved path so we never hand GEAK a file whose
+        # contents don't actually contain the launcher's function. This
+        # catches two real failure modes:
+        #
+        #   * sys.path shadowing — two installed packages share a leaf
+        #     name (e.g. namespace clash from a stale wheel + the
+        #     editable checkout) and ``find_spec`` returns the wrong
+        #     one. Without this check we'd "resolve" to a real file
+        #     that doesn't host the launcher's symbol.
+        #   * Operator misconfiguration of
+        #     ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` — pointing at a
+        #     directory that happens to contain a same-named ``.py``
+        #     stub (test fixture, snapshot, doc example) instead of
+        #     the live source tree.
+        #
+        # When the launcher provides no function name (``#L<line>`` /
+        # bare-path shapes), or the source is not a ``.py`` file, we
+        # fall through to existence-only validation since AST cannot
+        # walk it. Verification failures fall through to the next
+        # candidate root rather than short-circuiting, so a shadowing
+        # spec doesn't block a valid fallback entry.
+        if func and abs_path.endswith(".py"):
+            if _function_line_from_ast(Path(abs_path), func) is None:
+                continue
+        return abs_path, line, func
+    return None
 
 
 def _function_line_from_ast(path: Path, function_name: str) -> int | None:
@@ -1032,61 +1369,6 @@ def aggregate_by_source_function(
     return ordered
 
 
-def raw_candidates_from_priority_data(priority_data_path: Path, top_k: int) -> list[dict[str, Any]]:
-    """Convert TraceLens priority_data.json into hot-kernel candidate rows.
-
-    ``priority_data.findings[]`` is category-level. Its ``members[]`` entries
-    carry operation names and time/impact values, which are the best bridge
-    back into Hyperloom's existing hot_kernels schema.
-    """
-
-    try:
-        payload = json.loads(priority_data_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-    findings = payload.get("findings")
-    if not isinstance(findings, list):
-        return []
-
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for finding in sorted(
-        (f for f in findings if isinstance(f, dict)),
-        key=lambda f: _safe_float(f.get("impact_score")),
-        reverse=True,
-    ):
-        category = str(finding.get("category") or "").strip()
-        members = finding.get("members")
-        if not isinstance(members, list):
-            members = []
-        for member in members:
-            if not isinstance(member, dict):
-                continue
-            name = str(member.get("operation") or member.get("name") or "").strip()
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            time_ms = _safe_float(member.get("time_ms"))
-            rows.append({
-                "name": name,
-                "duration_us": time_ms * 1000.0,
-                "call_count": int(_safe_float(member.get("operation_count"), 1.0)),
-                "source_file": str(member.get("source_path") or member.get("source_file") or ""),
-                "source_type": "unknown",
-                "shapes": [],
-                "tracelens_category": category,
-                "impact_score": _safe_float(member.get("impact_score")),
-                "impact_score_low": _safe_float(member.get("impact_score_low")),
-                "impact_score_high": _safe_float(member.get("impact_score_high")),
-                "library": member.get("library") or finding.get("library") or "",
-                "bound_type": member.get("bound_type") or finding.get("bound_type") or "",
-            })
-            if len(rows) >= top_k:
-                return rows
-    return rows
-
-
 __all__ = [
     "TraceLensSkillRunResult",
     "UPSTREAM_CATEGORY_TO_GEAK",
@@ -1097,10 +1379,10 @@ __all__ = [
     "aggregate_by_source_function",
     "build_orchestrator_prompt",
     "discover_capture_folder",
+    "extract_idle_pct_from_analysis_md",
     "infer_analysis_mode",
     "normalize_upstream_category",
     "parse_analysis_md",
-    "raw_candidates_from_priority_data",
     "run_tracelens_skill",
     "write_local_cmd_prefix",
 ]

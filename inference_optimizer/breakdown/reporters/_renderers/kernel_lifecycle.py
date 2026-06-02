@@ -11,7 +11,7 @@ they used to scrape out of MAE events:
 * ``call_count``     — number of times the kernel was launched
 * ``bandwidth%`` / ``compute%`` — roofline utilization
 * ``selected``       — did the orchestrator route it into kernel
-                       optimization? (top-15 in last_select_kernels)
+                       optimization? (top-15 in last_trace_analyze)
 * ``geak_speedup``   — best micro-speedup the GEAK lane achieved
                        (None = lane never touched this kernel)
 * ``oob_speedup``    — best micro-speedup the OOB lane achieved
@@ -30,7 +30,6 @@ from typing import Any
 from ..base import (
     Decision,
     RenderedSection,
-    fmt_pct,
     md_table,
     register_renderer,
 )

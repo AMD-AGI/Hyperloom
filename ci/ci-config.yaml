@@ -2,7 +2,9 @@ claw:
   endpoint: ${SAFE_BASE_URL}/claw-api/v1
   api_key_env: CLAW_API_KEY
   sandbox_workspace_env: SANDBOX_WORKSPACE
-  sandbox_timeout: 28800
+  # InferenceX comparison jobs are intentionally long-running (up to 3 days)
+  # and are separate from the production_1000 optimize-submit pool.
+  sandbox_timeout: 259200
   agent_id: agent_default
   # plugin 4 (Hyperloom) bundles two tools:
   #   - tool 3:  hyperloom-public-mcp (primus-safe-core42 MCP server)
@@ -57,6 +59,8 @@ defaults:
   kernel_opt_workspace: ${KERNEL_OPT_WORKSPACE}
   min_kernels: 5
   inferencex_path: ${NFS_ROOT}/InferenceX
+  oob_path: ${NFS_ROOT}/OOB
+  tracelens_root: ${NFS_ROOT}/TraceLens-internal
   kernel_opt_backends: geak
   random_range_ratio: 0.8
 
@@ -68,23 +72,6 @@ models:
     optimization_depth: full
     kernel_opt_backends: claude
     target_gpu: mi300x
-
-  # ── DeepSeek R1 (FP8, MoRI 1P1D multi-node — TP=8 + TP=8 across 2 nodes) ──
-  # Same amd-master lookup as single-node DSR1 (image / framework / precision
-  # come from `inferenceX_key: dsr1-fp8-mi300x-sglang`), but `key` is unique so
-  # the matrix doesn't dedupe with the single-node entry above. `mode: remote`
-  # triggers orchestrator.py's prompt_template_remote.md path (multi-node MoRI
-  # 1P1D, RayJob via SaFE MCP). yunkai validated this prompt path manually.
-  - key: dsr1-multinode-fp8-mi300x-sglang
-    inferenceX_key: dsr1-fp8-mi300x-sglang
-    inferenceX_api_name: DeepSeek-R1-0528
-    model_path_override: ${NFS_ROOT}/models/DeepSeek-R1-0528
-    optimization_depth: full
-    kernel_opt_backends: claude
-    target_gpu: mi300x
-    tp: 16
-    mode: remote
-    rayjob_image: harbor.core42.primus-safe.amd.com/custom/sync/sglang:202604290707
 
   # ── gpt-oss 120B (FP4, TP=8, vLLM) ──
   - inferenceX_key: gptoss-fp4-mi300x-vllm
@@ -110,14 +97,13 @@ models:
     kernel_opt_backends: claude
     target_gpu: mi300x
 
-  # ── GLM 5 (FP8) — DISABLED 2026-05-11 ──
-  # Reason: InferenceX has no MI300X baseline for GLM-5; the ifx key resolves
-  # to glm5_fp8_mi355x.sh (MI355X 288GB script). Copying that script's
-  # --mem-fraction-static 0.85 + TP=16 single-instance breaks on MI300X
-  # (192GB HBM, MoRI 1P1D TP=8/8). Re-enable when either:
-  #   (a) InferenceX adds a glm5-fp8-mi300x-* entry in amd-master.yaml, or
-  #   (b) we patch ci to inject MI300X memory adjustment + MoRI launch flags
-  #       before the benchmark_script_section reaches the agent.
+  # ── GLM 5 (FP8) old single-node attempt — DISABLED 2026-05-11 ──
+  # The original disabled block below kept the MI355X inferenceX_key as a
+  # fallback for amd-master.yaml lookup. That approach surfaced the wrong
+  # benchmark script (MI355X --mem-fraction-static 0.85 + TP=16 single-
+  # instance) and OOM'd on MI300X 192GB. Replaced 2026-05-26 by the
+  # self-contained multi-node entry below; this block is kept only as a
+  # historical "do not re-enable" marker.
   # - inferenceX_key: glm5-fp8-mi355x-sglang
   #   inferenceX_api_name: GLM-5
   #   model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
@@ -127,6 +113,54 @@ models:
   #   tp: 16
   #   mode: remote
   #   rayjob_image: harbor.core42.primus-safe.amd.com/custom/sync/sglang:202604290707
+
+  # ── GLM 5 (FP8, MoE+MLA+NSA) multi-node — TP=16 across 2 MI300X nodes ──
+  # Pure Hyperloom-internal entry: InferenceX has no MI300X baseline for GLM-5,
+  # so this entry is self-contained (carries model_hf / image / framework /
+  # precision / conc / isl_osl_configs directly). orchestrator.py picks up the
+  # `synthesize_entry_from_ci_config()` path when inferenceX_key is absent.
+  # Multi-node TP=16 spreads the ~1.4TB FP8 weights to ~88GB/GPU, leaving
+  # ~75GB/GPU headroom for KV cache on MI300X 192GB cards (single-node TP=8
+  # OOMs — see the historical block above).
+  # Validated 2026-05-22 (session zai-org-GLM-5_20260522T070305Z_525d8a89):
+  #   baseline 527.50 → optimized 690.89 tok/s (+30.97%)
+  #   winning backend: --decode-attention-backend aiter
+  - key: glm5-multinode-fp8-mi300x-sglang
+    model_hf: zai-org/GLM-5
+    model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
+    # profilerfix: rocprofiler captures HipGraphLaunch kernels (issue #352)
+    # Pre-profilerfix image (restore when reverting): lmsysorg/sglang:v0.5.11-rocm720-mi30x
+    image: primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix
+    framework: sglang
+    precision: fp8
+    conc: 64
+    isl_osl_configs:
+      - [1024, 1024]
+    optimization_depth: full
+    kernel_opt_backends: claude
+    target_gpu: mi300x
+    tp: 16
+    ep: 1
+    mode: remote
+    # Multi-node knobs — see prompt_template.md "Task submission" block.
+    # nodes=2 triggers the RayJob 2-node multi-node prompt path.
+    # target_gain=30 / max_hours=24 match weilei's validated 5/22 run config:
+    # GLM-5 multi-node typically needs 2-3 h cold-start + benchmark, and a
+    # single-backend +30% is the established expectation before kernel-opt.
+    nodes: 2
+    target_gain: 30
+    max_hours: 24
+    random_range_ratio: 0.8
+    rayjob_image: harbor.core42.primus-safe.amd.com/custom/sync/sglang:202605190643
+    # NOTE: do NOT set `claw_plugin_id: null` here. We tried it in
+    # commit 3f14eee thinking weilei's manual GLM-5 run "didn't go through
+    # plugin" — but a Claw GUI manual session also defaults to plugin_id=4,
+    # so weilei was always using the Hyperloom plugin. Without a pluginId
+    # the sandbox doesn't load the Hyperloom plugin's tool bundle
+    # (Bash/Read/Write/Grep/etc.); the agent receives the prompt but has
+    # no tools to invoke, sits idle ~10 min, then the session times out
+    # with "agent=failed, 0 tool calls" (runs 26431077434 / 26431116688).
+    # Leave the field absent → inherits the legacy default plugin_id=4.
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang

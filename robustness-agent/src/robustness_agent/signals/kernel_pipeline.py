@@ -1,0 +1,416 @@
+"""Kernel-pipeline / external-backend health signals (F1-F5).
+
+Five detectors catch the failure modes that K1 + K3 + remain_issue.md
+P2#7 documented:
+
+* **F1 ``ray_pending_starvation``** — ``ray status`` reports a non-zero
+  ``Pending`` count across at least ``min_pending_ticks`` consecutive
+  ticks. Indicates the cluster quota ledger is wedged (the canonical
+  P2#7 case: ``reported_used > total``) so ``kernel_opt`` / GEAK
+  submissions are accumulating without dispatch.
+
+* **F2 ``geak_budget_starvation``** — same kernel_id has its GEAK
+  backend attempt killed by SIGTERM/timeout markers in
+  ``optimization_attempts.jsonl`` across at least
+  ``min_geak_sigterm_attempts`` rows. Means the 90 min default budget
+  is too short for that kernel's ``select_patch`` round; extending it
+  or skipping the kernel is the only fix.
+
+* **F4 ``cursor_auth_storm``** — ``optimization_attempts.jsonl`` shows
+  ``backend=cursor`` AND ``report_text`` carrying a ``401`` /
+  authentication-failure marker across at least ``min_cursor_401_hits``
+  rows. The user wired ``--backends cursor`` without a ``CURSOR_API_KEY``
+  override; throttle further attempts.
+
+* **F5 ``kernel_opt_no_progress``** — at least
+  ``min_kernels_with_no_progress`` distinct kernel_ids see every
+  backend attempt land on PARTIAL/REVERT (no KEEP) within the recent
+  oob_attempts window. Means the kernel pipeline is structurally
+  unable to optimise this model; prune ``kernel_opt`` and let the
+  budget flow to params/sweep.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from ..role.prompt_inputs import ReactorContext
+from ..sources.base import SourceData
+from ..state_store import DetectorStateView
+from .symptom import Symptom, SymptomSeverity
+
+
+
+# Markers we treat as "GEAK budget killed the run" in
+# ``optimization_attempts.jsonl::report_text``. Matches case-insensitive
+# because the kernel-agent / GEAK runner emits both ``SIGTERM`` and
+# ``signal 15`` variants.
+_GEAK_SIGTERM_MARKERS: tuple[str, ...] = (
+    "sigterm",
+    "signal 15",
+    "budget exhausted",
+    "timed out before select_patch",
+    "killed by deadline",
+)
+
+# Markers we treat as "cursor authentication failed". The Cursor gateway
+# returns ``401`` or ``unauthorized`` literally; we match either form.
+_CURSOR_AUTH_MARKERS: tuple[str, ...] = (
+    "401",
+    "unauthorized",
+    "authentication failed",
+    "primus.00009",
+)
+
+
+@dataclass
+class KernelPipelineConfig:
+    """Tunables for :func:`evaluate_kernel_pipeline_signals`."""
+
+    # F1 — pending count above this for N consecutive ticks → fire.
+    pending_count_threshold: int = 1
+    min_pending_ticks: int = 3
+    # F2 — same kernel_id has GEAK backend SIGTERM'd this many times.
+    min_geak_sigterm_attempts: int = 2
+    # F4 — cursor 401 marker count threshold.
+    min_cursor_401_hits: int = 3
+    # F5 — kernel_ids with no PARTIAL→KEEP progression across the
+    # recent oob_attempts window.
+    min_kernels_with_no_progress: int = 3
+
+
+# ---------------------------------------------------------------------------
+# F1 — Ray pending starvation (stateful — counts consecutive ticks)
+# ---------------------------------------------------------------------------
+
+class RayPendingDetector:
+    """Track the ``ray status`` pending count across ticks.
+
+    A single tick with pending > 0 is normal (tasks are about to
+    dispatch); ``min_pending_ticks`` consecutive ticks above the
+    threshold means the dispatcher is wedged.
+    """
+
+    def __init__(
+        self,
+        config: KernelPipelineConfig | None = None,
+        *,
+        state_view: "DetectorStateView | None" = None,
+    ) -> None:
+        self._config = config or KernelPipelineConfig()
+        self._state_view = state_view
+        # Disk-backed counter — see GpuLeakDetector for the same
+        # reasoning. Without this, F1 (≥3 consecutive ticks) cannot
+        # fire under M1 subprocess-per-tick transport.
+        loaded = state_view.load() if state_view is not None else {}
+        try:
+            self._consecutive_hits: int = max(
+                0, int(loaded.get("consecutive_hits", 0))
+            )
+        except (TypeError, ValueError):
+            self._consecutive_hits = 0
+        try:
+            self._last_pending: int = max(
+                0, int(loaded.get("last_pending", 0))
+            )
+        except (TypeError, ValueError):
+            self._last_pending = 0
+
+    def _persist(self) -> None:
+        if self._state_view is None:
+            return
+        self._state_view.save({
+            "consecutive_hits": self._consecutive_hits,
+            "last_pending": self._last_pending,
+        })
+
+    def evaluate(
+        self, ctx: ReactorContext, data: SourceData,
+    ) -> list[Symptom]:
+        ray_info = data.local_ray
+        if not isinstance(ray_info, dict) or not ray_info:
+            # No Ray data this tick → don't accumulate.
+            self._consecutive_hits = 0
+            self._persist()
+            return []
+        if not ray_info.get("healthy"):
+            # Ray head dead is its own signal (A6); we don't pile
+            # pending-starvation on top.
+            self._consecutive_hits = 0
+            self._persist()
+            return []
+        pending = ray_info.get("pending_tasks")
+        if not isinstance(pending, int) or pending <= self._config.pending_count_threshold:
+            self._consecutive_hits = 0
+            self._last_pending = 0
+            self._persist()
+            return []
+        self._consecutive_hits += 1
+        self._last_pending = pending
+        self._persist()
+        if self._consecutive_hits < self._config.min_pending_ticks:
+            return []
+        return [
+            Symptom(
+                name="ray_pending_starvation",
+                severity=SymptomSeverity.HIGH,
+                summary=(
+                    f"ray reports {pending} pending tasks for "
+                    f"{self._consecutive_hits} consecutive tick(s) "
+                    f"(>= {self._config.min_pending_ticks}); cluster "
+                    f"quota likely wedged"
+                ),
+                evidence={
+                    "pending_tasks": pending,
+                    "consecutive_ticks": self._consecutive_hits,
+                    "threshold": self._config.min_pending_ticks,
+                },
+                subject={},
+                source="local",
+                suggestion=(
+                    "prune_branch(kernel_opt) until ray clears; "
+                    "shrink concurrency or wait out the cluster quota anomaly"
+                ),
+            )
+        ]
+
+
+# ---------------------------------------------------------------------------
+# F2 — GEAK budget starvation
+# ---------------------------------------------------------------------------
+
+def _geak_budget_symptoms(
+    data: SourceData, cfg: KernelPipelineConfig,
+) -> list[Symptom]:
+    audit = data.local_decision_audit
+    if not isinstance(audit, dict):
+        return []
+    attempts = audit.get("oob_attempts") or []
+    if not isinstance(attempts, list):
+        return []
+    by_kernel: dict[str, list[dict[str, Any]]] = {}
+    for entry in attempts:
+        if not isinstance(entry, dict):
+            continue
+        backend = str(entry.get("backend") or "").lower()
+        if "geak" not in backend:
+            continue
+        report = str(entry.get("report_text") or "").lower()
+        if not any(m in report for m in _GEAK_SIGTERM_MARKERS):
+            continue
+        kernel_id = str(entry.get("kernel_id") or "unknown")
+        by_kernel.setdefault(kernel_id, []).append(entry)
+    out: list[Symptom] = []
+    for kernel_id, rows in by_kernel.items():
+        if len(rows) < cfg.min_geak_sigterm_attempts:
+            continue
+        out.append(
+            Symptom(
+                name="geak_budget_starvation",
+                severity=SymptomSeverity.HIGH,
+                summary=(
+                    f"GEAK backend was SIGTERM'd on kernel_id={kernel_id!r} "
+                    f"in {len(rows)} consecutive attempts "
+                    f"(>= {cfg.min_geak_sigterm_attempts}); "
+                    f"select_patch never completes within budget"
+                ),
+                evidence={
+                    "kernel_id": kernel_id,
+                    "attempt_count": len(rows),
+                    "threshold": cfg.min_geak_sigterm_attempts,
+                    "last_report_head": (
+                        str(rows[-1].get("report_text") or "")[:200]
+                    ),
+                },
+                subject={"kernel_id": kernel_id},
+                source="local",
+                suggestion=(
+                    "extend GEAK budget for this kernel OR prune it from "
+                    "the kernel_opt rotation — current budget cannot "
+                    "produce a verdict"
+                ),
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# F4 — Cursor 401 storm
+# ---------------------------------------------------------------------------
+
+def _cursor_auth_storm_symptoms(
+    data: SourceData, cfg: KernelPipelineConfig,
+) -> list[Symptom]:
+    audit = data.local_decision_audit
+    if not isinstance(audit, dict):
+        return []
+    attempts = audit.get("oob_attempts") or []
+    if not isinstance(attempts, list):
+        return []
+    hits: list[dict[str, Any]] = []
+    for entry in attempts:
+        if not isinstance(entry, dict):
+            continue
+        backend = str(entry.get("backend") or "").lower()
+        if "cursor" not in backend:
+            continue
+        report = str(entry.get("report_text") or "").lower()
+        if not any(m in report for m in _CURSOR_AUTH_MARKERS):
+            continue
+        hits.append(entry)
+    if len(hits) < cfg.min_cursor_401_hits:
+        return []
+    return [
+        Symptom(
+            name="cursor_auth_storm",
+            severity=SymptomSeverity.MEDIUM,
+            summary=(
+                f"cursor backend returned 401/auth-failed on "
+                f"{len(hits)} attempts (>= {cfg.min_cursor_401_hits}); "
+                f"CURSOR_API_KEY likely missing or revoked"
+            ),
+            evidence={
+                "hit_count": len(hits),
+                "threshold": cfg.min_cursor_401_hits,
+                "kernel_ids": list({
+                    str(h.get("kernel_id") or "") for h in hits
+                })[:5],
+            },
+            subject={"backend": "cursor"},
+            source="local",
+            suggestion=(
+                "drop cursor from --backends until CURSOR_API_KEY is "
+                "rotated; the auto-skip path only kicks in when the "
+                "env var is unset, not when explicit user override is in play"
+            ),
+        )
+    ]
+
+
+# ---------------------------------------------------------------------------
+# F5 — Kernel-opt no-progress
+# ---------------------------------------------------------------------------
+
+def _kernel_opt_no_progress_symptoms(
+    data: SourceData, cfg: KernelPipelineConfig,
+) -> list[Symptom]:
+    """Identify kernels where every backend attempt landed at
+    PARTIAL/REVERT (no KEEP) across the recent attempt window.
+    """
+    audit = data.local_decision_audit
+    if not isinstance(audit, dict):
+        return []
+    attempts = audit.get("oob_attempts") or []
+    integrate = audit.get("recent_integrate") or []
+    if not isinstance(attempts, list) and not isinstance(integrate, list):
+        return []
+
+    # Build per-kernel rollup from BOTH oob_attempts (per-backend) and
+    # recent_integrate (per-attempt KEEP/REVERT outcome). A kernel
+    # ``has_keep`` only when at least one row reports a positive
+    # speedup OR a KEEP decision.
+    rollups: dict[str, dict[str, Any]] = {}
+    if isinstance(attempts, list):
+        for entry in attempts:
+            if not isinstance(entry, dict):
+                continue
+            kernel_id = str(entry.get("kernel_id") or "")
+            if not kernel_id:
+                continue
+            roll = rollups.setdefault(kernel_id, {
+                "kernel_id": kernel_id,
+                "backends": set(),
+                "has_keep": False,
+                "attempt_count": 0,
+            })
+            roll["attempt_count"] += 1
+            backend = str(entry.get("backend") or "").lower()
+            if backend:
+                roll["backends"].add(backend)
+            ms = entry.get("microbench_speedup")
+            if isinstance(ms, (int, float)) and ms >= 1.2:
+                roll["has_keep"] = True
+    if isinstance(integrate, list):
+        for entry in integrate:
+            if not isinstance(entry, dict):
+                continue
+            kernel_id = str(entry.get("kernel_id") or "")
+            if not kernel_id:
+                continue
+            roll = rollups.setdefault(kernel_id, {
+                "kernel_id": kernel_id,
+                "backends": set(),
+                "has_keep": False,
+                "attempt_count": 0,
+            })
+            if str(entry.get("decision") or "") == "KEEP":
+                roll["has_keep"] = True
+
+    # Only count kernels with at least 2 distinct backends attempted —
+    # one-shot kernels haven't had time to fail across the pipeline.
+    bad_kernels = [
+        roll for roll in rollups.values()
+        if not roll["has_keep"] and len(roll["backends"]) >= 2
+    ]
+    if len(bad_kernels) < cfg.min_kernels_with_no_progress:
+        return []
+    return [
+        Symptom(
+            name="kernel_opt_no_progress",
+            severity=SymptomSeverity.HIGH,
+            summary=(
+                f"{len(bad_kernels)} kernel_ids have all backend attempts "
+                f"land on PARTIAL/REVERT with no KEEP "
+                f"(>= {cfg.min_kernels_with_no_progress}); the kernel_opt "
+                f"pipeline cannot optimise this model"
+            ),
+            evidence={
+                "kernel_count": len(bad_kernels),
+                "threshold": cfg.min_kernels_with_no_progress,
+                "kernels": [
+                    {"kernel_id": roll["kernel_id"],
+                     "backends": sorted(roll["backends"]),
+                     "attempt_count": roll["attempt_count"]}
+                    for roll in bad_kernels[:5]
+                ],
+            },
+            subject={},
+            source="local",
+            suggestion=(
+                "prune_branch(kernel_opt); the budget will land further "
+                "wins on params/sweep instead"
+            ),
+        )
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Public entry point — module-level helper (stateful F1 lives in the class)
+# ---------------------------------------------------------------------------
+
+def evaluate_kernel_pipeline_signals(
+    ctx: ReactorContext,
+    data: SourceData,
+    *,
+    config: KernelPipelineConfig | None = None,
+) -> list[Symptom]:
+    """Stateless slice of F (F2 / F4 / F5).
+
+    F1 ``ray_pending_starvation`` is stateful (consecutive-tick streak)
+    and lives in :class:`RayPendingDetector`; the classifier instantiates
+    one and calls its ``evaluate`` separately.
+    """
+    cfg = config or KernelPipelineConfig()
+    out: list[Symptom] = []
+    out.extend(_geak_budget_symptoms(data, cfg))
+    out.extend(_cursor_auth_storm_symptoms(data, cfg))
+    out.extend(_kernel_opt_no_progress_symptoms(data, cfg))
+    return out
+
+
+__all__ = [
+    "KernelPipelineConfig",
+    "RayPendingDetector",
+    "evaluate_kernel_pipeline_signals",
+]

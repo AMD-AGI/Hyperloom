@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 @dataclass
 class GpuSnapshot:
+    """One-time GPU metrics snapshot collected by monitors."""
     gpu_id: int
     utilization: float
     vram_used_mb: float
@@ -24,6 +25,7 @@ class GpuSnapshot:
 
     @property
     def vram_used_pct(self) -> float:
+        """VRAM utilization percentage (0 if total is zero)."""
         if self.vram_total_mb <= 0:
             return 0.0
         return (self.vram_used_mb / self.vram_total_mb) * 100.0
@@ -31,6 +33,7 @@ class GpuSnapshot:
 
 @dataclass
 class ProcessInfo:
+    """Minimal process info surfaced by process monitors."""
     pid: int
     state: str
     cmd: str
@@ -40,6 +43,7 @@ class ProcessInfo:
 
 @dataclass
 class DiskSnapshot:
+    """Disk usage snapshot for a single mount."""
     mount: str
     total_gb: float
     used_gb: float
@@ -47,6 +51,7 @@ class DiskSnapshot:
 
     @property
     def used_pct(self) -> float:
+        """Disk utilization percentage (0 if total is zero)."""
         if self.total_gb <= 0:
             return 0.0
         return (self.used_gb / self.total_gb) * 100.0
@@ -54,6 +59,7 @@ class DiskSnapshot:
 
 @dataclass
 class ServerHealthStatus:
+    """HTTP health probe result for a service endpoint."""
     url: str
     reachable: bool
     response_time_ms: float = 0.0
@@ -63,6 +69,7 @@ class ServerHealthStatus:
 
 @dataclass
 class FaultEvent:
+    """Raw fault event emitted by monitors for downstream checks."""
     monitor_id: str
     category: str
     severity: str
@@ -89,6 +96,7 @@ class CheckResult(str, Enum):
 
 @dataclass
 class Alert:
+    """Structured alert emitted by checks and forwarded to the Coordinator."""
     check_name: str
     severity: Severity
     summary: str
@@ -99,6 +107,7 @@ class Alert:
 
 @dataclass
 class RcaFinding:
+    """RCA output capturing root cause, recommended action, and evidence."""
     trigger_alerts: list[Alert]
     root_cause: str
     suggested_action: str
@@ -114,6 +123,7 @@ class RcaFinding:
 
 @dataclass
 class ConductorEvent:
+    """Subset of Conductor events consumed by the robustness agent."""
     event_id: int
     agent: str
     intent_type: str

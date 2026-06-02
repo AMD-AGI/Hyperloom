@@ -1,12 +1,26 @@
-"""Unit tests for the multi-node robustness CLI option plumbing.
+"""Unit tests for ``inference_optimizer.cli`` robustness backend wiring.
 
-Exercises :func:`inference_optimizer.cli._build_robustness_options` —
-the small function that translates CLI flags + env vars into the
-``request.options`` payload sent to ``robustness-agent``'s runtime.
-The multi-node policy lives here: when ``--nodes >= 2`` the agent
-must disable its local sandbox probe and lean on robustness-server
-for cluster pod metrics; this test pins that contract so a future
-refactor cannot silently regress to the false-positive M1 behaviour.
+Covers two helpers:
+
+* ``_build_robustness_options`` — translates ``argparse.Namespace`` into
+  the ``request.options`` overrides that :class:`RobustnessAgentBackend`
+  forwards verbatim to ``python -m robustness_agent.runtime.cli tick``.
+  The multi-node policy lives here: when ``--nodes >= 2`` the agent must
+  disable its local sandbox probe and lean on robustness-server for
+  cluster pod metrics, and the hardcoded ``127.0.0.1:8888`` inference
+  probe is turned off while the ``no_levers_found`` floor is lifted to
+  60 min. These tests pin that contract so a future refactor cannot
+  silently regress to the false-positive M1 behaviour.
+
+* ``_resolve_robustness_choice`` — picks ``"mock"`` vs ``"agent"`` from
+  the operator flag with multi-node auto-downgrade (the agent backend's
+  ``LocalProbeSource`` family targets sandbox-local resources that all
+  live in separate pods on ``--nodes >= 2``, so the cleanest path is to
+  fall back to the heartbeat-only mock). Repro: sandbox
+  primus-claw-20260522063032-mcctl turn=0 emitted ``ray_head_dead`` HIGH
+  + ``prune_branch(kernel_opt)`` + ``escalate_strategy_change`` from a
+  ``ray status`` probe failing because the Ray head lives in a separate
+  RayJob pod, unreachable from the sandbox.
 """
 
 from __future__ import annotations
@@ -15,15 +29,35 @@ import argparse
 
 import pytest
 
-from inference_optimizer.cli import _build_robustness_options
+from inference_optimizer.cli import (
+    _build_robustness_options,
+    _resolve_robustness_choice,
+)
+
+
+_WORKLOAD_ENV_KEYS = (
+    "ROBUSTNESS_WORKLOAD_UID",
+    "CLAW_WORKLOAD_UID",
+    "WORKLOAD_UID",
+    "KUBE_WORKLOAD_UID",
+    "RAY_JOB_ID",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_workload_env(monkeypatch):
+    """Keep the workload-uid env discovery deterministic across hosts."""
+    for key in _WORKLOAD_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
 
 
 def _ns(**overrides) -> argparse.Namespace:
     """Build a namespace matching what the argparse parser would produce."""
     base = dict(
+        nodes=1,
         robustness_server_url=None,
         robustness_llm_rca=None,
-        nodes=1,
+        robustness_backend=None,  # CLI default; resolves to DEFAULT_*
         robustness_workload_uid=None,
         robustness_disable_local_probe=None,
         robustness_enable_cluster_pod_metrics=None,
@@ -33,49 +67,63 @@ def _ns(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def test_single_node_emits_no_multi_node_options(monkeypatch):
+# ---------------------------------------------------------------------------
+# _build_robustness_options — multi-node cluster policy
+# ---------------------------------------------------------------------------
+
+def test_single_node_emits_no_multi_node_options():
     """Default 1-node call passes nothing extra into request.options."""
-    for key in (
-        "ROBUSTNESS_WORKLOAD_UID",
-        "CLAW_WORKLOAD_UID",
-        "WORKLOAD_UID",
-        "KUBE_WORKLOAD_UID",
-        "RAY_JOB_ID",
-    ):
-        monkeypatch.delenv(key, raising=False)
     options = _build_robustness_options(_ns())
-    assert "disable_local_probe" not in options
-    assert "enable_cluster_pod_metrics" not in options
-    assert "nodes" not in options
-    assert "workload_uid" not in options
+    assert options == {}
 
 
-def test_multi_node_auto_enables_disable_local_probe_and_pod_metrics(monkeypatch):
+def test_single_node_passes_server_url_and_llm_rca():
+    """Existing operator-supplied flags still propagate verbatim."""
+    options = _build_robustness_options(_ns(
+        nodes=1,
+        robustness_server_url="http://robustness.svc:8080",
+        robustness_llm_rca=True,
+    ))
+    assert options == {
+        "robustness_server_url": "http://robustness.svc:8080",
+        "llm_rca_enabled": True,
+    }
+
+
+def test_multi_node_auto_enables_disable_local_probe_and_pod_metrics():
     """``--nodes >= 2`` auto-enables the cluster-only policy."""
-    for key in (
-        "ROBUSTNESS_WORKLOAD_UID",
-        "CLAW_WORKLOAD_UID",
-        "WORKLOAD_UID",
-        "KUBE_WORKLOAD_UID",
-        "RAY_JOB_ID",
-    ):
-        monkeypatch.delenv(key, raising=False)
     options = _build_robustness_options(_ns(nodes=4))
     assert options["nodes"] == 4
     assert options["disable_local_probe"] is True
     assert options["enable_cluster_pod_metrics"] is True
 
 
-def test_multi_node_respects_explicit_opt_out(monkeypatch):
-    """Operator can override the multi-node defaults explicitly."""
-    for key in (
-        "ROBUSTNESS_WORKLOAD_UID",
-        "CLAW_WORKLOAD_UID",
-        "WORKLOAD_UID",
-        "KUBE_WORKLOAD_UID",
-        "RAY_JOB_ID",
-    ):
-        monkeypatch.delenv(key, raising=False)
+def test_multi_node_disables_inference_probe_and_bumps_floor():
+    """``nodes >= 2`` → auto-probe-inference-server False (the hardcoded
+    ``127.0.0.1:8888/health`` probe can never reach the head pod) plus
+    the full cluster policy and the 60 min no_levers floor."""
+    options = _build_robustness_options(_ns(nodes=2))
+    assert options == {
+        "nodes": 2,
+        "disable_local_probe": True,
+        "enable_cluster_pod_metrics": True,
+        "auto_probe_inference_server": False,
+        "progress_no_levers_min_minutes": 60.0,
+    }
+
+
+def test_multi_node_bumps_no_levers_floor_to_60_minutes():
+    """``nodes >= 2`` → progress_no_levers_min_minutes=60.0 layers a
+    wall-clock buffer on top of the explore_started gate; single-node
+    must keep the runtime default (key absent)."""
+    multi = _build_robustness_options(_ns(nodes=2))
+    assert multi["progress_no_levers_min_minutes"] == 60.0
+    single = _build_robustness_options(_ns(nodes=1))
+    assert "progress_no_levers_min_minutes" not in single
+
+
+def test_multi_node_respects_explicit_opt_out():
+    """Operator can override the multi-node cluster defaults explicitly."""
     options = _build_robustness_options(
         _ns(
             nodes=2,
@@ -87,6 +135,22 @@ def test_multi_node_respects_explicit_opt_out(monkeypatch):
     assert options["enable_cluster_pod_metrics"] is False
 
 
+def test_multi_node_preserves_operator_flags():
+    """Multi-node auto-disable must coexist with explicit operator flags."""
+    options = _build_robustness_options(_ns(
+        nodes=4,
+        robustness_server_url="http://robustness.svc:8080",
+    ))
+    assert options == {
+        "robustness_server_url": "http://robustness.svc:8080",
+        "nodes": 4,
+        "disable_local_probe": True,
+        "enable_cluster_pod_metrics": True,
+        "auto_probe_inference_server": False,
+        "progress_no_levers_min_minutes": 60.0,
+    }
+
+
 def test_workload_uid_cli_flag_wins_over_env(monkeypatch):
     monkeypatch.setenv("CLAW_WORKLOAD_UID", "env-uid")
     options = _build_robustness_options(
@@ -96,37 +160,103 @@ def test_workload_uid_cli_flag_wins_over_env(monkeypatch):
 
 
 def test_workload_uid_env_fallback(monkeypatch):
-    monkeypatch.delenv("ROBUSTNESS_WORKLOAD_UID", raising=False)
     monkeypatch.setenv("CLAW_WORKLOAD_UID", "env-uid")
-    monkeypatch.delenv("WORKLOAD_UID", raising=False)
-    monkeypatch.delenv("KUBE_WORKLOAD_UID", raising=False)
-    monkeypatch.delenv("RAY_JOB_ID", raising=False)
     options = _build_robustness_options(_ns(nodes=2))
     assert options["workload_uid"] == "env-uid"
 
 
-def test_pod_metrics_categories_csv_is_split(monkeypatch):
-    for key in (
-        "ROBUSTNESS_WORKLOAD_UID",
-        "CLAW_WORKLOAD_UID",
-        "WORKLOAD_UID",
-        "KUBE_WORKLOAD_UID",
-        "RAY_JOB_ID",
-    ):
-        monkeypatch.delenv(key, raising=False)
+def test_pod_metrics_categories_csv_is_split():
     options = _build_robustness_options(
         _ns(robustness_pod_metrics_categories=" gpu, memory ,  ,disk"),
     )
     assert options["pod_metrics_categories"] == ["gpu", "memory", "disk"]
 
 
-def test_existing_server_url_and_llm_rca_pass_through():
-    """Pre-existing option keys still ride through unchanged."""
-    options = _build_robustness_options(
-        _ns(
-            robustness_server_url="http://example.invalid:8000",
-            robustness_llm_rca=True,
-        )
+def test_missing_nodes_attr_treated_as_single_node():
+    """Legacy entry points that build a Namespace without ``nodes`` at
+    all must not crash and must default to single-node semantics."""
+    ns = argparse.Namespace(
+        robustness_server_url=None,
+        robustness_llm_rca=None,
     )
-    assert options["robustness_server_url"] == "http://example.invalid:8000"
-    assert options["llm_rca_enabled"] is True
+    options = _build_robustness_options(ns)
+    assert "auto_probe_inference_server" not in options
+    assert "progress_no_levers_min_minutes" not in options
+    assert "disable_local_probe" not in options
+
+
+def test_nodes_zero_or_none_treated_as_single_node():
+    """``nodes=0`` and ``nodes=None`` safely degrade to single-node."""
+    for options in (
+        _build_robustness_options(_ns(nodes=0)),
+        _build_robustness_options(_ns(nodes=None)),
+    ):
+        assert "auto_probe_inference_server" not in options
+        assert "progress_no_levers_min_minutes" not in options
+        assert "disable_local_probe" not in options
+
+
+# ---------------------------------------------------------------------------
+# _resolve_robustness_choice — multi-node auto-downgrade to mock
+# ---------------------------------------------------------------------------
+
+def test_resolve_choice_single_node_default_keeps_agent():
+    """Default path on single-node must stay ``"agent"`` so the real
+    LocalProbe coverage is preserved on hosts where the inference server
+    / ray actually live in the sandbox container."""
+    ns = _ns(nodes=1, robustness_backend=None)
+    assert _resolve_robustness_choice(ns) == "agent"
+
+
+def test_resolve_choice_single_node_explicit_mock_kept():
+    """Explicit ``--robustness-mock`` on single-node passes through."""
+    ns = _ns(nodes=1, robustness_backend="mock")
+    assert _resolve_robustness_choice(ns) == "mock"
+
+
+def test_resolve_choice_multi_node_default_downgrades_to_mock(capsys):
+    """``args.nodes >= 2`` with the default agent choice → mock, silently."""
+    ns = _ns(nodes=2, robustness_backend=None)
+    chosen = _resolve_robustness_choice(ns)
+    assert chosen == "mock"
+    captured = capsys.readouterr()
+    assert "WARN" not in captured.err
+    assert "WARN" not in captured.out
+
+
+def test_resolve_choice_multi_node_explicit_agent_downgrades_with_warning(capsys):
+    """``args.nodes >= 2`` with ``--robustness-agent`` explicitly → mock
+    with a WARNING on stderr that points operators at the multi-node
+    SKILL section."""
+    ns = _ns(nodes=2, robustness_backend="agent")
+    chosen = _resolve_robustness_choice(ns)
+    assert chosen == "mock"
+    captured = capsys.readouterr()
+    assert "WARN" in captured.err
+    assert "auto-downgrad" in captured.err.lower()
+    assert "multi_node/SKILL.md" in captured.err
+
+
+def test_resolve_choice_multi_node_explicit_mock_no_warning(capsys):
+    """Operators who anticipate the auto-downgrade and pass
+    ``--robustness-mock`` explicitly must NOT see the WARNING."""
+    ns = _ns(nodes=4, robustness_backend="mock")
+    chosen = _resolve_robustness_choice(ns)
+    assert chosen == "mock"
+    captured = capsys.readouterr()
+    assert "WARN" not in captured.err
+
+
+def test_resolve_choice_missing_nodes_attr_treated_as_single_node():
+    """Legacy entry points that omit ``nodes`` keep the agent default."""
+    ns = argparse.Namespace(robustness_backend=None)
+    assert _resolve_robustness_choice(ns) == "agent"
+
+
+def test_resolve_choice_nodes_zero_or_none_treated_as_single_node():
+    """``nodes=0`` / ``nodes=None`` must NOT trip the multi-node downgrade."""
+    for ns in (
+        _ns(nodes=0, robustness_backend="agent"),
+        _ns(nodes=None, robustness_backend="agent"),
+    ):
+        assert _resolve_robustness_choice(ns) == "agent"

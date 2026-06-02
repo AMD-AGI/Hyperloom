@@ -8,8 +8,8 @@ single canonical flow that P0 must support:
     3. Coordinator materializes the approved proposal as a ``baseline`` task
     4. Dispatcher runs the task via the registered ``baseline`` runner
        (a one-line Python lambda for this demo)
-    5. Orchestration emits REQUEST{target=kernel, kind=select_kernels}
-    6. Kernel (mock) auto-responds with RESPONSE{kind=select_kernels_done}
+    5. Orchestration emits REQUEST{target=kernel, kind=trace_analyze}
+    6. Kernel (mock) auto-responds with RESPONSE{kind=trace_analyze_done}
     7. Coordinator routes the response back to Orchestration's inbox
     8. Orchestration acknowledges via send_message
 
@@ -24,9 +24,6 @@ Output: a sequence of bullet-pointed events ending with the final state.
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
-from pathlib import Path
 
 from ..orchestrator.backends import (
     MockBackend,
@@ -59,7 +56,7 @@ def _orchestration_plan() -> ScriptedPlan:
         MockTurn(intents=[
             Intent(type=IntentType.REQUEST, payload={
                 "target_agent": "kernel",
-                "kind": "select_kernels",
+                "kind": "trace_analyze",
                 "params": {"top_k": 5},
                 "reason": "kick off Plan A kernel optimization",
             }),
