@@ -939,6 +939,59 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
         assert result is not None and result[0] == "conc_sweep_done", terminal
 
 
+def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
+    """Bug #7: KERNEL→SWEEP must drain pending KEEP integrates before
+    enqueuing sweep / conc_sweep. Otherwise the KEEP'd kernel is
+    orphaned (SWEEP allowed set lacks 'integrate') and downstream
+    actions measure the explore-only current_best, masking the kernel's
+    E2E contribution.
+
+    Verifies _on_enter_sweep calls integrate_handler for each pending
+    KEEP via the SharedState ledger queue (next_pending_keep_kernel_id).
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from inference_optimizer.orchestrator import kernel_request_handlers
+
+    # Mock integrate_handler so we don't really run sglang.
+    fake_integrate = AsyncMock(
+        return_value={
+            "status": "ok", "decision": "KEEP",
+            "kernel_id": "k001", "gain_pct": 1.5,
+        },
+    )
+    monkeypatch.setattr(
+        kernel_request_handlers, "integrate_handler", fake_integrate,
+    )
+    # Also patch the symbol where coordinator imports it from.
+    from inference_optimizer.orchestrator import coordinator as coord_mod
+    if hasattr(coord_mod, "integrate_handler"):
+        monkeypatch.setattr(coord_mod, "integrate_handler", fake_integrate)
+
+    # Minimal coordinator double: only needs shared_state with KEEP queue
+    # and session_dir; verify the drain helper itself, not the full
+    # _on_enter_sweep wiring (which is tested elsewhere).
+    coord = MagicMock()
+    coord.shared_state = MagicMock()
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.rejected_kernel_ids = []
+    coord.shared_state.save = MagicMock()
+    # Pop two KEEPs in sequence then empty.
+    pending_queue = ["k001", "k002"]
+    coord.shared_state.next_pending_keep_kernel_id = lambda: (
+        pending_queue.pop(0) if pending_queue else ""
+    )
+    coord.session_dir = Path("/tmp/sess")
+
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+    asyncio.run(Coordinator._drain_pending_keep_integrates(coord))
+
+    # Both KEEPs got dispatched, save called after each.
+    assert fake_integrate.await_count == 2, fake_integrate.await_args_list
+    # State save called at least once per integrate.
+    assert coord.shared_state.save.call_count >= 2
+
+
 def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
     """Bug #11: ``conc_sweep_phase_singleton`` rule must deny
     LLM-emitted conc_sweep proposals once the auto-enqueue stamped

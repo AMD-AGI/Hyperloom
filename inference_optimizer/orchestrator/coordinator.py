@@ -3028,6 +3028,65 @@ class Coordinator:
     # ------------------------------------------------------------------
     # v0.8 §3.2 §5.4 + SWEEP phase auto-dispatch
     # ------------------------------------------------------------------
+    async def _drain_pending_keep_integrates(self) -> None:
+        """Bug #7: drain pending KEEP integrates inherited from KERNEL.
+
+        KERNEL→SWEEP transition is a hard budget cap; an orchestration
+        tick window between a kernel's final KEEP and ``kernel_phase_
+        budget_exhausted`` is often too short to propose+approve+run
+        ``integrate``. The KEEP then strands in the ``kernel_opt_attempts``
+        ledger with no path to land (SWEEP allowed set is {sweep,
+        conc_sweep, recover}; ``integrate`` is denied by phase_incompatible).
+        Downstream sweep / conc_sweep then measure the explore-only
+        current_best and the kernel's E2E contribution never reaches
+        the optimization_stack.
+
+        Mitigation: at SWEEP entry, walk
+        ``SharedState.next_pending_keep_kernel_id`` until empty, calling
+        ``integrate_handler`` directly. Each integrate runs an actual
+        E2E re-baseline (5-20 min) so this can delay SWEEP entry; that
+        is acceptable vs hours of GPU idled in singleton-blocked SWEEP
+        loops. Safety cap of 10 KEEPs guards against pathological queue
+        sizes; failures push the kernel into ``rejected_kernel_ids`` so
+        the queue cannot deadlock.
+        """
+        from .kernel_request_handlers import integrate_handler
+        state = self.shared_state
+        drained = 0
+        max_drain = 10
+        while drained < max_drain:
+            kid = state.next_pending_keep_kernel_id()
+            if not kid:
+                break
+            log.info(
+                "SWEEP entry: draining pending KEEP integrate for "
+                "kernel_id=%s (drained %d so far)", kid, drained,
+            )
+            try:
+                await integrate_handler(
+                    {"kernel_id": kid, "base_tput": float(state.baseline_tput or 0.0)},
+                    session_dir=self.session_dir,
+                )
+                state.save(self.session_dir)
+            except Exception as exc:  # noqa: BLE001 — never block SWEEP entry
+                log.exception(
+                    "SWEEP entry: integrate(%s) raised %r; marking "
+                    "rejected to prevent drain loop deadlock", kid, exc,
+                )
+                if state.rejected_kernel_ids is None:
+                    state.rejected_kernel_ids = []
+                if kid not in state.rejected_kernel_ids:
+                    state.rejected_kernel_ids.append(kid)
+                state.save(self.session_dir)
+            drained += 1
+        if drained >= max_drain:
+            log.warning(
+                "SWEEP entry: drain cap (%d) reached; remaining pending "
+                "KEEPs will be visible in summary.by_kernel as KEEP_PENDING",
+                max_drain,
+            )
+
+    # ------------------------------------------------------------------
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
         """Auto-enqueue a ``sweep`` task on SWEEP entry.
 
@@ -3065,6 +3124,11 @@ class Coordinator:
         the LLM intent payload.
         """
         state = self.shared_state
+        # Bug #7 fix: drain pending KEEP integrates from prior KERNEL
+        # phase so sweep / conc_sweep measure the full current_best
+        # (explore + kernel stack), not the explore-only baseline.
+        if getattr(state, "has_keep_pending_integrate", False):
+            await self._drain_pending_keep_integrates()
         try:
             task = await self._enqueue_internal_sweep_task(
                 reason="phase_entry",
