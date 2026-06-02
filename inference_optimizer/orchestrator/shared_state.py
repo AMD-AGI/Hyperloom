@@ -2892,6 +2892,10 @@ class SharedState:
             summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
+                # TraceLens derive_kernel_category bucket (MoE / LayerNorm /
+                # GEMM / ...). Without this passthrough downstream consumers
+                # (kernel_attempt_summary by_kernel rows) get an empty string.
+                "kernel_category": entry.get("kernel_category") or "",
                 "gpu_pct": entry.get("gpu_pct"),
                 "bottleneck": entry.get("bottleneck"),
                 "bound_type": entry.get("bound_type"),
