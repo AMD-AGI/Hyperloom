@@ -195,10 +195,11 @@ These govern the optimizer's EXPLORE phase, not the launcher; the full
 contract lives in `orchestrator/system_prompts/orchestration.md`. In
 brief:
 
-- **IR-4 specialist-first**: EXPLORE grids must carry
+- **IR-4 — EXPLORE is specialist-first**: EXPLORE grids must carry
   `provenance='specialist:<domain>'` (up to `research_lane_capacity` per
   round, hard cap 6) or `'default_grid'`
-  (cold-start, uncapped); all-`llm_direct` grids are denied. Specialists
+  (cold-start, uncapped); all-`llm_direct` grids are denied
+  (`explore_requires_specialist_provenance`). Specialists
   author patches into an isolated worktree; `integrate_patch` does the
   actual `git apply` + throughput/accuracy gate.
 - **IR-6 HARD force-exit**: EXPLORE exits the moment wall-clock remaining
