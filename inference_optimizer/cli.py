@@ -5111,19 +5111,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Forward llm_rca_enabled=false into request.options.",
     )
     opt.add_argument(
-        "--nodes",
-        dest="nodes",
-        type=int,
-        default=int(os.environ.get("NODES", "1") or "1"),
-        help="Number of nodes the optimization run is spanning (RayJob worker "
-             "count + head). Honoured by the robustness-agent multi-node "
-             "policy: --nodes>=2 disables the local sandbox probe and "
-             "enables the cluster pod-metrics fan-out so symptoms come "
-             "from robustness-server instead of per-pod rocm-smi/HTTP "
-             "probes. Single-node (default) keeps the legacy local-probe "
-             "fallback unchanged.",
-    )
-    opt.add_argument(
         "--robustness-workload-uid",
         dest="robustness_workload_uid",
         type=str,
