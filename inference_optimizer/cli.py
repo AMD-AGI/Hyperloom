@@ -89,6 +89,7 @@ from .paths import (
     make_session_dir,
     mn_profile_trace_root,
     session_dir as _session_dir_resolve,
+    workspace_root as _workspace_root_resolve,
 )
 from .session_paths import (
     agent_prompt_snapshot,
@@ -853,6 +854,60 @@ def _resume_safe_numeric(
     return default
 
 
+def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
+    """Best-effort loader for the launcher's advisory ``model_arch`` profile.
+
+    Reads ``<workspace_root>/model_arch.json`` (the convention path under
+    ``$USER_DATA_PATH``) written pre-launch by the SKILL launcher. The
+    profile is **advisory-only** — it is injected into prompts but drives
+    no deterministic gating.
+
+    Soft-degrade contract (never blocks launch):
+      * file missing / unreadable / not valid JSON / not a dict -> WARN,
+        return ``{}``.
+      * stale-file guard: the convention path lives at the shared
+        workspace root (parent of every model/session dir), so a leftover
+        file from a previous run could otherwise leak into an unrelated
+        launch. Require ``data["model_name"]`` basename to match the
+        launched ``--model`` basename; mismatch -> WARN
+        ``model_arch_stale_or_mismatch``, return ``{}``.
+    """
+    arch_path = workspace_root / "model_arch.json"
+    try:
+        raw = arch_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logging.warning("model_arch_unreadable: %s (%s)", arch_path, exc)
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logging.warning("model_arch_invalid_json: %s (%s)", arch_path, exc)
+        return {}
+    if not isinstance(data, dict):
+        logging.warning(
+            "model_arch_not_a_dict: %s (got %s)", arch_path, type(data).__name__
+        )
+        return {}
+    declared = str(data.get("model_name") or "").strip()
+    if not declared:
+        logging.warning(
+            "model_arch_missing_model_name: %s (cannot verify freshness)", arch_path
+        )
+        return {}
+    if Path(declared).name != Path(model_name).name:
+        logging.warning(
+            "model_arch_stale_or_mismatch: %s declares model_name=%r but "
+            "launching %r — ignoring",
+            arch_path,
+            declared,
+            model_name,
+        )
+        return {}
+    return data
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -1023,6 +1078,13 @@ def _seed_shared_state(
         model_name=Path(args.model).name,
         model_path=str(args.model),
         model_class=args.model_class or "",
+        # Advisory architecture profile (launcher-supplied convention file).
+        # Fresh-launch only: resume rehydrates the persisted value from
+        # state.json (see load_or_init below), so we must NOT clobber it
+        # with a possibly newer/older convention file. Soft-degrade to {}.
+        model_arch=_load_model_arch(
+            _workspace_root_resolve(), Path(args.model).name
+        ),
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI / env at fresh-session time
@@ -1127,20 +1189,9 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 
 # Real executors enabled in every run mode (kernel + no-kernel).
 #
-# v0.8 M3 + KB_gaps/Gap-10: the legacy ``backends`` / ``params`` /
-# ``validate_stack`` registrations have been removed alongside
-# PolicyGate's ``action_deprecated`` rule. The merged ``explore``
-# action subsumes the per-variant KEEP/REVERT plus the per-KEEP stack
-# rebench; validate_stack is no longer a
-# standalone action.
-#
-# The legacy executor Python modules (``action_executors/backends.py``,
-# ``params.py``, ``validate_stack.py``) have been physically deleted
-# from the tree. The legacy resume audit trails (``backends_attempts``
-# etc.) keep their meaning on disk so legacy session resumes still
-# render correctly. New sessions never see these action names because
-# PolicyGate denies them with ``rule='action_deprecated'`` before a
-# task is ever queued.
+# The merged ``explore`` action subsumes the per-variant KEEP/REVERT
+# plus the per-KEEP stack rebench; there is no standalone validation
+# action.
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline":          baseline_executor,
     # GAP 1 — ``replay_warm_recipe`` runs the same Magpie subprocess
@@ -1168,8 +1219,7 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     # cleans up leaked VRAM owners and, behind
     # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, optionally shells out to
     # ``rocm-smi --gpureset``. See
-    # ``orchestrator/action_executors/recover.py``. ``validate_stack``
-    # has been retired and is intentionally absent.
+    # ``orchestrator/action_executors/recover.py``.
     "recover":           recover_executor,
 }
 
@@ -4858,15 +4908,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model-class", type=str,
         default=os.environ.get("MODEL_CLASS", None),
         help=(
-            "Model class hint consumed by "
-            "``orchestrator/scoring.MODEL_CLASS_ACTION_PRIORS`` to seed "
-            "per-action base scores. Recognised values (case-insensitive, "
-            "with -/+/space tolerated): dense / moe_mla / moe_swa / "
-            "moe_mla_nsa. The deleted ``classify`` action used to discover "
-            "this from the model files; the external SKILL caller is now "
-            "expected to supply it via this flag (or the MODEL_CLASS env "
-            "var). Unset / unknown values fall back to the ``moe_mla`` "
-            "curated priors so DeepSeek-shaped sessions keep working."
+            "Categorical model-class key. It is the deterministic key for "
+            "several consumers: the atom explore seed grid "
+            "(action_executors/explore.py), the framework-agent gap search "
+            "token (action_executors/_framework_gap_composer.py), the recipe "
+            "key, and the orchestration prompt label. Recognised values "
+            "(case-insensitive, with -/+/space tolerated): dense / moe_mla / "
+            "moe_swa / moe_mla_nsa. The deleted ``classify`` action used to "
+            "discover this from the model files; the external SKILL caller is "
+            "now expected to supply it via this flag (or the MODEL_CLASS env "
+            "var). Unset / unknown values fall back to ``moe_mla`` so "
+            "DeepSeek-shaped sessions keep working. For richer *advisory* "
+            "model context (attention variant, KV/token, experts, MTP, ...) "
+            "the SKILL launcher writes $USER_DATA_PATH/model_arch.json, which "
+            "is injected into prompts but drives no gating."
         ),
     )
     opt.add_argument("--target-summary", type=str, default=None,
