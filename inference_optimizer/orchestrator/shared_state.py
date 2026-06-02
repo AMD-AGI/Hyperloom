@@ -3866,6 +3866,86 @@ class SharedState:
             )
         return "\n".join(rows)
 
+    def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
+        """Render advisory multi-model proposal scores for Orchestration.
+
+        Reads the ``ensemble_scores`` blob attached to the most recent
+        :attr:`specialist_rounds` entries by the ProposalScorer (see
+        ``orchestrator/proposal_scorer.py``). Each line shows a variant's
+        per-model ``score ("reason")`` side-by-side so Orchestration can
+        see agreement / disagreement. There is deliberately NO mean and
+        NO sorting — these are one reference among many (parallel to
+        gaps / KB / analysis.md), not a ranking directive (Inv-9.1: no
+        system-side scoreboard).
+
+        Returns ``""`` when no recent round carries scores so the caller
+        skips the whole section header.
+
+        Format::
+
+            round=<round_id> domain=<domain>
+              - <variant_name>: claude-opus-4-7=8.0 ("..."), gpt-5.4=6.5 ("...")
+        """
+        rounds = [
+            r for r in (self.specialist_rounds or [])
+            if isinstance(r, dict)
+            and isinstance(r.get("ensemble_scores"), dict)
+            and (r["ensemble_scores"].get("models") or {})
+        ]
+        if not rounds:
+            return ""
+        rows: list[str] = [
+            "(Advisory only — one reference among many, NOT a ranking "
+            "directive. Scores are 0-10 likelihood-of-throughput-gain "
+            "priors from independent models; weigh alongside gaps / KB / "
+            "analysis.md.)",
+        ]
+        for r in rounds[-max_rounds:]:
+            ens = r["ensemble_scores"]
+            models = ens.get("models") or {}
+            scale = str(ens.get("scale") or "0-10")
+            round_id = str(r.get("round_id") or "?")
+            domain = str(r.get("domain") or "?")
+            rows.append(f"round={round_id} domain={domain} scale={scale}")
+            # Collect every variant name seen across models, preserving
+            # the proposal_set order when available.
+            ordered_names: list[str] = []
+            seen: set[str] = set()
+            for variant in (r.get("proposal_set") or []):
+                if isinstance(variant, dict):
+                    nm = str(variant.get("name") or "")
+                    if nm and nm not in seen:
+                        ordered_names.append(nm)
+                        seen.add(nm)
+            for per_model in models.values():
+                if isinstance(per_model, dict):
+                    for nm in per_model:
+                        if nm not in seen:
+                            ordered_names.append(nm)
+                            seen.add(nm)
+            for nm in ordered_names:
+                parts: list[str] = []
+                for model_slug, per_model in models.items():
+                    if not isinstance(per_model, dict):
+                        continue
+                    cell = per_model.get(nm)
+                    if isinstance(cell, dict) and cell.get("score") is not None:
+                        reason = str(cell.get("reason") or "").replace("\n", " ")
+                        if len(reason) > 80:
+                            reason = reason[:77] + "..."
+                        parts.append(
+                            f"{model_slug}={float(cell['score']):.1f} "
+                            f"(\"{reason}\")"
+                        )
+                    else:
+                        parts.append(f"{model_slug}=n/a")
+                rows.append(f"  - {nm}: " + ", ".join(parts))
+            errors = ens.get("errors") or {}
+            if errors:
+                err_models = ", ".join(sorted(errors))
+                rows.append(f"  · models unavailable this round: {err_models}")
+        return "\n".join(rows)
+
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
         lines = [

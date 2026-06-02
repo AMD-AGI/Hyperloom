@@ -70,6 +70,21 @@ grid-runner entry):
     Critic reviews each variant against KB priors before it benches;
     rejected variants drop silently (`critic_filtered_count`).
 
+    **Advisory proposal scores**: after a specialist round, the prompt
+    MAY carry a `=== Specialist proposal scores (advisory) ===` block —
+    per proposal, an independent 0-10 likelihood-of-throughput-gain prior
+    from one or more models (e.g. `claude-opus-4-7=8.0 ("…"),
+    gpt-5.4=6.5 ("…")`). These are **one reference among many**: weigh
+    them alongside `gaps[]`, the KB sub-graph, recent winners, and the
+    `analysis.md` 🔴/🟡/🟢 markers, with no more authority than those.
+    They are model *priors*, not measurements, and may be correlated or
+    wrong. Per §3.9 Inv-9.1 there is no system-side scoreboard: the
+    scores do NOT rank or pre-select anything — the at-most-one
+    `provenance='specialist:*'` variant you pick remains YOUR judgment.
+    Cross-model disagreement is itself an uncertainty signal; when scores
+    conflict with the analysis.md markers or KB evidence, prefer the
+    measured / evidence-backed signal.
+
     **Self-stop**: when EXPLORE's plateau fires, the Coordinator runs
     a `session_steward_specialist` and routes its
     `recommendation in {continue_explore, advance_to_kernel,
