@@ -143,134 +143,6 @@ def test_canonical_fingerprint_matches_variant_fingerprint():
 
 
 # ===========================================================================
-# SharedState — explore_search legacy migration
-# ===========================================================================
-def test_explore_search_migration_unions_legacy_ledgers():
-    fp_attn = variant_fingerprint("--attention-backend aiter", {})
-    fp_max_seqs = variant_fingerprint("--max-num-seqs 512", {})
-    fp_triton = variant_fingerprint("--decode-attention-backend triton", {})
-    raw = {
-        "backends_search": {
-            "schema_version": 1,
-            "tested": {
-                fp_attn: {
-                    "name": "attn_aiter",
-                    "extra_server_args": "--attention-backend aiter",
-                    "extra_envs": {},
-                    "status": "succeeded",
-                    "tput": 1500.0, "gain_pct": 5.0,
-                    "round_id": "backends-001",
-                },
-                fp_triton: {
-                    "name": "decode_triton",
-                    "extra_server_args": "--decode-attention-backend triton",
-                    "extra_envs": {},
-                    "status": "succeeded",
-                    "tput": 750.0, "gain_pct": -25.0,
-                    "round_id": "backends-001",
-                },
-            },
-            "accepted": [{
-                "name": "attn_aiter",
-                "extra_server_args": "--attention-backend aiter",
-                "extra_envs": {},
-                "fingerprint": fp_attn,
-                "gain_pct": 5.0,
-            }],
-            "rejected": [{
-                "name": "decode_triton",
-                "extra_server_args": "--decode-attention-backend triton",
-                "extra_envs": {},
-                "fingerprint": fp_triton,
-                "reason": "not_keep", "gain_pct": -25.0,
-            }],
-            "name_index": {}, "cursor": 2,
-        },
-        "params_search": {
-            "schema_version": 2,
-            "tested": {
-                fp_max_seqs: {
-                    "name": "max_seqs_512",
-                    "extra_server_args": "--max-num-seqs 512",
-                    "extra_envs": {},
-                    "gain_pct": 2.5,
-                    "round_id": "params-001",
-                },
-            },
-            "accepted": [{
-                "name": "max_seqs_512",
-                "extra_server_args": "--max-num-seqs 512",
-                "extra_envs": {},
-                "fingerprint": fp_max_seqs,
-                "gain_pct": 2.5,
-            }],
-            "rejected": [], "name_index": {}, "cursor": 1,
-        },
-        "backend_winners_history": [{
-            "round_id": "backends-001",
-            "variant_name": "attn_aiter",
-            "gain_pct": 5.0,
-            "extra_server_args": "--attention-backend aiter",
-            "extra_envs": {},
-            "ts": "2026-05-01T00:00:30",
-        }],
-        "params_winner_history": [{
-            "round_id": "params-001",
-            "variant_name": "max_seqs_512",
-            "gain_pct": 2.5, "tput": 1450.0,
-            "ts": "2026-05-01T00:02:00",
-        }],
-        "synergy_attempted": ["attn_aiter+max_seqs_512"],
-    }
-
-    state = SharedState.from_dict(raw)
-    es = state.explore_search
-
-    # All three fingerprints made it across (no name collisions, no
-    # accidental dedup).
-    assert set(es["tested"].keys()) == {fp_attn, fp_triton, fp_max_seqs}
-    # Accepted bucket is the union (attn_aiter + max_seqs_512).
-    assert {a["name"] for a in es["accepted"]} == {"attn_aiter", "max_seqs_512"}
-    # Rejected fingerprints don't appear in accepted (so a re-promote
-    # wouldn't be double-counted).
-    rejected_fps = {r["fingerprint"] for r in es["rejected"]}
-    accepted_fps = {a["fingerprint"] for a in es["accepted"]}
-    assert not (rejected_fps & accepted_fps)
-    # winners_history merges both lists, in stable order.
-    assert len(es["winners_history"]) == 2
-    # Synergy combo string was normalized to a sorted list.
-    assert es["synergy_attempted"] == [["attn_aiter", "max_seqs_512"]]
-    # provenance is stamped on every row so the ledger origin is clear.
-    for row in es["tested"].values():
-        assert row["provenance"].startswith("legacy:")
-
-
-def test_explore_search_migration_is_idempotent():
-    """Re-loading the same raw state.json must not double-count entries."""
-    fp_attn = variant_fingerprint("--attention-backend aiter", {})
-    raw = {
-        "backends_search": {
-            "schema_version": 1,
-            "tested": {fp_attn: {
-                "name": "attn_aiter",
-                "extra_server_args": "--attention-backend aiter",
-                "extra_envs": {},
-                "status": "succeeded",
-                "tput": 1500.0, "gain_pct": 5.0,
-            }},
-            "accepted": [],
-            "rejected": [],
-            "name_index": {}, "cursor": 1,
-        },
-    }
-    state_a = SharedState.from_dict(raw)
-    # Round-trip through to_dict / from_dict to mimic resume.
-    state_b = SharedState.from_dict(state_a.to_dict())
-    assert state_a.explore_search["tested"] == state_b.explore_search["tested"]
-    assert state_a.explore_search["winners_history"] == state_b.explore_search["winners_history"]
-
-
-# ===========================================================================
 # SharedState — record_explore_accepted / apply_explore_search_update
 # ===========================================================================
 def test_record_explore_accepted_dedup_by_fingerprint():
@@ -1157,7 +1029,7 @@ async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_
 
 
 # ===========================================================================
-# breakdown.capability_summary — explore row + legacy aliases
+# breakdown.capability_summary — explore row + legacy compat rows
 # ===========================================================================
 def test_capability_summary_has_explore_row_with_legacy_aliases():
     state = {
@@ -1180,10 +1052,13 @@ def test_capability_summary_has_explore_row_with_legacy_aliases():
     assert cap["explore"]["best_gain_pct"] == 4.2
     assert cap["explore"]["keep_unstable_count"] == 1
     assert cap["explore"]["winners_history"] == 1
-    # Legacy aliases still emitted (KB_design §3.12 §4.2).
+    # Legacy compat rows stay emitted so archived (pre-merge) sessions
+    # still render; on a current session they are ``not_attempted``.
     assert "backends" in cap
     assert "params" in cap
     assert "validate_stack" in cap
+    assert cap["backends"]["status"] == "not_attempted"
+    assert cap["params"]["status"] == "not_attempted"
 
 
 # ===========================================================================

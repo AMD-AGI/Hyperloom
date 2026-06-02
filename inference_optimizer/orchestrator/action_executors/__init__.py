@@ -4,13 +4,9 @@ Each runner is an ``async def fn(RunnerContext) -> dict`` that the
 SubAgentRunner dispatches when a queued task's ``kind`` matches its
 registered name.
 
-v0.8 M3 + KB_gaps/Dead-A consolidated the legacy ``backends`` /
-``params`` / ``validate_stack`` executors into the merged
-:class:`ExploreExecutor`. Their modules and yamls have been
-physically deleted; the legacy dataclass fields (``backends_search`` /
-``params_search`` / ``last_validate_stack`` / ``*_attempts``) stay on
-:class:`SharedState` for resume parity (Inv-10.1) but no executor
-backs them in fresh sessions.
+The merged :class:`ExploreExecutor` is the single grid-runner entry;
+it maintains the unified ``explore_search`` ledger on
+:class:`SharedState`.
 """
 
 from .baseline import (
