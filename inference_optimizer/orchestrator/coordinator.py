@@ -2504,6 +2504,33 @@ class Coordinator:
         ]
         return lanes, int(getattr(meta, "lease_ttl_sec", 0) or 0)
 
+    def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
+        """Summarise warm-start ``what_worked`` items the scout can skip.
+
+        Returns a list of ``{name, source}`` for proven optimizations from
+        the prior session's recipe so the research scout focuses on net-new
+        priors instead of re-mining already-validated ones. Empty when no
+        warm recipe / no ``what_worked`` rows. Fail-soft.
+        """
+        state = self.shared_state
+        warm = getattr(state, "warm_start_recipe", None) or {}
+        if not isinstance(warm, dict) or not warm:
+            return []
+        recipe = warm.get("recipe") or {}
+        recipe_attrs = (recipe.get("attrs") or recipe) if isinstance(recipe, dict) else {}
+        what_worked = recipe_attrs.get("what_worked") or []
+        if not isinstance(what_worked, list):
+            return []
+        out: list[dict[str, str]] = []
+        for row in what_worked:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            out.append({"name": name, "source": str(row.get("source") or "").strip()})
+        return out
+
     def _inject_warm_recipe_history_into_ledger(self) -> int:
         """GAP 1 supporting helper — pre-fill ``explore_search.rejected``
         with the warm-start recipe's historical ``what_failed`` rows.
@@ -3840,6 +3867,9 @@ class Coordinator:
             "reason": str(reason),
             "seen_pr_ids": seen,
         }
+        proven = self._warm_recipe_proven_items()
+        if proven:
+            params["already_proven"] = proven
         await self._warm_specialist_params(params)
         try:
             task, was_existing = await self.tasks.create_or_return_existing(
@@ -4000,6 +4030,7 @@ class Coordinator:
                     "severity": "medium",
                     "domain_hint": str(tags[0]) if tags else "",
                     "source": "research_scout",
+                    "provenance": str(hint.get("source") or ""),
                 })
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
@@ -8052,6 +8083,18 @@ class Coordinator:
             if _gap_notes:
                 params["target_gap_notes"] = _gap_notes
 
+        if "research_hints" not in params:
+            try:
+                from . import research_hints as _research_hints
+                _hints_block = _research_hints.summarise_for_prompt(
+                    self.session_dir,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: specialist research hints failed")
+                _hints_block = ""
+            if _hints_block:
+                params["research_hints"] = _hints_block
+
         # fill gap-specific anchors from the
         # gaps[] ledger. Orchestration carries a ``gap_canonical_id``
         # via ``delegate.params`` (and also as the M5 ``gap`` field);
@@ -10969,6 +11012,47 @@ class Coordinator:
             })
         return out
 
+    def _collect_attempt_provenance(
+        self,
+    ) -> tuple[dict[str, str], list[dict[str, Any]]]:
+        """Map proven optimizations back to their research-hint origin.
+
+        Walks the gaps[] attempts ledger and returns:
+
+        * ``kept_sources`` — ``{variant_name: provenance}`` for KEEP
+          attempts whose gap carries an external ``provenance`` (e.g. a
+          research-hint PR/blog URL).
+        * ``reverted_rows`` — ``what_failed``-shaped rows for REVERT
+          attempts, carrying the variant name, a reason, the measured
+          gain, and the originating source when known.
+
+        Fail-soft: any malformed gap/attempt row is skipped.
+        """
+        kept_sources: dict[str, str] = {}
+        reverted_rows: list[dict[str, Any]] = []
+        gaps = getattr(self.shared_state, "gaps", []) or []
+        for gap in gaps:
+            if not isinstance(gap, dict):
+                continue
+            provenance = str(gap.get("provenance") or "").strip()
+            for attempt in gap.get("attempts") or []:
+                if not isinstance(attempt, dict):
+                    continue
+                variant = str(attempt.get("variant_name") or "").strip()
+                outcome = str(attempt.get("outcome") or "").strip().upper()
+                if outcome == "KEEP" and variant and provenance:
+                    kept_sources.setdefault(variant, provenance)
+                elif outcome == "REVERT" and variant:
+                    row: dict[str, Any] = {
+                        "name": variant,
+                        "reason": "reverted",
+                        "gain_pct": attempt.get("gain_pct"),
+                    }
+                    if provenance:
+                        row["source"] = provenance
+                    reverted_rows.append(row)
+        return kept_sources, reverted_rows
+
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
         """Materialise the recipe-shaped view of :class:`SharedState`.
 
@@ -11024,6 +11108,10 @@ class Coordinator:
                 ).strip()
                 if stack_args:
                     best_config["extra_sglang_args"] = stack_args
+        sediment_on = bool(getattr(ss, "recipe_sediment_enabled", True))
+        kept_sources, reverted_rows = (
+            self._collect_attempt_provenance() if sediment_on else ({}, [])
+        )
         what_worked: list[dict[str, Any]] = []
         for idx, entry in enumerate(opt_stack):
             if not isinstance(entry, dict):
@@ -11031,8 +11119,9 @@ class Coordinator:
             gain_per: float | None = None
             if idx < len(gain_per_stack):
                 gain_per = gain_per_stack[idx]
-            what_worked.append({
-                "name":              str(entry.get("name") or ""),
+            name = str(entry.get("name") or entry.get("kernel_id") or "")
+            row: dict[str, Any] = {
+                "name":              name,
                 "extra_sglang_args": str(
                     entry.get("extra_server_args")
                     or entry.get("extra_sglang_args")
@@ -11040,7 +11129,11 @@ class Coordinator:
                 ),
                 "extra_envs":        dict(entry.get("extra_envs") or {}),
                 "gain_pct":          gain_per,
-            })
+            }
+            src = kept_sources.get(name)
+            if src:
+                row["source"] = src
+            what_worked.append(row)
         what_failed: list[dict[str, Any]] = []
         for failure in last_failures[-10:]:
             if isinstance(failure, dict):
@@ -11048,6 +11141,8 @@ class Coordinator:
                     "name":  str(failure.get("name") or failure.get("action") or ""),
                     "reason": str(failure.get("reason") or failure.get("error_class") or ""),
                 })
+        for rev in reverted_rows:
+            what_failed.append(rev)
         kernel_optimizations = self._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
         cumulative_total = float(getattr(ss, "cumulative_gain", 0.0) or 0.0)

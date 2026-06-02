@@ -920,6 +920,10 @@ class SharedState:
     # (``--no-target-advisory`` turns it off). Advisory only — never gates
     # Objective / scoring.
     target_advisory_enabled: bool = True
+    # Master switch for sedimenting KEEP/REVERT provenance (research-hint
+    # source + measured gain) into the persistent recipe. When off the
+    # recipe stays purely ephemeral (existing behaviour).
+    recipe_sediment_enabled: bool = True
     research_scout_runs: int = 0
     research_scout_seen_pr_ids: list[str] = field(default_factory=list)
     # Round id at which the scout was last dispatched, so the K-round
@@ -2863,6 +2867,11 @@ class SharedState:
                 "severity":        str(entry.get("severity") or "medium"),
                 "domain_hint":     str(entry.get("domain_hint") or ""),
                 "source":          str(entry.get("source") or ""),
+                # Origin reference (e.g. a research-hint PR/blog URL) that
+                # outlives the session so KEEP/REVERT outcomes can be
+                # sedimented into the recipe with provenance. Optional;
+                # absent on gaps without an external origin.
+                "provenance":      str(entry.get("provenance") or ""),
                 "first_seen_ts":   str(entry.get("first_seen_ts") or now),
                 "last_updated_ts": now,
                 "attempts":        list(entry.get("attempts") or []),
@@ -2874,7 +2883,8 @@ class SharedState:
         else:
             # Field-wise merge: incoming non-empty values win except
             # for ``first_seen_ts`` (preserve oldest).
-            for key in ("symptom", "layer", "severity", "domain_hint", "source"):
+            for key in ("symptom", "layer", "severity", "domain_hint",
+                        "source", "provenance"):
                 incoming = entry.get(key)
                 if incoming:
                     existing[key] = str(incoming)

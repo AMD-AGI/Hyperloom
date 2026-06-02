@@ -480,6 +480,11 @@ class SpecialistRunner:
                 peak_tflops=float(params.get("peak_tflops") or 0.0),
                 arch_notes=str(params.get("arch_notes") or ""),
                 target_gap_notes=str(params.get("target_gap_notes") or ""),
+                already_proven=[
+                    p for p in (params.get("already_proven") or [])
+                    if isinstance(p, dict)
+                ],
+                research_hints=str(params.get("research_hints") or ""),
                 # Workload context — populated by
                 # Coordinator._warm_specialist_params from SharedState.
                 # Zero/empty means "Coordinator did not plumb this

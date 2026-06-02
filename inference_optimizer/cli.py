@@ -1194,6 +1194,7 @@ def _seed_shared_state(
             1, int(getattr(args, "research_scout_interval", 3) or 3)
         ),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
+        recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
         depth_gate_thresholds=_parse_depth_gate_thresholds(
             getattr(args, "depth_gate_thresholds", "") or ""
         ),
@@ -4357,6 +4358,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
               "prompts; advisory-only)")
     else:
         print("Target advisory : DISABLED (--no-target-advisory)")
+    if bool(getattr(args, "recipe_sediment", True)):
+        print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to "
+              "persistent recipe)")
+    else:
+        print("Recipe sediment : DISABLED (--no-recipe-sediment)")
     if bool(getattr(args, "depth_gate", True)):
         print("Depth gate      : ENABLED (stop/advance blocked while "
               "exploration is too shallow; IR-6 budget overrides)")
@@ -5620,6 +5626,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Re-dispatch the research scout every N EXPLORE rounds with "
              "the current bottleneck context (append-only). Default 3. "
              "Ignored when ``--no-research-scout`` is set.",
+    )
+    opt.add_argument(
+        "--recipe-sediment",
+        dest="recipe_sediment",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_RECIPE_SEDIMENT"),
+        help="Sediment KEEP/REVERT provenance into the persistent recipe: "
+             "KEEP optimizations traceable to a research hint carry their "
+             "source + measured gain into ``what_worked``; REVERTs land in "
+             "``what_failed`` so the next warm-start avoids re-testing them. "
+             "Default on; pass ``--no-recipe-sediment`` to keep the recipe "
+             "purely ephemeral. Env: INFERENCE_OPTIMIZER_RECIPE_SEDIMENT=0.",
     )
     opt.add_argument(
         "--target-advisory",

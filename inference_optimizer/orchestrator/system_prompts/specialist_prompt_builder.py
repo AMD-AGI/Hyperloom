@@ -382,12 +382,26 @@ def _focus_session_steward_specialist(
 def _focus_research_scout_specialist(
     inp: SpecialistPromptInputs,
 ) -> list[str]:
+    proven_lines: list[str] = []
+    if inp.already_proven:
+        proven_lines.append(
+            "**Already proven (warm-start recipe) — do NOT re-mine these; "
+            "focus on net-new priors:**"
+        )
+        for item in inp.already_proven[:12]:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            src = str(item.get("source") or "").strip()
+            proven_lines.append(f"- {name}" + (f" (source={src})" if src else ""))
+        proven_lines.append("")
     return [
         "You are the **research scout** — a read-only collector of",
         "*already-proven* priors. You do NOT benchmark, apply patches, or",
         "decide KEEP/REVERT. Your single deliverable is a prioritised list",
         "of research hints, each with an explicit source.",
         "",
+        *proven_lines,
         "**Three research sources (cover all that are reachable)**",
         "1. **Reference launch scripts** — look under",
         "   ``$INFERENCEX_PATH/benchmarks/single_node/`` for scripts",
@@ -467,6 +481,13 @@ class SpecialistPromptInputs:
     # Advisory competitor target gap block (mirrored from the
     # Coordinator). Direction hint only; never gates the specialist.
     target_gap_notes: str = ""
+    # Already-proven warm-recipe optimizations (``{name, source}``) the
+    # research scout should skip re-mining. Empty on cold-start.
+    already_proven: list[dict[str, str]] = field(default_factory=list)
+    # Compact advisory research-hint block (source-backed priors collected
+    # this session). Rendered alongside the KB sub-graph as a co-equal
+    # prior; its presence suppresses the cold-start fallback.
+    research_hints: str = ""
     # Workload context (mirrored from SharedState by
     # Coordinator._warm_specialist_params; renders in section 2 so
     # the specialist sees the actual benchmark workload instead of
@@ -705,6 +726,7 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
         and not inp.warm_start_lessons
         and not inp.warm_start_pitfalls
         and not inp.pr_feed
+        and not inp.research_hints
     )
 
 
@@ -712,6 +734,23 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 4. CORTEX KB SUB-GRAPH", ""]
     cold = _is_cold_start(inp)
     if not inp.kb_subgraph:
+        if inp.research_hints:
+            # Research hints stand in as the advisory prior when the KB
+            # anchor is empty — co-equal with the KB sub-graph, never a
+            # deterministic gate. This keeps the cold-start fallback from
+            # firing whenever the scout produced fresh source-backed priors.
+            rows.extend([
+                "KB anchor is empty for this (model, hardware, domain), but "
+                "the research scout collected source-backed priors this "
+                "session. Treat these as your advisory prior (co-equal with "
+                "the KB sub-graph; the Critic still gates the final answer):",
+                "",
+                inp.research_hints,
+                "",
+                "Anchor proposals on these hints where they fit the gap "
+                "(Section 3) and hardware (Section 2).",
+            ])
+            return rows
         if cold:
             # Cold-start directive: replaces the bare "(none)" with a
             # specific instruction so the specialist proposes
