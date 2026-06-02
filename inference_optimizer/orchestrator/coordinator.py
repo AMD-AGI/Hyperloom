@@ -4948,6 +4948,18 @@ class Coordinator:
             if scores_block:
                 sections.append("=== Specialist proposal scores (advisory) ===")
                 sections.append(scores_block)
+            # Priors-match: which recently proposed variants align with
+            # proven research hints / the dominant external gap. Advisory
+            # ordering signal only (NOT a score, NOT a gate); omitted
+            # when nothing matches.
+            try:
+                priors_block = self._priors_match_advisory_block()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: priors-match advisory failed")
+                priors_block = ""
+            if priors_block:
+                sections.append("=== Priors-match (advisory ordering) ===")
+                sections.append(priors_block)
 
         # Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
@@ -8751,6 +8763,96 @@ class Coordinator:
         )
         return _research_hints.full_gap_summary(gap)
 
+    def _current_primary_gap(self) -> str | None:
+        """Resolve the dominant external gap direction ('latency' /
+        'throughput') from the LLM-authored competitor target, or
+        ``None`` when advisory is off / no comparable target exists.
+
+        Fail-soft: any read / parse problem yields ``None``.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "target_advisory_enabled", True)):
+            return None
+        try:
+            from . import research_hints as _research_hints
+
+            target = _research_hints.load_competitor_target(self.session_dir)
+            if not target:
+                return None
+            best = getattr(state, "current_best", None)
+            if not isinstance(best, dict):
+                return None
+            tput = best.get("tput")
+            tpot = best.get("tpot_mean_ms")
+            tp = int(getattr(state, "tp", 0) or 0)
+            our_tput_per_gpu = (
+                float(tput) / tp
+                if isinstance(tput, (int, float)) and tput > 0 and tp > 0
+                else None
+            )
+            our_tpot_ms = (
+                float(tpot)
+                if isinstance(tpot, (int, float)) and tpot > 0 else None
+            )
+            conc = int(getattr(state, "conc", 0) or 0) or None
+            gap = _research_hints.gap_analysis(
+                target,
+                our_tput_per_gpu=our_tput_per_gpu,
+                our_tpot_ms=our_tpot_ms,
+                conc=conc,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            return None
+        if not isinstance(gap, dict):
+            return None
+        return str(gap.get("primary_gap") or "").strip() or None
+
+    def _recent_proposed_variants(
+        self, *, max_rounds: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Collect proposal_set rows from the most recent specialist rounds.
+
+        Mirrors the window :meth:`SharedState.to_proposal_scores_summary`
+        renders so the priors-match annotation lines up with the scores
+        the prompt already shows. Deduped by variant name; fail-soft.
+        """
+        rounds = [
+            r for r in (getattr(self.shared_state, "specialist_rounds", []) or [])
+            if isinstance(r, dict) and isinstance(r.get("proposal_set"), list)
+        ]
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for r in rounds[-max_rounds:]:
+            for variant in r.get("proposal_set") or []:
+                if not isinstance(variant, dict):
+                    continue
+                name = str(variant.get("name") or "").strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    out.append(variant)
+        return out
+
+    def _priors_match_advisory_block(self) -> str:
+        """Flag recently proposed variants that align with proven priors
+        or the dominant external gap so Orchestration tries them earlier.
+
+        Advisory only — affects prompt ordering, never Objective /
+        scoring / gates. Empty string when nothing matches. Fail-soft.
+        """
+        try:
+            from . import research_hints as _research_hints
+
+            variants = self._recent_proposed_variants()
+            if not variants:
+                return ""
+            hints = _research_hints.load_hints(self.session_dir)
+            primary_gap = self._current_primary_gap()
+            return _research_hints.priors_match_summary(
+                variants, hints, primary_gap=primary_gap,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            return ""
+
     def _apply_depth_gate_to_verdict(
         self, *, raw_rec: str, next_gap: str, task: "Task",
     ) -> tuple[str, str]:
@@ -9638,6 +9740,9 @@ class Coordinator:
             "workspace": result.get("workspace"),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        integrate_gap_cid = str(result.get("gap_canonical_id") or "").strip()
+        if integrate_gap_cid:
+            entry["gap_canonical_id"] = integrate_gap_cid
         key = (entry["kernel_id"], entry["patch_path"], entry["target_file"])
         existing = {
             (item.get("kernel_id"), item.get("patch_path"), item.get("target_file"))
@@ -11014,14 +11119,21 @@ class Coordinator:
 
     def _collect_attempt_provenance(
         self,
-    ) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    ) -> tuple[dict[str, str], dict[str, str], list[dict[str, Any]]]:
         """Map proven optimizations back to their research-hint origin.
 
         Walks the gaps[] attempts ledger and returns:
 
         * ``kept_sources`` — ``{variant_name: provenance}`` for KEEP
           attempts whose gap carries an external ``provenance`` (e.g. a
-          research-hint PR/blog URL).
+          research-hint PR/blog URL). Also keyed by ``kernel_id`` when
+          the attempt carries one.
+        * ``kept_by_gap`` — ``{gap_canonical_id: provenance}`` for every
+          gap that both carries a ``provenance`` and has at least one
+          KEEP attempt. This is the primary, naming-independent lookup:
+          a stack entry stamped with its ``gap_canonical_id`` resolves
+          its source even when its ``name`` (explore ``variant_name`` vs.
+          kernel ``kernel_id``) never matches the attempt's key.
         * ``reverted_rows`` — ``what_failed``-shaped rows for REVERT
           attempts, carrying the variant name, a reason, the measured
           gain, and the originating source when known.
@@ -11029,29 +11141,37 @@ class Coordinator:
         Fail-soft: any malformed gap/attempt row is skipped.
         """
         kept_sources: dict[str, str] = {}
+        kept_by_gap: dict[str, str] = {}
         reverted_rows: list[dict[str, Any]] = []
         gaps = getattr(self.shared_state, "gaps", []) or []
         for gap in gaps:
             if not isinstance(gap, dict):
                 continue
             provenance = str(gap.get("provenance") or "").strip()
+            canonical = str(gap.get("canonical_id") or "").strip()
             for attempt in gap.get("attempts") or []:
                 if not isinstance(attempt, dict):
                     continue
                 variant = str(attempt.get("variant_name") or "").strip()
+                kernel = str(attempt.get("kernel_id") or "").strip()
                 outcome = str(attempt.get("outcome") or "").strip().upper()
-                if outcome == "KEEP" and variant and provenance:
-                    kept_sources.setdefault(variant, provenance)
-                elif outcome == "REVERT" and variant:
+                if outcome == "KEEP" and provenance:
+                    if variant:
+                        kept_sources.setdefault(variant, provenance)
+                    if kernel:
+                        kept_sources.setdefault(kernel, provenance)
+                    if canonical:
+                        kept_by_gap.setdefault(canonical, provenance)
+                elif outcome == "REVERT" and (variant or kernel):
                     row: dict[str, Any] = {
-                        "name": variant,
+                        "name": variant or kernel,
                         "reason": "reverted",
                         "gain_pct": attempt.get("gain_pct"),
                     }
                     if provenance:
                         row["source"] = provenance
                     reverted_rows.append(row)
-        return kept_sources, reverted_rows
+        return kept_sources, kept_by_gap, reverted_rows
 
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
         """Materialise the recipe-shaped view of :class:`SharedState`.
@@ -11109,8 +11229,8 @@ class Coordinator:
                 if stack_args:
                     best_config["extra_sglang_args"] = stack_args
         sediment_on = bool(getattr(ss, "recipe_sediment_enabled", True))
-        kept_sources, reverted_rows = (
-            self._collect_attempt_provenance() if sediment_on else ({}, [])
+        kept_sources, kept_by_gap, reverted_rows = (
+            self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
         )
         what_worked: list[dict[str, Any]] = []
         for idx, entry in enumerate(opt_stack):
@@ -11119,7 +11239,12 @@ class Coordinator:
             gain_per: float | None = None
             if idx < len(gain_per_stack):
                 gain_per = gain_per_stack[idx]
-            name = str(entry.get("name") or entry.get("kernel_id") or "")
+            name = str(
+                entry.get("variant_name")
+                or entry.get("name")
+                or entry.get("kernel_id")
+                or ""
+            )
             row: dict[str, Any] = {
                 "name":              name,
                 "extra_sglang_args": str(
@@ -11130,7 +11255,15 @@ class Coordinator:
                 "extra_envs":        dict(entry.get("extra_envs") or {}),
                 "gain_pct":          gain_per,
             }
-            src = kept_sources.get(name)
+            # Prefer the gap-id provenance stamped on the entry at KEEP
+            # time (naming-independent across explore / kernel stages);
+            # fall back to matching the entry's name / kernel_id.
+            entry_gap = str(entry.get("gap_canonical_id") or "").strip()
+            src = (
+                (kept_by_gap.get(entry_gap) if entry_gap else None)
+                or kept_sources.get(name)
+                or kept_sources.get(str(entry.get("kernel_id") or ""))
+            )
             if src:
                 row["source"] = src
             what_worked.append(row)
@@ -11402,11 +11535,16 @@ class Coordinator:
 
     def _lift_to_current_best(
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
+        *, gap_canonical_id: str = "",
     ) -> None:
         """Update SharedState.current_best + recompute cumulative_gain.
 
         Helper for both the 1-shot KEEP threshold path and the
         cross-round consistent-winner path in _promote_to_shared_state.
+
+        ``gap_canonical_id`` (when known) is stamped onto the appended
+        stack entry so recipe sedimentation can resolve the entry's
+        research-hint provenance by gap id rather than by name.
         """
         previous = self.shared_state.current_best or {}
         if not self.shared_state.optimization_stack:
@@ -11447,7 +11585,7 @@ class Coordinator:
             }
             key = (task_kind, str(variant_name or ""))
             if key not in existing:
-                self.shared_state.optimization_stack.append({
+                stack_entry: dict[str, Any] = {
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
@@ -11460,7 +11598,10 @@ class Coordinator:
                         bv.get("workspace") if isinstance(bv, dict) else None
                     ),
                     "ts": datetime.now(timezone.utc).isoformat(),
-                })
+                }
+                if gap_canonical_id:
+                    stack_entry["gap_canonical_id"] = gap_canonical_id
+                self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into ``gain_per_stack_entry`` so indexes
                 # stay aligned across the two parallel lists. See the
                 # SharedState docstring for the V1 StackGainEntry contract.
@@ -11966,8 +12107,13 @@ class Coordinator:
                     and isinstance(best_tput, (int, float))
                     and best_tput > 0
                 ):
+                    explore_gap_cid = (
+                        str((task.params or {}).get("gap_canonical_id") or "").strip()
+                        if task is not None else ""
+                    )
                     self._lift_to_current_best(
                         "explore", float(best_tput), best_winner,
+                        gap_canonical_id=explore_gap_cid,
                     )
                     promoted = True
                     changed = True

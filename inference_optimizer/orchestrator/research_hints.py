@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -361,6 +362,127 @@ def _to_num(value: Any) -> float | None:
         return None
 
 
+# Direction keywords associated with cutting per-output-token latency.
+# Used to flag variants that align with a dominant TPOT gap so they
+# surface earlier as an advisory prior (never a gate).
+_LATENCY_DIRECTION_KEYWORDS: tuple[str, ...] = (
+    "mtp", "speculative", "eagle", "medusa", "decode", "comm", "overlap",
+    "allreduce", "all_reduce", "quantized_allreduce", "cuda_graph",
+    "cudagraph", "fused", "fuse",
+)
+
+_STOPWORDS: frozenset[str] = frozenset({
+    "the", "and", "for", "with", "use", "using", "enable", "enabled",
+    "via", "this", "that", "from", "into", "per", "set", "than", "more",
+    "less", "when", "then", "case", "mode", "flag", "flags", "value",
+})
+
+
+def _tokens(text: str) -> set[str]:
+    out: set[str] = set()
+    for raw in re.split(r"[^a-z0-9]+", str(text).lower()):
+        tok = raw.strip()
+        if len(tok) >= 3 and tok not in _STOPWORDS:
+            out.add(tok)
+    return out
+
+
+def match_variants_to_priors(
+    variants: list[dict[str, Any]],
+    hints: list[dict[str, Any]],
+    *,
+    primary_gap: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Annotate which variants align with proven priors (advisory only).
+
+    For each variant ``{name, ...}`` returns a ``{name: {hints: [...],
+    latency_aligned: bool}}`` entry ONLY when it matches at least one
+    research hint (token overlap on the hint's ``what`` / ``domain_tags``)
+    or aligns with a dominant latency gap (``primary_gap == 'latency'``
+    and the variant carries a latency-direction keyword).
+
+    Matching is keyword-based and intentionally loose: it informs
+    prompt ordering, never gating/scoring. Returns an empty dict when
+    there is nothing to surface (caller skips the section). Fail-soft on
+    malformed rows.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    latency_dominant = str(primary_gap or "").strip().lower() == "latency"
+    hint_tokens: list[tuple[str, set[str]]] = []
+    for h in hints or []:
+        if not isinstance(h, dict):
+            continue
+        what = str(h.get("what") or "").strip()
+        if not what:
+            continue
+        toks = _tokens(what)
+        for tag in h.get("domain_tags") or []:
+            toks |= _tokens(tag)
+        if toks:
+            hint_tokens.append((what, toks))
+    for variant in variants or []:
+        if not isinstance(variant, dict):
+            continue
+        name = str(variant.get("name") or "").strip()
+        if not name:
+            continue
+        text = " ".join(
+            str(variant.get(k) or "")
+            for k in ("name", "extra_server_args", "extra_sglang_args",
+                      "candidate_extra_server_args", "description")
+        )
+        text += " " + " ".join(str(t) for t in (variant.get("domain_tags") or []))
+        vtoks = _tokens(text)
+        matched_hints: list[str] = []
+        for what, toks in hint_tokens:
+            if vtoks & toks:
+                matched_hints.append(what)
+        latency_aligned = bool(
+            latency_dominant
+            and any(kw in vtoks for kw in _LATENCY_DIRECTION_KEYWORDS)
+        )
+        if matched_hints or latency_aligned:
+            out[name] = {
+                "hints": matched_hints,
+                "latency_aligned": latency_aligned,
+            }
+    return out
+
+
+def priors_match_summary(
+    variants: list[dict[str, Any]],
+    hints: list[dict[str, Any]],
+    *,
+    primary_gap: str | None = None,
+    max_rows: int = 12,
+) -> str:
+    """Render an advisory block flagging variants that match priors.
+
+    Empty string when nothing matches so the section is skipped.
+    Advisory only — affects prompt ordering, never Objective/scoring/gate.
+    """
+    matches = match_variants_to_priors(
+        variants, hints, primary_gap=primary_gap,
+    )
+    if not matches:
+        return ""
+    lines = [
+        "Recently proposed variants that align with proven priors / the "
+        "dominant external gap. Treat as a reason to TRY THESE EARLIER — "
+        "advisory ordering only, NOT a score, NOT a gate.",
+    ]
+    for name in sorted(matches)[:max_rows]:
+        info = matches[name]
+        tags: list[str] = []
+        if info.get("latency_aligned"):
+            tags.append("aligns-with-latency-gap")
+        for what in info.get("hints") or []:
+            short = what if len(what) <= 60 else what[:57] + "..."
+            tags.append(f"hint:{short}")
+        lines.append(f"- {name}: " + "; ".join(tags))
+    return "\n".join(lines)
+
+
 def summarise_for_prompt(
     session_dir: Path, *, max_entries: int = 8,
 ) -> str:
@@ -397,6 +519,8 @@ __all__ = [
     "gap_analysis",
     "load_competitor_target",
     "load_hints",
+    "match_variants_to_priors",
+    "priors_match_summary",
     "summarise_for_prompt",
     "write_competitor_target",
     "write_hints_skeleton",

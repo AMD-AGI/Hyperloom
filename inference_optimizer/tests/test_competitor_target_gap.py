@@ -143,3 +143,49 @@ def test_derive_tpot_skipped_without_osl():
     measurement = {"ttft_mean_ms": 100.0, "e2el_mean_ms": 1090.0}
     benchmark_result._derive_tpot_if_missing(measurement, {})
     assert measurement.get("tpot_mean_ms") is None
+
+
+def test_match_variants_to_priors_by_hint_keyword():
+    variants = [
+        {"name": "mtp_on", "extra_server_args": "--speculative-algorithm EAGLE"},
+        {"name": "tp4", "extra_server_args": "--tp 4"},
+    ]
+    hints = [{
+        "what": "enable MTP speculative decoding",
+        "source": "https://pr/1",
+        "domain_tags": ["serving_specialist"],
+    }]
+    matches = research_hints.match_variants_to_priors(variants, hints)
+    assert "mtp_on" in matches
+    assert matches["mtp_on"]["hints"]
+    assert "tp4" not in matches
+
+
+def test_match_variants_latency_alignment():
+    variants = [
+        {"name": "fuse_rmsnorm", "extra_server_args": "--enable-fused-rmsnorm"},
+        {"name": "bs256", "extra_server_args": "--max-batch 256"},
+    ]
+    matches = research_hints.match_variants_to_priors(
+        variants, [], primary_gap="latency",
+    )
+    assert matches["fuse_rmsnorm"]["latency_aligned"] is True
+    assert "bs256" not in matches
+
+
+def test_match_variants_no_latency_alignment_when_throughput_gap():
+    variants = [{"name": "fuse_rmsnorm", "extra_server_args": "--fused"}]
+    matches = research_hints.match_variants_to_priors(
+        variants, [], primary_gap="throughput",
+    )
+    assert matches == {}
+
+
+def test_priors_match_summary_renders_and_skips_empty():
+    variants = [{"name": "mtp_on", "extra_server_args": "--mtp"}]
+    hints = [{"what": "try mtp", "source": "s"}]
+    text = research_hints.priors_match_summary(variants, hints)
+    assert "mtp_on" in text
+    assert "advisory" in text.lower()
+    assert research_hints.priors_match_summary([], hints) == ""
+    assert research_hints.priors_match_summary(variants, []) == ""

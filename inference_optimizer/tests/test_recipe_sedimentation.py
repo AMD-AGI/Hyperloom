@@ -59,11 +59,42 @@ def test_collect_attempt_provenance_maps_keep_and_revert(tmp_path):
         "variant_name": "bad_flag", "outcome": "REVERT", "gain_pct": -1.0,
     })
 
-    kept, reverted = coord._collect_attempt_provenance()
+    kept, kept_by_gap, reverted = coord._collect_attempt_provenance()
     assert kept == {"mtp_on": "https://pr/123"}
+    assert kept_by_gap == {"gap.research_hint.0": "https://pr/123"}
     assert len(reverted) == 1
     assert reverted[0]["name"] == "bad_flag"
     assert reverted[0]["source"] == "https://pr/123"
+
+
+def test_provenance_resolves_by_gap_id_when_name_mismatches(tmp_path):
+    """Cross-stage KEEP (kernel integrate) whose stack entry name never
+    matches the explore attempt's ``variant_name`` still sediments its
+    source via the stamped ``gap_canonical_id``.
+    """
+    coord = _make_coordinator(tmp_path)
+    ss = coord.shared_state
+    ss.optimization_stack = [{
+        "action": "integrate",
+        "kernel_id": "k007",
+        "extra_server_args": "--fused",
+        "gap_canonical_id": "gap.research_hint.0",
+    }]
+    ss.gain_per_stack_entry = [3.1]
+    ss.upsert_gap({
+        "canonical_id": "gap.research_hint.0",
+        "symptom": "fuse rmsnorm",
+        "layer": "research_hint",
+        "source": "research_scout",
+        "provenance": "https://pr/777",
+    })
+    ss.append_gap_attempt("gap.research_hint.0", {
+        "variant_name": "rmsnorm_fuse", "outcome": "KEEP", "gain_pct": 3.1,
+    })
+
+    attrs = coord._build_recipe_attrs_from_state()
+    row = next(x for x in attrs["what_worked"] if x["name"] == "k007")
+    assert row["source"] == "https://pr/777"
 
 
 def test_build_recipe_attrs_sediments_source_and_revert(tmp_path):
