@@ -786,8 +786,8 @@ def _build_proposal_scorer(
 
     Returns ``None`` when ``--no-proposal-scoring`` is set or the
     resolved model list is empty. Models default to
-    :data:`DEFAULT_SCORER_MODELS`
-    (``claude-opus-4-8,claude-opus-4-7,gpt-5.5,dvue-aoai-005-Kimi-K2.6``).
+    :data:`DEFAULT_SCORER_MODELS` (``claude-opus-4-8,gpt-5.5,
+    dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview``).
     Adding a
     model = appending its gateway slug to ``--proposal-scorer-models``.
     The scorer is purely advisory and never gates anything.
@@ -5365,8 +5365,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated gateway model slugs that independently "
              "score each specialist proposal_set (advisory only; never "
              "gates; rater identities are anonymized in the orchestration "
-             "prompt). Default "
-             "'claude-opus-4-8,claude-opus-4-7,gpt-5.5,dvue-aoai-005-Kimi-K2.6'. "
+             "prompt). Default 'claude-opus-4-8,gpt-5.5,"
+             "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
              "Add a model by "
              "appending its slug. Empty list disables scoring.",
     )

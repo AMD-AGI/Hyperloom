@@ -51,13 +51,17 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SCORER_MODELS: tuple[str, ...] = (
     "claude-opus-4-8",
-    "claude-opus-4-7",
     "gpt-5.5",
-    # Kimi K2.6 is a reasoning model: it spends completion tokens on
-    # internal reasoning before emitting the JSON, so it needs the
-    # larger ``max_completion_tokens`` default below (4096) — at 1200 it
-    # returns finish_reason=length with empty content.
+    # Kimi K2.6 and Gemini 3.1 Pro are reasoning models: they spend
+    # completion tokens on internal reasoning before emitting the JSON,
+    # so they need the larger ``max_completion_tokens`` default below
+    # (4096) — at 1200 Kimi returns finish_reason=length with empty
+    # content. Gemini MUST carry the ``gemini/`` provider prefix: the
+    # bare ``gemini-3.1-pro-preview`` slug routes to a broken Vertex ADC
+    # path on the gateway (APIConnectionError), while ``gemini/…`` routes
+    # to a working backend.
     "dvue-aoai-005-Kimi-K2.6",
+    "gemini/gemini-3.1-pro-preview",
 )
 
 # Soft cap on what we feed each model so a pathological proposal_set

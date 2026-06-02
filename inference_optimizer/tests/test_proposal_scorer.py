@@ -218,9 +218,9 @@ def test_extract_scores_json_bare_and_fenced():
 def test_default_models_constant():
     assert DEFAULT_SCORER_MODELS == (
         "claude-opus-4-8",
-        "claude-opus-4-7",
         "gpt-5.5",
         "dvue-aoai-005-Kimi-K2.6",
+        "gemini/gemini-3.1-pro-preview",
     )
 
 
