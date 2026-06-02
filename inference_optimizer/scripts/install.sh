@@ -63,16 +63,6 @@ load_dotenv_no_clobber() {
       \'*\') value="${value#\'}"; value="${value%\'}" ;;
     esac
     [ -z "$key" ] && continue
-    case "$key" in
-      TRACELENS_ROOT|TRACELENS_INTERNAL_ROOT)
-        case "$value" in
-          ""|'\'|'\\') continue ;;
-        esac
-        local _tl_trimmed="${value//[[:space:]]/}"
-        [ -z "$_tl_trimmed" ] && continue
-        [ "$_tl_trimmed" = '\' ] && continue
-        ;;
-    esac
     if [ -z "${!key:-}" ]; then
       export "$key=$value"
       loaded=$((loaded + 1))

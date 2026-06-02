@@ -136,40 +136,6 @@ def test_local_setup_respects_existing_dependency_paths(tmp_path: Path) -> None:
     assert not (tmp_path / "deps" / "Primus-Claw").exists()
 
 
-def test_local_setup_ignores_backslash_placeholder_in_dotenv(tmp_path: Path) -> None:
-    """Regression: TRACELENS_INTERNAL_ROOT=\\ in .env must not block clone."""
-    mini_root = tmp_path / "mini-hyperloom"
-    mini_root.mkdir()
-    (mini_root / ".env").write_text(
-        "TRACELENS_INTERNAL_ROOT=\\\nTRACELENS_ROOT=\\\n",
-        encoding="utf-8",
-    )
-    remotes = tmp_path / "remotes"
-    primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
-    inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
-    tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-    tracelens_internal = _git_repo(remotes / "TraceLens-internal", {"README.md": "internal\n"})
-
-    result = _run_local_setup(
-        tmp_path,
-        env={
-            "REPO_ROOT": str(mini_root),
-            "PRIMUS_CLAW_REPO": str(primus),
-            "INFERENCEX_REPO": str(inferencex),
-            "TRACELENS_REPO": str(tracelens_public),
-            "TRACELENS_REF": "HEAD",
-            "TRACELENS_INTERNAL_REPO": str(tracelens_internal),
-            "TRACELENS_INTERNAL_REF": "HEAD",
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
-    env_text = (tmp_path / "session" / "runtime" / "local-setup.env.sh").read_text(encoding="utf-8")
-    assert "export TRACELENS_INTERNAL_ROOT=" in env_text
-    assert "export TL_EXTENSION='TraceLens_internal'" in env_text
-    assert "does not exist: \\" not in result.stderr
-
-
 def test_local_setup_fails_for_missing_explicit_dependency_path(tmp_path: Path) -> None:
     result = _run_local_setup(
         tmp_path,
