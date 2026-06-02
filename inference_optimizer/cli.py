@@ -3052,6 +3052,50 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
         )
 
 
+def _run_quantization_prelude(args: argparse.Namespace) -> None:
+    """Run the quantization-agent once before the optimization loop.
+
+    No-op unless ``--quantize "<prompt>"`` was passed. When set, this drives
+    AMD Quark PTQ from the prompt via the ``quantization_request_handlers``
+    adapter, then rewrites ``args.model`` (+ ``$MODEL_PATH``) to the exported
+    quantized model so every downstream phase (baseline / profile / sweep /
+    kernel) optimizes the quantized model instead of the source.
+
+    Contract:
+      * Skipped on ``--resume`` (a resumed session already has its model
+        pinned in the manifest; re-quantizing would diverge from it).
+      * On a failed/blocked quantization the process exits with code 3 —
+        we must not silently fall through and optimize the un-quantized
+        source model when the user explicitly asked for quantization.
+    """
+    prompt = getattr(args, "quantize", None)
+    if not prompt:
+        return
+    if getattr(args, "resume", False):
+        print("Quantization prelude: skipped (--resume); using model from manifest.")
+        return
+
+    from .paths import workspace_root
+
+    source_model = str(args.model)
+    workspace = workspace_root() / "quantization" / Path(source_model).name
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    # Adapter lives in the orchestrator package; lazy-import so the CLI keeps
+    # importing cleanly even in environments without the quantization deps.
+    from .orchestrator.quantization_request_handlers import run_quantization_prelude
+
+    quantized_model_dir = run_quantization_prelude(
+        prompt=prompt,
+        source_model=source_model,
+        workspace=workspace,
+    )
+
+    args.model = Path(quantized_model_dir)
+    os.environ["MODEL_PATH"] = str(quantized_model_dir)
+    print(f"Quantization prelude: model -> {quantized_model_dir}")
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     # Surface --nodes to the rest of the process (preflight diagnostics
     # and any executor that wants to short-circuit when the optimizer is
@@ -3471,6 +3515,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # (baseline / profile / sweep / backends / params) inject it into
         # the Magpie YAML instead of trusting the YAML's hardcoded `model:`.
         os.environ["MODEL_PATH"] = str(args.model)
+
+        # Quantization prelude (one-shot, before any session/baseline work):
+        # if --quantize was passed, quantize the source model now and rewrite
+        # args.model to the exported quantized model. No-op otherwise.
+        _run_quantization_prelude(args)
 
         # Resolve framework: --framework > $FRAMEWORK env > "sglang".
         # Session-wide; mixing frameworks in one session is not supported.
@@ -3934,6 +3983,15 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Model path (required for new runs; ignored when "
                            "--resume is set — model is read from manifest.json/"
                            "state.json)")
+    opt.add_argument(
+        "--quantize", type=str, default=None, metavar="PROMPT",
+        help="Optional natural-language quantization request. When set, the "
+             "quantization-agent runs ONCE as a prelude before the "
+             "optimization loop: it drives AMD Quark PTQ from this prompt, "
+             "then rewrites --model to the exported quantized model so the "
+             "rest of the run optimizes the quantized model. Ignored on "
+             "--resume.",
+    )
     opt.add_argument(
         "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,
         help="Override the real target GPU for TraceLens/GEAK prompts. Magpie "
