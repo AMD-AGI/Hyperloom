@@ -3157,6 +3157,13 @@ class Coordinator:
                 task.task_id, reason,
                 params["concs"], params["total_budget_sec"],
             )
+        # Bug #11 fix: stamp evidence so PolicyGate's
+        # ``conc_sweep_phase_singleton`` rule can deny subsequent
+        # LLM-emitted conc_sweep proposals in the same SWEEP phase.
+        # Without this, orchestration loops re-proposing conc_sweep
+        # (sweep is singleton-blocked, only conc_sweep is allowed)
+        # until SWEEP budget exhausts.
+        self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
         return task
 
     async def _enqueue_internal_sweep_task(
@@ -11579,6 +11586,11 @@ class Coordinator:
                     "report_path":      result.get("report_json_path"),
                 },
             )
+            # Bug #12 fix: write last_conc_sweep so
+            # ``phase_state.exit_normal_sweep`` can fire ``conc_sweep_done``
+            # and SWEEP→CLOSE transitions without waiting for budget
+            # exhaustion.
+            self.shared_state.record_conc_sweep(result)
             self.shared_state.save(self.session_dir)
             return
         # Audit trail (kernel-parity) for the 6 non-kernel actions: one

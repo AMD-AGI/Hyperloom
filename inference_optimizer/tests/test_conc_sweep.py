@@ -873,3 +873,115 @@ def test_format_summary_line_budget_exhausted_suffix():
     line = format_summary_line(payload)
     assert "budget_exhausted" in line
     assert "@7200s" in line
+
+
+# ---------------------------------------------------------------------------
+# Bug #12: record_conc_sweep writes state.last_conc_sweep so
+# exit_normal_sweep can detect SWEEP completion via conc_sweep alone.
+# ---------------------------------------------------------------------------
+def test_record_conc_sweep_writes_last_conc_sweep():
+    s = SharedState()
+    assert s.last_conc_sweep == {}
+    s.record_conc_sweep({
+        "status":           "succeeded",
+        "skip_reason":      "",
+        "was_skipped":      False,
+        "budget_exhausted": False,
+        "summary":          {"successful_pairs": 8, "best_speedup": 1.05},
+        "workspace":        "/tmp/conc_sweep_xyz",
+    })
+    assert s.last_conc_sweep.get("status") == "succeeded"
+    assert s.last_conc_sweep.get("summary", {}).get("successful_pairs") == 8
+    assert s.last_conc_sweep.get("ts")
+    # Skip cases also recorded so SWEEP exits cleanly even on skip.
+    s.record_conc_sweep({
+        "status":       "skipped",
+        "skip_reason":  "no_optimization_to_compare",
+        "was_skipped":  True,
+    })
+    assert s.last_conc_sweep.get("status") == "skipped"
+    assert s.last_conc_sweep.get("skip_reason") == "no_optimization_to_compare"
+    assert s.last_conc_sweep.get("was_skipped") is True
+
+
+def test_exit_normal_sweep_returns_conc_sweep_done():
+    """Bug #12: SWEEP→CLOSE must fire on conc_sweep completion too,
+    not only on sweep_done / budget_exhausted. Without this, an orchestration
+    agent that re-proposes conc_sweep (because sweep is singleton-blocked
+    or skipped) keeps SWEEP alive until budget exhaustion."""
+    from inference_optimizer.orchestrator.phase_state import exit_normal_sweep
+
+    class _State:
+        last_sweep = {}             # no sweep recorded
+        last_conc_sweep = {}
+        phase = "SWEEP"
+        phase_started_ts = "2026-06-02T10:00:00+00:00"
+        max_minutes = 360
+        phase_budget_pct = {"SWEEP": 0.50}
+
+    # No sweep, no conc_sweep => don't exit (budget remaining).
+    assert exit_normal_sweep(_State()) is None
+
+    # Mirror what record_conc_sweep writes — status must trigger
+    # exit reason ``conc_sweep_done``.
+    _State.last_conc_sweep = {"status": "succeeded"}
+    result = exit_normal_sweep(_State())
+    assert result is not None
+    reason, evidence = result
+    assert reason == "conc_sweep_done", reason
+    assert evidence.get("conc_sweep_status") == "succeeded"
+
+    # Skipped also counts as "done" (the action ran to its terminal
+    # decision); without this guard SWEEP would idle until budget.
+    for terminal in ("partial", "completed", "skipped"):
+        _State.last_conc_sweep = {"status": terminal}
+        result = exit_normal_sweep(_State())
+        assert result is not None and result[0] == "conc_sweep_done", terminal
+
+
+def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
+    """Bug #11: ``conc_sweep_phase_singleton`` rule must deny
+    LLM-emitted conc_sweep proposals once the auto-enqueue stamped
+    ``evidence.auto_conc_sweep_task_id`` in the current SWEEP entry.
+    Without this, orchestration loops re-proposing conc_sweep until
+    SWEEP budget exhausts, wasting hours of GPU time."""
+    from inference_optimizer.orchestrator.policy import PolicyGate, PolicyDenied
+
+    class _State:
+        phase = "SWEEP"
+        phase_history = [{
+            "to_phase": "SWEEP",
+            "evidence": {"auto_conc_sweep_task_id": "cs-abc-123"},
+        }]
+
+    gate = PolicyGate.__new__(PolicyGate)
+    gate.shared_state = _State()
+
+    # Auto-enqueue already covered conc_sweep -> deny LLM repeat.
+    with pytest.raises(PolicyDenied) as exc_info:
+        gate._validate_conc_sweep_singleton(
+            {"params": {}}, intent_kind="propose_action",
+        )
+    assert exc_info.value.rule == "conc_sweep_phase_singleton"
+    assert "auto_conc_sweep_task_id" in str(exc_info.value)
+
+    # Operator bypass works (audit trail trace).
+    gate._validate_conc_sweep_singleton(
+        {"params": {"bypass_conc_sweep_singleton": True}},
+        intent_kind="propose_action",
+    )
+
+    # No evidence stamp -> rule is inert.
+    _State.phase_history = [{"to_phase": "SWEEP", "evidence": {}}]
+    gate._validate_conc_sweep_singleton(
+        {"params": {}}, intent_kind="propose_action",
+    )
+
+    # Outside SWEEP -> rule is inert.
+    _State.phase_history = [{
+        "to_phase": "EXPLORE",
+        "evidence": {"auto_conc_sweep_task_id": "cs-x"},
+    }]
+    gate._validate_conc_sweep_singleton(
+        {"params": {}}, intent_kind="propose_action",
+    )

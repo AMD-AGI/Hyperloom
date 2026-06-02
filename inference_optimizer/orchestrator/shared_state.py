@@ -678,6 +678,11 @@ class SharedState:
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
+    # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE can
+    # exit on conc_sweep completion (not only sweep completion). Carries
+    # status / skip_reason / summary so phase_state.exit_normal_sweep
+    # treats succeeded / partial / completed / skipped as terminal.
+    last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Kernel-opt response tracking — Coordinator records the most recent
     # `run_optimization_done` so Orch sees what's been tried and doesn't
     # re-dispatch the same kernel_id every tick.
@@ -3069,6 +3074,31 @@ class SharedState:
             "best_for_each_conc": result.get("best_for_each_conc") or {},
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
+        }
+
+    def record_conc_sweep(self, result: dict[str, Any]) -> None:
+        """Record conc_sweep task completion (mirrors record_sweep).
+
+        Bug #12 fix: ``phase_state.exit_normal_sweep`` previously only
+        looked at ``last_sweep.status`` to fire ``sweep_done``. When the
+        SWEEP phase reaches its terminal state via conc_sweep alone (e.g.
+        sweep was singleton-blocked or completed in a prior session and
+        only conc_sweep runs in this resume), the phase had no exit
+        signal and idled until ``sweep_budget_exhausted``. Writing
+        ``last_conc_sweep.status`` lets ``exit_normal_sweep`` return
+        ``conc_sweep_done`` and the SWEEP→CLOSE transition fires
+        immediately after conc_sweep settles.
+        """
+        if not isinstance(result, dict):
+            return
+        self.last_conc_sweep = {
+            "ts":               _now_iso(),
+            "status":           str(result.get("status") or "succeeded"),
+            "skip_reason":      str(result.get("skip_reason") or ""),
+            "was_skipped":      bool(result.get("was_skipped", False)),
+            "budget_exhausted": bool(result.get("budget_exhausted", False)),
+            "summary":          dict(result.get("summary") or {}),
+            "workspace":        str(result.get("workspace") or ""),
         }
 
     # ------------------------------------------------------------------
