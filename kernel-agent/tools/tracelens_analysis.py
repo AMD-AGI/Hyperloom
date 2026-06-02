@@ -588,6 +588,8 @@ def _trace_input_sort_key(path: Path) -> tuple[int, str]:
         return (0, name)
     if re.search(r"TP-\d+-DECODE\.trace\.json(?:\.gz)?$", name):
         return (2, name)
+    if name.startswith("bs_") or name.startswith("graph_capture"):
+        return (3, name)
     return (1, name)
 
 
