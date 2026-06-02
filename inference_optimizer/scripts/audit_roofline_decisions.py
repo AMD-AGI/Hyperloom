@@ -103,21 +103,17 @@ def _flatten_discovered_flag_names(state: dict[str, Any]) -> set[str]:
 
 def _extract_proposed_flag_names(state: dict[str, Any]) -> list[str]:
     found: list[str] = []
-    for action in ("backends", "params"):
-        attempts = state.get(f"{action}_attempts") or []
-        if not isinstance(attempts, list):
-            continue
+    attempts = state.get("explore_attempts") or []
+    if isinstance(attempts, list):
         for entry in attempts:
             if not isinstance(entry, dict):
                 continue
             args = str(entry.get("extra_server_args") or "")
             if args:
                 found.extend(_FLAG_PATTERN.findall(args))
-    for key in ("params_search", "backends_search"):
-        sub = state.get(key) or {}
-        tested = sub.get("tested") if isinstance(sub, dict) else None
-        if not isinstance(tested, dict):
-            continue
+    sub = state.get("explore_search") or {}
+    tested = sub.get("tested") if isinstance(sub, dict) else None
+    if isinstance(tested, dict):
         for snap in tested.values():
             if isinstance(snap, dict):
                 args = str(snap.get("extra_server_args") or "")
@@ -135,10 +131,8 @@ def _count_analysis_md_references(state: dict[str, Any]) -> int:
                 reason = str(entry.get("reason") or "").lower()
                 if any(kw.lower() in reason for kw in _ANALYSIS_MD_KEYWORDS):
                     count += 1
-    for action in ("backends", "params", "comm_optimization"):
-        attempts = state.get(f"{action}_attempts") or []
-        if not isinstance(attempts, list):
-            continue
+    attempts = state.get("explore_attempts") or []
+    if isinstance(attempts, list):
         for entry in attempts:
             if isinstance(entry, dict):
                 notes = str(entry.get("notes") or "").lower()

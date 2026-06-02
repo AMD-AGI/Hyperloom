@@ -109,21 +109,6 @@ read them when invoked standalone.
 
 ---
 
-## 7. PMC roofline (optional)
-
-| Variable                                       | Default | Description                                                                                                                       |
-|------------------------------------------------|---------|-----------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_ENABLE_PMC_ROOFLINE`                | `0`     | Set to `1` to layer Magpie PMC roofline analysis on top of TraceLens.                                                              |
-| `HYPERLOOM_PMC_ROOFLINE_FORCE`                 | `0`     | Force the roofline step even when the bottleneck classifier marks the workload as `memory-bound` (where roofline adds no signal). |
-| `HYPERLOOM_PMC_ROOFLINE_PORT`                  | `30001` | Server port the roofline harness binds.                                                                                            |
-| `HYPERLOOM_PMC_ROOFLINE_GPU_TYPE`              | inherits `GPU_TYPE` | Override the GPU type used for roofline limits.                                                                        |
-| `HYPERLOOM_PMC_ROOFLINE_MODE`                  | `launch`| `launch` or `attach`.                                                                                                              |
-| `HYPERLOOM_PMC_ROOFLINE_DURATION_MS`           | `15000` | PMC sampling window in milliseconds.                                                                                               |
-| `HYPERLOOM_PMC_ROOFLINE_STARTUP_TIMEOUT_S`     | `600`   | How long to wait for the roofline server to come up before failing the step.                                                        |
-| `HYPERLOOM_ALLOW_DIRECT_PMC_ROOFLINE`          | `0`     | Allow `pmc_roofline` to run outside Ray for local debugging only. Never set to `1` in production.                                  |
-
----
-
 ## 8. Critic / Robustness / KB
 
 | Variable                              | Default                | Description                                                                                                                          |

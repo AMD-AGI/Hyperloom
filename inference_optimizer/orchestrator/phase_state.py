@@ -32,15 +32,8 @@ Vocabularies are closed enums; PolicyGate cross-checks any write of
 v0.8 transition (M3 complete)
 -----------------------------
 The §3.2 design talks about ``explore`` (single merged action) and
-``specialist`` (LLM sub-agent). M3 (``explore`` merge) and M5
-(``specialist``) have shipped; the legacy ``backends`` / ``params`` /
-``validate_stack`` action names are now closed at the PolicyGate
-boundary via the ``action_deprecated`` rule (KB_gaps/Gap-10 /
-KB_design §3.13 M3 §PR7). The EXPLORE allowed-action set reflects
-that — only ``explore`` / ``specialist`` / ``recover`` remain. The
-legacy executor modules and ``last_backends`` / ``backends_attempts``
-fields stay on :class:`SharedState` for legacy resume parity (Inv-10.1)
-but cannot be re-entered in a fresh session.
+``specialist`` (LLM sub-agent). Both have shipped; the EXPLORE
+allowed-action set is ``explore`` / ``specialist`` / ``recover``.
 """
 
 from __future__ import annotations
@@ -84,21 +77,11 @@ def phase_index(phase: str) -> int:
 # v0.8 view:
 #
 # * EXPLORE allowlist contains the merged ``explore`` action and the
-#   ``specialist`` LLM sub-agent. The v0.6 ``backends`` / ``params`` /
-#   ``validate_stack`` are gone — PolicyGate's ``action_deprecated``
-#   rule denies them at the intent boundary with a
-#   structured replacement hint, so the LLM gets a single
-#   forward-pointing error instead of the misleading
-#   ``phase_incompatible`` "wait for the phase to advance" message.
+#   ``specialist`` LLM sub-agent.
 # * ``recover`` stays in every phase — phase-orthogonal per §3.2.
 # * ``session_breakdown`` is a CLOSE action (it materializes the
-#   report bundle). The v0.6 ``validate_stack`` rebench is now
-#   inlined into ``explore``, so it disappears
-#   from the EXPLORE allowlist alongside the other legacy names.
-#
-# Note: the dataclass fields ``last_backends`` / ``backends_attempts``
-# / etc. stay on :class:`SharedState` for resume parity (Inv-10.1);
-# only the *entry points* close.
+#   report bundle). The per-KEEP stack rebench is inlined into
+#   ``explore``.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     PHASE_PRELUDE: frozenset({
         # ``roofline`` / ``profile`` are Coordinator-auto-enqueued at
@@ -1078,21 +1061,21 @@ def exit_normal_explore(
             }
     elif not disable_legacy_proxy:
         params_streak = int(getattr(state, "params_no_promote_streak", 0) or 0)
-        backends_search = getattr(state, "backends_search", None) or {}
-        backends_accepted = 0
-        if isinstance(backends_search, dict):
-            accepted = backends_search.get("accepted") or []
-            backends_accepted = len(accepted) if isinstance(accepted, list) else 0
+        explore_search = getattr(state, "explore_search", None) or {}
+        explore_accepted = 0
+        if isinstance(explore_search, dict):
+            accepted = explore_search.get("accepted") or []
+            explore_accepted = len(accepted) if isinstance(accepted, list) else 0
         optimization_stack = getattr(state, "optimization_stack", None) or []
         has_results = bool(
             isinstance(optimization_stack, list) and optimization_stack
         )
-        if params_streak >= 5 and backends_accepted == 0 and has_results:
+        if params_streak >= 5 and explore_accepted == 0 and has_results:
             return "plateau_explore", {
                 "evidence": "m2_proxy",
                 "r09_provisional": True,
                 "params_no_promote_streak": params_streak,
-                "backends_accepted": backends_accepted,
+                "explore_accepted": explore_accepted,
                 "note": (
                     "KB_design §3.14 R-09 — legacy params_no_promote_streak "
                     "proxy fired (signals empty); set "

@@ -8,7 +8,7 @@ the safety net it thinks it does:
 * **I1 ``state_json_corrupt``** — ``state.json`` failed to load as
   JSON, OR the file is now smaller than the previous known-good size
   (partial write during crash). Coordinator's resume path uses this
-  file to restore baseline / current_best / params_search ledgers;
+  file to restore baseline / current_best / explore_search ledgers;
   losing it during a long run silently throws away progress.
 
 * **I2 ``coordinator_wal_bloat``** — ``coordinator.db-wal`` crossed a
@@ -115,7 +115,7 @@ def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
             summary=(
                 f"state.json is unreadable: {error}; resume from this "
                 f"session would lose baseline / current_best / "
-                f"params_search progress"
+                f"explore_search progress"
             ),
             evidence={
                 "path": state.get("path"),
