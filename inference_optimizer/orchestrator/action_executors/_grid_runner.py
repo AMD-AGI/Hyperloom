@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # an already-tested ``--block-size 128`` under a freshly invented name silently
 # re-burned the wall clock. The fingerprint hashes the *content* that actually
 # changes Magpie behavior (server args + env overrides) so any rename ends up
-# at the same key in ``SharedState.{params_search,backends_search}.tested``.
+# at the same key in ``SharedState.explore_search.tested``.
 #
 # Normalization rules:
 #   * args: ``shlex.split`` → sorted token tuple. Sorting is intentionally

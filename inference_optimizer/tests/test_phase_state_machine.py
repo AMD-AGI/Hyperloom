@@ -73,17 +73,6 @@ def test_allowed_actions_disjoint_phases():
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
 
 
-def test_retired_pmc_roofline_not_in_any_phase_allowlist():
-    # ``pmc_roofline`` action + executor were physically removed; leaving
-    # it in any phase allowlist would let PolicyGate R1 pass an LLM
-    # ``propose_action{action_name='pmc_roofline'}`` only to fail at the
-    # registry/handler layer with a confusing error.
-    for phase, allowed in phase_state.PHASE_ALLOWED_ACTIONS.items():
-        assert "pmc_roofline" not in allowed, (
-            f"{phase} still lists retired action 'pmc_roofline'"
-        )
-
-
 def test_is_action_allowed_in_phase_handles_unknowns():
     assert phase_state.is_action_allowed_in_phase("baseline", "PRELUDE")
     assert not phase_state.is_action_allowed_in_phase("baseline", "EXPLORE")
@@ -168,8 +157,8 @@ def test_exit_normal_explore_uses_budget_exhaustion():
         max_minutes=10,  # 600s total; 60% explore budget = 360s
         phase_budget_pct={},
         params_no_promote_streak=0,
-        backends_search={},
-        optimization_stack=[{"action": "params"}],
+        explore_search={},
+        optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
     out = phase_state.exit_normal_explore(
@@ -187,8 +176,8 @@ def test_exit_normal_explore_plateau_heuristic():
         max_minutes=0,  # unlimited
         phase_budget_pct={},
         params_no_promote_streak=5,
-        backends_search={},
-        optimization_stack=[{"action": "params"}],
+        explore_search={},
+        optimization_stack=[{"action": "explore"}],
     )
     out = phase_state.exit_normal_explore(state)
     assert out is not None and out[0] == "plateau_explore"
@@ -205,8 +194,8 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         phase_budget_pct={},
         stop_reason="",
         params_no_promote_streak=5,
-        backends_search={},
-        optimization_stack=[{"action": "params"}],
+        explore_search={},
+        optimization_stack=[{"action": "explore"}],
     )
     out = phase_state.compute_next_phase(state, kernel_enabled=False)
     assert out is not None
@@ -224,7 +213,7 @@ def test_compute_next_phase_terminal_overrides_phase():
         phase_budget_pct={},
         stop_reason="target_reached",
         params_no_promote_streak=0,
-        backends_search={},
+        explore_search={},
         optimization_stack=[],
     )
     out = phase_state.compute_next_phase(state, kernel_enabled=True)

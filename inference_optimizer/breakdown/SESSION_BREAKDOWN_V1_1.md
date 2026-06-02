@@ -74,7 +74,7 @@ state.json + runs/ + kernel-agent/
 
 | Field / behavior | Primary writer | Reader |
 |------------------|----------------|--------|
-| `params_search.tested`, `rejected`, `last_round` | Coordinator / grid runner | `collect_decision_journal` |
+| `explore_search.tested`, `rejected`, `last_round` | Coordinator / grid runner | `collect_decision_journal` |
 | `*_attempts[].extras` (gain, best variant) | Coordinator audit | `_round_decision_from_attempt` |
 | `promotion_rule`, `variants_tested_count`, … | Coordinator Phase 2 | same |
 | variant `invocation`, `benchmark_report_path` | disk under `runs/{params,backends}/` | collector workspace walk |

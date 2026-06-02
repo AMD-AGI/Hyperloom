@@ -66,10 +66,8 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # ``specialist`` is yaml-less (v0.8 M5, parameterised by
 # ``params.domain``) so it is added explicitly.
 # ``support`` was added in 2026-05 alongside the real ``recover``
-# executor (Change C of the gpu-leak-robustness-fix plan); the legacy
-# stub-action purge (Gap-13) removed the dream / re_explore /
-# comm_optimization / compiler_tuning yamls, so ``recover`` is the
-# only fallback ``support`` entry.
+# executor (Change C of the gpu-leak-robustness-fix plan); ``recover``
+# is the only fallback ``support`` entry.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline",
     # GAP 1 — Coordinator-internal warm-recipe replay. Same workspace
