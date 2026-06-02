@@ -1423,7 +1423,11 @@ async def _async_return(value: Any) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_report_success_sets_stop_reason(session_dir):
+async def test_report_success_does_not_stop_run(session_dir):
+    """Long-run continuity: a successful mid-run ``report`` task no
+    longer sets ``stop_reason='report_emitted'``. The LLM may emit a
+    report snapshot and keep exploring; the run continues until the
+    wall-clock deadline (or another stop_reason) fires."""
     _write_marker_target_baseline(session_dir)
     c = Coordinator(session_dir, backends=_silent_backends())
     c.sub.register_executor("report", report_executor)
@@ -1438,9 +1442,7 @@ async def test_report_success_sets_stop_reason(session_dir):
         await c._pump_dispatcher_once()
         after = await c.tasks.get(task.task_id)
         assert after.state == "succeeded"
-        assert c.shared_state.stop_reason == "report_emitted"
-        on_disk = json.loads((session_dir / "state.json").read_text())
-        assert on_disk["stop_reason"] == "report_emitted"
+        assert not (c.shared_state.stop_reason or "").strip()
     finally:
         await c.stop()
 
