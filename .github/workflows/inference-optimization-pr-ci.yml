@@ -118,7 +118,7 @@ jobs:
 
       - name: Upload PR-CI report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Distinct prefix from schedule CI's `report-*` so reviewers
           # can tell at a glance which workflow produced an artifact.
