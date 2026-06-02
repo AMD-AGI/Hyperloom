@@ -6581,6 +6581,17 @@ class Coordinator:
                 params.setdefault(
                     "roofline_saturation_snapshot", dict(history[-1]),
                 )
+        # Thread the persisted explore_search ledger so the ExploreExecutor's
+        # canonical_fingerprint dedup has cross-turn memory. Without it,
+        # params["explore_search"] is unset every round: the executor restarts
+        # dedup from an empty ledger (re-benching an already-tested (args, envs)
+        # under a renamed variant that escapes dedup), and the single-round
+        # tested/rejected it returns overwrite the persisted ledger via
+        # apply_explore_search_update — starving the specialist prompt's
+        # exhausted-knob context. setdefault keeps an explicit override.
+        es = getattr(self.shared_state, "explore_search", None)
+        if isinstance(es, dict) and es.get("tested"):
+            params.setdefault("explore_search", es)
 
     async def _materialize_approved_proposal(
         self,
