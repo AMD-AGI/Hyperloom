@@ -64,6 +64,38 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
     assert r["best_throughput"] == 5800.5
 
 
+def test_negative_knowledge_roundtrips() -> None:
+    # Tier 0: pitfalls / lessons / what_failed must survive the full
+    # emit -> YAML parse -> read path so a gbrain warm-start keeps its
+    # anti-priors. Parse the emitted frontmatter exactly as gbrain would.
+    import yaml
+
+    pitfalls = [{"flag": "--num-continuous-decode-steps 16", "reason": "noise -0.3%"}]
+    lessons = [{"note": "fp8 baseline already near-optimal"}]
+    what_failed = [{"variant": "ncds16", "gain_pct": -0.28}]
+    what_worked = [{"flag": "--cuda-graph-max-bs 256", "gain_pct": 0.4}]
+    _slug, content = recipe_to_page(_recipe(
+        pitfalls=pitfalls, lessons=lessons,
+        what_failed=what_failed, what_worked=what_worked,
+    ))
+    fm = yaml.safe_load(content.split("---", 2)[1])
+    r = _page_to_recipe(fm)
+    assert r["pitfalls"] == pitfalls
+    assert r["lessons"] == lessons
+    assert r["what_failed"] == what_failed
+    assert r["what_worked"] == what_worked
+
+
+def test_negative_knowledge_absent_yields_empty() -> None:
+    # No regression: a recipe without these fields still reads back empty.
+    import yaml
+
+    fm = yaml.safe_load(recipe_to_page(_recipe())[1].split("---", 2)[1])
+    r = _page_to_recipe(fm)
+    assert r["pitfalls"] == [] and r["lessons"] == []
+    assert r["what_failed"] == [] and r["what_worked"] == []
+
+
 def test_recipe_to_page_skips_bare_anchor() -> None:
     # anchor with no best_config is not worth caching remotely
     assert recipe_to_page(_recipe(best_config={})) is None

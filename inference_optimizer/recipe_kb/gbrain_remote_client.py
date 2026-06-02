@@ -112,6 +112,27 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
+def _json_list(value: Any) -> list[Any]:
+    """Decode a recipe-page list field stored as a JSON string.
+
+    The ingest/mirror writer (``gbrain_ingest.recipe_to_page``) encodes
+    structured list-of-dict fields (``what_failed`` / ``pitfalls`` /
+    ``lessons`` / ...) as JSON strings because the minimal YAML emitter
+    only renders scalar lists. Tolerates an already-decoded list (in case
+    a future page stores them natively) and degrades to ``[]`` on absence
+    or malformed content so a bad page never breaks warm-start.
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return []
+        return decoded if isinstance(decoded, list) else []
+    return []
+
+
 def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, str]:
     """Project gbrain recipe attrs into the v2 ``best_config`` dict.
 
@@ -164,12 +185,12 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
         "best_throughput": _as_float(
             attrs.get("best_throughput") or attrs.get("output_throughput")
         ),
-        "what_worked": [],
-        "what_failed": [],
-        "remaining_gaps": [],
+        "what_worked": _json_list(attrs.get("what_worked")),
+        "what_failed": _json_list(attrs.get("what_failed")),
+        "remaining_gaps": _json_list(attrs.get("remaining_gaps")),
         "prs_tested": [],
-        "pitfalls": [],
-        "lessons": [],
+        "pitfalls": _json_list(attrs.get("pitfalls")),
+        "lessons": _json_list(attrs.get("lessons")),
         "last_profiled": "",
         "stack_fingerprint": dict(attrs.get("stack_fingerprint") or {}),
         "sessions": [],
