@@ -869,7 +869,7 @@ jobs:
 
       - name: Upload per-model manifest
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: submission-manifest-${{ matrix.key }}
           path: submit-output/
@@ -878,7 +878,7 @@ jobs:
 
       - name: Upload per-model task artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: task-artifacts-${{ matrix.key }}
           path: task-artifacts/
@@ -889,7 +889,7 @@ jobs:
         # Per-model prewarm log lets us diagnose "why was this model slow on
         # first encounter" reports.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: prewarm-log-${{ matrix.key }}
           path: prewarm.log
@@ -998,7 +998,7 @@ jobs:
 
       - name: Upload final summary
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-summary
           path: summary-out/
