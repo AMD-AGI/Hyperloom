@@ -42,6 +42,10 @@ class _StateStub:
         self.model = "test-model"
         self.framework = "sglang"
         self.gpu_type = "MI300X"
+        self.model_class = "dense"
+        self.precision = "fp8"
+        self.framework_pr_max_candidates = 0
+        self.last_profile_kernel_breakdown = None
         self._saves = 0
 
     def save(self, _session_dir: Path) -> None:
@@ -50,12 +54,29 @@ class _StateStub:
 
 class _CoordinatorStub:
     """Holds just enough attributes to bind the Coordinator's discover
-    methods to."""
+    methods to.
+
+    These focused retry tests pin discovery to a *single* repo so that
+    one ``_discover_next_framework_pr_batch`` call == one
+    ``phase_discover`` call (the per-batch failure-counter semantics the
+    suite asserts). The cross-repo fan-out is covered separately in
+    ``test_framework_pr_discover_directed.py``. The dedup / tried-refs
+    helpers are bound directly from Coordinator so behaviour stays real.
+    """
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub()
         self.framework_pr_discover_timeout_sec = 0.0
+
+    def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
+        return ["https://github.com/sgl-project/sglang.git"]
+
+    def _framework_pr_known_candidate_ids(self) -> set[str]:
+        return Coordinator._framework_pr_known_candidate_ids(self)  # type: ignore[arg-type]
+
+    def _framework_pr_tried_refs(self) -> list[str]:
+        return Coordinator._framework_pr_tried_refs(self)  # type: ignore[arg-type]
 
 
 async def _call_discover(stub: _CoordinatorStub) -> bool:
