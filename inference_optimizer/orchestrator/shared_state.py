@@ -3004,12 +3004,27 @@ class SharedState:
         n_patch = sum(
             1 for m in mix if (m or {}).get("change_type") == "code_patch"
         )
+        # B2: config explore rounds that produced measurements but KEPT
+        # nothing (all REVERT / KEEP_UNSTABLE) are recorded as
+        # ``config_attempt``. They count toward the escalation signal so
+        # repeated fruitless config tuning escalates to a code-patch
+        # ``integrate_patch`` even when the MI300X noise floor prevents
+        # any config KEEP (the failure mode that left this loop spinning).
+        n_config_attempt = sum(
+            1 for m in mix if (m or {}).get("change_type") == "config_attempt"
+        )
         consec = int(self.consecutive_config_only_rounds or 0)
+        config_pressure = n_config + n_config_attempt
         lines = [
-            f"config_keeps={n_config} code_patch_keeps={n_patch} "
+            f"config_keeps={n_config} config_attempts={n_config_attempt} "
+            f"code_patch_keeps={n_patch} "
             f"consecutive_config_only_rounds={consec}"
         ]
-        if consec >= escalate_at or (n_config >= config_heavy_at and n_patch == 0):
+        if (
+            consec >= escalate_at
+            or (n_config >= config_heavy_at and n_patch == 0)
+            or (config_pressure >= escalate_at and n_patch == 0)
+        ):
             lines.append(
                 "ESCALATION: config-only for too long. Config tuning has a "
                 "low ceiling — your NEXT EXPLORE dispatch SHOULD delegate a "
