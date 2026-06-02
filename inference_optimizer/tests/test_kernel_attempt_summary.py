@@ -412,3 +412,267 @@ def test_attempt_without_top15_still_listed(tmp_path: Path) -> None:
     out = build_kernel_optimization_summary(state, tmp_path)
     assert out["totals"]["attempted"] == 1
     assert any(r["kernel_id"] == "k_obsolete" for r in out["by_kernel"])
+
+
+# ---------------------------------------------------------------------------
+# Issue: summary buried failure root-cause in details file
+# ---------------------------------------------------------------------------
+def _write_full_kernel_result(
+    session_dir: Path, session_id: str, kernel_id: str,
+    *, attempts: list[dict[str, Any]],
+    verification: dict[str, Any] | None = None,
+) -> None:
+    """Like _write_backend_results but supports the top-level verification
+    block (used by the upgraded _render_attempted_row to pull real values
+    instead of leaving compile_passed/correctness_passed as null)."""
+    results_dir = (
+        session_dir / "kernel-agent" / "runs" / session_id / "results"
+    )
+    results_dir.mkdir(parents=True, exist_ok=True)
+    body: dict[str, Any] = {"kernel_id": kernel_id, "attempts": attempts}
+    if verification is not None:
+        body["verification"] = verification
+    (results_dir / f"{kernel_id}.json").write_text(
+        json.dumps(body), encoding="utf-8",
+    )
+
+
+def test_produced_artifact_excludes_stdout_log_path(tmp_path: Path) -> None:
+    """A geak preprocess failure points optimized_path at *_stdout.log;
+    that path is a log dump, not a real kernel artifact. produced_artifact
+    must be False."""
+    state = _make_state(
+        session_id="sid1",
+        top15=[_top15_entry("k001", gpu_pct=50.0)],
+        attempts={"k001": _attempt_entry(decision="REVERT",
+                                          rejected_reason="max_failures",
+                                          compile_passed=False)},
+        rejected_ids=["k001"],
+    )
+    _write_full_kernel_result(
+        tmp_path, "sid1", "k001",
+        attempts=[{
+            "backend": "geak", "status": "failed", "attempt_id": "g1",
+            "optimized_path": "/workspace/optimized/geak-78bd_stdout.log",
+            "returncode": 1, "elapsed_s": 213.5,
+        }],
+    )
+    out = build_kernel_optimization_summary(state, tmp_path)
+    ladder = out["by_kernel"][0]["backend_ladder"]
+    assert ladder[0]["produced_artifact"] is False, (
+        f"stdout log should not count as artifact: {ladder[0]}"
+    )
+
+
+def test_backend_ladder_elapsed_uses_elapsed_s_field(tmp_path: Path) -> None:
+    """Real kernel-agent results write ``elapsed_s`` (no -ec); the loader
+    must read that field so elapsed_sec lands in the ladder row."""
+    state = _make_state(
+        session_id="sid1",
+        top15=[_top15_entry("k001")],
+        attempts={"k001": _attempt_entry(decision="REVERT",
+                                          rejected_reason="max_failures",
+                                          compile_passed=False)},
+        rejected_ids=["k001"],
+    )
+    _write_full_kernel_result(
+        tmp_path, "sid1", "k001",
+        attempts=[{
+            "backend": "geak", "status": "failed", "attempt_id": "g1",
+            "optimized_path": "/workspace/optimized/v1.cu",
+            "returncode": 1, "elapsed_s": 213.5,
+        }],
+    )
+    out = build_kernel_optimization_summary(state, tmp_path)
+    ladder = out["by_kernel"][0]["backend_ladder"]
+    assert ladder[0].get("elapsed_sec") == 213.5
+
+
+def test_backend_ladder_classifies_timeout(tmp_path: Path) -> None:
+    """claude/codex oob CLI dies with 'Timed out after 480s'; ladder row
+    must surface error_class='timeout' + a concise error_message."""
+    state = _make_state(
+        session_id="sid1",
+        top15=[_top15_entry("k001")],
+        attempts={"k001": _attempt_entry(decision="REVERT",
+                                          rejected_reason="max_failures",
+                                          compile_passed=False)},
+        rejected_ids=["k001"],
+    )
+    _write_full_kernel_result(
+        tmp_path, "sid1", "k001",
+        attempts=[{
+            "backend": "claude", "status": "failed", "attempt_id": "c1",
+            "optimized_path": "/workspace/optimized/c1_stdout.log",
+            "returncode": 1, "elapsed_s": 483.4,
+            "stdout_tail": (
+                'status: running -> failed\n'
+                '{"task_id": "abc",\n  "status": "failed",\n'
+                '  "error_message": "Timed out after 480s",\n'
+                '  "partial_outputs": []}\n'
+            ),
+        }],
+    )
+    out = build_kernel_optimization_summary(state, tmp_path)
+    row = out["by_kernel"][0]["backend_ladder"][0]
+    assert row.get("error_class") == "timeout"
+    assert "480s" in (row.get("error_message") or "")
+
+
+def test_backend_ladder_classifies_preprocess_failed(tmp_path: Path) -> None:
+    """GEAK preprocess v3 emits 'success=False, errors=N' on failure; the
+    classifier must map that to error_class='preprocess_failed'."""
+    state = _make_state(
+        session_id="sid1",
+        top15=[_top15_entry("k001")],
+        attempts={"k001": _attempt_entry(decision="REVERT",
+                                          rejected_reason="max_failures",
+                                          compile_passed=False)},
+        rejected_ids=["k001"],
+    )
+    _write_full_kernel_result(
+        tmp_path, "sid1", "k001",
+        attempts=[{
+            "backend": "geak", "status": "failed", "attempt_id": "g1",
+            "optimized_path": "/workspace/optimized/g1_stdout.log",
+            "returncode": 1, "elapsed_s": 213.5,
+            "stdout_tail": (
+                "minisweagent.run.preprocess_v3.adapter: INFO: v3 "
+                "preprocess completed in 184.0s (success=False, errors=1)\n"
+                "minisweagent.run.mini: INFO:  starting\n"
+                "minisweagent.run.mini: INFO:  completed: ran\n"
+            ),
+        }],
+    )
+    out = build_kernel_optimization_summary(state, tmp_path)
+    row = out["by_kernel"][0]["backend_ladder"][0]
+    assert row.get("error_class") == "preprocess_failed"
+    assert "preprocess" in (row.get("error_message") or "").lower()
+
+
+def test_backend_ladder_preprocess_failed_with_line_wrapped_stdout(
+    tmp_path: Path,
+) -> None:
+    """Real GEAK stdout_tail wraps at ~80 cols, so the
+    'preprocess completed in Ns' and '(success=False, errors=N)'
+    fragments end up on separate lines. The classifier's regex must
+    tolerate that interstitial whitespace."""
+    state = _make_state(
+        session_id="sid1",
+        top15=[_top15_entry("k001")],
+        attempts={"k001": _attempt_entry(decision="REVERT",
+                                          rejected_reason="max_failures",
+                                          compile_passed=False)},
+        rejected_ids=["k001"],
+    )
+    wrapped_stdout = (
+        "  > minisweagent.run.preprocess_v3.adapter: INFO: v3 "
+        "preprocess completed in 108.7s \n"
+        "  > (success=False, errors=1)                          \n"
+        "  > minisweagent.run.mini: INFO:  starting\n"
+    )
+    _write_full_kernel_result(
+        tmp_path, "sid1", "k001",
+        attempts=[{
+            "backend": "geak", "status": "failed", "attempt_id": "g1",
+            "optimized_path": "/workspace/optimized/g1_stdout.log",
+            "returncode": 1, "elapsed_s": 108.7,
+            "stdout_tail": wrapped_stdout,
+        }],
+    )
+    out = build_kernel_optimization_summary(state, tmp_path)
+    row = out["by_kernel"][0]["backend_ladder"][0]
+    assert row.get("error_class") == "preprocess_failed", (
+        f"wrapped log should still classify: {row}"
+    )
+
+
+def test_render_attempted_row_pulls_verification_from_result_file(
+    tmp_path: Path,
+) -> None:
+    """compile_passed / correctness_passed must come from the detail file's
+    verification block when the attempt ledger doesn't carry them
+    (which is the case for IN_FLIGHT / ATTEMPTED_REJECTED kernels)."""
+    state = _make_state(
+        session_id="sid1",
+        top15=[_top15_entry("k001")],
+        attempts={"k001": _attempt_entry(decision="REVERT",
+                                          rejected_reason="max_failures",
+                                          # ledger has no compile/correctness
+                                          compile_passed=None,
+                                          correctness_passed=None)},
+        rejected_ids=["k001"],
+    )
+    _write_full_kernel_result(
+        tmp_path, "sid1", "k001",
+        attempts=[{
+            "backend": "codex", "status": "partial", "attempt_id": "x1",
+            "optimized_path": "/workspace/optimized/v1.cu",
+            "returncode": 1, "elapsed_s": 483.3,
+        }],
+        verification={
+            "compile_passed": True,
+            "correctness_passed": False,
+            "correctness_source": "missing",
+            "micro_speedup": 1.0,
+            "verification_status": "deferred",
+        },
+    )
+    out = build_kernel_optimization_summary(state, tmp_path)
+    v = out["by_kernel"][0]["verification"]
+    assert v.get("compile_passed") is True
+    assert v.get("correctness_passed") is False
+    assert v.get("correctness_source") == "missing"
+    assert v.get("verification_status") == "deferred"
+
+
+def test_failure_breakdown_classifies_by_error_class(tmp_path: Path) -> None:
+    """failure_reason_breakdown must use the new error_class buckets so
+    real root causes (timeout / preprocess_failed) are not buried in 'other'."""
+    state = _make_state(
+        session_id="sid1",
+        top15=[_top15_entry("k001", gpu_pct=10.0),
+               _top15_entry("k002", gpu_pct=20.0)],
+        attempts={
+            "k001": _attempt_entry(decision="REVERT",
+                                    rejected_reason="max_failures",
+                                    compile_passed=False),
+            "k002": _attempt_entry(decision="REVERT",
+                                    rejected_reason="max_failures",
+                                    compile_passed=False),
+        },
+        rejected_ids=["k001", "k002"],
+    )
+    # k001: preprocess failure
+    _write_full_kernel_result(
+        tmp_path, "sid1", "k001",
+        attempts=[{
+            "backend": "geak", "status": "failed", "attempt_id": "g1",
+            "optimized_path": "/workspace/optimized/g1_stdout.log",
+            "returncode": 1,
+            "stdout_tail": (
+                "v3 preprocess completed in 100s (success=False, errors=2)"
+            ),
+        }],
+    )
+    # k002: ladder all timed out
+    _write_full_kernel_result(
+        tmp_path, "sid1", "k002",
+        attempts=[
+            {"backend": "claude", "status": "failed", "attempt_id": "c1",
+             "optimized_path": "/workspace/optimized/c1_stdout.log",
+             "returncode": 1,
+             "stdout_tail": '"error_message": "Timed out after 480s"'},
+            {"backend": "codex", "status": "failed", "attempt_id": "x1",
+             "optimized_path": "/workspace/optimized/x1_stdout.log",
+             "returncode": 1,
+             "stdout_tail": '"error_message": "Timed out after 480s"'},
+        ],
+    )
+    out = build_kernel_optimization_summary(state, tmp_path)
+    breakdown = out["failure_reason_breakdown"]
+    assert breakdown.get("preprocess_failed") == 1, breakdown
+    assert breakdown.get("timeout") == 1, breakdown
+    assert breakdown.get("other", 0) == 0, (
+        f"new buckets should absorb root causes, leaving other empty: {breakdown}"
+    )

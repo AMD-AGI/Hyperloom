@@ -26,6 +26,7 @@ missing files — the kernel-agent run dir is best-effort.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,110 @@ KNOWN_REJECTION_REASONS = (
     "max_partial_attempts_without_keep",
     "max_failures_without_keep",
 )
+
+#: ``backend_ladder[].error_class`` vocabulary surfaced into
+#: ``failure_reason_breakdown`` so root causes (timeout / preprocess /
+#: compile / correctness / agent error) are no longer buried in ``other``.
+#: Empty string is reserved for succeeded attempts.
+ERROR_CLASS_TIMEOUT = "timeout"
+ERROR_CLASS_PREPROCESS_FAILED = "preprocess_failed"
+ERROR_CLASS_COMPILE_FAILED = "compile_failed"
+ERROR_CLASS_CORRECTNESS_FAILED = "correctness_failed"
+ERROR_CLASS_AGENT_ERROR = "agent_error"
+ERROR_CLASS_UNKNOWN = "unknown"
+
+#: kernel-agent often points ``optimized_path`` at a stdout / stderr
+#: dump when the run failed early (preprocess, build, harness). Those
+#: paths are NOT real artifacts and must not flip
+#: ``produced_artifact=true`` (which would mask ``ladder_all_failed``).
+_ARTIFACT_LOG_SUFFIXES = (
+    "_stdout.log", "_stderr.log", ".log", ".txt",
+)
+
+
+def _is_real_artifact_path(path: str) -> bool:
+    """True only when ``path`` looks like a real kernel artifact.
+
+    Excludes stdout/stderr/log dumps that kernel-agent writes even on
+    early-failure paths (e.g. geak preprocess failure still writes
+    ``<id>_stdout.log`` and stuffs it into ``optimized_path``).
+    """
+    if not path:
+        return False
+    p = path.strip()
+    if not p:
+        return False
+    low = p.lower()
+    if any(low.endswith(suf) for suf in _ARTIFACT_LOG_SUFFIXES):
+        return False
+    fname = low.rsplit("/", 1)[-1]
+    if "_stdout" in fname or "_stderr" in fname:
+        return False
+    return True
+
+
+_RE_TIMEOUT = re.compile(r"Timed out after (\d+)s")
+# stdout_tail is wrapped at ~80 cols by the log formatter, so the
+# "preprocess ... (success=False, errors=N)" signal often straddles a
+# newline. Allow up to 300 chars of any-whitespace between the keyword
+# and the failure marker, and let ``errors=`` sit on a wrapped line too.
+_RE_PREPROCESS_FAILED = re.compile(
+    r"preprocess[\s\S]{0,300}?success=False"
+    r"(?:[\s\S]{0,80}?errors=(\d+))?",
+    re.IGNORECASE,
+)
+_RE_COMPILE_FAILED = re.compile(
+    r"(compile|build).{0,30}(failed|error)|undefined reference",
+    re.IGNORECASE,
+)
+_RE_CORRECTNESS_FAILED = re.compile(
+    r"correctness.{0,30}(failed|mismatch)|accuracy mismatch",
+    re.IGNORECASE,
+)
+
+
+def _classify_attempt_failure(
+    attempt: dict[str, Any],
+) -> tuple[str, str]:
+    """Classify a failed/partial attempt into ``(error_class, error_message)``.
+
+    Deterministic, never LLM. Priority order: timeout → preprocess →
+    compile → correctness → generic agent_error → unknown. ``succeeded``
+    attempts get ``("", "")``.
+    """
+    status = str(attempt.get("status") or "").strip().lower()
+    if status == "succeeded":
+        return "", ""
+    stdout = str(attempt.get("stdout_tail") or "")
+    explicit_err = str(attempt.get("error_message") or "")
+
+    # timeout — explicit oob CLI signal; check stdout AND error_message
+    for blob in (explicit_err, stdout):
+        m = _RE_TIMEOUT.search(blob)
+        if m:
+            secs = m.group(1)
+            return ERROR_CLASS_TIMEOUT, f"Timed out after {secs}s"
+
+    # preprocess failure (GEAK pattern)
+    m = _RE_PREPROCESS_FAILED.search(stdout)
+    if m:
+        errs = m.group(1) or "?"
+        return (
+            ERROR_CLASS_PREPROCESS_FAILED,
+            f"preprocess reported {errs} error(s)",
+        )
+
+    if _RE_COMPILE_FAILED.search(stdout):
+        return ERROR_CLASS_COMPILE_FAILED, "compilation failed"
+
+    if _RE_CORRECTNESS_FAILED.search(stdout):
+        return ERROR_CLASS_CORRECTNESS_FAILED, "correctness check failed"
+
+    rc = attempt.get("returncode")
+    if isinstance(rc, int) and rc != 0:
+        return ERROR_CLASS_AGENT_ERROR, f"agent exit code {rc}"
+
+    return ERROR_CLASS_UNKNOWN, ""
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +232,29 @@ def _backend_results_dir(session_dir: Path, session_id: str) -> Path | None:
     return None
 
 
+def _load_kernel_result(
+    results_dir: Path | None, kernel_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Read the raw kernel-agent ``results/<kid>.json`` payload.
+
+    Returns ``(payload_dict_or_None, unavailable_reason)``. Reused by
+    both ladder harvesting and verification passthrough so a single
+    read covers both downstream needs.
+    """
+    if results_dir is None:
+        return None, "kernel_agent_results_dir_missing"
+    fpath = results_dir / f"{kernel_id}.json"
+    if not fpath.is_file():
+        return None, "kernel_agent_result_file_missing"
+    try:
+        data = json.loads(fpath.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, "parse_error"
+    if not isinstance(data, dict):
+        return None, "parse_error"
+    return data, ""
+
+
 def _load_backend_ladder(
     results_dir: Path | None, kernel_id: str,
 ) -> tuple[list[dict[str, Any]], str]:
@@ -135,23 +263,15 @@ def _load_backend_ladder(
     Returns ``(ladder, unavailable_reason)``:
     * ``ladder`` is the list of compact per-backend rows (empty when
       unavailable); each row carries ``backend / status / attempt_id /
-      produced_artifact / elapsed_sec``.
+      produced_artifact / elapsed_sec / error_class / error_message``.
     * ``unavailable_reason`` is empty on success or one of
       ``kernel_agent_results_dir_missing``,
       ``kernel_agent_result_file_missing``, ``parse_error``,
       ``no_attempts_recorded``.
     """
-    if results_dir is None:
-        return [], "kernel_agent_results_dir_missing"
-    fpath = results_dir / f"{kernel_id}.json"
-    if not fpath.is_file():
-        return [], "kernel_agent_result_file_missing"
-    try:
-        data = json.loads(fpath.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return [], "parse_error"
-    if not isinstance(data, dict):
-        return [], "parse_error"
+    data, reason = _load_kernel_result(results_dir, kernel_id)
+    if data is None:
+        return [], reason
     raw_attempts = data.get("attempts") or []
     if not isinstance(raw_attempts, list) or not raw_attempts:
         return [], "no_attempts_recorded"
@@ -159,18 +279,31 @@ def _load_backend_ladder(
     for a in raw_attempts:
         if not isinstance(a, dict):
             continue
-        produced = bool(
-            (a.get("optimized_path") or "").strip()
-        )
+        # produced_artifact: real kernel code, not a stdout/stderr dump.
+        # kernel-agent writes ``optimized_path`` even on early-failure
+        # paths (e.g. geak preprocess failure -> *_stdout.log).
+        produced = _is_real_artifact_path(a.get("optimized_path") or "")
         row: dict[str, Any] = {
             "backend": str(a.get("backend") or ""),
             "status": str(a.get("status") or ""),
             "attempt_id": str(a.get("attempt_id") or ""),
             "produced_artifact": produced,
         }
-        elapsed = a.get("elapsed_sec")
+        # kernel-agent results use ``elapsed_s`` (no -ec). Read both for
+        # forward compatibility but the canonical source is elapsed_s.
+        elapsed = a.get("elapsed_s")
+        if elapsed is None:
+            elapsed = a.get("elapsed_sec")
         if isinstance(elapsed, (int, float)):
             row["elapsed_sec"] = float(elapsed)
+        # error_class / error_message: deterministic root-cause tag so the
+        # frontend doesn't have to scrape stdout_tail to know why a
+        # backend failed.
+        err_class, err_msg = _classify_attempt_failure(a)
+        if err_class:
+            row["error_class"] = err_class
+        if err_msg:
+            row["error_message"] = err_msg
         ladder.append(row)
     return ladder, ""
 
@@ -511,11 +644,33 @@ def _render_attempted_row(
 ) -> dict[str, Any]:
     kid = str(top_entry.get("kernel_id") or attempt.get("kernel_id") or "")
     ladder, ladder_unavailable = _load_backend_ladder(results_dir, kid)
+    # Pull the raw kernel-agent result once so verification passthrough
+    # below doesn't re-read the file.
+    kernel_result, _ = _load_kernel_result(results_dir, kid)
 
     verification: dict[str, Any] = {
         "compile_passed": attempt.get("compile_passed"),
         "correctness_passed": attempt.get("correctness_passed"),
     }
+    # Detail-file passthrough: IN_FLIGHT / ATTEMPTED_REJECTED kernels
+    # never populate ledger compile/correctness fields, so without this
+    # block their verification dict stays {"compile_passed": null,
+    # "correctness_passed": null} even though the detail file has the
+    # real values. Surfaces the extended audit fields too.
+    if isinstance(kernel_result, dict):
+        ver_block = kernel_result.get("verification")
+        if isinstance(ver_block, dict):
+            for key in (
+                "compile_passed", "correctness_passed",
+                "correctness_source", "micro_speedup",
+                "micro_speedup_source", "verification_status",
+                "best_artifact_path", "best_backend", "best_attempt_id",
+            ):
+                v = ver_block.get(key)
+                if v is not None:
+                    verification[key] = v
+    # last_kernel_opt is the KEEP_PENDING handoff and wins over both
+    # the ledger and the detail file for the current pending kernel.
     if isinstance(last_kernel_opt, dict) and last_kernel_opt:
         for key in (
             "compile_passed", "correctness_passed", "best_artifact_path",
@@ -573,20 +728,39 @@ def _render_attempted_row(
 # ---------------------------------------------------------------------------
 # Aggregations / takeaways
 # ---------------------------------------------------------------------------
+#: ``backend_ladder[].error_class`` -> ``failure_reason_breakdown`` bucket.
+#: Lets root causes (timeout / preprocess / compile / correctness) land in
+#: dedicated buckets instead of the legacy catch-all ``other``.
+_ERROR_CLASS_TO_BUCKET = {
+    ERROR_CLASS_TIMEOUT:            "timeout",
+    ERROR_CLASS_PREPROCESS_FAILED:  "preprocess_failed",
+    ERROR_CLASS_COMPILE_FAILED:     "compile_failed",
+    ERROR_CLASS_CORRECTNESS_FAILED: "correctness_failed",
+    ERROR_CLASS_AGENT_ERROR:        "agent_error",
+}
+
+
 def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int]:
     """Count high-level failure modes across attempted-rejected kernels.
 
-    ``ladder_all_failed`` is the single most actionable bucket — when
-    every backend in the geak/claude/codex ladder returned ``failed``
-    and produced no artifact, the kernel-agent toolchain itself is the
-    bottleneck, not any one backend.
+    Priority: dedicated ``error_class``-derived buckets (timeout /
+    preprocess_failed / compile_failed / correctness_failed /
+    agent_error) trump the legacy structural buckets so root causes
+    don't get buried in ``other``. Falls back to the structural
+    classification when no ladder attempt carries an error_class.
     """
     breakdown: dict[str, int] = {
+        # Legacy structural buckets (kept for back-compat)
         "ladder_all_failed": 0,
         "ladder_partial_no_artifact": 0,
         "speedup_below_threshold": 0,
-        "correctness_failed": 0,
         "ladder_unavailable": 0,
+        # Root-cause buckets derived from error_class
+        "timeout": 0,
+        "preprocess_failed": 0,
+        "compile_failed": 0,
+        "correctness_failed": 0,
+        "agent_error": 0,
         "other": 0,
     }
     for row in by_kernel:
@@ -597,6 +771,23 @@ def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int
         if not ladder:
             breakdown["ladder_unavailable" if ladder_unavail else "other"] += 1
             continue
+
+        # 1) error_class wins: pick the most common failure mode across
+        #    failed/partial attempts (a kernel that timed out on 2 of 3
+        #    backends is fundamentally a timeout problem).
+        ec_counts: dict[str, int] = {}
+        for r in ladder:
+            ec = str(r.get("error_class") or "")
+            if ec and ec != ERROR_CLASS_UNKNOWN:
+                ec_counts[ec] = ec_counts.get(ec, 0) + 1
+        if ec_counts:
+            top_ec = max(ec_counts.items(), key=lambda kv: kv[1])[0]
+            bucket = _ERROR_CLASS_TO_BUCKET.get(top_ec, "other")
+            breakdown[bucket] += 1
+            continue
+
+        # 2) Structural fallback (legacy paths: pre-error_class data,
+        #    correctness checked via verification block, etc.)
         any_artifact = any(r.get("produced_artifact") for r in ladder)
         all_failed = all(r.get("status") == "failed" for r in ladder)
         verification = row.get("verification") or {}
@@ -710,6 +901,12 @@ __all__ = [
     "build_kernel_optimization_summary",
     "CATEGORY_INTEGRATED",
     "CATEGORY_KEEP_PENDING",
+    "ERROR_CLASS_TIMEOUT",
+    "ERROR_CLASS_PREPROCESS_FAILED",
+    "ERROR_CLASS_COMPILE_FAILED",
+    "ERROR_CLASS_CORRECTNESS_FAILED",
+    "ERROR_CLASS_AGENT_ERROR",
+    "ERROR_CLASS_UNKNOWN",
     "CATEGORY_ATTEMPTED_REJECTED",
     "CATEGORY_IN_FLIGHT",
     "CATEGORY_UNATTEMPTED",
