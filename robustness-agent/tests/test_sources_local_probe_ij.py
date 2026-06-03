@@ -211,12 +211,15 @@ def test_probe_leases_via_full_probe(tmp_path):
 
 def test_probe_external_mounts_records_latency(monkeypatch, tmp_path):
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path))
+    monkeypatch.setenv("TRACELENS_INTERNAL_ROOT", str(tmp_path))
     monkeypatch.setenv("INFERENCEX_PATH", "/nonexistent/path/zzz")
     monkeypatch.delenv("OOB_SRC", raising=False)
     out = _probe_external_mounts(timeout_s=5.0)
     by_env = {row["env_name"]: row for row in out}
     assert "TRACELENS_ROOT" in by_env
     assert by_env["TRACELENS_ROOT"]["ok"] is True
+    assert "TRACELENS_INTERNAL_ROOT" in by_env
+    assert by_env["TRACELENS_INTERNAL_ROOT"]["ok"] is True
     assert "INFERENCEX_PATH" in by_env
     assert by_env["INFERENCEX_PATH"]["ok"] is False
     # OOB_SRC has no default — should be skipped silently.
@@ -261,6 +264,7 @@ async def test_fetch_populates_state_and_deps(tmp_path, monkeypatch):
     _write(tmp_path / "state.json", json.dumps({"baseline_tput": 1.0}))
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path))
+    monkeypatch.setenv("TRACELENS_INTERNAL_ROOT", str(tmp_path))
     cfg = LocalProbeConfig(
         session_dir=tmp_path,
         disk_mountpoints=(),
