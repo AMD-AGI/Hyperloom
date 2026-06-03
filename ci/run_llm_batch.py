@@ -7,12 +7,7 @@ returned in input order and can also be written as JSONL with ``--output``.
 API keys are intentionally read from environment variables instead of being
 hard-coded in this file:
 
-  export LLM_PROXY_KEY_GZ=ak-...
-  export LLM_PROXY_KEY_FSY=ak-...
-  export LLM_PROXY_KEY_BYK=ak-...
-  export LLM_PROXY_KEY_LSS=ak-...
-  export LLM_PROXY_KEY_ZXF=ak-...
-  export LLM_PROXY_KEY_HCJ=ak-...
+  export LLM_PROXY_KEY=ak-...
 """
 
 from __future__ import annotations
@@ -35,12 +30,10 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 DEFAULT_BASE_URL = "https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1"
 DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_KEY_ENV_NAMES = (
-    ("gz", "LLM_PROXY_KEY_GZ"),
-    ("fsy", "LLM_PROXY_KEY_FSY"),
-    ("byk", "LLM_PROXY_KEY_BYK"),
-    ("lss", "LLM_PROXY_KEY_LSS"),
-    ("zxf", "LLM_PROXY_KEY_ZXF"),
-    ("hcj", "LLM_PROXY_KEY_HCJ"),
+    "LLM_PROXY_KEY",
+    "OPENAI_API_KEY",
+    "CLAW_API_KEY",
+    "SAFE_API_KEY",
 )
 
 
@@ -89,22 +82,12 @@ def build_tasks() -> list[list[dict[str, str]]]:
     ]
 
 
-def _load_keys() -> list[tuple[str, str]]:
-    keys: list[tuple[str, str]] = []
-    for name, env_name in DEFAULT_KEY_ENV_NAMES:
+def _load_key() -> tuple[str, str] | None:
+    for env_name in DEFAULT_KEY_ENV_NAMES:
         value = (os.environ.get(env_name) or "").strip()
         if value:
-            keys.append((name, value))
-    if keys:
-        return keys
-
-    raw = (os.environ.get("LLM_PROXY_KEYS") or "").strip()
-    if raw:
-        for idx, item in enumerate(raw.split(","), start=1):
-            key = item.strip()
-            if key:
-                keys.append((f"key{idx}", key))
-    return keys
+            return env_name, value
+    return None
 
 
 def _retry_after_seconds(exc: APIStatusError, attempt: int, cap_s: float) -> float:
@@ -125,12 +108,12 @@ def _network_backoff_seconds(attempt: int, cap_s: float) -> float:
 def _call_one(
     idx: int,
     messages: list[dict[str, str]],
-    clients: list[tuple[str, OpenAI]],
+    client: OpenAI,
+    key_name: str,
     sem: threading.Semaphore,
     gate: GlobalCooldownGate,
     cfg: BatchConfig,
 ) -> str:
-    name, client = clients[idx % len(clients)]
     last_err: BaseException | None = None
 
     for attempt in range(cfg.max_retries):
@@ -155,24 +138,25 @@ def _call_one(
         time.sleep(delay_s)
 
     raise RuntimeError(
-        f"task {idx} (key={name}) failed after {cfg.max_retries} retries: {last_err}"
+        f"task {idx} (key={key_name}) failed after {cfg.max_retries} retries: {last_err}"
     )
 
 
 def run_batch(tasks: list[list[dict[str, str]]], cfg: BatchConfig) -> list[str | None]:
-    keys = _load_keys()
-    if not keys:
-        names = ", ".join(env for _, env in DEFAULT_KEY_ENV_NAMES)
+    loaded_key = _load_key()
+    if loaded_key is None:
+        names = ", ".join(DEFAULT_KEY_ENV_NAMES)
         raise RuntimeError(
-            f"no API keys configured; set one or more of {names}, "
-            "or set comma-separated LLM_PROXY_KEYS"
+            f"no API key configured; set one of {names}"
         )
+    key_name, key_value = loaded_key
 
     http_client = httpx.Client(verify=cfg.verify_tls, timeout=cfg.timeout_s)
-    clients = [
-        (name, OpenAI(api_key=key, base_url=cfg.base_url, http_client=http_client))
-        for name, key in keys
-    ]
+    client = OpenAI(
+        api_key=key_value,
+        base_url=cfg.base_url,
+        http_client=http_client,
+    )
     sem = threading.Semaphore(max(1, cfg.max_concurrency))
     gate = GlobalCooldownGate()
 
@@ -180,7 +164,7 @@ def run_batch(tasks: list[list[dict[str, str]]], cfg: BatchConfig) -> list[str |
     ok = fail = 0
     with ThreadPoolExecutor(max_workers=max(1, cfg.max_concurrency)) as pool:
         futs = {
-            pool.submit(_call_one, i, messages, clients, sem, gate, cfg): i
+            pool.submit(_call_one, i, messages, client, key_name, sem, gate, cfg): i
             for i, messages in enumerate(tasks)
         }
         for fut in as_completed(futs):

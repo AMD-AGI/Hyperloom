@@ -87,6 +87,70 @@ from .action_executors.benchmark_result import is_valid_measurement
 log = logging.getLogger(__name__)
 
 
+def _infer_model_class_from_config(model_path: str) -> str:
+    """Infer a deterministic model_class from local model metadata."""
+    raw_path = (model_path or "").strip()
+    payload: dict[str, Any] = {}
+    if raw_path:
+        cfg = Path(raw_path) / "config.json"
+        try:
+            if cfg.is_file():
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    payload = data
+        except Exception:  # noqa: BLE001 - best effort only.
+            log.debug("model_class inference: failed to read %s", cfg, exc_info=True)
+
+    text_parts: list[str] = [raw_path.lower()]
+    arch = payload.get("architectures")
+    if isinstance(arch, list):
+        text_parts.extend(str(x).lower() for x in arch if x)
+    elif arch:
+        text_parts.append(str(arch).lower())
+    for key in ("model_type", "attention_type", "attn_type"):
+        if payload.get(key):
+            text_parts.append(str(payload[key]).lower())
+    text = " ".join(text_parts)
+
+    def _positive_int(*keys: str) -> bool:
+        for key in keys:
+            val = payload.get(key)
+            if isinstance(val, bool):
+                continue
+            try:
+                if val is not None and int(val) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    is_moe = (
+        _positive_int(
+            "num_experts",
+            "n_routed_experts",
+            "num_local_experts",
+            "moe_num_experts",
+        )
+        or any(k in text for k in (
+            "moe", "mixtral", "deepseek-v2", "deepseek-v3", "deepseek-r1",
+            "kimi", "glm-5", "glm5",
+        ))
+    )
+    is_mla = any(k in text for k in (
+        "mla", "multi-head latent", "deepseek", "kimi", "glm-5", "glm5",
+    ))
+    is_nsa = any(k in text for k in (
+        "nsa", "native sparse attention", "glm-5", "glm5",
+    ))
+    if is_moe and is_mla and is_nsa:
+        return "moe_mla_nsa"
+    if is_moe and is_mla:
+        return "moe_mla"
+    if is_moe:
+        return "moe_swa"
+    return "dense"
+
+
 # Audit-trail kinds (must match shared_state._AUDIT_ACTIONS). Coordinator
 # calls SharedState.record_action_attempt for these on both the
 # success and failure dispatcher branches so the prompt sees a full
@@ -732,18 +796,25 @@ class Coordinator:
             session_dir=self.session_dir,
             shared_state=self.shared_state,
         )
-        # External SKILL fills `model_class` via --model-class / MODEL_CLASS
-        # (the deleted `classify` action used to do this from inside the loop).
-        # Only overwrite a blank value so a resumed session keeps whatever was
-        # previously persisted; explicit overrides require a fresh session.
-        if self._model_class_override and not (self.shared_state.model_class or "").strip():
-            self.shared_state.model_class = self._model_class_override
+        # External SKILL may fill `model_class` via --model-class /
+        # MODEL_CLASS. If it does not, restore the deleted `classify` action's
+        # lightweight persistence duty by deriving the class once at boot and
+        # writing it to state.json. Only overwrite a blank value so resumed
+        # sessions keep their persisted class.
+        if not (self.shared_state.model_class or "").strip():
+            inferred_model_class = (
+                self._model_class_override
+                or _infer_model_class_from_config(
+                    self.shared_state.model_path or os.environ.get("MODEL_PATH", "")
+                )
+            )
+            self.shared_state.model_class = inferred_model_class
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — best effort; not worth aborting boot.
                 log.exception(
                     "Coordinator: failed to persist model_class=%r at boot",
-                    self._model_class_override,
+                    inferred_model_class,
                 )
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
