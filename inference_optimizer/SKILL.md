@@ -456,6 +456,12 @@ inference_optimizer optimize \
   `mxfp4` / `mxfp4_fp8`); it resolves to a curated prompt internally
   (`orchestrator/quantization_schemes.py`). `none` or omit = no quantization.
   Free-text `--quantize` takes priority when both are given.
+- **Keep `--precision` consistent with the quantization.** When a quantization
+  scheme is requested, also set `--precision`/`PRECISION` to that scheme (e.g.
+  `--quantize-scheme int4_wo_128` → `--precision int4_wo_128`). Otherwise the
+  benchmark configs, display names, and the optimization report carry the stale
+  operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
+  actually-quantized model. Never leave a conflicting precision when quantizing.
 - Behavior: one-shot, **skipped on `--resume`**. On a failed/unusable
   quantization the run **hard-stops (`SystemExit(3)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
