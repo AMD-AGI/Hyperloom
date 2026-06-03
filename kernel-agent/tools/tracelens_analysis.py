@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import gzip
+import importlib.util
 import json
 import os
 import re
@@ -703,6 +705,69 @@ _REUSABLE_SOURCE_ROOTS = (
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
 )
+
+# Framework packages whose installed location we resolve dynamically so the
+# kernel source resolver + reusability gate are image-agnostic (source-built
+# /sgl-workspace, pip dist-packages, /opt/venv, conda, ...).
+_FRAMEWORK_PKGS = ("aiter", "sglang", "vllm", "triton")
+_FRAMEWORK_ROOTS_ENV = (
+    "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS",
+    "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
+)
+
+
+@functools.lru_cache(maxsize=1)
+def framework_source_roots() -> tuple[str, ...]:
+    """Image-agnostic union of framework source roots, highest priority first.
+
+    Order: explicit env override -> dynamically-resolved installed package
+    locations (``importlib`` find_spec) -> hardcoded fallback list. Only
+    existing directories are kept. Trailing ``/`` is normalized so callers can
+    keep doing the cheap ``root in path`` substring test.
+    """
+    roots: list[str] = []
+
+    def _add(raw: str | None) -> None:
+        if not raw:
+            return
+        p = str(raw).strip()
+        if not p:
+            return
+        try:
+            if not Path(p).is_dir():
+                return
+        except OSError:
+            return
+        norm = p.rstrip("/") + "/"
+        if norm not in roots:
+            roots.append(norm)
+
+    # 1. explicit operator override (colon/semicolon separated; entries may be
+    #    bare paths or ``pkg=path``).
+    for env in _FRAMEWORK_ROOTS_ENV:
+        for tok in os.environ.get(env, "").replace(";", ":").split(":"):
+            tok = tok.strip()
+            if "=" in tok:
+                tok = tok.split("=", 1)[1]
+            _add(tok)
+
+    # 2. dynamically resolve where each framework is actually installed.
+    for pkg in _FRAMEWORK_PKGS:
+        try:
+            spec = importlib.util.find_spec(pkg)
+        except (ImportError, ValueError, ModuleNotFoundError):
+            spec = None
+        if spec is None:
+            continue
+        for loc in (spec.submodule_search_locations or []):
+            _add(loc)
+
+    # 3. hardcoded fallbacks (source-built layouts that may not be importable
+    #    from this interpreter, e.g. a /sgl-workspace checkout on PYTHONPATH).
+    for p in _REUSABLE_SOURCE_ROOTS:
+        _add(p)
+
+    return tuple(roots)
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
 # raw memcpy/copy ops, and PyTorch native copy. Folded from the feature
@@ -738,7 +803,7 @@ def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
         return True
     if any(marker in lower_name for marker in _COMPILE_GENERATED_NAME_MARKERS):
         # A stable in-repo SGLang/vLLM Triton source can still be reusable.
-        return not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS)
+        return not any(root.lower() in lower_file for root in framework_source_roots())
     return False
 
 
@@ -787,7 +852,7 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"runtime-generated (torch.compile / Inductor cache): {source_file}"
         )
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _REUSABLE_SOURCE_ROOTS):
+    if not any(root.lower() in lower_file for root in framework_source_roots()):
         return False, (
             f"source not under a reusable framework root: {source_file}"
         )
@@ -823,6 +888,13 @@ _VENDOR_DISPATCH_SIGS = (
     "AITER_JIT_LOAD",  # aiter macro
     "hipModuleLoad",  # raw .co loader
     "AiterAsmKernel",  # ASM dispatch wrapper
+    # aiter `@compile_ops(...)` JIT op stubs (functions with `...` bodies that
+    # compile/load a precompiled CK/ASM module from AITER_CSRC_DIR). The real
+    # device body lives in the C++/CK sources, not this Python file, so the
+    # symbol must be re-resolved to its actual kernel source before dispatch.
+    "@compile_ops",
+    "compile_ops(",
+    "AITER_CSRC_DIR",
 )
 _VENDOR_KEYWORD_NAMES = (
     "hipblaslt", "rocblaslt", "miopen", "ck_kernels",
@@ -1007,21 +1079,60 @@ def _rank_paths(paths: list[Path]) -> list[Path]:
     return sorted(paths, key=score)
 
 
-def locate_source_via_grep(name: str) -> str:
-    """Locate a kernel source file by grepping known repos.
+_KERNEL_DEFINITION_MARKERS = (
+    "@triton.jit",          # Triton kernel definition
+    "__global__",           # CUDA/HIP global kernel
+    "ck_tile::kentry",      # Composable Kernel entry
+    "kentry<",              # CK template entry
+    "template <",           # CK templated kernel
+)
 
-    Returns "" when no confident match exists. Never fabricates a path.
+
+def _path_defines_kernel(path: Path, keyword: str) -> bool:
+    """True when *path* looks like it DEFINES the kernel (vs merely referencing
+    it): the filename stem matches the keyword and/or the body carries a kernel
+    definition marker. Used to prefer the real device source over dispatch
+    wrappers / call sites that only mention the symbol."""
+    try:
+        stem_match = keyword.lower() in path.stem.lower()
+        if path.stat().st_size > 1024 * 1024:
+            return stem_match
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    defines = any(m in text for m in _KERNEL_DEFINITION_MARKERS) or (
+        f"def {keyword}" in text
+    )
+    return stem_match or defines
+
+
+def locate_source_via_grep(name: str) -> str:
+    """Locate a kernel source file by grepping the (image-agnostic) framework
+    source roots. Prefers the file that DEFINES the kernel and is not itself a
+    dispatch wrapper. Returns "" when no confident match exists; never
+    fabricates a path.
     """
     keywords = _candidate_keywords(name)
     if not keywords:
         return ""
     for keyword in keywords:
         hits: list[Path] = []
-        for root in KNOWN_SEARCH_ROOTS:
+        for root in framework_source_roots():
             hits.extend(_grep_for_keyword(keyword, Path(root)))
-        if hits:
-            ranked = _rank_paths(hits)
-            return str(ranked[0])
+        if not hits:
+            continue
+        ranked = _rank_paths(hits)
+        non_wrapper = [p for p in ranked
+                       if not is_vendor_dispatch_wrapper(name, str(p))]
+        # 1. real definition that is not a wrapper (best)
+        defining = [p for p in non_wrapper if _path_defines_kernel(p, keyword)]
+        if defining:
+            return str(defining[0])
+        # 2. any non-wrapper hit
+        if non_wrapper:
+            return str(non_wrapper[0])
+        # 3. last resort: top-ranked hit (caller re-checks wrapper status)
+        return str(ranked[0])
     return ""
 
 
@@ -1381,6 +1492,16 @@ def _finalize_candidates(
         item["duration_us"] = round(item["duration_us"], 3)
         if not item.get("source_file"):
             item["source_file"] = locate_source_via_grep(item["name"])
+        elif is_vendor_dispatch_wrapper(item["name"], item.get("source_file", "")):
+            # The trace attributed this kernel to a dispatch stub (e.g. aiter's
+            # ``@compile_ops`` ``moe_op.py`` or a pip dispatch wrapper) rather
+            # than the device body. Re-resolve to the real editable kernel
+            # source via the (image-agnostic) source-root grep before dispatch.
+            # If nothing better is found the vendor downgrade below still drops
+            # it honestly, so GEAK is never handed a non-rewritable shim.
+            _real = locate_source_via_grep(item["name"])
+            if _real and not is_vendor_dispatch_wrapper(item["name"], _real):
+                item["source_file"] = _real
         # Trace events for ASM-implemented kernels point at a tiny pybind11
         # shim TU (e.g. csrc/pybind/gemm_a16w16_asm_pybind.cu, 233 B). Try to
         # promote that to the real device code so optimization is meaningful.
