@@ -9,7 +9,6 @@ actions_taken=["aborted: source checkout failed"].
   # Production: USER_DATA_PATH is the wekafs path Claw mounts for this run.
   # The V2 session_dir + audit files live directly under it (already
   # persistent — CI reads them straight from wekafs, no copy needed).
-  : "${USER_DATA_PATH:=/workspace/hyperloom}"
   export USER_DATA_PATH
   echo "[CI_PATH] USER_DATA_PATH=$USER_DATA_PATH (persistent session + artifact root)"
   export HYPERLOOM_SOURCE_REPO="${HYPERLOOM_SOURCE_REPO:-https://github.com/AMD-AGI/Hyperloom.git}"
@@ -71,6 +70,7 @@ Then run the skill at $HYPERLOOM_SOURCE_DIR/inference_optimizer/SKILL.md from
 that directory (cd "$HYPERLOOM_SOURCE_DIR").
 
   export CORTEX_KB_URL=https://global.primus-safe.amd.com/knowledge-base
+  export NODE_TLS_REJECT_UNAUTHORIZED=0
 
 SAFETY:
 - NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
