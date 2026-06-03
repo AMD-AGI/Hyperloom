@@ -374,6 +374,9 @@ def build_manifest(
         "research_lane_capacity": int(
             getattr(args, "research_lane_capacity", 1) or 1
         ) if args is not None else 1,
+        "gpu_specialist_capacity": int(
+            getattr(args, "gpu_specialist_capacity", 0) or 0
+        ) if args is not None else 0,
         # IR-3 soft-degrade audit.
         "kb_degraded_reason": (
             getattr(args, "kb_degraded_reason", None) if args is not None else None

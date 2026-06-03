@@ -31,6 +31,7 @@ from typing import Any, Callable
 from ..specialist_domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     SpecialistDomain,
+    domain_for_tag,
     get_domain,
 )
 
@@ -403,6 +404,68 @@ def _focus_session_steward_specialist(
     ]
 
 
+def _focus_research_scout_specialist(
+    inp: SpecialistPromptInputs,
+) -> list[str]:
+    proven_lines: list[str] = []
+    if inp.already_proven:
+        proven_lines.append(
+            "**Already proven (warm-start recipe) — do NOT re-mine these; "
+            "focus on net-new priors:**"
+        )
+        for item in inp.already_proven[:12]:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            src = str(item.get("source") or "").strip()
+            proven_lines.append(f"- {name}" + (f" (source={src})" if src else ""))
+        proven_lines.append("")
+    return [
+        "You are the **research scout** — a read-only collector of",
+        "*already-proven* priors. You do NOT benchmark, apply patches, or",
+        "decide KEEP/REVERT. Your single deliverable is a prioritised list",
+        "of research hints, each with an explicit source.",
+        "",
+        *proven_lines,
+        "**Three research sources (cover all that are reachable)**",
+        "1. **Reference launch scripts** — look under",
+        "   ``$INFERENCEX_PATH/benchmarks/single_node/`` for scripts",
+        "   matching this (model, GPU). Extract every validated env/flag",
+        "   and the throughput it reached. ``$INFERENCEX_PATH`` may be",
+        "   unset — skip this source silently if so.",
+        "2. **Model architecture features** — read the model's",
+        "   ``config.json`` (MTP ``num_nextn_predict_layers``, MoE expert",
+        "   count / routing, attention type MLA/GQA, quantization support)",
+        "   and infer optimizations those features unlock.",
+        "3. **Cross-framework / NVIDIA research** — survey PRs, blogs, and",
+        "   MLPerf results across frameworks and NVIDIA/TRT-LLM via",
+        "   ``WebSearch`` / ``mcp__pr_monitor__*`` for proven wins. Avoid",
+        "   re-listing PRs the FRAMEWORK_PR phase already covered (the",
+        "   Coordinator dedups by PR id, but skip obvious repeats).",
+        "",
+        "**Gap computation** — where you find a reference throughput,",
+        "compute the gap versus our current baseline and let the gap size",
+        "drive each hint's priority.",
+        "",
+        "**Output protocol** — emit ONE ``specialist_done`` carrying a",
+        "``research`` block:",
+        "- ``hints``: list of ``{what, expected_impact, accuracy_risk,",
+        "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog",
+        "  / MLPerf row / reference script path); a hint without a source",
+        "  is dropped.",
+        "- optional ``competitor_target``: ``{gpu, model, framework,",
+        "  precision, per_conc:[{conc, tput_per_gpu, tpot_ms,",
+        "  interactivity, source}], notes}`` — every per-conc number MUST",
+        "  carry its own ``source`` or it is discarded.",
+        "- optional ``prs_fetched`` / ``pr_diffs_read`` / ``nvidia_refs``:",
+        "  ids you actually inspected (feeds exploration-depth tracking).",
+        "",
+        "**Iron rule** — read-only. Never write a patch, never launch a",
+        "benchmark, never recommend a phase transition. Turn proven priors",
+        "into structured hints and stop.",
+    ]
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[
     str, "Callable[[SpecialistPromptInputs], list[str]]"
 ] = {
@@ -413,6 +476,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[
     "system_specialist":    _focus_system_specialist,
     "pr_intel_specialist":  _focus_pr_intel_specialist,
     "session_steward_specialist": _focus_session_steward_specialist,
+    "research_scout_specialist": _focus_research_scout_specialist,
 }
 
 
@@ -435,10 +499,21 @@ class SpecialistPromptInputs:
     # tensor-parallel sessions where the Coordinator forgot to
     # plumb ``params['tp']`` from SharedState.
     gpu_type: str = ""
+    allocated_gpu_ids: tuple[int, ...] = ()
     tp: int = 0
     hbm_gb: float = 0.0
     peak_tflops: float = 0.0
     arch_notes: str = ""
+    # Advisory competitor target gap block (mirrored from the
+    # Coordinator). Direction hint only; never gates the specialist.
+    target_gap_notes: str = ""
+    # Already-proven warm-recipe optimizations (``{name, source}``) the
+    # research scout should skip re-mining. Empty on cold-start.
+    already_proven: list[dict[str, str]] = field(default_factory=list)
+    # Compact advisory research-hint block (source-backed priors collected
+    # this session). Rendered alongside the KB sub-graph as a co-equal
+    # prior; its presence suppresses the cold-start fallback.
+    research_hints: str = ""
     # Workload context (mirrored from SharedState by
     # Coordinator._warm_specialist_params; renders in section 2 so
     # the specialist sees the actual benchmark workload instead of
@@ -501,6 +576,12 @@ class SpecialistPromptInputs:
     # branch was retired with the FRAMEWORK_PR phase migration.
     sub_kind: str = ""
 
+    # Additional knowledge-domain tags carried by a multi-tag dispatch.
+    # Each tag contributes its per-domain focus block to Section 1 (the
+    # primary ``domain`` block renders first). Empty for single-tag
+    # dispatch.
+    extra_focus_tags: tuple[str, ...] = ()
+
     # Active server framework name (``sglang`` / ``vllm`` / ``atom``).
     # Mirrored from ``SharedState.framework`` by
     # ``Coordinator._warm_specialist_params``. Empty string means the
@@ -556,12 +637,29 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     # paragraph. Each domain template emphasises the surface area the
     # specialist should reason about + the typical winning techniques
     # (lifted from Arbor's orchestrator.md "agent expertise" table).
+    rendered_focus_keys: set[str] = set()
     focus = _DOMAIN_FOCUS_TEMPLATES.get(inp.domain.key)
     if focus is not None:
         body.append("")
         body.append(f"### Domain focus — {inp.domain.key}")
         body.append("")
         body.extend(focus(inp))
+        rendered_focus_keys.add(inp.domain.key)
+    # Multi-tag dispatch: append the focus block of each additional
+    # knowledge-domain tag (resolved to a representative specialist
+    # key) so a combined-domain specialist sees every relevant surface.
+    for tag in inp.extra_focus_tags:
+        tag_domain = domain_for_tag(tag)
+        if tag_domain is None or tag_domain.key in rendered_focus_keys:
+            continue
+        tag_focus = _DOMAIN_FOCUS_TEMPLATES.get(tag_domain.key)
+        if tag_focus is None:
+            continue
+        body.append("")
+        body.append(f"### Domain focus — {tag_domain.key}")
+        body.append("")
+        body.extend(tag_focus(inp))
+        rendered_focus_keys.add(tag_domain.key)
     return body
 
 
@@ -574,6 +672,15 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- gpu_type: {inp.gpu_type}")
     else:
         rows.append(f"- gpu_type: {_NONE_PLACEHOLDER}")
+    if inp.allocated_gpu_ids:
+        rows.append(
+            "- allocated specialist GPU ids: "
+            + ", ".join(str(g) for g in inp.allocated_gpu_ids)
+        )
+        rows.append(
+            "- GPU specialist scope: short experiments / microbenchmarks only; "
+            "do not launch a persistent serving server or Magpie benchmark loop."
+        )
     if inp.tp > 0:
         rows.append(f"- TP: {inp.tp}")
     else:
@@ -603,6 +710,9 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     if inp.arch_notes:
         rows.append("")
         rows.append(f"Model architecture (advisory): {inp.arch_notes}")
+    if inp.target_gap_notes:
+        rows.append("")
+        rows.append(inp.target_gap_notes)
     return rows
 
 
@@ -651,6 +761,7 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
         and not inp.warm_start_lessons
         and not inp.warm_start_pitfalls
         and not inp.pr_feed
+        and not inp.research_hints
     )
 
 
@@ -658,6 +769,23 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 4. CORTEX KB SUB-GRAPH", ""]
     cold = _is_cold_start(inp)
     if not inp.kb_subgraph:
+        if inp.research_hints:
+            # Research hints stand in as the advisory prior when the KB
+            # anchor is empty — co-equal with the KB sub-graph, never a
+            # deterministic gate. This keeps the cold-start fallback from
+            # firing whenever the scout produced fresh source-backed priors.
+            rows.extend([
+                "KB anchor is empty for this (model, hardware, domain), but "
+                "the research scout collected source-backed priors this "
+                "session. Treat these as your advisory prior (co-equal with "
+                "the KB sub-graph; the Critic still gates the final answer):",
+                "",
+                inp.research_hints,
+                "",
+                "Anchor proposals on these hints where they fit the gap "
+                "(Section 3) and hardware (Section 2).",
+            ])
+            return rows
         if cold:
             # Cold-start directive: replaces the bare "(none)" with a
             # specific instruction so the specialist proposes
@@ -1232,13 +1360,25 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 # ---------------------------------------------------------------------------
 def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
     workspace = inp.workspace_path or "<runs/specialist/<task_id>/>"
+    if inp.allocated_gpu_ids:
+        gpu_rule = [
+            "1. You have an explicit GPU specialist allocation for this task.",
+            "   You MAY run short GPU experiments or microbenchmarks on the",
+            "   allocated visible devices only. You MUST NOT launch persistent",
+            "   serving servers, run Magpie benchmark loops, restart vLLM/SGLang,",
+            "   or control the production serving process.",
+        ]
+    else:
+        gpu_rule = [
+            "1. **NEVER** touch the serving GPU (no Magpie / no benchmark / no",
+            "   server restart / no vllm or sglang process control). The",
+            "   Coordinator runs benchmarks; you only propose what to try and",
+            "   optionally author patches.",
+        ]
     return [
         "## 9. IRON RULES (Inv-5.1 / Inv-5.2 / Inv-5.3)",
         "",
-        "1. **NEVER** touch the serving GPU (no Magpie / no benchmark / no",
-        "   server restart / no vllm or sglang process control). The",
-        "   Coordinator runs benchmarks; you only propose what to try and",
-        "   optionally author patches.",
+        *gpu_rule,
         "2. **You MAY** write source patches, but ONLY into your own",
         f"   worktree at ``{workspace}/`` (a git checkout branched off",
         "   the framework HEAD just for this task). Concretely:",
