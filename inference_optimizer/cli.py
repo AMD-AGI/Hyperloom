@@ -53,6 +53,7 @@ from .orchestrator.action_executors import (
     baseline_executor,
     explore_executor,
     recover_executor,
+    conc_sweep_executor,
     report_executor,
     session_breakdown_executor,
     sweep_executor,
@@ -1158,9 +1159,41 @@ def _seed_shared_state(
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         explore_roofline_hard_gate=explore_roofline_hard_gate,
+        # SWEEP-phase post-sweep concurrency sweep flags (on by default).
+        # See ``orchestrator/conc_sweep.py`` + coordinator hook
+        # ``_enqueue_internal_conc_sweep_task``.
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
+        conc_sweep_concs=_parse_conc_sweep_concs(args),
+        conc_sweep_total_budget_sec=int(
+            getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
+        ),
+        conc_sweep_variant_timeout_sec=int(
+            getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
+        ),
     )
     state.save(session_dir)
     return state
+
+
+def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
+    """Parse ``--conc-sweep-concs '1,2,4,8'`` into a list[int]. Drops
+    non-integer tokens with a warning rather than crashing the CLI
+    boot so a typo doesn't take the whole session down. Empty list
+    (e.g. ``--conc-sweep-concs ''``) lets ``SharedState`` default-factory
+    populate the canonical 1..128 ladder."""
+    raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
+    if not raw:
+        return [1, 2, 4, 8, 16, 32, 64, 128]
+    out: list[int] = []
+    for tok in raw.split(","):
+        t = tok.strip()
+        if not t:
+            continue
+        try:
+            out.append(int(t))
+        except ValueError:
+            log.warning("conc_sweep: ignoring non-integer CONC token %r", t)
+    return out or [1, 2, 4, 8, 16, 32, 64, 128]
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
@@ -1237,6 +1270,11 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "profile":           profile_executor,
     "explore":           explore_executor,
     "sweep":             sweep_executor,
+    # Coordinator-internal post-sweep concurrency comparison.
+    # On by default; disable via ``--no-enable-conc-sweep``. PolicyGate
+    # denies any LLM-proposed delegate{action_name='conc_sweep'}, so
+    # the only entry is the SWEEP-completion auto-enqueue hook.
+    "conc_sweep":        conc_sweep_executor,
     "report":            report_executor,
     "session_breakdown": session_breakdown_executor,
     # ``recover`` re-enabled in 2026-05 alongside the robustness-agent
@@ -1634,7 +1672,64 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
+    _print_kernel_opt_summary_line(state)
     print("===============================================")
+
+
+def _print_kernel_opt_summary_line(state: SharedState) -> None:
+    """One-line forensic readout of kernel_opt attempts at session end.
+
+    Pulls the same aggregation used by
+    ``reports/kernel_optimization_summary.json`` so stdout matches the
+    on-disk report. Best-effort: any failure is swallowed (this is a
+    summary print, not a critical path).
+    """
+    try:
+        from .orchestrator.kernel_attempt_summary import (
+            build_kernel_optimization_summary,
+        )
+        session_dir = _resolve_session_dir_for_summary(state)
+        if session_dir is None:
+            return
+        summary = build_kernel_optimization_summary(state, session_dir)
+        totals = summary.get("totals") or {}
+        attempted = int(totals.get("attempted") or 0)
+        if attempted == 0 and int(totals.get("unattempted") or 0) == 0:
+            return
+        integrated = int(totals.get("integrated") or 0)
+        rejected = int(totals.get("rejected") or 0)
+        unattempted = int(totals.get("unattempted") or 0)
+        print(
+            f"  kernel_opt           : {attempted} attempted "
+            f"({integrated} integrated, {rejected} rejected), "
+            f"{unattempted} unattempted in top candidates"
+        )
+        takeaways = summary.get("top_takeaways") or []
+        if len(takeaways) >= 2:
+            print(f"  kernel_opt_top_cause : {takeaways[1]}")
+        report_path = (
+            Path(session_dir) / "reports" / "kernel_optimization_summary.json"
+        )
+        if report_path.is_file():
+            print(f"  kernel_opt_report    : {report_path}")
+    except Exception:  # noqa: BLE001 — stdout print must never fail the run
+        pass
+
+
+def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
+    """Best-effort session_dir lookup for the stdout kernel_opt line.
+
+    SharedState does not carry session_dir directly, so we use the same
+    discovery the SessionInit path uses: HYPERLOOM_SESSION_DIR env when
+    set, else the cwd-anchored default. Returns ``None`` if neither
+    resolves to an existing directory.
+    """
+    env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
+    if env_sd:
+        p = Path(env_sd).expanduser()
+        if p.is_dir():
+            return p
+    return None
 
 
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
@@ -4661,6 +4756,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     "emergency final report write failed (non-fatal)"
                 )
 
+    # NOTE: conc_sweep used to run here as a post-hook. It is now a
+    # real SWEEP-phase action auto-enqueued by the Coordinator after
+    # the SWEEP-entry sweep task lands (see
+    # ``coordinator._enqueue_internal_conc_sweep_task``). The CLI
+    # flags still live below and are mirrored onto SharedState at
+    # session init.
+
     _print_final_summary(coordinator.shared_state, stop_reason)
     return 0 if stop_reason in (
         "target_reached",
@@ -5501,6 +5603,75 @@ def _build_parser() -> argparse.ArgumentParser:
              "identical (same idempotency keys, same pending-task "
              "dispatch gate, same watermark anchor update). Env: "
              "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
+    )
+    # ------------------------------------------------------------------
+    # Post-optimization concurrency sweep (on by default).
+    #
+    # Runs an extra "baseline vs optimized" Magpie grid across CONC
+    # values after the close-sequence report has been written. The
+    # output is JSON/CSV in ``reports/conc_sweep_summary.json``; the
+    # frontend pairs it with the roofline ceiling to visualise the
+    # full curve. See ``orchestrator/conc_sweep.py``.
+    #
+    # Costs ~30 min/point on an 8xMI300 box and is bounded by
+    # ``--conc-sweep-total-budget-sec`` (default 2.5h) plus the
+    # remaining session wall-clock. Skip conditions (no baseline, no
+    # ``current_best``, no ISL/OSL) short-circuit before any subprocess
+    # is launched and are recorded in the JSON envelope. Disable with
+    # ``--no-enable-conc-sweep`` or
+    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``.
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--enable-conc-sweep",
+        dest="enable_conc_sweep",
+        action=argparse.BooleanOptionalAction,
+        default=(
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP", "",
+            ).strip().lower() not in ("0", "false", "no", "off")
+        ),
+        help="Run a post-optimization concurrency sweep (baseline vs "
+             "current_best across CONC) and write "
+             "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
+             "On by default; disable with --no-enable-conc-sweep or "
+             "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0.",
+    )
+    opt.add_argument(
+        "--conc-sweep-concs",
+        dest="conc_sweep_concs",
+        type=str,
+        default=os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", "1,2,4,8,16,32,64,128",
+        ),
+        help="Comma-separated CONC ladder for --enable-conc-sweep. "
+             "Default 1,2,4,8,16,32,64,128.",
+    )
+    opt.add_argument(
+        "--conc-sweep-timeout-sec",
+        dest="conc_sweep_timeout_sec",
+        type=int,
+        default=int(os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_TIMEOUT_SEC", "1800",
+        )),
+        help="Per-variant timeout (seconds) for --enable-conc-sweep. "
+             "Default 1800 (~30 min). Per-variant cap is also clamped "
+             "by the remaining --conc-sweep-total-budget-sec.",
+    )
+    opt.add_argument(
+        "--conc-sweep-total-budget-sec",
+        dest="conc_sweep_total_budget_sec",
+        type=int,
+        default=int(os.environ.get(
+            "INFERENCE_OPTIMIZER_CONC_SWEEP_TOTAL_BUDGET_SEC", "9000",
+        )),
+        help="Total wall-clock budget (seconds) for the whole conc-sweep "
+             "action, independent of the per-variant Magpie timeout. "
+             "Once exhausted, remaining variants are recorded as "
+             "status=skipped / error_class=budget_exhausted and the "
+             "JSON envelope carries budget_exhausted=true. Default 9000 "
+             "(~2.5h); set to 0 to disable. Also bounded above by the "
+             "main session wall-clock deadline since conc_sweep runs as "
+             "a SWEEP-phase action.",
     )
     # Retired flags that operator scripts may still pass. We hard-fail
     # at argparse time with a one-line migration hint instead of
