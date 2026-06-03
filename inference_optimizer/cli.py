@@ -116,6 +116,17 @@ class _RetiredFlag(argparse.Action):
         hint: str,
         **kwargs: Any,
     ) -> None:
+        """Register the retired flag as a zero-argument, hidden action.
+
+        Args:
+            option_strings (list[str]): The flag spellings this action handles.
+            dest (str): The argparse destination name (unused; suppressed).
+            hint (str): One-line migration hint shown in the error message when
+                the retired flag is used.
+            **kwargs (Any): Passed through to :class:`argparse.Action`; ``nargs``,
+                ``default``, and ``help`` are defaulted so the flag takes no
+                value and stays out of ``--help``.
+        """
         kwargs.setdefault("nargs", 0)
         kwargs.setdefault("default", argparse.SUPPRESS)
         kwargs.setdefault("help", argparse.SUPPRESS)
@@ -129,6 +140,17 @@ class _RetiredFlag(argparse.Action):
         values: Any,
         option_string: str | None = None,
     ) -> None:
+        """Abort parsing with a migration hint when the retired flag is seen.
+
+        Args:
+            parser (argparse.ArgumentParser): The parser invoking this action.
+            namespace (argparse.Namespace): The in-progress parse namespace.
+            values (Any): Parsed values for the flag (always empty; ``nargs=0``).
+            option_string (str | None): The exact flag spelling that triggered this.
+
+        Raises:
+            SystemExit: Always — ``parser.error`` prints the message and exits 2.
+        """
         parser.error(f"{option_string} was removed. {self._hint}")
 
 
@@ -140,12 +162,27 @@ def _orchestration_rules_fragment_path() -> Path:
     :class:`ActionMetadata` and run-level parameters by
     :func:`build_orchestration_prompt`. Kernel-vs-no-kernel is a builder
     parameter, not a separate file.
+
+    Returns:
+        Path: Filesystem path to the ``orchestration.md`` rules fragment.
     """
     return asset_system_prompts_dir() / "orchestration.md"
 
 
 def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
-    """Return ``(kind, value)`` strings consumed by the prompt builder."""
+    """Summarise an objective into the ``(kind, value)`` pair the prompt expects.
+
+    Inspects the objective for the first recognised target attribute
+    (``target_gain_pct`` → float, ``target_tput_per_gpu`` → float,
+    ``baseline_dir`` → str) and pairs it with the objective's ``kind()``.
+
+    Args:
+        objective (Objective): The run objective to summarise.
+
+    Returns:
+        tuple[str, float | str | None]: ``(kind, value)`` where ``value`` is the
+        objective's numeric / string target, or ``None`` when none is present.
+    """
     kind = objective.kind()
     value: float | str | None = None
     if hasattr(objective, "target_gain_pct"):
@@ -173,6 +210,18 @@ def _build_orchestration_prompt(
     parameter and every enabled action carries a 1-line description.
 
     Callers may still pass ``--orch-prompt`` to fully override the result.
+
+    Args:
+        no_kernel (bool): When True, build the no-kernel variant of the prompt
+            (kernel actions disabled).
+        framework (str): The serving framework (e.g. ``"sglang"`` / ``"vllm"``).
+        objective (Objective): The run objective, summarised into the prompt.
+        max_minutes (int): The run's time budget in minutes.
+        action_registry (ActionRegistry | None): Optional preloaded registry;
+            a fresh one is loaded when omitted.
+
+    Returns:
+        str: The composed Orchestration system prompt.
     """
     registry = action_registry or ActionRegistry().load()
     enabled = default_enabled_actions(no_kernel=no_kernel)
@@ -191,7 +240,11 @@ def _build_orchestration_prompt(
 
 
 def _load_critic_prompt() -> str:
-    """Return the Critic system prompt sourced from ``system_prompts/critic.md``."""
+    """Return the Critic system prompt sourced from ``system_prompts/critic.md``.
+
+    Returns:
+        str: The contents of ``critic.md``.
+    """
     return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
 
 
@@ -231,7 +284,18 @@ _GFX_TO_RUNNER: dict[str, str] = {
 
 
 def _gpu_runner_type(gpu_type: str) -> str:
-    """Return the Magpie runner label for a resolved real GPU type."""
+    """Map a resolved GPU type onto its Magpie runner label.
+
+    ``mi325x`` is folded onto the ``mi300x`` runner because Magpie does not
+    ship dedicated ``*_mi325x.sh`` scripts; every other value is returned
+    normalized (lower-cased, stripped).
+
+    Args:
+        gpu_type (str): The resolved GPU type (e.g. ``"mi300x"``, ``"mi355x"``).
+
+    Returns:
+        str: The Magpie runner label, normalized to lower case.
+    """
     normalized = str(gpu_type or "").strip().lower()
     if normalized == "mi325x":
         return "mi300x"
@@ -278,6 +342,10 @@ def _resolve_critic_agent_root() -> Path | None:
     1. ``$CRITIC_AGENT_ROOT`` env var (operator override).
     2. Sibling ``critic-agent/`` next to the inference_optimizer package
        (i.e. ``$REPO_ROOT/critic-agent``).
+
+    Returns:
+        Path | None: The resolved critic-agent root containing
+        ``runtime/cli.py``, or ``None`` when no valid root is found.
     """
     override = os.environ.get(_CRITIC_AGENT_ROOT_ENV, "").strip()
     if override:
@@ -294,6 +362,13 @@ def _validate_critic_agent_runtime(root: Path) -> None:
 
     Raises :class:`SystemExit` with a clear message when the runtime cannot
     start; printed in the operator's voice so they know which env to fix.
+
+    Args:
+        root (Path): The critic-agent root used as the subprocess ``cwd``.
+
+    Raises:
+        SystemExit: If the runtime sanity check fails to launch or exits
+            non-zero (exit code 2).
     """
     cmd = [sys.executable, "-m", "runtime.cli", "--help"]
     try:
@@ -342,6 +417,10 @@ def _resolve_robustness_agent_root() -> Path | None:
     1. ``$ROBUSTNESS_AGENT_ROOT`` env var (operator override).
     2. Sibling ``robustness-agent/`` next to the inference_optimizer package
        (i.e. ``$REPO_ROOT/robustness-agent``).
+
+    Returns:
+        Path | None: The resolved robustness-agent root containing
+        ``src/robustness_agent/runtime/cli.py``, or ``None`` when not found.
     """
     override = os.environ.get(_ROBUSTNESS_AGENT_ROOT_ENV, "").strip()
     if override:
@@ -354,7 +433,19 @@ def _resolve_robustness_agent_root() -> Path | None:
 
 
 def _validate_robustness_agent_runtime(root: Path) -> None:
-    """Fail fast if ``python -m robustness_agent.runtime.cli --help`` doesn't work."""
+    """Fail fast if ``python -m robustness_agent.runtime.cli --help`` doesn't work.
+
+    Runs the runtime's ``--help`` with ``cwd=root`` and ``PYTHONPATH`` extended
+    by ``<root>/src`` so the subprocess resolves the module the same way the
+    real backend will. Any launch failure or non-zero exit prints an
+    operator-facing message and aborts.
+
+    Args:
+        root (Path): The robustness-agent skill root to validate.
+
+    Raises:
+        SystemExit: With code 2 when the runtime cannot start or exits non-zero.
+    """
     src = str(root / "src")
     env = dict(os.environ)
     env["PYTHONPATH"] = src + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else src
@@ -420,9 +511,17 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
       ``sys.exit(2)`` so operators don't burn a ~6-min cold start on
       a doomed run.
 
-    Returns the list of flag names auto-disabled — always empty since
-    no defaults are flipped. The return type is preserved so callers
-    that append to / log the list keep working unchanged.
+    Args:
+        args (argparse.Namespace): The parsed CLI arguments; only ``nodes`` is
+            inspected for the multi-node fail-fast guard.
+
+    Returns:
+        list[str]: The list of flag names auto-disabled — always empty since no
+        defaults are flipped. The return type is preserved so callers that
+        append to / log the list keep working unchanged.
+
+    Raises:
+        SystemExit: If ``--nodes >= 2`` (atom multi-node is unsupported).
     """
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
@@ -466,12 +565,18 @@ def _resolve_gpu_type(
     failure (CPU sandbox, container without rocm-smi) is the only path
     that keeps the user-supplied value.
 
-    Returns ``(effective_gpu_type, warnings)``. Effective gpu_type is the
-    string the rest of the cli should write into ``args``/``state``/
-    ``manifest``; ``warnings`` is a list of human-readable lines that the
-    caller should ``print(..., file=sys.stderr)`` so the operator sees
-    them but they do not pollute stdout (which now carries the machine-
-    readable ``HYPERLOOM_LAUNCH`` sentinel).
+    Args:
+        user_specified (str): The operator-supplied ``--gpu-type`` hint
+            (expected pre-lowercased and stripped).
+        probed (str): The hardware-probed gpu_type (expected pre-lowercased and
+            stripped).
+
+    Returns:
+        tuple[str, list[str]]: ``(effective_gpu_type, warnings)``. The effective
+        gpu_type is the string the rest of the cli should write into
+        ``args``/``state``/``manifest``; ``warnings`` is a list of
+        human-readable lines the caller should print to stderr so the operator
+        sees them without polluting the machine-readable stdout sentinel.
     """
     warnings: list[str] = []
     if probed and user_specified and probed != user_specified:
@@ -499,14 +604,28 @@ def _emit_launch_info(
     """Print the machine-readable HYPERLOOM_LAUNCH stdout line and
     optionally write the same payload to ``launch_info_file`` as JSON.
 
-    Returns the launch_info dict so callers / tests can inspect what was
-    emitted. Side effects:
+    Side effects:
 
     * ``print("HYPERLOOM_LAUNCH key=value ...")`` to stdout (single line,
       grep-friendly, sed/eval-parseable).
     * When ``launch_info_file`` is set, the same payload is JSON-dumped to
       that path (parent dirs created on demand) so launcher scripts can
       ``jq -r .pid`` instead of grepping the log.
+
+    Args:
+        pid (int): The optimizer process id.
+        session_dir (Path): The session root directory.
+        session_id (str): The session identifier.
+        run_log (str): Path to the run log file.
+        gpu_type (str): The resolved GPU type.
+        framework (str): The serving framework.
+        model (str): The model name / id.
+        launch_info_file (str | None): Optional path to also write the payload
+            as JSON; skipped when None/empty.
+
+    Returns:
+        dict[str, Any]: The launch_info dict so callers / tests can inspect
+        what was emitted.
     """
     launch_info: dict[str, Any] = {
         "event": "launch",
@@ -562,11 +681,19 @@ def _clean_stale_aiter_locks(
       4. legacy fallback list (``/sgl-workspace/aiter/aiter/jit/build``
          then site-packages variants)
 
-    Returns a stats dict (``{dir, scanned, deleted, skipped_fresh,
-    errors}``) so the caller can log a single line and tests can pin the
-    behaviour without filesystem flakiness. Never raises: any OSError /
-    permission issue is recorded in ``errors`` and the rest of the sweep
-    proceeds.
+    Never raises: any OSError / permission issue is recorded in ``errors``
+    and the rest of the sweep proceeds.
+
+    Args:
+        aiter_jit_dir (Path | None): Explicit aiter JIT build dir. When None,
+            the resolution order above is used.
+        stale_minutes (int): Age threshold in minutes; only locks older than
+            this are deleted. Defaults to 5.
+
+    Returns:
+        dict[str, Any]: A stats dict (``{dir, scanned, deleted, skipped_fresh,
+        errors}``) so the caller can log a single line and tests can pin the
+        behaviour without filesystem flakiness.
     """
     stats: dict[str, Any] = {
         "dir": None,
@@ -650,6 +777,10 @@ def _autodetect_gpu_type() -> str | None:
     back to torch.cuda.get_device_properties(0).gcnArchName parsing. Both
     are best-effort — on CPU-only or non-ROCm boxes we silently return
     None so the caller can defer to Magpie's own detection layer.
+
+    Returns:
+        str | None: The detected GPU type (``"mi300x"`` / ``"mi325x"`` /
+        ``"mi355x"``), or ``None`` when it cannot be determined.
     """
     import subprocess
     try:
@@ -672,6 +803,19 @@ def _autodetect_gpu_type() -> str | None:
 
 
 async def _noop_prep(ctx) -> dict:
+    """No-op executor stub for kernel-owned action kinds.
+
+    Registered for action kinds whose real work happens inside the kernel
+    agent's request handlers (via ``emit_intent``); this process only needs a
+    well-formed success payload so ``SubAgentRunner`` does not raise
+    ``no_executor`` on the dispatched task.
+
+    Args:
+        ctx: The runner context; ``ctx.task.kind`` names the dispatched action.
+
+    Returns:
+        dict: A ``succeeded`` result echoing the task kind with a ``noop-stub`` note.
+    """
     return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
 
 
@@ -707,6 +851,32 @@ def _build_backends(
     * ``agent`` — :class:`RobustnessAgentBackend` driving
       ``python -m robustness_agent.runtime.cli`` in a subprocess. Mirrors
       the critic-agent transport. Requires ``robustness_agent_root``.
+
+    Args:
+        claude_model (str): Model id for the Claude-backed roles.
+        codex_model (str): Model id for the Codex-backed roles.
+        kernel_codex (bool): When True, use a Codex backend for the kernel role.
+        critic_choice (str): One of ``"mock"`` / ``"agent"`` / ``"codex_bare"``.
+        session_dir (Path): Session root passed to agent backends.
+        critic_agent_root (Path | None): Critic-agent skill root; required when
+            ``critic_choice == "agent"``.
+        critic_kb_mode (str): KB mode for the critic-agent backend. Defaults to
+            ``"inmemory"``.
+        robustness_choice (str): One of ``"mock"`` / ``"agent"``. Defaults to
+            ``"mock"``.
+        robustness_agent_root (Path | None): Robustness-agent skill root;
+            required when ``robustness_choice == "agent"``.
+        robustness_options (dict[str, Any] | None): Optional options forwarded
+            to the robustness-agent backend.
+        no_kernel (bool): When True, skip constructing a kernel backend.
+
+    Returns:
+        dict[str, Any]: A mapping of role name (``orchestration`` / ``critic`` /
+        ``robustness`` and optionally ``kernel``) to its backend instance.
+
+    Raises:
+        ValueError: If ``critic_choice`` / ``robustness_choice`` is invalid or a
+            required agent root is missing for the selected mode.
     """
     if critic_choice not in ("mock", "agent", "codex_bare"):
         raise ValueError(
@@ -805,6 +975,18 @@ def _resume_safe_flag(
     This is what makes robustness_monitor.sh resume preserve the
     operator's original ``--no-warm-replay`` / ``--no-fact-writes``
     intent without re-passing the flag.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI arguments.
+        arg_name (str): Attribute name on ``args`` carrying the flag value.
+        manifest (dict | None): The persisted launch manifest, or None.
+        manifest_key (str): Key under which the flag is stored in the manifest.
+        default (bool): Fallback value when neither arg nor manifest applies.
+        invert (bool): When True, invert the arg value (for ``--no-*`` flags).
+            Defaults to False.
+
+    Returns:
+        bool: The resolved boolean value for the flag.
     """
     raw_arg = getattr(args, arg_name, None)
     # ``--no-*`` flag → user passed it → True; default is False.
@@ -834,6 +1016,16 @@ def _resume_safe_numeric(
     Argparse fills in the registered default when the flag isn't
     passed, so we detect "explicitly set" as "value differs from
     default" — fragile but matches the existing pattern in cli.py.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI arguments.
+        arg_name (str): Attribute name on ``args`` carrying the value.
+        manifest (dict | None): The persisted launch manifest, or None.
+        manifest_key (str): Key under which the value is stored in the manifest.
+        default (float): Fallback value when neither arg nor manifest applies.
+
+    Returns:
+        float: The resolved numeric value for the option.
     """
     raw_arg = getattr(args, arg_name, None)
     if raw_arg is not None:
@@ -871,6 +1063,16 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
         launch. Require ``data["model_name"]`` basename to match the
         launched ``--model`` basename; mismatch -> WARN
         ``model_arch_stale_or_mismatch``, return ``{}``.
+
+    Args:
+        workspace_root (Path): The shared workspace root (``$USER_DATA_PATH``)
+            under which ``model_arch.json`` is expected.
+        model_name (str): The launched ``--model`` name, used for the stale-file
+            basename match.
+
+    Returns:
+        dict: The parsed advisory ``model_arch`` profile, or ``{}`` when the
+        file is missing, unreadable, invalid, or stale.
     """
     arch_path = workspace_root / "model_arch.json"
     try:
@@ -914,6 +1116,27 @@ def _seed_shared_state(
     *,
     session_id: str,
 ) -> SharedState:
+    """Build and persist the fresh-session :class:`SharedState`.
+
+    Resolves every CLI/env knob the optimizer's main loop needs and writes the
+    resulting state to ``session_dir``. Notable resolution steps:
+
+    * ``research_lane_capacity`` is clamped to ``[0, MAX_RESEARCH_LANE_CAPACITY]``.
+    * Plateau / EXPLORE-force-exit / steward overrides are collected from the
+      matching ``--plateau-*`` / ``--explore-*`` / ``--steward-*`` flags; absent
+      keys fall through to library defaults at phase-compute time.
+    * Workload metadata (``tp``, ``ep``, ``conc``, ``isl``, ``osl``,
+      ``max_model_len``) is read from CLI flags first, then the matching env var.
+    * The advisory ``model_arch`` profile is loaded fresh (soft-degrades to ``{}``).
+
+    Args:
+        session_dir (Path): The session directory to save the state into.
+        args (argparse.Namespace): Parsed ``optimize`` arguments.
+        session_id (str): The canonical session id for this run.
+
+    Returns:
+        SharedState: The freshly seeded, already-persisted shared state.
+    """
     # research_lane capacity is locked here for the lifetime
     # of the session. Clamp to [0, MAX_RESEARCH_LANE_CAPACITY] (M6
     # ceiling; values above this are silently clamped down). The cap
@@ -968,6 +1191,15 @@ def _seed_shared_state(
     # (single source of truth); we duplicate the parse here so SharedState
     # can be populated without re-reading the file we just wrote.
     def _int_env_or_arg(arg_name: str, env_name: str) -> int:
+        """Resolve an int workload knob from a CLI arg, falling back to env.
+
+        Args:
+            arg_name (str): Attribute name to read off ``args``.
+            env_name (str): Environment variable consulted when the arg is unset/0.
+
+        Returns:
+            int: The resolved value, or 0 when neither source yields a valid int.
+        """
         val = getattr(args, arg_name, None)
         if val is None or val == 0:
             raw = (os.environ.get(env_name, "") or "").strip()
@@ -996,6 +1228,14 @@ def _seed_shared_state(
         process that has *intentionally* set ``$FRAMEWORK_VERSION=""``
         (e.g. a CI smoke test that doesn't want sglang imported) still
         gets the empty-string outcome instead of an unexpected import.
+
+        Args:
+            args_in (Any): The parsed CLI arguments object carrying
+                ``framework_version`` / ``framework``.
+
+        Returns:
+            str: The resolved framework version slug, or ``""`` when it cannot
+            be determined.
         """
         explicit = (
             (getattr(args_in, "framework_version", None) or "").strip()
@@ -1139,7 +1379,12 @@ def _seed_shared_state(
 
 
 def _print_session_skeleton(session_dir: Path) -> None:
-    """Echo the freshly-created skeleton so launchers see the exact layout."""
+    """Echo the freshly-created skeleton so launchers see the exact layout.
+
+    Args:
+        session_dir (Path): The session root directory whose skeleton
+            subdirectories are listed.
+    """
     print(f"Session layout under {session_dir}:")
     for sub in _SESSION_SKELETON:
         marker = "ok" if (session_dir / sub).is_dir() else "MISSING"
@@ -1157,6 +1402,11 @@ def _snapshot_system_prompts(
     Writes to ``agents/<role>/system_prompt.snapshot.md`` so resume
     runs and post-mortem inspection can compare against the in-memory
     prompt without re-deriving it from CLI args.
+
+    Args:
+        session_dir (Path): The session root under which snapshots are written.
+        prompts (dict[str, str]): Mapping of agent role to its effective system
+            prompt body.
     """
     for role, body in prompts.items():
         target = agent_prompt_snapshot(session_dir, role)
@@ -1165,6 +1415,20 @@ def _snapshot_system_prompts(
 
 
 def _default_target_summary(args: argparse.Namespace) -> str:
+    """Compose a human-readable objective summary from the CLI target flags.
+
+    Used as the fallback ``target_summary`` when the operator did not pass an
+    explicit ``--target-summary``. The phrasing depends on which target flag is
+    set: ``--target-gain`` (percentage), ``--target-tput`` (tok/s/GPU), or
+    neither (open-ended optimization within the time budget).
+
+    Args:
+        args (argparse.Namespace): Parsed ``optimize`` arguments (reads ``model``,
+            ``target_gain``, ``target_tput``, ``max_hours``).
+
+    Returns:
+        str: A one-sentence description of the run's objective.
+    """
     if args.target_gain:
         return (
             f"Establish baseline on {Path(args.model).name} then drive "
@@ -1276,6 +1540,16 @@ def _build_specialist_executor(
     The factory captures ``session_dir`` + ``knowledge_plane`` once at
     cli boot; the same runner instance handles every specialist task
     for the session.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments (reads the
+            ``specialist_*`` knobs and ``claude_model``).
+        session_dir (Path): Session root captured by the adapter.
+        knowledge_plane (Any): The live KnowledgePlane captured by the adapter.
+
+    Returns:
+        Callable[[Any], Awaitable[dict]]: An ``async fn(ctx) -> dict`` executor
+        adapter compatible with ``SubAgentRunner.ExecutorFn``.
     """
     import shutil
 
@@ -1354,6 +1628,19 @@ def _build_specialist_executor(
         )
     else:
         def _backend_factory(domain: Any) -> Any:
+            """Build an in-process :class:`ClaudeBackend` for a specialist domain.
+
+            Fallback path used when the ``claude`` binary is unavailable for
+            subprocess dispatch.
+
+            Args:
+                domain (Any): The specialist domain requesting a backend (unused;
+                    every domain shares the same Claude model configuration).
+
+            Returns:
+                Any: A :class:`ClaudeBackend` configured with the specialist model
+                and turn cap.
+            """
             # in-process Claude path (fallback).
             return ClaudeBackend(
                 model=claude_model, max_turns_default=max_turns,
@@ -1379,6 +1666,14 @@ def _build_specialist_executor(
         ``succeeded`` / ``empty_synthesised`` / ``stale`` etc. is
         preserved under ``result.runner_status`` for downstream
         analytics (breakdown.specialist_runs).
+
+        Args:
+            ctx (Any): The live :class:`SubAgentRunner` runner context whose
+                ``task`` is the dispatched specialist :class:`Task`.
+
+        Returns:
+            dict: A well-formed result payload translating the
+            :class:`SpecialistRunResult` dataclass fields.
         """
         run_result = await runner.run(ctx)
         # Translate dataclass → dict. The Coordinator's
@@ -1410,6 +1705,15 @@ def _build_dynamic_action_executor(
     Production uses a real Claude backend; tests register a
     :class:`MockBackend` through the same path. Falls back to the
     stub executor when no ``claude`` binary is on PATH.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments (reads the
+            ``dynamic_action_*`` knobs and ``claude_model``).
+
+    Returns:
+        Callable[[Any], Awaitable[dict]]: An ``async fn(ctx) -> dict`` executor
+        backed by :class:`DynamicActionRunner`, or the stub executor when no
+        ``claude`` binary is available.
     """
     import shutil
 
@@ -1453,6 +1757,14 @@ def _build_dynamic_action_executor(
     )
 
     async def _executor(ctx: Any) -> dict:
+        """Adapter: run the :class:`DynamicActionRunner` and return its result dict.
+
+        Args:
+            ctx (Any): The :class:`SubAgentRunner` runner context for the task.
+
+        Returns:
+            dict: The runner result serialised via ``DynamicActionResult.to_dict``.
+        """
         result = await runner.run(ctx)
         return result.to_dict()
 
@@ -1493,6 +1805,19 @@ def _register_executors(
     ``--research-lane-capacity > 0``. ``None`` keeps the legacy
     behaviour where a ``delegate{action='specialist'}`` task hits
     ``no_executor`` and fails (M3 / pre-M5 path).
+
+    Args:
+        coordinator (Coordinator): The coordinator whose SubAgentRunner the
+            executors are registered on.
+        no_kernel (bool): When True, skip the kernel-owned executor table and
+            no-op stubs. Defaults to False.
+        compare_against_gpu (str | None): Reference GPU for the
+            ``target_analysis`` executor; empty/None writes a no-target marker.
+        session_dir (Path | None): Session root passed to executors that need it.
+        specialist_executor (Callable[[Any], Awaitable[dict]] | None): Optional
+            specialist adapter to register for ``delegate{action='specialist'}``.
+        dynamic_action_executor (Callable[[Any], Awaitable[dict]] | None):
+            Optional dynamic-action adapter to register.
     """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)
@@ -1580,6 +1905,20 @@ def _register_executors(
 
 
 def _print_final_summary(state: SharedState, stop_reason: str) -> None:
+    """Print the end-of-run summary block to stdout.
+
+    Reports the stop reason, session id, model, baseline throughput, the
+    per-round (informational) cumulative gain, the validated cumulative gain
+    (with a staleness warning when the optimization stack grew after the last
+    validation), the current best config, pruned families, and crash count.
+
+    Args:
+        state (SharedState): The final shared state after the run completes.
+        stop_reason (str): Why the run stopped (e.g. ``"target_reached"``).
+
+    Returns:
+        None
+    """
     print()
     print("================ Final summary ================")
     print(f"  stop_reason          : {stop_reason}")
@@ -1618,6 +1957,13 @@ def _derive_anthropic_base_url(openai_base_url: str) -> str:
     The Anthropic SDK appends ``/v1`` itself, so we strip a trailing
     ``/v1`` from the OpenAI-style URL. Returns the input verbatim when
     there is no ``/v1`` suffix to strip.
+
+    Args:
+        openai_base_url (str): The OpenAI-style base URL (possibly with a
+            trailing ``/v1``).
+
+    Returns:
+        str: The derived Anthropic base URL with any trailing ``/v1`` removed.
     """
     from urllib.parse import urlparse, urlunparse
 
@@ -1637,6 +1983,12 @@ def _reset_claude_config_to_upstream(
     value would make the Claude CLI dial a port no longer bound. We
     rewrite to the upstream Anthropic URL so the CLI talks directly to
     the gateway with its ``x-api-key`` header (the gateway accepts it).
+
+    Args:
+        safe_key (str): API key to write as ``primaryApiKey`` (left untouched
+            when empty and already present).
+        anthropic_base_url (str): The upstream Anthropic URL to set as
+            ``customApiUrl``; an empty value is a no-op.
     """
     import json as _json
 
@@ -1875,6 +2227,12 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
     will later import them (``sys.executable``); cross-interpreter installs
     are the precise failure mode that "claude-agent-sdk was not installed
     in /opt/venv → installed 0.1.77" reports come from.
+
+    Args:
+        python_exe (str): Path to the interpreter used to probe and install the
+            SDKs (the same one that will import them at runtime).
+        pip_extra (list[str]): Extra arguments passed through to
+            ``pip install`` (e.g. index URLs / flags).
     """
     candidates = (
         ("claude_agent_sdk", "claude-agent-sdk>=0.1.65"),
@@ -2106,6 +2464,14 @@ def _emit_preflight_diagnostics(
     with a single grep-friendly section that operators (and the launcher
     LLM) can paste verbatim into status reports without spelunking the
     source for env var names.
+
+    Args:
+        magpie_python (str): Path to the Magpie Python interpreter, echoed in
+            the diagnostics block.
+        anthropic_base_url (str | None): The resolved Anthropic base URL, or
+            None when ``OPENAI_BASE_URL`` is missing.
+        args (argparse.Namespace | None): Optional parsed CLI arguments; when
+            present, KB / PR-monitor status lines are also emitted.
     """
     from .orchestrator.action_executors.baseline import (
         BASELINE_COLD_START_TIMEOUT_SEC,
@@ -2186,6 +2552,10 @@ def _print_cortex_kb_queue_status() -> None:
     ``runtime/cortex/.kb_flusher.pid``; the dead-letter count is the
     422-style permanent-reject signal that telegraphs an upcoming
     cold-start session for new models.
+
+    Returns:
+        None: This helper prints a diagnostics line as a side effect and
+        returns nothing.
     """
     from .session_paths import (
         cortex_dead_letter_ndjson,
@@ -2199,6 +2569,15 @@ def _print_cortex_kb_queue_status() -> None:
     flushed = cortex_flushed_ndjson(sd)
 
     def _count(p: Path) -> int:
+        """Count non-blank lines (NDJSON rows) in a queue file.
+
+        Args:
+            p (Path): Path to the NDJSON file to count.
+
+        Returns:
+            int: The number of non-empty lines, or 0 when the file is missing
+            or unreadable.
+        """
         if not p.exists():
             return 0
         try:
@@ -2240,6 +2619,15 @@ def _probe_llm_catalog(
     signed certs, set ``INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1`` to
     skip verification (a warning is printed since the probe also sends
     ``Authorization: Bearer <api_key>``).
+
+    Args:
+        base_url (str): The catalog base URL; ``/models`` is appended. Empty
+            short-circuits to None.
+        api_key (str): Bearer token sent in the ``Authorization`` header.
+
+    Returns:
+        set[str] | None: The set of model ids returned by the catalog, or None
+        when the probe is skipped or exhausts its retries.
     """
     import time
 
@@ -2347,10 +2735,20 @@ def _validate_and_resolve_claude_model(
       model is missing but the fallback (4-6) is in catalog, rewrite the
       arg + WARN. Otherwise sys.exit(2) — refuse to start the service.
 
-    Returns the catalog id set on success (so the codex smoke-test can
-    reuse it without re-probing); returns None if catalog probe failed but
-    the chosen model was already in ``_CLAUDE_ALLOWED_MODELS`` AND we
-    decide to proceed (we don't — gateway unreachable means abort).
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments; ``args.claude_model``
+            is validated and may be rewritten in place.
+        resolved_urls (tuple[str, str] | None): Optional ``(base_url, api_key)``
+            pair used to probe the gateway catalog.
+
+    Returns:
+        set[str] | None: The catalog id set on success (so the codex smoke-test
+        can reuse it without re-probing), or None when the catalog could not be
+        probed.
+
+    Raises:
+        SystemExit: If the chosen model is disallowed or unavailable and no
+            valid fallback exists (exit code 2).
     """
     chosen = (args.claude_model or "").strip()
     if chosen not in _CLAUDE_ALLOWED_MODELS:
@@ -2420,6 +2818,12 @@ def _smoke_test_codex_model(
     requested. We still want to flag obvious typos / missing models BEFORE
     the Coordinator starts ticking, since the Codex backend's
     ``__post_init__`` does not pre-validate against the catalog.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments (reads ``codex_model``,
+            ``critic_backend``, ``kernel_codex``, ``no_kernel``).
+        catalog_ids (set[str] | None): The gateway catalog id set; None skips
+            the check entirely.
     """
     if catalog_ids is None:
         return
@@ -2463,9 +2867,14 @@ def _preflight(
     7. node / claude / codex CLI presence check (WARN-only).
     8. Single canonical diagnostics block.
 
-    Returns ``(anthropic_base_url, openai_base_url)`` — the resolved
-    upstream URLs that ``_run_optimize`` uses for the catalog probe and
-    diagnostics. ``None`` only when ``OPENAI_BASE_URL`` is missing.
+    Args:
+        args (argparse.Namespace | None): Optional parsed CLI arguments; when
+            present, KB / PR-monitor status is included in diagnostics.
+
+    Returns:
+        tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)`` — the
+        resolved upstream URLs used for the catalog probe and diagnostics, or
+        ``None`` when ``OPENAI_BASE_URL`` is missing.
     """
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
@@ -2682,6 +3091,11 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
 
     Never raises and never ``sys.exit``s — KB/PR outages downgrade to
     NDJSON fallback / specialist no-op, not an aborted launch.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments; mutated in place with
+            the resolved ``cortex_enabled`` / ``pr_monitor_enabled`` flags and
+            their degraded-reason markers.
     """
     explicit_kb = bool(getattr(args, "degraded_kb", False))
     explicit_pr = bool(getattr(args, "degraded_pr", False))
@@ -2773,6 +3187,18 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     ``args.critic_backend`` is set by the matching CLI flag (or ``None`` if
     the operator passed nothing), in which case we fall back to
     :data:`DEFAULT_CRITIC_BACKEND`. Hard-fails on an invalid value.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments; reads
+            ``critic_backend``.
+
+    Returns:
+        str: The resolved critic backend choice (one of
+        ``_VALID_CRITIC_BACKENDS``).
+
+    Raises:
+        SystemExit: If the resolved value is not a valid critic backend
+            (exit code 2).
     """
     chosen = args.critic_backend
     if chosen is None:
@@ -2824,6 +3250,18 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     the auto-downgrade is honoured anyway; passing
     ``--robustness-mock`` suppresses the WARNING. Single-node
     behaviour is unchanged.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments; reads
+            ``robustness_backend`` and ``nodes``.
+
+    Returns:
+        str: The resolved robustness backend choice (``"mock"`` or
+        ``"agent"``), auto-downgraded to ``"mock"`` on multi-node.
+
+    Raises:
+        SystemExit: If the resolved value is not a valid robustness backend
+            (exit code 2).
     """
     chosen = getattr(args, "robustness_backend", None)
     explicit = chosen is not None
@@ -2874,6 +3312,14 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     intact while multi-node stops emitting the bogus alert. Operators
     who configure an explicit cluster-local probe target can re-enable
     via a future ``--robustness-auto-probe-inference-server`` flag.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments; reads the
+            ``robustness_*`` knobs and ``nodes``.
+
+    Returns:
+        dict[str, Any]: The non-default ``request.options`` overrides to pass
+        to the robustness-agent runtime.
     """
     options: dict[str, Any] = {}
     server_url = getattr(args, "robustness_server_url", None)
@@ -2924,6 +3370,13 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     The directory is NOT created here — :class:`LocalRecipeStore`
     handles lazy creation on first write so a degraded run that
     never touches the KB pays nothing on disk.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments; reads
+            ``local_kb_root``.
+
+    Returns:
+        Path: The resolved local recipe-snapshot KB root directory.
     """
     explicit = (
         getattr(args, "local_kb_root", None)
@@ -2958,6 +3411,14 @@ def _build_recipe_kb_dispatcher(
 
     The local store is always wired, regardless of remote
     presence — writes have to land somewhere.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments; reads ``degraded_kb``
+            and ``cortex_kb_url``.
+
+    Returns:
+        Any: A :class:`recipe_kb.RecipeKB` dispatcher wired with a local store
+        and (optionally) a remote client.
     """
     from .recipe_kb import LocalRecipeStore, RecipeKB, RemoteRecipeClient
 
@@ -3013,6 +3474,19 @@ def _bootstrap_cortex_kb(
     * T0 hard failures (e.g. filesystem permission denied) log a
       warning and continue with an empty warm-start; the recipe
       will be created on the first KEEP/REVERT.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments used to build the KB
+            dispatcher; may be mutated with a degraded reason on T0 failure.
+        session_dir (Path): Session root for SharedState + T0 anchoring.
+        manifest (dict[str, Any]): The launch manifest providing workload /
+            hardware / fingerprint metadata.
+        resume (bool): Whether this is a resumed session (passed through to
+            ``run_t0_anchor``).
+
+    Returns:
+        Any: The :class:`recipe_kb.RecipeKB` dispatcher, so the caller can
+        thread it into the Coordinator.
     """
     kb = _build_recipe_kb_dispatcher(args)
 
@@ -3105,12 +3579,21 @@ def _maybe_spawn_kb_flusher(
 ) -> tuple[subprocess.Popen | None, Path]:
     """No-op shim — flusher daemon is retired.
 
-    Returns ``(None, pid_path)`` and writes a status marker with
-    ``reason="retired_v2_local_write"`` so the breakdown collector
-    surfaces the cutover state. Full retirement (deleting the
-    helper + its callers + the status marker / pid path machinery)
-    happens in a follow-up commit alongside the cortex_kb_client
-    module deletion.
+    Writes a status marker with ``reason="retired_v2_local_write"`` so the
+    breakdown collector surfaces the cutover state. Full retirement
+    (deleting the helper + its callers + the status marker / pid path
+    machinery) happens in a follow-up commit alongside the
+    cortex_kb_client module deletion.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments (unused by the shim,
+            kept for signature compatibility).
+        session_dir (Path): Session root under which the status marker / pid
+            path live.
+
+    Returns:
+        tuple[subprocess.Popen | None, Path]: Always ``(None, pid_path)`` since
+        the flusher daemon is retired.
     """
     from .session_paths import (
         cortex_dir,
@@ -3151,7 +3634,23 @@ def _stop_kb_flusher(
     *,
     grace_sec: float = 10.0,
 ) -> None:
-    """No-op shim — flusher is retired (always spawned proc=None)."""
+    """No-op shim for the retired KB flusher daemon.
+
+    Production spawns ``proc=None`` so this returns immediately. The defensive
+    branch only fires when a stale daemon from a prior code version is still
+    alive: it sends ``SIGTERM`` (waiting up to ``grace_sec``), escalates to
+    ``kill()`` on timeout, and removes the pid file.
+
+    Args:
+        proc (subprocess.Popen | None): A live flusher process to stop, or
+            ``None`` (the normal case post-retirement).
+        pid_path (Path): The pid file to unlink after stopping.
+        grace_sec (float): Seconds to wait for graceful ``SIGTERM`` shutdown
+            before killing. Defaults to 10.0.
+
+    Returns:
+        None
+    """
     if proc is None:
         return
     # Defensive: if a stale prior daemon still exists, terminate it.
@@ -3191,6 +3690,17 @@ def _bootstrap_knowledge_plane(
     disabled :class:`PRMonitorClient` (which also strips the
     ``mcp__pr_monitor__*`` tool block on the specialist side via
     :meth:`SpecialistRunner._resolve_tools`).
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments (reads the
+            ``pr_monitor_*`` knobs and degraded markers).
+        cortex_client (Any): Optional bootstrapped Cortex KB client. Defaults
+            to None (unwired per the local-kb design).
+        session_dir (Path | None): Optional session root used to write the
+            ``pr_monitor`` status marker.
+
+    Returns:
+        KnowledgePlane: The constructed facade wrapping the PR Monitor client.
     """
     from .orchestrator.knowledge_plane import (
         KnowledgePlane,
@@ -3280,6 +3790,10 @@ def _reset_state_file(session_dir: Path) -> None:
     the Cortex KB cross-session knowledge is *not* touched here — only
     the per-session fact-layer is reset. ``Coordinator`` will reseed
     its dataclass defaults on the next ``load_or_init`` call.
+
+    Args:
+        session_dir (Path): Session root whose ``state.json`` is backed up and
+            removed.
     """
     state_path = session_dir / "state.json"
     if not state_path.exists():
@@ -3324,6 +3838,14 @@ def _gc_old_profile_traces(
     Override knobs (env):
       HYPERLOOM_MN_TRACE_RETENTION_DAYS -- int days, default 7
       HYPERLOOM_MN_TRACE_GC_DISABLE     -- "1" disables GC entirely
+
+    Args:
+        root (str | None): Explicit trace-root override; defaults to
+            :func:`mn_profile_trace_root` when None.
+        retention_days (int): Age threshold in days; subdirectories older than
+            this are removed. Defaults to 7 (overridable via env).
+        keep (str | None): Optional directory name to never collect (guards the
+            active session against clock skew).
     """
     if os.environ.get("HYPERLOOM_MN_TRACE_GC_DISABLE", "").strip() in (
         "1", "true", "yes",
@@ -3375,7 +3897,25 @@ def _gc_old_profile_traces(
 
 
 def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
-    """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS."""
+    """Create/reuse the SaFE RayJob stack for a multi-node run.
+
+    No-op when ``--nodes < 2``. Otherwise resolves the RayJob container image
+    (CLI flag → env → prior state file), creates or reuses the RayJob, runs the
+    one-time bootstrap if it hasn't run yet, exports ``RAY_ADDRESS`` for
+    kernel-agent Ray tasks, sets ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` to a
+    cluster-shared trace directory namespaced by ``rayjob_id`` (GC'ing older
+    sibling dirs), and replays previously-applied kernel patches onto the
+    (possibly fresh) pods.
+
+    Args:
+        args (argparse.Namespace): Parsed ``optimize`` arguments (reads
+            ``nodes``, ``rayjob_image``, ``rayjob_gpus_per_node``,
+            ``rayjob_extra_env``).
+
+    Raises:
+        SystemExit: With code 2 when ``--nodes >= 2`` but no RayJob image is
+            configured, or with the create/bootstrap return code on failure.
+    """
     nodes = max(1, int(args.nodes))
     if nodes < 2:
         return
@@ -3527,6 +4067,10 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
     each replay is mirrored verbatim; per-patch failures emit a
     warning but do not raise so a single broken patch doesn't block
     other replays or the subsequent optimize loop.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments; reads ``nodes`` (a
+            no-op when ``< 2``).
     """
     nodes = max(1, int(getattr(args, "nodes", 1) or 1))
     if nodes < 2:
@@ -3606,7 +4150,18 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
 
 
 def _argv_has_option(argv: list[str], option: str) -> bool:
-    """Return True when argv explicitly carries ``option``."""
+    """Report whether ``argv`` explicitly carries a given option.
+
+    Matches both the bare flag (``--tp``) and the ``=``-joined form
+    (``--tp=8``).
+
+    Args:
+        argv (list[str]): The argument vector to scan.
+        option (str): The long-option flag to look for (e.g. ``"--tp"``).
+
+    Returns:
+        bool: ``True`` when the option appears in ``argv``, else ``False``.
+    """
     prefix = f"{option}="
     return any(arg == option or arg.startswith(prefix) for arg in argv)
 
@@ -3625,6 +4180,16 @@ def _export_workload_envs_for_optimize(
     operator explicitly passes ``--tp`` / ``--conc`` / ``--ep``, those values
     must still win because the action executors read these knobs from
     ``os.environ`` while materializing Magpie YAMLs.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments; reads ``conc``.
+        nodes_resolved (int): The resolved node count; ``>= 2`` always exports.
+        tp_resolved (int): The resolved tensor-parallel degree to export as
+            ``TP``.
+        ep_resolved (int): The resolved expert-parallel degree to export as
+            ``EP``.
+        argv (list[str] | None): Argument vector to inspect for explicit flags;
+            defaults to ``sys.argv[1:]`` when None.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     if nodes_resolved >= 2 or _argv_has_option(argv, "--tp"):
@@ -3636,6 +4201,30 @@ def _export_workload_envs_for_optimize(
 
 
 async def _run_optimize(args: argparse.Namespace) -> int:
+    """Drive a full ``optimize`` run end to end and return a process exit code.
+
+    Orchestrates the whole launch sequence: resolves topology knobs
+    (``--nodes`` / ``--tp`` / ``--ep`` / ``--pd-*``) and fails fast on invalid
+    multi-node topologies, exports workload env vars, provisions the multi-node
+    RayJob stack when needed, runs ``_preflight`` (dep install, auth aliases,
+    GPU/shm hygiene, model-catalog gating), seeds or resumes the session
+    (manifest, :class:`SharedState`, KB / KnowledgePlane / specialist wiring),
+    builds the per-role backends, objective, and :class:`Coordinator`, then runs
+    ``coordinator.run()`` until the objective, time budget, tick cap, or SIGTERM
+    stops it. On exit it stops the coordinator, writes the session breakdown and
+    final report safety nets, and prints the final summary.
+
+    Args:
+        args (argparse.Namespace): Parsed ``optimize`` arguments.
+
+    Returns:
+        int: ``0`` for a clean stop (``target_reached``, ``no_more_leverage``,
+        ``time_exhausted``, ``max_ticks``); ``1`` otherwise.
+
+    Raises:
+        SystemExit: Via the preflight / topology gates when configuration is
+            invalid (e.g. TP exceeds total GPUs, missing RayJob image).
+    """
     # Surface --nodes to the rest of the process (preflight diagnostics
     # and any executor that wants to short-circuit when the optimizer is
     # in single-node mode) by exporting it before _preflight runs. We
@@ -4641,6 +5230,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level ``inference_optimizer`` argument parser.
+
+    Defines the global ``--verbose`` flag and the ``optimize`` subcommand with
+    its full set of model, topology, backend, phase-gating, plateau / steward,
+    explore-tuning, KB / PR-monitor, and multi-node options. Many defaults are
+    sourced from environment variables so the CLI and env stay interchangeable.
+
+    Returns:
+        argparse.ArgumentParser: The fully-configured parser.
+    """
     p = argparse.ArgumentParser(
         prog="inference_optimizer",
         description="Inference Optimizer v0.6 — multi-agent SGLang/vLLM optimization",
@@ -5429,6 +6028,15 @@ def _build_parser() -> argparse.ArgumentParser:
     # that gated the legacy single-step ``profile`` path are gone.
     # ------------------------------------------------------------------
     def _env_default_on(env_var: str) -> bool:
+        """Resolve a default-on boolean toggle from an environment variable.
+
+        Args:
+            env_var (str): The environment variable name to read.
+
+        Returns:
+            bool: ``False`` only when the variable is explicitly set to ``"0"``;
+            ``True`` otherwise (including when unset).
+        """
         return os.environ.get(env_var, "1").strip() != "0"
 
     # The standalone FRAMEWORK_PR phase is on by default; use
@@ -5510,6 +6118,15 @@ def _build_parser() -> argparse.ArgumentParser:
     # than the bare baseline.
     # ------------------------------------------------------------------
     def _env_float_or(default: float, env_var: str) -> float:
+        """Resolve a float CLI default from an environment variable.
+
+        Args:
+            default (float): Value to use when the variable is unset or invalid.
+            env_var (str): The environment variable name to read.
+
+        Returns:
+            float: The parsed env value, or ``default`` on absence / parse error.
+        """
         raw = os.environ.get(env_var, "").strip()
         if not raw:
             return float(default)
@@ -5519,6 +6136,15 @@ def _build_parser() -> argparse.ArgumentParser:
             return float(default)
 
     def _env_int_or(default: int, env_var: str) -> int:
+        """Resolve an int CLI default from an environment variable.
+
+        Args:
+            default (int): Value to use when the variable is unset or invalid.
+            env_var (str): The environment variable name to read.
+
+        Returns:
+            int: The parsed env value, or ``default`` on absence / parse error.
+        """
         raw = os.environ.get(env_var, "").strip()
         if not raw:
             return int(default)
@@ -5875,6 +6501,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: parse arguments and dispatch the requested subcommand.
+
+    Configures logging from the ``-v`` count, resolves any ``--*-prompt`` flag
+    that points at a file (reading its contents in place), and runs the
+    ``optimize`` subcommand via :func:`asyncio.run`. Prints help and returns a
+    non-zero code for unknown commands.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv[1:]`` when ``None``.
+
+    Returns:
+        int: The process exit code (``optimize`` result, or ``2`` for no/unknown
+        command).
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)

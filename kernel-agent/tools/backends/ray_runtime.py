@@ -16,6 +16,15 @@ from typing import Optional
 
 
 def ray_status_ok() -> bool:
+    """Check whether a Ray cluster is currently reachable.
+
+    Runs ``ray status`` with output suppressed and inspects the exit
+    code.
+
+    Returns:
+        bool: True if ``ray status`` exits 0 (a cluster is reachable),
+            False otherwise.
+    """
     proc = subprocess.run(
         ["ray", "status"],
         stdout=subprocess.DEVNULL,
@@ -26,11 +35,23 @@ def ray_status_ok() -> bool:
 
 
 def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> bool:
-    """Ensure a Ray cluster is reachable.
+    """Ensure a Ray cluster is reachable, starting a head node if needed.
 
-    Returns True if this call started Ray (so caller may stop it later).
-    Returns False if Ray was already running.
-    Raises RuntimeError if Ray fails to start.
+    If no cluster is reachable, runs ``ray start --head`` (optionally
+    pinning the GPU count and tee-ing output to a log file).
+
+    Args:
+        num_gpus (Optional[int]): When set, passed as ``--num-gpus`` to
+            the new head node. Ignored when a cluster already exists.
+        log_path (Optional[Path]): When set, the start command and its
+            output are appended here; the parent directory is created.
+
+    Returns:
+        bool: True if this call started Ray (so the caller may stop it
+            later); False if Ray was already running.
+
+    Raises:
+        RuntimeError: If the ``ray start`` command exits non-zero.
     """
     if ray_status_ok():
         return False
@@ -51,6 +72,17 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
 
 
 def stop_ray_if_owned(started: bool, log_path: Optional[Path] = None) -> None:
+    """Stop Ray only if this process started it.
+
+    A no-op when ``started`` is False, so callers can pair this with
+    :func:`ensure_ray_cluster` without tracking ownership themselves.
+
+    Args:
+        started (bool): The return value from :func:`ensure_ray_cluster`;
+            True means this process owns the cluster and should stop it.
+        log_path (Optional[Path]): When set, ``ray stop --force`` output
+            is appended here.
+    """
     if not started:
         return
     if log_path is not None:
@@ -94,6 +126,18 @@ SAFE_ENV_KEYS = (
 
 
 def safe_runtime_env() -> dict:
+    """Build a Ray ``runtime_env`` from the allowlisted environment keys.
+
+    Copies only the keys in :data:`SAFE_ENV_KEYS` from the current
+    environment, then fills sensible fallbacks (e.g. deriving the
+    per-provider API keys and base URLs from ``SAFE_API_KEY`` /
+    ``OPENAI_BASE_URL``). GPU-visibility variables are deliberately
+    excluded so Ray manages device assignment itself.
+
+    Returns:
+        dict: A ``{"env_vars": {...}}`` mapping suitable for passing as
+            Ray's ``runtime_env``.
+    """
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
     if "SAFE_API_KEY" in env:
         env.setdefault("OPENAI_API_KEY", env["SAFE_API_KEY"])
@@ -115,7 +159,16 @@ def safe_runtime_env() -> dict:
 
 
 def quiet_ray_init():
-    """Initialize ray while suppressing the connect banner on stdout."""
+    """Initialize ray while suppressing the connect banner on stdout.
+
+    Connects to ``$RAY_ADDRESS`` (default ``auto``) with driver logging
+    silenced and the connect banner redirected away from stdout, using
+    the allowlisted runtime env from :func:`safe_runtime_env`.
+
+    Returns:
+        dict: The ``runtime_env`` mapping that was passed to
+            ``ray.init`` (so callers can reuse it for nested tasks).
+    """
     import contextlib
     import io
     import ray

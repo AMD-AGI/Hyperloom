@@ -20,6 +20,17 @@ from .symptom import Symptom, SymptomSeverity
 
 @dataclass
 class CrashConfig:
+    """Crash-count thresholds for :func:`evaluate_crash_signals`.
+
+    Attributes:
+        medium_threshold (int): Consecutive crashes at which a MEDIUM
+            ``crash_count_rising`` symptom fires.
+        high_threshold (int): Consecutive crashes at which a HIGH
+            ``crash_count_high`` symptom fires.
+        emergency_threshold (int): Consecutive crashes at which a HIGH
+            ``crash_count_emergency`` symptom fires.
+    """
+
     medium_threshold: int = 2
     high_threshold: int = 5
     emergency_threshold: int = 10
@@ -31,6 +42,23 @@ def evaluate_crash_signals(
     *,
     config: CrashConfig | None = None,
 ) -> list[Symptom]:
+    """Emit an escalating crash-count symptom from the shared-state counter.
+
+    Picks MEDIUM/HIGH severity and a matching symptom name based on how many
+    consecutive crashes the session has recorded.
+
+    Args:
+        ctx (ReactorContext): Reactor context providing the shared-state crash
+            count and current action.
+        data (SourceData): Collected source data (unused but kept for a uniform
+            rule signature).
+        config (CrashConfig | None): Tunables; defaults to :class:`CrashConfig`
+            when ``None``.
+
+    Returns:
+        list[Symptom]: A one-element list with the crash symptom once the medium
+            threshold is reached, otherwise an empty list.
+    """
     cfg = config or CrashConfig()
     crash_count = ctx.shared_state.crash_count
     if crash_count < cfg.medium_threshold:

@@ -71,6 +71,14 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
 
     The function is best-effort: a malformed payload is logged and the caller
     falls back to manifest-only gap composition.
+
+    Args:
+        breakdown_path (str | Path | None): Path to the profile kernel
+            breakdown JSON (``SharedState.last_profile_kernel_breakdown``).
+
+    Returns:
+        str: One canonical bottleneck keyword, or ``""`` when the path is
+            missing / unreadable or no kernel name matches.
     """
     if not breakdown_path:
         return ""
@@ -119,6 +127,14 @@ def _normalize_model_class(model_class: str) -> str:
     Uses the same canonicalisation rule (basename + lowercase, with
     -/+/space tolerated) that every other ``model_class`` consumer applies
     so the gap search token stays grep-friendly across the codebase.
+
+    Args:
+        model_class (str): The raw model-class label (e.g. ``moe_mla``,
+            ``Dense``, ``""``).
+
+    Returns:
+        str: The canonical lowercase token (``-`` / ``+`` / space → ``_``), or
+            ``""`` when the input is empty.
     """
     raw = (model_class or "").strip().lower()
     if not raw:
@@ -132,6 +148,13 @@ def _model_class_to_search_token(model_class: str) -> str:
     fa's anti-correlation table activates on tokens like ``dense`` / ``moe``
     so the gap MUST carry one of those, not the more granular IO labels
     (``moe_mla`` / ``moe_swa`` / ...).
+
+    Args:
+        model_class (str): The IO model-class label to map.
+
+    Returns:
+        str: ``"moe"`` / ``"dense"`` / the normalized token, or ``""`` when the
+            input is empty.
     """
     mc = _normalize_model_class(model_class)
     if not mc:
@@ -154,36 +177,26 @@ def compose_gap(
 ) -> tuple[str, list[str]]:
     """Build ``(gap_description, keywords)`` for the framework_pr arm.
 
-    Parameters
-    ----------
-    framework, gpu_type, model_class
-        Lifted from :class:`SharedState` (already populated by classify /
-        baseline). All optional; missing fields are quietly dropped from the
-        composed gap so the executor still has *something* to send to fa.
-    precision
-        Sourced from ``manifest.json``'s ``workload.precision`` because
-        SharedState does not surface it directly. Empty string is fine.
-    profile_kernel_breakdown_path
-        Path to the JSON dumped by the profile executor (sorted-by-time top
-        kernels). When present, the composer adds a bottleneck keyword like
-        ``attention`` / ``moe`` / ``gemm``. Missing / unreadable → silent
-        fallback to manifest-only gap.
-    tried_refs
-        Refs already tried this session (passed through; reserved for future
-        use to bias the gap away from previously-rejected PR categories).
-        Currently unused by the composer, but accepted now so callers stay
-        forward-compatible.
+    Args:
+        framework (str): Framework token lifted from :class:`SharedState`
+            (optional; dropped from the gap when empty).
+        gpu_type (str): GPU type token lifted from SharedState (optional).
+        model_class (str): Model-class label lifted from SharedState (optional;
+            mapped to a fa-friendly architectural token).
+        precision (str): Precision sourced from ``manifest.json``'s
+            ``workload.precision``; empty string is fine.
+        profile_kernel_breakdown_path (str | Path | None): Path to the profile
+            executor's kernel breakdown JSON; adds a bottleneck keyword when
+            readable, else silently falls back to a manifest-only gap.
+        tried_refs (Sequence[str]): Refs already tried this session (accepted
+            for forward-compat; currently unused by the composer).
 
-    Returns
-    -------
-    ``(gap_description, keywords)`` where:
-      * ``gap_description`` is a free-text phrase fa can pass to
-        primus-cortex /v1/search/prs (also fed to extract_keywords as the
-        fallback when explicit keywords are empty).
-      * ``keywords`` is the explicit keyword list (lowercased, deduped,
-        sorted for determinism) the executor passes to fa to bypass
-        extract_keywords entirely. Always non-empty when at least one
-        of (framework / gpu_type / model_class / bottleneck) is known.
+    Returns:
+        tuple[str, list[str]]: ``(gap_description, keywords)`` where
+            ``gap_description`` is a free-text phrase for fa's PR search and
+            ``keywords`` is the lowercased, deduped, sorted explicit keyword
+            list (non-empty when any of framework / gpu_type / model_class /
+            bottleneck is known).
     """
     fw = (framework or "").strip().lower()
     gpu = (gpu_type or "").strip().lower()

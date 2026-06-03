@@ -117,7 +117,15 @@ _EVENT_FIELD_SETS: dict[DispatchHistoryEvent, frozenset[str]] = {
 
 
 def event_field_set(event: DispatchHistoryEvent | str) -> frozenset[str]:
-    """Public accessor for the closed schema of one event type."""
+    """Return the closed field schema for one event type.
+
+    Args:
+        event (DispatchHistoryEvent | str): Event as an enum member or
+            its string value.
+
+    Returns:
+        frozenset[str]: The allowed field names for that event's rows.
+    """
     e = event if isinstance(event, DispatchHistoryEvent) else DispatchHistoryEvent(event)
     return _EVENT_FIELD_SETS[e]
 
@@ -127,6 +135,11 @@ class DispatchHistoryRowError(ValueError):
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string.
+
+    Returns:
+        str: Timestamp with microsecond precision in UTC.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -143,6 +156,18 @@ def append_dispatch_history_row(
     extras. ``event`` + ``ts`` are filled in by the writer; OSError on
     disk is logged + swallowed so audit-write failures never break the
     lifecycle.
+
+    Args:
+        session_dir (Path): Session directory holding the history file.
+        dyn_id (str): Dynamic-action identifier for the history path.
+        event (DispatchHistoryEvent | str): Event type whose schema the
+            payload must satisfy.
+        payload (dict[str, Any]): Non-header fields for the row; must
+            not include ``event`` or ``ts``.
+
+    Raises:
+        DispatchHistoryRowError: If the payload includes header fields,
+            or has extra/missing fields against the event schema.
     """
     event_enum = (
         event if isinstance(event, DispatchHistoryEvent)
@@ -228,9 +253,19 @@ def write_dynamic_action_telemetry(
     """Overwrite ``telemetry.json`` for one dyn_id on terminal transition.
 
     Idempotent: a later write replaces an earlier one (the resume
-    abandoned sweep is the canonical second-pass writer). Raises
-    :class:`TelemetryRowError` when ``lifecycle`` is non-terminal or
-    the payload violates :data:`TELEMETRY_FIELDS`.
+    abandoned sweep is the canonical second-pass writer).
+
+    Args:
+        session_dir (Path): Session directory holding the telemetry file.
+        dyn_id (str): Dynamic-action identifier for the telemetry path.
+        lifecycle (DynamicActionStatus | str): Terminal lifecycle status
+            whose counter is set to 1.
+        gain_pct (float | None): Optional integrate gain percentage.
+        round_index (int | None): Optional dispatch round index.
+
+    Raises:
+        TelemetryRowError: If ``lifecycle`` is non-terminal or the
+            payload violates :data:`TELEMETRY_FIELDS`.
     """
     lifecycle_enum = (
         lifecycle if isinstance(lifecycle, DynamicActionStatus)

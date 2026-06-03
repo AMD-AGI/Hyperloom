@@ -110,6 +110,23 @@ def evaluate_budget_signals(
     *,
     config: BudgetConfig | None = None,
 ) -> list[Symptom]:
+    """Evaluate the wall-clock budget ladder and absolute-time deadline rules.
+
+    Computes burn percentage and remaining time from the shared-state snapshot
+    and emits the appropriate percentage-based and time-anchored symptoms.
+    Stays silent on sub-``min_budget_minutes`` sessions and during the closing
+    phase.
+
+    Args:
+        ctx (ReactorContext): Reactor context providing the shared-state
+            snapshot.
+        config (BudgetConfig | None): Tunables; defaults to :class:`BudgetConfig`
+            when ``None``.
+
+    Returns:
+        list[Symptom]: Any budget/deadline symptoms for this tick, possibly
+            empty.
+    """
     cfg = config or BudgetConfig()
     snap: SharedStateSnapshot = ctx.shared_state
     budget = float(snap.budget_minutes or 0.0)
@@ -175,6 +192,16 @@ def evaluate_budget_signals(
 def _imminent_symptom(
     snap: SharedStateSnapshot, *, burn_pct: float, cfg: BudgetConfig,
 ) -> Symptom:
+    """Build the HIGH ``deadline_imminent`` wind-down symptom.
+
+    Args:
+        snap (SharedStateSnapshot): Current shared-state snapshot.
+        burn_pct (float): Fraction of the budget already consumed.
+        cfg (BudgetConfig): Budget tunables.
+
+    Returns:
+        Symptom: A HIGH-severity symptom recommending ``delegate(report)``.
+    """
     return Symptom(
         name="deadline_imminent",
         severity=SymptomSeverity.HIGH,
@@ -208,6 +235,16 @@ def _imminent_symptom(
 def _burn_no_gain_symptom(
     snap: SharedStateSnapshot, *, burn_pct: float, cfg: BudgetConfig,
 ) -> Symptom:
+    """Build the MEDIUM ``budget_burn_no_gain`` mid-stage warning symptom.
+
+    Args:
+        snap (SharedStateSnapshot): Current shared-state snapshot.
+        burn_pct (float): Fraction of the budget already consumed.
+        cfg (BudgetConfig): Budget tunables.
+
+    Returns:
+        Symptom: A MEDIUM-severity symptom nudging a strategy change.
+    """
     return Symptom(
         name="budget_burn_no_gain",
         severity=SymptomSeverity.MEDIUM,
@@ -241,6 +278,14 @@ def _strategy_drift_symptom(
     Intentionally low-severity (MEDIUM) — Robustness only diagnoses
     here; the ActionLadder emits an ``alert(medium)`` so Orchestration
     can see the early-strategy hint without losing decision authority.
+
+    Args:
+        snap (SharedStateSnapshot): Current shared-state snapshot.
+        burn_pct (float): Fraction of the budget already consumed.
+        cfg (BudgetConfig): Budget tunables.
+
+    Returns:
+        Symptom: A MEDIUM-severity ``budget_strategy_drift`` symptom.
     """
     return Symptom(
         name="budget_strategy_drift",
@@ -280,6 +325,16 @@ def _deadline_warning_symptom(
     Severity depends on whether the run has validated gain. With gain
     we only nudge (MEDIUM); without gain we treat the time crunch as
     HIGH because the run is now both empty AND about to be cut.
+
+    Args:
+        snap (SharedStateSnapshot): Current shared-state snapshot.
+        remaining (float): Minutes left before the deadline.
+        validated (float): Validated cumulative gain percentage.
+        cfg (BudgetConfig): Budget tunables.
+
+    Returns:
+        Symptom: A ``deadline_warning`` symptom, HIGH when there is no validated
+            gain and MEDIUM otherwise.
     """
     if validated < cfg.productive_gain_pct:
         severity = SymptomSeverity.HIGH
@@ -324,6 +379,14 @@ def _hard_cutoff_symptom(
     Always HIGH, always emits ``delegate(report)`` in the ladder.
     Mirrors the Coordinator orchestration prompt's
     ``WARNING: < 5 min remaining`` warning, just on the Robustness side.
+
+    Args:
+        snap (SharedStateSnapshot): Current shared-state snapshot.
+        remaining (float): Minutes left before the deadline.
+        cfg (BudgetConfig): Budget tunables.
+
+    Returns:
+        Symptom: A HIGH-severity ``deadline_hard_cutoff`` symptom.
     """
     return Symptom(
         name="deadline_hard_cutoff",

@@ -80,6 +80,15 @@ _MTIME_GATE_SLACK_SEC: float = 1.0
 
 
 def _to_float(value: Any) -> float | None:
+    """Coerce a value to ``float``, rejecting bools and ``None``.
+
+    Args:
+        value (Any): The value to coerce.
+
+    Returns:
+        float | None: The parsed float, or ``None`` when the value is a
+        bool, ``None``, or not convertible.
+    """
     if isinstance(value, bool) or value is None:
         return None
     try:
@@ -89,6 +98,15 @@ def _to_float(value: Any) -> float | None:
 
 
 def _to_int(value: Any) -> int | None:
+    """Coerce a value to ``int``, rejecting bools and ``None``.
+
+    Args:
+        value (Any): The value to coerce.
+
+    Returns:
+        int | None: The parsed int, or ``None`` when the value is a
+        bool, ``None``, or not convertible.
+    """
     if isinstance(value, bool) or value is None:
         return None
     try:
@@ -98,6 +116,14 @@ def _to_int(value: Any) -> int | None:
 
 
 def _first_float(*values: Any) -> float | None:
+    """Return the first value that parses as a float.
+
+    Args:
+        *values (Any): Candidate values, tried in order.
+
+    Returns:
+        float | None: The first successfully parsed float, or ``None``.
+    """
     for value in values:
         parsed = _to_float(value)
         if parsed is not None:
@@ -106,6 +132,14 @@ def _first_float(*values: Any) -> float | None:
 
 
 def _first_int(*values: Any) -> int | None:
+    """Return the first value that parses as an int.
+
+    Args:
+        *values (Any): Candidate values, tried in order.
+
+    Returns:
+        int | None: The first successfully parsed int, or ``None``.
+    """
     for value in values:
         parsed = _to_int(value)
         if parsed is not None:
@@ -114,6 +148,15 @@ def _first_int(*values: Any) -> int | None:
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
+    """Load a JSON object from ``path``, tolerating read/parse errors.
+
+    Args:
+        path (Path): The JSON file to read.
+
+    Returns:
+        dict[str, Any] | None: The parsed mapping, or ``None`` on IO /
+        decode error or when the top-level JSON is not an object.
+    """
     try:
         with path.open(encoding="utf-8") as f:
             data = json.load(f)
@@ -123,7 +166,15 @@ def _load_json(path: Path) -> dict[str, Any] | None:
 
 
 def _candidate_raw_jsons(workspace: Path) -> list[Path]:
-    """Return likely InferenceX result files, preferring baseline over profile."""
+    """Return likely InferenceX result files, preferring baseline over profile.
+
+    Args:
+        workspace (Path): The task workspace to scan recursively.
+
+    Returns:
+        list[Path]: Candidate ``*.json`` result paths (excluding
+        ``benchmark_report.json``), ordered baseline-before-profile.
+    """
     paths = [
         p for p in workspace.rglob("*.json")
         if p.name != "benchmark_report.json"
@@ -172,11 +223,32 @@ def _rescue_candidate_paths(
     The function intentionally never raises: any I/O error on a single
     candidate is swallowed (the file is just skipped) so the caller's
     fast-path (no rescue) is preserved.
+
+    Args:
+        workspace (Path): The task workspace; candidates already inside
+            it are skipped (handled by :func:`_candidate_raw_jsons`).
+        subprocess_started_unix (float | None): Wall-clock start of the
+            benchmark subprocess; older candidates are dropped as stale.
+
+    Returns:
+        list[Path]: Absolute paths to fresh, in-scope leak candidates.
     """
     candidates: list[Path] = []
     seen: set[Path] = set()
 
     def _push(path: Path) -> None:
+        """Add ``path`` to the candidate list if it passes all gates.
+
+        Resolves the path, skips duplicates and in-workspace files,
+        requires a regular file, and (when a start time is known)
+        drops stale candidates older than the subprocess launch.
+
+        Args:
+            path (Path): A candidate leak path to consider.
+
+        Returns:
+            None: Mutates the enclosing ``candidates``/``seen`` sets.
+        """
         try:
             resolved = path.resolve()
         except OSError:
@@ -250,6 +322,14 @@ def _materialize_rescue_into_workspace(
     when the source already lives inside the workspace (the latter
     means the path came through ``_candidate_raw_jsons`` already and
     we should not re-copy onto ourselves).
+
+    Args:
+        rescue_path (Path): The leaked result file to copy.
+        workspace (Path): The task workspace to copy the file into.
+
+    Returns:
+        Path | None: The destination path on success, or ``None`` on
+        failure or when the source already lives inside the workspace.
     """
     try:
         rescue_resolved = rescue_path.resolve()
@@ -288,6 +368,13 @@ def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
     3. Default :data:`_DEFAULT_LEAK_ARTIFACT_ROOT`
        (``/workspace``), matching the destinations hardcoded into
        Magpie's bundled ``InferenceX/benchmarks/*.sh``.
+
+    Args:
+        leak_root (Path | None): Explicit single root override; takes
+            precedence over env and default when provided.
+
+    Returns:
+        tuple[Path, ...]: The directory roots to scan for leak files.
     """
     if leak_root is not None:
         return (leak_root,)
@@ -328,11 +415,22 @@ def harvest_leaked_artifacts(
     artifacts remain distinguishable (``server.log``,
     ``gpu_metrics.csv``, etc.).
 
-    Returns a list of ``(leak_path, copy_path)`` tuples for audit.
     Each step is wrapped in its own ``try`` so a permission error on
     one artifact does not block the rest of the harvest. The function
     intentionally never raises: callers always receive a (possibly
     empty) list and can decide what to surface to the prompt.
+
+    Args:
+        destination (Path): Workspace directory to copy artifacts into.
+        subprocess_started_unix (float | None): Wall-clock start of the
+            benchmark; older matches are skipped as stale.
+        leak_root (Path | None): Explicit single scan root override.
+        extra_globs (tuple[str, ...]): Additional glob patterns to scan
+            beyond :data:`_DEFAULT_LEAK_ARTIFACT_GLOBS`.
+
+    Returns:
+        list[tuple[Path, Path]]: ``(leak_path, copy_path)`` pairs for
+        every artifact successfully harvested.
     """
     harvested: list[tuple[Path, Path]] = []
     leak_roots = _resolve_leak_roots(leak_root)
@@ -408,6 +506,21 @@ def _merge_raw_result(
     *,
     source_path: Path,
 ) -> None:
+    """Fill missing measurement fields from a raw InferenceX result.
+
+    Only keys that are still ``None`` in ``measurement`` are populated,
+    so an earlier (preferred) source is never overwritten.
+
+    Args:
+        measurement (dict[str, Any]): The measurement dict to fill in
+            place.
+        raw (dict[str, Any]): The raw InferenceX result mapping.
+        source_path (Path): Path the raw result was read from; recorded
+            as ``raw_result_path`` when not already set.
+
+    Returns:
+        None: ``measurement`` is mutated in place.
+    """
     if measurement.get("output_throughput") is None:
         measurement["output_throughput"] = _to_float(raw.get("output_throughput"))
     if measurement.get("request_throughput") is None:
@@ -458,6 +571,18 @@ def extract_benchmark_measurement(
     Callers (executors) capture ``time.time()`` immediately before
     invoking the benchmark subprocess and forward it here so we only
     adopt a leaked result that was written *after* this run started.
+
+    Args:
+        report (dict[str, Any] | None): The wrapper's
+            ``benchmark_report.json`` payload, if any.
+        workspace (Path | None): The task workspace to search for raw
+            InferenceX result JSONs and leak destinations.
+        subprocess_started_unix (float | None): Wall-clock start used to
+            gate the salvage pass against stale leaks.
+
+    Returns:
+        dict[str, Any]: A normalized measurement dict, including a
+        ``valid_measurement`` flag and any ``nonfatal_warnings``.
     """
     report = report or {}
     throughput = report.get("throughput") or {}
@@ -549,6 +674,18 @@ def extract_benchmark_measurement(
 
 
 def is_valid_measurement(result: dict[str, Any] | None) -> bool:
+    """Return whether a measurement reflects a usable benchmark result.
+
+    A measurement is valid when it reports positive output throughput
+    and at least one completed request.
+
+    Args:
+        result (dict[str, Any] | None): The measurement dict to check.
+
+    Returns:
+        bool: ``True`` if throughput and completed requests are both
+        positive; ``False`` otherwise.
+    """
     if not isinstance(result, dict):
         return False
     output_tput = _to_float(result.get("output_throughput"))

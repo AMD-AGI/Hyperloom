@@ -70,6 +70,14 @@ class ProgressDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
+        """Initialise the detector and restore the persisted gain history.
+
+        Args:
+            config (ProgressConfig | None): Tunables; defaults to
+                :class:`ProgressConfig` when ``None``.
+            state_view (DetectorStateView | None): Disk-backed state view used to
+                load/persist the rolling gain history and last tick.
+        """
         self._config = config or ProgressConfig()
         self._state_view = state_view
         # Disk-backed rolling history — B2 ``gain_plateau`` requires
@@ -95,6 +103,7 @@ class ProgressDetector:
             self._last_tick = -1
 
     def _persist(self) -> None:
+        """Write the gain history and last tick to the state view, if any."""
         if self._state_view is None:
             return
         self._state_view.save({
@@ -104,12 +113,35 @@ class ProgressDetector:
 
     @property
     def gain_history(self) -> list[float]:
-        """Visible for tests; production code should not rely on this."""
+        """Snapshot of the rolling validated-gain history.
+
+        Visible for tests; production code should not rely on this.
+
+        Returns:
+            list[float]: A copy of the recorded ``cumulative_gain_validated``
+                samples.
+        """
         return list(self._gain_history)
 
     def evaluate(
         self, ctx: ReactorContext, data: SourceData,
     ) -> list[Symptom]:
+        """Update the gain history and evaluate the B2/B3 stagnation rules.
+
+        Appends one gain sample per new Coordinator tick, then runs the
+        ``gain_plateau`` and ``no_levers_found`` checks. Short-circuits when the
+        run is already closing or has a stop reason.
+
+        Args:
+            ctx (ReactorContext): Reactor context providing the shared-state
+                snapshot.
+            data (SourceData): Collected source data (unused but kept for a
+                uniform rule signature).
+
+        Returns:
+            list[Symptom]: Any ``gain_plateau`` / ``no_levers_found`` symptoms
+                for this tick, possibly empty.
+        """
         snap = ctx.shared_state
         if snap.closing_phase or snap.stop_reason:
             # Run is already winding down; we don't pile more signals on.
@@ -134,6 +166,17 @@ class ProgressDetector:
         return out
 
     def _gain_plateau_symptom(self, snap: SharedStateSnapshot) -> Symptom | None:
+        """B2: build a ``gain_plateau`` symptom when validated gain has flatlined.
+
+        Args:
+            snap (SharedStateSnapshot): Current shared-state snapshot.
+
+        Returns:
+            Symptom | None: A ``gain_plateau`` symptom (HIGH when gain is still
+                zero, MEDIUM when a shippable gain exists), or ``None`` when the
+                window is not full, the stack is empty, or the gain is still
+                moving.
+        """
         cfg = self._config
         if len(self._gain_history) < cfg.gain_window_ticks:
             return None
@@ -187,6 +230,19 @@ class ProgressDetector:
         )
 
     def _no_levers_symptom(self, snap: SharedStateSnapshot) -> Symptom | None:
+        """B3: build a ``no_levers_found`` symptom for an empty, gainless run.
+
+        Fires only after the explore phase has started and the configured
+        elapsed-minute and tick floors are met, while no kernel_opt work is in
+        flight.
+
+        Args:
+            snap (SharedStateSnapshot): Current shared-state snapshot.
+
+        Returns:
+            Symptom | None: A HIGH-severity ``no_levers_found`` symptom, or
+                ``None`` when any guard condition defers the fire.
+        """
         cfg = self._config
         if snap.optimization_stack_size > 0:
             return None
@@ -248,7 +304,16 @@ def evaluate_progress_signals(
     ctx: ReactorContext,
     data: SourceData,
 ) -> list[Symptom]:
-    """Module-level helper mirroring the other signal rule entry points."""
+    """Module-level helper mirroring the other signal rule entry points.
+
+    Args:
+        detector (ProgressDetector): The stateful detector owned by the caller.
+        ctx (ReactorContext): Reactor context for the current tick.
+        data (SourceData): Collected source data.
+
+    Returns:
+        list[Symptom]: The detector's symptoms for this tick, possibly empty.
+    """
     return detector.evaluate(ctx, data)
 
 

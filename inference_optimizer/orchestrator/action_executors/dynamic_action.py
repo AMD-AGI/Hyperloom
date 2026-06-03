@@ -23,12 +23,26 @@ log = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO-8601 string.
+
+    Returns:
+        str: The current UTC timestamp formatted with ``timespec="microseconds"``.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _resolve_artifact_dir(ctx: RunnerContext) -> Path | None:
     """Prefer ``params['artifact_path']``; fall back to the per-task
-    workspace; return None when neither resolves."""
+    workspace; return None when neither resolves.
+
+    Args:
+        ctx (RunnerContext): The runner context whose ``task.params`` /
+            ``extra`` are searched for an artefact dir.
+
+    Returns:
+        Path | None: The resolved artefact directory, or ``None`` when neither
+            source provides one.
+    """
     explicit = ctx.task.params.get("artifact_path")
     if explicit:
         return Path(explicit)
@@ -40,7 +54,16 @@ def _resolve_artifact_dir(ctx: RunnerContext) -> Path | None:
 
 async def dynamic_action_executor(ctx: RunnerContext) -> dict[str, Any]:
     """Append one ``SUB_AGENT_DONE`` history row + write empty
-    ``proposal_set.json``."""
+    ``proposal_set.json``.
+
+    Args:
+        ctx (RunnerContext): The runner context carrying the dynamic-action
+            params and artefact/workspace paths.
+
+    Returns:
+        dict[str, Any]: A stub result with an empty ``proposal_set`` and the
+            ``stub_empty`` outcome.
+    """
     dyn_id = str(ctx.task.params.get("dyn_id") or ctx.task.task_id)
     artifact_dir = _resolve_artifact_dir(ctx)
     if artifact_dir is not None:
@@ -106,7 +129,16 @@ def _session_dir_from_artifact(
 ) -> Path | None:
     """Recover ``session_dir`` from an
     ``<sd>/agents/orchestration/dynamic_actions/<dyn_id>`` artefact
-    path; return ``None`` when the layout does not match."""
+    path; return ``None`` when the layout does not match.
+
+    Args:
+        artifact_dir (Path): The artefact directory to walk back up from.
+        dyn_id (str): The dynamic-action id expected as the artefact dir name.
+
+    Returns:
+        Path | None: The recovered session directory, or ``None`` when the
+            layout does not match.
+    """
     if artifact_dir.name != dyn_id:
         return None
     candidate = artifact_dir.parent.parent.parent.parent

@@ -96,6 +96,11 @@ SCHEMA_VERSION = 3
 
 
 def _utc_now_compact() -> str:
+    """Format the current UTC time as a compact session-id timestamp.
+
+    Returns:
+        str: Timestamp in ``YYYYMMDDTHHMMSSZ`` form.
+    """
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
@@ -112,6 +117,15 @@ _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
 
 
 def _read_first_line(path: Path) -> str:
+    """Return the first non-empty, stripped line of a file.
+
+    Args:
+        path (Path): File to read.
+
+    Returns:
+        str: First non-blank line stripped of surrounding whitespace, or an
+        empty string when the file is missing, empty, or unreadable.
+    """
     try:
         if not path.exists():
             return ""
@@ -134,9 +148,10 @@ def _detect_stack_fingerprint() -> dict[str, str]:
     3. Importing the python package and reading ``__version__`` /
        ``__commit__`` (best-effort, swallows ImportError).
 
-    Returns a fixed-shape dict where missing components map to the
-    sentinel ``"unknown"``. The dict is JSON-serializable and small, so
-    it's safe to include in manifest.json + Cortex session attrs.
+    Returns:
+        dict[str, str]: Fixed-shape mapping of component name (``rocm``,
+        ``aiter``, ``sglang``, ``vllm``) to a version/commit string, with
+        ``"unknown"`` for components that could not be resolved.
     """
     out: dict[str, str] = {}
     for component, env_vars in _STACK_FINGERPRINT_ENVS.items():
@@ -173,13 +188,26 @@ def _detect_stack_fingerprint() -> dict[str, str]:
 
 
 def _git_revision() -> str:
-    """Best-effort short git SHA of the repo containing this package; empty on failure."""
+    """Best-effort short git SHA of the repo containing this package.
+
+    Returns:
+        str: Short HEAD SHA, or an empty string when the package directory is
+        not a git checkout or the lookup fails.
+    """
     here = Path(__file__).resolve().parent
     return _git_revision_at(here)
 
 
 def _git_revision_at(path: Path) -> str:
-    """Best-effort short git SHA at ``path``; empty when not a checkout."""
+    """Best-effort short git SHA at ``path``.
+
+    Args:
+        path (Path): Directory expected to be (within) a git checkout.
+
+    Returns:
+        str: Short HEAD SHA, or an empty string when ``path`` is not a checkout
+        or the git invocation fails.
+    """
     try:
         out = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
@@ -193,7 +221,15 @@ def _git_revision_at(path: Path) -> str:
 
 
 def _git_remote_at(path: Path) -> str:
-    """Best-effort ``origin`` remote URL at ``path``; empty on failure."""
+    """Best-effort ``origin`` remote URL at ``path``.
+
+    Args:
+        path (Path): Directory expected to be (within) a git checkout.
+
+    Returns:
+        str: ``remote.origin.url`` value, or an empty string when unset or the
+        git invocation fails.
+    """
     try:
         out = subprocess.run(
             ["git", "-C", str(path), "config", "--get", "remote.origin.url"],
@@ -211,6 +247,14 @@ def _describe_dep(env_var: str) -> dict[str, str]:
     pointed at by ``$env_var``. All fields default to empty string when
     the env var is unset, the directory is missing, or git is unhappy —
     we never raise out of here.
+
+    Args:
+        env_var (str): Name of the environment variable holding the dependency
+            checkout path.
+
+    Returns:
+        dict[str, str]: Mapping with ``path``, ``commit``, and ``remote`` keys;
+        any unresolved field is an empty string.
     """
     raw = (os.environ.get(env_var) or "").strip()
     if not raw:
@@ -233,6 +277,10 @@ def _build_dependencies() -> dict[str, dict[str, str]]:
     Recording the commit SHA + remote URL is how downstream debuggers
     answer "which upstream did this run hit?" once the clones have
     moved on.
+
+    Returns:
+        dict[str, dict[str, str]]: Mapping of dependency name (``magpie``,
+        ``inferencex``) to its ``{path, commit, remote}`` provenance dict.
     """
     return {
         "magpie":     _describe_dep("MAGPIE_DIR"),
@@ -249,6 +297,11 @@ def _detect_image() -> str | None:
     layer surfaces a warning rather than fabricating a value.
 
     Never raises — every disk / parse failure is swallowed.
+
+    Returns:
+        str | None: Detected container image reference (or
+        ``unknown@<sha>`` from a cgroup probe), or ``None`` when no source
+        yields a value.
     """
     for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
         val = (os.environ.get(var) or "").strip()
@@ -286,7 +339,16 @@ def _detect_image() -> str | None:
 
 
 def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
-    """Mirror cli._run_optimize's objective derivation, without importing it."""
+    """Mirror cli._run_optimize's objective derivation, without importing it.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args; checked for
+            ``target_gain``, ``target_tput``, and ``target_baseline_dir``.
+
+    Returns:
+        dict[str, Any]: Objective mapping with ``kind`` (one of ``gain_pct``,
+        ``tput``, ``baseline``, ``time_only``) and an associated ``value``.
+    """
     if getattr(args, "target_gain", None):
         return {"kind": "gain_pct", "value": float(args.target_gain)}
     if getattr(args, "target_tput", None):
@@ -303,6 +365,13 @@ def build_session_id(model_name: str = "") -> str:
     computed from :func:`paths.session_dir`); it only goes into
     manifest.json, SharedState.session_id, and log/report metadata so
     multiple archived sessions are distinguishable.
+
+    Args:
+        model_name (str): Optional model name used as the label stem; falls
+            back to ``"session"`` when empty.
+
+    Returns:
+        str: A label of the form ``<stem>_<UTC_timestamp>_<uuid8>``.
     """
     stem = (model_name or "session").strip().replace("/", "_") or "session"
     return f"{stem}_{_utc_now_compact()}_{uuid.uuid4().hex[:8]}"
@@ -314,6 +383,22 @@ def build_manifest(
     args: argparse.Namespace | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
+    """Assemble the schema-v3 session manifest dictionary.
+
+    Merges environment variables and (optional) parsed CLI args into the
+    canonical resume tag, including workload, objective, dependency
+    provenance, stack fingerprint, image, and warm-replay settings.
+
+    Args:
+        session_dir (Path): Session directory the manifest describes.
+        args (argparse.Namespace | None): Parsed CLI args overriding env-based
+            defaults; ``None`` uses environment/defaults only.
+        session_id (str | None): Explicit session-id label; derived from the
+            model name when ``None``.
+
+    Returns:
+        dict[str, Any]: JSON-serializable manifest mapping.
+    """
     model_path = ""
     model_name = ""
     framework = os.environ.get("FRAMEWORK", "")
@@ -409,8 +494,18 @@ def write_manifest(
 ) -> dict[str, Any]:
     """Atomically write ``manifest.json`` under session_dir.
 
-    Returns the manifest dict (so the caller can echo it / reuse the
-    derived session_id label without re-reading the file).
+    The manifest is built via :func:`build_manifest` and written through a
+    temp file + ``os.replace`` so readers never observe a partial file.
+
+    Args:
+        session_dir (Path): Session directory to write the manifest into.
+        args (argparse.Namespace | None): Parsed CLI args passed to
+            :func:`build_manifest`.
+        session_id (str | None): Explicit session-id label, if any.
+
+    Returns:
+        dict[str, Any]: The manifest dict that was written, so the caller can
+        echo it or reuse the derived session-id label.
     """
     sd = Path(session_dir)
     manifest = build_manifest(sd, args=args, session_id=session_id)
@@ -430,8 +525,16 @@ def write_manifest(
 def load_manifest(session_dir: Path) -> dict[str, Any]:
     """Read ``manifest.json`` for an existing session.
 
-    Raises ``FileNotFoundError`` if the file is missing — that signal
-    is what ``--resume`` uses to refuse a fresh sandbox.
+    Args:
+        session_dir (Path): Session directory expected to contain
+            ``manifest.json``.
+
+    Returns:
+        dict[str, Any]: The parsed manifest mapping.
+
+    Raises:
+        FileNotFoundError: When ``manifest.json`` is missing — the signal
+            ``--resume`` uses to refuse a fresh sandbox.
     """
     p = manifest_path(Path(session_dir))
     if not p.exists():

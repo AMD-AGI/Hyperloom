@@ -19,7 +19,12 @@ from sglang.srt.layers.layernorm import RMSNorm
 
 
 def main() -> int:
-    """Parse args, compare RMSNorm vs reference, write accuracy.json."""
+    """Parse args, compare RMSNorm vs reference, write accuracy.json.
+
+    Returns:
+        int: Process exit code: ``0`` on success, ``2`` when no CUDA/ROCm
+            device is available.
+    """
     parser = argparse.ArgumentParser(description="Tiny RMSNorm numerical-accuracy check")
     parser.add_argument("--out", required=True, help="Path to accuracy.json")
     parser.add_argument("--num-tokens", type=int, default=4096)

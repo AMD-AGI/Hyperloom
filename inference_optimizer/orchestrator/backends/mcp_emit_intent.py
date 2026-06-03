@@ -78,7 +78,21 @@ EMIT_INTENT_TOOL_DESCRIPTION = (
 
 
 def validate_emit_intent_input(payload: dict[str, Any]) -> None:
-    """Eager single-intent validation (mirrors :func:`validate_envelope`)."""
+    """Eager single-intent validation (mirrors :func:`validate_envelope`).
+
+    Checks the tool-input shape (only ``intent_type`` and ``payload`` keys,
+    both present), that ``intent_type`` is a known :class:`IntentType`, and
+    that the inner payload carries every required field for that type.
+
+    Args:
+        payload (dict[str, Any]): The raw ``emit_intent`` tool input to
+            validate.
+
+    Raises:
+        IntentValidationError: If the input is not a dict, has unexpected or
+            missing top-level keys, names an unknown intent type, or omits a
+            required payload field.
+    """
     if not isinstance(payload, dict):
         raise IntentValidationError(
             f"emit_intent input must be an object, got {type(payload).__name__}"
@@ -113,7 +127,17 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
 
 
 async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
-    """Default handler — validate then ack. Errors return is_error=True."""
+    """Default handler — validate then ack. Errors return is_error=True.
+
+    Args:
+        args (dict[str, Any]): The ``emit_intent`` tool input forwarded by the
+            SDK.
+
+    Returns:
+        dict[str, Any]: An MCP tool-result envelope; ``{"content": ["ok"]}`` on
+        success, or a text ``validation_error`` envelope with ``is_error=True``
+        when validation fails.
+    """
     try:
         validate_emit_intent_input(args)
     except IntentValidationError as exc:
@@ -126,6 +150,16 @@ async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_sdk(sdk_module: Any | None) -> Any | None:
+    """Return the provided SDK module or import ``claude_agent_sdk``.
+
+    Args:
+        sdk_module (Any | None): An explicit SDK module override (used by
+            tests); when ``None`` the real ``claude_agent_sdk`` is imported.
+
+    Returns:
+        Any | None: The resolved SDK module, or ``None`` if the override is
+        absent and the SDK cannot be imported.
+    """
     if sdk_module is not None:
         return sdk_module
     try:
@@ -143,15 +177,23 @@ def build_emit_intent_server(
 ) -> Any | None:
     """Build the in-process MCP server config exposing ``emit_intent``.
 
-    Returns the SDK ``McpSdkServerConfig`` to plug into
-    :class:`ClaudeAgentOptions.mcp_servers`, or ``None`` if the SDK lacks
-    in-process MCP helpers.
+    Resolves the SDK (or its test overrides), decorates the handler as the
+    ``emit_intent`` tool, and wraps it in an in-process SDK MCP server config.
 
-    Test seams:
+    Args:
+        sdk_module (Any | None): Explicit SDK module override; defaults to
+            importing ``claude_agent_sdk``.
+        tool_factory (Callable[..., Any] | None): Replacement for ``sdk.tool``;
+            falls back to the SDK's attribute when ``None``.
+        server_factory (Callable[..., Any] | None): Replacement for
+            ``sdk.create_sdk_mcp_server``; falls back to the SDK's attribute.
+        handler (Callable[[dict[str, Any]], Any] | None): Replacement for the
+            default validator-handler.
 
-    * ``tool_factory`` — replacement for ``sdk.tool``
-    * ``server_factory`` — replacement for ``sdk.create_sdk_mcp_server``
-    * ``handler`` — replacement for the default validator-handler
+    Returns:
+        Any | None: The SDK ``McpSdkServerConfig`` to plug into
+        :class:`ClaudeAgentOptions.mcp_servers`, or ``None`` if the SDK lacks
+        in-process MCP helpers.
     """
     sdk = _resolve_sdk(sdk_module)
     handler = handler or _emit_intent_handler

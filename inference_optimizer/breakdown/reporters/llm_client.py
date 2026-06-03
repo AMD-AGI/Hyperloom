@@ -58,6 +58,15 @@ class NullClient:
     """
 
     def complete(self, *, system: str, user: str) -> str:  # noqa: D401
+        """Return an empty string, disabling the narrative pass.
+
+        Args:
+            system (str): The system prompt (ignored).
+            user (str): The user message (ignored).
+
+        Returns:
+            str: Always an empty string.
+        """
         return ""
 
 
@@ -79,6 +88,20 @@ class OpenAIHttpClient:
     timeout_sec: float = 60.0
 
     def complete(self, *, system: str, user: str) -> str:
+        """POST one chat-completion request and return the message text.
+
+        Args:
+            system (str): The system prompt.
+            user (str): The user message.
+
+        Returns:
+            str: The content of ``choices[0].message.content`` (empty string
+                if the model returned no content).
+
+        Raises:
+            LLMClientError: If the HTTP request fails or the response shape is
+                unexpected.
+        """
         import httpx  # local import (see module docstring rationale)
 
         url = self.base_url.rstrip("/") + "/chat/completions"
@@ -128,6 +151,20 @@ class AnthropicHttpClient:
     timeout_sec: float = 60.0
 
     def complete(self, *, system: str, user: str) -> str:
+        """POST one Messages-API request and return the concatenated text.
+
+        Args:
+            system (str): The system prompt.
+            user (str): The user message.
+
+        Returns:
+            str: The joined text of all ``text`` content blocks in the
+                response.
+
+        Raises:
+            LLMClientError: If the HTTP request fails or the response shape is
+                unexpected.
+        """
         import httpx
 
         url = self.base_url.rstrip("/") + "/v1/messages"
@@ -177,6 +214,11 @@ def build_client_from_env() -> Any | None:
       ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_API_KEY`` for the Anthropic
       one. Missing required vars returns ``None`` (deterministic-only
       report).
+
+    Returns:
+        Any | None: A configured :class:`OpenAIHttpClient` or
+            :class:`AnthropicHttpClient`, or ``None`` when the backend is
+            disabled, unknown, or its required environment variables are unset.
     """
     backend = (os.environ.get("HYPERLOOM_REPORT_LLM_BACKEND") or "none").lower()
     if backend in ("", "none", "off", "disabled"):
