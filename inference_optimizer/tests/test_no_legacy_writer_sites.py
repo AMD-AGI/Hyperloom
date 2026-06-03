@@ -85,8 +85,6 @@ ALLOWED_FILES: dict[str, str] = {
     # Prompt / orientation text that names both keys explicitly so the
     # LLM and any human reader of the prompt knows the alias exists
     # for one release.
-    "inference_optimizer/orchestrator/system_prompts/prompt_builder.py":
-        "explanatory paragraph naming the legacy alias",
     "inference_optimizer/cli.py":
         "warm-replay executor registration comment names RecipeKB "
         "best_config field names",
@@ -147,11 +145,19 @@ ALLOWED_FILES: dict[str, str] = {
         "test_atom_server_args_not_read_from_extra_sglang_args "
         "parametrise the materialised metadata reader",
 
-    # SKILL.md names the legacy extra_sglang_args alias as compat-surface
-    # context in the IR-8 entry.
-    "inference_optimizer/SKILL.md":
-        "IR-8 entry names the legacy extra_sglang_args alias as "
-        "compat-surface context",
+    # Watermark-refresh profile executor inherits current_best's launch
+    # args through the canonical channel; the comment + params key name
+    # the legacy alias for the downstream reader's back-compat path.
+    "inference_optimizer/orchestrator/action_executors/profile.py":
+        "watermark-refresh inheritance comments name the legacy "
+        "extra_sglang_args channel for the downstream reader",
+    "inference_optimizer/tests/test_profile_and_kernel_handlers.py":
+        "profile/kernel handler tests exercise the legacy "
+        "extra_sglang_args inheritance channel",
+    # Back-compat regression for the cumulative-merge helper, which is
+    # named after the legacy field it dedupes.
+    "inference_optimizer/tests/test_extra_sglang_args_merge.py":
+        "cumulative extra_sglang_args merge/dedupe back-compat tests",
 
 }
 
@@ -163,6 +169,9 @@ _SKIP_DIRECTORIES: tuple[str, ...] = (
     ".git/",
     "node_modules/",
     "__pycache__/",
+    # setuptools build metadata (regenerated SOURCES.txt mirrors file
+    # names, not source content — not a real writer site).
+    "hyperloom_inference_optimizer.egg-info/",
 )
 
 

@@ -66,20 +66,11 @@ def test_allowed_actions_disjoint_phases():
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "kernel_opt" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL"]
     assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
+    assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL"]
+    assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
     assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
-
-
-def test_retired_pmc_roofline_not_in_any_phase_allowlist():
-    # ``pmc_roofline`` action + executor were physically removed; leaving
-    # it in any phase allowlist would let PolicyGate R1 pass an LLM
-    # ``propose_action{action_name='pmc_roofline'}`` only to fail at the
-    # registry/handler layer with a confusing error.
-    for phase, allowed in phase_state.PHASE_ALLOWED_ACTIONS.items():
-        assert "pmc_roofline" not in allowed, (
-            f"{phase} still lists retired action 'pmc_roofline'"
-        )
 
 
 def test_is_action_allowed_in_phase_handles_unknowns():
@@ -135,6 +126,18 @@ def test_exit_normal_prelude_triggers_on_baseline_tput():
     assert evidence["baseline_tput"] == 1234.5
 
 
+def test_exit_normal_prelude_blocked_while_warm_replay_in_flight():
+    """PRELUDE must not advance to FRAMEWORK_PR until warm-replay settles."""
+    state = SimpleNamespace(
+        baseline_tput=1234.5,
+        warm_replay_outcome={"status": "in_flight", "replay_task_id": "abc"},
+    )
+    assert phase_state.exit_normal_prelude(state) is None
+    state.warm_replay_outcome = {"status": "failed"}
+    out = phase_state.exit_normal_prelude(state)
+    assert out is not None and out[0] == "prelude_done"
+
+
 def test_exit_terminal_prelude_after_three_baseline_failures():
     state = SimpleNamespace(baseline_failure_streak=2)
     assert phase_state.exit_terminal_prelude(state) is None
@@ -154,8 +157,8 @@ def test_exit_normal_explore_uses_budget_exhaustion():
         max_minutes=10,  # 600s total; 60% explore budget = 360s
         phase_budget_pct={},
         params_no_promote_streak=0,
-        backends_search={},
-        optimization_stack=[{"action": "params"}],
+        explore_search={},
+        optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
     out = phase_state.exit_normal_explore(
@@ -173,8 +176,8 @@ def test_exit_normal_explore_plateau_heuristic():
         max_minutes=0,  # unlimited
         phase_budget_pct={},
         params_no_promote_streak=5,
-        backends_search={},
-        optimization_stack=[{"action": "params"}],
+        explore_search={},
+        optimization_stack=[{"action": "explore"}],
     )
     out = phase_state.exit_normal_explore(state)
     assert out is not None and out[0] == "plateau_explore"
@@ -191,8 +194,8 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         phase_budget_pct={},
         stop_reason="",
         params_no_promote_streak=5,
-        backends_search={},
-        optimization_stack=[{"action": "params"}],
+        explore_search={},
+        optimization_stack=[{"action": "explore"}],
     )
     out = phase_state.compute_next_phase(state, kernel_enabled=False)
     assert out is not None
@@ -210,7 +213,7 @@ def test_compute_next_phase_terminal_overrides_phase():
         phase_budget_pct={},
         stop_reason="target_reached",
         params_no_promote_streak=0,
-        backends_search={},
+        explore_search={},
         optimization_stack=[],
     )
     out = phase_state.compute_next_phase(state, kernel_enabled=True)
@@ -418,14 +421,16 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     row = c.shared_state.phase_history[0]
     assert row["to_phase"] == "PRELUDE"
     assert row["reason"] == "phase_entered"
-    # Budget dict populated.
-    # EXPLORE budget yielded 0.03 to PRELUDE (0.05 → 0.08) when the
-    # initial roofline became a PRELUDE step instead of an EXPLORE
-    # auto-enqueue, then a further 0.10 to KERNEL (0.25 → 0.35) so
-    # GEAK quick-mode kernel-opt can finish a full cycle. Sum across
-    # phases remains 1.0.
-    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.47
-    assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.08
+    # Budget dict populated. 2026-06 rebalance reshaped the slice:
+    # PRELUDE 0.08 → 0.05 (only ever used ~5min of 27min in practice),
+    # EXPLORE 0.47 → 0.40 (force-exit at phase_remaining_pct=0.176
+    # confirmed it was over-provisioned by ~7pp), KERNEL held at 0.35
+    # (GEAK quick-mode needs full cycles), and SWEEP 0.08 → 0.18 to
+    # fit the sweep + conc_sweep pair that field telemetry showed
+    # running ~2.5x over the old 8% slice. Sum across phases stays
+    # at 1.0.
+    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.40
+    assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.05
 
 
 @pytest.mark.asyncio

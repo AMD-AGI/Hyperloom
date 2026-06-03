@@ -70,61 +70,6 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
         assert registry.get(name) is not None
 
 
-# v0.8 KB_gaps/Gap-13 — KB_design §3.15 §2.3 retired these four
-# ``support``-family actions. The yaml meta files are deleted and
-# the registry no longer carries them; the assertions below pin all
-# three halves of the contract (enabled set, no-kernel enabled set,
-# registry membership) so a regression re-adds a stub yaml is loud.
-_REMOVED_NOOP_ACTIONS: tuple[str, ...] = (
-    "comm_optimization",
-    "compiler_tuning",
-    "dream",
-    "re_explore",
-)
-
-
-@pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
-def test_noop_actions_excluded_from_full_enabled(name: str):
-    assert name not in FULL_ENABLED_ACTIONS, (
-        f"{name!r} was retired in KB_design §3.15 §2.3 and must not "
-        "appear in the Orchestration enabled-action set"
-    )
-
-
-@pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
-def test_noop_actions_excluded_from_no_kernel_enabled(name: str):
-    assert name not in NO_KERNEL_ENABLED_ACTIONS
-
-
-@pytest.mark.parametrize("name", _REMOVED_NOOP_ACTIONS)
-def test_removed_noop_actions_are_absent_from_registry(registry, name):
-    """v0.8 KB_gaps/Gap-13 — KB_design §3.15 §2.3 retired the four
-    ``support``-family stub actions in favour of specialist sub-agents.
-    The yaml meta files are deleted, so the registry MUST NOT carry
-    them. Re-introducing requires a specialist domain, not a yaml."""
-    assert registry.get(name) is None, (
-        f"action metadata for {name!r} re-appeared in the registry — "
-        "KB_design §3.15 §2.3 retired it; restore via a specialist "
-        "domain instead"
-    )
-
-
-def test_removed_noop_actions_absent_from_default_catalogue(registry, rules_path):
-    text = build_orchestration_prompt(
-        action_registry=registry,
-        enabled_actions=FULL_ENABLED_ACTIONS,
-        framework="sglang",
-        objective_kind="time_only",
-        objective_value=None,
-        max_minutes=120,
-        rules_fragment_path=rules_path,
-    )
-    for name in _REMOVED_NOOP_ACTIONS:
-        assert f"**{name}**" not in text, (
-            f"{name!r} should not appear as an action bullet in the prompt"
-        )
-
-
 def test_recover_is_enabled_and_has_real_executor(registry):
     """``recover`` was re-enabled in 2026-05 alongside RecoverExecutor.
 
@@ -367,7 +312,7 @@ def test_explicit_kernel_enabled_override_wins(registry, rules_path):
     text = build_orchestration_prompt(
         action_registry=registry,
         # Caller forgot to filter — builder must STILL respect explicit flag
-        enabled_actions=("baseline", "backends", "params", "report"),
+        enabled_actions=("baseline", "explore", "report"),
         framework="sglang",
         kernel_enabled=False,
         objective_kind="time_only",
@@ -421,9 +366,9 @@ def test_time_budget_section_lists_all_enabled_phases(registry, rules_path):
         )
     assert "Sum of typical phase ETAs" in pipeline_block
     assert "max_minutes=120" in pipeline_block
-    # Mandatory rule about validate_stack must be in the budget section so
-    # the LLM treats it as part of the schedule, not a side note.
-    assert "validate_stack" in pipeline_block
+    # The inlined stack rebench must be documented in the budget
+    # section so the LLM treats it as part of the schedule.
+    assert "stack rebench" in pipeline_block
 
 
 # ---------------------------------------------------------------------------

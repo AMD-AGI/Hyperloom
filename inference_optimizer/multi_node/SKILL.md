@@ -450,8 +450,8 @@ default `--robustness-agent` was selected via
   itself, evidence that it will fail on another. Do NOT auto-extend a
   known-bad list across model classes by analogy — re-probe per model
   and let the runtime's own rejected-variant ledger
-  (`backends_search.rejected` / `params_search.rejected` in
-  `state.json`) accumulate evidence instead. If you genuinely need to
+  (`explore_search.rejected` in `state.json`) accumulate evidence
+  instead. If you genuinely need to
   skip a variant for the *current* model, capture the failure first
   (let it run once and surface the per-variant abort marker the grid
   runner writes), then state that decision in the prompt with the
