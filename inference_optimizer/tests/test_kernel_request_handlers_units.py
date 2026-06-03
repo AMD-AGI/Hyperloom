@@ -615,3 +615,40 @@ class TestDefaultKernelBatchParallel:
             krh._default_kernel_batch_parallel()
             == krh._DEFAULT_KERNEL_BATCH_PARALLEL
         )
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_kernel_id
+# ---------------------------------------------------------------------------
+
+class TestReconcileKernelId:
+    CANDS = [
+        {"kernel_id": "k001", "name": "aten::mm"},
+        {"kernel_id": "k010", "name": "aiter::rmsnorm"},
+    ]
+
+    def test_exact_id_kept(self):
+        assert krh._reconcile_kernel_id("k010", self.CANDS) == "k010"
+
+    def test_name_match_kept(self):
+        # An exact operator-name match is a valid request; keep it.
+        assert krh._reconcile_kernel_id("aten::mm", self.CANDS) == "aten::mm"
+
+    def test_normalized_prefix_resolves_to_real_id(self):
+        assert krh._reconcile_kernel_id("kn001", self.CANDS) == "k001"
+        assert krh._reconcile_kernel_id("rn010", self.CANDS) == "k010"
+
+    def test_missing_id_falls_back_to_first(self):
+        assert krh._reconcile_kernel_id("", self.CANDS) == "k001"
+        assert krh._reconcile_kernel_id(None, self.CANDS) == "k001"
+
+    def test_hallucinated_id_falls_back_not_passthrough(self):
+        # The key regression: an unknown operator name must NOT pass through
+        # to the CLI (which would KeyError); fall back to the real candidate.
+        assert krh._reconcile_kernel_id("aiter.silu_and_mul", self.CANDS) == "k001"
+        assert (
+            krh._reconcile_kernel_id(
+                "framework_sglang_silu_and_mul_m64", self.CANDS
+            )
+            == "k001"
+        )
