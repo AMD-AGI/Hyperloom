@@ -213,6 +213,24 @@ def _resolve_pd_args(
         or os.environ.get("PD_IB_DEVICE", "")
         or ""
     ).strip()
+    # Per-role EP / extra server args (InferenceX disagg recipes give
+    # prefill and decode different MoE topologies). Resolved from state +
+    # $PD_PREFILL_EP / $PD_DECODE_EP / $PD_PREFILL_EXTRA_ARGS /
+    # $PD_DECODE_EXTRA_ARGS only (no explicit kwarg — the prompt exports
+    # them). 0 / "" means "fall back to the shared --ep / --extra-args",
+    # so colocated and single-flag PD callers are unchanged.
+    pep = _intf(None, "last_restart_pd_prefill_ep", "PD_PREFILL_EP")
+    dep = _intf(None, "last_restart_pd_decode_ep", "PD_DECODE_EP")
+    prefill_extra = (
+        state.get("last_restart_pd_prefill_extra_args")
+        or os.environ.get("PD_PREFILL_EXTRA_ARGS", "")
+        or ""
+    ).strip()
+    decode_extra = (
+        state.get("last_restart_pd_decode_extra_args")
+        or os.environ.get("PD_DECODE_EXTRA_ARGS", "")
+        or ""
+    ).strip()
 
     state_nodes = int(state.get("nodes") or 0)
     if pn <= 0 or dn <= 0:
@@ -237,6 +255,10 @@ def _resolve_pd_args(
         "pd_decode_tp": dtp,
         "pd_transfer_backend": tb,
         "pd_ib_device": ib,
+        "pd_prefill_ep": pep,
+        "pd_decode_ep": dep,
+        "pd_prefill_extra_args": prefill_extra,
+        "pd_decode_extra_args": decode_extra,
     })
     return out
 
@@ -501,6 +523,12 @@ async def restart_server_for_round(
             pd_decode_tp=pd.get("pd_decode_tp", 0),
             pd_transfer_backend=pd.get("pd_transfer_backend", ""),
             pd_ib_device=pd.get("pd_ib_device", ""),
+            # Per-role EP / extra-args (disaggregated only; 0 / "" => fall
+            # back to the shared ep / extra_args in the CLI fan-out).
+            pd_prefill_ep=pd.get("pd_prefill_ep", 0),
+            pd_decode_ep=pd.get("pd_decode_ep", 0),
+            pd_prefill_extra_args=pd.get("pd_prefill_extra_args", ""),
+            pd_decode_extra_args=pd.get("pd_decode_extra_args", ""),
             pd_bootstrap_port=8998,
             pd_vllm_router_cmd="",
         )
@@ -602,6 +630,7 @@ async def _wait_for_server_health_async(
 
     state = _read_state() or {}
     service_url = str(state.get("service_url") or "").strip()
+    backend = str(state.get("backend") or "").strip().lower()
     head_ip = str(state.get("head_pod_ip") or "").strip()
     if head_ip and ".svc.cluster.local" in service_url:
         m = _re.search(r":(\d+)$", service_url)
@@ -619,18 +648,113 @@ async def _wait_for_server_health_async(
         "post-restart /health wait: url=%s timeout_s=%d poll_every_s=%d",
         health_url, timeout_s, poll_every_s,
     )
-    async with _httpx.AsyncClient(timeout=5.0) as client:
+    # Dynamo-ONLY serving-readiness extension. STRICTLY gated on
+    # backend == "dynamo": for Dynamo the service_url points at the
+    # frontend, whose /health returns 200 the moment its HTTP server is up
+    # -- decoupled from whether the prefill/decode workers finished loading
+    # weights and registered with the frontend (KvStore/NATS discovery).
+    # On huge-shard models (e.g. GLM-5, 282 safetensors) the optimizer
+    # otherwise races baseline against an empty router and gets 0 completed
+    # requests -> baseline_failed. We therefore additionally require
+    # /v1/models non-empty AND a 1-token /v1/completions to succeed.
+    #
+    # Explicitly NOT applied to other backends:
+    #   * RayJob multi-node -> service_url is the sglang server itself,
+    #     whose /health already gates on weight-load; keep /health-only.
+    #   * single-node       -> never reaches here (restart_server_for_round
+    #     is a no-op when not is_multi_node).
+    wait_model_ready = (backend == "dynamo")
+    # When wait_model_ready is on, also do a 1-token completion probe to
+    # confirm workers actually serve traffic (Dynamo registers models in
+    # /v1/models before the worker is ready to accept requests; this
+    # causes the first benchmark to get 503 "Model temporarily
+    # unavailable" for every request, surfacing as `completed=0` →
+    # `baseline_failed`).
+    models_url = service_url.rstrip("/") + "/v1/models"
+    completions_url = service_url.rstrip("/") + "/v1/completions"
+    health_ok_at = None
+    models_ready_at = None
+    consecutive_completion_ok = 0
+    # require N consecutive successful 1-token completions before declaring ready
+    completion_probe_required = int(
+        os.environ.get("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", "2") or 2
+    )
+    async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:
             elapsed = int(_time.monotonic() - started)
             try:
                 resp = await client.get(health_url)
                 if resp.status_code == 200:
-                    log.info(
-                        "post-restart /health OK after %ds (url=%s)",
-                        elapsed, health_url,
-                    )
-                    return
-                last_err = f"http_status={resp.status_code}"
+                    if health_ok_at is None:
+                        health_ok_at = elapsed
+                        log.info(
+                            "post-restart /health OK after %ds (url=%s)%s",
+                            elapsed, health_url,
+                            "; now also waiting for /v1/models to be non-empty" if wait_model_ready else "",
+                        )
+                    if not wait_model_ready:
+                        return
+                    # /v1/models probe
+                    try:
+                        mresp = await client.get(models_url)
+                        if mresp.status_code == 200:
+                            try:
+                                data = mresp.json()
+                            except Exception:
+                                data = {}
+                            models = data.get("data") if isinstance(data, dict) else None
+                            if isinstance(models, list) and len(models) > 0:
+                                if models_ready_at is None:
+                                    models_ready_at = elapsed
+                                    log.info(
+                                        "post-restart /v1/models populated after %ds (n=%d, health_ok_at=%ds); now probing /v1/completions",
+                                        elapsed, len(models), health_ok_at,
+                                    )
+                                # Worker-readiness probe: tiny completion
+                                model_id = ""
+                                try:
+                                    model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
+                                except Exception:
+                                    model_id = ""
+                                if not model_id:
+                                    last_err = "completion_probe: no model id"
+                                    consecutive_completion_ok = 0
+                                else:
+                                    try:
+                                        cresp = await client.post(
+                                            completions_url,
+                                            json={
+                                                "model": model_id,
+                                                "prompt": "hi",
+                                                "max_tokens": 1,
+                                                "temperature": 0,
+                                                "stream": False,
+                                            },
+                                        )
+                                        if cresp.status_code == 200:
+                                            consecutive_completion_ok += 1
+                                            if consecutive_completion_ok >= completion_probe_required:
+                                                log.info(
+                                                    "post-restart READY after %ds (n=%d, models_at=%ds, completion_ok_x%d)",
+                                                    elapsed, len(models), models_ready_at, consecutive_completion_ok,
+                                                )
+                                                return
+                                            last_err = f"completion_probe ok x{consecutive_completion_ok}/{completion_probe_required}"
+                                        else:
+                                            consecutive_completion_ok = 0
+                                            last_err = f"completion_probe_http={cresp.status_code}"
+                                    except Exception as cexc:  # noqa: BLE001
+                                        consecutive_completion_ok = 0
+                                        last_err = f"completion_probe {type(cexc).__name__}: {str(cexc)[:80]}"
+                            else:
+                                last_err = f"models_empty (health_ok_at={health_ok_at}s)"
+                                consecutive_completion_ok = 0
+                        else:
+                            last_err = f"models_http_status={mresp.status_code}"
+                    except Exception as mexc:  # noqa: BLE001
+                        last_err = f"models_probe {type(mexc).__name__}: {str(mexc)[:80]}"
+                else:
+                    last_err = f"http_status={resp.status_code}"
             except Exception as exc:  # noqa: BLE001
                 last_err = f"{type(exc).__name__}: {str(exc)[:120]}"
             if elapsed > timeout_s:
