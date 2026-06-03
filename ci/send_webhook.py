@@ -102,13 +102,14 @@ def _cell(text: Any, weight: str | None = None, color: str | None = None) -> dic
 
 
 def _sort_key(row: dict[str, Any]) -> tuple[int, float]:
+    delivered_rank = 0 if row.get("ci_success") else 1
     gain = row.get("gain_pct")
     if gain is None:
-        return (1, 0.0)
+        return (delivered_rank, 1.0)
     try:
-        return (0, -float(gain))
+        return (delivered_rank, -float(gain))
     except (TypeError, ValueError):
-        return (1, 0.0)
+        return (delivered_rank, 1.0)
 
 
 def _build_payload(
@@ -119,16 +120,18 @@ def _build_payload(
     dashboard_url: str,
 ) -> dict[str, Any]:
     n = len(all_rows)
-    succeeded = sum(1 for r in all_rows if r.get("final_status") == "Succeeded")
+    delivered = sum(1 for r in all_rows if r.get("ci_success"))
+    safe_succeeded = sum(1 for r in all_rows if r.get("final_status") == "Succeeded")
     with_metrics = sum(
         1 for r in all_rows
-        if r.get("baseline_tok_per_gpu") and r.get("optimized_tok_per_gpu")
+        if r.get("baseline_tok_per_gpu") is not None
+        and r.get("optimized_tok_per_gpu") is not None
     )
     with_gain = sum(
         1 for r in all_rows
         if (r.get("gain_pct") or 0) > 0
-        and r.get("baseline_tok_per_gpu")
-        and r.get("optimized_tok_per_gpu")
+        and r.get("baseline_tok_per_gpu") is not None
+        and r.get("optimized_tok_per_gpu") is not None
     )
     run_id = os.environ.get("GITHUB_RUN_ID", "?")
     repo = os.environ.get("GITHUB_REPOSITORY", "AMD-AGI/Hyperloom")
@@ -145,7 +148,8 @@ def _build_payload(
         {
             "type": "TextBlock",
             "text": (
-                f"{succeeded}/{n} SaFE succeeded · {with_metrics} with metrics · "
+                f"{delivered}/{n} delivered · {safe_succeeded} SaFE succeeded · "
+                f"{with_metrics} with metrics · "
                 f"{with_gain} with positive gain"
             ),
             "wrap": True,

@@ -5446,6 +5446,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable the advisory specialist-proposal scorer entirely.",
     )
     # ------------------------------------------------------------------
+    # Advisory specialist-proposal scorer (ProposalScorer). Scores each
+    # specialist proposal_set with one or more gateway models (single
+    # 0-10 composite + one-line reason) and surfaces the results to
+    # Orchestration as one reference among many — never gates anything.
+    # Adding a model = appending its gateway slug to the comma list.
+    # ------------------------------------------------------------------
+    opt.add_argument(
+        "--proposal-scorer-models",
+        dest="proposal_scorer_models",
+        type=str,
+        default=",".join(DEFAULT_SCORER_MODELS),
+        help="Comma-separated gateway model slugs that independently "
+             "score each specialist proposal_set (advisory only; never "
+             "gates; rater identities are anonymized in the orchestration "
+             "prompt). Default 'claude-opus-4-8,gpt-5.5,"
+             "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
+             "Add a model by "
+             "appending its slug. Empty list disables scoring.",
+    )
+    opt.add_argument(
+        "--no-proposal-scoring",
+        dest="no_proposal_scoring",
+        action="store_true",
+        help="Disable the advisory specialist-proposal scorer entirely.",
+    )
+    # ------------------------------------------------------------------
     # v0.8 §3.5 / §3.13 M5 + specialist sub-agent
     # backend selection. Specialists run via Claude (default) and inherit
     # the orchestration model unless overridden. Per-task turn / time
