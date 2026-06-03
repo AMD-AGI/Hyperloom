@@ -60,7 +60,7 @@ inference_optimizer/
 ├── manifest.py                # Session manifest writer
 ├── paths.py                   # USER_DATA_PATH-rooted path helpers
 ├── orchestrator/              # Coordinator + agent roles + action executors
-│   ├── action_executors/      # baseline / profile / params / backends / sweep …
+│   ├── action_executors/      # baseline / roofline / explore / sweep / report …
 │   ├── backends/              # Critic / Robustness subprocess adapters
 │   └── system_prompts/        # Orchestration prompt construction
 ├── baseline_comparison/       # InferenceX reference fetching & target analysis
