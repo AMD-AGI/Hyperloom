@@ -252,6 +252,14 @@ def test_125_derive_category_normalizations():
         ("moe_dispatch_kernel", "MoE"),
         ("softmax_kernel_v2", "Softmax"),
         ("all_reduce_xgmi_kernel", "Communication"),
+        # PyTorch GEMM op-name variants. The csv-priority path catches
+        # these when unified_perf_summary.csv carries the op category,
+        # but the heuristic must also resolve them so raw-trace sessions
+        # / sessions where the csv has empty op category for these ops
+        # do not fall through to "unknown".
+        ("aten::mm", "GEMM"),
+        ("aten::addmm", "GEMM"),
+        ("aten::bmm", "GEMM"),
     ]
     for name, expected in cases:
         assert tla.derive_kernel_category({"name": name}) == expected, name

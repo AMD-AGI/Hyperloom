@@ -1492,7 +1492,12 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
         return "FlyDSL"
     name = str(candidate.get("name") or "").lower()
     if any(t in name for t in ("gemm", "matmul", "rocblas", "hipblas",
-                                "cijk", "sgemm", "hgemm")):
+                                "cijk", "sgemm", "hgemm",
+                                # PyTorch op-name variants the priority-1
+                                # csv lookup misses when unified_perf_summary
+                                # is absent (raw-trace path or empty op
+                                # category column).
+                                "::mm", "::addmm", "::bmm")):
         return "GEMM"
     if any(t in name for t in ("attention", "attn", "fmha",
                                 "paged_attention", "flash")):
