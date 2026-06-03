@@ -456,8 +456,11 @@ RUNTIME_API_NAMES = {
     "cudadevicesynchronize",
     "cudastreamsynchronize",
 }
-DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens"
-DEFAULT_TRACELENS_INTERNAL_ROOT = "/wekafs/hyperloom/TraceLens-internal"
+DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
+# Internal extension is opt-in: no default path. It is used only when
+# TRACELENS_INTERNAL_ROOT (env) or --tracelens-internal-root is set; an empty
+# value keeps Hyperloom on the open-source-only report.
+DEFAULT_TRACELENS_INTERNAL_ROOT = ""
 
 
 def utc_now() -> str:
@@ -2556,8 +2559,9 @@ def main() -> int:
     parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", DEFAULT_TRACELENS_ROOT))
     parser.add_argument("--tracelens-internal-root",
                         default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
-                        help="TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
-                             "Rehydration module; plumbed to run_tracelens_skill.")
+                        help="Optional TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
+                             "Rehydration module; plumbed to run_tracelens_skill. "
+                             "Leave empty for the open-source-only report.")
     parser.add_argument("--roofline-json", default="")
     parser.add_argument(
         "--capture-folder",
@@ -2748,24 +2752,28 @@ def main() -> int:
                           log_path=log_path, artifact_paths=artifacts, run_id=run_id,
                           started_at=started_at)
             tl_root = Path(args.tracelens_root)
-            tl_internal_root: Path | None = Path(args.tracelens_internal_root)
+            # Internal extension is opt-in: used only when a non-empty
+            # --tracelens-internal-root / TRACELENS_INTERNAL_ROOT is provided.
+            internal_root_arg = (args.tracelens_internal_root or "").strip()
+            tl_internal_root: Path | None = (
+                Path(internal_root_arg) if internal_root_arg else None
+            )
             if not tl_root.exists():
                 raise FileNotFoundError(
                     f"TraceLens root not found: {tl_root} "
                     "(set TRACELENS_ROOT or pass --tracelens-root)"
                 )
-            if os.environ.get("TRACELENS_INSTALL_INTERNAL", "1") != "0":
-                if not tl_internal_root.exists():
-                    raise FileNotFoundError(
-                        f"TraceLens-internal root not found: {tl_internal_root} "
-                        "(set TRACELENS_INTERNAL_ROOT or pass --tracelens-internal-root)"
-                    )
-            else:
+            if tl_internal_root is not None and not tl_internal_root.exists():
                 append_log(log_path,
-                    "TraceLens-internal: skipped "
-                    f"(TRACELENS_INSTALL_INTERNAL={os.environ.get('TRACELENS_INSTALL_INTERNAL', '1')})")
-                os.environ.pop("TL_EXTENSION", None)
+                    f"TraceLens-internal root not found: {tl_internal_root}; "
+                    "falling back to open-source-only "
+                    "(provide an existing internal checkout to enable)")
                 tl_internal_root = None
+            if tl_internal_root is None:
+                append_log(log_path,
+                    "TraceLens-internal: not provided "
+                    "(open-source-only; set TRACELENS_INTERNAL_ROOT to enable)")
+                os.environ.pop("TL_EXTENSION", None)
             run_command([sys.executable, "-m", "pip", "install", "-e", "."],
                         cwd=tl_root, log_path=log_path,
                         timeout_s=max(60, int(args.budget_minutes * 60)))
