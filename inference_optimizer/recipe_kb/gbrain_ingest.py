@@ -146,6 +146,14 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         _value = recipe.get(_field)
         if _value:
             attrs[_field] = json.dumps(_value, ensure_ascii=False, default=str)
+    # Stack fingerprint (aiter / rocm / framework versions) rides the page as
+    # a nested dict so a gbrain warm-start can derive framework_version / rocm
+    # / aiter without the local store. The reader already expects
+    # attrs["stack_fingerprint"] as a dict (gbrain_remote_client._page_to_recipe);
+    # without this the write side never emits it and the reader always sees {}.
+    _stack_fp = recipe.get("stack_fingerprint")
+    if isinstance(_stack_fp, Mapping) and _stack_fp:
+        attrs["stack_fingerprint"] = {str(k): str(v) for k, v in _stack_fp.items()}
     tags = [
         "kind:recipe",
         f"model:{_tag_value(model)}",
