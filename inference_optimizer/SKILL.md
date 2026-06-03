@@ -197,8 +197,8 @@ brief:
 
 - **IR-4 — EXPLORE is specialist-first**: EXPLORE grids must carry
   `provenance='specialist:<domain>'` (up to `research_lane_capacity` per
-  round, hard cap 6) or `'default_grid'`
-  (cold-start, uncapped); all-`llm_direct` grids are denied
+  round, clamped to the `2 × visible GPU count` ceiling) or
+  `'default_grid'` (cold-start, uncapped); all-`llm_direct` grids are denied
   (`explore_requires_specialist_provenance`). Specialists
   author patches into an isolated worktree; `integrate_patch` does the
   actual `git apply` + throughput/accuracy gate.

@@ -4564,7 +4564,13 @@ class Coordinator:
         finally:
             if self.shared_state.closing_phase:
                 self.shared_state.closing_phase = False
-            self.shared_state.set_stop_reason(stop_reason or "unknown")
+            # Resuming an already-terminal session re-enters the loop past
+            # its deadline and can break out before the local stop_reason is
+            # reassigned; preserve any prior persisted reason instead of
+            # downgrading it to "unknown".
+            self.shared_state.set_stop_reason(
+                stop_reason or self.shared_state.stop_reason or "unknown"
+            )
             self.shared_state.save(self.session_dir)
             log.info(
                 "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "

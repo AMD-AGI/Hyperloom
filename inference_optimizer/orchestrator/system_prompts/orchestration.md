@@ -52,7 +52,8 @@ grid-runner entry):
     **Specialist-first**: on entering EXPLORE you MUST
     `delegate{action_name='specialist'}` for the top-K gaps in
     parallel in the same tick (fan out up to `research_lane_capacity`,
-    default 4, hard cap 6). Wait for ≥1 `specialist_done` before you
+    default 4, clamped to the GPU-derived ceiling `2 × visible GPU
+    count`). Wait for ≥1 `specialist_done` before you
     propose `explore` (grid from `proposal_set`) or `integrate_patch`
     (from specialist patches).
 
@@ -61,9 +62,10 @@ grid-runner entry):
     `specialist_done.proposal_set`) OR `provenance='default_grid'`
     (cold-start, no specialist yet). All-llm_direct grids are denied
     (`explore_requires_specialist_provenance`). Per round select up to
-    `research_lane_capacity` specialist variants (hard cap 6;
-    `explore_specialist_grid_max_one` — the numeric cap tracks
-    `research_lane_capacity`); prefer the strongest and defer any
+    `research_lane_capacity` specialist variants
+    (`explore_specialist_grid_max_one` — the numeric cap tracks
+    `research_lane_capacity`, clamped to the `2 × visible GPU count`
+    ceiling); prefer the strongest and defer any
     runners-up beyond the cap. `default_grid` is uncapped. If no specialist
     variant survives this round, go straight to `integrate_patch` or
     dispatch the next specialist round instead of `explore`. The
