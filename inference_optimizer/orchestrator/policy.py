@@ -339,19 +339,6 @@ FRAMEWORK_PR_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset({
 #: request.kind collision.
 KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset({
     "mcp__cortex_kb__propose_point",
-    # The methods these tool names map to (propose_edge / hypothesize /
-    # ingest_attempt / verify / commit) have been retired from the
-    # client, but the tool names stay on the denylist because the
-    # safety contract — KB writes are Coordinator-owned, not
-    # specialist-callable — is independent of which methods currently
-    # exist. Specialists that attempt to invoke any of these get an
-    # immediate ``kb_write_unauthorized`` denial rather than a confusing
-    # "tool not found" downstream.
-    "mcp__cortex_kb__propose_edge",
-    "mcp__cortex_kb__hypothesize",
-    "mcp__cortex_kb__ingest_attempt",
-    "mcp__cortex_kb__verify",
-    "mcp__cortex_kb__commit",
 })
 
 #: KB *readonly* surfaces. R5 ``tool_whitelist_role`` requires the
@@ -919,11 +906,9 @@ class PolicyGate:
         # vllm engines on init; see _validate_sweep_singleton.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # Same gain-driven / explore-minimum gates apply at the
-        # delegate channel so kernel_opt cannot bypass them by skipping
-        # propose_action.
+        # Same explore-minimum gate applies at the delegate channel so
+        # kernel_opt cannot bypass it by skipping propose_action.
         self._validate_fp8_only_action(action_name, intent_kind="delegate")
-        self._validate_gain_driven_kernel_opt(action_name)
         self._validate_explore_minimum_before_kernel_opt(action_name)
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
         # No registry → fall through (P0 / dev-mode where registry isn't loaded).
@@ -1022,11 +1007,7 @@ class PolicyGate:
         if action_name == EXPLORE_ACTION_NAME:
             self._validate_explore_provenance(payload)
             self._validate_explore_grid_size(payload)
-        # F3-2 (Roofline-v2 N19c): gain-driven kernel_opt lock — until
-        # cheap rounds have plateaued, kernel_opt is denied so we don't
-        # spend a 30 min GPU lane on a cheap-still-earning frontier.
         self._validate_fp8_only_action(action_name, intent_kind="propose_action")
-        self._validate_gain_driven_kernel_opt(action_name)
         # F3-5: explore-attempt minimum guard — kernel_opt requires at
         # least one successful explore round on record.
         self._validate_explore_minimum_before_kernel_opt(action_name)
@@ -1044,81 +1025,8 @@ class PolicyGate:
     # Propose_action sub-gates (F3 series)
     #
     # Reading order in the dispatch path:
-    #   1. _validate_gain_driven_kernel_opt                 (N19c)
-    #   2. _validate_explore_minimum_before_kernel_opt      (F3-5)
+    #   1. _validate_explore_minimum_before_kernel_opt      (F3-5)
     # ------------------------------------------------------------------
-
-    _N19C_HISTORY_WINDOW: int = 3
-    _N19C_EPSILON_PCT: float = 0.5
-
-    def _validate_gain_driven_kernel_opt(self, action_name: str) -> None:
-        """F3-2 (N19c): lock ``kernel_opt`` until cheap exploration
-        plateaus.
-
-        Reads the last ``_N19C_HISTORY_WINDOW`` entries of
-        :attr:`SharedState.gain_per_stack_entry` (the canonical
-        per-KEEP delta_pct ledger this branch already maintains; v0.8
-        replacement for v0.6's ``last_cheap_explore_gain_pct``).
-        Denies if the moving-average ``delta_pct`` is still
-        ``>= _N19C_EPSILON_PCT``: cheap rounds are still earning,
-        burning a kernel-opt lane is premature.
-
-        Toggle: :attr:`SharedState.gain_driven_kernel_opt` (F0-10,
-        default off).
-        """
-        if action_name != "kernel_opt":
-            return
-        ss = getattr(self, "shared_state", None)
-        if ss is None:
-            return
-        if not bool(getattr(ss, "gain_driven_kernel_opt", False)):
-            return
-        # Defer to the phase allowlist when kernel_opt is proposed
-        # outside the KERNEL phase — the phase_incompatible rule's
-        # message is more actionable there. N19c is a within-KERNEL
-        # gate, not a phase gate.
-        if str(getattr(ss, "phase", "") or "") != "KERNEL":
-            return
-        history = list(getattr(ss, "gain_per_stack_entry", []) or [])
-        # Keep only entries with a real per-round delta on record
-        # (resumed / seeded entries use ``delta_pct=None``).
-        deltas: list[float] = []
-        for entry in reversed(history):
-            if not isinstance(entry, dict):
-                continue
-            d = entry.get("delta_pct")
-            if isinstance(d, (int, float)):
-                deltas.append(float(d))
-            if len(deltas) >= self._N19C_HISTORY_WINDOW:
-                break
-        if len(deltas) < self._N19C_HISTORY_WINDOW:
-            raise PolicyDenied(
-                f"propose_action: kernel_opt is locked: only "
-                f"{len(deltas)} cheap-round delta(s) on record "
-                f"(need {self._N19C_HISTORY_WINDOW} for the gain-trend "
-                f"window). Run more explore / specialist rounds first.",
-                rule="n19c_gain_driven_kernel_opt",
-                hint=(
-                    "propose_action{action_name='explore'} or "
-                    "delegate{action_name='specialist', ...} until the "
-                    "ledger has at least "
-                    f"{self._N19C_HISTORY_WINDOW} integrated rounds."
-                ),
-            )
-        avg = sum(deltas) / float(len(deltas))
-        if avg >= self._N19C_EPSILON_PCT:
-            raise PolicyDenied(
-                f"propose_action: kernel_opt is locked: cheap rounds "
-                f"still earning (last {len(deltas)} avg "
-                f"{avg:+.2f}% >= {self._N19C_EPSILON_PCT:.2f}%). "
-                f"Continue cheap rounds until the average drops below "
-                f"the threshold.",
-                rule="n19c_gain_driven_kernel_opt",
-                hint=(
-                    "propose_action{action_name='explore'} or "
-                    "delegate{action_name='specialist', ...}"
-                ),
-            )
 
     def _validate_explore_minimum_before_kernel_opt(
         self, action_name: str,
@@ -1170,8 +1078,6 @@ class PolicyGate:
                 hint=("include at least one allowed field, e.g. "
                       "{'changes': {'current_action': '<action_name>'}}"),
             )
-        if role.can_mutate_core_state:
-            return
         violating = sorted(set(changes.keys()) & CORE_STATE_FIELDS)
         if violating:
             raise PolicyDenied(
