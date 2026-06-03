@@ -156,6 +156,7 @@ ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset({
 CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "current_best",
     "stop_reason",
+    "last_tick_exception",
     "cumulative_gain",
     # Coordinator-owned validated cumulative gain trio.
     "cumulative_gain_validated",
