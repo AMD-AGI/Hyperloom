@@ -207,6 +207,9 @@ LATEST_STATE_SCHEMA_VERSION: int = 2
 # deeply-nested ledgers, so a one-shot walk-and-rewrite on load is
 # the cleanest migration — the next save then emits canonical only
 # and a re-load is a no-op.
+#
+# Compat (read-only): remove this rename map and the walker below once
+# old-session resume of pre-rename state.json is no longer supported.
 _PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
     "extra_sglang_args":           "extra_server_args",
     "candidate_extra_sglang_args": "candidate_extra_server_args",
@@ -1261,6 +1264,10 @@ class SharedState:
         # gets a usable count. ``params_no_promote_streak`` is kept
         # as a read-only fallback for legacy M2 plateau proxy when
         # ``explore_search`` is empty; everything else is dropped.
+        #
+        # Compat (read-only): remove this drop list once old-session
+        # resume of pre-v0.8 scoreboard / select_kernels state.json is no
+        # longer supported.
         _legacy_drop_fields = (
             "action_scores",
             "score_violation",
