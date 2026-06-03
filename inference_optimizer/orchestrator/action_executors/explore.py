@@ -83,22 +83,15 @@ log = logging.getLogger(__name__)
 # because the inlined stack rebench acts as the second gate — even a
 # marginal +0.3% won't survive into ``optimization_stack`` unless the
 # cumulative stack still wins after this variant is layered onto it.
-DEFAULT_KEEP_THRESHOLD_PCT = 0.2
+DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 # Stack rebench stability threshold. After a KEEP, the stack-applied
 # rebench tput must beat ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)``;
-# otherwise the variant is evicted (KEEP_UNSTABLE → REVERT).
-#
-# Default lowered from 0.5% → 0.2% so the rebench gate matches
-# ``DEFAULT_KEEP_THRESHOLD_PCT`` (per-variant KEEP threshold). The 0.5%
-# default was originally KB_design §3.4 §4.4's "保守值"; in practice it
-# sat squarely inside the ±1% inter-run noise band observed on MI300X
-# (e.g. Qwen3-32B FP8: single-run +0.4% rebench dipping to −0.4% on the
-# 2nd run), which silently downgraded otherwise-real wins to
-# KEEP_UNSTABLE and pushed `cumulative_gain_validated` to 0%.
-# Matching the single-variant KEEP threshold keeps both decisions
-# consistent under the same noise floor.
-DEFAULT_STACK_STABLE_PCT = 0.2
+# otherwise the variant is evicted (KEEP_UNSTABLE → REVERT). Set below
+# the single-variant KEEP threshold so a genuine win that loses a little
+# headroom when layered onto the cumulative stack is not immediately
+# evicted.
+DEFAULT_STACK_STABLE_PCT = 0.5
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -131,7 +124,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
           "extra_args" | "extra_server_args": str,
           "extra_envs": dict[str,str],
           "note": str,
-          "provenance": str,            # default_grid / llm_direct / specialist:<domain>
+          "provenance": str,            # llm_direct / default_grid / specialist:<tag> / dynamic
           "kb_evidence": list,          # passthrough (M5/M6 uses)
           "pr_evidence": list,          # passthrough
           "source_evidence": list,      # passthrough
@@ -140,13 +133,10 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     Unknown keys are ignored. ``provenance`` defaults to ``'default_grid'``
     when the LLM/specialist forgot to stamp it.
 
-    PR-A9 (Arbor-into-Hyperloom): the legacy ``'llm_direct'`` default
-    was retired. PolicyGate's ``explore_requires_specialist_provenance``
-    rule denies grids whose variants are all ``llm_direct``, so we
-    fall back to ``'default_grid'`` for unstamped variants — that
-    keeps the executor running on cold-start grids while still
-    letting the policy gate flag deliberately llm_direct-stamped
-    grids upstream.
+    Unstamped variants default to ``'default_grid'`` so generated seed
+    grids remain distinguishable from deliberate ``'llm_direct'``
+    Orchestration hypotheses. PolicyGate treats provenance as an audit
+    label; only specialist/dynamic per-round caps are enforced.
     """
     out: list[GridVariant] = []
     for raw in payload or []:
@@ -601,10 +591,9 @@ class ExploreExecutor:
             # seed grid exists for the active framework, fall through
             # to the seed instead of failing the task. Stamps each
             # variant with
-            # ``provenance='default_grid'`` so PolicyGate's
-            # ``explore_requires_specialist_provenance`` rule (which
-            # accepts ``specialist:*`` OR ``default_grid``) is
-            # satisfied. The seed honours
+            # ``provenance='default_grid'`` so cold-start seed variants
+            # are visibly distinct from Orchestration-authored
+            # ``llm_direct`` hypotheses. The seed honours
             # ``provenance='default_grid'`` already (see
             # ``_atom_default_grid``); no extra stamping needed.
             seed_model_class = (

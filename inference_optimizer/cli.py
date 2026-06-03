@@ -451,6 +451,34 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
 _assert_atom_single_node = _apply_atom_auto_tighten
 
 
+_DEPTH_GATE_THRESHOLD_KEYS = frozenset({
+    "scout_runs_min", "prs_fetched_min", "pr_diffs_read_min",
+    "nvidia_refs_min", "code_patches_min", "reverts_to_evaluate",
+})
+
+
+def _parse_depth_gate_thresholds(raw: str) -> dict[str, int]:
+    """Parse ``--depth-gate-thresholds`` (``key=value,...``) into a dict.
+
+    Unknown keys and non-integer values are skipped silently so a typo
+    degrades to the defaults rather than aborting startup.
+    """
+    out: dict[str, int] = {}
+    for token in str(raw or "").split(","):
+        token = token.strip()
+        if not token or "=" not in token:
+            continue
+        key, _, value = token.partition("=")
+        key = key.strip()
+        if key not in _DEPTH_GATE_THRESHOLD_KEYS:
+            continue
+        try:
+            out[key] = int(value.strip())
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _resolve_gpu_type(
     user_specified: str,
     probed: str,
@@ -776,7 +804,7 @@ def _build_backends(
         if kernel_codex:
             backends["kernel"] = CodexBackend(model=codex_model)
         else:
-            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=4)
+            backends["kernel"] = ClaudeBackend(model=claude_model, max_turns_default=5)
     return backends
 
 
@@ -943,19 +971,30 @@ def _seed_shared_state(
     *,
     session_id: str,
 ) -> SharedState:
-    # research_lane capacity is locked here for the lifetime
-    # of the session. Clamp to [0, MAX_RESEARCH_LANE_CAPACITY] (M6
-    # ceiling; values above this are silently clamped down). The cap
-    # protects LLM quota and PR Monitor load (§3.14 R-07).
+    # research_lane capacity is locked here for the lifetime of the
+    # session. Clamp to [0, research-lane ceiling], where the ceiling
+    # scales with the visible GPU count (``2 × GPU``). The cap protects
+    # LLM quota and PR Monitor load (§3.14 R-07).
     from inference_optimizer.orchestrator.policy import (
-        MAX_RESEARCH_LANE_CAPACITY,
+        research_lane_ceiling,
     )
     research_lane_capacity = int(
         getattr(args, "research_lane_capacity", 1) or 1
     )
     research_lane_capacity = max(
-        0, min(MAX_RESEARCH_LANE_CAPACITY, research_lane_capacity),
+        0, min(research_lane_ceiling(), research_lane_capacity),
     )
+    gpu_specialist_capacity_raw = getattr(
+        args, "gpu_specialist_capacity", None,
+    )
+    try:
+        gpu_specialist_capacity = max(
+            0,
+            int(gpu_specialist_capacity_raw)
+            if gpu_specialist_capacity_raw is not None else 0,
+        )
+    except (TypeError, ValueError):
+        gpu_specialist_capacity = 0
     # collect plateau threshold overrides into a single dict
     #. Only non-None CLI overrides
     # land in the dict; absent keys fall through to the
@@ -1144,6 +1183,7 @@ def _seed_shared_state(
         cumulative_gain=0.0,
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
+        gpu_specialist_capacity=gpu_specialist_capacity,
         plateau_overrides=plateau_overrides,
         explore_overtime_kill_ratio=explore_overtime_kill_ratio,
         enable_roofline=bool(
@@ -1159,6 +1199,15 @@ def _seed_shared_state(
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         explore_roofline_hard_gate=explore_roofline_hard_gate,
+        research_scout_enabled=bool(getattr(args, "research_scout", True)),
+        research_scout_interval=max(
+            1, int(getattr(args, "research_scout_interval", 3) or 3)
+        ),
+        target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
+        recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
+        depth_gate_thresholds=_parse_depth_gate_thresholds(
+            getattr(args, "depth_gate_thresholds", "") or ""
+        ),
         # SWEEP-phase post-sweep concurrency sweep flags (on by default).
         # See ``orchestrator/conc_sweep.py`` + coordinator hook
         # ``_enqueue_internal_conc_sweep_task``.
@@ -1171,6 +1220,7 @@ def _seed_shared_state(
             getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
         ),
     )
+    state.set_depth_gate_enabled(bool(getattr(args, "depth_gate", True)))
     state.save(session_dir)
     return state
 
@@ -1459,6 +1509,9 @@ def _build_specialist_executor(
             "done_path": run_result.done_path,
             "error": run_result.error,
             "notes": list(run_result.notes or []),
+            "allocated_gpu_ids": list(
+                (run_result.specialist_done or {}).get("allocated_gpu_ids") or []
+            ),
         }
 
     return _executor
@@ -1674,6 +1727,47 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print(f"  crash_count          : {state.crash_count}")
     _print_kernel_opt_summary_line(state)
     print("===============================================")
+
+
+def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
+    """Make the persisted ``crash_count`` agree with the authoritative
+    in-memory value printed in the final summary.
+
+    The ReportExecutor and the breakdown writer both reload state from
+    ``state.json`` (``SharedState.load_or_init``), so a reactor-pass
+    crash increment that lost a write race against a later save would
+    leave ``state.json`` / ``reports/final.json`` showing a stale (lower)
+    count while the live coordinator object — and therefore the console
+    summary — shows the true count. Reconcile both disk artifacts to the
+    live value at teardown so all three sources never disagree. We only
+    ever raise the persisted value (``max``); we never lower a count that
+    disk recorded but memory somehow missed. Best-effort: never fatal.
+    """
+    live = int(getattr(state, "crash_count", 0) or 0)
+
+    # 1) state.json — reload, bump if stale, atomic re-save.
+    try:
+        disk_state = SharedState.load_or_init(session_dir)
+        if int(disk_state.crash_count or 0) < live:
+            disk_state.crash_count = live
+            disk_state.save(session_dir)
+    except Exception:  # noqa: BLE001
+        log.exception("crash_count reconcile (state.json) failed (non-fatal)")
+
+    # 2) reports/final.json — patch the single field in place if present.
+    try:
+        from .session_paths import reports_dir
+        final_json = reports_dir(session_dir) / "final.json"
+        if final_json.exists():
+            data = json.loads(final_json.read_text(encoding="utf-8"))
+            if int(data.get("crash_count") or 0) < live:
+                data["crash_count"] = live
+                final_json.write_text(
+                    json.dumps(data, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+    except Exception:  # noqa: BLE001
+        log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 
 def _print_kernel_opt_summary_line(state: SharedState) -> None:
@@ -4478,6 +4572,38 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     elif no_explore:
         print("Explore phase   : DISABLED (--no-explore); "
               f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}")
+    if bool(getattr(args, "research_scout", True)):
+        print(
+            "Research scout  : ENABLED at PRELUDE (re-dispatch every "
+            f"{max(1, int(getattr(args, 'research_scout_interval', 3) or 3))} "
+            "explore rounds)"
+        )
+    else:
+        print("Research scout  : DISABLED (--no-research-scout)")
+    if bool(getattr(args, "target_advisory", True)):
+        print("Target advisory : ENABLED (External target gap injected into "
+              "prompts; advisory-only)")
+    else:
+        print("Target advisory : DISABLED (--no-target-advisory)")
+    if bool(getattr(args, "recipe_sediment", True)):
+        print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to "
+              "persistent recipe)")
+    else:
+        print("Recipe sediment : DISABLED (--no-recipe-sediment)")
+    if bool(getattr(args, "depth_gate", True)):
+        print("Depth gate      : ENABLED (stop/advance blocked while "
+              "exploration is too shallow; IR-6 budget overrides)")
+    else:
+        print("Depth gate      : DISABLED (--no-depth-gate); legacy "
+              "single steward continuation")
+    if bool(getattr(args, "allow_empty_kernel_shape", False)):
+        os.environ["HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE"] = "1"
+        print("Kernel shape    : empty-shape dispatch ALLOWED "
+              "(--allow-empty-kernel-shape)")
+    else:
+        os.environ.pop("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", None)
+        print("Kernel shape    : non-empty trace shape REQUIRED for "
+              "kernel-opt dispatch")
 
     # Resolve critic backend choice + critic-agent runtime root before
     # _build_backends (which constructs CriticAgentBackend immediately and
@@ -4835,6 +4961,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     "emergency final report write failed (non-fatal)"
                 )
 
+    _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep used to run here as a post-hook. It is now a
     # real SWEEP-phase action auto-enqueued by the Coordinator after
     # the SWEEP-entry sweep task lands (see
@@ -5555,10 +5682,9 @@ def _build_parser() -> argparse.ArgumentParser:
     #           for the Orchestration LLM to fan out one specialist per
     #           top-K gap inside one tick (multi-emit shape) and have
     #           the dispatcher actually run them in parallel.
-    #   * 6   → M6 ceiling that matches Arbor's "six specialists across
-    #           domains" pattern; hard upper bound (values above this
-    #           are silently clamped down to 6 — see
-    #           ``MAX_RESEARCH_LANE_CAPACITY`` in
+    #   * The upper bound scales with the visible GPU count
+    #           (``2 × GPU``); operator values above the ceiling are
+    #           silently clamped down (see ``research_lane_ceiling`` in
     #           ``orchestrator/policy.py``).
     # Locked at session start (mirrored into manifest + SharedState);
     # PolicyGate denies mid-flight mutation via CORE_STATE_FIELDS.
@@ -5572,10 +5698,24 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         help="Max concurrent LLM specialist sub-agents on the "
              "research_lane. 0 disables specialist "
-             "dispatch entirely (degrades to M3 LLM-direct grid); 4 is "
-             "the PR-A3 default (Arbor-into-Hyperloom); 6 is the M6 "
-             "hard cap. Range [0, 6]; values above 6 are silently "
-             "clamped down. Locked at session start.",
+             "dispatch entirely (degrades to LLM-direct grid); 4 is "
+             "the default. The upper bound scales with the visible GPU "
+             "count (2 x GPU); values above it are silently clamped "
+             "down. Locked at session start.",
+    )
+    opt.add_argument(
+        "--gpu-specialist-capacity",
+        dest="gpu_specialist_capacity",
+        type=int,
+        default=int(
+            os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0")
+            or "0"
+        ),
+        help="Number of GPUs available to specialists that request "
+             "needs_gpu=true. 0 disables GPU specialists (default). "
+             "Set INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES to a "
+             "comma-separated GPU id pool when the specialist pool should "
+             "not use device ids 0..N-1. Locked at session start.",
     )
     # ------------------------------------------------------------------
     # Advisory specialist-proposal scorer (ProposalScorer). Scores each
@@ -5718,6 +5858,20 @@ def _build_parser() -> argparse.ArgumentParser:
         return os.environ.get(env_var, "1").strip() != "0"
 
     opt.add_argument(
+        "--allow-empty-kernel-shape",
+        dest="allow_empty_kernel_shape",
+        action="store_true",
+        default=os.environ.get(
+            "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "0",
+        ).strip().lower() in {"1", "true", "yes", "on"},
+        help="Escape hatch (default off): allow kernel optimization to "
+             "dispatch a candidate with no trace-anchored shape. Normally "
+             "a shapeless candidate is rejected with a structured error so "
+             "the run returns to ``trace_analyze`` instead of burning a "
+             "GEAK / OOB budget on an unanchored kernel. Env: "
+             "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1.",
+    )
+    opt.add_argument(
         "--enable-roofline",
         dest="enable_roofline",
         action=argparse.BooleanOptionalAction,
@@ -5731,6 +5885,80 @@ def _build_parser() -> argparse.ArgumentParser:
              "identical (same idempotency keys, same pending-task "
              "dispatch gate, same watermark anchor update). Env: "
              "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
+    )
+    opt.add_argument(
+        "--research-scout",
+        dest="research_scout",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_RESEARCH_SCOUT"),
+        help="Auto-dispatch a read-only research scout at PRELUDE (and "
+             "every --research-scout-interval EXPLORE rounds) that "
+             "collects proven priors — reference launch scripts, model "
+             "config.json architecture features, and cross-framework / "
+             "NVIDIA research — into ``research_hints.md`` and seeds "
+             "high-priority gaps. Default on; pass ``--no-research-scout`` "
+             "to disable the whole feature. Env: "
+             "INFERENCE_OPTIMIZER_RESEARCH_SCOUT=0.",
+    )
+    opt.add_argument(
+        "--research-scout-interval",
+        dest="research_scout_interval",
+        type=int,
+        default=3,
+        help="Re-dispatch the research scout every N EXPLORE rounds with "
+             "the current bottleneck context (append-only). Default 3. "
+             "Ignored when ``--no-research-scout`` is set.",
+    )
+    opt.add_argument(
+        "--recipe-sediment",
+        dest="recipe_sediment",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_RECIPE_SEDIMENT"),
+        help="Sediment KEEP/REVERT provenance into the persistent recipe: "
+             "KEEP optimizations traceable to a research hint carry their "
+             "source + measured gain into ``what_worked``; REVERTs land in "
+             "``what_failed`` so the next warm-start avoids re-testing them. "
+             "Default on; pass ``--no-recipe-sediment`` to keep the recipe "
+             "purely ephemeral. Env: INFERENCE_OPTIMIZER_RECIPE_SEDIMENT=0.",
+    )
+    opt.add_argument(
+        "--target-advisory",
+        dest="target_advisory",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_TARGET_ADVISORY"),
+        help="Inject an advisory 'External target gap' block (throughput / "
+             "TPOT / interactivity gap vs the LLM-authored competitor "
+             "target) into the orchestration and specialist prompts; when "
+             "the TPOT ratio dominates it nudges toward latency-reducing "
+             "directions. Advisory only — never gates Objective or scoring. "
+             "Default on; pass ``--no-target-advisory`` to disable. Env: "
+             "INFERENCE_OPTIMIZER_TARGET_ADVISORY=0.",
+    )
+    opt.add_argument(
+        "--depth-gate",
+        dest="depth_gate",
+        action=argparse.BooleanOptionalAction,
+        default=_env_default_on("INFERENCE_OPTIMIZER_DEPTH_GATE"),
+        help="Deterministic exploration-depth guard. When the session "
+             "steward recommends stop / advance-to-kernel but the run "
+             "has not explored deeply enough (too few scout runs, no "
+             "code patch, too few PRs/diffs/NVIDIA refs), the verdict is "
+             "rewritten to continue_explore with a deepening hint — as "
+             "many times as needed, bounded only by the IR-6 budget "
+             "gate. Default on; ``--no-depth-gate`` restores the legacy "
+             "single-continuation steward behaviour. Env: "
+             "INFERENCE_OPTIMIZER_DEPTH_GATE=0.",
+    )
+    opt.add_argument(
+        "--depth-gate-thresholds",
+        dest="depth_gate_thresholds",
+        default="",
+        help="Override depth-gate minimums as comma-separated key=value "
+             "pairs. Keys: scout_runs_min, prs_fetched_min, "
+             "pr_diffs_read_min, nvidia_refs_min, code_patches_min, "
+             "reverts_to_evaluate. Defaults: 2,5,3,2,1 evaluated after "
+             "reverts_to_evaluate=3. Example: "
+             "``--depth-gate-thresholds scout_runs_min=1,code_patches_min=2``.",
     )
     # ------------------------------------------------------------------
     # Post-optimization concurrency sweep (on by default).
