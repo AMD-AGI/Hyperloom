@@ -169,7 +169,9 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
     if magpie_dir:
         root = Path(magpie_dir)
     else:
-        env = os.environ.get("MAGPIE_DIR", "").strip()
+        env = (
+            os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or ""
+        ).strip()
         if env:
             root = Path(env)
     if root is None:

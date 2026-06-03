@@ -206,13 +206,18 @@ def _git_remote_at(path: Path) -> str:
         return ""
 
 
-def _describe_dep(env_var: str) -> dict[str, str]:
+def _describe_dep(*env_vars: str) -> dict[str, str]:
     """Build a `{path, commit, remote}` provenance dict for one dependency
-    pointed at by ``$env_var``. All fields default to empty string when
-    the env var is unset, the directory is missing, or git is unhappy —
-    we never raise out of here.
+    pointed at by the first set env var among ``env_vars`` (in priority
+    order — used so MAGPIE_PATH wins over the legacy MAGPIE_DIR). All fields
+    default to empty string when no env var is set, the directory is missing,
+    or git is unhappy — we never raise out of here.
     """
-    raw = (os.environ.get(env_var) or "").strip()
+    raw = ""
+    for env_var in env_vars:
+        raw = (os.environ.get(env_var) or "").strip()
+        if raw:
+            break
     if not raw:
         return {"path": "", "commit": "", "remote": ""}
     path = Path(raw)
@@ -235,7 +240,7 @@ def _build_dependencies() -> dict[str, dict[str, str]]:
     moved on.
     """
     return {
-        "magpie":     _describe_dep("MAGPIE_DIR"),
+        "magpie":     _describe_dep("MAGPIE_PATH", "MAGPIE_DIR"),
         "inferencex": _describe_dep("INFERENCEX_PATH"),
     }
 
