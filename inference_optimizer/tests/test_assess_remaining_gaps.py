@@ -179,8 +179,10 @@ def test_exit_normal_explore_routes_on_stop_session():
 
 
 def test_exit_normal_explore_continuation_exhausted():
-    """Second continue_explore (after first was used) -> exit plateau."""
+    """Legacy: second continue_explore (after first was used) -> exit
+    plateau when the depth gate is disabled."""
     state = _make_plateau_state()
+    state.set_depth_gate_enabled(False)
     state.steward_continuation_used = True
     state.last_remaining_gaps_assessment = {
         "recommendation": "continue_explore",
@@ -190,6 +192,19 @@ def test_exit_normal_explore_continuation_exhausted():
     assert out is not None
     reason, _evidence = out
     assert reason == "plateau_explore"
+
+
+def test_exit_normal_explore_depth_gate_allows_repeat_continuation():
+    """With the depth gate on, a continuation is honoured even after the
+    legacy single-continuation marker is set (multi-continue)."""
+    state = _make_plateau_state()
+    state.set_depth_gate_enabled(True)
+    state.steward_continuation_used = True
+    state.last_remaining_gaps_assessment = {
+        "recommendation": "continue_explore",
+        "next_gap_canonical_id": "gap.Z",
+    }
+    assert phase_state.exit_normal_explore(state) is None
 
 
 def test_exit_normal_explore_steward_disabled():
@@ -262,6 +277,9 @@ async def test_route_stop_session():
         shared_state=state,
         session_dir="/tmp",
         append_gap_attempt=lambda *a, **kw: None,
+        _apply_depth_gate_to_verdict=lambda **kw: (
+            kw["raw_rec"], kw["next_gap"],
+        ),
     )
     task = SimpleNamespace(task_id="task-stop", params={})
     payload = {
@@ -290,6 +308,9 @@ async def test_route_advance_to_kernel():
         shared_state=state,
         session_dir="/tmp",
         append_gap_attempt=lambda *a, **kw: None,
+        _apply_depth_gate_to_verdict=lambda **kw: (
+            kw["raw_rec"], kw["next_gap"],
+        ),
     )
     task = SimpleNamespace(task_id="task-adv", params={})
     payload = {
@@ -306,17 +327,21 @@ async def test_route_advance_to_kernel():
 
 
 @pytest.mark.asyncio
-async def test_route_continue_explore_grants_first_then_coerces_second():
+async def test_route_continue_explore_allows_repeat_under_depth_gate():
+    """With the depth gate active (default), the legacy single-continuation
+    cap is lifted — a second continue_explore is still honoured."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     state = SharedState(session_id="t-route-cont", phase="EXPLORE")
     state.explore_search = {"cursor": 1}
     state.params_no_promote_streak = 5
     state.specialist_domain_empty_streak = {"serving_specialist": 3}
-    # First call: continue_explore -> granted.
     fake = SimpleNamespace(
         shared_state=state,
         session_dir="/tmp",
+        _apply_depth_gate_to_verdict=lambda **kw: (
+            kw["raw_rec"], kw["next_gap"],
+        ),
     )
     task = SimpleNamespace(task_id="task-cont-1", params={})
     payload_1 = {
@@ -331,12 +356,10 @@ async def test_route_continue_explore_grants_first_then_coerces_second():
     )
     assert state.steward_continuation_used is True
     assert state.params_no_promote_streak == 0
-    assert state.specialist_domain_empty_streak == {}
     assert state.last_remaining_gaps_assessment["recommendation"] == "continue_explore"
-    # Stop reason should NOT be set yet.
     assert state.stop_reason in ("", None)
 
-    # Second call: continue_explore again -> coerced to advance_to_kernel.
+    # Second call: continue_explore again -> still granted (no cap).
     task2 = SimpleNamespace(task_id="task-cont-2", params={})
     payload_2 = {
         "domain": "session_steward_specialist",
@@ -348,8 +371,8 @@ async def test_route_continue_explore_grants_first_then_coerces_second():
     await Coordinator._route_steward_verdict(
         fake, task=task2, done_payload=payload_2,
     )
-    assert state.pending_escalate_hint == "skip_to_kernel"
-    assert state.last_remaining_gaps_assessment["recommendation"] == "advance_to_kernel"
+    assert state.last_remaining_gaps_assessment["recommendation"] == "continue_explore"
+    assert state.pending_escalate_hint != "skip_to_kernel"
 
 
 @pytest.mark.asyncio
@@ -400,6 +423,9 @@ async def test_route_coerces_out_of_vocab():
     fake = SimpleNamespace(
         shared_state=state,
         session_dir="/tmp",
+        _apply_depth_gate_to_verdict=lambda **kw: (
+            kw["raw_rec"], kw["next_gap"],
+        ),
     )
     task = SimpleNamespace(task_id="task-oov", params={})
     payload = {
@@ -427,6 +453,9 @@ async def test_route_continue_explore_missing_gap_id_coerced():
     fake = SimpleNamespace(
         shared_state=state,
         session_dir="/tmp",
+        _apply_depth_gate_to_verdict=lambda **kw: (
+            kw["raw_rec"], kw["next_gap"],
+        ),
     )
     task = SimpleNamespace(task_id="task-missgap", params={})
     payload = {
