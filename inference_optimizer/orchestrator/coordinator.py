@@ -4587,6 +4587,20 @@ class Coordinator:
                 sections.append("=== Specialist proposal scores (advisory) ===")
                 sections.append(scores_block)
 
+            # PR-A8 / D3 (Arbor-into-Hyperloom): surface the intervention-mix
+            # ledger so Orchestration escalates to a code-patch specialist
+            # when it has been config-only for too long (Arbor's "do not
+            # settle for config-only" rule). ``record_intervention`` maintains
+            # the ledger + counter; this block is its consumer.
+            try:
+                mix_block = self.shared_state.to_intervention_mix_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: intervention_mix_summary failed")
+                mix_block = ""
+            if mix_block:
+                sections.append("=== Intervention mix (config vs code_patch) ===")
+                sections.append(mix_block)
+
         # Robustness gets a phase budget telemetry +
         # specialist health block so it can fire the medium-severity
         # alerts described in the role prompt.
@@ -8253,6 +8267,140 @@ class Coordinator:
                 task.task_id,
             )
 
+        # B3 (auto-apply unlock): if this specialist authored source
+        # patches, push them to the Critic now so the integrate_patch
+        # gate can pass and the patch actually reaches the serving GPU.
+        try:
+            await self._maybe_autosubmit_specialist_patches(
+                task=task, done_payload=done_payload,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "B3: specialist patch autosubmit failed for task=%s",
+                task.task_id,
+            )
+
+    async def _maybe_autosubmit_specialist_patches(
+        self, *, task: "Task", done_payload: dict[str, Any],
+    ) -> None:
+        """B3 (Arbor-into-Hyperloom follow-up): auto-surface a specialist's
+        source patches to the Critic.
+
+        When a specialist writes ``patches_written`` into its worktree, push
+        a synthetic ``integrate_patch`` proposal onto the bus. The Critic
+        reviews it and — on approve — ``_handle_single_verdict`` both mirrors
+        the verdict onto ``SharedState.specialist_patch_verdicts`` (so
+        PolicyGate's ``integrate_patch_requires_critic_verdict`` gate passes)
+        and calls ``_materialize_approved_proposal`` to queue the
+        integrate_patch task. Mirrors the dynamic_action critic-dispatch
+        pattern (see ``_dispatch_dynamic_patch_to_critic``).
+
+        Without this, source patches sit unreviewed in the worktree forever:
+        the Critic only ever reviews ``explore`` variants, so the gate keeps
+        denying every integrate_patch delegate and config tuning spins with
+        no path to a code patch.
+
+        Idempotent: skips when a verdict for this specialist is already on
+        record (resume / re-entry) or a pending integrate_patch proposal for
+        the same ``specialist_task_id`` is already awaiting the Critic.
+        """
+        patches = done_payload.get("patches_written") or []
+        if not isinstance(patches, list) or not patches:
+            return
+        sid = str(task.task_id or "").strip()
+        if not sid:
+            return
+        # B4 guard: never submit a patch set that does not exist on disk.
+        # ``patches_written`` may carry a dangling claim (worktree never
+        # materialised / agent reported a path it never wrote). Resolve each
+        # against the specialist worktree + workspace; only submit when at
+        # least one real file is found, otherwise integrate_patch would apply
+        # nothing. The runner's _finalize already validates for the dispatch
+        # path; this re-checks the intent-routing (defense-in-depth) path too.
+        from ..session_paths import runs_dir as _runs_dir
+        resolve_bases: list[Path] = []
+        if self.session_dir is not None:
+            spec_root = _runs_dir(Path(self.session_dir), "specialist", sid)
+            resolve_bases = [spec_root / "worktree", spec_root]
+        existing_patches: list[str] = []
+        for p in patches:
+            raw = Path(str(p))
+            cands = [raw] if raw.is_absolute() else []
+            for base in resolve_bases:
+                cands.append(base / raw)
+            if any(c.is_file() for c in cands):
+                existing_patches.append(str(p))
+        if not existing_patches:
+            await self._record_observation(
+                "coordinator", "observation",
+                {
+                    "kind": "specialist_patch_autosubmit_skipped_no_files",
+                    "specialist_task_id": sid,
+                    "claimed": [str(x) for x in patches][:8],
+                },
+            )
+            return
+        # Already ruled on by the Critic (e.g. after resume) — nothing to do.
+        try:
+            if self.shared_state.get_specialist_patch_verdict(sid):
+                return
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+        # A synthetic review for this specialist is already in flight.
+        for p in self.state.pending_proposals.values():
+            try:
+                if getattr(p, "action_name", "") != "integrate_patch":
+                    continue
+                pl = getattr(p, "payload", {}) or {}
+                if (pl.get("params") or {}).get("specialist_task_id") == sid:
+                    return
+            except Exception:  # noqa: BLE001 — defensive
+                continue
+        proposals = done_payload.get("proposal_set") or []
+        patch_name = ""
+        if isinstance(proposals, list) and proposals:
+            patch_name = str((proposals[0] or {}).get("name") or "")
+        propose_payload = {
+            "action_name": "integrate_patch",
+            "provenance": "specialist",
+            "predicted_gain_pct": 0.0,
+            "params": {
+                "specialist_task_id": sid,
+                "provenance": "specialist",
+                "patch_name": patch_name,
+            },
+        }
+        msg = Message.new(
+            "coordinator", "*", "proposal",
+            {**propose_payload, "needs_review": True},
+            priority=1,
+        )
+        await self.bus.append_and_seq(msg)
+        self.state.pending_proposals[msg.msg_id] = PendingProposal(
+            proposal_msg_id=msg.msg_id,
+            from_agent="coordinator",
+            action_name="integrate_patch",
+            predicted_gain_pct=0.0,
+            payload=dict(propose_payload),
+        )
+        await self._record_observation(
+            "coordinator", "observation",
+            {
+                "kind": "specialist_patch_autosubmitted_for_review",
+                "specialist_task_id": sid,
+                "proposal_msg_id": msg.msg_id,
+                "patch_name": patch_name,
+                "patches": [str(x) for x in patches][:8],
+            },
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "B3: save after specialist patch autosubmit failed for "
+                "task=%s", sid,
+            )
+
     async def _route_steward_verdict(
         self, *, task: "Task", done_payload: dict[str, Any],
     ) -> None:
@@ -9148,6 +9296,20 @@ class Coordinator:
             winners = result.get("winners") or []
             best = result.get("best_variant")
             if not winners and not best:
+                # B2: a config explore round that produced measurements but
+                # KEPT nothing (all REVERT / KEEP_UNSTABLE) still counts as a
+                # config-only *attempt*. Record it so the intervention-mix
+                # ESCALATION can fire on repeated config attempts even when
+                # the noise floor prevents any config KEEP — otherwise the
+                # "do not settle for config-only" nudge never reaches the
+                # Orchestration prompt and the loop never escalates to a
+                # code-patch ``integrate_patch``.
+                self.shared_state.record_intervention(
+                    change_type="config_attempt",
+                    action="explore",
+                    task_id=task.task_id,
+                    delta_pct=None,
+                )
                 return
             delta_pct = None
             if isinstance(best, dict):
