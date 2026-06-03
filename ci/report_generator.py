@@ -16,7 +16,20 @@ LLM_ENDPOINT = os.environ.get("SAFE_BASE_URL", "") + "/api/v1/llm-proxy/v1/chat/
 
 
 def _extract_metrics_via_llm(report_content: str) -> dict:
-    """Use LLM to extract baseline/optimized throughput from optimization report."""
+    """Use an LLM to extract throughput metrics from an optimization report.
+
+    Returns an empty dict when no ``LLM_API_KEY`` is configured or when the
+    request/parse fails.
+
+    Args:
+        report_content (str): The optimization report text (truncated to the
+            first 4000 chars before being sent to the model).
+
+    Returns:
+        dict: Numeric metrics among ``baseline_throughput``,
+        ``optimized_throughput``, ``tok_per_gpu_baseline``,
+        ``tok_per_gpu_optimized``, and ``gain_pct``; empty on failure.
+    """
     api_key = os.environ.get("LLM_API_KEY")
     if not api_key:
         return {}
@@ -70,7 +83,15 @@ def _extract_metrics_via_llm(report_content: str) -> dict:
 
 
 def _first_of(d: dict, *keys: str) -> Any | None:
-    """Return the first non-None value found for the given keys."""
+    """Return the first non-None value found for the given keys.
+
+    Args:
+        d (dict): Dictionary to look up keys in.
+        *keys (str): Keys to try in order.
+
+    Returns:
+        Any | None: The first non-None value, or None if all keys are absent.
+    """
     for k in keys:
         v = d.get(k)
         if v is not None:
@@ -85,6 +106,13 @@ def _parse_metrics_from_report(content: str) -> dict:
         | Output Throughput (tok/s) | 2313.52 | ~2497 (avg) | **+7.9%** |
         | tok/s/GPU | 289.19 | ~312 (avg) | **+7.9%** |
     Prefers total throughput over per-GPU.
+
+    Args:
+        content (str): The markdown content of ``optimization_report.md``.
+
+    Returns:
+        dict: Any of ``gain_pct``, ``baseline_throughput``, and
+        ``optimized_throughput`` that could be parsed.
     """
     import re
 
@@ -112,7 +140,19 @@ def _parse_metrics_from_report(content: str) -> dict:
 
 
 def extract_optimization_data(result_dir: str) -> dict:
-    """Extract key metrics from a Hyperloom optimization result directory."""
+    """Extract key metrics from a Hyperloom optimization result directory.
+
+    Tries, in priority order: structured ``ci_metrics.json``, regex parsing of
+    ``optimization_report.md``, then an LLM extraction fallback.
+
+    Args:
+        result_dir (str): Path to the optimization result directory.
+
+    Returns:
+        dict: Metrics including ``baseline_throughput``,
+        ``optimized_throughput``, ``gain_pct``, ``actions``, and
+        ``report_exists`` (plus ``report_content`` when present).
+    """
     rd = Path(result_dir)
     data: dict[str, Any] = {
         "baseline_throughput": None,
@@ -209,7 +249,25 @@ def build_model_result(
     result_dir: str,
     ifx_reference: dict | None = None,
 ) -> dict:
-    """Build a complete result dict for one model."""
+    """Build a complete result dict for one model.
+
+    Extracts optimization metrics and, when an InferenceX reference is given,
+    computes the per-GPU comparison (correcting total-vs-per-GPU mismatches).
+
+    Args:
+        model_name (str): Display name of the model.
+        ifx_key (str): InferenceX key identifying the baseline row.
+        image (str): Container image used for the run.
+        precision (str): Model precision label.
+        status (str): Run status (e.g. ``completed``, ``failed``, ``timeout``).
+        timestamp (str): Run timestamp string.
+        result_dir (str): Path to the optimization result directory.
+        ifx_reference (dict | None): Optional InferenceX reference metrics for
+            computing the ``vs_inferenceX_pct`` comparison.
+
+    Returns:
+        dict: The assembled per-model result record.
+    """
     opt_data = extract_optimization_data(result_dir)
 
     result = {
@@ -258,7 +316,17 @@ def generate_markdown_report(
     ifx_commit: str,
     ci_run_id: str,
 ) -> str:
-    """Generate a markdown summary report."""
+    """Generate a markdown summary report.
+
+    Args:
+        results (list[dict]): Per-model result records to render.
+        trigger (str): What triggered the CI run.
+        ifx_commit (str): InferenceX commit hash (abbreviated in the header).
+        ci_run_id (str): Identifier of the CI run.
+
+    Returns:
+        str: The full markdown report as a single string.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
         "# Inference Optimization CI Report",
@@ -305,7 +373,18 @@ def generate_json_summary(
     ifx_commit: str,
     ci_run_id: str,
 ) -> dict:
-    """Generate a machine-readable JSON summary."""
+    """Generate a machine-readable JSON summary.
+
+    Args:
+        results (list[dict]): Per-model result records.
+        trigger (str): What triggered the CI run.
+        ifx_commit (str): InferenceX commit hash.
+        ci_run_id (str): Identifier of the CI run.
+
+    Returns:
+        dict: Summary with run metadata, the ``models`` list, and aggregate
+        ``stats`` (counts by status and average gain).
+    """
     return {
         "ci_run_id": ci_run_id,
         "trigger": trigger,
@@ -326,6 +405,14 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
     """Generate GitHub Actions Job Summary (written to $GITHUB_STEP_SUMMARY).
 
     Each model gets its own comparison table.
+
+    Args:
+        results (list[dict]): Per-model result records.
+        trigger (str): What triggered the CI run.
+        ifx_commit (str): InferenceX commit hash (abbreviated in the header).
+
+    Returns:
+        str: The GitHub-flavored markdown job summary.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
@@ -404,6 +491,15 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
 
 
 def _fmt_pct(v: float | None) -> str:
+    """Format a percentage value for display in report tables.
+
+    Args:
+        v (float | None): The percentage value.
+
+    Returns:
+        str: ``"N/A"`` for None, ``"--"`` for near-zero values, otherwise a
+        signed one-decimal percentage like ``"+7.9%"``.
+    """
     if v is None:
         return "N/A"
     if abs(v) < 0.05:
@@ -412,4 +508,12 @@ def _fmt_pct(v: float | None) -> str:
 
 
 def _avg(values: list[float]) -> float | None:
+    """Compute the mean of a list of values, rounded to one decimal.
+
+    Args:
+        values (list[float]): The values to average.
+
+    Returns:
+        float | None: The rounded mean, or None when the list is empty.
+    """
     return round(sum(values) / len(values), 1) if values else None

@@ -53,6 +53,12 @@ from typing import Any
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp formatted via ``datetime.isoformat``
+            with ``timespec="microseconds"`` (e.g. ``"2026-06-02T18:29:00.123456+00:00"``).
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -77,12 +83,19 @@ _MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
 def render_model_arch_compact(arch: dict | None) -> str:
     """Render the advisory ``model_arch`` profile as a single compact line.
 
-    Returns ``""`` when ``arch`` is empty / not a dict so callers can omit
-    the prompt block entirely. Structured fields render as
-    ``decoder=Sparse MoE; attention=MLA; ...`` followed by an optional
-    ``notes=<free text>`` trailer. Empty / ``None`` field values are
-    dropped. This is the single source of truth shared by the
-    orchestration prompt summary and the specialist ``arch_notes`` carrier.
+    Structured fields render as ``decoder=Sparse MoE; attention=MLA; ...``
+    followed by an optional ``notes=<free text>`` trailer. Empty / ``None``
+    field values are dropped. This is the single source of truth shared by
+    the orchestration prompt summary and the specialist ``arch_notes`` carrier.
+
+    Args:
+        arch (dict | None): The advisory architecture profile dict (hybrid
+            structured fields + free-text ``notes``), or ``None``.
+
+    Returns:
+        str: The compact ``label=value; ...`` rendering, or ``""`` when
+            ``arch`` is empty / not a dict so callers can omit the prompt
+            block entirely.
     """
     if not isinstance(arch, dict) or not arch:
         return ""
@@ -219,8 +232,13 @@ def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
     soon as the new key appears); otherwise the legacy value is
     copied over.
 
-    Returns the total number of keys rewritten so the caller can log
-    a single info-level migration event.
+    Args:
+        obj (Any): The object to walk. Dicts and lists are recursed into;
+            any other type is left untouched.
+
+    Returns:
+        int: The total number of keys rewritten, so the caller can log a
+            single info-level migration event.
     """
     migrated = 0
     if isinstance(obj, dict):
@@ -250,6 +268,22 @@ class TraceAnalyzeSnapshot:
 
     The on-disk shape stays a plain ``dict`` so the legacy ``state.json``
     round-trip (Inv-10.1 fact-layer compatibility) keeps working.
+
+    Attributes:
+        trace_input (str): Path / identifier of the trace that was analyzed.
+        candidates_path (str): Path to the emitted kernel-candidates artifact.
+        kernel_roofline_path (str): Path to the per-kernel roofline artifact.
+        hot_kernels_top15 (list[dict[str, Any]]): Top-15 hottest kernels.
+        kernel_roofline_top15 (list[dict[str, Any]]): Top-15 kernel roofline rows.
+        task_groups (list[dict[str, Any]]): Grouped kernels sharing an AST source.
+        reusable_native_kernel_ids (list[str]): Kernel ids flagged reusable.
+        trace_health_warnings (list[dict[str, Any]]): Routing / health warnings.
+        analysis_md_path (str): Path to the TraceLens ``analysis.md`` report.
+        analysis_md_text (str): Verbatim text of ``analysis.md`` (may be empty).
+        roofline_snapshot_id (int): Monotonic snapshot counter for this analysis.
+        roofline_baseline_gain_at_snapshot (float): Validated cumulative gain
+            captured at snapshot write time.
+        ts (str): ISO timestamp the snapshot was recorded.
     """
 
     trace_input: str = ""
@@ -268,6 +302,21 @@ class TraceAnalyzeSnapshot:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "TraceAnalyzeSnapshot":
+        """Build a typed snapshot from the on-disk ``last_trace_analyze`` dict.
+
+        Each field is coerced to its declared type with a safe default so a
+        partial / legacy blob never raises. Used as a typed reader on the
+        consumer side; the canonical writer remains
+        :meth:`SharedState.record_trace_analyze`.
+
+        Args:
+            d (dict[str, Any] | None): The raw snapshot dict (e.g. from
+                ``state.json``), or ``None`` to build an all-defaults instance.
+
+        Returns:
+            TraceAnalyzeSnapshot: A populated snapshot with every field
+                normalized to its declared type.
+        """
         d = d or {}
         return cls(
             trace_input=str(d.get("trace_input") or ""),
@@ -292,6 +341,41 @@ class TraceAnalyzeSnapshot:
 
 @dataclass
 class SharedState:
+    """Persistent, session-level state shared across all reactors.
+
+    Backed by JSON at ``$SESSION_DIR/state.json`` and round-tripped via
+    :meth:`from_dict` / :meth:`to_dict`. The Coordinator is the only
+    writer; LLM agents mutate it indirectly through validated
+    ``UPDATE_STATE`` intents (PolicyGate enforces the
+    ``CORE_STATE_FIELDS`` single-writer guard). Reactors read the state
+    through prompt injection via the various ``to_*`` / ``_format_*``
+    renderers.
+
+    The dataclass carries a large, evolving set of fields covering session
+    identity, workload shape, optimization progress, the phase state
+    machine, per-action audit trails, the gaps ledger, warm-start KB
+    snapshots, and feature toggles. Each field is documented by the inline
+    comment immediately preceding it; the module docstring summarises the
+    core fact-layer fields. Mutators (``record_*`` / ``upsert_*`` /
+    ``apply_*``) are pure in-memory helpers — they do not call
+    :meth:`save`; the Coordinator batches a single ``save()`` per pass.
+
+    Attributes:
+        schema_version (int): On-disk schema version; bumped by the
+            :meth:`from_dict` migration step. Fresh sessions start at
+            :data:`LATEST_STATE_SCHEMA_VERSION`.
+        session_id (str): Coordinator-assigned session identifier.
+        model_name (str): HuggingFace-style model identifier under test.
+        baseline_tput (float): Baseline throughput (tok/s/GPU).
+        current_best (dict[str, Any]): Materialized best-known config.
+        optimization_stack (list[dict[str, Any]]): Accepted incremental wins.
+        cumulative_gain_validated (float): End-to-end re-benchmarked gain %.
+        phase (str): Current pipeline phase (PRELUDE / FRAMEWORK_PR /
+            EXPLORE / KERNEL / SWEEP / CLOSE).
+        gaps (list[dict[str, Any]]): Structured ledger of unresolved
+            bottlenecks consumed by specialists and the orchestration prompt.
+    """
+
     # versioned state.json schema. Bumped by the
     # migration step in :meth:`from_dict` whenever a payload is
     # loaded. Fresh sessions are born at the latest version.
@@ -1120,11 +1204,32 @@ class SharedState:
     # ------------------------------------------------------------------
     @classmethod
     def state_path(cls, session_dir: Path) -> Path:
+        """Return the canonical ``state.json`` path for a session directory.
+
+        Args:
+            session_dir (Path): The session root directory.
+
+        Returns:
+            Path: ``session_dir / "state.json"``.
+        """
         return Path(session_dir) / "state.json"
 
     @classmethod
     def load_or_init(cls, session_dir: Path) -> "SharedState":
-        """Load existing ``state.json`` or return a fresh blank instance."""
+        """Load existing ``state.json`` or return a fresh blank instance.
+
+        Reads and migrates the persisted state via :meth:`from_dict` when
+        the file exists; otherwise constructs a default instance for a
+        brand-new session.
+
+        Args:
+            session_dir (Path): The session root directory containing (or
+                that will contain) ``state.json``.
+
+        Returns:
+            SharedState: The loaded-and-migrated state, or a fresh default
+                instance when no ``state.json`` exists yet.
+        """
         path = cls.state_path(session_dir)
         if not path.exists():
             return cls()
@@ -1134,6 +1239,30 @@ class SharedState:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
+        """Construct a :class:`SharedState` from a raw ``state.json`` dict.
+
+        Single migration entry point. Runs the legacy
+        ``extra_sglang_args`` -> ``extra_server_args`` key rename, drops
+        retired scoreboard fields, normalizes the unified
+        ``explore_search`` ledger, enforces the fact-layer integrity check,
+        and bumps ``schema_version`` to :data:`LATEST_STATE_SCHEMA_VERSION`.
+        Unknown keys are dropped and missing keys fall back to dataclass
+        defaults, so older / newer on-disk shapes load without crashing.
+        The function is idempotent: re-loading an already-current payload
+        short-circuits the migration logging.
+
+        Args:
+            raw (dict[str, Any]): The raw JSON payload loaded from
+                ``state.json`` (``{}`` for a fresh session).
+
+        Returns:
+            SharedState: The migrated, fully-populated state instance.
+
+        Raises:
+            ValueError: When a fact-layer field was present in a non-empty
+                legacy payload but could not be loaded, and the migration
+                mode is ``strict`` (Inv-10.1).
+        """
         # unified migration entry point. A v0.6 state.json
         # has no top-level ``schema_version`` field; treat the absence as
         # ``schema_version=1`` and run the §3.10 §5.2 field-mapping step.
@@ -1315,6 +1444,20 @@ class SharedState:
         history fields into ``winners_history`` / ``synergy_attempted``
         so a resume preserves the cross-round aggregation the prompt
         summary and plateau proxy read.
+
+        Args:
+            existing (Any): The prior ``explore_search`` ledger (or any
+                non-dict, treated as empty).
+            backend_winners_history (Any): Live backend winners history list
+                folded into ``winners_history``.
+            params_winner_history (Any): Live params winners history list
+                folded into ``winners_history``.
+            synergy_attempted (Any): Live synergy-combo history folded into
+                the deduped ``synergy_attempted`` list.
+
+        Returns:
+            dict[str, Any]: The shaped ledger with all defensive defaults
+                populated and the history fields merged + sorted.
         """
         from .action_executors._grid_runner import variant_fingerprint as _fp
 
@@ -1367,6 +1510,16 @@ class SharedState:
         sa_set: set[tuple[str, ...]] = set()
 
         def _normalize_combo(c: Any) -> tuple[str, ...] | None:
+            """Normalize a synergy combo to a sorted tuple of flag names.
+
+            Args:
+                c (Any): A list of flag-name strings or a ``"+"``-joined
+                    combo string.
+
+            Returns:
+                tuple[str, ...] | None: The sorted flag-name tuple, or
+                    ``None`` when the input yields no usable names.
+            """
             if isinstance(c, list):
                 items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
                 return items if items else None
@@ -1386,10 +1539,25 @@ class SharedState:
         return out
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize this state to a plain JSON-compatible dict.
+
+        Returns:
+            dict[str, Any]: A deep ``dataclasses.asdict`` copy suitable for
+                JSON serialization.
+        """
         return asdict(self)
 
     def save(self, session_dir: Path) -> None:
-        """Atomically write state.json (tmp + os.replace)."""
+        """Atomically write ``state.json`` (tmp file + ``os.replace``).
+
+        Serializes via :meth:`to_dict` and writes to a temp file in the
+        same directory before an atomic rename, so concurrent readers never
+        observe a partial blob. The temp file is cleaned up on failure.
+
+        Args:
+            session_dir (Path): The session root directory; created if it
+                does not already exist.
+        """
         path = self.state_path(session_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".json", dir=str(path.parent))
@@ -1408,17 +1576,40 @@ class SharedState:
     # Mutators (used by the Coordinator only — LLM agents go via intents)
     # ------------------------------------------------------------------
     def add_pruned_family(self, family: str) -> bool:
-        """Idempotent add. Returns True iff the family was newly added."""
+        """Idempotently mark an action family as pruned.
+
+        Args:
+            family (str): The action family identifier to prune.
+
+        Returns:
+            bool: ``True`` iff the family was newly added; ``False`` when it
+                was already present.
+        """
         if family in self.pruned_families:
             return False
         self.pruned_families.append(family)
         return True
 
     def is_pruned(self, family: str) -> bool:
+        """Report whether an action family has been pruned.
+
+        Args:
+            family (str): The action family identifier to check.
+
+        Returns:
+            bool: ``True`` when ``family`` is in :attr:`pruned_families`.
+        """
         return family in self.pruned_families
 
     def prune_family(self, family: str) -> bool:
-        """Alias for :meth:`add_pruned_family` (policy-loop stop-loss)."""
+        """Alias for :meth:`add_pruned_family` (policy-loop stop-loss).
+
+        Args:
+            family (str): The action family identifier to prune.
+
+        Returns:
+            bool: ``True`` iff the family was newly added.
+        """
         return self.add_pruned_family(family)
 
     _POLICY_DENIAL_HISTORY_CAP = 50
@@ -1433,7 +1624,25 @@ class SharedState:
         tick: int,
         intent_payload: dict[str, Any] | None = None,
     ) -> int:
-        """Append a denial row and bump per-(action,rule) streak."""
+        """Append a PolicyGate denial row and bump the per-(action, rule) streak.
+
+        Records a capped rolling history entry and increments the
+        consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
+
+        Args:
+            action_name (str): The action the denied intent targeted (empty
+                is normalized to ``"*"`` in the streak key).
+            rule (str): The PolicyGate rule id that fired.
+            hint (str): Human-readable remediation hint surfaced to the LLM.
+            intent_type (str): The denied intent's type.
+            tick (int): The Coordinator tick at which the denial occurred.
+            intent_payload (dict[str, Any] | None): Optional intent payload;
+                when present, its sorted keys are recorded for context.
+
+        Returns:
+            int: The new consecutive-denial streak value for this
+                (action, rule) pair.
+        """
         key = f"{action_name or '*'}:{rule}"
         streak = int(self.policy_denial_streak.get(key, 0)) + 1
         self.policy_denial_streak[key] = streak
@@ -1456,6 +1665,16 @@ class SharedState:
         return streak
 
     def reset_policy_denial_streak(self, action_name: str) -> None:
+        """Clear all consecutive-denial streaks for a given action.
+
+        Drops every ``policy_denial_streak`` entry whose key begins with
+        ``"<action_name>:"`` — called when the action finally succeeds so a
+        later denial starts a fresh streak.
+
+        Args:
+            action_name (str): The action whose streaks should be reset; a
+                falsy value is a no-op.
+        """
         if not action_name:
             return
         prefix = f"{action_name}:"
@@ -1488,8 +1707,21 @@ class SharedState:
         ``"true"`` enables strict). The CLI flips the env on for
         production runs once the vocab has been dogfooded.
 
-        Returns the value actually written (normalised + clipped to
-        the vocab).
+        Args:
+            value (str): The proposed stop reason. Empty / whitespace clears
+                :attr:`stop_reason`.
+            strict (bool | None): When ``True``, raise on an out-of-vocab
+                value; when ``False``, map it to ``"unknown"``. ``None``
+                (default) reads the strictness from the
+                ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON`` env var.
+
+        Returns:
+            str: The value actually written (normalised + clipped to the
+                vocab; ``""`` when cleared, ``"unknown"`` in lenient mode).
+
+        Raises:
+            ValueError: When ``value`` is out of vocab and ``strict`` is
+                ``True``.
         """
         from .phase_state import STOP_REASON_VOCAB, is_valid_stop_reason
         text = str(value or "").strip()
@@ -1539,10 +1771,28 @@ class SharedState:
     ) -> dict[str, Any]:
         """Stash a session_steward_specialist verdict on SharedState.
 
-        Returns the row that landed in ``last_remaining_gaps_assessment``
-        so the Coordinator can route on it immediately without
-        re-reading state. History capped at
-        :attr:`_STEWARD_ASSESSMENT_HISTORY_CAP` (drops oldest).
+        Writes the latest verdict to ``last_remaining_gaps_assessment`` and
+        appends it to the capped ``remaining_gaps_assessments`` history.
+
+        Args:
+            recommendation (str): The steward's routing recommendation
+                (e.g. ``continue_explore`` / ``advance_to_kernel`` /
+                ``stop_session``).
+            next_gap_canonical_id (str): Canonical id of the gap to pursue
+                next (used by the ``continue_explore`` path).
+            remaining_potential_pct_estimate (float): Estimated remaining
+                headroom in gain percent.
+            rationale (str): Free-text justification (clipped to 2000 chars).
+            task_id (str): The steward task id that produced the verdict.
+            round_at_assessment (int): The explore round at assessment time.
+            source_payload (dict[str, Any] | None): Optional full verdict
+                payload; when present, its sorted keys are recorded.
+
+        Returns:
+            dict[str, Any]: The row written to
+                ``last_remaining_gaps_assessment`` so the Coordinator can
+                route on it without re-reading state. History is capped at
+                :attr:`_STEWARD_ASSESSMENT_HISTORY_CAP` (drops oldest).
         """
         row = {
             "ts": _now_iso(),
@@ -1573,10 +1823,17 @@ class SharedState:
     def set_pending_escalate_hint(self, hint: str) -> str:
         """Stash the LLM-supplied hint for the next phase compute pass.
 
-        Returns the value actually written. Unknown hints are
-        silently dropped (Inv-8.2 — phase decisions only react to a
-        closed vocabulary; arbitrary robustness payloads should not
-        steer the state machine).
+        Unknown hints are silently dropped (Inv-8.2 — phase decisions only
+        react to a closed vocabulary; arbitrary robustness payloads should
+        not steer the state machine).
+
+        Args:
+            hint (str): The escalate hint to stash; validated against the
+                closed escalate-hint vocabulary.
+
+        Returns:
+            str: The value actually written (``""`` when the hint was
+                empty or rejected as out-of-vocab).
         """
         from .phase_state import is_valid_escalate_hint
         text = str(hint or "").strip()
@@ -1589,9 +1846,12 @@ class SharedState:
         """Pop the pending hint, recording the consumption in audit fields.
 
         The phase machine calls this *after* it acted on the hint so
-        the next tick doesn't re-trigger the same transition. Returns
-        the hint that was cleared (empty string when nothing was
-        pending).
+        the next tick doesn't re-trigger the same transition. Stamps
+        ``last_consumed_escalate_hint`` and its timestamp on consumption.
+
+        Returns:
+            str: The hint that was cleared, or ``""`` when nothing was
+                pending.
         """
         hint = (self.pending_escalate_hint or "").strip()
         if not hint:
@@ -1622,8 +1882,20 @@ class SharedState:
         :data:`policy.CORE_STATE_FIELDS`, so any ``update_state`` intent
         touching them is rejected first.
 
-        Returns the inserted row (so callers don't have to re-read the
-        list to log it).
+        Args:
+            to_phase (str): The phase being entered.
+            reason (str): The transition reason (must be in
+                ``PHASE_EXIT_REASONS``).
+            evidence (dict[str, Any] | None): Optional structured evidence
+                attached to the history row.
+            ts (str | None): ISO timestamp override; defaults to now (UTC,
+                second precision).
+            ts_unix (float | None): Unix-epoch override matching ``ts``;
+                defaults to the current time.
+
+        Returns:
+            dict[str, Any]: The inserted phase_history row (so callers don't
+                have to re-read the list to log it).
         """
         from datetime import datetime as _dt, timezone as _tz
         import time as _time
@@ -1652,6 +1924,15 @@ class SharedState:
         return row
 
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
+        """Render the most recent PolicyGate denials for prompt injection.
+
+        Args:
+            top_k (int): Maximum number of newest denial rows to render.
+
+        Returns:
+            str: A ``=== Recent policy denials ===`` block, or ``""`` when
+                no denials have been recorded.
+        """
         if not self.policy_denial_history:
             return ""
         rows = list(self.policy_denial_history)[-top_k:]
@@ -1668,6 +1949,14 @@ class SharedState:
         return "\n".join(lines)
 
     def increment_crash_count(self, by: int = 1) -> int:
+        """Increment the cumulative crash counter.
+
+        Args:
+            by (int): Amount to add to :attr:`crash_count` (default 1).
+
+        Returns:
+            int: The post-increment crash count.
+        """
         self.crash_count += by
         return self.crash_count
 
@@ -1680,8 +1969,16 @@ class SharedState:
         ``allow_core=False`` and PolicyGate already filtered them upstream
         — this method does *not* re-validate the role/source allowlist.
 
-        Returns the dict of fields that were actually written (may be a
-        subset of input if unknown keys are passed).
+        Args:
+            changes (dict[str, Any]): Field-name -> value updates to apply.
+                Keys that are not dataclass fields are ignored.
+            allow_core (bool): Reserved for Coordinator-internal callers
+                updating ``CORE_STATE_FIELDS``; this method itself does not
+                re-enforce the guard.
+
+        Returns:
+            dict[str, Any]: The subset of fields that were actually written
+                (unknown keys are dropped).
         """
         if not changes:
             return {}
@@ -1694,7 +1991,13 @@ class SharedState:
         return applied
 
     def _format_last_kernel_opt(self) -> str:
-        """Single-line repr of last kernel-opt outcome for prompt injection."""
+        """Single-line repr of last kernel-opt outcome for prompt injection.
+
+        Returns:
+            str: A compact ``kernel_id=... decision=... speedup=...`` line
+                (with optional per-kernel attempts/retired history), or
+                ``"(none)"`` when no kernel_opt has run.
+        """
         if not self.last_kernel_opt:
             return "(none)"
         ko = self.last_kernel_opt
@@ -1719,6 +2022,23 @@ class SharedState:
     def _resolve_kernel_patch_identity(
         self, payload: dict[str, Any] | None,
     ) -> tuple[str, str, str, str]:
+        """Resolve a kernel patch's identity tuple from a result/intent payload.
+
+        Pulls ``kernel_id`` / patch path / target file / extra server args
+        from the envelope, back-filling the patch path from
+        :attr:`last_kernel_opt` when the payload omits it but names a
+        matching kernel. The legacy ``extra_sglang_args`` alias is resolved
+        through the compat helper.
+
+        Args:
+            payload (dict[str, Any] | None): The kernel_opt result or LLM
+                intent envelope (``None`` treated as empty).
+
+        Returns:
+            tuple[str, str, str, str]: ``(kernel_id, patch_path,
+                target_file, extra_args)``; any unresolved component is an
+                empty string.
+        """
         payload = payload or {}
         kernel_id = str(payload.get("kernel_id") or "")
         patch_path = str(
@@ -1750,6 +2070,16 @@ class SharedState:
         return kernel_id, patch_path, target_file, extra_args
 
     def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
+        """Compute the dedup key for a kernel patch.
+
+        Args:
+            payload (dict[str, Any] | None): The kernel_opt result or intent
+                envelope.
+
+        Returns:
+            str: ``"<kernel_id>|<patch_path>|<extra_args>"``, or ``""`` when
+                either ``kernel_id`` or ``patch_path`` cannot be resolved.
+        """
         kernel_id, patch_path, _target_file, extra_args = (
             self._resolve_kernel_patch_identity(payload)
         )
@@ -1761,6 +2091,16 @@ class SharedState:
         self,
         payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
+        """Look up a previously-rejected patch matching ``payload``.
+
+        Args:
+            payload (dict[str, Any] | None): The kernel_opt result or intent
+                envelope identifying the patch.
+
+        Returns:
+            dict[str, Any] | None: The matching rejected-patch entry, or
+                ``None`` when the key is unresolvable or not on record.
+        """
         key = self.kernel_patch_key(payload)
         if not key:
             return None
@@ -1776,7 +2116,25 @@ class SharedState:
         max_attempts: int = 3,
         keep_threshold_pct: float = 1.0,
     ) -> dict[str, Any] | None:
-        """Persist one integrate E2E result and reject exhausted patch attempts."""
+        """Persist one integrate E2E result and reject exhausted patch attempts.
+
+        Appends the attempt to the per-key ``kernel_integrate_attempts``
+        ledger and, on a REVERT decision or once ``max_attempts`` is hit
+        without a KEEP, moves the patch into ``rejected_kernel_patches`` and
+        records its ``kernel_id`` in ``rejected_kernel_ids``.
+
+        Args:
+            result (dict[str, Any]): The integrate E2E result envelope.
+            max_attempts (int): Max attempts before rejecting a non-KEEP
+                patch (default 3).
+            keep_threshold_pct (float): The gain threshold recorded on the
+                rejection row for context (default 1.0).
+
+        Returns:
+            dict[str, Any] | None: The updated attempts entry (carrying a
+                ``rejected`` sub-dict when rejection fired), or ``None`` when
+                ``result`` is not a dict or its patch key is unresolvable.
+        """
         if not isinstance(result, dict):
             return None
         key = self.kernel_patch_key(result)
@@ -1891,6 +2249,13 @@ class SharedState:
         every tick (the r24 custom_allreduce dead-end). Threshold defaults
         to 2 attempts; override via
         ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL`` (>=1).
+
+        Args:
+            result (dict[str, Any]): The kernel_optimization_handler result
+                envelope (``kernel_id`` / ``proposal`` / ``verification`` /
+                ``status`` / ``error_class`` ...). A non-dict or
+                ``kernel_id``-less result is a no-op that preserves any
+                pending KEEP.
         """
         if not isinstance(result, dict):
             return
@@ -2055,7 +2420,15 @@ class SharedState:
         self.kernel_opt_attempts[kernel_id] = entry
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
-        """Capture the GEAK GEMM tuning result for sequencing and prompts."""
+        """Capture the GEAK GEMM tuning result for sequencing and prompts.
+
+        Snapshots the result into ``last_gemm_tuning`` and appends it to the
+        capped ``gemm_tuning_attempts`` history. A non-dict result is
+        normalized into a failure record.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning result envelope.
+        """
         if not isinstance(result, dict):
             result = {"status": "failed", "error": "non-dict gemm tuning result"}
         entry = dict(result)
@@ -2069,7 +2442,12 @@ class SharedState:
     # Multi-KEEP integrate queue helpers (PR-B follow-up).
     # ------------------------------------------------------------------
     def _kernel_ids_in_optimization_stack(self) -> set[str]:
-        """kernel_ids already absorbed into optimization_stack as integrate entries."""
+        """kernel_ids already absorbed into optimization_stack as integrate entries.
+
+        Returns:
+            set[str]: The set of ``kernel_id`` values that appear on an
+                ``integrate`` entry of :attr:`optimization_stack`.
+        """
         return {
             str(e.get("kernel_id"))
             for e in (self.optimization_stack or [])
@@ -2085,6 +2463,10 @@ class SharedState:
         integrated" -- ``apply_kernel_patch`` is a ``shutil.copy2`` whole-
         file overwrite, so two patches on the same file would silently
         clobber each other.
+
+        Returns:
+            set[str]: The set of source-file paths covered by an
+                ``integrate`` entry on :attr:`optimization_stack`.
         """
         sources: set[str] = set()
         for e in (self.optimization_stack or []):
@@ -2108,6 +2490,10 @@ class SharedState:
         Consumers: Coordinator's ``_kernel_opt_keep_pending`` for the
         TODO 4/5 integrate gate, plus the prompt_builder rendering used
         by Orchestration / robustness to see how many KEEPs are queued.
+
+        Returns:
+            str: The next KEEP ``kernel_id`` to integrate, or ``""`` when
+                the queue is drained.
         """
         integrated_ids = self._kernel_ids_in_optimization_stack()
         integrated_sources = self._source_files_in_optimization_stack()
@@ -2142,6 +2528,11 @@ class SharedState:
         Used by the Orchestration prompt so the LLM sees how many
         integrate cycles are queued and does NOT propose ``report``
         before draining them.
+
+        Returns:
+            list[str]: KEEP ``kernel_id`` values awaiting integrate, ordered
+                by ``last_micro_speedup`` descending (at most one per
+                source file).
         """
         integrated_ids = self._kernel_ids_in_optimization_stack()
         integrated_sources = self._source_files_in_optimization_stack()
@@ -2178,10 +2569,21 @@ class SharedState:
 
     @property
     def has_keep_pending_integrate(self) -> bool:
+        """Whether any KEEP kernel is still awaiting integrate.
+
+        Returns:
+            bool: ``True`` when :meth:`next_pending_keep_kernel_id` is
+                non-empty.
+        """
         return bool(self.next_pending_keep_kernel_id())
 
     @property
     def kernel_opt_attempts_count(self) -> int:
+        """Number of distinct kernels with recorded kernel_opt attempts.
+
+        Returns:
+            int: The size of the ``kernel_opt_attempts`` ledger.
+        """
         return len(self.kernel_opt_attempts or {})
 
     # ------------------------------------------------------------------
@@ -2220,6 +2622,19 @@ class SharedState:
         Each task_group contributes at most one kernel_id (the highest
         ``gpu_pct`` member that satisfies the filters), matching what
         ``_batch_kernel_candidates`` would actually dispatch.
+
+        Args:
+            min_gpu_pct (float | None): Minimum GPU-time share for a kernel
+                to qualify. ``None`` reads ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``
+                (default :data:`_DEFAULT_HOT_KERNEL_MIN_GPU_PCT`).
+            top_n (int | None): Cap on candidates returned (by ``gpu_pct``
+                desc). ``None`` reads ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``
+                (default :data:`_DEFAULT_HOT_KERNEL_GATE_TOP_N`).
+
+        Returns:
+            list[str]: The ``kernel_id`` of each qualifying untried hot
+                reusable kernel (one per task group), ordered by ``gpu_pct``
+                descending.
         """
         info = self.last_trace_analyze or {}
         hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
@@ -2318,8 +2733,14 @@ class SharedState:
     def _truncate_excerpt(value: Any, *, limit: int = 800) -> str | None:
         """Coerce ``value`` to str and trim to ``limit`` characters.
 
-        Returns None for falsy inputs so the prompt renderer can show
-        ``err=(none)`` instead of a quoted empty string.
+        Args:
+            value (Any): The value to stringify and truncate.
+            limit (int): Maximum length of the returned string (default 800).
+
+        Returns:
+            str | None: The truncated string, or ``None`` for falsy inputs
+                so the prompt renderer can show ``err=(none)`` instead of a
+                quoted empty string.
         """
         if value is None:
             return None
@@ -2338,6 +2759,15 @@ class SharedState:
         stderr usually has the actionable signal at the *end* (traceback,
         last log line), while a free-form error message is informative
         from the start.
+
+        Args:
+            value (Any): The subprocess error blob to stringify and tail.
+            limit (int): Maximum number of trailing characters to keep
+                (default 1000).
+
+        Returns:
+            str | None: The trailing slice of the stringified value, or
+                ``None`` for falsy inputs.
         """
         if value is None:
             return None
@@ -2378,6 +2808,24 @@ class SharedState:
 
         Pure persistence helper: does NOT call :meth:`save`. The
         Coordinator batches a single ``save()`` per dispatcher pass.
+
+        Args:
+            action (str): The action kind; must be in :data:`_AUDIT_ACTIONS`.
+            task_id (str): The task id that produced the result.
+            status (str): ``"succeeded"`` or ``"failed"``.
+            decision (str): The Coordinator's interpretation (``"promoted"``
+                / ``"discarded"`` / ``"salvaged"`` / ``"no_promote"`` /
+                ``"error"``).
+            result (dict[str, Any] | None): The executor result dict the key
+                metric and error context are read from.
+            extras (dict[str, Any] | None): Action-specific context appended
+                verbatim (round_id, trace_path, ...).
+            max_history (int): Cap on retained ``<action>_attempts`` rows
+                (default :data:`_DEFAULT_ATTEMPTS_HISTORY`).
+
+        Returns:
+            dict[str, Any] | None: The new attempt entry, or ``None`` when
+                ``action`` is not in the audit set.
         """
         if action not in _AUDIT_ACTIONS:
             return None
@@ -2461,6 +2909,17 @@ class SharedState:
         Unlike :meth:`record_action_attempt` this is invoked for **every**
         unpromotable task kind — kernel-owned actions land here too so
         the global failure tail is comprehensive.
+
+        Args:
+            action (str): The action kind that failed.
+            task_id (str): The task id that produced the failure.
+            result (dict[str, Any] | None): The executor result dict the
+                failure context is read from.
+            max_history (int): Cap on retained ``last_action_failures`` rows
+                (default :data:`_DEFAULT_LAST_FAILURES`).
+
+        Returns:
+            dict[str, Any]: The failure record that was appended.
         """
         result = result or {}
         error_class = result.get("error_class")
@@ -2525,6 +2984,13 @@ class SharedState:
         ``result['trace_report_path']``; OSErrors degrade silently to
         empty text (the ``analysis_md_path`` field still lets a future
         ``read_artifact`` intent re-fetch it on demand).
+
+        Args:
+            payload (dict[str, Any]): The trace_analyze request payload
+                (provides ``trace_input`` / ``trace_dir``).
+            result (dict[str, Any]): The executor result with hot kernels,
+                artifact paths, task groups, and the trace report path. A
+                non-dict result is a no-op.
         """
         if not isinstance(result, dict):
             return
@@ -2716,6 +3182,16 @@ class SharedState:
             pass
 
     def record_sweep(self, result: dict[str, Any]) -> None:
+        """Snapshot the most recent workload sweep into ``last_sweep``.
+
+        Selects the best succeeded grid entry by ``output_throughput`` and
+        records grid size, per-concurrency bests, the Pareto front, and the
+        workspace path.
+
+        Args:
+            result (dict[str, Any]): The sweep executor result envelope. A
+                non-dict result is a no-op.
+        """
         if not isinstance(result, dict):
             return
         grid = result.get("sweep_grid") or []
@@ -2750,6 +3226,10 @@ class SharedState:
         round have terminated (either via specialist_done or empty
         synthesise). Idempotent on ``round_id``: a re-record with the
         same id overwrites the latest entry rather than duplicating.
+
+        Args:
+            entry (dict[str, Any]): The round summary dict (keyed by
+                ``round_id``). A non-dict / empty entry is a no-op.
         """
         if not isinstance(entry, dict) or not entry:
             return
@@ -2769,9 +3249,17 @@ class SharedState:
     ) -> int:
         """Increment / reset the per-domain empty-proposal streak.
 
-        Returns the new streak value (0 when reset). The streak
-        threshold for escalation is read by Robustness from
+        The streak threshold for escalation is read by Robustness from
         ``KB_design §3.9`` and is not encoded here.
+
+        Args:
+            domain (str): The specialist domain key (empty is normalized to
+                ``"unknown"``).
+            empty (bool): ``True`` when the domain produced no proposals
+                (increment); ``False`` to reset the streak.
+
+        Returns:
+            int: The new streak value (0 when reset).
         """
         d = str(domain or "").strip() or "unknown"
         if empty:
@@ -2791,6 +3279,13 @@ class SharedState:
         Coordinator's :meth:`_warm_specialist_params` calls this to
         attach ``gap_symptom`` / ``gap_layer`` / ``gap_attempts`` onto
         a specialist task before dispatch.
+
+        Args:
+            canonical_id (str): The Cortex canonical id of the gap to find.
+
+        Returns:
+            dict[str, Any] | None: The matching gap row, or ``None`` when
+                no gap with that id exists.
         """
         if not canonical_id:
             return None
@@ -2809,8 +3304,15 @@ class SharedState:
         ``first_seen_ts`` when present.
 
         Coordinator-only writer (Inv-1 single-writer + PolicyGate
-        ``CORE_STATE_FIELDS`` lock). Returns the merged entry so the
-        caller can keep working with the canonical row.
+        ``CORE_STATE_FIELDS`` lock).
+
+        Args:
+            entry (dict[str, Any]): The gap row to insert or merge; must
+                carry a non-empty ``canonical_id``.
+
+        Returns:
+            dict[str, Any]: The merged canonical gap row, or ``{}`` when the
+                entry is not a dict or lacks a ``canonical_id``.
         """
         if not isinstance(entry, dict):
             return {}
@@ -2862,6 +3364,15 @@ class SharedState:
             others = [g for g in self.gaps if g is not merged]
 
             def _sort_key(g: dict[str, Any]) -> str:
+                """Sort key for gap trimming: newest-updated timestamp.
+
+                Args:
+                    g (dict[str, Any]): A gap row.
+
+                Returns:
+                    str: ``last_updated_ts`` (falling back to
+                        ``first_seen_ts`` then ``""``) for chronological sort.
+                """
                 return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
 
             others.sort(key=_sort_key)
@@ -2878,9 +3389,15 @@ class SharedState:
     ) -> dict[str, Any] | None:
         """Append one attempt row to an existing gap.
 
-        Returns the updated gap entry or ``None`` when the gap is not
-        known yet (caller may decide to ``upsert_gap`` with a freshly
-        synthesised symptom in that case).
+        Args:
+            canonical_id (str): The canonical id of the gap to append to.
+            attempt (dict[str, Any]): The attempt row; a ``ts`` is stamped
+                when absent.
+
+        Returns:
+            dict[str, Any] | None: The updated gap entry, or ``None`` when
+                the gap is not known yet (caller may ``upsert_gap`` with a
+                freshly synthesised symptom in that case).
         """
         gap = self.find_gap(canonical_id)
         if gap is None:
@@ -2898,7 +3415,14 @@ class SharedState:
 
         Used by :meth:`Coordinator._refresh_gaps` when the rebuild
         wants to discard stale rows wholesale (e.g. after a Cortex
-        traverse returned a new canonical set). Idempotent.
+        traverse returned a new canonical set). Idempotent; dedups by
+        ``canonical_id`` and applies both the per-gap attempts cap and the
+        global gap-list cap.
+
+        Args:
+            entries (list[dict[str, Any]]): The replacement gap rows. A
+                non-list is a no-op; rows without a ``canonical_id`` are
+                skipped.
         """
         if not isinstance(entries, list):
             return
@@ -2941,6 +3465,14 @@ class SharedState:
         ("kernel", "noop", ...) are still appended (the ledger is
         descriptive); the consecutive-config counter only advances on
         explicit ``"config"`` values and resets on ``"code_patch"``.
+
+        Args:
+            change_type (str): The intervention kind (``"config"`` /
+                ``"code_patch"`` / other); normalised to lowercase.
+            action (str): The action that produced the intervention.
+            task_id (str): The originating task id (optional).
+            delta_pct (float | None): The measured gain delta in percent
+                (optional).
         """
         ct = str(change_type or "").strip().lower()
         entry = {
@@ -2961,8 +3493,13 @@ class SharedState:
     def bump_specialist_dispatched(self, n: int = 1) -> int:
         """PR-A8: increment the per-EXPLORE specialist dispatch counter.
 
-        Returns the post-increment value so callers can act on it
-        inline (e.g. a robustness storm threshold).
+        Args:
+            n (int): Amount to add to
+                ``explore_specialist_dispatched_count`` (default 1).
+
+        Returns:
+            int: The post-increment counter value so callers can act on it
+                inline (e.g. a robustness storm threshold).
         """
         self.explore_specialist_dispatched_count = (
             int(self.explore_specialist_dispatched_count or 0) + int(n)
@@ -2986,7 +3523,13 @@ class SharedState:
         Coordinator-only writer (CORE_STATE_FIELDS protects it from
         LLM ``UPDATE_STATE``). Idempotent on ``dyn_id``: a re-record
         overwrites the summary but does not double-bump the counter.
-        Returns the post-increment round counter value.
+
+        Args:
+            dyn_id (str): The dynamic-action id. A falsy id is a no-op.
+            summary (dict[str, Any]): The lifecycle summary dict to store.
+
+        Returns:
+            int: The post-increment ``dynamic_action_round_count`` value.
         """
         key = str(dyn_id or "").strip()
         if not key:
@@ -3022,6 +3565,17 @@ class SharedState:
         ``status``; ``last_updated_at`` is always refreshed. Illegal
         transitions are logged and skipped so a buggy hook cannot
         corrupt the audit trail.
+
+        Args:
+            dyn_id (str): The dynamic-action id to update. A falsy id, an
+                unknown ``status``, or an illegal transition is dropped.
+            status (str): The target :class:`DynamicActionStatus` value.
+            last_outcome (str | None): Prompt-friendly outcome label;
+                defaults to the canonical label for ``status``.
+            cumulative_gain (float | None): Updated cumulative gain when
+                provided.
+            extra (dict[str, Any] | None): Additional keys merged verbatim
+                into the summary row.
         """
         # Local import avoids the cycle with
         # :mod:`dynamic_action_proposal`.
@@ -3091,8 +3645,16 @@ class SharedState:
         Renders the most recent ``max_entries`` summaries sorted by
         ``last_updated_at`` descending (stable tiebreak on
         ``dyn_id``). Older rows are collapsed into an elision marker
-        pointing at the on-disk artefact dir. Returns the empty
-        string when no rows exist so callers can skip the section.
+        pointing at the on-disk artefact dir.
+
+        Args:
+            max_entries (int): Maximum number of recent rows to render
+                in full (default 5).
+            title (str): The section header label.
+
+        Returns:
+            str: The rendered ``=== <title> ===`` block, or ``""`` when no
+                dynamic actions exist so callers can skip the section.
         """
         summaries = self.dynamic_actions or {}
         if not summaries:
@@ -3133,11 +3695,24 @@ class SharedState:
         _last_outcome_lookup: dict | None = None,
         _status_enum: Any | None = None,
     ) -> str:
-        """Render one compact summary row (~50 tokens):
+        """Render one compact summary row (~50 tokens).
+
+        Output shape::
 
             - <dyn_id> [<STATUS>, gain=<delta>%] scope=[d1,d2]
               motivation: "<motivation_gap_short>"
               artifact: <artifact_path>
+
+        Args:
+            summary (dict[str, Any]): The dynamic-action summary row.
+            _last_outcome_lookup (dict | None): Optional status -> outcome
+                label map (unused in the current render; reserved for
+                callers passing the canonical lookup).
+            _status_enum (Any | None): Optional status enum (reserved;
+                unused in the current render).
+
+        Returns:
+            str: The three-line rendered summary block.
         """
         dyn_id = str(summary.get("dyn_id") or "(unknown)")
         status = str(summary.get("status") or "(unknown)")
@@ -3173,6 +3748,12 @@ class SharedState:
         round-trip). Empty / falsy ``verdict`` clears the entry; this
         is how an operator forces a re-review by deleting the prior
         decision.
+
+        Args:
+            specialist_task_id (str): The specialist task whose patches were
+                reviewed. A falsy id is a no-op.
+            verdict (str): The Critic verdict (normalised to lowercase); a
+                falsy verdict clears the recorded entry.
         """
         sid = str(specialist_task_id or "").strip()
         if not sid:
@@ -3186,15 +3767,27 @@ class SharedState:
     def get_specialist_patch_verdict(
         self, specialist_task_id: str,
     ) -> str:
-        """PR-A7: return the recorded patch verdict, or empty string
-        when no critic decision is on record yet."""
+        """PR-A7: return the recorded patch verdict for a specialist task.
+
+        Args:
+            specialist_task_id (str): The specialist task id to look up.
+
+        Returns:
+            str: The recorded verdict, or ``""`` when no critic decision is
+                on record yet (or the id is falsy).
+        """
         sid = str(specialist_task_id or "").strip()
         if not sid:
             return ""
         return self.specialist_patch_verdicts.get(sid, "") or ""
 
     def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
-        """Snapshot the most recent specialist task (parity with last_*)."""
+        """Snapshot the most recent specialist task (parity with last_*).
+
+        Args:
+            snapshot (dict[str, Any]): The specialist task snapshot to copy
+                into ``last_specialist``. A non-dict value is ignored.
+        """
         if isinstance(snapshot, dict):
             self.last_specialist = dict(snapshot)
 
@@ -3208,6 +3801,12 @@ class SharedState:
         executor never writes ``accepted`` directly —
         :meth:`record_explore_accepted` is the single writer for that
         bucket (Coordinator calls it on promote).
+
+        Args:
+            update (dict[str, Any]): The ledger increment from the
+                ExploreExecutor (``tested`` / ``rejected`` /
+                ``winners_history`` / ``synergy_attempted`` / ``last_round``
+                / ...). A non-dict value is a no-op.
         """
         if not isinstance(update, dict):
             return
@@ -3265,6 +3864,11 @@ class SharedState:
         bloat the list; also removes a matching entry from
         ``rejected`` so a previously-rejected variant that later
         promotes doesn't appear in both buckets.
+
+        Args:
+            variant (dict[str, Any]): The promoted variant (server args /
+                envs / gain / stack index / provenance ...). A non-dict /
+                empty value is a no-op.
         """
         if not isinstance(variant, dict) or not variant:
             return
@@ -3341,6 +3945,16 @@ class SharedState:
 
         Idempotent: re-recording overwrites the per-framework entry but
         leaves other frameworks untouched.
+
+        Args:
+            framework (str): The framework name (normalised to lowercase;
+                empty becomes ``"unknown"``).
+            backend_flags (list[str] | None): Discovered backend flag names;
+                stored sorted+deduped when provided.
+            param_flags (list[str] | None): Discovered param flag names;
+                stored sorted+deduped when provided.
+            source_path (str): Path the flags were discovered from
+                (recorded when non-empty).
         """
         fw = (framework or "").strip().lower() or "unknown"
         entry = dict(self.discovered_flags.get(fw) or {})
@@ -3370,11 +3984,34 @@ class SharedState:
         retries / sibling-flag variants from what previously won. Marathon
         equivalent: orchestrator pane's per-tick "follow-on actions"
         synthesis (marathon/skills/SKILL.md §"Dynamic Idea Generation").
+
+        Args:
+            action (str): The explore action that produced this round.
+            base_tput (float): The base throughput the winners improved on.
+            base_extra_args (str): The base server args of the round.
+            winners (list[dict[str, Any]]): Winning variants (≥+1% over
+                base) to record.
+            best (dict[str, Any] | None): The single best variant of the
+                round (or ``None``).
+            max_history (int): Cap on retained history rows (default 20).
+
+        Returns:
+            None: This method mutates ``backend_winners_history`` in place and
+            returns nothing.
         """
         from .action_executors._grid_runner import variant_fingerprint
         round_id = f"{action}-{len(self.backend_winners_history) + 1:03d}"
 
         def _stamped(entry: dict[str, Any]) -> dict[str, Any]:
+            """Normalize a winner entry into the stored history schema.
+
+            Args:
+                entry (dict[str, Any]): A raw winner variant dict.
+
+            Returns:
+                dict[str, Any]: The stamped variant with resolved args /
+                    envs / tput / gain and a computed fingerprint.
+            """
             args = str(
                 entry.get("candidate_extra_server_args")
                 or entry.get("extra_server_args") or ""
@@ -3426,7 +4063,11 @@ class SharedState:
     # rounds). ``increment_tick`` stays — it's a pure monotonic
     # counter used by plateau / phase budget math.
     def increment_tick(self) -> int:
-        """Bump the Coordinator tick counter and return the new value."""
+        """Bump the Coordinator tick counter.
+
+        Returns:
+            int: The post-increment monotonic tick value.
+        """
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
@@ -3462,6 +4103,21 @@ class SharedState:
         with ``AttributeError``. Filling it in is a no-design-change
         fix: the math + list append were already implied by the
         adjacent comments on the call sites.
+
+        Args:
+            action (str): The action whose KEEP is being recorded (context
+                only; not stored by this helper).
+            variant_name (str | None): The promoted variant name (context
+                only).
+            new_tput (float): The throughput of the newly-promoted config.
+            extra_server_args (str): The variant's server args (context
+                only).
+            ts (str | None): Optional timestamp (context only).
+
+        Returns:
+            float | None: The computed incremental ``gain_pct`` that was
+                appended to ``gain_per_stack_entry``, or ``None`` when
+                ``baseline_tput`` is 0 or ``new_tput`` is non-positive.
         """
         try:
             base = float(self.baseline_tput or 0.0)
@@ -3509,8 +4165,13 @@ class SharedState:
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
         """Wall-clock minutes since ``start_ts``.
 
-        Returns 0.0 when ``start_ts`` is empty / unparseable so callers can
-        treat the value as "no time consumed yet" without a try/except.
+        Args:
+            now (datetime | None): Reference "now" (defaults to current UTC);
+                naive datetimes are assumed UTC.
+
+        Returns:
+            float: Minutes elapsed since ``start_ts`` (clamped at 0.0), or
+                0.0 when ``start_ts`` is empty / unparseable.
         """
         if not self.start_ts:
             return 0.0
@@ -3529,9 +4190,13 @@ class SharedState:
     def remaining_minutes(self, *, now: datetime | None = None) -> float | None:
         """Minutes left in the wall-clock budget.
 
-        Returns ``None`` when ``max_minutes`` is 0 / unset — i.e. the run
-        has no upper bound. Otherwise the result is clamped at 0 so the
-        prompt never advertises negative time.
+        Args:
+            now (datetime | None): Reference "now" passed through to
+                :meth:`elapsed_minutes`.
+
+        Returns:
+            float | None: Minutes left (clamped at 0.0), or ``None`` when
+                ``max_minutes`` is 0 / unset (no upper bound).
         """
         if not self.max_minutes:
             return None
@@ -3547,6 +4212,10 @@ class SharedState:
         ``cumulative_gain_validated_stack_len``, so a longer stack means
         at least one new KEEP (e.g. from ``integrate``) came in without
         an end-to-end revalidation.
+
+        Returns:
+            bool: ``True`` when the stack has grown since the last validated
+                rebench.
         """
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
 
@@ -3557,6 +4226,14 @@ class SharedState:
         see the *outcome-shaped* state (raw gain, validated gain, time
         spent vs budget, validated-stack staleness) before drowning in
         verbose execution detail.
+
+        Args:
+            now (datetime | None): Reference "now" for the elapsed/remaining
+                time math (defaults to current UTC).
+
+        Returns:
+            str: A multi-line mission-progress block (baseline, current
+                best, gains, stack, time budget).
         """
         elapsed = self.elapsed_minutes(now=now)
         remaining = self.remaining_minutes(now=now)
@@ -3588,6 +4265,12 @@ class SharedState:
         )
 
     def _format_current_best_for_mission(self) -> str:
+        """Render the ``current_best`` one-liner for the mission summary.
+
+        Returns:
+            str: ``action=... tput=... variant=...``, or ``"(none)"`` when
+                no current best is set.
+        """
         if not isinstance(self.current_best, dict) or not self.current_best:
             return "(none)"
         return (
@@ -3612,6 +4295,15 @@ class SharedState:
 
         When in EXPLORE, an extra ``force_exit`` line surfaces how much
         runway is left before the HARD force-exit gate (IR-6) fires.
+
+        Args:
+            budget_pct (dict[str, float] | None): Per-phase wall-clock
+                budget fractions; defaults to ``phase_budget_pct``.
+            now_unix (float | None): Reference unix time for the budget
+                math (defaults to current time).
+
+        Returns:
+            str: The compact ``=== Phase ===`` block (≤ ~5 lines).
         """
         from .phase_state import (
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
@@ -3703,6 +4395,16 @@ class SharedState:
         Lists each phase that appears in ``phase_history`` plus the
         current phase. Each line shows ``phase: elapsed=Xs cap=Ys (Z%)``
         so Robustness can spot a phase that's blown past its budget.
+
+        Args:
+            budget_pct (dict[str, float] | None): Per-phase wall-clock
+                budget fractions; defaults to ``phase_budget_pct``.
+            now_unix (float | None): Reference unix time for measuring the
+                active phase segment (defaults to current time).
+
+        Returns:
+            str: One line per phase seen in ``phase_history`` (plus the
+                active phase), or ``"(no phase history yet)"``.
         """
         from .phase_state import (
             DEFAULT_PHASE_BUDGET_PCT,
@@ -3764,6 +4466,14 @@ class SharedState:
         full JSON snapshot lives at
         ``runtime/cortex/.kb_warm.json`` / ``.kb_pitfalls.json`` for any
         agent willing to Read it directly.
+
+        Args:
+            max_lines (int): Cap on rendered lines before truncation
+                (default 12).
+
+        Returns:
+            str: The compact warm-start block, or ``""`` when no recipe and
+                no pitfalls are available.
         """
         recipe = self.warm_start_recipe or {}
         pitfalls = self.warm_start_pitfalls or []
@@ -3823,6 +4533,14 @@ class SharedState:
         ``last_updated_ts``) to keep the prompt section bounded —
         long sessions occasionally accumulate dozens of gaps; the
         full list still lives in ``state.json`` for resume.
+
+        Args:
+            max_entries (int): Maximum number of newest gap rows to render
+                (default 10).
+
+        Returns:
+            str: The rendered gap rows, or ``""`` when ``gaps`` is empty so
+                callers can skip the section header.
         """
         if not self.gaps:
             return ""
@@ -3867,7 +4585,13 @@ class SharedState:
         return "\n".join(rows)
 
     def to_prompt_summary(self) -> str:
-        """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
+        """Compact, human-readable snapshot for prompt injection (DESIGN §8.3).
+
+        Returns:
+            str: A multi-line dump of the session's key fact-layer and
+                audit fields (baseline / current best / gains / kernel-opt
+                queue / attempts history / failures / phase status).
+        """
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
@@ -3956,7 +4680,15 @@ class SharedState:
     # ------------------------------------------------------------------
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
-        """Render one ``last_<action>`` snapshot or attempts[-1] entry."""
+        """Render one ``last_<action>`` snapshot or ``attempts[-1]`` entry.
+
+        Args:
+            entry (dict[str, Any] | None): The attempt snapshot to render.
+
+        Returns:
+            str: A compact ``status=... decision=... <metric> err=... ws=...``
+                line, or ``"(none)"`` when the entry is empty.
+        """
         if not isinstance(entry, dict) or not entry:
             return "(none)"
         metric = entry.get("key_metric")
@@ -3980,6 +4712,10 @@ class SharedState:
         Format: ``baseline:total(s<successes>,f<failures>) ...``. Helps
         the LLM gauge per-action reliability without flooding the prompt
         with up to 6x20 individual rows.
+
+        Returns:
+            str: The per-action success/failure tally line, or
+                ``"(no attempts recorded)"`` when no audit history exists.
         """
         parts: list[str] = []
         for action in sorted(_AUDIT_ACTIONS):
@@ -4007,6 +4743,10 @@ class SharedState:
         truncate to 3 rows in the prompt so the LLM sees what blew up
         most recently without re-reading 10 rows of stale subprocess
         tails. The full list is still on disk in ``state.json``.
+
+        Returns:
+            str: A ``|``-joined render of up to the 3 newest failures (with
+                an ``[+N earlier]`` suffix), or ``"(none)"``.
         """
         if not self.last_action_failures:
             return "(none)"
@@ -4030,6 +4770,12 @@ class SharedState:
         return " | ".join(rows) + suffix if rows else "(none)"
 
     def _format_rejected_kernel_patches(self) -> str:
+        """Render the most recent rejected kernel patches for the prompt.
+
+        Returns:
+            str | list[str]: A list of compact per-patch lines (last 5), or
+                ``"(none)"`` when no patches have been rejected.
+        """
         if not self.rejected_kernel_patches:
             return "(none)"
         return [
@@ -4042,6 +4788,12 @@ class SharedState:
         ] or "(none)"
 
     def _format_discovered_flags(self) -> str:
+        """Render the per-framework discovered-flag counts for the prompt.
+
+        Returns:
+            str: ``<framework>:backend=N/param=M`` parts joined by commas,
+                or a hint string when no flags have been discovered yet.
+        """
         if not self.discovered_flags:
             return "(none — first backends/params round will populate)"
         parts: list[str] = []
@@ -4061,6 +4813,13 @@ class SharedState:
         Used by :meth:`_format_backend_winners_history` and
         :meth:`_format_search_state` so the LLM sees the same numerical
         signal everywhere the explore ledger surfaces.
+
+        Args:
+            entry (dict[str, Any]): A search variant (name / gain / tput /
+                server args / envs).
+
+        Returns:
+            str: The single-line render of the variant.
         """
         name = str(entry.get("name") or "?")
         gain = entry.get("gain_pct")
@@ -4094,6 +4853,16 @@ class SharedState:
         ``gain_pct``; the matching ``tested[fingerprint]`` entry does.
         Pulling the value across at render time keeps the renderer
         symmetric and avoids a second writer for accepted entries.
+
+        Args:
+            entry (dict[str, Any]): The accepted-variant entry to enrich.
+            tested (dict[str, Any]): The ``explore_search.tested`` map keyed
+                by fingerprint.
+
+        Returns:
+            dict[str, Any]: The entry unchanged when already complete, else
+                a copy with ``gain_pct`` / ``tput`` backfilled from
+                ``tested``.
         """
         if (
             entry.get("gain_pct") is not None
@@ -4124,6 +4893,10 @@ class SharedState:
         for the last 5 rounds so the IDEA GENERATION step (SKILL.md) has
         real signal to rank retries / synergy combos by, not just names.
         Older rounds collapse to a ``[+N earlier rounds elided]`` line.
+
+        Returns:
+            str: The multi-line winners-history render (last 5 rounds), or
+                ``"(no explore rounds completed)"``.
         """
         if not self.backend_winners_history:
             return "(no explore rounds completed)"
@@ -4160,6 +4933,12 @@ class SharedState:
         return "\n".join(out)
 
     def _format_explore_search(self) -> str:
+        """Render the unified ``explore_search`` ledger for the prompt.
+
+        Returns:
+            str: The :meth:`_format_search_state` render of
+                :attr:`explore_search`.
+        """
         return self._format_search_state(self.explore_search)
 
     @staticmethod
@@ -4171,6 +4950,13 @@ class SharedState:
         names alone. Counts go on the head line; bodies show only the
         most recent 5 entries per bucket (older rows are still in the
         ledger; only the prompt body is truncated).
+
+        Args:
+            search (dict[str, Any] | None): The search ledger to render.
+
+        Returns:
+            str: The multi-line ledger render, or ``"(none)"`` when the
+                ledger is empty.
         """
         if not search:
             return "(none)"
@@ -4202,6 +4988,12 @@ class SharedState:
         return "\n".join(out)
 
     def _format_optimization_stack(self) -> str:
+        """Render the optimization stack as ``action:variant`` parts.
+
+        Returns:
+            str | list[str]: A list of ``action:variant_name`` strings, or
+                ``"(none)"`` when the stack is empty.
+        """
         if not self.optimization_stack:
             return "(none)"
         parts = []
@@ -4225,6 +5017,13 @@ class SharedState:
         Cherry-picked from main alongside F1-2 (RooflineExecutor); the
         helper module ``inference_optimizer/tracelens_md.py`` lands in
         the same commit.
+
+        Args:
+            text (str): The markdown text to sanitize.
+
+        Returns:
+            str: The text with base64 image data URLs removed (``""`` for
+                falsy input).
         """
         if not text:
             return text or ""
@@ -4255,6 +5054,10 @@ class SharedState:
         ``shared_state.py:2772`` ; the N27 fallback-mode branch is
         omitted because PolicyGate fallback (F3) is not yet on this
         branch — the simpler default-hint message stands in until F3.
+
+        Returns:
+            str: The full report between ``=== TraceLens Analysis ... ===``
+                bookends, or a one-line hint when no snapshot is cached yet.
         """
         cached = self.last_trace_analyze or {}
         md_text = cached.get("analysis_md_text") or ""
@@ -4284,12 +5087,31 @@ class SharedState:
         )
 
     def _format_last_trace_analyze(self) -> str:
+        """Render the canonical ``last_trace_analyze`` cache for the prompt.
+
+        Returns:
+            str: The :meth:`_format_trace_analyze_blob` render of
+                :attr:`last_trace_analyze`.
+        """
         # Canonical post-M4 cache key. Legacy ``last_select_kernels``
         # field was removed in this branch — see SharedState dataclass
         # docstring.
         return self._format_trace_analyze_blob(self.last_trace_analyze)
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
+        """Render a trace-analyze cache blob as a compact prompt line.
+
+        Surfaces the trace input, candidates path, top kernel ids, reusable
+        native kernel ids, and any trace-health routing warnings.
+
+        Args:
+            blob (dict[str, Any] | None): A ``last_trace_analyze``-shaped
+                dict to render.
+
+        Returns:
+            str: The compact one-line render, or ``"(none)"`` when the blob
+                is empty.
+        """
         if not blob:
             return "(none)"
         ids = [
@@ -4334,6 +5156,12 @@ class SharedState:
         return f"{base} warnings=[{'; '.join(rendered)}]"
 
     def _format_last_sweep(self) -> str:
+        """Render the last workload sweep result for the prompt.
+
+        Returns:
+            str: ``grid_size=... best=... tput=... conc/isl/osl=...``, or
+                ``"(none)"`` when no sweep has run.
+        """
         if not self.last_sweep:
             return "(none)"
         best = self.last_sweep.get("best_overall") or {}

@@ -38,6 +38,12 @@ class FindingSinkConfig:
 
     @property
     def file_path(self) -> Path:
+        """Resolved JSONL file path for this session's findings.
+
+        Returns:
+            Path: ``session_dir/subdir/{session_id}.jsonl`` (falling back
+            to ``default`` when ``session_id`` is empty).
+        """
         safe = self.session_id or "default"
         return self.session_dir / self.subdir / f"{safe}.jsonl"
 
@@ -46,14 +52,35 @@ class FindingSink:
     """JSONL append sink with simple error suppression."""
 
     def __init__(self, config: FindingSinkConfig) -> None:
+        """Initialise the sink.
+
+        Args:
+            config (FindingSinkConfig): Configuration describing the
+                destination directory, session id, and subdirectory.
+        """
         self._config = config
         self._warned: set[str] = set()
 
     @property
     def file_path(self) -> Path:
+        """Path of the JSONL file this sink appends to.
+
+        Returns:
+            Path: The configured findings file path.
+        """
         return self._config.file_path
 
     async def append_many(self, findings: Iterable[Finding]) -> int:
+        """Append a batch of findings as JSONL rows off the event loop.
+
+        Args:
+            findings (Iterable[Finding]): Findings to serialise and
+                append.
+
+        Returns:
+            int: The number of rows written (0 when ``findings`` is
+            empty).
+        """
         rows = [finding_to_row(f) for f in findings]
         if not rows:
             return 0
@@ -61,6 +88,14 @@ class FindingSink:
         return len(rows)
 
     def _write_rows(self, rows: list[dict[str, Any]]) -> None:
+        """Append serialised rows to the JSONL file.
+
+        Creates parent directories as needed. Write failures are
+        suppressed and logged once per error class rather than raised.
+
+        Args:
+            rows (list[dict[str, Any]]): Pre-serialised finding rows.
+        """
         path = self._config.file_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,6 +107,12 @@ class FindingSink:
             self._warn_once("io", f"finding sink io error: {exc}")
 
     def _warn_once(self, key: str, message: str) -> None:
+        """Log a warning at most once per error class.
+
+        Args:
+            key (str): Dedup key identifying the error class.
+            message (str): The warning message to log.
+        """
         if key in self._warned:
             return
         log.warning("findings sink: %s", message)
@@ -79,7 +120,14 @@ class FindingSink:
 
 
 def finding_to_row(finding: Finding) -> dict[str, Any]:
-    """Serialise a :class:`Finding` for JSONL persistence."""
+    """Serialise a :class:`Finding` for JSONL persistence.
+
+    Args:
+        finding (Finding): The finding to serialise.
+
+    Returns:
+        dict[str, Any]: A plain dict suitable for ``json.dumps``.
+    """
     row = asdict(finding)
     return row
 

@@ -118,12 +118,25 @@ class JournalEntry:
     ts:                str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Strip ``None`` values so the file stays compact and JSON-diffable."""
+        """Strip ``None`` values so the file stays compact and JSON-diffable.
+
+        Returns:
+            dict[str, Any]: The entry as a dict with ``None``/empty fields
+                removed.
+        """
         raw = dataclasses.asdict(self)
         return {k: v for k, v in raw.items() if v is not None and v != ""}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> JournalEntry:
+        """Reconstruct a :class:`JournalEntry` from a plain dict.
+
+        Args:
+            d (dict[str, Any]): The serialised entry.
+
+        Returns:
+            JournalEntry: The reconstructed entry with coerced field types.
+        """
         return cls(
             phase=str(d.get("phase", "")),
             iter=int(d.get("iter", 0)),
@@ -153,6 +166,10 @@ class JournalEntry:
           when :func:`summarize_change` falls back to the task kind
           string; without ``task_id`` in the key the second entry would
           be silently dropped as a "resume replay".
+
+        Returns:
+            tuple[str, int, str, str, str, str, str]: The dedupe key
+                ``(phase, iter, kind, change, outcome, variant_name, task_id)``.
         """
         return (
             self.phase, self.iter, self.kind, self.change,
@@ -201,6 +218,18 @@ class Journal:
         on-disk file's defaults *only* when the caller leaves them empty,
         so a resume call that doesn't know the baseline yet won't blow
         away an earlier write that captured it.
+
+        Args:
+            session_dir (Path): The session directory root.
+            session_id (str): Session identifier.
+            model (str): Model name.
+            hardware (str): Hardware label.
+            framework (str): Framework name. Defaults to ``""``.
+            baseline_throughput (float): Baseline throughput. Defaults to
+                ``0.0``.
+
+        Returns:
+            Journal: The loaded or newly created journal.
         """
         path = cls._journal_path(session_dir)
         if path.exists():
@@ -236,6 +265,14 @@ class Journal:
 
     @staticmethod
     def _journal_path(session_dir: Path) -> Path:
+        """Resolve (and create) the journal file path under a session dir.
+
+        Args:
+            session_dir (Path): The session directory root.
+
+        Returns:
+            Path: The path to the journal file inside ``reports/``.
+        """
         reports = Path(session_dir) / "reports"
         reports.mkdir(parents=True, exist_ok=True)
         return reports / JOURNAL_FILENAME
@@ -249,6 +286,14 @@ class Journal:
         Returns ``True`` when the entry was new (and the file was
         rewritten), ``False`` when a duplicate dedupe_key was found
         (resume replay safety).
+
+        Args:
+            entry (JournalEntry): The decision row to append; its ``ts`` is
+                populated when empty.
+
+        Returns:
+            bool: ``True`` when the entry was new and persisted, ``False`` on a
+                duplicate dedupe key.
         """
         if not entry.ts:
             entry.ts = _now_iso()
@@ -271,6 +316,10 @@ class Journal:
         Intended to be called once at CLOSE (T4). Both arguments are
         optional so a partial finalize (e.g. only ``final_throughput``
         known) is allowed.
+
+        Args:
+            final_throughput (float | None): Final measured throughput.
+            total_gain_pct (float | None): Total gain percentage vs baseline.
         """
         if final_throughput is not None:
             self.final_throughput = float(final_throughput)
@@ -285,6 +334,10 @@ class Journal:
         constructor receives ``0.0`` and we backfill once the baseline
         executor finishes. No-op when the new value is non-positive
         (avoids erasing a real measurement with a stale 0).
+
+        Args:
+            baseline_throughput (float): The measured baseline throughput;
+                ignored when non-positive.
         """
         if baseline_throughput and baseline_throughput > 0:
             self.baseline_throughput = float(baseline_throughput)
@@ -315,6 +368,11 @@ class Journal:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the whole journal (header + entries) to a dict.
+
+        Returns:
+            dict[str, Any]: The journal as a JSON-serialisable dict.
+        """
         out: dict[str, Any] = {
             "session_id":          self.session_id,
             "model":               self.model,
@@ -332,7 +390,11 @@ class Journal:
 # helpers
 # ---------------------------------------------------------------------------
 def _now_iso() -> str:
-    """ISO-8601 UTC timestamp (seconds precision) used for entry ``ts``."""
+    """ISO-8601 UTC timestamp (seconds precision) used for entry ``ts``.
+
+    Returns:
+        str: The current UTC timestamp with a ``Z`` suffix.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z",
     )
@@ -348,6 +410,12 @@ def _variant_args(variant: dict[str, Any]) -> str:
     ``KIND_OTHER`` and emit an empty journal ``change`` string. Read
     canonical first, keep a read-only legacy fallback for any
     pre-rename caller.
+
+    Args:
+        variant (dict[str, Any]): The variant descriptor.
+
+    Returns:
+        str: The server-arg string, or ``""`` when none is present.
     """
     return str(
         variant.get("extra_server_args")
@@ -362,6 +430,13 @@ def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) 
     Coarse heuristic; the inputs are noisy (variants can mix backend +
     param + env in one cell) so we pick the most prominent dimension
     in the order: env-only > kernel_file > integrate > backend > param.
+
+    Args:
+        task_kind (str): The task kind/action name.
+        variant (dict[str, Any] | None): Optional explore variant descriptor.
+
+    Returns:
+        str: One of the ``KIND_*`` vocabulary values.
     """
     kind = (task_kind or "").lower()
     if kind in ("kernel_opt", "deep_kernel_analysis", "operator_tuning"):
@@ -393,6 +468,18 @@ def summarize_change(
 
     Caller-friendly summary used as the ``change`` field. Falls back to
     the task kind when nothing more informative is available.
+
+    Args:
+        task_kind (str): The kind of task being summarized; used as the
+            fallback description.
+        variant (dict[str, Any] | None): Optional variant dict whose name,
+            args, and ``extra_envs`` are preferred for the summary.
+        result_dict (dict[str, Any] | None): Optional result dict scanned for
+            ``kernel_id`` / ``patch_path`` / ``pr_url`` when no variant info is
+            available.
+
+    Returns:
+        str: A one-line human-readable summary of the change.
     """
     if isinstance(variant, dict):
         name = str(variant.get("name") or "").strip()

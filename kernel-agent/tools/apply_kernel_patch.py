@@ -42,7 +42,16 @@ _CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
 
 
 def known_target_roots() -> tuple[str, ...]:
-    """Resolved framework roots (importlib/glob when orchestrator is importable)."""
+    """Resolved framework roots (importlib/glob when orchestrator is importable).
+
+    Resolves once and caches the result. Falls back to
+    :data:`_FALLBACK_KNOWN_TARGET_ROOTS` when the orchestrator package is
+    not importable (standalone CLI use).
+
+    Returns:
+        tuple[str, ...]: Absolute path-prefix strings for the recognised
+            reusable framework source roots (aiter / sglang / vllm).
+    """
     global _CACHED_KNOWN_TARGET_ROOTS
     if _CACHED_KNOWN_TARGET_ROOTS is not None:
         return _CACHED_KNOWN_TARGET_ROOTS
@@ -87,7 +96,14 @@ _MN_STATE_FILE_DEFAULT = "/tmp/multi_node_state.json"
 
 
 def _mn_state_path() -> Path:
-    """Resolve where ``inference_optimizer.multi_node`` dropped its state."""
+    """Resolve where ``inference_optimizer.multi_node`` dropped its state.
+
+    Honours the ``$MULTI_NODE_STATE_FILE`` override and falls back to
+    ``/tmp/multi_node_state.json``.
+
+    Returns:
+        Path: The resolved multi-node state-file path.
+    """
     return Path(os.environ.get("MULTI_NODE_STATE_FILE", _MN_STATE_FILE_DEFAULT))
 
 
@@ -106,6 +122,10 @@ def _is_multi_node() -> bool:
     ``create-rayjob``. Missing file / unreadable / ``nodes < 2`` →
     ``False``, so single-node and standalone CLI use of this tool
     keep their pre-multinode behaviour bit-for-bit.
+
+    Returns:
+        bool: ``True`` when the state file reports ``nodes >= 2``, else
+            ``False`` (including missing / unreadable / malformed state).
     """
     state_path = _mn_state_path()
     try:
@@ -125,17 +145,26 @@ def _dispatch_multinode_apply(
     backup_dir_on_pod: str,
     timeout_sec: int = 180,
 ) -> dict[str, Any]:
-    """Run ``python3 -m inference_optimizer.multi_node apply-patch`` to
-    fan the same patch out to every pod (head + workers).
+    """Fan the same patch out to every pod via the multi_node CLI.
 
-    Returns the parsed JSON document produced by
-    kernel_patch_multinode.py — caller checks ``status == "ok"`` and
-    persists ``per_node`` (host → backup_path map) into the
-    apply-kernel-patch manifest so revert can reach the same pods.
+    Runs ``python3 -m inference_optimizer.multi_node apply-patch`` so the head
+    and worker pods all receive the patch.
 
-    Raises RuntimeError on subprocess failure / non-JSON output / pod
-    status != ok so the apply_kernel_patch caller can roll back the
-    sandbox-local copy.
+    Args:
+        target_file (Path): The source file being patched on each pod.
+        patch_path (Path): The patch (full replacement source) file.
+        kernel_id (str): Identifier for the kernel being patched.
+        backup_dir_on_pod (str): Per-pod backup directory for the originals.
+        timeout_sec (int): Subprocess timeout in seconds.
+
+    Returns:
+        dict[str, Any]: The parsed JSON document produced by
+            kernel_patch_multinode.py; the caller checks ``status == "ok"`` and
+            persists ``per_node`` (host → backup_path map) into the manifest.
+
+    Raises:
+        RuntimeError: On subprocess failure, non-JSON output, or pod
+            ``status != "ok"``, so the caller can roll back the sandbox copy.
     """
     cmd = [
         sys.executable, "-m", "inference_optimizer.multi_node",
@@ -176,12 +205,21 @@ def _dispatch_multinode_revert(
     backup_map: dict[str, str],
     timeout_sec: int = 120,
 ) -> dict[str, Any]:
-    """Run ``python3 -m inference_optimizer.multi_node revert-patch`` to
-    restore the original file on every pod that received the apply.
+    """Restore the original file on every pod that received the apply.
 
+    Runs ``python3 -m inference_optimizer.multi_node revert-patch``.
     Best-effort: a partial revert is logged but not raised — the
-    caller (revert_kernel_patch) has already restored the sandbox
+    caller (:func:`revert_kernel_patch`) has already restored the sandbox
     copy, and re-running revert is idempotent on noop_missing_backup.
+
+    Args:
+        target_path (str): The source file path to restore on each pod.
+        backup_map (dict[str, str]): Mapping of hostname to per-pod backup path.
+        timeout_sec (int): Subprocess timeout in seconds.
+
+    Returns:
+        dict[str, Any]: The parsed CLI JSON document when available, otherwise a
+            synthesized ``partial`` status dict with the captured output tails.
     """
     cmd = [
         sys.executable, "-m", "inference_optimizer.multi_node",
@@ -214,23 +252,54 @@ def _dispatch_multinode_revert(
 
 
 def _now() -> str:
-    """Return the current UTC timestamp as an ISO8601 string."""
+    """Return the current UTC timestamp as an ISO8601 string.
+
+    Returns:
+        str: The current UTC time formatted as an ISO8601 string.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_name(value: str) -> str:
-    """Sanitize a filename component to a safe, short identifier."""
+    """Sanitize a filename component to a safe, short identifier.
+
+    Non-alphanumeric characters (other than ``._-``) become underscores and the
+    result is truncated to 80 characters.
+
+    Args:
+        value (str): The raw string to sanitize.
+
+    Returns:
+        str: A filesystem-safe identifier, or ``"kernel"`` when empty.
+    """
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "kernel"
 
 
 def _path_hash(path: Path) -> str:
-    """Return a short, stable hash for ``path`` to disambiguate backups."""
+    """Return a short, stable hash for ``path`` to disambiguate backups.
+
+    Args:
+        path (Path): The path to hash.
+
+    Returns:
+        str: The first 16 hex characters of the SHA-256 of the path string.
+    """
     return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
 
 
 def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
-    """Copy a file into the backup tree and return the manifest entry."""
+    """Copy a file into the backup tree and return the manifest entry.
+
+    Args:
+        path (Path): The file to back up.
+        backup_dir (Path): Root of the backup tree.
+        group (str): Sub-directory grouping (e.g. ``"source"`` / ``"artifacts"``).
+
+    Returns:
+        dict[str, str]: A manifest entry with ``path`` (original) and
+            ``backup_path`` (backup copy) keys.
+    """
     dst = backup_dir / group / f"{_path_hash(path)}_{path.name}"
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, dst)
@@ -238,7 +307,19 @@ def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
 
 
 def _source_text_looks_complete(text: str, suffix: str) -> bool:
-    """Heuristically check that the patch text is a full source file."""
+    """Heuristically check that the patch text is a full source file.
+
+    For Python, requires the text to compile and contain a recognisable
+    top-level marker; for compiled sources, requires a C/C++/HIP marker.
+
+    Args:
+        text (str): The candidate source text.
+        suffix (str): The lower-cased target file suffix (e.g. ``.py``).
+
+    Returns:
+        bool: ``True`` when the text looks like a complete source file of the
+            given suffix, else ``False``.
+    """
     stripped = text.strip()
     if not stripped or "```" in stripped:
         return False
@@ -263,6 +344,22 @@ def _source_text_looks_complete(text: str, suffix: str) -> bool:
 
 
 def _validate_patch_source(patch: Path, target: Path) -> None:
+    """Validate that ``patch`` is a complete drop-in replacement for ``target``.
+
+    Checks that the patch is not a text artifact, that its suffix matches the
+    target's, that it reads as text and looks like a complete source file, that
+    it is compatible with the target (see
+    :func:`_validate_replacement_compatibility`), and that Python patches
+    compile.
+
+    Args:
+        patch (Path): The candidate replacement source file.
+        target (Path): The file that would be replaced.
+
+    Raises:
+        ValueError: If the patch is incompatible, not a complete source file,
+            or not decodable as text.
+    """
     patch_suffix = patch.suffix.lower()
     target_suffix = target.suffix.lower()
     if patch_suffix in TEXT_ARTIFACT_SUFFIXES:
@@ -285,6 +382,17 @@ def _validate_patch_source(patch: Path, target: Path) -> None:
 
 
 def _host_entry_functions(source_text: str) -> set[str]:
+    """Extract public host (non-``__global__``) entry function names.
+
+    Scans for C/C++ free-function definitions with common return types,
+    excluding ``__global__`` kernels, leading-underscore helpers, and ``main``.
+
+    Args:
+        source_text (str): The C/C++/HIP source text to scan.
+
+    Returns:
+        set[str]: The set of discovered host entry-function names.
+    """
     names: set[str] = set()
     pattern = re.compile(
         r"(?m)^\s*(?!__global__)(?:template\s*<[^>]+>\s*)?"
@@ -300,6 +408,20 @@ def _host_entry_functions(source_text: str) -> set[str]:
 
 
 def _validate_replacement_compatibility(patch_text: str, target_text: str, target: Path) -> None:
+    """Guard against patches that break the target's integration contract.
+
+    Rejects patches that introduce standalone PYBIND11/TORCH_LIBRARY
+    registrations absent from the target, drop a required ``namespace aiter``,
+    or omit any host entry function the target exposes.
+
+    Args:
+        patch_text (str): The candidate replacement source text.
+        target_text (str): The current target source text.
+        target (Path): The target path (used in error messages).
+
+    Raises:
+        ValueError: If the patch is incompatible with the target's contract.
+    """
     if "PYBIND11_MODULE" in patch_text and "PYBIND11_MODULE" not in target_text:
         raise ValueError(
             "patch creates a standalone PYBIND11 module but target is a framework source file"
@@ -323,9 +445,27 @@ def _validate_replacement_compatibility(patch_text: str, target_text: str, targe
 
 
 def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
+    """Clear Python / Triton / Inductor caches around a Python patch.
+
+    Removes ``__pycache__`` dirs near the target plus the well-known Triton and
+    torch-inductor cache directories so a re-import recompiles the patched
+    kernel.
+
+    Args:
+        target (Path): The patched Python source file.
+
+    Returns:
+        dict[str, Any]: ``{"status": "ok", "removed": [...]}`` listing the
+            paths that were removed.
+    """
     removed: list[str] = []
 
     def remove_path(path: Path) -> None:
+        """Remove a file or directory, recording success and ignoring errors.
+
+        Args:
+            path (Path): The file or directory to remove.
+        """
         try:
             if path.is_dir():
                 shutil.rmtree(path)
@@ -386,6 +526,12 @@ def _target_is_in_aiter_csrc(target_file: Path) -> bool:
     the dist-packages layout (``/usr/local/lib/python3.10/dist-packages/aiter/
     csrc/...``) — in both cases the relative segment ``aiter/csrc/`` appears
     verbatim in the absolute path.
+
+    Args:
+        target_file (Path): The file path to test.
+
+    Returns:
+        bool: ``True`` when ``aiter/csrc/`` appears in the path, else ``False``.
     """
     return _AITER_CSRC_MARKER in str(target_file).replace(os.sep, "/")
 
@@ -401,6 +547,10 @@ def _aiter_jit_build_dir() -> Path | None:
     Returns ``None`` when aiter is not importable in the current interpreter
     (the kernel-agent sandbox container always has aiter available; this
     fallback exists so unit tests on a host without aiter still pass).
+
+    Returns:
+        Path | None: The ``<aiter>/jit/build`` path, or ``None`` when aiter is
+            not importable in the current interpreter.
     """
     try:
         spec = importlib.util.find_spec("aiter")
@@ -435,6 +585,17 @@ def _invalidate_aiter_jit_build(
 
     ``jit_build_dir_override`` is a test-only escape hatch so unit tests can
     point at a synthetic jit/build/ tree without an importable aiter package.
+
+    Args:
+        target_file (Path): The file being patched (gates the aiter/csrc check).
+        backup_dir (Path): Directory into which ``jit/build`` is moved.
+        jit_build_dir_override (Path | None): Test-only override pointing at a
+            synthetic ``jit/build`` directory.
+
+    Returns:
+        dict[str, Any]: A status dict — ``ok`` (with ``src`` / ``backup_path`` /
+            ``moved_at``), ``skipped`` (with ``reason``), or ``failed`` (with
+            ``error``).
     """
     if not _target_is_in_aiter_csrc(target_file):
         return {"status": "skipped", "reason": "target not under aiter/csrc/"}
@@ -484,6 +645,14 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
     Moves the backup back to its original location. If the post-rebuild first
     import already regenerated a fresh jit/build/, that fresh dir is removed
     first so the pre-patch state is restored bit-for-bit (revert semantics).
+
+    Args:
+        jit_build_backup (dict[str, Any]): The backup record produced by
+            :func:`_invalidate_aiter_jit_build`.
+
+    Returns:
+        dict[str, Any]: A status dict — ``ok`` (with ``restored_to``),
+            ``skipped`` (with ``reason``), or ``failed`` (with ``error``).
     """
     if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") != "ok":
         return {"status": "skipped", "reason": "no backup recorded"}
@@ -519,6 +688,27 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
 
 
 def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[str, Any]:
+    """Determine the rebuild strategy for a patch target.
+
+    Matches the target against the known framework roots (aiter / sglang /
+    vllm) to pick the rebuild command and artifact roots, and decides whether
+    the target is a compiled source. Python targets never rebuild.
+
+    Args:
+        target_file (Path): The file being patched.
+        allow_unknown_target (bool): When ``True``, targets outside the known
+            roots are accepted (rooted at the target's parent) instead of
+            raising.
+
+    Returns:
+        dict[str, Any]: A strategy dict with ``compiled`` (bool), ``root``
+            (str), ``rebuild_command`` (list[str]) and ``artifact_roots``
+            (list[Path]).
+
+    Raises:
+        ValueError: When the target is outside the known roots and
+            ``allow_unknown_target`` is ``False``.
+    """
     target = str(target_file)
     lower = target.lower()
     roots = known_target_roots()
@@ -569,6 +759,20 @@ def _discover_artifacts(
     *,
     max_artifacts: int = 400,
 ) -> list[Path]:
+    """Collect compiled-artifact files to back up before a rebuild.
+
+    Includes any explicitly provided artifact paths, then walks each root for
+    files with a compiled-artifact suffix, deduplicating and capping the total.
+
+    Args:
+        roots (Iterable[Path]): Directories to scan recursively for artifacts.
+        explicit_artifact_paths (Iterable[str] | None): Caller-specified
+            artifact files to always include.
+        max_artifacts (int): Maximum number of artifacts to collect.
+
+    Returns:
+        list[Path]: The discovered artifact file paths.
+    """
     seen: set[Path] = set()
     artifacts: list[Path] = []
     for raw in explicit_artifact_paths or []:
@@ -589,6 +793,20 @@ def _discover_artifacts(
 
 
 def _run_rebuild(command: list[str], cwd: Path, timeout_sec: int) -> dict[str, Any]:
+    """Run a rebuild command and capture its result.
+
+    The subprocess runs with ``/opt/venv/bin`` prepended to ``PATH``.
+
+    Args:
+        command (list[str]): The rebuild command argv; empty means skip.
+        cwd (Path): Working directory for the rebuild.
+        timeout_sec (int): Subprocess timeout in seconds.
+
+    Returns:
+        dict[str, Any]: A result dict with ``status`` (``ok`` / ``failed`` /
+            ``skipped``), ``returncode``, captured ``stdout_tail`` /
+            ``stderr_tail``, and the ``command`` / ``cwd`` used.
+    """
     if not command:
         return {"status": "skipped", "reason": "no rebuild command"}
     proc = subprocess.run(
@@ -610,6 +828,21 @@ def _run_rebuild(command: list[str], cwd: Path, timeout_sec: int) -> dict[str, A
 
 
 def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
+    """Revert a previously applied kernel patch from its manifest.
+
+    Restores backed-up artifacts and source, clears Python caches when the
+    target is Python, restores any aiter ``jit/build`` backup, and fans out a
+    best-effort revert to multi-node pods. The manifest is updated in place
+    with the reverted status.
+
+    Args:
+        manifest_path (str | Path): Path to the apply manifest JSON file.
+
+    Returns:
+        dict[str, Any]: A result dict with ``status``, ``manifest_path``,
+            ``restored_paths``, ``reverted_at`` and, when fan-out ran, a
+            ``multinode_revert`` block.
+    """
     manifest_file = Path(manifest_path)
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
     restored: list[str] = []
@@ -699,6 +932,33 @@ def apply_kernel_patch(
     allow_unknown_target: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
+    """Apply an optimized kernel file with backup, rebuild, and fan-out.
+
+    Validates the patch against the target, backs up the source (and compiled
+    artifacts), writes a manifest, copies the patch into place, clears caches,
+    fans the patch out to multi-node pods when active, and rebuilds compiled
+    targets — reverting automatically on rebuild failure.
+
+    Args:
+        patch_path (str | Path): The replacement source file.
+        target_file (str | Path): The file to replace.
+        backup_root (str | Path): Root directory for backups and the manifest.
+        kernel_id (str): Identifier for the kernel being patched.
+        artifact_paths (Iterable[str] | None): Explicit compiled artifacts to
+            back up in addition to discovered ones.
+        rebuild_command (list[str] | str | None): Override rebuild command; a
+            string is run via ``bash -lc``.
+        rebuild_timeout_sec (int): Rebuild subprocess timeout in seconds.
+        skip_rebuild (bool): When ``True``, skip the rebuild step.
+        allow_unknown_target (bool): Allow targets outside the known roots.
+        dry_run (bool): Prepare backups/manifest only, without applying.
+
+    Returns:
+        dict[str, Any]: A result dict with ``status`` and, on success, the
+            manifest path, target, backup dir, compiled flag, artifact count,
+            cache-clear / rebuild / jit-build records, and an optional
+            ``multinode`` block.
+    """
     patch = Path(patch_path).resolve()
     target = Path(target_file).resolve()
     if not patch.is_file():
@@ -901,6 +1161,15 @@ def apply_kernel_patch(
 
 
 def main() -> int:
+    """Run the apply/revert CLI and print the JSON result.
+
+    Parses ``apply`` / ``revert`` subcommands, dispatches to
+    :func:`apply_kernel_patch` or :func:`revert_kernel_patch`, and prints the
+    result document.
+
+    Returns:
+        int: ``0`` when the result status is ``"ok"``, otherwise ``1``.
+    """
     parser = argparse.ArgumentParser(description="Apply or revert a kernel patch")
     sub = parser.add_subparsers(dest="command", required=True)
     apply_p = sub.add_parser("apply")

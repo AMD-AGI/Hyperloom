@@ -106,7 +106,15 @@ DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
 # ---------------------------------------------------------------------------
 def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
     """``git rev-parse HEAD`` in ``framework_root``. Returns
-    ``(sha, stderr)``; sha is None when the call fails."""
+    ``(sha, stderr)``; sha is None when the call fails.
+
+    Args:
+        framework_root (Path): The git working tree to query.
+
+    Returns:
+        tuple[str | None, str]: ``(sha, stderr)`` where ``sha`` is the HEAD
+            commit hash, or ``None`` with an error string on failure.
+    """
     cmd = ["git", "-C", str(framework_root), "rev-parse", "HEAD"]
     try:
         cp = subprocess.run(
@@ -124,7 +132,16 @@ def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
     followed by ``git clean -fd`` to also discard untracked files added
     by the candidate (e.g. patches that create new files). Used as the
     REVERT path so a failed candidate cannot leak partial state into
-    the next candidate's baseline."""
+    the next candidate's baseline.
+
+    Args:
+        framework_root (Path): The git working tree to reset.
+        sha (str): The commit hash to reset back to.
+
+    Returns:
+        tuple[bool, str]: ``(ok, stderr)`` where ``ok`` is True on a clean
+            reset + clean, and ``stderr`` carries the failure reason otherwise.
+    """
     cmd = ["git", "-C", str(framework_root), "reset", "--hard", sha]
     try:
         cp = subprocess.run(
@@ -152,7 +169,16 @@ def _git_commit_keep(
     """``git commit -am <message>`` with hyperloom identity, then return
     the new HEAD sha. Identity is forced via ``-c`` so callers don't need
     to depend on whatever user.email is configured in the framework_root
-    git repo (Magpie clones may not have one)."""
+    git repo (Magpie clones may not have one).
+
+    Args:
+        framework_root (Path): The git working tree to commit in.
+        message (str): The commit message.
+
+    Returns:
+        tuple[str | None, str]: ``(new_sha, stderr)`` where ``new_sha`` is the
+            committed HEAD hash, or ``None`` with an error string on failure.
+    """
     cmd = [
         "git",
         "-c", "user.email=framework-pr@hyperloom.local",
@@ -176,7 +202,15 @@ def _git_commit_keep(
 
 def _candidate_slug(candidate: dict[str, Any]) -> str:
     """Short, filesystem-safe identifier for the candidate (for variant
-    names + workspace paths). Prefer ``repo/pr_number`` when present."""
+    names + workspace paths). Prefer ``repo/pr_number`` when present.
+
+    Args:
+        candidate (dict[str, Any]): The PR metadata row (``repo``,
+            ``pr_number``, ``ref`` ...).
+
+    Returns:
+        str: A filesystem-safe slug derived from the candidate fields.
+    """
     repo = str(candidate.get("repo") or "").replace("/", "-")
     pr = candidate.get("pr_number")
     if repo and pr not in (None, "", 0):
@@ -194,7 +228,18 @@ def _fetch_diff_to_path(
     ``(ok, stderr)``. Uses curl rather than aiohttp because the
     integrate_patch path is also subprocess-based and we want consistent
     behaviour for restricted-network sessions (curl honours the same
-    HTTPS_PROXY plumbing as the rest of the runtime)."""
+    HTTPS_PROXY plumbing as the rest of the runtime).
+
+    Args:
+        diff_url (str): The unified-diff URL to download.
+        dest (Path): The ``.patch`` file path to write to.
+        timeout_sec (float): The curl ``--max-time`` budget in seconds.
+
+    Returns:
+        tuple[bool, str]: ``(ok, stderr)`` where ``ok`` is True when a
+            non-empty file was written, ``stderr`` carries the reason on
+            failure.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "curl", "-fsSL", "--retry", "2", "--max-time",
@@ -218,7 +263,16 @@ def _run_git(
     args: list[str], *, timeout: float = 120.0,
 ) -> tuple[bool, str, str]:
     """Run ``git <args>`` capturing output. Returns ``(ok, stdout, stderr)``.
-    Never raises (spawn / timeout failures map to ``(False, "", reason)``)."""
+    Never raises (spawn / timeout failures map to ``(False, "", reason)``).
+
+    Args:
+        args (list[str]): The git arguments (without the leading ``git``).
+        timeout (float): The subprocess timeout in seconds.
+
+    Returns:
+        tuple[bool, str, str]: ``(ok, stdout, stderr)`` where ``ok`` reflects a
+            zero return code.
+    """
     try:
         cp = subprocess.run(
             ["git", *args],
@@ -255,6 +309,18 @@ def _materialize_pr_diff_via_worktree(
       1. ``candidate.head_sha`` (explicit sha from discovery).
       2. ``candidate.ref`` (e.g. a branch / tag the origin already has).
       3. ``refs/pull/<pr_number>/head`` (GitHub PR head ref).
+
+    Args:
+        framework_root (Path): The git repo (with a fetchable origin) the PR
+            head is fetched into.
+        candidate (dict[str, Any]): The PR metadata row used to resolve the
+            head ref (``head_sha`` / ``ref`` / ``pr_number``).
+        dest (Path): The path the extracted unified diff is written to.
+        timeout_sec (float): Per-git-step timeout budget in seconds.
+
+    Returns:
+        tuple[bool, str]: ``(ok, err)`` where ``ok`` is True when a non-empty
+            diff was written, ``err`` carries the failure reason otherwise.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     root = str(framework_root)
@@ -356,6 +422,20 @@ class FrameworkPrExecutor:
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
         diff_fetch_timeout_sec: float = DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     ):
+        """Initialize the executor with session + bench defaults.
+
+        Args:
+            session_dir (Path | str | None): The session directory used to
+                root per-task workspaces; resolved from the environment when
+                ``None``.
+            default_config_path (Path | str | None): Default baseline config
+                path used when ``params.config_path`` is absent.
+            variant_timeout_sec (int): Default per-variant bench timeout.
+            keep_threshold_pct (float): Default throughput delta (percent)
+                required to KEEP a candidate.
+            diff_fetch_timeout_sec (float): Default timeout for fetching /
+                materializing the candidate diff.
+        """
         self.session_dir = (
             Path(session_dir) if session_dir else _resolve_session_dir()
         )
@@ -367,6 +447,24 @@ class FrameworkPrExecutor:
         self.diff_fetch_timeout_sec = float(diff_fetch_timeout_sec)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Fetch, apply, bench and KEEP/REVERT one approved PR candidate.
+
+        Resolves the patch source (explicit paths, checkout-head worktree
+        diff, or curled ``diff_url``), snapshots the live tree HEAD, applies
+        the diff, optionally benches it via :meth:`_bench_candidate`, and
+        commits (KEEP) or ``git reset --hard`` reverts based on the throughput
+        delta and accuracy gate.
+
+        Args:
+            ctx: The runner context carrying ``task.params`` (the ``candidate``
+                row and bench knobs) and ``extra`` (workspace / shared_state).
+
+        Returns:
+            dict[str, Any]: A result dict whose ``status`` is one of ``kept``,
+                ``reverted``, ``apply_failed``, ``no_patch``, ``fetch_failed``,
+                ``applied_no_bench`` or ``failed``, plus throughput / accuracy
+                / patch bookkeeping fields.
+        """
         params = dict(ctx.task.params or {})
         extra = getattr(ctx, "extra", None) or {}
         candidate = params.get("candidate") or {}
@@ -760,6 +858,16 @@ class FrameworkPrExecutor:
         Returns the list of patches reverted (currently the full
         ``applied`` list when the reset succeeds, empty otherwise) for
         downstream telemetry / result schema compat.
+
+        Args:
+            framework_root (Path | None): The git working tree to reset, or
+                ``None`` (no-op).
+            applied (list[Path]): The patches applied by this candidate.
+            pre_apply_sha (str): The HEAD sha captured before applying.
+
+        Returns:
+            list[Path]: The reverted patches (the full ``applied`` list on a
+                successful reset, otherwise an empty list).
         """
         if framework_root is None or not applied:
             return []
@@ -781,7 +889,22 @@ class FrameworkPrExecutor:
         """Run a 1-variant Magpie bench under the patched server +
         evaluate the accuracy gate. Mirrors
         :meth:`IntegratePatchExecutor._bench_patch` so the gain
-        bookkeeping is identical across the two integration channels."""
+        bookkeeping is identical across the two integration channels.
+
+        Args:
+            params (dict[str, Any]): The task params carrying config / model /
+                bench knobs (``config_path``, ``base_extra_args`` ...).
+            output_root (Path): The per-task workspace bench artifacts root.
+            slug (str): The candidate slug used to name the grid variant.
+
+        Returns:
+            tuple[dict[str, Any], dict[str, Any]]: ``(bench_result,
+                gate_evidence)`` where ``bench_result`` summarizes the single
+                variant and ``gate_evidence`` carries ``accuracy_pass``.
+
+        Raises:
+            RuntimeError: If the resolved baseline config does not exist.
+        """
         config_path = Path(
             params.get("config_path")
             or self.default_config_path

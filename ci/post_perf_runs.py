@@ -97,7 +97,13 @@ def is_complete_session(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     The 935-file d2d10ce6 import already accepted 319 such sessions and they
     are fully valid leaderboard entries.
 
-    Returns (ok, reason_if_rejected).
+    Args:
+        data (Dict[str, Any]): A V2 session breakdown with ``baseline``,
+            ``final``, and ``session`` sub-objects.
+
+    Returns:
+        Tuple[bool, Optional[str]]: ``(True, None)`` when the session is
+        complete, otherwise ``(False, reason)`` describing the rejection.
     """
     baseline = data.get("baseline") or {}
     final = data.get("final") or {}
@@ -123,11 +129,21 @@ def is_complete_session(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
 # ---------------------------------------------------------------------------
 
 def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """
-    Returns (body, error_msg). On error, body is None.
+    """Build the perf_runs POST body from a session breakdown file.
+
+    Accepts bare V2, wrapped V2, legacy V1 flat, and universal-fallback
+    layouts, applies the V2 transform and row extraction, and runs strict
+    client-side validation so no NULL/blank leaderboard columns are posted.
 
     `body` is exactly the JSON document we POST. Keys match the perf_runs
     DTO 1:1 so the server can persist them verbatim.
+
+    Args:
+        path (Path): Path to a ``session_breakdown.json`` file.
+
+    Returns:
+        Tuple[Optional[Dict[str, Any]], Optional[str]]: ``(body, None)`` on
+        success, or ``(None, error_msg)`` when the file is rejected.
     """
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -221,7 +237,20 @@ _RETRIABLE_STATUS = {408, 425, 429, 502, 503, 504}
 
 
 def post_once(endpoint: str, token: str, body: Dict[str, Any], timeout: float) -> Tuple[int, str]:
-    """Single POST. Returns (status_code, response_text)."""
+    """Issue a single POST request to the perf-leaderboard API.
+
+    Low-level connection errors are mapped to status ``599`` so the retry loop
+    can decide whether to retry.
+
+    Args:
+        endpoint (str): Full URL to POST to.
+        token (str): Value for the ``Authorization`` header.
+        body (Dict[str, Any]): JSON-serializable request body.
+        timeout (float): Request timeout in seconds.
+
+    Returns:
+        Tuple[int, str]: The HTTP status code and response text.
+    """
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
@@ -249,7 +278,22 @@ def post_once(endpoint: str, token: str, body: Dict[str, Any], timeout: float) -
 
 def post_with_retry(endpoint: str, token: str, body: Dict[str, Any],
                     timeout: float, max_retries: int) -> Tuple[int, str, int]:
-    """Returns (final_status, body_text, attempts)."""
+    """POST with exponential backoff and full jitter on retriable failures.
+
+    Only statuses in ``_RETRIABLE_STATUS`` (plus the synthetic ``599``) are
+    retried; ``429`` uses a heavier base backoff.
+
+    Args:
+        endpoint (str): Full URL to POST to.
+        token (str): Value for the ``Authorization`` header.
+        body (Dict[str, Any]): JSON-serializable request body.
+        timeout (float): Per-request timeout in seconds.
+        max_retries (int): Maximum number of retries after the first attempt.
+
+    Returns:
+        Tuple[int, str, int]: The final status code, response text, and the
+        number of attempts made.
+    """
     attempt = 0
     while True:
         attempt += 1
@@ -271,6 +315,18 @@ def post_with_retry(endpoint: str, token: str, body: Dict[str, Any],
 # ---------------------------------------------------------------------------
 
 def iter_files(paths: List[str], scan_dir: Optional[str]) -> List[Path]:
+    """Collect unique ``session_breakdown.json`` paths from inputs.
+
+    Directories are scanned recursively; explicit file paths are included
+    as-is. Duplicates (by resolved path) are removed while preserving order.
+
+    Args:
+        paths (List[str]): File or directory paths supplied on the CLI.
+        scan_dir (Optional[str]): Additional directory to scan recursively.
+
+    Returns:
+        List[Path]: De-duplicated list of session breakdown file paths.
+    """
     files: List[Path] = []
     for p in paths:
         pp = Path(p)
@@ -292,6 +348,20 @@ def iter_files(paths: List[str], scan_dir: Optional[str]) -> List[Path]:
 
 def process_file(path: Path, endpoint: str, token: str, timeout: float,
                  max_retries: int, dry_run: bool) -> Dict[str, Any]:
+    """Build, validate, and (optionally) POST a single breakdown file.
+
+    Args:
+        path (Path): Path to a ``session_breakdown.json`` file.
+        endpoint (str): Full URL to POST to.
+        token (str): Value for the ``Authorization`` header.
+        timeout (float): Per-request timeout in seconds.
+        max_retries (int): Maximum number of retries after the first attempt.
+        dry_run (bool): When True, build and validate the body but skip the POST.
+
+    Returns:
+        Dict[str, Any]: A ledger record describing the outcome, including
+        ``ok``, ``status``, and identifying fields or an ``error``.
+    """
     body, err = build_body(path)
     base_record = {
         "path":      str(path),
@@ -322,6 +392,15 @@ def process_file(path: Path, endpoint: str, token: str, timeout: float,
 
 
 def main() -> int:
+    """Parse CLI arguments and upload session breakdown files concurrently.
+
+    Discovers input files, dispatches uploads across a thread pool, appends
+    per-file outcomes to a JSONL ledger, and prints a summary with a status
+    breakdown.
+
+    Returns:
+        int: ``0`` if every file succeeded, otherwise ``1``.
+    """
     ap = argparse.ArgumentParser(
         description="Upload session_breakdown.json files to the perf-leaderboard API.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

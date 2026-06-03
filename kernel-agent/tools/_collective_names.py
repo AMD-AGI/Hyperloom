@@ -47,10 +47,21 @@ _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 def _normalise_kernel_name(name: str) -> str:
     """Lowercase + underscore-delimit *name* so substring tests are stable.
 
+    Folds camelCase boundaries, hyphens, dots, and other non-word
+    characters to single underscores, then strips leading/trailing
+    underscores and lowercases the result.
+
     Examples:
       ``CustomAllReduce``  → ``custom_all_reduce``
       ``rccl.AllGather``   → ``rccl_all_gather``
       ``triton-all-to-all`` → ``triton_all_to_all``
+
+    Args:
+        name (str): Raw kernel name in any casing/delimiter style.
+
+    Returns:
+        str: The normalised lowercase, underscore-delimited form, or
+            an empty string when *name* is falsy.
     """
     if not name:
         return ""
@@ -66,6 +77,15 @@ def kernel_name_implies_multigpu(name: str) -> bool:
     Intended as a fallback for cases where TraceLens did not surface
     ``is_multigpu=True`` / ``num_gpus_recommended >= 2``. The check is
     leaf-name only — it does not chase dispatch wrappers.
+
+    Args:
+        name (str): Kernel name to test. Normalised internally before
+            pattern matching.
+
+    Returns:
+        bool: True if the normalised name matches a collective-op token
+            (all_reduce / all_gather / reduce_scatter / all_to_all /
+            broadcast / NCCL-RCCL prefix); False otherwise.
     """
     norm = _normalise_kernel_name(name)
     if not norm:

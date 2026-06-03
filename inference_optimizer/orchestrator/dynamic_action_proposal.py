@@ -149,6 +149,14 @@ def can_transition(
     Missing source (no prior summary) is treated as creation; only
     ``DISPATCHED`` is a legal first state. Same-status re-writes are
     idempotent.
+
+    Args:
+        from_state (DynamicActionStatus | str | None): Current status,
+            or ``None``/empty for a first write.
+        to_state (DynamicActionStatus | str): Target status.
+
+    Returns:
+        bool: ``True`` when the transition is permitted.
     """
     target = (
         to_state if isinstance(to_state, DynamicActionStatus)
@@ -285,8 +293,17 @@ _DIFF_NORMALISE_DROP_LINES: tuple[re.Pattern[str], ...] = (
 
 
 def _normalise_diff_for_compare(text: str) -> str:
-    """Strip git-only metadata + trailing whitespace, return the
-    canonical form for byte comparison."""
+    """Return a diff's canonical form for byte comparison.
+
+    Strips git-only metadata lines, trailing whitespace, and blank
+    lines so two diffs can be compared on hunk semantics.
+
+    Args:
+        text (str): Raw diff text to normalise.
+
+    Returns:
+        str: The normalised diff body.
+    """
     body = text or ""
     for pat in _DIFF_NORMALISE_DROP_LINES:
         body = pat.sub("", body)
@@ -308,6 +325,12 @@ class ProposalValidationResult:
     detail: str = ""
 
     def to_journal_dict(self) -> dict[str, Any]:
+        """Render the validation result for the runner journal.
+
+        Returns:
+            dict[str, Any]: The ``ok`` flag plus ``reason`` and
+            ``detail`` strings.
+        """
         return {
             "ok": self.ok,
             "reason": self.reason,
@@ -316,6 +339,15 @@ class ProposalValidationResult:
 
 
 def _numeric_claims(text: str) -> list[str]:
+    """Return numeric speedup-claim substrings found in ``text``.
+
+    Args:
+        text (str): Text to scan with the numeric-claim regexes.
+
+    Returns:
+        list[str]: Every matched numeric-claim substring; empty when
+        none match.
+    """
     hits: list[str] = []
     for pattern in _NUMERIC_CLAIM_PATTERNS:
         for match in pattern.finditer(text or ""):
@@ -324,6 +356,15 @@ def _numeric_claims(text: str) -> list[str]:
 
 
 def _coerce_string_list(value: Any) -> list[str]:
+    """Coerce a scalar or iterable into a list of strings.
+
+    Args:
+        value (Any): ``None``, a string, or an iterable of values.
+
+    Returns:
+        list[str]: ``[]`` for ``None``/non-iterables, a single-element
+        list for a string, otherwise each item stringified.
+    """
     if value is None:
         return []
     if isinstance(value, str):
@@ -355,6 +396,18 @@ def validate_proposal(
 
     Empty ``patch_text`` is handled upstream as the ``COMPLETED_EMPTY``
     signal and is not reached here.
+
+    Args:
+        proposal (dict[str, Any]): The ``emit_proposal`` payload.
+        spec_scope_domains (list[str]): Authoritative scope domains; the
+            proposal's domains must be a subset.
+        worktree_cumulative_diff (str | None): ``git diff HEAD`` from the
+            worktree; when non-empty the patch must match it. ``None``
+            disables the check.
+
+    Returns:
+        ProposalValidationResult: ``ok=True`` with the normalised
+        payload, or ``ok=False`` with a stable reason code and detail.
     """
     if not isinstance(proposal, dict):
         return ProposalValidationResult(
@@ -481,7 +534,19 @@ def build_proposal_set_payload(
     """Build the ``proposal_set.json`` body.
 
     ``normalised_proposal=None`` represents the ``COMPLETED_EMPTY``
-    signal (sub-agent declared no feasible cross-domain combo)."""
+    signal (sub-agent declared no feasible cross-domain combo).
+
+    Args:
+        dyn_id (str): Dynamic-action identifier.
+        normalised_proposal (dict[str, Any] | None): Validated proposal,
+            or ``None`` for the empty signal.
+        journal_path (str): Path to the runner journal recorded in the
+            payload.
+
+    Returns:
+        dict[str, Any]: The ``proposal_set.json`` body with the proposal
+        list and ``empty`` flag.
+    """
     if normalised_proposal is None:
         return {
             "dyn_id": str(dyn_id),

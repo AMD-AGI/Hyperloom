@@ -109,6 +109,10 @@ def _resolve_aiter_jit_dir_dynamic() -> list[str]:
 
     Returns an ordered candidate list (``jit`` preferred over
     ``jit/build``). Empty if aiter cannot be located.
+
+    Returns:
+        list[str]: Ordered candidate jit-dir paths (``jit`` before
+            ``jit/build``), or an empty list when aiter is not importable.
     """
     try:
         spec = importlib.util.find_spec("aiter")
@@ -146,6 +150,10 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
         is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
                        None when probe failed.
         probe_status   "found" | "not_found" | "error".
+
+    Returns:
+        dict[str, Any]: Probe info with keys ``path``, ``kernel_count``,
+            ``size_mb``, ``is_cold`` and ``probe_status``.
     """
     info: dict[str, Any] = {
         "path": None,
@@ -214,6 +222,18 @@ class BaselineExecutor:
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
+        """Initialize the baseline executor with launch defaults.
+
+        Args:
+            magpie_python (str | None): Python interpreter used to invoke
+                Magpie; resolved automatically when ``None``.
+            default_config_path (Path | str | None): Default Magpie YAML config
+                path; resolved from ``$FRAMEWORK`` at call time when ``None``.
+            session_dir (Path | str | None): Canonical session root for
+                per-task workspaces; resolved automatically when ``None``.
+            default_timeout_sec (int): Default (warm-start) subprocess timeout.
+            cwd (Path | str): Working directory for the Magpie subprocess.
+        """
         from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
         self.magpie_python = magpie_python or _resolve_magpie_python()
         # None = resolve from $FRAMEWORK at call time. Tests may pass an
@@ -226,7 +246,11 @@ class BaselineExecutor:
         self.cwd = Path(cwd)
 
     def _resolve_default_config(self) -> Path:
-        """Hook for subclasses (ProfileExecutor) to swap the resolver."""
+        """Hook for subclasses (ProfileExecutor) to swap the resolver.
+
+        Returns:
+            Path: The default baseline Magpie YAML config path.
+        """
         return _default_baseline_config()
 
     def _resolve_workspace(self, ctx: RunnerContext, action: str) -> Path:
@@ -239,6 +263,14 @@ class BaselineExecutor:
         3. ``runs_dir(self.session_dir, action, ctx.task.task_id)``
            — direct-instantiation fallback (tests / examples that don't
            wire the Coordinator).
+
+        Args:
+            ctx (RunnerContext): The runner context (``task.params`` /
+                ``extra``) used to resolve the workspace.
+            action (str): The action name used in the fallback runs-dir path.
+
+        Returns:
+            Path: The resolved per-task workspace directory.
         """
         params = ctx.task.params or {}
         if params.get("output_dir"):
@@ -261,6 +293,13 @@ class BaselineExecutor:
 
         Every path emits exactly one log line so the chosen timeout +
         rationale is greppable in ``optimizer_runs/run_*.log``.
+
+        Args:
+            params (dict[str, Any]): The task params, optionally carrying an
+                explicit ``timeout_sec``.
+
+        Returns:
+            int: The resolved subprocess timeout in seconds.
         """
         explicit = params.get("timeout_sec")
         if explicit:
@@ -312,10 +351,40 @@ class BaselineExecutor:
         ProfileExecutor uses this to patch/validate the exact InferenceX
         checkout named by the rendered YAML. Baseline/params/backends keep the
         no-op default so their launch path is unchanged.
+
+        Args:
+            config_path (Path): The materialized YAML config path.
+            output_dir (Path): The per-task workspace directory.
+
+        Returns:
+            dict[str, Any] | None: An early-return result dict to short-circuit
+                the launch, or ``None`` to proceed with the normal launch path.
         """
         return None
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the Magpie baseline benchmark and parse its result.
+
+        Materializes the workload config, resolves the timeout (with cold-start
+        detection), restarts the multi-node server when required, launches
+        Magpie via ``run_with_session_kill``, harvests leaked artifacts, parses
+        ``benchmark_report.json`` and the accuracy eval, and returns a result
+        dict the Coordinator promotes into SharedState.
+
+        Args:
+            ctx (RunnerContext): The runner context carrying ``task.params``
+                (config / model / timeout knobs) and ``extra`` (workspace).
+
+        Returns:
+            dict[str, Any]: On success, a ``status="succeeded"`` dict with
+                throughput / latency / accuracy measurements and artifact
+                paths; on failure, a ``status="failed"`` dict with an
+                ``error_class`` (``timeout``, ``subprocess_nonzero``,
+                ``no_workspace``, ``no_report``, ``invalid_measurement`` ...).
+
+        Raises:
+            FileNotFoundError: If the resolved baseline config does not exist.
+        """
         params = ctx.task.params or {}
         config_path = Path(
             params.get("config_path")

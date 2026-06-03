@@ -104,11 +104,29 @@ MAX_BENCH_WALL_CLOCK_SEC: float = 60.0
 # Helpers
 # ---------------------------------------------------------------------------
 def _error(reason: str, **extra: Any) -> dict[str, Any]:
-    """Standard tool error envelope: ``{ok: False, reason, ...}``."""
+    """Build a standard tool error envelope.
+
+    Args:
+        reason (str): Machine-readable error reason code.
+        **extra (Any): Additional context fields merged into the
+            envelope.
+
+    Returns:
+        dict[str, Any]: ``{"ok": False, "reason": reason, ...extra}``.
+    """
     return {"ok": False, "reason": reason, **extra}
 
 
 def _ok(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a standard tool success envelope.
+
+    Args:
+        payload (dict[str, Any] | None): Optional fields merged into the
+            envelope.
+
+    Returns:
+        dict[str, Any]: ``{"ok": True, ...payload}``.
+    """
     out: dict[str, Any] = {"ok": True}
     if payload:
         out.update(payload)
@@ -121,6 +139,12 @@ def _effective_read_limit(max_bytes: int | None) -> int:
     ``None`` / non-positive falls back to ``MAX_READ_SOURCE_CHARS``;
     any positive value is clamped down to it so a sub-agent can ask
     for a smaller targeted read but never exceed the ceiling.
+
+    Args:
+        max_bytes (int | None): Caller-requested byte limit, or ``None``.
+
+    Returns:
+        int: The effective limit, never above ``MAX_READ_SOURCE_CHARS``.
     """
     try:
         n = int(max_bytes) if max_bytes is not None else 0
@@ -132,6 +156,19 @@ def _effective_read_limit(max_bytes: int | None) -> int:
 
 
 def _path_under(child: Path, parent: Path) -> bool:
+    """Return whether ``child`` resolves to a path inside ``parent``.
+
+    Both paths are resolved first so symlinks and ``..`` cannot escape
+    containment.
+
+    Args:
+        child (Path): Candidate path to test.
+        parent (Path): Directory expected to contain ``child``.
+
+    Returns:
+        bool: ``True`` when ``child`` is under ``parent``; ``False`` on
+        any value or OS error during resolution.
+    """
     try:
         child.resolve().relative_to(parent.resolve())
         return True
@@ -150,6 +187,16 @@ def read_source(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     Failures (path outside roots, missing file, etc.) are returned as
     ``_error`` envelopes so the sub-agent can self-correct without
     aborting the turn loop.
+
+    Args:
+        path (str): Absolute path to read; must lie under a framework
+            source root and contain no globs or ``..`` segments.
+        max_bytes (int | None): Optional smaller read limit, clamped to
+            ``MAX_READ_SOURCE_CHARS``.
+
+    Returns:
+        dict[str, Any]: Success envelope with ``content``, ``truncated``,
+        and ``bytes_returned``, or an ``_error`` envelope.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -198,6 +245,19 @@ def read_session_artifact(
     ``dyn_id`` is the current dispatch's id; reads addressed at any
     *other* ``dynamic_actions/<other_id>/`` directory are denied.
     ``max_bytes`` is clamped to ``MAX_READ_SOURCE_CHARS``.
+
+    Args:
+        session_dir (Path): Root the relative path is resolved against.
+        relative_path (str): Session-relative path; must match an
+            allowed prefix and avoid deny segments and ``..``.
+        dyn_id (str): Current dispatch id used for cross-dyn_id
+            isolation.
+        max_bytes (int | None): Optional smaller read limit, clamped to
+            ``MAX_READ_SOURCE_CHARS``.
+
+    Returns:
+        dict[str, Any]: Success envelope with ``content``, ``truncated``,
+        and ``bytes_returned``, or an ``_error`` envelope.
     """
     raw = str(relative_path or "").strip()
     if not raw:
@@ -266,6 +326,20 @@ async def run_bench(
     Output lands under ``worktree/scratch/bench/<bench_id>/<call_id>/``
     and is destroyed with the worktree (never surfaces in artefacts).
     ``bench_dir_root`` overrides the script discovery root for tests.
+
+    Args:
+        bench_id (str): Registered bench identifier to run.
+        worktree (Path): Worktree the bench script executes inside.
+        call_id (str): Per-call identifier used in the scratch path.
+        params (dict[str, Any] | None): Bench parameters passed via the
+            ``DYNAMIC_BENCH_PARAMS_JSON`` env var.
+        bench_dir_root (Path | None): Override for the bench-script
+            discovery root (tests); defaults to the package ``benches/``.
+
+    Returns:
+        dict[str, Any]: Success envelope with exit code and stdout/stderr
+        tails, or an ``_error`` envelope (disabled, unknown bench,
+        missing script, spawn failure, or timeout).
     """
     if not BENCH_TOOL_ENABLED_V1:
         return _error(
@@ -344,8 +418,21 @@ _PATCH_PATH_RE = re.compile(r"^(?:---|\+\+\+) (?:a|b)/(?P<path>.+)$", re.M)
 def apply_patch_in_worktree(
     worktree: Path, patch_text: str,
 ) -> dict[str, Any]:
-    """Try ``git apply`` inside the worktree (self-check). The patch is
-    not committed; the runner resets the worktree on terminate."""
+    """Try ``git apply`` inside the worktree (self-check).
+
+    Runs ``git apply --check`` then a real ``git apply``. The patch is
+    not committed; the runner resets the worktree on terminate.
+
+    Args:
+        worktree (Path): Worktree the patch is applied inside.
+        patch_text (str): Unified diff text to apply; paths must not
+            escape the worktree.
+
+    Returns:
+        dict[str, Any]: ``_ok({"applied": True})`` on success, or an
+        ``_error`` envelope (empty patch, missing worktree, path escape,
+        spawn failure, rejection, or timeout).
+    """
     if not patch_text or not patch_text.strip():
         return _error("empty_patch")
     worktree = Path(worktree)
@@ -399,6 +486,13 @@ def capture_worktree_cumulative_diff(worktree: Path) -> str | None:
     * ``<diff>`` — uncommitted-change diff.
     * ``None``   — git failure / not a repo; callers skip the
                    cumulative-diff check rather than aborting.
+
+    Args:
+        worktree (Path): Worktree to diff against ``HEAD``.
+
+    Returns:
+        str | None: The diff text (``""`` when clean), or ``None`` on a
+        git failure or when the path is not a repo.
     """
     worktree = Path(worktree)
     if not worktree.is_dir():
@@ -416,7 +510,15 @@ def capture_worktree_cumulative_diff(worktree: Path) -> str | None:
 
 
 def reset_worktree(worktree: Path) -> None:
-    """Discard uncommitted changes + untracked files in ``worktree``."""
+    """Discard uncommitted changes and untracked files in a worktree.
+
+    Runs ``git reset --hard`` followed by ``git clean -fd``,
+    swallowing missing-git and timeout errors. No-op when ``worktree``
+    is not a directory.
+
+    Args:
+        worktree (Path): Worktree to reset.
+    """
     worktree = Path(worktree)
     if not worktree.is_dir():
         return
