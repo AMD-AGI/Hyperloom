@@ -1187,7 +1187,7 @@ def _run_magpie(
 
     env = os.environ.copy()
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-    magpie_dir = os.environ.get("MAGPIE_DIR", "")
+    magpie_dir = os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or ""
     if magpie_dir:
         env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
 
