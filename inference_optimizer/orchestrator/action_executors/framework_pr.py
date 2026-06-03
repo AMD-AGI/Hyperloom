@@ -149,16 +149,30 @@ def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
 def _git_commit_keep(
     framework_root: Path, message: str,
 ) -> tuple[str | None, str]:
-    """``git commit -am <message>`` with hyperloom identity, then return
-    the new HEAD sha. Identity is forced via ``-c`` so callers don't need
-    to depend on whatever user.email is configured in the framework_root
-    git repo (Magpie clones may not have one)."""
+    """``git add -A && git commit -m <message>`` with hyperloom identity,
+    then return the new HEAD sha. ``add -A`` (not ``commit -am``) is used
+    so a PR that adds *new* files is captured in the KEEP commit — ``-am``
+    only stages already-tracked modifications, which would either leave a
+    new file untracked in the worktree (polluting the next candidate's
+    baseline) or fail outright for an add-only PR. Identity is forced via
+    ``-c`` so callers don't need to depend on whatever user.email is
+    configured in the framework_root git repo (Magpie clones may not have
+    one)."""
+    add = ["git", "-C", str(framework_root), "add", "-A"]
+    try:
+        cp_add = subprocess.run(
+            add, capture_output=True, text=True, timeout=60.0, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return None, f"git add -A spawn failed: {exc!r}"
+    if cp_add.returncode != 0:
+        return None, cp_add.stderr.strip()
     cmd = [
         "git",
         "-c", "user.email=framework-pr@hyperloom.local",
         "-c", "user.name=hyperloom framework_pr",
         "-C", str(framework_root),
-        "commit", "-am", message,
+        "commit", "-m", message,
     ]
     try:
         cp = subprocess.run(
@@ -229,6 +243,62 @@ def _run_git(
     if cp.returncode != 0:
         return False, cp.stdout or "", (cp.stderr or "").strip()
     return True, cp.stdout or "", cp.stderr or ""
+
+
+def _normalize_repo_id(url_or_slug: str) -> str:
+    """Reduce a repo URL or ``owner/name`` slug to a canonical
+    ``owner/name`` lowercase token for same-repo comparison. Tolerates
+    ``https://github.com/Owner/Name.git``, ``git@github.com:Owner/Name``,
+    and a bare ``Owner/Name``."""
+    s = (url_or_slug or "").strip().lower()
+    if not s:
+        return ""
+    s = s.rstrip("/")
+    if s.endswith(".git"):
+        s = s[:-4]
+    # Strip scheme / host so only the trailing owner/name remains.
+    for sep in ("github.com/", "github.com:"):
+        if sep in s:
+            s = s.split(sep, 1)[1]
+            break
+    parts = [p for p in s.split("/") if p]
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return s
+
+
+def _candidate_is_same_repo(
+    candidate: dict[str, Any], framework_root: Path,
+) -> bool:
+    """True unless we can POSITIVELY prove the candidate lives in a
+    different repo than the live framework_root's origin (in which case
+    checkout-head's ``git fetch origin`` would resolve the wrong ref).
+
+    Fails OPEN (returns True) whenever the comparison is inconclusive:
+    no candidate repo, unreadable origin, or an origin that is not a
+    GitHub-style ``owner/name`` URL (e.g. a local-path clone). The guard
+    only fires when BOTH sides yield an ``owner/name`` token and they
+    differ — so a normal single-repo session is never downgraded."""
+    cand_repo = _normalize_repo_id(
+        str(candidate.get("repo") or candidate.get("discovered_repo_url") or "")
+    )
+    # A candidate repo token without an owner/name shape can't be compared.
+    if not cand_repo or "/" not in cand_repo:
+        return True
+    ok, out, _err = _run_git(
+        ["-C", str(framework_root), "remote", "get-url", "origin"],
+        timeout=30.0,
+    )
+    if not ok or not out.strip():
+        return True
+    origin_raw = out.strip()
+    # Only a GitHub-style origin gives an owner/name token directly
+    # comparable to the candidate's ``repo`` slug. A local-path / mirror
+    # / non-GitHub origin is inconclusive → fail open (don't downgrade a
+    # legitimate same-repo session whose clone uses a local path).
+    if "github.com" not in origin_raw.lower():
+        return True
+    return _normalize_repo_id(origin_raw) == cand_repo
 
 
 def _materialize_pr_diff_via_worktree(
@@ -475,6 +545,21 @@ class FrameworkPrExecutor:
             use_checkout_head = explicit_checkout or (
                 not diff_url and has_checkout_ref
             )
+            # Same-repo guard: checkout-head fetches the candidate's ref
+            # from the LIVE framework_root's origin, so it only works when
+            # the PR lives in that same repo. A cross-repo candidate (e.g.
+            # a ROCm/vllm PR while the live tree is sglang) would fetch the
+            # wrong ref, so disable checkout-head and rely on diff_url.
+            if use_checkout_head and not _candidate_is_same_repo(
+                candidate, framework_root,
+            ):
+                log.info(
+                    "framework_pr: candidate repo %r differs from live "
+                    "framework_root origin; disabling checkout-head, "
+                    "using diff_url",
+                    candidate.get("repo") or candidate.get("discovered_repo_url"),
+                )
+                use_checkout_head = False
             if not diff_url and not use_checkout_head:
                 # No served diff and nothing to check out → genuine
                 # no-patch (preserves the pre-checkout-head contract).
@@ -602,6 +687,7 @@ class FrameworkPrExecutor:
                 "batch_id": batch_id,
                 "patches_applied": [str(p) for p in applied],
                 "patches_reverted": [],
+                "patch_source_mode": patch_source_mode,
                 "reason": "apply_only=True; benchmark skipped",
                 "workspace": str(output_root),
             }
