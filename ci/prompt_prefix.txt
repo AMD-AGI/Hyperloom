@@ -78,3 +78,8 @@ Then run the skill at $HYPERLOOM_SOURCE_DIR/inference_optimizer/SKILL.md from
 that directory (cd "$HYPERLOOM_SOURCE_DIR").
 
   export CORTEX_KB_URL=https://global.primus-safe.amd.com/knowledge-base
+
+SAFETY:
+- NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
+- NEVER run `kill -9 $(ps aux | grep ...)` — this kills the sandbox executor itself.
+- Per-bash timeouts must be <= 120s; use short polling loops rather than one long blocking call.
