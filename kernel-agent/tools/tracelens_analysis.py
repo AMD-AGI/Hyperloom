@@ -9,10 +9,8 @@ local validation without requiring TraceLens to be installed.
 from __future__ import annotations
 
 import argparse
-import ast
 import asyncio
 import functools
-import glob
 import gzip
 import json
 import os
@@ -20,6 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -655,15 +654,61 @@ def extract_source_file(event: dict[str, Any]) -> str:
     return ""
 
 
+_FLYDSL_SOURCE_MARKERS = (
+    "import flydsl",
+    "from flydsl",
+    "@flyc.kernel",
+    "@flyc.jit",
+    "flydsl.compiler",
+    "flydsl.expr",
+)
+_FLYDSL_SCAN_BYTES = 4096
+
+
+def _looks_like_flydsl_source(source_file: str) -> bool:
+    """Return True when ``source_file`` is a FlyDSL kernel source.
+
+    Detection is content-based: FlyDSL kernels are plain ``.py`` files
+    so neither extension nor path is reliable. Sniff the first 4 KiB
+    for FlyDSL import / decorator markers — same signals GEAK's
+    ``task_generator._infer_kernel_type`` uses upstream.
+    """
+    if not source_file or not source_file.endswith(".py"):
+        return False
+    try:
+        with open(source_file, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(_FLYDSL_SCAN_BYTES)
+    except OSError:
+        return False
+    return any(marker in head for marker in _FLYDSL_SOURCE_MARKERS)
+
+
+_FLYDSL_PSEUDO_OP_NAME_MARKERS = (
+    "pseudo_op::moe_flydsl_",
+    "pseudo_op::flydsl_",
+)
+
+
 def source_type_for(name: str, source_file: str) -> str:
     lower_name = name.lower()
     lower_file = source_file.lower()
+    # PR #668 (TraceLens) injects ``pseudo_op::moe_flydsl_stage1`` /
+    # ``pseudo_op::moe_flydsl_stage2`` above ``aiter::fused_moe_`` events
+    # whose subtree contains FlyDSL stage markers. The pseudo-op carries
+    # no source_file (it is synthetic) so content sniffing returns
+    # ``unknown``. Match the upstream pseudo-op name prefix directly so
+    # the candidate gets ``source_type=flydsl`` without needing a
+    # resolvable .py path.
+    if any(marker in lower_name for marker in _FLYDSL_PSEUDO_OP_NAME_MARKERS):
+        return "flydsl"
     if is_runtime_generated_kernel(name, source_file):
         return "runtime_generated"
     if source_file.endswith((".cu", ".cuh", ".hip", ".cpp", ".h", ".hpp")):
         return "hip_cpp"
     if "triton" in lower_name and source_file.endswith(".py"):
         return "triton"
+    if _looks_like_flydsl_source(source_file):
+        return "flydsl"
     if source_file.endswith(".py"):
         return "python"
     if "hipblas" in lower_name or "rocblas" in lower_name:
@@ -685,47 +730,34 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-_REUSABLE_SOURCE_ROOTS = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    "/opt/venv/lib/python3.12/site-packages/aiter/",
-    "/opt/venv/lib/python3.12/site-packages/sglang/",
-    "/opt/venv/lib/python3.12/site-packages/vllm/",
-    # Production vLLM wheel install layout (system dist-packages).
-    # Required since vLLM in the current image ships under
-    # ``/usr/local/lib/python3.12/dist-packages/vllm/`` rather than the
-    # editable ``/sgl-workspace/vllm/`` checkout the legacy entries
-    # assumed. The python3.10 fallback covers older images where the
-    # interpreter has not yet been bumped.
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-    # atom layout. The filesystem path is ``/app/ATOM/atom/`` but
-    # ``is_runtime_generated_kernel`` lowercases inputs before substring
-    # matching, so the prefix below is stored lowercase to match. Keep
-    # in sync with ``inference_optimizer/orchestrator/
-    # kernel_request_handlers.py`` ``_REUSABLE_SOURCE_ROOTS`` — both
-    # lists feed the same reusable-kernel classifier.
-    "/app/atom/atom/",
-    "/opt/venv/lib/python3.10/site-packages/atom/",
-    "/opt/venv/lib/python3.12/site-packages/atom/",
-    "/usr/local/lib/python3.12/dist-packages/atom/",
-    "/usr/local/lib/python3.10/dist-packages/atom/",
-    # aiter ships its device sources (.cu/.cuh) in the sibling ``aiter_meta``
-    # package (``<...>/aiter_meta/csrc/``), NOT under ``aiter/`` — so the
-    # ``aiter/`` entries above never match a resolved device source.
-    # ``_reusable_roots()`` also adds aiter's own ``AITER_CSRC_DIR`` at
-    # runtime; this static substring covers the common wheel layout when
-    # aiter cannot be imported for the dynamic probe.
-    "/aiter_meta/csrc/",
-)
+@functools.lru_cache(maxsize=1)
+def _framework_patch_roots() -> tuple[str, ...]:
+    """Framework install roots (shared with PolicyGate / apply_kernel_patch).
+
+    Sourced from ``framework_paths.resolve_patch_target_roots`` (importlib +
+    glob discovery + static fallbacks, incl. atom). Callers below lower-case
+    the source path before the substring check, so we also emit a lower-case
+    variant of every root (``/app/ATOM/atom/`` -> ``/app/atom/atom/``) to keep
+    the case-insensitive match working.
+    """
+    try:
+        from inference_optimizer.orchestrator.framework_paths import (
+            resolve_patch_target_roots,
+        )
+
+        roots = resolve_patch_target_roots()
+    except ImportError:
+        from apply_kernel_patch import known_target_roots
+
+        roots = known_target_roots()
+    out: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        for variant in (root, root.lower()):
+            if variant and variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    return tuple(out)
 
 
 @functools.lru_cache(maxsize=1)
@@ -741,14 +773,38 @@ def _aiter_csrc_root() -> str:
     return (raw.rstrip("/") + "/") if raw else ""
 
 
+def _flydsl_reusable_roots() -> tuple[str, ...]:
+    """FlyDSL kernel checkout root(s) for PR #668 moe_flydsl pseudo-ops.
+
+    The real rewritable source for ``pseudo_op::moe_flydsl_*`` lives under
+    ``$DSL2_ROOT/kernels/`` (e.g. moe_gemm_2stage.py). The dynamic
+    framework-root discovery does not know about the FlyDSL checkout, so
+    without this the candidate is rejected "source not under a reusable
+    framework root" and never reaches GEAK. Lower-cased because
+    classify_patchability matches against ``lower_file``. ``$DSL2_ROOT`` /
+    ``$FLYDSL_ROOT`` take precedence; the WekaFS checkout is the default.
+    """
+    out: list[str] = []
+    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
+        val = (os.environ.get(env_key, "") or "").strip()
+        if val:
+            out.append((val.rstrip("/") + "/").lower())
+    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+        if default not in out:
+            out.append(default)
+    return tuple(out)
+
+
 def _reusable_roots() -> tuple[str, ...]:
-    """Static reusable roots plus aiter's own (dynamic) csrc root, so a device
-    source resolved via aiter's build registry counts as reusable regardless
-    of where the wheel placed ``aiter_meta``."""
+    """Discovered framework roots + aiter csrc + FlyDSL checkout (dynamic)."""
+    roots = _framework_patch_roots()
     csrc = _aiter_csrc_root()
-    if csrc and csrc not in _REUSABLE_SOURCE_ROOTS:
-        return _REUSABLE_SOURCE_ROOTS + (csrc,)
-    return _REUSABLE_SOURCE_ROOTS
+    if csrc and csrc not in roots:
+        roots = roots + (csrc,)
+    for fly in _flydsl_reusable_roots():
+        if fly not in roots:
+            roots = roots + (fly,)
+    return roots
 # Kernel-name substrings that mark an operation as non-patchable regardless
 # of source-file resolution: vendor BLAS routines, RCCL/NCCL collectives,
 # raw memcpy/copy ops, and PyTorch native copy. Folded from the feature
@@ -838,9 +894,9 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"source not under a reusable framework root: {source_file}"
         )
     source_type = candidate.get("source_type")
-    if source_type not in {"hip_cpp", "triton", "python"}:
+    if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (
-            f"source_type={source_type!r} not in {{hip_cpp, triton, python}}"
+            f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}"
         )
     return True, ""
 
@@ -1272,82 +1328,6 @@ _AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
 _AITER_FALLBACK_REPO = "/sgl-workspace/aiter"
 
 
-@functools.lru_cache(maxsize=1)
-def _aiter_compile_ops_index() -> dict[str, str]:
-    """Map ``{op_function_name: @compile_ops module name}`` by scanning the
-    installed aiter package's ``@compile_ops("module_...")`` decorators.
-
-    This is the table-free replacement for :data:`_AITER_COMPILE_OPS_PROMOTIONS`:
-    aiter itself is the source of truth for which kernel maps to which JIT
-    module, and ``optCompilerConfig.json`` (read via ``get_args_of_build``)
-    maps that module to its device ``.cu`` sources. Cached once per process;
-    empty when aiter is unavailable."""
-    try:
-        import aiter.jit.core as _jc  # type: ignore
-    except Exception:
-        return {}
-    try:
-        aiter_root = os.path.dirname(os.path.dirname(_jc.__file__))
-    except Exception:
-        return {}
-    index: dict[str, str] = {}
-    for path in glob.glob(os.path.join(aiter_root, "**", "*.py"), recursive=True):
-        try:
-            tree = ast.parse(open(path, encoding="utf-8", errors="replace").read())
-        except Exception:
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for dec in node.decorator_list:
-                if (isinstance(dec, ast.Call)
-                        and getattr(dec.func, "id", None) == "compile_ops"
-                        and dec.args
-                        and isinstance(dec.args[0], ast.Constant)
-                        and isinstance(dec.args[0].value, str)):
-                    index.setdefault(node.name, dec.args[0].value)
-    return index
-
-
-def resolve_aiter_source_from_name(kernel_name: str) -> str:
-    """Resolve an aiter kernel op name to its device ``.cu`` via aiter's OWN
-    build registry — no hardcoded per-kernel table.
-
-    Pipeline: ``op name`` → ``@compile_ops`` module (decorator scan, cached) →
-    ``aiter.jit.core.get_args_of_build(module)['srcs']`` (aiter resolves the
-    ``{AITER_CSRC_DIR}/...`` paths itself) → first existing non-pybind device
-    source. Returns ``""`` when the op is not an aiter ``@compile_ops`` kernel
-    or aiter cannot resolve it (callers then keep their existing signal).
-
-    Unlike :func:`upgrade_aiter_compile_ops_launcher`, this resolves purely
-    from the op NAME, so it also works when the trace carried no
-    ``source_file`` at all (e.g. HIP-graph-captured decode kernels)."""
-    if not kernel_name:
-        return ""
-    op = kernel_name.split("(")[0].split("<")[0].strip()
-    if "::" in op:
-        op = op.split("::")[-1]
-    module = _aiter_compile_ops_index().get(op)
-    if not module:
-        return ""
-    try:
-        import aiter.jit.core as _jc  # type: ignore
-        srcs = _jc.get_args_of_build(module).get("srcs") or []
-    except Exception:
-        return ""
-    device_exts = (".cu", ".cuh", ".hip", ".cpp", ".cc")
-    # Prefer the real device translation unit (skip the pybind glue TU).
-    for src in srcs:
-        if (isinstance(src, str) and "/pybind/" not in src.replace(os.sep, "/")
-                and src.endswith(device_exts) and os.path.isfile(src)):
-            return src
-    # Fall back to any existing listed source so the caller still gets a signal.
-    for src in srcs:
-        if isinstance(src, str) and os.path.isfile(src):
-            return src
-    return ""
-
-
 def upgrade_aiter_compile_ops_launcher(
     source_file: str, kernel_name: str, kernel_repo: str,
 ) -> str:
@@ -1508,9 +1488,16 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
     cat = (candidate.get("tracelens_category") or "").strip()
     if cat:
         return normalize_upstream_category(cat)
+    if candidate.get("source_type") == "flydsl":
+        return "FlyDSL"
     name = str(candidate.get("name") or "").lower()
     if any(t in name for t in ("gemm", "matmul", "rocblas", "hipblas",
-                                "cijk", "sgemm", "hgemm")):
+                                "cijk", "sgemm", "hgemm",
+                                # PyTorch op-name variants the priority-1
+                                # csv lookup misses when unified_perf_summary
+                                # is absent (raw-trace path or empty op
+                                # category column).
+                                "::mm", "::addmm", "::bmm")):
         return "GEMM"
     if any(t in name for t in ("attention", "attn", "fmha",
                                 "paged_attention", "flash")):
@@ -1595,13 +1582,50 @@ def analyze_trace_files(trace_files: list[Path], top_k: int) -> list[dict[str, A
     return _finalize_candidates(top, total_dur=total_dur)
 
 
+def load_op_category_map(
+    perf_report_csv_dir: Path | str,
+) -> dict[str, str]:
+    """Read ``{name: raw TraceLens op category}`` from unified_perf_summary.csv.
+
+    TraceLens emits one row per (name, shape); we keep the first
+    non-empty op category per name (stable across shapes for one op).
+    Returns ``{}`` when the csv is unavailable so callers degrade
+    gracefully to the name-heuristic fallback in ``derive_kernel_category``.
+    """
+    csv_path = Path(perf_report_csv_dir) / "unified_perf_summary.csv"
+    if not csv_path.is_file():
+        return {}
+    import csv as _csv
+    out: dict[str, str] = {}
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            for row in _csv.DictReader(f):
+                name = str(row.get("name") or "").strip()
+                cat = str(row.get("op category") or "").strip()
+                if name and cat and name not in out:
+                    out[name] = cat
+    except (OSError, _csv.Error):
+        return {}
+    return out
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]], *, total_dur: float | None = None,
+    perf_report_csv_dir: Path | str | None = None,
 ) -> list[dict[str, Any]]:
     """Apply source resolution / pybind upgrade / backend recommend / notes.
 
     Shared post-processing for parsed candidate rows. Mutates ``top`` in place.
+
+    When ``perf_report_csv_dir`` is provided, populate each item's
+    ``tracelens_category`` from TraceLens's unified_perf_summary.csv so
+    ``derive_kernel_category`` takes its priority-1 (upstream) branch
+    instead of falling through to the name heuristic.
     """
+    op_cat_map = (
+        load_op_category_map(perf_report_csv_dir)
+        if perf_report_csv_dir is not None else {}
+    )
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
     for idx, item in enumerate(top, 1):
@@ -1634,27 +1658,35 @@ def _finalize_candidates(
         # set elsewhere in tracelens_skill_runner._row_to_candidate and
         # is preserved through this pass for AST-grouping consumers.
         wrapper_before_promotion = item.get("source_file", "")
-        # PRIMARY: resolve the device .cu straight from the op name via aiter's
-        # OWN build registry (@compile_ops module -> optCompilerConfig srcs).
-        # Table-free, covers any kernel the installed wheel ships (incl. ones
-        # the static table predates, e.g. moe_cktile2stages), and works even
-        # when the trace carried no source_file (HIP-graph capture).
-        promoted_source = resolve_aiter_source_from_name(item["name"])
-        # FALLBACK: the legacy static promotion table, for environments where
-        # aiter cannot be imported or the op is absent from its registry.
-        if not promoted_source:
-            promoted_source = upgrade_aiter_compile_ops_launcher(
-                wrapper_before_promotion, item["name"], item.get("kernel_repo", "")
-            )
-        if promoted_source and promoted_source != wrapper_before_promotion:
-            item["source_file"] = promoted_source
-            if wrapper_before_promotion:
-                item["launcher_source_file"] = wrapper_before_promotion
-                item["source_promoted_from_launcher"] = True
+        item["source_file"] = upgrade_aiter_compile_ops_launcher(
+            wrapper_before_promotion, item["name"], item.get("kernel_repo", "")
+        )
+        if item["source_file"] != wrapper_before_promotion:
+            item["launcher_source_file"] = wrapper_before_promotion
+            item["source_promoted_from_launcher"] = True
         # Re-resolve repo in case the upgraded path lives in a different repo
         # (rare, but defensive).
         item["kernel_repo"] = find_repo_root(item.get("source_file", "")) or item["kernel_repo"]
         item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
+        # PR #668 FlyDSL pseudo-ops (pseudo_op::moe_flydsl_stage{1,2}) are
+        # synthetic and carry no source_file, so classify_patchability below
+        # would reject them ("source file not resolved") and kernel-opt would
+        # see zero reusable-native candidates. Inject the real FlyDSL MoE
+        # kernel source BEFORE the patchability gate so FlyDSL routes to GEAK.
+        # FlyDSL pseudo-ops either carry no source_file or a profiler frame
+        # label like ``aiter/fused_moe.py(986): fused_moe_2stages`` that is
+        # not a real rewritable path under a reusable framework root. In both
+        # cases inject the real FlyDSL MoE kernel source.
+        if item["source_type"] == "flydsl":
+            _sf = str(item.get("source_file") or "").strip()
+            if (not _sf) or (not os.path.isfile(_sf)):
+                _fb = _resolve_flydsl_source_fallback()
+                if _fb:
+                    item["source_file"] = _fb
+                    item["kernel_repo"] = (
+                        find_repo_root(_fb) or item.get("kernel_repo", "")
+                    )
+                    item["flydsl_source_from_fallback"] = True
         # Re-classify thin vendor / dispatch wrappers (the .so/.co loader
         # shims that have no rewritable kernel body). Even when the file
         # extension is .cu/.py and source_type would otherwise be hip_cpp/
@@ -1685,6 +1717,14 @@ def _finalize_candidates(
         item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
         item["recommended_backends"] = recommend_backends(item)
         item["optimization_notes"] = build_notes(item)
+        # TraceLens csv lookup activates derive_kernel_category's
+        # priority-1 (upstream) path. Only overrides when there is no
+        # pre-set tracelens_category (analysis.md parsing path may set
+        # it directly).
+        if op_cat_map and not str(item.get("tracelens_category") or "").strip():
+            csv_cat = op_cat_map.get(str(item.get("name") or ""))
+            if csv_cat:
+                item["tracelens_category"] = csv_cat
         # Surface a stable kernel_category for GEAK to dispatch on, plus a
         # source_path mirror for downstream prompt/report consumers. Shape is
         # already populated in `shapes`.
@@ -1826,9 +1866,120 @@ def merge_roofline_into_candidates(
         else:
             item.setdefault("bottleneck", "unknown")
             item.setdefault("arithmetic_intensity", None)
-            item.setdefault("compute_utilization_pct", 0.0)
-            item.setdefault("bandwidth_utilization_pct", 0.0)
+            item.setdefault("compute_utilization_pct", None)
+            item.setdefault("bandwidth_utilization_pct", None)
             item.setdefault("recommended_actions", [])
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Project one hot-kernel candidate into the kernel-roofline view."""
+    arithmetic_intensity = _first_non_empty(
+        candidate.get("arithmetic_intensity"),
+        candidate.get("flops_per_byte"),
+    )
+    return {
+        "kernel_id": candidate.get("kernel_id"),
+        "name": candidate.get("name"),
+        "gpu_pct": candidate.get("gpu_pct"),
+        "duration_us": candidate.get("duration_us"),
+        "call_count": candidate.get("call_count"),
+        "kernel_category": candidate.get("kernel_category"),
+        "source_file": candidate.get("source_file"),
+        "bottleneck": _first_non_empty(
+            candidate.get("bottleneck"),
+            candidate.get("bound_type"),
+        ),
+        "bound_type": candidate.get("bound_type"),
+        "arithmetic_intensity": arithmetic_intensity,
+        "flops_per_byte": candidate.get("flops_per_byte"),
+        "efficiency_percent": candidate.get("efficiency_percent"),
+        "compute_utilization_pct": candidate.get("compute_utilization_pct"),
+        "bandwidth_utilization_pct": candidate.get("bandwidth_utilization_pct"),
+        "suggestion": candidate.get("suggestion") or "",
+        "roofline_name": candidate.get("roofline_name"),
+        "recommended_actions": list(candidate.get("recommended_actions") or []),
+        "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
+    }
+
+
+def build_kernel_roofline_payload(
+    *,
+    trace_input: str,
+    trace_input_type: str,
+    analysis_md_path: str,
+    kernel_candidates_path: str,
+    roofline_json_path: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the structured per-kernel roofline sidecar.
+
+    This sidecar is a view over TraceLens candidates plus optional
+    ``--roofline-json`` enrichment. It does not invent missing
+    utilization counters: absent compute/bandwidth utilization stays
+    ``null`` in JSON.
+    """
+    rows = [
+        _kernel_roofline_row(candidate)
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    ]
+    return {
+        "schema_version": 1,
+        "source": "tracelens_analysis",
+        "trace_input": trace_input,
+        "trace_input_type": trace_input_type,
+        "analysis_md_path": analysis_md_path,
+        "kernel_candidates_path": kernel_candidates_path,
+        "roofline_json_path": roofline_json_path,
+        "kernels": rows,
+    }
+
+
+def kernel_roofline_path_for_run(run_dir: Path) -> Path:
+    """Return the session-level kernel roofline report path (latest pointer).
+
+    PR-C: ``run_dir`` is now ``.../runs/<session_id>/<ts>_<run_id>/`` so
+    we walk one extra level up to reach the kernel-agent root.
+    Pre-PR-C layout (``.../runs/<session_id>/``) is still supported via
+    the fallback branch in case a caller invokes this with an old-shape
+    path.
+
+    The session-level path remains the dashboard's stable entry point
+    (one path, always the latest). Per-snapshot analysis.md /
+    kernel_candidates.json etc. live under the per-invocation run_dir
+    and are stamped into ``roofline_snapshots[i].analysis_md_path``
+    so historical snapshots survive intact.
+    """
+    try:
+        # PR-C layout: .../runs/<session_id>/<ts>_<run_id>/
+        session_sub = run_dir.parent
+        runs_dir = session_sub.parent
+        kernel_agent_dir = runs_dir.parent
+    except (IndexError, AttributeError):
+        return run_dir / "reports" / "kernel_roofline.json"
+    if runs_dir.name == "runs" and kernel_agent_dir.name == "kernel-agent":
+        session_dir = kernel_agent_dir.parent
+        return session_dir / "reports" / "kernel_roofline.json"
+    # Backward-compat: pre-PR-C layout (.../runs/<session_id>/)
+    try:
+        runs_dir_legacy = run_dir.parent
+        kernel_agent_dir_legacy = runs_dir_legacy.parent
+    except (IndexError, AttributeError):
+        return run_dir / "reports" / "kernel_roofline.json"
+    if (
+        runs_dir_legacy.name == "runs"
+        and kernel_agent_dir_legacy.name == "kernel-agent"
+    ):
+        session_dir = kernel_agent_dir_legacy.parent
+        return session_dir / "reports" / "kernel_roofline.json"
+    return run_dir / "reports" / "kernel_roofline.json"
 
 
 def _candidate_model_config_paths(model_name: str) -> list[Path]:
@@ -1891,16 +2042,89 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
     return {}
 
 
+_FLYDSL_TARGET_ARCH_BY_PLATFORM = {
+    "mi300x": "gfx942",
+    "mi325x": "gfx942",
+    "mi355x": "gfx950",
+}
+_FLYDSL_SMEM_MARKERS = ("SmemAllocator", "SmemPtr", "smem_alloc")
+_FLYDSL_BUFFER_LOAD_MARKERS = (
+    "make_buffer_tensor", "BufferCopy", "rocdl", "buffer_load",
+)
+
+
+def _resolve_flydsl_source_fallback() -> str:
+    """Resolve the real FlyDSL MoE kernel source for pseudo-op candidates.
+
+    PR #668 pseudo-ops (``pseudo_op::moe_flydsl_stage{1,2}``) are synthetic
+    and carry no ``source_file``, so :func:`classify_patchability` would
+    reject them ("source file not resolved") and the kernel-opt routing
+    would see zero reusable-native candidates. The real rewritable source
+    is FlyDSL's 2-stage MoE GEMM kernel under ``$DSL2_ROOT/kernels/``.
+    Returns the first existing path, else "".
+    """
+    roots = [
+        os.environ.get("DSL2_ROOT", "").strip(),
+        os.environ.get("FLYDSL_ROOT", "").strip(),
+        "/wekafs/yunkai/FlyDSL",
+        "/sgl-workspace/flydsl",
+    ]
+    for root in roots:
+        if not root:
+            continue
+        cand = os.path.join(root, "kernels", "moe_gemm_2stage.py")
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _flydsl_kernel_params(
+    source_file: str, target_platform: str,
+) -> dict[str, Any]:
+    """Return FlyDSL-specific kernel_params for prompt construction.
+
+    Mirrors the metadata GEAK's ``skills/flydsl/`` cheatsheet keys off:
+    JIT cache state, MLIR target arch, and whether the source uses
+    SmemAllocator / buffer-load intrinsics. Best-effort — missing fields
+    just omit; never raise.
+    """
+    params: dict[str, Any] = {}
+    arch = _FLYDSL_TARGET_ARCH_BY_PLATFORM.get(
+        (target_platform or "").strip().lower(),
+    )
+    if arch:
+        params["FLYDSL_TARGET_ARCH"] = arch
+    cache_dir = os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", "").strip()
+    if cache_dir:
+        params["FLYDSL_AUTOTUNE_CACHE_DIR"] = cache_dir
+    enable_cache = os.environ.get("FLYDSL_RUNTIME_ENABLE_CACHE", "").strip()
+    if enable_cache:
+        params["FLYDSL_RUNTIME_ENABLE_CACHE"] = enable_cache
+    if source_file:
+        try:
+            with open(source_file, "r", encoding="utf-8", errors="replace") as fh:
+                head = fh.read(_FLYDSL_SCAN_BYTES)
+        except OSError:
+            head = ""
+        if head:
+            if any(m in head for m in _FLYDSL_SMEM_MARKERS):
+                params["FLYDSL_USES_SMEM"] = True
+            if any(m in head for m in _FLYDSL_BUFFER_LOAD_MARKERS):
+                params["FLYDSL_USES_BUFFER_LOAD"] = True
+    return params
+
+
 def enrich_candidates_with_runtime_metadata(
     candidates: list[dict[str, Any]], args: argparse.Namespace,
 ) -> None:
     """Attach stable runtime metadata fields before GEAK prompt generation."""
     framework = str(getattr(args, "framework", "") or "").strip()
     model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
+    target_platform = str(getattr(args, "target_platform", "") or "")
     runtime_flags = {
         "analysis_mode": getattr(args, "analysis_mode", ""),
         "runtime_env": getattr(args, "runtime_env", ""),
-        "target_platform": getattr(args, "target_platform", ""),
+        "target_platform": target_platform,
     }
     for item in candidates:
         if not isinstance(item, dict):
@@ -1922,6 +2146,22 @@ def enrich_candidates_with_runtime_metadata(
             params = item["kernel_params"]
             if isinstance(params, dict):
                 for key, value in model_params.items():
+                    params.setdefault(key, value)
+        if item.get("source_type") == "flydsl":
+            # PR #668 pseudo-ops carry no source_file (or a non-file frame
+            # label). Inject the real FlyDSL MoE kernel source so GEAK has a
+            # file to rewrite.
+            _sf2 = str(item.get("source_file") or "").strip()
+            if (not _sf2) or (not os.path.isfile(_sf2)):
+                fb = _resolve_flydsl_source_fallback()
+                if fb:
+                    item["source_file"] = fb
+            flydsl_params = _flydsl_kernel_params(
+                str(item.get("source_file") or ""), target_platform,
+            )
+            params = item["kernel_params"]
+            if isinstance(params, dict):
+                for key, value in flydsl_params.items():
                     params.setdefault(key, value)
         flags = item.get("runtime_flags")
         if not isinstance(flags, dict):
@@ -2118,6 +2358,7 @@ def write_reports(
     }
     atomic_write_json(run_dir / "trace_input_manifest.json", manifest)
     atomic_write_json(tracelens_dir / "tracelens_report.json", report)
+    kernel_candidates_path = run_dir / "kernel_candidates.json"
     # Per AMD-AGI/Hyperloom#314: ``kernel_candidates.json::hot_kernels``
     # is the dispatch payload consumed by the kernel-opt path
     # (``kernel_optimization.load_candidates``, ``parallel_e2e_runner``,
@@ -2143,8 +2384,13 @@ def write_reports(
         if isinstance(c, dict) and c.get("reusable_native_kernel") is not True
     ]
     atomic_write_json(
-        run_dir / "kernel_candidates.json",
-        {**report, "hot_kernels": routable_candidates, "skipped_kernels": skipped_kernels},
+        kernel_candidates_path,
+        {
+            **report,
+            "hot_kernels": routable_candidates,
+            "skipped_kernels": skipped_kernels,
+            "task_groups": task_groups,
+        },
     )
 
     # PR-A §3: per-run audit sidecar listing which TraceLens hot kernels
@@ -2200,9 +2446,26 @@ def write_reports(
             )
             existing_report_path = stub_md
 
-    return {
+    kernel_roofline_path = kernel_roofline_path_for_run(run_dir)
+    kernel_roofline_payload = build_kernel_roofline_payload(
+        trace_input=str(Path(args.trace_input).resolve()),
+        trace_input_type=trace_input_type,
+        analysis_md_path=(
+            str(existing_report_path) if existing_report_path else ""
+        ),
+        kernel_candidates_path=str(kernel_candidates_path),
+        roofline_json_path=(
+            str(Path(args.roofline_json).expanduser())
+            if getattr(args, "roofline_json", "") else ""
+        ),
+        candidates=candidates,
+    )
+    atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
+
+    artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
-        "kernel_candidates": str(run_dir / "kernel_candidates.json"),
+        "kernel_candidates": str(kernel_candidates_path),
+        "kernel_roofline": str(kernel_roofline_path),
         "tracelens_report_json": str(tracelens_dir / "tracelens_report.json"),
         # Post-#203 (PR #217): the canonical Markdown exit IS the
         # upstream SDK orchestrator's analysis.md surfaced via
@@ -2212,6 +2475,7 @@ def write_reports(
         "trace_report_path": str(existing_report_path) if existing_report_path else "",
         "tracelens_summary": str(summary_path),
     }
+    return artifact_paths
 
 
 def _default_workspace_path() -> str:
@@ -2407,8 +2671,20 @@ def main() -> int:
     session_id = args.session_id or uuid.uuid4().hex[:12]
     run_id = f"tl-{uuid.uuid4().hex[:8]}"
     started_at = utc_now()
+    # PR-C: per-tracelens-invocation sub-directory so PRELUDE + every
+    # watermark refresh keeps its own analysis.md / kernel_candidates /
+    # trace_split / etc. instead of overwriting the previous run's
+    # files. Format ``<compact_timestamp>_<run_id>`` — sorts
+    # chronologically, run_id keeps uniqueness across same-second
+    # invocations. Pre-PR-C readers walking ``.../runs/<session_id>/``
+    # directly will need to descend one more level; ``kernel_roofline_
+    # path_for_run`` has been updated to handle both layouts.
+    ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0]
+    if not ts_compact.endswith("Z"):
+        ts_compact = ts_compact + "Z"
+    sub_dir = f"{ts_compact}_{run_id}"
     root = Path(args.workspace_path) / "kernel-agent"
-    run_dir = root / "runs" / session_id
+    run_dir = root / "runs" / session_id / sub_dir
     log_path = run_dir / "logs" / "tracelens_analysis" / f"{run_id}.log"
     status_path = run_dir / "status" / "tracelens_analysis" / f"{run_id}.json"
     artifacts: dict[str, str] = {}
@@ -2867,6 +3143,9 @@ def main() -> int:
                         agent_candidates = _finalize_candidates(
                             raw_agent_candidates,
                             total_dur=total_dur or None,
+                            perf_report_csv_dir=(
+                                skill_result.output_dir / "perf_report_csvs"
+                            ),
                         )
                         append_log(
                             log_path,

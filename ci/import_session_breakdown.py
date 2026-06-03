@@ -84,7 +84,9 @@ IMPORTER_VERSION = "1.1.0"
 # ---------------------------------------------------------------------------
 
 DEFAULT_IMAGES: Dict[str, str] = {
-    "sglang": "harbor.core42.example-internal-host.invalid/proxy/lmsysorg/sglang:v0.5.11-rocm720-mi30x",
+    # sglang profilerfix: rocprofiler captures HipGraphLaunch kernels (issue #352)
+    # Pre-profilerfix image (restore when reverting): "harbor.core42.example-internal-host.invalid/proxy/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
+    "sglang": "harbor.core42.example-internal-host.invalid/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix",
     "vllm":   "harbor.core42.example-internal-host.invalid/proxy/vllm/vllm-openai-rocm:v0.19.0",
 }
 

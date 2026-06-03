@@ -117,6 +117,12 @@ KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
     "deep_kernel_analysis",
     "operator_tuning",
     "vendor_kernel_config",
+    "gemm_tuning",
+})
+
+FP8_ONLY_ACTIONS: frozenset[str] = frozenset({
+    "gemm_tuning",
+    "run_gemm_tuning",
 })
 
 
@@ -183,6 +189,7 @@ EXPLORE_ACTION_NAME: str = "explore"
 # Coordinator's auto-enqueue already landed one in SWEEP phase) has
 # a single source of truth.  See _validate_sweep_singleton.
 SWEEP_ACTION_NAME: str = "sweep"
+CONC_SWEEP_ACTION_NAME: str = "conc_sweep"
 
 # Provenance values that pass the explore-provenance gate. Anything
 # else (``llm_direct``, missing, unknown) is denied. ``dynamic`` is a
@@ -276,48 +283,6 @@ DYNAMIC_ACTION_KERNEL_DOMAIN_LITERAL: str = "kernel"
 
 
 # ---------------------------------------------------------------------------
-# v0.8 M3 / ``action_deprecated`` rule
-#
-# KB_design §3.4 / §3.15 §2.3: v0.8 merged ``backends`` / ``params`` /
-# ``validate_stack`` into a single ``explore`` action (with the per-KEEP
-# stack-rebench inlined). The legacy executors stay in the tree so v0.6
-# resumes that still carry the corresponding ``*_attempts`` ledger
-# fields don't crash on load (Inv-10.1 fact-layer survival), but new
-# Orchestration intents that name one of the deprecated actions must
-# be rejected at the PolicyGate boundary so the LLM gets a structured
-# ``policy_denied{rule='action_deprecated'}`` event and a clear
-# replacement hint.
-#
-# Why this lives in PolicyGate and not just in
-# ``phase_state.PHASE_ALLOWED_ACTIONS``:
-#
-# * ``phase_incompatible`` (R1) denies an action for the wrong reason —
-#   "not in phase=EXPLORE allowed set" hides the *real* cause (the
-#   action is gone, not the phase). The LLM gets a misleading hint to
-#   "wait for the phase to advance".
-# * R1 fires *only when ``strict_phase=True``* (production). Without
-#   ``action_deprecated`` an early-dev / test run with
-#   ``strict_phase=False`` happily accepts ``propose_action='backends'``
-#   and dispatches it; the resulting ``no_executor`` failure surfaces
-#   far later in the dispatcher.
-# * Inv-11.3 orthogonality wants exactly one rule per intent;
-#   ``action_deprecated`` fires *before* R1 so deprecation always wins
-#   over phase-allowed checks.
-# ---------------------------------------------------------------------------
-DEPRECATED_ACTION_NAMES: frozenset[str] = frozenset({
-    "backends",
-    "params",
-    "validate_stack",
-})
-
-DEPRECATED_ACTION_REPLACEMENTS: dict[str, str] = {
-    "backends": "explore",
-    "params":   "explore",
-    "validate_stack": "explore (per-KEEP stack rebench is inlined)",
-}
-
-
-# ---------------------------------------------------------------------------
 # Analysis actions that are Coordinator-internal only
 #
 # ``roofline`` (composite: profile + trace_analyze + analysis.md
@@ -332,9 +297,8 @@ DEPRECATED_ACTION_REPLACEMENTS: dict[str, str] = {
 # / ``integrate_patch``).
 #
 # The denial is symmetric across delegate / propose_action / request:
-# the rule fires *after* ``action_deprecated`` (no overlap today —
-# different name sets) but *before* the kernel-owned + phase + unknown
-# checks, so the canonical hint always wins.
+# the rule fires *before* the kernel-owned + phase + unknown checks, so
+# the canonical hint always wins.
 # ---------------------------------------------------------------------------
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset({
     "roofline",
@@ -376,19 +340,6 @@ FRAMEWORK_PR_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset({
 #: request.kind collision.
 KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset({
     "mcp__cortex_kb__propose_point",
-    # The methods these tool names map to (propose_edge / hypothesize /
-    # ingest_attempt / verify / commit) have been retired from the
-    # client, but the tool names stay on the denylist because the
-    # safety contract — KB writes are Coordinator-owned, not
-    # specialist-callable — is independent of which methods currently
-    # exist. Specialists that attempt to invoke any of these get an
-    # immediate ``kb_write_unauthorized`` denial rather than a confusing
-    # "tool not found" downstream.
-    "mcp__cortex_kb__propose_edge",
-    "mcp__cortex_kb__hypothesize",
-    "mcp__cortex_kb__ingest_attempt",
-    "mcp__cortex_kb__verify",
-    "mcp__cortex_kb__commit",
 })
 
 #: KB *readonly* surfaces. R5 ``tool_whitelist_role`` requires the
@@ -556,10 +507,10 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset({
 # source trees that legitimately live outside session_dir. We allowlist
 # the well-known parents here; anything else falls through to the
 # session_dir containment check.
-SOURCE_FILE_ALLOWLIST: tuple[str, ...] = resolve_source_file_allowlist()
-
 # Field name-only allowlist: when the payload key is `source_file`, the
-# value may match SOURCE_FILE_ALLOWLIST instead of being session-rooted.
+# value may match :func:`resolve_source_file_allowlist` instead of being
+# session-rooted. Resolved at check time so importlib/glob discovery and
+# env overrides apply without a process restart.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file"})
 
 
@@ -683,12 +634,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # explore search ledger.
     # Coordinator's ``apply_explore_search_update`` / ``record_explore_accepted``
     # are the sole writers; LLM ``update_state`` must not rewrite the ledger
-    # directly (would bypass dedup-by-fingerprint + Inv-1). The legacy
-    # ``backends_search`` / ``params_search`` fields remain in the lock list
-    # purely for legacy resume parity — their writer APIs were retired in the legacy release.
+    # directly (would bypass dedup-by-fingerprint + Inv-1).
     "explore_search",
-    "backends_search",
-    "params_search",
     # structured gaps ledger (KB_design §3.3 /
     # §3.5 / §3.9 §6). Coordinator's ``_refresh_gaps`` is the sole
     # writer; LLM agents read via prompt injection. Locking the field
@@ -701,6 +648,18 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # outcomes via UPDATE_STATE.
     "dynamic_actions",
     "dynamic_action_round_count",
+    # FRAMEWORK_PR per-repo discovery budget. Coordinator-controlled
+    # search depth knob (mirrors research_lane_capacity's "set once,
+    # don't let the LLM raise mid-flight" intent); locking it stops a
+    # non-core role from inflating the per-batch search / bench queue
+    # via update_state.
+    "framework_pr_max_candidates",
+    # Advisory model-architecture profile. Produced pre-launch by the
+    # SKILL launcher into state.json; drives no deterministic gating but
+    # is injected into specialist prompts, so lock it to keep the
+    # launcher / state.json as the sole source of truth (an LLM
+    # update_state must not pollute the specialist prompt context).
+    "model_arch",
 })
 
 
@@ -888,13 +847,6 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
-        # v0.8 M3 / ``action_deprecated`` (KB_design
-        # §3.13 M3 §PR7). Fires *before* the kernel-owned + phase
-        # checks so the LLM gets the canonical "use ``explore``
-        # instead" hint regardless of which other rule would have
-        # fired. Inv-11.3: one deprecated action triggers exactly one
-        # rule.
-        self._validate_action_not_deprecated(action_name, intent_kind="delegate")
         # analysis_action_not_llm_proposable —
         # roofline / profile are Coordinator-internal (PRELUDE bootstrap
         # + watermark-triggered). Block the LLM from racing the auto
@@ -955,10 +907,14 @@ class PolicyGate:
         # vllm engines on init; see _validate_sweep_singleton.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # Same gain-driven / explore-minimum gates apply at the
-        # delegate channel so kernel_opt cannot bypass them by skipping
-        # propose_action.
-        self._validate_gain_driven_kernel_opt(action_name)
+        # conc_sweep_phase_singleton (Bug #11): block duplicate
+        # conc_sweep proposals once Coordinator's post-sweep hook
+        # already dispatched one; see _validate_conc_sweep_singleton.
+        if action_name == CONC_SWEEP_ACTION_NAME:
+            self._validate_conc_sweep_singleton(payload, intent_kind="delegate")
+        # Same explore-minimum gate applies at the delegate channel so
+        # kernel_opt cannot bypass it by skipping propose_action.
+        self._validate_fp8_only_action(action_name, intent_kind="delegate")
         self._validate_explore_minimum_before_kernel_opt(action_name)
         # If an ActionRegistry is wired, refuse delegate for unknown action names.
         # No registry → fall through (P0 / dev-mode where registry isn't loaded).
@@ -1021,11 +977,6 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        # v0.8 M3 / same ``action_deprecated`` gate
-        # as ``_validate_delegate``. Catches advisory LLM proposals so
-        # the policy_denial event surfaces in the prompt before the
-        # delegate is even attempted.
-        self._validate_action_not_deprecated(action_name, intent_kind="propose_action")
         # analysis_action_not_llm_proposable
         # (propose channel) — same rule, same hint.
         self._validate_action_not_llm_proposable(
@@ -1051,6 +1002,11 @@ class PolicyGate:
             self._validate_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
+        # conc_sweep_phase_singleton (Bug #11) on propose_action.
+        if action_name == CONC_SWEEP_ACTION_NAME:
+            self._validate_conc_sweep_singleton(
+                payload, intent_kind="propose_action",
+            )
         # PR-A9 + explore_specialist_grid_max_one — same explore-grid
         # gates as the delegate channel. Without these, an LLM that
         # cannot delegate{action_name='explore', ...} (e.g. wrong role
@@ -1062,15 +1018,9 @@ class PolicyGate:
         if action_name == EXPLORE_ACTION_NAME:
             self._validate_explore_provenance(payload)
             self._validate_explore_grid_size(payload)
-        # F3-2 (Roofline-v2 N19c): gain-driven kernel_opt lock — until
-        # cheap rounds have plateaued, kernel_opt is denied so we don't
-        # spend a 30 min GPU lane on a cheap-still-earning frontier.
-        self._validate_gain_driven_kernel_opt(action_name)
+        self._validate_fp8_only_action(action_name, intent_kind="propose_action")
         # F3-5: explore-attempt minimum guard — kernel_opt requires at
-        # least one successful explore round on record (replaces the
-        # legacy backends_attempts / params_attempts sequence
-        # denials, which had no writers in the legacy release and would have
-        # permanently locked kernel_opt).
+        # least one successful explore round on record.
         self._validate_explore_minimum_before_kernel_opt(action_name)
         # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
@@ -1086,92 +1036,14 @@ class PolicyGate:
     # Propose_action sub-gates (F3 series)
     #
     # Reading order in the dispatch path:
-    #   1. _validate_gain_driven_kernel_opt                 (N19c)
-    #   2. _validate_explore_minimum_before_kernel_opt      (F3-5)
+    #   1. _validate_explore_minimum_before_kernel_opt      (F3-5)
     # ------------------------------------------------------------------
-
-    _N19C_HISTORY_WINDOW: int = 3
-    _N19C_EPSILON_PCT: float = 0.5
-
-    def _validate_gain_driven_kernel_opt(self, action_name: str) -> None:
-        """F3-2 (N19c): lock ``kernel_opt`` until cheap exploration
-        plateaus.
-
-        Reads the last ``_N19C_HISTORY_WINDOW`` entries of
-        :attr:`SharedState.gain_per_stack_entry` (the canonical
-        per-KEEP delta_pct ledger this branch already maintains; v0.8
-        replacement for v0.6's ``last_cheap_explore_gain_pct``).
-        Denies if the moving-average ``delta_pct`` is still
-        ``>= _N19C_EPSILON_PCT``: cheap rounds are still earning,
-        burning a kernel-opt lane is premature.
-
-        Toggle: :attr:`SharedState.gain_driven_kernel_opt` (F0-10,
-        default off).
-        """
-        if action_name != "kernel_opt":
-            return
-        ss = getattr(self, "shared_state", None)
-        if ss is None:
-            return
-        if not bool(getattr(ss, "gain_driven_kernel_opt", False)):
-            return
-        # Defer to the phase allowlist when kernel_opt is proposed
-        # outside the KERNEL phase — the phase_incompatible rule's
-        # message is more actionable there. N19c is a within-KERNEL
-        # gate, not a phase gate.
-        if str(getattr(ss, "phase", "") or "") != "KERNEL":
-            return
-        history = list(getattr(ss, "gain_per_stack_entry", []) or [])
-        # Keep only entries with a real per-round delta on record
-        # (resumed / seeded entries use ``delta_pct=None``).
-        deltas: list[float] = []
-        for entry in reversed(history):
-            if not isinstance(entry, dict):
-                continue
-            d = entry.get("delta_pct")
-            if isinstance(d, (int, float)):
-                deltas.append(float(d))
-            if len(deltas) >= self._N19C_HISTORY_WINDOW:
-                break
-        if len(deltas) < self._N19C_HISTORY_WINDOW:
-            raise PolicyDenied(
-                f"propose_action: kernel_opt is locked: only "
-                f"{len(deltas)} cheap-round delta(s) on record "
-                f"(need {self._N19C_HISTORY_WINDOW} for the gain-trend "
-                f"window). Run more explore / specialist rounds first.",
-                rule="n19c_gain_driven_kernel_opt",
-                hint=(
-                    "propose_action{action_name='explore'} or "
-                    "delegate{action_name='specialist', ...} until the "
-                    "ledger has at least "
-                    f"{self._N19C_HISTORY_WINDOW} integrated rounds."
-                ),
-            )
-        avg = sum(deltas) / float(len(deltas))
-        if avg >= self._N19C_EPSILON_PCT:
-            raise PolicyDenied(
-                f"propose_action: kernel_opt is locked: cheap rounds "
-                f"still earning (last {len(deltas)} avg "
-                f"{avg:+.2f}% >= {self._N19C_EPSILON_PCT:.2f}%). "
-                f"Continue cheap rounds until the average drops below "
-                f"the threshold.",
-                rule="n19c_gain_driven_kernel_opt",
-                hint=(
-                    "propose_action{action_name='explore'} or "
-                    "delegate{action_name='specialist', ...}"
-                ),
-            )
 
     def _validate_explore_minimum_before_kernel_opt(
         self, action_name: str,
     ) -> None:
         """F3-5: ``kernel_opt`` requires at least one successful explore
         round on record.
-
-        Replaces v0.6's ``backends_attempts < 1`` / ``params_attempts
-        < 1`` sequence denials, which would lock kernel_opt forever on
-        this branch (no writers exist for those fields — see
-        the retired-features list §1.3).
 
         Successful = at least one entry in ``gain_per_stack_entry``,
         which is appended only when ``optimization_stack`` accepts a
@@ -1205,11 +1077,7 @@ class PolicyGate:
             f"length = {accepted}). Run explore + integrate_patch "
             f"before invoking kernel_opt.",
             rule="explore_attempts_minimum_before_kernel_opt",
-            hint=(
-                "propose_action{action_name='explore'} (explore is the "
-                "v0.8 successor to v0.6 backends / params / "
-                "validate_stack — see KB_design §3.4 / KB_gaps Dead-A)."
-            ),
+            hint="propose_action{action_name='explore'} first.",
         )
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
@@ -1221,8 +1089,6 @@ class PolicyGate:
                 hint=("include at least one allowed field, e.g. "
                       "{'changes': {'current_action': '<action_name>'}}"),
             )
-        if role.can_mutate_core_state:
-            return
         violating = sorted(set(changes.keys()) & CORE_STATE_FIELDS)
         if violating:
             raise PolicyDenied(
@@ -1257,13 +1123,6 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # v0.8 M3 / ``action_deprecated`` covers the
-        # REQUEST channel too (defense in depth). None of the legacy
-        # request kinds (trace_analyze / kernel_opt / integrate /
-        # ...) collide with the deprecated set today, but an operator
-        # extension that re-uses one of the legacy names via
-        # ``request.kind`` would still be caught here.
-        self._validate_action_not_deprecated(kind, intent_kind="request")
         # analysis_action_not_llm_proposable —
         # defense in depth: nobody REQUESTs roofline/profile today, but
         # an extension that does would race the auto-managed gate.
@@ -1274,6 +1133,7 @@ class PolicyGate:
         # their REQUEST kind: kernel_opt / integrate / etc.).
         if target == "kernel" and kind in KERNEL_OWNED_ACTIONS:
             self._validate_phase_action(role, kind, intent_kind="request")
+        self._validate_fp8_only_action(kind, intent_kind="request")
         # v0.8 §3.11 R4 / R5 — defense in depth: a REQUEST.kind cannot
         # smuggle a KB write / external tool invocation either.
         self._validate_no_kb_write_collision(kind, intent_kind="request")
@@ -1352,54 +1212,6 @@ class PolicyGate:
                 )
 
     # ------------------------------------------------------------------
-    # v0.8 M3 / action_deprecated
-    # ------------------------------------------------------------------
-    def _validate_action_not_deprecated(
-        self,
-        action_name: str,
-        *,
-        intent_kind: str,
-    ) -> None:
-        """Reject a v0.6 action name that v0.8 has replaced.
-
-        The deprecation is *hard* in the legacy release:
-        new sessions cannot use ``backends`` / ``params`` /
-        ``validate_stack`` directly; all three flows merge into
-        ``explore``. The denial carries a structured replacement hint
-        so the LLM can self-correct in one tick.
-
-        ``intent_kind`` is folded into the denial message so the
-        policy_denial event in the prompt names the actual smuggling
-        channel (delegate vs propose_action vs request).
-
-        No-op when ``action_name`` isn't in
-        :data:`DEPRECATED_ACTION_NAMES` — keeps the helper cheap on
-        the hot path. Fires *before* phase / role gates so the
-        deprecation hint always wins over phase_incompatible /
-        unknown_action (Inv-11.3 orthogonality).
-        """
-        if not action_name:
-            return
-        if action_name not in DEPRECATED_ACTION_NAMES:
-            return
-        replacement = DEPRECATED_ACTION_REPLACEMENTS.get(
-            action_name, "explore",
-        )
-        raise PolicyDenied(
-            f"action {action_name!r} is deprecated since the legacy release (M3); "
-            f"use {replacement!r} instead",
-            rule="action_deprecated",
-            hint=(
-                f"intent_kind={intent_kind!r}: emit "
-                f"delegate{{action_name='explore', params={{grid: [...]}}}} "
-                f"or propose_action{{action_name='explore', ...}}. "
-                f"KB_design §3.4 / §3.15 §2.3 — v0.8 merged "
-                f"backends/params/validate_stack into the single "
-                f"explore action with per-KEEP stack rebench inlined."
-            ),
-        )
-
-    # ------------------------------------------------------------------
     # analysis_action_not_llm_proposable —
     # deny LLM proposals of ``roofline`` / ``profile``
     # ------------------------------------------------------------------
@@ -1420,10 +1232,9 @@ class PolicyGate:
         gate and could double-enqueue.
 
         No-op when ``action_name`` isn't in
-        :data:`INTERNAL_ONLY_ACTION_NAMES`. Fires *after*
-        ``action_deprecated`` (the two sets are disjoint today) but
-        *before* the kernel-owned / phase / unknown gates, so the
-        canonical hint always wins.
+        :data:`INTERNAL_ONLY_ACTION_NAMES`. Fires *before* the
+        kernel-owned / phase / unknown gates, so the canonical hint
+        always wins.
         """
         if not action_name:
             return
@@ -1531,6 +1342,42 @@ class PolicyGate:
             f"action {action_name!r} not allowed in phase={phase}",
             rule="phase_incompatible",
             hint=hint,
+        )
+
+    # ------------------------------------------------------------------
+    # FP8-only actions
+    # ------------------------------------------------------------------
+    def _validate_fp8_only_action(
+        self,
+        action_name: str,
+        *,
+        intent_kind: str,
+    ) -> None:
+        """Reject GEMM tuning for non-FP8 sessions.
+
+        ``gemm_tuning`` drives aiter A8W8 block-scale FP8 GEMM CSV
+        dispatch. Running it on BF16 / non-quantized workloads wastes the
+        serving lane and may patch the wrong framework path, so enforce the
+        precision contract at the intent boundary. The handler repeats the
+        same check as defense in depth for programmatic callers.
+        """
+        if not action_name or action_name not in FP8_ONLY_ACTIONS:
+            return
+        state = self.shared_state
+        if state is None:
+            return
+        precision = str(getattr(state, "precision", "") or "").strip().lower()
+        if precision == "fp8":
+            return
+        raise PolicyDenied(
+            f"action {action_name!r} is FP8-only but session precision={precision or '(unset)'!r}",
+            rule="fp8_only_action",
+            hint=(
+                f"intent_kind={intent_kind!r}: GEAK GEMM tuning only applies "
+                "to FP8 block-scale workloads. Set PRECISION=fp8 / "
+                "--precision fp8, or skip gemm_tuning and continue with "
+                "non-FP8 actions."
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -1796,9 +1643,39 @@ class PolicyGate:
     # ``provenance='specialist:*'`` variants Orchestration may stack
     # into one explore round. ``default_grid`` variants are unaffected
     # (cold-start path). Backstops the prompt instruction by hard-denying
-    # at PolicyGate so an over-eager LLM cannot ship a 5-way grid even
-    # if the orchestration prompt is later softened.
+    # at PolicyGate so an over-eager LLM cannot ship an oversized grid
+    # even if the orchestration prompt is later softened.
+    #
+    # The cap is dynamic: it tracks the session's
+    # ``research_lane_capacity`` (how many specialists may fan out in
+    # parallel per round), clamped to ``MAX_RESEARCH_LANE_CAPACITY`` (6).
+    # The historical hard-1 (``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS``)
+    # remains the fallback when SharedState / the field is unavailable.
+    # The rule id is kept as ``explore_specialist_grid_max_one`` for
+    # audit-trail / breakdown stability even though the numeric cap may
+    # now exceed one.
     # ------------------------------------------------------------------
+    def _effective_specialist_grid_cap(self) -> int:
+        """Per-round cap on ``provenance='specialist:*'`` explore variants.
+
+        Tracks ``SharedState.research_lane_capacity`` (clamped to
+        ``MAX_RESEARCH_LANE_CAPACITY``); falls back to
+        ``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS`` (1) when SharedState
+        is unavailable or the field is unset / non-positive.
+        """
+        ss = getattr(self, "shared_state", None)
+        rlc = 0
+        if ss is not None:
+            try:
+                rlc = int(getattr(ss, "research_lane_capacity", 0) or 0)
+            except (TypeError, ValueError):
+                rlc = 0
+        if rlc > 0:
+            cap = min(MAX_RESEARCH_LANE_CAPACITY, rlc)
+        else:
+            cap = MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS
+        return max(1, cap)
+
     def _validate_explore_grid_size(
         self, payload: dict[str, Any],
     ) -> None:
@@ -1813,18 +1690,23 @@ class PolicyGate:
             if isinstance(v, dict)
             and str(v.get("provenance") or "").startswith("specialist:")
         )
-        if specialist_sourced > MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS:
+        specialist_cap = self._effective_specialist_grid_cap()
+        if specialist_sourced > specialist_cap:
             raise PolicyDenied(
                 f"explore: grid contains {specialist_sourced} "
                 f"specialist-sourced variants; max "
-                f"{MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS} per round.",
+                f"{specialist_cap} per round "
+                f"(= research_lane_capacity).",
                 rule="explore_specialist_grid_max_one",
                 hint=(
                     "Across all specialist_done.proposal_set entries in "
-                    "the inbox, select AT MOST one variant per explore "
-                    "round to stamp provenance='specialist:<domain>'. "
-                    "If multiple specialist proposals look attractive, "
-                    "defer the runners-up to a subsequent explore round. "
+                    f"the inbox, select AT MOST {specialist_cap} variant(s) "
+                    "per explore round to stamp "
+                    "provenance='specialist:<domain>' (the cap tracks "
+                    "research_lane_capacity, hard-capped at "
+                    f"{MAX_RESEARCH_LANE_CAPACITY}). If more specialist "
+                    "proposals look attractive, defer the runners-up "
+                    "beyond the cap to a subsequent explore round. "
                     "``default_grid`` variants are unaffected (cold-start "
                     "path)."
                 ),
@@ -1932,6 +1814,61 @@ class PolicyGate:
                 f"set params.bypass_sweep_singleton=True on the "
                 f"{intent_kind} payload (the override is recorded "
                 f"on the audit trail)."
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # ``conc_sweep_phase_singleton`` (Bug #11)
+    # ------------------------------------------------------------------
+    def _validate_conc_sweep_singleton(
+        self, payload: dict[str, Any], *, intent_kind: str,
+    ) -> None:
+        """Enforce one conc_sweep per SWEEP phase.
+
+        Mirrors :meth:`_validate_sweep_singleton`. Coordinator's post-
+        sweep hook (or SWEEP-entry hook when sweep is already covered)
+        stamps ``evidence.auto_conc_sweep_task_id``. Re-proposals here
+        are denied: every conc_sweep runs the same baseline + current_
+        best ladder, so a second run yields no new data but burns
+        another 30–150 minutes of GPU. Without this rule orchestration
+        loops re-proposing conc_sweep (the only non-sweep, non-recover
+        action allowed in SWEEP) until budget exhausts.
+
+        Operator escape hatch: ``params.bypass_conc_sweep_singleton=True``.
+        """
+        params = payload.get("params") or {}
+        if isinstance(params, dict) and params.get("bypass_conc_sweep_singleton"):
+            return
+        ss = getattr(self, "shared_state", None)
+        if ss is None:
+            return
+        history = getattr(ss, "phase_history", None) or []
+        if not history:
+            return
+        latest = history[-1]
+        if not isinstance(latest, dict):
+            return
+        if str(latest.get("to_phase") or "").strip() != PHASE_SWEEP:
+            return
+        evidence = latest.get("evidence")
+        if not isinstance(evidence, dict):
+            return
+        auto_id = str(evidence.get("auto_conc_sweep_task_id") or "").strip()
+        if not auto_id:
+            return
+        raise PolicyDenied(
+            f"conc_sweep: SWEEP phase already has an auto-enqueued "
+            f"conc_sweep task (auto_conc_sweep_task_id={auto_id!r}); "
+            f"duplicate runs reproduce the same baseline + current_best "
+            f"comparison and add no new data while burning 30-150 min "
+            f"of GPU time.",
+            rule="conc_sweep_phase_singleton",
+            hint=(
+                "Coordinator's post-sweep hook already dispatched "
+                "conc_sweep — wait for SWEEP→CLOSE. If you need a "
+                "second run for debug, set "
+                f"params.bypass_conc_sweep_singleton=True on the "
+                f"{intent_kind} payload (recorded on the audit trail)."
             ),
         )
 
@@ -2546,7 +2483,7 @@ class PolicyGate:
 
     def _path_in_source_allowlist(self, value: str) -> bool:
         s = str(value)
-        return any(s.startswith(p) for p in SOURCE_FILE_ALLOWLIST)
+        return any(s.startswith(p) for p in resolve_source_file_allowlist())
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
         """Match a value against runtime-resolved trace path prefixes.
@@ -2590,7 +2527,7 @@ class PolicyGate:
                 raise PolicyDenied(
                     f"role={role.name!r} {intent_type.value} payload field "
                     f"{key!r}={node!r} is not under session_dir or any of "
-                    f"{list(SOURCE_FILE_ALLOWLIST)!r}",
+                    f"{list(resolve_source_file_allowlist())!r}",
                     rule="source_file_not_allowlisted",
                     hint=("kernel-opt may only target framework source trees "
                           "under aiter/sglang/vllm; reject the request"),
@@ -2644,8 +2581,6 @@ __all__ = [
     "CORE_STATE_FIELDS",
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
-    "DEPRECATED_ACTION_NAMES",
-    "DEPRECATED_ACTION_REPLACEMENTS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",
@@ -2658,7 +2593,6 @@ __all__ = [
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
-    "SOURCE_FILE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",
 ]
