@@ -747,9 +747,6 @@ class SharedState:
     # remain Coordinator-internal and are denied by PolicyGate when
     # proposed by the LLM (``analysis_action_not_llm_proposable``).
     enable_roofline: bool = True
-    # Cheap-rounds gain gate is opt-in — only locks ``kernel_opt`` when
-    # the operator has tuned the thresholds for their workload.
-    gain_driven_kernel_opt: bool = False
     # Per-variant overtime kill multiplier for ExploreExecutor: when
     # > 0 AND ``baseline_runtime_sec`` > 0, single-variant Magpie runs
     # in the explore loop are killed once their wall-clock exceeds
@@ -3514,6 +3511,64 @@ class SharedState:
         """
         self.explore_specialist_dispatched_count = 0
 
+    def to_intervention_mix_summary(self) -> str:
+        """PR-A8 / D3 (Arbor-into-Hyperloom): render the config-vs-code_patch
+        intervention ledger for the Orchestration per-tick prompt.
+
+        Returns ``""`` when the ledger is empty (nothing recorded yet — no
+        escalation possible). Otherwise returns a one-line counts summary,
+        plus an ``ESCALATION`` directive when the session has been
+        config-only for too long, nudging Orchestration to dispatch a
+        code-patch ``serving_specialist`` next (Arbor's "do not settle for
+        config-only" rule). ``record_intervention`` maintains the ledger;
+        this is its sole consumer.
+
+        Thresholds mirror Arbor's ``get_intervention_mix`` heuristics:
+        escalate when ``consecutive_config_only_rounds >= 2`` OR the ledger
+        is config-heavy (>= 5 config keeps) with zero code_patch keeps.
+        """
+        mix = self.intervention_mix or []
+        if not mix:
+            return ""
+        escalate_at = 2
+        config_heavy_at = 5
+        n_config = sum(
+            1 for m in mix if (m or {}).get("change_type") == "config"
+        )
+        n_patch = sum(
+            1 for m in mix if (m or {}).get("change_type") == "code_patch"
+        )
+        # B2: config explore rounds that produced measurements but KEPT
+        # nothing (all REVERT / KEEP_UNSTABLE) are recorded as
+        # ``config_attempt``. They count toward the escalation signal so
+        # repeated fruitless config tuning escalates to a code-patch
+        # ``integrate_patch`` even when the MI300X noise floor prevents
+        # any config KEEP (the failure mode that left this loop spinning).
+        n_config_attempt = sum(
+            1 for m in mix if (m or {}).get("change_type") == "config_attempt"
+        )
+        consec = int(self.consecutive_config_only_rounds or 0)
+        config_pressure = n_config + n_config_attempt
+        lines = [
+            f"config_keeps={n_config} config_attempts={n_config_attempt} "
+            f"code_patch_keeps={n_patch} "
+            f"consecutive_config_only_rounds={consec}"
+        ]
+        if (
+            consec >= escalate_at
+            or (n_config >= config_heavy_at and n_patch == 0)
+            or (config_pressure >= escalate_at and n_patch == 0)
+        ):
+            lines.append(
+                "ESCALATION: config-only for too long. Config tuning has a "
+                "low ceiling — your NEXT EXPLORE dispatch SHOULD delegate a "
+                "`serving_specialist` to author a framework SOURCE patch "
+                "(scheduler / kv_cache / chunked-prefill), integrated via "
+                "`integrate_patch`, rather than another config-only "
+                "`params` / `explore` round."
+            )
+        return "\n".join(lines)
+
     def record_dynamic_action_dispatch(
         self, dyn_id: str, summary: dict[str, Any],
     ) -> int:
@@ -4582,6 +4637,125 @@ class SharedState:
                 f"  · (+{len(ordered) - max_entries} older gaps elided; "
                 f"see state.json `gaps[]`)"
             )
+        return "\n".join(rows)
+
+    def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
+        """Render advisory multi-model proposal scores for Orchestration.
+
+        Reads the ``ensemble_scores`` blob attached to the most recent
+        :attr:`specialist_rounds` entries by the ProposalScorer (see
+        ``orchestrator/proposal_scorer.py``). Each line shows a variant's
+        per-rater ``score ("reason")`` side-by-side so Orchestration can
+        see agreement / disagreement. There is deliberately NO mean and
+        NO sorting — these are one reference among many (parallel to
+        gaps / KB / analysis.md), not a ranking directive (Inv-9.1: no
+        system-side scoreboard).
+
+        The rater identities are **anonymized** (``rater_1``, ``rater_2``,
+        …) so Orchestration weighs the scores on their merits and reasons
+        alone, free of any per-model prior / brand bias. The mapping is
+        *stable within a render* (the same model maps to the same
+        ``rater_N`` across every round shown) so cross-round agreement is
+        still legible, but the real model slugs never reach the prompt —
+        they stay in ``ensemble_scores`` (state.json) for debug / audit.
+
+        Returns ``""`` when no recent round carries scores so the caller
+        skips the whole section header.
+
+        Format::
+
+            round=<round_id> domain=<domain>
+              - <variant_name>: rater_1=8.0 ("..."), rater_2=6.5 ("...")
+        """
+        rounds = [
+            r for r in (self.specialist_rounds or [])
+            if isinstance(r, dict)
+            and isinstance(r.get("ensemble_scores"), dict)
+            and (r["ensemble_scores"].get("models") or {})
+        ]
+        if not rounds:
+            return ""
+        shown = rounds[-max_rounds:]
+        # Stable, anonymized rater labels: collect every real model slug
+        # across the rounds being shown, sort for determinism, and map
+        # each to ``rater_N``. The same model gets the same label across
+        # rounds (cross-round agreement stays legible) while the real
+        # slug never reaches the prompt — Orchestration must weigh scores
+        # on merit, not on which brand emitted them (avoids model bias).
+        all_slugs: set[str] = set()
+        for r in shown:
+            models = r["ensemble_scores"].get("models") or {}
+            all_slugs.update(str(s) for s in models.keys())
+            errs = r["ensemble_scores"].get("errors") or {}
+            all_slugs.update(str(s) for s in errs.keys())
+        rater_label = {
+            slug: f"rater_{i}"
+            for i, slug in enumerate(sorted(all_slugs), start=1)
+        }
+        rows: list[str] = [
+            "(Advisory only — one reference among many, NOT a ranking "
+            "directive. Scores are 0-10 likelihood-of-throughput-gain "
+            "priors from independent anonymized raters; weigh on merit "
+            "alongside gaps / KB / analysis.md.)",
+        ]
+        for r in shown:
+            ens = r["ensemble_scores"]
+            models = ens.get("models") or {}
+            scale = str(ens.get("scale") or "0-10")
+            round_id = str(r.get("round_id") or "?")
+            domain = str(r.get("domain") or "?")
+            rows.append(f"round={round_id} domain={domain} scale={scale}")
+            # Collect every variant name seen across models, preserving
+            # the proposal_set order when available.
+            ordered_names: list[str] = []
+            seen: set[str] = set()
+            for variant in (r.get("proposal_set") or []):
+                if isinstance(variant, dict):
+                    nm = str(variant.get("name") or "")
+                    if nm and nm not in seen:
+                        ordered_names.append(nm)
+                        seen.add(nm)
+            for per_model in models.values():
+                if isinstance(per_model, dict):
+                    for nm in per_model:
+                        if nm not in seen:
+                            ordered_names.append(nm)
+                            seen.add(nm)
+            # Render raters in stable label order (rater_1, rater_2, …)
+            # so a given column means the same model across every round
+            # without ever printing the model slug.
+            ordered_slugs = sorted(
+                (s for s in models if s in rater_label),
+                key=lambda s: rater_label[s],
+            )
+            for nm in ordered_names:
+                parts: list[str] = []
+                for model_slug in ordered_slugs:
+                    per_model = models.get(model_slug)
+                    if not isinstance(per_model, dict):
+                        continue
+                    label = rater_label[model_slug]
+                    cell = per_model.get(nm)
+                    if isinstance(cell, dict) and cell.get("score") is not None:
+                        reason = str(cell.get("reason") or "").replace("\n", " ")
+                        if len(reason) > 80:
+                            reason = reason[:77] + "..."
+                        parts.append(
+                            f"{label}={float(cell['score']):.1f} "
+                            f"(\"{reason}\")"
+                        )
+                    else:
+                        parts.append(f"{label}=n/a")
+                rows.append(f"  - {nm}: " + ", ".join(parts))
+            errors = ens.get("errors") or {}
+            if errors:
+                err_labels = ", ".join(
+                    sorted(
+                        rater_label.get(str(s), "rater_?")
+                        for s in errors
+                    )
+                )
+                rows.append(f"  · raters unavailable this round: {err_labels}")
         return "\n".join(rows)
 
     def to_prompt_summary(self) -> str:
