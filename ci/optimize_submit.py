@@ -50,6 +50,7 @@ import logging
 import os
 import random
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -154,6 +155,21 @@ def _load_default_prompt_prefix() -> str:
     except OSError:
         pass
     return ""
+
+
+def _with_image_env_prompt_prefix(prompt_prefix: str | None, image: str | None) -> str | None:
+    """Append per-task image exports so V2 writes manifest.image at startup."""
+    image = (image or "").strip()
+    if not image:
+        return prompt_prefix
+    block = "\n".join([
+        "CI SANDBOX IMAGE (export before launching `inference_optimizer optimize`):",
+        f"  export HYPERLOOM_IMAGE={shlex.quote(image)}",
+        "  export CONTAINER_IMAGE=\"${CONTAINER_IMAGE:-$HYPERLOOM_IMAGE}\"",
+        "  export KERNEL_OPT_IMAGE=\"${KERNEL_OPT_IMAGE:-$HYPERLOOM_IMAGE}\"",
+    ])
+    prefix = (prompt_prefix or "").rstrip()
+    return f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
 
 
 def parse_kernel_backends(raw: str | None) -> list[str]:
@@ -1261,11 +1277,12 @@ def process_model(
             return rec
 
     try:
+        task_prompt_prefix = _with_image_env_prompt_prefix(prompt_prefix, image)
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
             mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path,
             oob_path=oob_path, tracelens_root=tracelens_root,
-            prompt_prefix=prompt_prefix, prompt_suffix=prompt_suffix,
+            prompt_prefix=task_prompt_prefix, prompt_suffix=prompt_suffix,
             kernel_backends=kernel_backends, max_hours=max_hours,
             target_gain=target_gain, results_path=results_path)
     except Exception as e:
@@ -1822,6 +1839,47 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
     subdirs = ("", "phase10_report", "results", "v2_session")
 
     n = 0
+
+    def _session_has_matching_json(sess_path: str) -> bool:
+        for sub in subdirs:
+            base = os.path.join(sess_path, sub) if sub else sess_path
+            if not os.path.isdir(base):
+                continue
+            for fn in targets:
+                p = Path(base) / fn
+                if not p.is_file():
+                    continue
+                try:
+                    d = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                mf = _json_model_field(d) if isinstance(d, dict) else ""
+                if mf and _record_model_field_matches(rec, mf):
+                    return True
+        return False
+
+    def _backfill_files(sess_path: str) -> int:
+        updated = 0
+        for sub in subdirs:
+            base = os.path.join(sess_path, sub) if sub else sess_path
+            if not os.path.isdir(base):
+                continue
+            for fn in targets:
+                p = Path(base) / fn
+                if not p.is_file():
+                    continue
+                try:
+                    before = p.read_bytes()
+                    _backfill_ci_metrics_file(p, rec)
+                    if p.read_bytes() != before:
+                        updated += 1
+                        log.info("[task %s] wekafs backfill: %s",
+                                 rec.task_id, p)
+                except Exception as e:
+                    log.warning("[task %s] wekafs backfill failed for %s: %s",
+                                rec.task_id, p, e)
+        return updated
+
     for uid_dir in os.listdir(users_root):
         uid_path = os.path.join(users_root, uid_dir)
         if not os.path.isdir(uid_path):
@@ -1849,31 +1907,50 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
                 except Exception:
                     continue
                 mf = str(d.get("model") or d.get("model_name") or "")
-                if mf and _norm_token(mf.split("/")[-1]) == target:
+                if mf and _record_model_field_matches(rec, mf):
                     matched = True
                     break
+            if not matched and _session_has_matching_json(sess_path):
+                matched = True
             if not matched and _record_matches_session_dir(rec, sess):
                 matched = True
             if not matched:
                 continue
-            for sub in subdirs:
-                base = os.path.join(sess_path, sub) if sub else sess_path
-                if not os.path.isdir(base):
+            n += _backfill_files(sess_path)
+
+        # HyperloomV2 current layout:
+        # /wekafs/users/<uid>/<model-path-basename>/<YYYYmmddTHHMMSSZ>/...
+        # A deleted ci_metrics.json must not prevent image/session metadata
+        # backfill into the original V2 manifest.json.
+        if rec.safe_user_id and uid_dir != rec.safe_user_id:
+            continue
+        for model_dir_name in _candidate_model_dir_names(rec):
+            model_dir = os.path.join(uid_path, model_dir_name)
+            if not os.path.isdir(model_dir):
+                continue
+            try:
+                ts_entries = sorted(os.listdir(model_dir), reverse=True)
+            except Exception:
+                continue
+            for ts_entry in ts_entries:
+                sess_path = os.path.join(model_dir, ts_entry)
+                if not os.path.isdir(sess_path):
                     continue
-                for fn in targets:
-                    p = Path(base) / fn
-                    if not p.is_file():
+                try:
+                    if os.path.getmtime(sess_path) < fresh_cutoff:
                         continue
-                    try:
-                        before = p.read_bytes()
-                        _backfill_ci_metrics_file(p, rec)
-                        if p.read_bytes() != before:
-                            n += 1
-                            log.info("[task %s] wekafs backfill: %s",
-                                     rec.task_id, p)
-                    except Exception as e:
-                        log.warning("[task %s] wekafs backfill failed for %s: %s",
-                                    rec.task_id, p, e)
+                except OSError:
+                    continue
+                ts = _session_timestamp_from_path(ts_entry)
+                matched = (
+                    _record_has_task_window(rec)
+                    and _timestamp_in_task_window(ts, rec)
+                )
+                if not matched and _session_has_matching_json(sess_path):
+                    matched = True
+                if not matched:
+                    continue
+                n += _backfill_files(sess_path)
     return n
 
 
@@ -1907,6 +1984,21 @@ def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
         if in_identity != in_dir:
             return False
     return True
+
+
+def _record_model_field_matches(rec: SubmissionRecord, model_field: str) -> bool:
+    """Compare a JSON model field with a SubmissionRecord conservatively."""
+    observed = _norm_token(str(model_field or ""))
+    if not observed:
+        return False
+    allowed = {
+        _norm_token((rec.model or "").split("/")[-1]),
+        _norm_token((rec.model or "").replace("/", "-")),
+        _norm_token((rec.model_path or "").rstrip("/\\").split("/")[-1]),
+        _norm_token(rec.display_name or ""),
+    }
+    allowed.discard("")
+    return observed in allowed or _norm_token(str(model_field).split("/")[-1]) in allowed
 
 
 def _candidate_model_dir_names(rec: SubmissionRecord) -> list[str]:
