@@ -3618,6 +3618,150 @@ def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Kernel Optimization Summary (Breakdown 面板对接文档 §A1; PR #399)
+# ---------------------------------------------------------------------------
+_KERNEL_OPT_SUMMARY_REL_PATH = "reports/kernel_optimization_summary.json"
+
+
+def collect_kernel_optimization_summary(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Mirror ``<session_dir>/reports/kernel_optimization_summary.json``
+    into the breakdown's ``kernel_optimization_summary`` section
+    (Breakdown 面板对接文档 §A1).
+
+    The file is produced deterministically by the ``report`` action
+    (``orchestrator.kernel_attempt_summary.build_kernel_optimization_summary``),
+    which runs as CLOSE step 1 — strictly *before* the
+    ``session_breakdown`` action (step 2) writes this breakdown — so the
+    report is already on disk for a normally-closed session. Mirroring
+    it here lets the dashboard read sbd alone instead of walking the
+    ``reports/`` + kernel-agent tree itself.
+
+    Behaviour (matches :func:`collect_kernel_roofline`):
+
+    * File missing → ``{}``, **no warning**. Offline / pre-#399 sessions
+      and any session where the ``report`` action never ran simply won't
+      have it; the dashboard hides Block 1 on an empty dict.
+    * Malformed / non-object JSON → ``{}`` + warning (never raises).
+    * Otherwise the report is mirrored **verbatim** (so producer-side
+      field additions ride through without a breakdown schema change),
+      apart from light shape guards on the containers the dashboard
+      iterates (``by_kernel`` list; ``totals`` /
+      ``*_breakdown`` / ``field_glossary`` objects), plus an added
+      ``report_path`` rel-link to the source file.
+    """
+    path = session_dir / _KERNEL_OPT_SUMMARY_REL_PATH
+    if not path.exists():
+        # Quiet on absence — keeps breakdowns of legacy / non-report
+        # sessions warning-free (mirrors collect_kernel_roofline).
+        return {}
+    blob = _load_json_safe(path, warnings)
+    if not isinstance(blob, dict):
+        warnings.append(
+            f"kernel_optimization_summary: {_KERNEL_OPT_SUMMARY_REL_PATH} "
+            "is not a JSON object"
+        )
+        return {}
+
+    out = dict(blob)
+
+    raw_by_kernel = out.get("by_kernel")
+    if raw_by_kernel is None:
+        out["by_kernel"] = []
+    elif not isinstance(raw_by_kernel, list):
+        warnings.append(
+            "kernel_optimization_summary.by_kernel is not a list; dropping entries"
+        )
+        out["by_kernel"] = []
+    else:
+        # Drop any non-dict rows so the dashboard can iterate safely;
+        # otherwise pass each row through verbatim (nested verification /
+        # backend_ladder shapes documented in §A1.4).
+        out["by_kernel"] = [r for r in raw_by_kernel if isinstance(r, dict)]
+
+    for key in (
+        "totals", "rejection_breakdown", "unattempted_reason_breakdown",
+        "failure_reason_breakdown", "field_glossary",
+    ):
+        val = out.get(key)
+        if val is not None and not isinstance(val, dict):
+            warnings.append(
+                f"kernel_optimization_summary.{key} is not an object; dropping"
+            )
+            out[key] = {}
+
+    takeaways = out.get("top_takeaways")
+    if takeaways is not None and not isinstance(takeaways, list):
+        warnings.append(
+            "kernel_optimization_summary.top_takeaways is not a list; dropping"
+        )
+        out["top_takeaways"] = []
+
+    out["report_path"] = _rel(path, session_dir) or _KERNEL_OPT_SUMMARY_REL_PATH
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Conc Sweep Summary (Breakdown 面板对接文档 §A2; PR #399)
+# ---------------------------------------------------------------------------
+_CONC_SWEEP_SUMMARY_REL_PATH = "reports/conc_sweep_summary.json"
+
+
+def collect_conc_sweep_summary(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Mirror ``<session_dir>/reports/conc_sweep_summary.json`` into the
+    breakdown's ``conc_sweep_summary`` section (Breakdown 面板对接文档 §A2).
+
+    Produced by the ``conc_sweep`` action during SWEEP (well before
+    CLOSE), so it is already on disk when sbd exports. Surfacing it here
+    extends the single-CONC headline gain into the full baseline-vs-
+    current_best CONC ladder for the dashboard's dual-curve chart.
+
+    Behaviour:
+
+    * File missing → ``{}``, **no warning** (conc_sweep often disabled /
+      skipped; the dashboard hides Block 2 on an empty dict).
+    * Malformed / non-object JSON → ``{}`` + warning (never raises).
+    * Otherwise mirrored **verbatim** + an added ``report_path``. The
+      only shape guard is on ``comparison`` (the array the dual-curve
+      chart iterates directly).
+
+    IMPORTANT — do **not** synthesize the optional blocks: when the
+    producer writes ``status="skipped"`` it intentionally omits
+    ``baseline`` / ``optimized`` / ``comparison`` / ``summary`` (§A2.4),
+    and ``roofline_ceiling`` (§A2.9) is absent on older products.
+    Consumers must branch on ``status`` before reading those keys; we
+    pass through exactly what the producer wrote.
+    """
+    path = session_dir / _CONC_SWEEP_SUMMARY_REL_PATH
+    if not path.exists():
+        return {}
+    blob = _load_json_safe(path, warnings)
+    if not isinstance(blob, dict):
+        warnings.append(
+            f"conc_sweep_summary: {_CONC_SWEEP_SUMMARY_REL_PATH} "
+            "is not a JSON object"
+        )
+        return {}
+
+    out = dict(blob)
+
+    comparison = out.get("comparison")
+    if comparison is not None and not isinstance(comparison, list):
+        warnings.append(
+            "conc_sweep_summary.comparison is not a list; dropping entries"
+        )
+        out["comparison"] = []
+
+    out["report_path"] = _rel(path, session_dir) or _CONC_SWEEP_SUMMARY_REL_PATH
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Optimization stack — raw KEEP ledger passthrough
 # ---------------------------------------------------------------------------
 # ``state.optimization_stack[]`` is the authoritative ordered list of
