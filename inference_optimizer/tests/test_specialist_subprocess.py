@@ -219,9 +219,7 @@ def test_kb_write_tools_remain_denied():
     """KB lifecycle stays Coordinator-owned — Inv-2 / Inv-6.1 cannot
     be relaxed by PR-A2."""
     for kb_tool in (
-        "mcp__cortex_kb__hypothesize",
-        "mcp__cortex_kb__verify",
-        "mcp__cortex_kb__commit",
+        "mcp__cortex_kb__propose_point",
     ):
         assert kb_tool in SPECIALIST_TOOL_DENYLIST
 

@@ -348,8 +348,9 @@ def test_report_denied_when_hot_reusable_kernels_untried(session_dir):
     being reusable hot kernels with zero attempts. The new gate must
     deny report and surface the untried set in the hint.
 
-    Requires N19c to be unlocked so the hot_kernel_unfinished rule
-    activates -- simulated here via cheap-exhausted (last_delta < EPS).
+    Requires the kernel_opt request gate to be open so the
+    hot_kernel_unfinished rule activates -- a roofline snapshot on
+    record opens it.
     """
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
@@ -363,7 +364,6 @@ def test_report_denied_when_hot_reusable_kernels_untried(session_dir):
     ])
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
     coord.shared_state.explore_attempts = [{"variant_name": "x"}]
-    coord.shared_state.last_cheap_delta_gain = 0.05  # below EPS
 
     denied = coord._sequence_denial_for_action("report")
     assert isinstance(denied, PolicyDenied)
@@ -416,9 +416,8 @@ def test_required_next_step_surfaces_untried_hot_kernels(session_dir):
     """``_required_next_step`` should also surface the TODO 4a line so
     Orchestration sees the explicit list when no KEEP is pending.
 
-    Requires N19c unlocked (cheap exhausted) -- otherwise the TODO is
-    intentionally hidden to avoid the death-spiral covered by the
-    test below.
+    Requires the kernel_opt request gate open (roofline snapshot on
+    record) -- otherwise the TODO is intentionally hidden.
     """
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
@@ -430,7 +429,6 @@ def test_required_next_step_surfaces_untried_hot_kernels(session_dir):
     ])
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
     coord.shared_state.explore_attempts = [{"variant_name": "x"}]
-    coord.shared_state.last_cheap_delta_gain = 0.05  # below EPS
     todo = coord._required_next_step()
     assert "TODO 4a/5" in todo
     # Highest gpu_pct first
@@ -454,109 +452,56 @@ def test_report_gate_inactive_when_no_reusable_hot_kernel_above_threshold(
 
 
 # ---------------------------------------------------------------------------
-# PR-C death-spiral guard: hot_kernel_unfinished must yield to N19c
-# (reproduces session 20260523T014653Z bug)
+# PR-C hot-kernel report gate: ``_kernel_opt_unlocked`` opens once a
+# roofline snapshot exists (or the escape hatch is set).
 # ---------------------------------------------------------------------------
-def _seed_post_cheap_round(coord, *, snapshot_id=1, last_delta=0.77):
-    """Mimic 'cheap action ran once'. On this branch
-    ``_kernel_opt_unlocked`` reads the F3-5 ``gain_per_stack_entry``
-    ledger (window=3, EPSILON=0.5%) instead of main's v0.6
-    ``backends_attempts`` + ``last_cheap_delta_gain``, so we seed the
-    last-3 deltas at ``last_delta`` and flip the
-    ``gain_driven_kernel_opt`` toggle on.
-
-    With ``last_delta=0.77`` (>= 0.5) the gate is CLOSED; with
-    ``last_delta=0.1`` (< 0.5) the gate is OPEN.
-    """
+def _seed_roofline_snapshot(coord, *, snapshot_id=1):
+    """Mark a roofline snapshot as recorded so ``_kernel_opt_unlocked``
+    reports the kernel_opt request gate as open."""
     coord.shared_state.last_trace_analyze = dict(
         coord.shared_state.last_trace_analyze or {}
     )
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = snapshot_id
-    coord.shared_state.gain_driven_kernel_opt = True
-    coord.shared_state.gain_per_stack_entry = [
-        {"delta_pct": float(last_delta)} for _ in range(3)
-    ]
 
 
-def test_report_gate_yields_when_kernel_opt_locked_by_n19c(session_dir):
-    """20260523T014653Z death-spiral repro:
-
-    1. Cheap round produced +0.77% delta (> EPSILON=0.3%)
-       -> N19c locks kernel_opt
-    2. PR-C's untried_hot_reusable_kernels has k001/k002/k005/k008
-       -> hot_kernel_unfinished previously denied `report`
-    3. LLM tried run_optimization -> N19c denied execution_order
-    4. 10 consecutive execution_order denials -> policy_loop auto-stop
-
-    Fix: report's hot_kernel_unfinished rule must yield when
-    ``_kernel_opt_unlocked()`` returns False. The LLM can then either
-    propose another cheap round (preferred -- cheap is still earning)
-    or emit ``report`` if no cheap actions are left.
-    """
+def test_report_gate_fires_once_snapshot_exists(session_dir):
+    """With a roofline snapshot on record, ``_kernel_opt_unlocked`` is
+    open and PR-C's hot_kernel_unfinished rule denies ``report`` while
+    reusable hot kernels remain untried."""
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_trace_analyze(coord, hot_kernels=[
         {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
          "source_file": "/p/moe_op.py"},
-        {"kernel_id": "k002", "gpu_pct": 47.9, "reusable_native_kernel": True,
+    ])
+    _seed_roofline_snapshot(coord, snapshot_id=1)
+
+    assert coord._kernel_opt_unlocked() is True
+    denied = coord._sequence_denial_for_action("report")
+    assert isinstance(denied, PolicyDenied)
+    assert denied.rule == "hot_kernel_unfinished"
+
+
+def test_report_gate_closed_without_snapshot(session_dir):
+    """Without a roofline snapshot (and no escape hatch),
+    ``_kernel_opt_unlocked`` is closed so hot_kernel_unfinished does
+    not push the LLM toward kernel_opt."""
+    coord = Coordinator(session_dir, backends=_backends_full())
+    _seed_post_baseline(coord)
+    _seed_trace_analyze(coord, hot_kernels=[
+        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
          "source_file": "/p/moe_op.py"},
     ])
-    _seed_post_cheap_round(coord, snapshot_id=1, last_delta=0.77)
 
-    # N19c is locked (cheap still earning)
     assert coord._kernel_opt_unlocked() is False
-    # ... so hot_kernel_unfinished must NOT deny report
     denied = coord._sequence_denial_for_action("report")
     if denied is not None:
         assert denied.rule != "hot_kernel_unfinished", denied
 
 
-def test_required_next_step_hides_todo_4a_when_kernel_opt_locked(session_dir):
-    """Symmetric to the report-gate yield: TODO 4a must not push the
-    LLM toward `run_optimization` if N19c will just reject it."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-    ])
-    _seed_post_cheap_round(coord, snapshot_id=1, last_delta=0.77)
-
-    todo = coord._required_next_step()
-    assert "TODO 4a" not in todo, (
-        f"TODO 4a leaked while N19c locks kernel_opt: {todo!r}"
-    )
-
-
-def test_report_gate_fires_again_after_cheap_exhausts(session_dir):
-    """Once cheap delta falls below EPSILON, N19c unlocks and PR-C
-    re-activates -- gate must fire again."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(coord, hot_kernels=[
-        {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-    ])
-    # First: cheap still earning -> gate yields
-    _seed_post_cheap_round(coord, snapshot_id=1, last_delta=0.77)
-    denied_1 = coord._sequence_denial_for_action("report")
-    assert denied_1 is None or denied_1.rule != "hot_kernel_unfinished"
-
-    # Then: cheap exhausted (delta drops below F3-5 epsilon=0.5%) ->
-    # gate fires
-    coord.shared_state.gain_per_stack_entry = [
-        {"delta_pct": 0.1} for _ in range(3)
-    ]
-    assert coord._kernel_opt_unlocked() is True
-    denied_2 = coord._sequence_denial_for_action("report")
-    assert isinstance(denied_2, PolicyDenied)
-    assert denied_2.rule == "hot_kernel_unfinished"
-
-
 def test_report_gate_active_with_escape_hatch(session_dir, monkeypatch):
-    """ALLOW_EARLY_KERNEL_OPT bypasses N19c -> kernel_opt is
-    immediately dispatchable -> hot_kernel_unfinished fires even
-    without a prior cheap round."""
+    """ALLOW_EARLY_KERNEL_OPT unlocks kernel_opt unconditionally ->
+    hot_kernel_unfinished fires even without a roofline snapshot."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_EARLY_KERNEL_OPT", "1")
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
@@ -564,7 +509,7 @@ def test_report_gate_active_with_escape_hatch(session_dir, monkeypatch):
         {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True,
          "source_file": "/p/moe_op.py"},
     ])
-    # No cheap round at all; escape hatch unlocks kernel_opt.
+    # No snapshot at all; escape hatch unlocks kernel_opt.
     assert coord._kernel_opt_unlocked() is True
     denied = coord._sequence_denial_for_action("report")
     assert isinstance(denied, PolicyDenied)
