@@ -4100,13 +4100,13 @@ class Coordinator:
                 if objective.reached(self.shared_state):
                     stop_reason = "target_reached"
                     break
-                # The ``_has_no_more_leverage`` safety net (which used to
-                # wind the session down to SWEEP -> CLOSE via the
-                # skip_to_sweep hint when cheap rounds plateaued and every
-                # reusable kernel was rejected) has been removed to
-                # prioritise long-run continuity: the run keeps exploring
-                # until the wall-clock deadline rather than self-winding
-                # down on a plateau judgment.
+                # The no-more-leverage safety net (which used to wind the
+                # session down to SWEEP -> CLOSE via the skip_to_sweep hint
+                # when cheap rounds plateaued and every reusable kernel was
+                # rejected) has been removed to prioritise long-run
+                # continuity: the run keeps exploring until the wall-clock
+                # deadline rather than self-winding down on a plateau
+                # judgment.
                 if (
                     deadline is not None
                     and time.monotonic() >= deadline
@@ -4193,32 +4193,6 @@ class Coordinator:
                     pass
         return self.shared_state.stop_reason
 
-    async def _has_no_more_leverage(self) -> bool:
-        """Return True when automated explore/kernel levers are exhausted.
-
-        v0.8 plateau judgment lives in :mod:`phase_state`; this helper
-        is the safety-net check the closing-phase path consults before
-        winding the session down. We require:
-
-        1. baseline + current_best present (otherwise we are still in
-           PRELUDE / never finished a round)
-        2. no pending proposals or queued / running tasks
-        3. ``params_no_promote_streak >= 5`` (proxy still used as
-           the cross-phase plateau hint; see KB_gaps/Gap-15)
-        4. every reusable kernel_id is rejected.
-        """
-        if self.shared_state.baseline_tput <= 0:
-            return False
-        if not self.shared_state.current_best:
-            return False
-        if self.state.pending_proposals:
-            return False
-        if await self.tasks.queued() or await self.tasks.running():
-            return False
-        if self.shared_state.params_no_promote_streak < 5:
-            return False
-        return self._all_reusable_kernels_rejected()
-
     async def _enter_closing_phase(self, *, grace_sec: float) -> float:
         """Enter report-flush phase after the wall-clock deadline.
 
@@ -4294,27 +4268,6 @@ class Coordinator:
         return task.state in {
             "succeeded", "failed", "cancelled", "needs_manual_review",
         }
-
-    def _all_reusable_kernels_rejected(self) -> bool:
-        select = self.shared_state.last_trace_analyze or {}
-        reusable = {
-            str(k) for k in (select.get("reusable_native_kernel_ids") or [])
-            if k
-        }
-        if not reusable:
-            return bool(self.shared_state.last_profile_trace)
-
-        rejected = {
-            str(k) for k in (self.shared_state.rejected_kernel_ids or [])
-            if k
-        }
-        for entry in self.shared_state.rejected_kernel_patches or []:
-            if isinstance(entry, dict) and entry.get("kernel_id"):
-                rejected.add(str(entry["kernel_id"]))
-        last = self.shared_state.last_kernel_opt or {}
-        if last.get("kernel_id") and last.get("decision") == "REVERT":
-            rejected.add(str(last["kernel_id"]))
-        return reusable <= rejected
 
     # ==================================================================
     # Reactor
