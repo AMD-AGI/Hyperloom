@@ -16,8 +16,10 @@ namespace. The sibling `$USER_DATA_PATH/kernel-agent-workspace/<kernel_id>/`
 tree (created by Coordinator) holds cross-task GEAK/OOB work artefacts
 keyed by `kernel_id`. Default `USER_DATA_PATH` is `/workspace/hyperloom`.
 Do not write outside `$USER_DATA_PATH` except for reading user-provided
-trace/source paths and the read-only TraceLens source at
-`$TRACELENS_ROOT` (default `/wekafs/hyperloom/TraceLens-internal`).
+trace/source paths, the TraceLens public source at
+`$TRACELENS_ROOT` (default `/workspace/TraceLens`), and the
+TraceLens-internal source at `$TRACELENS_INTERNAL_ROOT` (default
+`/workspace/TraceLens-internal`).
 The legacy `WORKSPACE_PATH` env was retired during the
 all-artefacts-under-`USER_DATA_PATH` migration; rename launchers that
 still set it.
@@ -59,8 +61,10 @@ are accepted as no-ops for backwards compat):
 - `ray==2.44.1` + `click<8.3.0`
 - Node.js 20 + npm when they are missing (required for the `claude` /
   `codex` npm CLIs)
-- TraceLens editable install from `/wekafs/hyperloom/TraceLens-internal` and
-  verifies `TraceLens_generate_perf_report_pytorch_inference --help`
+- TraceLens public + internal editable installs from `$TRACELENS_ROOT`
+  (default `/workspace/TraceLens`) and `$TRACELENS_INTERNAL_ROOT` (default
+  `/workspace/TraceLens-internal`) and verifies
+  `TraceLens_generate_perf_report_pytorch_inference --help`
   (Hyperloom is inference-only since v0.4; the training-mode CLI is no
   longer accepted)
 - GEAK CLI from `GEAK_REF` (default `v3.2.0`) +
@@ -303,50 +307,57 @@ When **not** to merge:
 
 ## TraceLens Requirements
 
-TraceLens runs through its CLI and its own skill.
+TraceLens runs through its CLI and its own skill. It is **one dependency**
+installed from **two source repos** (public base, then internal rehydration module).
+Install both inside the GPU container before Hyperloom bootstrap (see README
+Local Mode step 1):
 
-`install.sh` already installs TraceLens (editable install) and verifies the
-perf-report CLI is on PATH. If `tracelens_analysis` fails with "CLI not
-found", re-run `install.sh` instead of cloning the open-source TraceLens
-repo from chat — the open-source clone does NOT contain the standalone
-skills required by `tools/tracelens_analysis.py`.
+```bash
+git clone https://github.com/AMD-AGI/TraceLens.git
+cd TraceLens && pip install -e .
 
-When `$TRACELENS_ROOT` is on a read-only mount (the WekaFS default at
-`/wekafs/hyperloom/TraceLens-internal`), `ensure_tracelens` automatically
-mirrors the source tree to `${HYPERLOOM_ROOT}/TraceLens-internal` (parallel
-to `${HYPERLOOM_ROOT}/geak` / `${HYPERLOOM_ROOT}/OOB/oob_cli`) via `cp -r`,
-runs `pip install -e` against the writable mirror, and `write_env_file`
-re-exports `TRACELENS_ROOT` pointing at the mirror so subsequent CLI
-subprocesses inherit it. This prevents the `trace_analyze` failure loop
-caused by `tools/tracelens_analysis.py` re-running `pip install -e .`
-inside `cwd=$TRACELENS_ROOT` on every request. No manual `rsync` is
-needed for the single-node read-only case.
+git clone https://github.com/AMD-AGI/TraceLens-internal.git
+cd TraceLens-internal && pip install -e .
+
+TraceLens_generate_perf_report_pytorch_inference --help
+```
+
+Container defaults: `/workspace/TraceLens` (`TRACELENS_ROOT`, public
+repo) and `/workspace/TraceLens-internal` (`TRACELENS_INTERNAL_ROOT`, internal repo —
+same TraceLens stack, rehydration module).  At analysis time, `TL_EXTENSION`
+is set to `$TRACELENS_INTERNAL_ROOT` in the orchestrator prompt so the
+analysis skill can locate the rehydration module.
+
+`install.sh` re-runs both editable installs and verifies the perf-report CLI
+is on PATH. If `tracelens_analysis` fails with "CLI not found", re-run
+`install.sh` or repeat the manual install above.
+
+When `$TRACELENS_ROOT` or `$TRACELENS_INTERNAL_ROOT` is on a read-only mount,
+`ensure_tracelens` automatically mirrors the checkout to
+`${HYPERLOOM_ROOT}/TraceLens` or `${HYPERLOOM_ROOT}/TraceLens-internal`
+respectively (parallel to `${HYPERLOOM_ROOT}/geak` /
+`${HYPERLOOM_ROOT}/OOB/oob_cli`) via `cp -r`, runs `pip install -e` against
+the writable mirror, and `write_env_file` re-exports the resolved root so
+subsequent CLI subprocesses inherit the mirror.
 
 If `install.sh` did not finish or the CLI is unexpectedly missing, run a
 manual editable install + smoke test before analysis:
 
 ```bash
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
-cd "$TRACELENS_ROOT"
-pip install -e .
-# TraceLens #124: only the `_inference` perf-report CLI is accepted
-# (correct execution mode = graph-replay for vLLM/SGLang traces). Hyperloom
-# is inference-only since v0.4; the legacy training-mode CLI is no
-# longer accepted — bump TraceLens-internal if the inference CLI is
-# missing.
-TraceLens_generate_perf_report_pytorch_inference --help
+export TRACELENS_ROOT="${TRACELENS_ROOT:-/workspace/TraceLens}"
+export TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/workspace/TraceLens-internal}"
+cd "$TRACELENS_ROOT" && pip install -e .
+cd "$TRACELENS_INTERNAL_ROOT" && pip install -e .
 ```
 
-If neither CLI is on PATH, stop and fix installation before analysis. Do not
-fall back to the open-source TraceLens clone when the internal mount exists;
-the internal mount contains the standalone skills expected by this tool.
+If the CLI is not on PATH, stop and fix installation before analysis.
 `tools/tracelens_analysis.py` picks the right CLI at runtime (preferring
 `_inference`, falling back to the legacy name) — see `select_perf_report_cli`.
 
 When running TraceLens analysis, read this skill file and strictly follow
 its order:
 
-`/wekafs/hyperloom/TraceLens-internal/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md`
+`$TRACELENS_ROOT/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md`
 
 Step 6 and Step 7 categories must run in independent Task subagents. Each
 subagent must write findings under `system_findings/` or `category_findings/`.
