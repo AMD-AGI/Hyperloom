@@ -13,6 +13,7 @@ delta computation runs.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -376,6 +377,104 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
     assert result["patches_reverted"] == []
     # KEEP: patch is still applied on the framework root.
     assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
+    """D2: a KEEP appends an 'integrated' record to lessons.jsonl so the
+    next ``fa phase-discover`` can dedup the already-integrated PR."""
+    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+
+    kb_root = tmp_path / "kb" / "framework_optimization"
+    monkeypatch.setattr(kb_writeback, "KB_ROOT", kb_root)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()
+    cand["pr_url"] = "https://github.com/sgl-project/sglang/pull/1234"
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx("t-fp-keep-kb", {
+        "candidate": cand,
+        "patches": [str(patch_path)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "kept"
+    lessons = kb_root / "lessons.jsonl"
+    assert lessons.exists()
+    records = [
+        json.loads(line)
+        for line in lessons.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 1
+    assert records[0]["outcome"] == "integrated"
+    assert records[0]["pr_url"] == cand["pr_url"]
+    assert records[0]["tps_delta_pct"] == pytest.approx(10.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
+    """D2: a REVERT appends a 'reverted_smoke_fail' record (dedup of a
+    tried-but-regressive PR)."""
+    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+
+    kb_root = tmp_path / "kb" / "framework_optimization"
+    monkeypatch.setattr(kb_writeback, "KB_ROOT", kb_root)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()
+    cand["pr_url"] = "https://github.com/sgl-project/sglang/pull/1234"
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 980.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx("t-fp-revert-kb", {
+        "candidate": cand,
+        "patches": [str(patch_path)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "reverted"
+    records = [
+        json.loads(line)
+        for line in (kb_root / "lessons.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 1
+    assert records[0]["outcome"] == "reverted_smoke_fail"
 
 
 @pytest.mark.asyncio
