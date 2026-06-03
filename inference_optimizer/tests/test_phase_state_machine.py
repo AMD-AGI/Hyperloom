@@ -97,7 +97,7 @@ def test_stop_reason_vocab_includes_v06_and_v08():
     for reason in (
         # v0.6 sentinels
         "target_reached", "time_exhausted", "max_ticks", "policy_loop",
-        "baseline_failed", "emergency",
+        "baseline_failed", "emergency", "coordinator_exception",
         # v0.8 additions
         "crash_threshold_exceeded", "user_stop_requested",
         "cortex_drain_failed", "plateau_explore",
