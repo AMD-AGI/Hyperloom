@@ -13,6 +13,7 @@ delta computation runs.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -379,6 +380,104 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
+    """D2: a KEEP appends an 'integrated' record to lessons.jsonl so the
+    next ``fa phase-discover`` can dedup the already-integrated PR."""
+    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+
+    kb_root = tmp_path / "kb" / "framework_optimization"
+    monkeypatch.setattr(kb_writeback, "KB_ROOT", kb_root)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()
+    cand["pr_url"] = "https://github.com/sgl-project/sglang/pull/1234"
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx("t-fp-keep-kb", {
+        "candidate": cand,
+        "patches": [str(patch_path)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "kept"
+    lessons = kb_root / "lessons.jsonl"
+    assert lessons.exists()
+    records = [
+        json.loads(line)
+        for line in lessons.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 1
+    assert records[0]["outcome"] == "integrated"
+    assert records[0]["pr_url"] == cand["pr_url"]
+    assert records[0]["tps_delta_pct"] == pytest.approx(10.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
+    """D2: a REVERT appends a 'reverted_smoke_fail' record (dedup of a
+    tried-but-regressive PR)."""
+    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+
+    kb_root = tmp_path / "kb" / "framework_optimization"
+    monkeypatch.setattr(kb_writeback, "KB_ROOT", kb_root)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()
+    cand["pr_url"] = "https://github.com/sgl-project/sglang/pull/1234"
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 980.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx("t-fp-revert-kb", {
+        "candidate": cand,
+        "patches": [str(patch_path)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "reverted"
+    records = [
+        json.loads(line)
+        for line in (kb_root / "lessons.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 1
+    assert records[0]["outcome"] == "reverted_smoke_fail"
+
+
+@pytest.mark.asyncio
 async def test_executor_revert_when_delta_below_threshold(tmp_path: Path):
     """Bench returns -2% tput → REVERT. Patch is rolled back."""
     session_dir = tmp_path / "session"
@@ -739,6 +838,92 @@ async def test_executor_no_diff_url_falls_back_to_checkout_head(tmp_path: Path):
     })
     result = await executor(ctx)
     assert result["status"] == "applied_no_bench", result
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
+    """P2 regression: a PR that ADDS a new file (no edits to tracked
+    files) must KEEP cleanly — _git_commit_keep runs ``git add -A`` so the
+    new file is captured in the commit instead of being dropped by
+    ``commit -am`` (which would either leave it untracked or fail)."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    patch_path = tmp_path / "add.patch"
+    patch_path.write_text(_PATCH_B_ADDS_FILE, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx("t-fp-addfile", {
+        "candidate": cand,
+        "patches": [str(patch_path)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "kept", result
+    assert result.get("keep_commit_sha")
+    # The new file is present AND committed (not left as untracked debris).
+    assert (repo / "new.py").exists()
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert status == "", f"worktree not clean after KEEP: {status!r}"
+
+
+@pytest.mark.asyncio
+async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
+    """P1 regression: a candidate whose repo differs from the live
+    framework_root's origin must NOT use checkout-head (which would fetch
+    the wrong ref from the live origin). Even with apply_mode=checkout_head
+    explicitly set, the executor falls back to diff_url."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    # Point the live origin at sgl-project/sglang.
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin",
+         "https://github.com/sgl-project/sglang.git"],
+        check=True, capture_output=True,
+    )
+    # A served diff_url so the fallback has something to apply.
+    diff_file = tmp_path / "served.patch"
+    diff_file.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = {
+        "repo": "ROCm/vllm",  # cross-repo vs the sglang live origin
+        "pr_number": 42,
+        "ref": "pr-head",
+        "title": "cross-repo PR",
+        "diff_url": f"file://{diff_file}",
+        "apply_mode": "checkout_head",  # explicitly requested, but cross-repo
+    }
+    ctx = _make_ctx("t-fp-crossrepo", {
+        "candidate": cand,
+        "framework_source_root": str(repo),
+        "apply_only": True,
+    })
+    result = await executor(ctx)
+
+    assert result["status"] == "applied_no_bench", result
+    # Fell back to the served diff_url (not checkout_head).
+    assert result.get("patch_source_mode") == "diff_url"
+    # The served diff actually landed.
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
