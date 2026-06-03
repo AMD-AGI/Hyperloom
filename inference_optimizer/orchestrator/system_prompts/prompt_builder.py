@@ -36,6 +36,7 @@ from ..action_registry import (
     ActionRegistry,
     VALID_PIPELINE_PHASES,
 )
+from ..action_surfaces import GRID_INJECTABLE_ACTIONS, KERNEL_OWNED_ACTIONS
 
 
 # ---------------------------------------------------------------------------
@@ -91,22 +92,6 @@ NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
     # the executor itself is kernel-agnostic.
     "recover",
 )
-
-# Actions that the Kernel agent owns end-to-end (Plan A). Orchestration MUST
-# emit `request{target_agent='kernel', kind=...}` for these instead of
-# `delegate{action_name=...}`. We highlight the difference in the catalogue
-# section so the LLM picks the right transport.
-KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
-    "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
-})
-
-# Actions that accept LLM-injected grid candidates via ``params.grid``.
-# The catalogue section appends a grid-override hint for these so the
-# LLM knows it can expand the search space beyond the shipped defaults.
-GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
-    "explore", "sweep",
-})
 
 # Phase ordering for the catalogue section. Any action whose pipeline_phase
 # is not in this tuple is appended at the end (defensive; current registry
