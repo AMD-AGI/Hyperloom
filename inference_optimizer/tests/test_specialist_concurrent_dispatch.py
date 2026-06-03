@@ -29,7 +29,7 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 async def _build_coord_with_capacity(
-    tmp_path: Path, *, capacity: int,
+    tmp_path: Path, *, capacity: int, gpu_specialist_capacity: int = 0,
 ):
     """Build a minimal-but-real Coordinator with the requested
     research_lane capacity. We bypass the full CLI bootstrap (which
@@ -47,6 +47,7 @@ async def _build_coord_with_capacity(
     # at construction time (it propagates to the leases DB inside __init__).
     state = SharedState(session_id=f"concurrent-{capacity}")
     state.research_lane_capacity = capacity
+    state.gpu_specialist_capacity = gpu_specialist_capacity
     state.save(tmp_path)
 
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -76,11 +77,15 @@ class _ConcurrencyProbe:
         self.sleep_seconds = sleep_seconds
         self.entries: list[tuple[str, float]] = []
         self.exits: list[tuple[str, float]] = []
+        self.gpu_ids_by_task: dict[str, list[int]] = {}
         self._lock = asyncio.Lock()
 
     async def __call__(self, ctx) -> dict:
         async with self._lock:
             self.entries.append((ctx.task.task_id, time.monotonic()))
+            self.gpu_ids_by_task[ctx.task.task_id] = list(
+                (ctx.extra or {}).get("gpu_ids") or []
+            )
         await asyncio.sleep(self.sleep_seconds)
         async with self._lock:
             self.exits.append((ctx.task.task_id, time.monotonic()))
@@ -239,6 +244,79 @@ async def test_dispatcher_capacity_one_falls_back_to_serial(tmp_path: Path):
     assert len(probe.entries) == 1
 
 
+@pytest.mark.asyncio
+async def test_gpu_specialist_pool_limits_dispatch_even_when_research_lane_free(
+    tmp_path: Path,
+):
+    coord = await _build_coord_with_capacity(
+        tmp_path, capacity=2, gpu_specialist_capacity=1,
+    )
+    probe = _ConcurrencyProbe(sleep_seconds=0.1)
+    coord.sub.register_executor("specialist", probe)
+
+    for i in range(2):
+        await coord.tasks.create_or_return_existing(
+            kind="specialist",
+            params={
+                "domain": "serving_specialist",
+                "gap_canonical_id": f"gap.gpu.{i}",
+                "max_turns": 2,
+                "needs_gpu": True,
+                "gpu_count": 1,
+            },
+            idempotency_key=f"gpu-t-{i}",
+            requires_lanes=["research_lane"],
+        )
+
+    await coord._pump_dispatcher_once()
+
+    assert len(probe.entries) == 1
+    ran_task_id = probe.entries[0][0]
+    assert probe.gpu_ids_by_task[ran_task_id] == [0]
+    queued = await coord.tasks.queued()
+    assert len(queued) == 1
+    assert queued[0].params["needs_gpu"] is True
+
+
+@pytest.mark.asyncio
+async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
+    tmp_path: Path, monkeypatch,
+):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "10")
+    coord = await _build_coord_with_capacity(
+        tmp_path, capacity=1, gpu_specialist_capacity=1,
+    )
+    probe = _ConcurrencyProbe(sleep_seconds=0.01)
+    coord.sub.register_executor("specialist", probe)
+    captured_ttls: list[int] = []
+    original_try_acquire = coord.gpu_specialist_pool.try_acquire
+
+    async def _spy_try_acquire(**kwargs):
+        captured_ttls.append(int(kwargs.get("ttl_sec") or 0))
+        return await original_try_acquire(**kwargs)
+
+    coord.gpu_specialist_pool.try_acquire = _spy_try_acquire  # type: ignore[method-assign]
+
+    await coord.tasks.create_or_return_existing(
+        kind="specialist",
+        params={
+            "domain": "serving_specialist",
+            "gap_canonical_id": "gap.gpu.ttl",
+            "max_turns": 4,
+            "needs_gpu": True,
+            "gpu_count": 1,
+        },
+        idempotency_key="gpu-ttl",
+        requires_lanes=["research_lane"],
+        lease_ttl_sec=5,
+    )
+
+    await coord._pump_dispatcher_once()
+
+    assert captured_ttls == [40]
+    assert probe.gpu_ids_by_task
+
+
 # ---------------------------------------------------------------------------
 # CLI surface check — the default capacity changed to 4 in PR-A3.
 # ---------------------------------------------------------------------------
@@ -249,18 +327,20 @@ def test_cli_default_research_lane_capacity_is_4():
     parser = cli_mod._build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
     assert args.research_lane_capacity == 4
+    assert args.gpu_specialist_capacity == 0
 
 
-def test_cli_clamps_research_lane_capacity_above_six(tmp_path):
-    """MAX_RESEARCH_LANE_CAPACITY=6 is a hard cap; operator values
-    above 6 are silently clamped down (no warning). Verifies the
-    SharedState ends up holding the clamped value, not the raw arg."""
+def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):
+    """The research-lane ceiling scales with the visible GPU count
+    (``2 × GPU``); operator values above it are silently clamped down.
+    Verifies the SharedState ends up holding the clamped value, not the
+    raw arg."""
     import argparse
 
     from inference_optimizer.cli import _seed_shared_state
-    from inference_optimizer.orchestrator.policy import (
-        MAX_RESEARCH_LANE_CAPACITY,
-    )
+    from inference_optimizer.orchestrator import policy as policy_mod
+
+    monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
 
     # Minimal Namespace: _seed_shared_state directly accesses model /
     # model_class / target_summary / max_hours (no getattr defaults);
@@ -278,5 +358,5 @@ def test_cli_clamps_research_lane_capacity_above_six(tmp_path):
         args=args,
         session_id="clamp-test",
     )
-    assert MAX_RESEARCH_LANE_CAPACITY == 6
-    assert state.research_lane_capacity == MAX_RESEARCH_LANE_CAPACITY
+    assert policy_mod.research_lane_ceiling() == 8
+    assert state.research_lane_capacity == 8

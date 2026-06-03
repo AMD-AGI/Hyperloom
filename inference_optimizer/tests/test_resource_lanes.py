@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from inference_optimizer.orchestrator.gpu_pool import SpecialistGpuPool
 from inference_optimizer.orchestrator.resource_lock import (
     KNOWN_LANES,
     LANE_CONFLICTS,
@@ -71,9 +72,9 @@ def locks(conn):
 # ===========================================================================
 # 1. Schema — v1 → v2 migration + defaults
 # ===========================================================================
-def test_schema_version_is_v2():
-    """v0.8 M6 bumps schema_version 1 → 2 to mark the PK widening."""
-    assert SCHEMA_VERSION == 2
+def test_schema_version_is_v3():
+    """v3 adds the specialist GPU pool leases table."""
+    assert SCHEMA_VERSION == 3
 
 
 def test_fresh_db_has_composite_pk(conn):
@@ -91,6 +92,12 @@ def test_fresh_db_seeds_default_lane_capacity(conn):
     rows = {r["lane"]: int(r["capacity"]) for r in cur.fetchall()}
     for lane, cap in DEFAULT_LANE_CAPACITIES.items():
         assert rows[lane] == cap
+
+
+def test_fresh_db_has_gpu_leases_table(conn):
+    cur = conn.raw.execute("PRAGMA table_info(gpu_leases)")
+    cols = {row["name"] for row in cur.fetchall()}
+    assert {"gpu_id", "holder_id", "task_id", "expires_at"} <= cols
 
 
 def test_set_lane_capacity_upserts(conn):
@@ -131,7 +138,7 @@ def test_v1_to_v2_migration_preserves_rows(tmp_path):
 
     db = SqliteConnection(p)
     v = ensure_schema(db.raw)
-    assert v == 2
+    assert v == 3
     cur = db.raw.execute("PRAGMA table_info(leases)")
     pk_cols = sorted(
         row["name"] for row in cur.fetchall() if int(row["pk"] or 0) > 0
@@ -216,6 +223,41 @@ async def test_research_lane_overflow_raises_LaneFull(conn, locks):
     assert "research_lane" in exc.value.full_lanes
     for l in leases:
         await locks.release(l)
+
+
+@pytest.mark.asyncio
+async def test_specialist_gpu_pool_allocates_and_releases(conn):
+    pool = SpecialistGpuPool(conn, gpu_ids=[0, 1])
+    lease = await pool.try_acquire(
+        count=1, holder_id="gpu-a", task_id="task-a", ttl_sec=60,
+    )
+    assert lease is not None
+    assert list(lease.gpu_ids) == [0]
+    second = await pool.try_acquire(
+        count=1, holder_id="gpu-b", task_id="task-b", ttl_sec=60,
+    )
+    assert second is not None
+    assert list(second.gpu_ids) == [1]
+    full = await pool.try_acquire(
+        count=1, holder_id="gpu-c", task_id="task-c", ttl_sec=60,
+    )
+    assert full is None
+    await pool.release(lease)
+    reacquired = await pool.try_acquire(
+        count=1, holder_id="gpu-c", task_id="task-c", ttl_sec=60,
+    )
+    assert reacquired is not None
+    assert list(reacquired.gpu_ids) == [0]
+    await pool.release(second)
+    await pool.release(reacquired)
+
+
+@pytest.mark.asyncio
+async def test_specialist_gpu_pool_rejects_oversized_request(conn):
+    pool = SpecialistGpuPool(conn, gpu_ids=[0])
+    assert await pool.try_acquire(
+        count=2, holder_id="gpu-a", task_id="task-a", ttl_sec=60,
+    ) is None
 
 
 @pytest.mark.asyncio

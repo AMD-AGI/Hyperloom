@@ -71,6 +71,10 @@ ALLOWED_FILES: dict[str, str] = {
         "roofline filter reads canonical extra_server_args with a "
         "read-only legacy extra_sglang_args fallback for pre-rename "
         "variant objects",
+    "inference_optimizer/orchestrator/research_hints.py":
+        "priors-match scorer builds a token blob from variant fields and "
+        "reads the legacy extra_sglang_args key alongside the canonical "
+        "extra_server_args so pre-rename variant dicts still match",
     "inference_optimizer/orchestrator/optimization_journal.py":
         "journal classification reads existing stack/variant args fields",
     # The materializer keeps the legacy name in its env-routing docstring

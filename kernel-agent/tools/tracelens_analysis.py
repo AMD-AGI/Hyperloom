@@ -1633,6 +1633,11 @@ def _finalize_candidates(
         item.setdefault("source_file", "")
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
+        # Shapes here are always extracted from trace events; mark the
+        # provenance so the dispatch-time validator can distinguish a
+        # trace-anchored shape from any future non-trace source.
+        if item.get("shapes"):
+            item.setdefault("shape_provenance", "torch_trace")
         item["kernel_id"] = f"k{idx:03d}"
         # Honour pre-computed gpu_pct when present, else compute now.
         if not item.get("gpu_pct"):
