@@ -228,3 +228,66 @@ def test_subprocess_tick_help_smoke():
     )
     assert proc.returncode == 0, f"stderr={proc.stderr}"
     assert "tick" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# M2 multi-node options plumbing
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
+    """``request.options`` overrides land on the per-tick :class:`Config`."""
+    # Make Config.discover deterministic for this assertion: drop any
+    # workload uid env so the only non-default value comes from options.
+    for key in (
+        "ROBUSTNESS_WORKLOAD_UID",
+        "CLAW_WORKLOAD_UID",
+        "WORKLOAD_UID",
+        "KUBE_WORKLOAD_UID",
+        "RAY_JOB_ID",
+        "ROBUSTNESS_DISABLE_LOCAL_PROBE",
+        "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS",
+        "ROBUSTNESS_NODES",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    captured: dict[str, object] = {}
+
+    from robustness_agent import runtime as runtime_pkg
+
+    real_build = runtime_pkg.cli.build_reactor_components  # type: ignore[attr-defined]
+
+    def _spy_build(config, *, rca=None, session_id=None):
+        captured["config"] = config
+        bundle = real_build(config, rca=rca, session_id=session_id)
+        return bundle
+
+    async def _zero_tick(_self, _ctx):
+        return []
+
+    monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
+    from robustness_agent.role.reactor import Reactor
+    monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)
+
+    from robustness_agent.runtime.cli import _coerce_request, _run_tick
+
+    request = _coerce_request({
+        **_REQUEST_HEARTBEAT,
+        "options": {
+            "session_dir": str(tmp_path),
+            "robustness_server_url": "",
+            "disable_local_probe": True,
+            "enable_cluster_pod_metrics": True,
+            "pod_metrics_categories": "gpu,memory",
+            "workload_uid": "wl-123",
+            "nodes": 4,
+        },
+    })
+    await _run_tick(request)
+
+    config = captured["config"]
+    assert config.disable_local_probe is True
+    assert config.enable_cluster_pod_metrics is True
+    assert config.pod_metrics_categories == ("gpu", "memory")
+    assert config.workload_uid == "wl-123"
+    assert config.nodes == 4
