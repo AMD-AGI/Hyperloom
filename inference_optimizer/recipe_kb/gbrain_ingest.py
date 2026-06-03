@@ -29,6 +29,11 @@ import re
 import sys
 from typing import Any, Mapping
 
+from ..compat.payload_aliases import (
+    CANONICAL_KEY,
+    LEGACY_KEY,
+    read_extra_server_args,
+)
 from .gbrain_remote_client import _GbrainMcp
 
 log = logging.getLogger(__name__)
@@ -99,11 +104,15 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
     """Split a v2 ``best_config`` dict into (sglang_args, envs).
 
     Inverse of ``GbrainRemoteRecipeClient._best_config_from_attrs`` so a
-    round-trip ingest->read preserves the champion config.
+    round-trip ingest->read preserves the champion config. Reads the
+    canonical ``extra_server_args`` (with a read-only legacy fallback via
+    the compat helper) and routes every other key into ``envs``.
     """
-    args = str(best_config.get("extra_sglang_args") or "").strip()
+    args = read_extra_server_args(dict(best_config)).strip()
     envs = {
-        str(k): str(v) for k, v in best_config.items() if k != "extra_sglang_args"
+        str(k): str(v)
+        for k, v in best_config.items()
+        if k not in (CANONICAL_KEY, LEGACY_KEY)
     }
     return args, envs
 
