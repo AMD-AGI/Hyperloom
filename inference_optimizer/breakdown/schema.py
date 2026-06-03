@@ -22,10 +22,15 @@ from typing import Any, TypedDict
 
 #: breakdown schema version. v2 adds the
 #: ``specialist_runs`` section, ``capability_summary.specialist``
-#: row, ``critic_robustness.kb_writes_summary`` sub-block, and the
+#: row, ``critic_robustness.kb_writes_summary`` sub-block, the
 #: top-level ``action_timeline`` / ``explore_search`` v1-reader
-#: aliases. Inv-12.1 guarantees a v0.6 / reader can still
-#: consume the file because v2 only *adds* fields.
+#: aliases, and (additively) the ``kernel_optimization_summary`` /
+#: ``conc_sweep_summary`` sections mirrored from
+#: ``reports/kernel_optimization_summary.json`` and
+#: ``reports/conc_sweep_summary.json`` (PR #399 lishuoshuo). Inv-12.1
+#: guarantees a v0.6 / v1 reader can still consume the file because v2
+#: only *adds* fields — the version string does not bump for additive
+#: sections.
 SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
 
 
@@ -941,6 +946,65 @@ class KernelRoofline(TypedDict, total=False):
     kernels: list[KernelRooflineEntry]
 
 
+# ---------------------------------------------------------------------------
+# Kernel Optimization Summary (Breakdown 面板对接文档 A1; PR #399 lishuoshuo)
+# ---------------------------------------------------------------------------
+# Mirror of ``<session_dir>/reports/kernel_optimization_summary.json``
+# (produced deterministically by the ``report`` action via
+# ``orchestrator/kernel_attempt_summary.build_kernel_optimization_summary``).
+# Answers "did each top kernel get optimized by the kernel-agent, and
+# why did it fail" without the dashboard walking the kernel-agent tree.
+# The collector mirrors the report verbatim (light top-level shape
+# guards only) so new producer fields ride through without a schema
+# change; the deeply-nested ``by_kernel[]`` rows therefore stay loose
+# (``dict``) and are documented in roofline优化对接文档.md §A1.4.
+class KernelOptimizationSummary(TypedDict, total=False):
+    schema_version: int                    # producer schema (currently 1; int, unlike conc_sweep's str)
+    session_id: str                        # global id ``{model}_{ts}_{short_uuid}``
+    model_name: str
+    cumulative_gain_validated_pct: float
+    totals: dict[str, int]                 # {top_candidates, attempted, integrated, keep_pending, rejected, in_flight, unattempted}
+    rejection_breakdown: dict[str, int]
+    unattempted_reason_breakdown: dict[str, int]
+    failure_reason_breakdown: dict[str, int]
+    field_glossary: dict[str, str]         # {field_name: explanation} for tooltips
+    top_takeaways: list[str]               # 2-4 deterministic (non-LLM) sentences
+    by_kernel: list[dict[str, Any]]        # one row per top kernel, sorted gpu_pct desc; shape per §A1.4
+    report_path: str                       # rel-to-session path to the mirrored source report
+
+
+# ---------------------------------------------------------------------------
+# Conc Sweep Summary (Breakdown 面板对接文档 A2; PR #399 lishuoshuo)
+# ---------------------------------------------------------------------------
+# Mirror of ``<session_dir>/reports/conc_sweep_summary.json`` (produced
+# by the ``conc_sweep`` action during SWEEP). Extends the single-CONC
+# headline gain into a baseline-vs-current_best curve across a CONC
+# ladder. Absent when conc_sweep never ran (Block hidden). When
+# ``status="skipped"`` the producer omits the baseline/optimized/
+# comparison/summary blocks — read ``status`` before those keys.
+class ConcSweepSummary(TypedDict, total=False):
+    schema_version: str                    # producer schema (currently "1.0"; str, unlike kernel summary's int)
+    status: str                            # succeeded / failed / skipped
+    skip_reason: str                       # only when status="skipped"
+    session_id: str
+    isl: int
+    osl: int
+    tp: int
+    concs_requested: list[int]
+    baseline: dict[str, Any]               # {extra_server_args, extra_envs, points[]}
+    optimized: dict[str, Any]              # {extra_server_args, extra_envs, points[]}
+    comparison: list[dict[str, Any]]       # per-CONC paired rows (feeds the dual curve + speedup bars)
+    summary: dict[str, Any]                # {successful_pairs, failed_pairs, best_conc, best_speedup, median_speedup, mean_speedup}
+    workspace: str
+    elapsed_sec: float
+    total_budget_sec: int                  # None when budget gate disabled
+    budget_exhausted: bool
+    report_json_path: str
+    report_csv_path: str                   # for the "download CSV" button
+    roofline_ceiling: dict[str, Any]       # per-CONC theoretical peak + MBU% (§A2.9); may be absent on old products
+    report_path: str                       # rel-to-session path to the mirrored source report
+
+
 class SessionBreakdown(TypedDict, total=False):
     schema_version: str
     exported_at_utc: str
@@ -991,6 +1055,15 @@ class SessionBreakdown(TypedDict, total=False):
     # §1). Mirrors ``<sd>/reports/kernel_roofline.json`` so consumers
     # don't have to walk the kernel-agent output tree themselves.
     kernel_roofline: KernelRoofline
+    # Kernel-agent attempt outcome summary (Breakdown 面板对接文档 §A1).
+    # Mirrors ``<sd>/reports/kernel_optimization_summary.json``. Empty
+    # dict when the report is absent (session predates PR #399 or the
+    # ``report`` action never ran) — the dashboard hides Block 1.
+    kernel_optimization_summary: KernelOptimizationSummary
+    # Post-optimization concurrency sweep (Breakdown 面板对接文档 §A2).
+    # Mirrors ``<sd>/reports/conc_sweep_summary.json``. Empty dict when
+    # conc_sweep never ran — the dashboard hides Block 2.
+    conc_sweep_summary: ConcSweepSummary
     # Per-snapshot roofline comparison list (one entry per
     # ``state.roofline_snapshots`` history pass). Drives the markdown-
     # report ``## Roofline`` section. Each entry has ``source_path /
@@ -1017,6 +1090,7 @@ __all__ = [
     "BenchmarkInvocation",
     "CapabilityEntry",
     "CapabilitySummary",
+    "ConcSweepSummary",
     "CriticIteration",
     "CriticKBWritesSummary",
     "CriticRobustness",
@@ -1032,6 +1106,7 @@ __all__ = [
     "LaneTimelineEntry",
     "KernelLifecycle",
     "KernelMetadata",
+    "KernelOptimizationSummary",
     "OptimizedKernel",
     "ParamSearch",
     "ParamSearchEntry",
