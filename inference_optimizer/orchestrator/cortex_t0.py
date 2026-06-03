@@ -257,6 +257,17 @@ def run_t0_anchor(
     _extras: dict[str, Any] = {}
     if _model_class:
         _extras["model_class"] = _model_class
+    # Architecture-identity tags from the model's config.json (carried on
+    # SharedState by ``cli._load_model_config_tags``). Stamped so a
+    # fine-tuned model's recipe records the same architecture as its base.
+    _architectures = getattr(shared_state, "model_architectures", None) or []
+    if isinstance(_architectures, list):
+        _arch_list = [str(a).strip() for a in _architectures if str(a or "").strip()]
+        if _arch_list:
+            _extras["architectures"] = _arch_list
+    _model_type = str(getattr(shared_state, "model_type", "") or "").strip()
+    if _model_type:
+        _extras["model_type"] = _model_type
     rocm_v = str(fp.get("rocm") or "").strip()
     if rocm_v and rocm_v != "unknown":
         _extras["rocm_version"] = rocm_v
