@@ -1076,8 +1076,17 @@ def _build_final_invocation(
 # ---------------------------------------------------------------------------
 # §5 Phase timeline
 # ---------------------------------------------------------------------------
+# Action labels whose ``<action>_attempts`` lists feed the phase timeline
+# and capability tallies. Carries BOTH the post-merge ``explore`` action
+# and the legacy ``backends`` / ``params`` / ``validate_stack`` names so
+# that breakdown can reprocess archived (pre-merge) sessions, whose
+# state.json still writes the legacy ``*_attempts`` lists, alongside
+# current sessions that write ``explore_attempts``. Missing lists are
+# skipped harmlessly, so a session only ever populates its own vocabulary.
 _AUDIT_ACTIONS = (
-    "baseline", "profile", "backends", "params", "sweep", "validate_stack",
+    "baseline", "profile", "explore",
+    "backends", "params", "validate_stack",
+    "sweep",
 )
 
 
@@ -1173,8 +1182,8 @@ def _capability_for_action(
     ``optimization_stack`` as a fallback: every stack entry whose
     ``action`` matches counts as a KEEP (the stack only collects
     successfully promoted entries by construction). Without this fallback
-    sessions that had a clear ``backends:vllm_kv_fp8`` final.action_path
-    would still report ``backends: not_attempted`` in capability_summary.
+    sessions that had a clear ``explore:vllm_kv_fp8`` final.action_path
+    would still report ``explore: not_attempted`` in capability_summary.
     """
     attempts_list = state.get(f"{action}_attempts") or []
     n_attempts = len(attempts_list) if isinstance(attempts_list, list) else 0
@@ -1186,7 +1195,7 @@ def _capability_for_action(
     # Fallback / augmentation from optimization_stack — only adopted
     # entries land here. Counts an entry once per action; the kernel
     # integrate path uses ``action="integrate"`` so it does not collide
-    # with backends/params/sweep here.
+    # with explore/sweep here.
     stack = state.get("optimization_stack") or []
     if isinstance(stack, list):
         stack_keeps = sum(
@@ -1233,6 +1242,11 @@ def collect_capability_summary(
     geak_cap = _from_invocations(geak_invocations)
     oob_cap = _from_invocations(oob_invocations)
 
+    # Legacy capability rows. Archived (pre-merge) sessions carry their
+    # search activity under ``backends_search`` / ``params_search`` and
+    # the ``validate_stack`` action; surface those rows so breakdown can
+    # reprocess them. On a current (post-merge) session these rows are
+    # ``not_attempted`` while ``explore`` (below) carries the activity.
     backends = _capability_for_action(state, "backends")
     backends_search = state.get("backends_search") or {}
     if isinstance(backends_search, dict):
@@ -1257,6 +1271,11 @@ def collect_capability_summary(
                 default=None,
             )
 
+    validate = _capability_for_action(state, "validate_stack")
+    validate["last_validated_gain_pct"] = _to_float(
+        state.get("cumulative_gain_validated")
+    )
+
     sweep_cap = _capability_for_action(state, "sweep")
     last_sweep = state.get("last_sweep") or {}
     if isinstance(last_sweep, dict):
@@ -1269,17 +1288,13 @@ def collect_capability_summary(
         if sweep_cap.get("attempts", 0) > 0:
             sweep_cap["status"] = "completed"
 
-    validate = _capability_for_action(state, "validate_stack")
-    validate["last_validated_gain_pct"] = _to_float(
+    # merged explore action capability row (KB_design §3.4). Carries
+    # the unified explore_search ledger activity, including the
+    # validated cumulative gain previously surfaced by validate_stack.
+    explore = _capability_for_action(state, "explore")
+    explore["last_validated_gain_pct"] = _to_float(
         state.get("cumulative_gain_validated")
     )
-
-    # merged explore action capability row (KB_design §3.4 +
-    # §3.12 §4.2 "兼容 alias"). The backends / params / validate_stack
-    # rows stay alongside to keep legacy resume reports readable. On a
-    # pure session those legacy rows will be ``not_attempted`` while
-    # ``explore`` carries the activity.
-    explore = _capability_for_action(state, "explore")
     explore_search = state.get("explore_search") or {}
     if isinstance(explore_search, dict):
         explore["tested"] = len(explore_search.get("tested") or {})
@@ -1310,8 +1325,8 @@ def collect_capability_summary(
     return {
         "geak":           geak_cap,
         "oob":            oob_cap,
-        # primary row; backends/params/validate_stack are
-        # kept as compatibility aliases.
+        # primary (post-merge) row; backends / params / validate_stack
+        # are kept as compatibility rows for archived sessions.
         "explore":        explore,
         "backends":       backends,
         "params":         params,
@@ -2299,14 +2314,28 @@ def collect_param_search(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
+    # Post-merge sessions carry the unified ``explore_search`` ledger;
+    # archived (pre-merge) sessions carry the legacy ``params_search`` /
+    # ``backends_search`` ledgers. Emit all three so breakdown reprocesses
+    # both vintages — each session only populates its own ledgers, the
+    # others ``_shape_ledger`` into empty shells.
+    explore_ledger = _shape_ledger(state.get("explore_search"))
+    explore_ledger["winner_history"] = list(state.get("params_winner_history") or [])
+    explore_ledger["no_promote_streak"] = int(
+        state.get("params_no_promote_streak") or 0
+    )
+
     params_ledger = _shape_ledger(state.get("params_search"))
     params_ledger["winner_history"] = list(state.get("params_winner_history") or [])
-    params_ledger["no_promote_streak"] = int(state.get("params_no_promote_streak") or 0)
+    params_ledger["no_promote_streak"] = int(
+        state.get("params_no_promote_streak") or 0
+    )
 
     backends_ledger = _shape_ledger(state.get("backends_search"))
 
     baseline_tput = _to_float(state.get("baseline_tput"))
     return {
+        "explore":                 explore_ledger,
         "params":                  params_ledger,
         "backends":                backends_ledger,
         "synergy_attempted":       list(state.get("synergy_attempted") or []),
@@ -2749,14 +2778,15 @@ def _action_family(action: str) -> str:
     s = (action or "").lower()
     if s.startswith("kernel_opt") or s == "integrate":
         return "kernel"
+    # Legacy stack-entry action labels from archived sessions.
     if s == "backends":
         return "backends"
     if s == "params":
         return "params"
-    if s == "sweep":
-        return "sweep"
     if s == "validate_stack":
         return "validate"
+    if s == "sweep":
+        return "sweep"
     # merged explore action. Bucketed into
     # its own ``explore`` family so the attribution table can show a
     # single row that subsumes the legacy backends + params buckets.
@@ -2950,10 +2980,13 @@ def collect_attribution(
     # total as the ground-truth denominator.
     validated_total = _to_float(state.get("cumulative_gain_validated")) or 0.0
     family_totals: dict[str, float] = {
-        "kernel": 0.0, "backends": 0.0, "params": 0.0,
-        "sweep": 0.0, "validate": 0.0, "other": 0.0,
-        # explore family (subsumes backends+params on v0.8
-        # sessions; legacy buckets stay populated on legacy resume).
+        "kernel": 0.0, "sweep": 0.0, "other": 0.0,
+        # Legacy buckets — populated when reprocessing archived
+        # (pre-merge) sessions whose optimization_stack entries carry
+        # the ``backends`` / ``params`` / ``validate_stack`` action.
+        "backends": 0.0, "params": 0.0, "validate": 0.0,
+        # explore family — the unified EXPLORE action that subsumes
+        # the former backends + params buckets on current sessions.
         "explore": 0.0,
         # FRAMEWORK_PR family. Stays separate from the
         # legacy ``other`` bucket so the dashboard can surface a
@@ -3034,7 +3067,9 @@ def collect_attribution(
             # FP8 / the tuner skipped / no KEEP); the dashboard can
             # iterate without presence checks.
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
-            # Legacy bucket aliases — preserved for legacy resume reports.
+            # Legacy bucket rows — preserved so archived-session reports
+            # reconcile (0.0 on current sessions, where activity is in
+            # ``explore_pct_of_total``).
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total":   round(family_totals.get("params", 0.0), 2),
             "sweep_pct_of_total":    round(family_totals.get("sweep", 0.0), 2),

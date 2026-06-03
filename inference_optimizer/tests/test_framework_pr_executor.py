@@ -13,6 +13,7 @@ delta computation runs.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -25,6 +26,7 @@ from inference_optimizer.orchestrator.action_executors.framework_pr import (
     FrameworkPrExecutor,
     _candidate_slug,
     _fetch_diff_to_path,
+    _materialize_pr_diff_via_worktree,
 )
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
     VariantResult,
@@ -163,12 +165,26 @@ async def test_executor_missing_candidate_fails_cleanly(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_executor_no_patch_when_diff_url_and_patches_absent(tmp_path: Path):
+async def test_executor_no_patch_when_no_source_at_all(tmp_path: Path):
+    """No diff_url, no explicit patches, AND no head ref to check out →
+    genuine no_patch. (A candidate with a ref/pr_number would instead be
+    auto-routed to checkout-head; see the checkout-head tests.)"""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
     executor = FrameworkPrExecutor(session_dir=session_dir)
-    cand = _make_candidate(diff_url="")  # no diff_url, no explicit patches
-    ctx = _make_ctx("t-fp-2", {"candidate": cand})
+    cand = {  # source-less candidate
+        "repo": "sgl-project/sglang",
+        "pr_number": "",
+        "ref": "",
+        "title": "no source",
+        "diff_url": "",
+    }
+    ctx = _make_ctx("t-fp-2", {
+        "candidate": cand,
+        "framework_source_root": str(repo),
+    })
     result = await executor(ctx)
     assert result["status"] == "no_patch"
     assert result["candidate"] == cand
@@ -361,6 +377,104 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
     assert result["patches_reverted"] == []
     # KEEP: patch is still applied on the framework root.
     assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_keep_writes_kb_lessons(tmp_path: Path, monkeypatch):
+    """D2: a KEEP appends an 'integrated' record to lessons.jsonl so the
+    next ``fa phase-discover`` can dedup the already-integrated PR."""
+    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+
+    kb_root = tmp_path / "kb" / "framework_optimization"
+    monkeypatch.setattr(kb_writeback, "KB_ROOT", kb_root)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()
+    cand["pr_url"] = "https://github.com/sgl-project/sglang/pull/1234"
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx("t-fp-keep-kb", {
+        "candidate": cand,
+        "patches": [str(patch_path)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "kept"
+    lessons = kb_root / "lessons.jsonl"
+    assert lessons.exists()
+    records = [
+        json.loads(line)
+        for line in lessons.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 1
+    assert records[0]["outcome"] == "integrated"
+    assert records[0]["pr_url"] == cand["pr_url"]
+    assert records[0]["tps_delta_pct"] == pytest.approx(10.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_executor_revert_writes_kb_lessons(tmp_path: Path, monkeypatch):
+    """D2: a REVERT appends a 'reverted_smoke_fail' record (dedup of a
+    tried-but-regressive PR)."""
+    import inference_optimizer.orchestrator.kb_writeback as kb_writeback
+
+    kb_root = tmp_path / "kb" / "framework_optimization"
+    monkeypatch.setattr(kb_writeback, "KB_ROOT", kb_root)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()
+    cand["pr_url"] = "https://github.com/sgl-project/sglang/pull/1234"
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 980.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx("t-fp-revert-kb", {
+        "candidate": cand,
+        "patches": [str(patch_path)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "reverted"
+    records = [
+        json.loads(line)
+        for line in (kb_root / "lessons.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 1
+    assert records[0]["outcome"] == "reverted_smoke_fail"
 
 
 @pytest.mark.asyncio
@@ -586,6 +700,230 @@ async def test_apply_failure_after_keep_preserves_kept_changes(tmp_path: Path):
     assert res_b["status"] == "apply_failed"
 
     # A's KEPT change must still be there.
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+# ---------------------------------------------------------------------------
+# 3c. checkout-head (diff source) mode
+# ---------------------------------------------------------------------------
+def _git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["GIT_AUTHOR_NAME"] = "FRAMEWORK_PR Test"
+    env["GIT_AUTHOR_EMAIL"] = "fw-pr@test.local"
+    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
+    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
+    return env
+
+
+def _init_repo_with_pr_branch(path: Path, *, pr_ref: str = "pr-head") -> str:
+    """Init a repo on ``main`` (the live tree), then create a divergent
+    ``pr_ref`` branch carrying one extra commit (the "PR head"). Returns
+    the PR head sha. ``origin`` is set to the repo itself so a
+    ``git fetch origin <pr_ref>`` resolves locally without a network."""
+    env = _git_env()
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main", str(path)],
+                   check=True, capture_output=True, env=env)
+    (path / "src.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "."],
+                   check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"],
+                   check=True, capture_output=True, env=env)
+    # PR branch: one commit changing return 1 -> return 2.
+    subprocess.run(["git", "-C", str(path), "checkout", "-b", pr_ref],
+                   check=True, capture_output=True, env=env)
+    (path / "src.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "commit", "-am", "pr head"],
+                   check=True, capture_output=True, env=env)
+    head = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True, env=env,
+    ).stdout.strip()
+    # Back to main (the live tree) and point origin at ourselves.
+    subprocess.run(["git", "-C", str(path), "checkout", "main"],
+                   check=True, capture_output=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(path), "remote", "add", "origin", str(path)],
+        check=True, capture_output=True, env=env,
+    )
+    return head
+
+
+def test_materialize_pr_diff_via_worktree_extracts_net_diff(tmp_path: Path):
+    repo = tmp_path / "framework"
+    head_sha = _init_repo_with_pr_branch(repo, pr_ref="pr-head")
+    dest = tmp_path / "out" / "pr.patch"
+    cand = {"repo": "x/y", "pr_number": 7, "ref": "pr-head",
+            "head_sha": head_sha}
+    ok, err = _materialize_pr_diff_via_worktree(
+        repo, cand, dest, timeout_sec=60.0,
+    )
+    assert ok, err
+    text = dest.read_text()
+    assert "src.py" in text
+    assert "return 2" in text
+    # The isolated worktree must be cleaned up.
+    assert not (dest.parent / "wt-x-y-pr-7").exists()
+    # Live tree (main) is untouched by the extraction.
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+def test_materialize_pr_diff_empty_when_no_ref(tmp_path: Path):
+    repo = tmp_path / "framework"
+    _init_repo_with_pr_branch(repo)
+    dest = tmp_path / "pr.patch"
+    ok, err = _materialize_pr_diff_via_worktree(
+        repo, {"repo": "x/y"}, dest, timeout_sec=30.0,
+    )
+    assert not ok
+    assert "cannot resolve PR head" in err or "head" in err.lower()
+
+
+@pytest.mark.asyncio
+async def test_executor_checkout_head_mode_applies_and_keeps(tmp_path: Path):
+    """End-to-end: apply_mode=checkout_head extracts the PR's net diff via
+    an isolated worktree, applies it to the live tree, benches it (mocked
+    +10%), and KEEPs. patch_source_mode is surfaced as checkout_head."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    head_sha = _init_repo_with_pr_branch(repo, pr_ref="pr-head")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = {
+        "repo": "sgl-project/sglang", "pr_number": 7, "ref": "pr-head",
+        "head_sha": head_sha, "title": "checkout-head PR", "diff_url": "",
+        "apply_mode": "checkout_head",
+    }
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx("t-fp-checkout", {
+        "candidate": cand,
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "kept", result
+    assert result["patch_source_mode"] == "checkout_head"
+    assert result["delta_pct"] == pytest.approx(10.0, abs=1e-6)
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_no_diff_url_falls_back_to_checkout_head(tmp_path: Path):
+    """When a candidate carries no diff_url, the executor auto-selects
+    checkout-head rather than returning no_patch."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    head_sha = _init_repo_with_pr_branch(repo, pr_ref="pr-head")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = {
+        "repo": "sgl-project/sglang", "pr_number": 7, "ref": "pr-head",
+        "head_sha": head_sha, "title": "no diff_url", "diff_url": "",
+    }
+    ctx = _make_ctx("t-fp-nodiffurl", {
+        "candidate": cand,
+        "framework_source_root": str(repo),
+        "apply_only": True,
+    })
+    result = await executor(ctx)
+    assert result["status"] == "applied_no_bench", result
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
+    """P2 regression: a PR that ADDS a new file (no edits to tracked
+    files) must KEEP cleanly — _git_commit_keep runs ``git add -A`` so the
+    new file is captured in the commit instead of being dropped by
+    ``commit -am`` (which would either leave it untracked or fail)."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    patch_path = tmp_path / "add.patch"
+    patch_path.write_text(_PATCH_B_ADDS_FILE, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = _make_candidate()
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return (
+            {"status": "succeeded", "output_throughput": 1100.0},
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx("t-fp-addfile", {
+        "candidate": cand,
+        "patches": [str(patch_path)],
+        "framework_source_root": str(repo),
+        "base_tput": 1000.0,
+        "keep_threshold_pct": 1.0,
+    })
+    with patch.object(FrameworkPrExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "kept", result
+    assert result.get("keep_commit_sha")
+    # The new file is present AND committed (not left as untracked debris).
+    assert (repo / "new.py").exists()
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert status == "", f"worktree not clean after KEEP: {status!r}"
+
+
+@pytest.mark.asyncio
+async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
+    """P1 regression: a candidate whose repo differs from the live
+    framework_root's origin must NOT use checkout-head (which would fetch
+    the wrong ref from the live origin). Even with apply_mode=checkout_head
+    explicitly set, the executor falls back to diff_url."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    # Point the live origin at sgl-project/sglang.
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin",
+         "https://github.com/sgl-project/sglang.git"],
+        check=True, capture_output=True,
+    )
+    # A served diff_url so the fallback has something to apply.
+    diff_file = tmp_path / "served.patch"
+    diff_file.write_text(_VALID_PATCH, encoding="utf-8")
+
+    executor = FrameworkPrExecutor(session_dir=session_dir)
+    cand = {
+        "repo": "ROCm/vllm",  # cross-repo vs the sglang live origin
+        "pr_number": 42,
+        "ref": "pr-head",
+        "title": "cross-repo PR",
+        "diff_url": f"file://{diff_file}",
+        "apply_mode": "checkout_head",  # explicitly requested, but cross-repo
+    }
+    ctx = _make_ctx("t-fp-crossrepo", {
+        "candidate": cand,
+        "framework_source_root": str(repo),
+        "apply_only": True,
+    })
+    result = await executor(ctx)
+
+    assert result["status"] == "applied_no_bench", result
+    # Fell back to the served diff_url (not checkout_head).
+    assert result.get("patch_source_mode") == "diff_url"
+    # The served diff actually landed.
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 

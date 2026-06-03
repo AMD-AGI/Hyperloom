@@ -66,10 +66,8 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
 # ``specialist`` is yaml-less (v0.8 M5, parameterised by
 # ``params.domain``) so it is added explicitly.
 # ``support`` was added in 2026-05 alongside the real ``recover``
-# executor (Change C of the gpu-leak-robustness-fix plan); the legacy
-# stub-action purge (Gap-13) removed the dream / re_explore /
-# comm_optimization / compiler_tuning yamls, so ``recover`` is the
-# only fallback ``support`` entry.
+# executor (Change C of the gpu-leak-robustness-fix plan); ``recover``
+# is the only fallback ``support`` entry.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     "baseline",
     # GAP 1 — Coordinator-internal warm-recipe replay. Same workspace
@@ -88,6 +86,12 @@ _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
     # (``analysis_action_not_llm_proposable``).
     "roofline", "profile",
     "sweep",
+    # SWEEP-phase post-sweep concurrency sweep (on by default;
+    # disable via ``--no-enable-conc-sweep``). Same workspace shape as ``sweep``
+    # (per-variant Magpie subdirs); pipeline_phase=explore in the
+    # registry so it lands in the registry-derived set, fallback only
+    # matters on registry load failure.
+    "conc_sweep",
     "explore",
     "specialist",
     # PR-A1 (Arbor-into-Hyperloom): ``integrate_patch`` is an

@@ -129,7 +129,9 @@ models:
   - key: glm5-multinode-fp8-mi300x-sglang
     model_hf: zai-org/GLM-5
     model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
-    image: lmsysorg/sglang:v0.5.11-rocm720-mi30x
+    # profilerfix: rocprofiler captures HipGraphLaunch kernels (issue #352)
+    # Pre-profilerfix image (restore when reverting): lmsysorg/sglang:v0.5.11-rocm720-mi30x
+    image: primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix
     framework: sglang
     precision: fp8
     conc: 64

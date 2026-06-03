@@ -13,7 +13,11 @@ fields:
     session_id          str   — set by Coordinator at session creation
     model_name          str   — e.g. "meta-llama/Llama-3.1-8B-Instruct"
     model_path          str   — local NFS path to weights
-    model_class         str   — set by `classify` action
+    model_class         str   — categorical key supplied via --model-class
+    model_arch          dict  — advisory architecture profile (hybrid
+                                structured + free-text notes) loaded from
+                                the launcher's ``$USER_DATA_PATH/model_arch.json``;
+                                prompt-context only, no deterministic gating
     target_summary      str   — set by `target_analysis` action
     baseline_tput       float — tok/s/GPU after `baseline` action
     baseline_accuracy   float — GSM8K score after `baseline`
@@ -50,6 +54,48 @@ from typing import Any
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+# Ordered (key, label) projection for the advisory ``model_arch`` profile.
+# ``notes`` is rendered last as a free-text trailer. Keys absent / empty /
+# ``None`` are dropped so the rendered block stays compact and only
+# surfaces fields the launcher actually populated.
+_MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("decoder_type", "decoder"),
+    ("attention", "attention"),
+    ("layer_mix", "layers"),
+    ("kv_cache_per_token", "kv/token"),
+    ("active_params", "params"),
+    ("num_experts", "experts"),
+    ("experts_per_tok", "experts/tok"),
+    ("mtp", "mtp"),
+    ("swa_window", "swa_window"),
+    ("norm", "norm"),
+)
+
+
+def render_model_arch_compact(arch: dict | None) -> str:
+    """Render the advisory ``model_arch`` profile as a single compact line.
+
+    Returns ``""`` when ``arch`` is empty / not a dict so callers can omit
+    the prompt block entirely. Structured fields render as
+    ``decoder=Sparse MoE; attention=MLA; ...`` followed by an optional
+    ``notes=<free text>`` trailer. Empty / ``None`` field values are
+    dropped. This is the single source of truth shared by the
+    orchestration prompt summary and the specialist ``arch_notes`` carrier.
+    """
+    if not isinstance(arch, dict) or not arch:
+        return ""
+    parts: list[str] = []
+    for key, label in _MODEL_ARCH_STRUCTURED_FIELDS:
+        val = arch.get(key)
+        if val is None or val == "":
+            continue
+        parts.append(f"{label}={val}")
+    notes = str(arch.get("notes") or "").strip()
+    if notes:
+        parts.append(f"notes={notes}")
+    return "; ".join(parts)
 
 
 # Default partial-attempt cap for run_optimization. kernel_opt is an
@@ -262,6 +308,14 @@ class SharedState:
     model_name: str = ""
     model_path: str = ""
     model_class: str = ""
+    # Advisory architecture profile (hybrid: a few structured fields +
+    # free-text ``notes``). Produced pre-launch by the SKILL launcher
+    # (LLM Architecture Gallery lookup, else a lightweight classify) and
+    # loaded from ``$USER_DATA_PATH/model_arch.json``. Prompt-context only
+    # — no deterministic gating consumes it (atom seed grid / compat
+    # filter / framework gap token / recipe key stay on ``model_class``).
+    # Empty dict means "no profile available"; renderers omit the block.
+    model_arch: dict = field(default_factory=dict)
     framework: str = ""
     gpu_type: str = ""
     # Workload metadata mirrored from manifest.json at session start
@@ -314,6 +368,30 @@ class SharedState:
     # After deterministic FP8 GEMM tuning succeeds, continue into source-level
     # kernel_opt by default. Operators can disable this for a GEMM-only run.
     continue_kernel_after_gemm: bool = True
+    # SWEEP-phase post-sweep concurrency sweep. On by default;
+    # operator opts out via ``--no-enable-conc-sweep`` /
+    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``. When True, the
+    # Coordinator auto-enqueues a ``conc_sweep`` task right after the
+    # SWEEP-entry sweep task lands (see ``_on_sweep_task_completed``);
+    # the executor runs baseline + current_best across the
+    # ``conc_sweep_concs`` ladder bounded by
+    # ``conc_sweep_total_budget_sec`` total wall-clock.
+    conc_sweep_enabled: bool = True
+    # CONC ladder used by the conc_sweep action. Default mirrors
+    # ``orchestrator.conc_sweep.DEFAULT_CONCS``. Empty list short-
+    # circuits the executor with skip_reason=empty_conc_list.
+    conc_sweep_concs: list[int] = field(
+        default_factory=lambda: [1, 2, 4, 8, 16, 32, 64, 128],
+    )
+    # Total wall-clock budget (seconds) for the whole conc_sweep
+    # action. Default 9000 (~2.5h). 0 disables the gate so the
+    # executor runs every variant until the per-variant timeout
+    # alone caps it.
+    conc_sweep_total_budget_sec: int = 9000
+    # Per-variant Magpie subprocess timeout (seconds). Default 1800
+    # (~30 min). Effective timeout is clamped to the remaining total
+    # budget so the last variant cannot overshoot the deadline.
+    conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
     baseline_accuracy: float = 0.0
@@ -583,6 +661,12 @@ class SharedState:
     # PR scan no longer collapses the whole FRAMEWORK_PR phase
     # silently.
     framework_pr_discover_failures: int = 0
+    # Per-repo candidate cap passed to ``fa phase-discover`` during the
+    # FRAMEWORK_PR phase. 0 / unset → the Coordinator falls back to
+    # ``DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES``. Bumping this makes each
+    # batch probe deeper (more PRs per repo per batch). Round-trips via
+    # the dataclass asdict/from_dict path like every other field.
+    framework_pr_max_candidates: int = 0
     # FRAMEWORK_PR Critic-gate decisions, one row per reviewed candidate:
     # ``{candidate_id, batch_id, verdict, rationale, ts}``. The
     # Coordinator's pump calls the Critic backend before each
@@ -603,9 +687,6 @@ class SharedState:
     # remain Coordinator-internal and are denied by PolicyGate when
     # proposed by the LLM (``analysis_action_not_llm_proposable``).
     enable_roofline: bool = True
-    # Cheap-rounds gain gate is opt-in — only locks ``kernel_opt`` when
-    # the operator has tuned the thresholds for their workload.
-    gain_driven_kernel_opt: bool = False
     # Per-variant overtime kill multiplier for ExploreExecutor: when
     # > 0 AND ``baseline_runtime_sec`` > 0, single-variant Magpie runs
     # in the explore loop are killed once their wall-clock exceeds
@@ -654,6 +735,11 @@ class SharedState:
     # Most recent workload sweep; used to reason about gains beyond the
     # smoke workload (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
+    # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE can
+    # exit on conc_sweep completion (not only sweep completion). Carries
+    # status / skip_reason / summary so phase_state.exit_normal_sweep
+    # treats succeeded / partial / completed / skipped as terminal.
+    last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Kernel-opt response tracking — Coordinator records the most recent
     # `run_optimization_done` so Orch sees what's been tried and doesn't
     # re-dispatch the same kernel_id every tick.
@@ -673,14 +759,6 @@ class SharedState:
     # source-level kernel rewrite: it produces an aiter A8W8 block-scale
     # tuned CSV and (for SGLang) a dispatch patch before kernel_opt runs.
     last_gemm_tuning: dict[str, Any] = field(default_factory=dict)
-    # ``last_backends`` / ``last_params``
-    # / ``last_validate_stack`` are legacy resume-parity zombies: the
-    # legacy actions are denied at PolicyGate so new sessions never
-    # write to them, but the field shape must stay so a resumed v0.6
-    # ``state.json`` round-trips (Inv-10.1 fact-layer compatibility).
-    last_backends: dict[str, Any] = field(default_factory=dict)
-    last_params: dict[str, Any] = field(default_factory=dict)
-    last_validate_stack: dict[str, Any] = field(default_factory=dict)
     # merged explore action snapshot. Same
     # schema as the other ``last_<action>`` mirrors.
     last_explore: dict[str, Any] = field(default_factory=dict)
@@ -694,13 +772,6 @@ class SharedState:
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # ``backends_attempts`` /
-    # ``params_attempts`` / ``validate_stack_attempts`` are kept as
-    # zero-write resume-parity zombies for the same Inv-10.1 reason
-    # as the snapshot mirrors above.
-    backends_attempts: list[dict[str, Any]] = field(default_factory=list)
-    params_attempts: list[dict[str, Any]] = field(default_factory=list)
-    validate_stack_attempts: list[dict[str, Any]] = field(default_factory=list)
     # explore audit log. Capped per _DEFAULT_ATTEMPTS_HISTORY.
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Roofline-v2 N10: per-tick roofline audit log (capped). Records the
@@ -740,15 +811,8 @@ class SharedState:
     # this to nudge Orch off the params plateau. Reset to 0 whenever
     # current_best advances.
     params_no_promote_streak: int = 0
-    # DFS ledger (params / backends). Kept on the dataclass for
-    # legacy resume parity (Inv-10.1); sessions read ``explore_search``
-    # below. ``tested`` is keyed by content fingerprint so two variants
-    # with identical args + envs under different names collapse.
-    params_search: dict[str, Any] = field(default_factory=dict)
-    backends_search: dict[str, Any] = field(default_factory=dict)
     # unified explore ledger (KB_design §3.4 Inv-4.1 "single
-    # ledger"). Merges the legacy ``backends_search`` + ``params_search``
-    # ledgers into one persistent DFS state for the merged ``explore``
+    # ledger"). Persistent DFS state for the merged ``explore``
     # action. ``tested`` is keyed by canonical_fingerprint (content-based,
     # see ``action_executors._canonical_fingerprint``), same hashing as
     # ``variant_fingerprint`` so the ledgers migrate losslessly.
@@ -1183,50 +1247,16 @@ class SharedState:
                     "v0.8 §3.9: dropped legacy scoreboard fields from "
                     "state.json (%s).", summary,
                 )
-        # Migrate any v1 ``params_search`` ledger (where ``tested`` was
-        # keyed by display name) to schema v2 (keyed by content
-        # fingerprint). Backends has
-        # no pre-fingerprint persisted data so it only needs default-key
-        # normalization. We do this here — at the load boundary — so the
-        # executor and Coordinator paths can assume the v2 schema and
-        # never need a fallback branch.
-        filtered["params_search"] = cls._migrate_search_ledger(
-            filtered.get("params_search"), schema_target=2,
-        )
-        filtered["backends_search"] = cls._migrate_search_ledger(
-            filtered.get("backends_search"), schema_target=1,
-        )
-        # merge the legacy backends_search + params_search ledgers
-        # into the unified ``explore_search`` ledger.
-        # The merge is one-shot at load: subsequent ExploreExecutor runs
-        # only touch ``explore_search``; the legacy ledgers stay around
-        # (deprecated, read-only) so an emergency rollback to v0.6 still
-        # has its data. ``record_*_accepted`` / executor updates from the
-        # legacy backends/params executors continue to write to the old
-        # ledgers — the merge function is idempotent under repeated calls,
-        # so an interleaved v0.6 fallback + legacy resume picks up cleanly.
-        explore_before = filtered.get("explore_search") or {}
+        # Normalize the unified ``explore_search`` ledger at the load
+        # boundary so the executor and Coordinator paths can assume the
+        # shaped schema and never need a fallback branch. Winners /
+        # synergy history are folded in from the live history fields.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
-            backends_search=filtered.get("backends_search"),
-            params_search=filtered.get("params_search"),
             backend_winners_history=filtered.get("backend_winners_history"),
             params_winner_history=filtered.get("params_winner_history"),
             synergy_attempted=filtered.get("synergy_attempted"),
         )
-        if needs_migration:
-            tested_before = (
-                len(explore_before.get("tested") or {})
-                if isinstance(explore_before, dict) else 0
-            )
-            tested_after = len(
-                filtered["explore_search"].get("tested") or {},
-            )
-            if tested_after > tested_before:
-                migration_events.append(
-                    "§3.4 merged backends_search/params_search → "
-                    f"explore_search (tested={tested_after})"
-                )
 
         # fact-layer integrity check. ``strict``
         # (the default) aborts when a fact-layer key was present in a
@@ -1296,337 +1326,53 @@ class SharedState:
         return cls(**filtered)
 
     @staticmethod
-    def _migrate_search_ledger(
-        ledger: Any, *, schema_target: int,
-    ) -> dict[str, Any]:
-        """Normalize an *_search ledger to the fingerprint-keyed schema.
-
-        Idempotent: already-migrated ledgers are returned with only the
-        defensive defaults filled in. A legacy v1 ledger whose ``tested``
-        is keyed by variant name gets re-keyed by content fingerprint
-        re-computed from the stored ``extra_server_args`` / ``extra_envs``;
-        the original name is preserved inside each entry and surfaced
-        through ``name_index`` so display lookups remain stable.
-        """
-        if not isinstance(ledger, dict) or not ledger:
-            return {}
-        from .action_executors._grid_runner import variant_fingerprint
-        out: dict[str, Any] = dict(ledger)
-        out.setdefault("schema_version", schema_target)
-        out.setdefault("accepted", [])
-        out.setdefault("rejected", [])
-        out.setdefault("tested", {})
-        out.setdefault("name_index", {})
-        out.setdefault("cursor", 0)
-        tested = out.get("tested") or {}
-        if not isinstance(tested, dict):
-            tested = {}
-        # A fingerprint key is a 16-char lowercase hex string; anything
-        # else is treated as a legacy display-name key.
-        def _looks_like_fingerprint(key: str) -> bool:
-            return (
-                isinstance(key, str)
-                and len(key) == 16
-                and all(c in "0123456789abcdef" for c in key)
-            )
-        migrated: dict[str, Any] = {}
-        name_index = dict(out.get("name_index") or {})
-        for key, entry in tested.items():
-            if not isinstance(entry, dict):
-                continue
-            if _looks_like_fingerprint(str(key)):
-                # Already fingerprint-keyed; just ensure name_index is in
-                # sync so display-name lookups also work on resume.
-                fp = str(key)
-                entry.setdefault("fingerprint", fp)
-                migrated[fp] = entry
-                nm = entry.get("name")
-                if nm:
-                    name_index[str(nm)] = fp
-                continue
-            # Legacy: key was a display name. Re-derive fingerprint from
-            # stored args/envs. Older entries nested the executor's
-            # full ``result`` dict under ``result``; check both.
-            nested = entry.get("result") if isinstance(entry.get("result"), dict) else {}
-            args = str(
-                entry.get("extra_server_args")
-                or nested.get("extra_server_args") or ""
-            )
-            envs = dict(
-                entry.get("extra_envs")
-                or nested.get("extra_envs") or {}
-            )
-            fp = variant_fingerprint(args, envs)
-            new_entry = dict(entry)
-            new_entry.setdefault("name", str(key))
-            new_entry.setdefault("extra_server_args", args)
-            new_entry.setdefault("extra_envs", envs)
-            new_entry["fingerprint"] = fp
-            migrated[fp] = new_entry
-            name_index[str(key)] = fp
-        out["tested"] = migrated
-        out["name_index"] = name_index
-        # Stamp fingerprints onto accepted/rejected too, so the executor's
-        # fast-path dedup sets fill cleanly on the first resume round.
-        for bucket in ("accepted", "rejected"):
-            rebuilt: list[dict[str, Any]] = []
-            for v in out.get(bucket) or []:
-                if not isinstance(v, dict):
-                    continue
-                v = dict(v)
-                if not v.get("fingerprint"):
-                    v["fingerprint"] = variant_fingerprint(
-                        str(v.get("extra_server_args") or ""),
-                        dict(v.get("extra_envs") or {}),
-                    )
-                rebuilt.append(v)
-                if v.get("name") and v.get("fingerprint"):
-                    name_index[str(v["name"])] = str(v["fingerprint"])
-            out[bucket] = rebuilt
-        out["name_index"] = name_index
-        # Bump the schema marker so callers can short-circuit re-migration.
-        out["schema_version"] = max(int(out.get("schema_version") or 0), schema_target)
-        return out
-
-    @staticmethod
     def _build_explore_search(
         *,
         existing: Any,
-        backends_search: Any,
-        params_search: Any,
         backend_winners_history: Any,
         params_winner_history: Any,
         synergy_attempted: Any,
     ) -> dict[str, Any]:
-        """Merge v0.6 backends_search + params_search into explore_search.
+        """Shape the unified ``explore_search`` ledger at load time.
 
-        Idempotent: if ``existing`` already carries ``schema_version >= 1``
-        and the legacy ledgers haven't grown new fingerprints since the
-        last merge (tracked via ``existing.merged_from_legacy_sig``),
-        the call is a no-op other than re-stamping defensive defaults.
-
-        Conflict resolution:
-
-        * ``tested`` — union by fingerprint; outcome rank
-          ``KEEP > REVERT > SKIPPED`` wins the row.
-        * ``accepted`` — union by fingerprint; later entries win
-          (newer KEEPs reflect the latest evidence).
-        * ``rejected`` — union by fingerprint; entries already in
-          ``accepted`` are dropped (a re-promote supersedes a prior
-          reject).
-        * ``winners_history`` — append of legacy ``backend_winners_history``
-          + ``params_winner_history``, sorted by ``round_id`` / ``ts``.
-        * ``discovered_flags`` — empty in M3 (filled by M5 specialists).
-        * ``synergy_attempted`` — copied from legacy field.
-        * ``domains_round_summary`` — empty (M5/M6 fills).
+        The ExploreExecutor owns ``explore_search`` at runtime; this
+        load-boundary normalizer only fills the defensive defaults and
+        folds the live ``*_winner_history`` / ``synergy_attempted``
+        history fields into ``winners_history`` / ``synergy_attempted``
+        so a resume preserves the cross-round aggregation the prompt
+        summary and plateau proxy read.
         """
         from .action_executors._grid_runner import variant_fingerprint as _fp
 
         existing = existing if isinstance(existing, dict) else {}
-        merged_sig = str(existing.get("merged_from_legacy_sig") or "")
+        out: dict[str, Any] = dict(existing)
+        out.setdefault("schema_version", 1)
+        out.setdefault("tested", {})
+        out.setdefault("accepted", [])
+        out.setdefault("rejected", [])
+        out.setdefault("discovered_flags", [])
+        out.setdefault("domains_round_summary", [])
+        out.setdefault("name_index", {})
+        out.setdefault("cursor", len(out.get("tested") or {}))
+        out.setdefault("last_round", {})
 
-        # Legacy ledger normalization (already migrated to v2/v1 by
-        # _migrate_search_ledger so tested is fingerprint-keyed).
-        b = backends_search if isinstance(backends_search, dict) else {}
-        p = params_search if isinstance(params_search, dict) else {}
-
-        # Compose a cheap signature of the source ledgers so we can
-        # short-circuit when nothing changed since the last merge.
-        legacy_sig = json.dumps(
-            {
-                "b_tested": sorted(list((b.get("tested") or {}).keys())),
-                "p_tested": sorted(list((p.get("tested") or {}).keys())),
-                "b_accepted": len(b.get("accepted") or []),
-                "p_accepted": len(p.get("accepted") or []),
-                "b_rejected": len(b.get("rejected") or []),
-                "p_rejected": len(p.get("rejected") or []),
-            },
-            sort_keys=True, separators=(",", ":"),
-        )
-        if (
-            existing
-            and existing.get("schema_version")
-            and merged_sig == legacy_sig
-        ):
-            # Idempotent re-load with no upstream changes; preserve
-            # whatever ExploreExecutor wrote since the last merge.
-            existing.setdefault("tested", {})
-            existing.setdefault("accepted", [])
-            existing.setdefault("rejected", [])
-            existing.setdefault("winners_history", [])
-            existing.setdefault("discovered_flags", [])
-            existing.setdefault("synergy_attempted", [])
-            existing.setdefault("domains_round_summary", [])
-            existing.setdefault("name_index", {})
-            existing.setdefault("cursor", 0)
-            return existing
-
-        _RANK = {"KEEP": 3, "REVERT": 2, "SKIPPED": 1, "FAILED": 1,
-                 "KEEP_UNSTABLE": 2, "": 0}
-
-        def _outcome_for(entry: dict[str, Any]) -> str:
-            """Map a legacy ledger entry to the outcome vocabulary."""
-            outcome = str(entry.get("outcome") or "").upper().strip()
-            if outcome:
-                return outcome
-            # Legacy entries didn't stamp ``outcome``; infer from the
-            # bucket the entry sat in. Reject/accept buckets handled by
-            # caller via the explicit code paths below.
-            status = str(entry.get("status") or "").lower()
-            if status == "failed":
-                return "FAILED"
-            return "REVERT"
-
-        # tested: union by fingerprint with outcome-rank precedence.
-        tested: dict[str, dict[str, Any]] = {}
-        name_index: dict[str, str] = {}
-
-        def _ingest_tested(source: dict[str, Any], legacy_action: str) -> None:
-            src_tested = source.get("tested") or {}
-            if not isinstance(src_tested, dict):
-                return
-            for fp_key, entry in src_tested.items():
-                if not isinstance(entry, dict):
-                    continue
-                fp = (
-                    str(fp_key)
-                    if (isinstance(fp_key, str)
-                        and len(fp_key) == 16
-                        and all(c in "0123456789abcdef" for c in fp_key))
-                    else str(entry.get("fingerprint")
-                             or _fp(
-                                 str(entry.get("extra_server_args") or ""),
-                                 dict(entry.get("extra_envs") or {}),
-                             ))
-                )
-                outcome = _outcome_for(entry)
-                row = {
-                    "fingerprint": fp,
-                    "name": str(entry.get("name") or ""),
-                    "extra_server_args": str(entry.get("extra_server_args") or ""),
-                    "extra_envs": dict(entry.get("extra_envs") or {}),
-                    "note": str(entry.get("note") or ""),
-                    "outcome": outcome,
-                    "round_id": str(entry.get("round_id") or ""),
-                    "ts": str(entry.get("ts") or ""),
-                    "gain_pct": entry.get("gain_pct"),
-                    "tput": entry.get("tput") or entry.get("output_throughput"),
-                    "provenance": str(entry.get("provenance")
-                                       or f"legacy:{legacy_action}"),
-                    "workload_signature": str(entry.get("workload_signature") or ""),
-                }
-                prev = tested.get(fp)
-                if prev is None or _RANK.get(outcome, 0) >= _RANK.get(
-                    str(prev.get("outcome") or ""), 0,
-                ):
-                    tested[fp] = row
-                if row["name"]:
-                    name_index[row["name"]] = fp
-
-        _ingest_tested(b, "backends")
-        _ingest_tested(p, "params")
-
-        # accepted: union by fingerprint, later entries win.
-        accepted_by_fp: dict[str, dict[str, Any]] = {}
-
-        def _ingest_accepted(source: dict[str, Any], legacy_action: str) -> None:
-            for entry in source.get("accepted") or []:
-                if not isinstance(entry, dict):
-                    continue
-                fp = str(entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_server_args") or ""),
-                    dict(entry.get("extra_envs") or {}),
-                ))
-                row = {
-                    "fingerprint": fp,
-                    "name": str(entry.get("name") or ""),
-                    "extra_server_args": str(entry.get("extra_server_args") or ""),
-                    "extra_envs": dict(entry.get("extra_envs") or {}),
-                    "note": str(entry.get("note") or ""),
-                    "gain_pct": entry.get("gain_pct"),
-                    "tput": entry.get("tput") or entry.get("output_throughput"),
-                    "stack_index": entry.get("stack_index"),
-                    "accepted_at_round": str(entry.get("accepted_at_round") or ""),
-                    "ts": str(entry.get("ts") or ""),
-                    "provenance": str(entry.get("provenance")
-                                       or f"legacy:{legacy_action}"),
-                }
-                accepted_by_fp[fp] = row
-                if row["name"]:
-                    name_index[row["name"]] = fp
-
-        _ingest_accepted(b, "backends")
-        _ingest_accepted(p, "params")
-        # Also pull from ``existing`` so a re-load preserves ExploreExecutor's
-        # own writes since the last merge.
-        for entry in existing.get("accepted") or []:
-            if not isinstance(entry, dict):
-                continue
-            fp = str(entry.get("fingerprint") or "")
-            if fp:
-                accepted_by_fp[fp] = dict(entry)
-
-        # rejected: union by fingerprint; drop fingerprints already in
-        # accepted (re-promote wins).
-        accepted_fps = set(accepted_by_fp.keys())
-        rejected_by_fp: dict[str, dict[str, Any]] = {}
-
-        def _ingest_rejected(source: dict[str, Any], legacy_action: str) -> None:
-            for entry in source.get("rejected") or []:
-                if not isinstance(entry, dict):
-                    continue
-                fp = str(entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_server_args") or ""),
-                    dict(entry.get("extra_envs") or {}),
-                ))
-                if fp in accepted_fps:
-                    continue
-                row = {
-                    "fingerprint": fp,
-                    "name": str(entry.get("name") or ""),
-                    "extra_server_args": str(entry.get("extra_server_args") or ""),
-                    "extra_envs": dict(entry.get("extra_envs") or {}),
-                    "note": str(entry.get("note") or ""),
-                    "reason": str(entry.get("reason") or "not_keep"),
-                    "gain_pct": entry.get("gain_pct"),
-                    "tput": entry.get("tput") or entry.get("output_throughput"),
-                    "round_id": str(entry.get("round_id") or ""),
-                    "ts": str(entry.get("ts") or ""),
-                    "provenance": str(entry.get("provenance")
-                                       or f"legacy:{legacy_action}"),
-                }
-                rejected_by_fp[fp] = row
-                if row["name"]:
-                    name_index[row["name"]] = fp
-
-        _ingest_rejected(b, "backends")
-        _ingest_rejected(p, "params")
-        for entry in existing.get("rejected") or []:
-            if not isinstance(entry, dict):
-                continue
-            fp = str(entry.get("fingerprint") or "")
-            if fp and fp not in accepted_fps:
-                rejected_by_fp[fp] = dict(entry)
-
-        # winners_history: append legacy lists + preserve any prior
-        # explore-side rows, then sort by (round_id, ts).
+        # winners_history: fold the live history fields + preserve any
+        # prior explore-side rows, then sort by (round_id, ts).
         wh: list[dict[str, Any]] = []
-        for source_list, legacy_action in (
-            (backend_winners_history, "backends"),
-            (params_winner_history, "params"),
-            (existing.get("winners_history") or [], "explore"),
+        for source_list in (
+            backend_winners_history,
+            params_winner_history,
+            existing.get("winners_history") or [],
         ):
             if not isinstance(source_list, list):
                 continue
             for entry in source_list:
                 if not isinstance(entry, dict):
                     continue
-                fp_val = entry.get("fingerprint")
-                if not fp_val:
-                    fp_val = _fp(
-                        str(entry.get("extra_server_args") or ""),
-                        dict(entry.get("extra_envs") or {}),
-                    )
+                fp_val = entry.get("fingerprint") or _fp(
+                    str(entry.get("extra_server_args") or ""),
+                    dict(entry.get("extra_envs") or {}),
+                )
                 wh.append({
                     "round_id": str(entry.get("round_id") or ""),
                     "variant_name": str(entry.get("variant_name")
@@ -1636,19 +1382,14 @@ class SharedState:
                     "extra_args": str(entry.get("extra_args")
                                        or entry.get("extra_server_args") or ""),
                     "extra_envs": dict(entry.get("extra_envs") or {}),
-                    "provenance": str(entry.get("provenance")
-                                       or f"legacy:{legacy_action}"),
+                    "provenance": str(entry.get("provenance") or ""),
                     "ts": str(entry.get("ts") or ""),
                 })
+        wh.sort(key=lambda r: (str(r.get("round_id") or ""), str(r.get("ts") or "")))
+        out["winners_history"] = wh
 
-        def _sort_key(row: dict[str, Any]) -> tuple[str, str]:
-            return (str(row.get("round_id") or ""), str(row.get("ts") or ""))
-
-        wh.sort(key=_sort_key)
-
-        # synergy_attempted: copy from legacy field; preserve any
-        # ExploreExecutor-side additions.
-        sa_raw = synergy_attempted if isinstance(synergy_attempted, list) else []
+        # synergy_attempted: fold the live field + preserve any
+        # ExploreExecutor-side additions, deduped.
         sa_set: set[tuple[str, ...]] = set()
 
         def _normalize_combo(c: Any) -> tuple[str, ...] | None:
@@ -1656,41 +1397,19 @@ class SharedState:
                 items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
                 return items if items else None
             if isinstance(c, str) and c.strip():
-                # Legacy synergy_attempted entries were "+"-joined strings.
                 parts = tuple(sorted(p for p in c.split("+") if p))
                 return parts if parts else None
             return None
 
-        for c in sa_raw:
-            norm = _normalize_combo(c)
-            if norm:
-                sa_set.add(norm)
-        for c in existing.get("synergy_attempted") or []:
-            norm = _normalize_combo(c)
-            if norm:
-                sa_set.add(norm)
-
-        # discovered_flags: M3 leaves empty; preserve any existing rows.
-        df_existing = existing.get("discovered_flags") or []
-        df: list[dict[str, Any]] = [
-            d for d in df_existing if isinstance(d, dict)
-        ]
-
-        return {
-            "schema_version": 1,
-            "tested": tested,
-            "accepted": list(accepted_by_fp.values()),
-            "rejected": list(rejected_by_fp.values()),
-            "winners_history": wh,
-            "discovered_flags": df,
-            "synergy_attempted": [list(c) for c in sorted(sa_set)],
-            "domains_round_summary": list(existing.get("domains_round_summary") or []),
-            "name_index": name_index,
-            "cursor": len(tested),
-            "last_round": dict(existing.get("last_round") or {}),
-            # Sentinel so a re-load with unchanged legacy data short-circuits.
-            "merged_from_legacy_sig": legacy_sig,
-        }
+        for source in (synergy_attempted, existing.get("synergy_attempted") or []):
+            if not isinstance(source, list):
+                continue
+            for c in source:
+                norm = _normalize_combo(c)
+                if norm:
+                    sa_set.add(norm)
+        out["synergy_attempted"] = [list(c) for c in sorted(sa_set)]
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -2868,6 +2587,10 @@ class SharedState:
             summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
+                # TraceLens derive_kernel_category bucket (MoE / LayerNorm /
+                # GEMM / ...). Without this passthrough downstream consumers
+                # (kernel_attempt_summary by_kernel rows) get an empty string.
+                "kernel_category": entry.get("kernel_category") or "",
                 "gpu_pct": entry.get("gpu_pct"),
                 "bottleneck": entry.get("bottleneck"),
                 "bound_type": entry.get("bound_type"),
@@ -2920,9 +2643,13 @@ class SharedState:
         analysis_md_text = ""
         if analysis_md_path:
             try:
-                # No truncation: typical analysis.md is 10-20 KB, worst
-                # case ~200 KB — well within the 200K-token orchestration
-                # context budget.
+                # Stored verbatim, but the prompt path strips embedded
+                # base64 data-URLs before injection (see
+                # ``_format_analysis_md_full`` /
+                # ``strip_base64_data_urls``). A raw analysis.md can be
+                # ~120K tokens of base64 images; post-strip it is ~6K
+                # tokens of actual report text. NEVER inject this field
+                # raw — always go through the strip helper.
                 analysis_md_text = Path(analysis_md_path).read_text(
                     encoding="utf-8", errors="replace",
                 )
@@ -3041,6 +2768,31 @@ class SharedState:
             "best_for_each_conc": result.get("best_for_each_conc") or {},
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
+        }
+
+    def record_conc_sweep(self, result: dict[str, Any]) -> None:
+        """Record conc_sweep task completion (mirrors record_sweep).
+
+        Bug #12 fix: ``phase_state.exit_normal_sweep`` previously only
+        looked at ``last_sweep.status`` to fire ``sweep_done``. When the
+        SWEEP phase reaches its terminal state via conc_sweep alone (e.g.
+        sweep was singleton-blocked or completed in a prior session and
+        only conc_sweep runs in this resume), the phase had no exit
+        signal and idled until ``sweep_budget_exhausted``. Writing
+        ``last_conc_sweep.status`` lets ``exit_normal_sweep`` return
+        ``conc_sweep_done`` and the SWEEP→CLOSE transition fires
+        immediately after conc_sweep settles.
+        """
+        if not isinstance(result, dict):
+            return
+        self.last_conc_sweep = {
+            "ts":               _now_iso(),
+            "status":           str(result.get("status") or "succeeded"),
+            "skip_reason":      str(result.get("skip_reason") or ""),
+            "was_skipped":      bool(result.get("was_skipped", False)),
+            "budget_exhausted": bool(result.get("budget_exhausted", False)),
+            "summary":          dict(result.get("summary") or {}),
+            "workspace":        str(result.get("workspace") or ""),
         }
 
     # ------------------------------------------------------------------
@@ -3279,6 +3031,64 @@ class SharedState:
         EXPLORE entry.
         """
         self.explore_specialist_dispatched_count = 0
+
+    def to_intervention_mix_summary(self) -> str:
+        """PR-A8 / D3 (Arbor-into-Hyperloom): render the config-vs-code_patch
+        intervention ledger for the Orchestration per-tick prompt.
+
+        Returns ``""`` when the ledger is empty (nothing recorded yet — no
+        escalation possible). Otherwise returns a one-line counts summary,
+        plus an ``ESCALATION`` directive when the session has been
+        config-only for too long, nudging Orchestration to dispatch a
+        code-patch ``serving_specialist`` next (Arbor's "do not settle for
+        config-only" rule). ``record_intervention`` maintains the ledger;
+        this is its sole consumer.
+
+        Thresholds mirror Arbor's ``get_intervention_mix`` heuristics:
+        escalate when ``consecutive_config_only_rounds >= 2`` OR the ledger
+        is config-heavy (>= 5 config keeps) with zero code_patch keeps.
+        """
+        mix = self.intervention_mix or []
+        if not mix:
+            return ""
+        escalate_at = 2
+        config_heavy_at = 5
+        n_config = sum(
+            1 for m in mix if (m or {}).get("change_type") == "config"
+        )
+        n_patch = sum(
+            1 for m in mix if (m or {}).get("change_type") == "code_patch"
+        )
+        # B2: config explore rounds that produced measurements but KEPT
+        # nothing (all REVERT / KEEP_UNSTABLE) are recorded as
+        # ``config_attempt``. They count toward the escalation signal so
+        # repeated fruitless config tuning escalates to a code-patch
+        # ``integrate_patch`` even when the MI300X noise floor prevents
+        # any config KEEP (the failure mode that left this loop spinning).
+        n_config_attempt = sum(
+            1 for m in mix if (m or {}).get("change_type") == "config_attempt"
+        )
+        consec = int(self.consecutive_config_only_rounds or 0)
+        config_pressure = n_config + n_config_attempt
+        lines = [
+            f"config_keeps={n_config} config_attempts={n_config_attempt} "
+            f"code_patch_keeps={n_patch} "
+            f"consecutive_config_only_rounds={consec}"
+        ]
+        if (
+            consec >= escalate_at
+            or (n_config >= config_heavy_at and n_patch == 0)
+            or (config_pressure >= escalate_at and n_patch == 0)
+        ):
+            lines.append(
+                "ESCALATION: config-only for too long. Config tuning has a "
+                "low ceiling — your NEXT EXPLORE dispatch SHOULD delegate a "
+                "`serving_specialist` to author a framework SOURCE patch "
+                "(scheduler / kv_cache / chunked-prefill), integrated via "
+                "`integrate_patch`, rather than another config-only "
+                "`params` / `explore` round."
+            )
+        return "\n".join(lines)
 
     def record_dynamic_action_dispatch(
         self, dyn_id: str, summary: dict[str, Any],
@@ -4169,11 +3979,141 @@ class SharedState:
             )
         return "\n".join(rows)
 
+    def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
+        """Render advisory multi-model proposal scores for Orchestration.
+
+        Reads the ``ensemble_scores`` blob attached to the most recent
+        :attr:`specialist_rounds` entries by the ProposalScorer (see
+        ``orchestrator/proposal_scorer.py``). Each line shows a variant's
+        per-rater ``score ("reason")`` side-by-side so Orchestration can
+        see agreement / disagreement. There is deliberately NO mean and
+        NO sorting — these are one reference among many (parallel to
+        gaps / KB / analysis.md), not a ranking directive (Inv-9.1: no
+        system-side scoreboard).
+
+        The rater identities are **anonymized** (``rater_1``, ``rater_2``,
+        …) so Orchestration weighs the scores on their merits and reasons
+        alone, free of any per-model prior / brand bias. The mapping is
+        *stable within a render* (the same model maps to the same
+        ``rater_N`` across every round shown) so cross-round agreement is
+        still legible, but the real model slugs never reach the prompt —
+        they stay in ``ensemble_scores`` (state.json) for debug / audit.
+
+        Returns ``""`` when no recent round carries scores so the caller
+        skips the whole section header.
+
+        Format::
+
+            round=<round_id> domain=<domain>
+              - <variant_name>: rater_1=8.0 ("..."), rater_2=6.5 ("...")
+        """
+        rounds = [
+            r for r in (self.specialist_rounds or [])
+            if isinstance(r, dict)
+            and isinstance(r.get("ensemble_scores"), dict)
+            and (r["ensemble_scores"].get("models") or {})
+        ]
+        if not rounds:
+            return ""
+        shown = rounds[-max_rounds:]
+        # Stable, anonymized rater labels: collect every real model slug
+        # across the rounds being shown, sort for determinism, and map
+        # each to ``rater_N``. The same model gets the same label across
+        # rounds (cross-round agreement stays legible) while the real
+        # slug never reaches the prompt — Orchestration must weigh scores
+        # on merit, not on which brand emitted them (avoids model bias).
+        all_slugs: set[str] = set()
+        for r in shown:
+            models = r["ensemble_scores"].get("models") or {}
+            all_slugs.update(str(s) for s in models.keys())
+            errs = r["ensemble_scores"].get("errors") or {}
+            all_slugs.update(str(s) for s in errs.keys())
+        rater_label = {
+            slug: f"rater_{i}"
+            for i, slug in enumerate(sorted(all_slugs), start=1)
+        }
+        rows: list[str] = [
+            "(Advisory only — one reference among many, NOT a ranking "
+            "directive. Scores are 0-10 likelihood-of-throughput-gain "
+            "priors from independent anonymized raters; weigh on merit "
+            "alongside gaps / KB / analysis.md.)",
+        ]
+        for r in shown:
+            ens = r["ensemble_scores"]
+            models = ens.get("models") or {}
+            scale = str(ens.get("scale") or "0-10")
+            round_id = str(r.get("round_id") or "?")
+            domain = str(r.get("domain") or "?")
+            rows.append(f"round={round_id} domain={domain} scale={scale}")
+            # Collect every variant name seen across models, preserving
+            # the proposal_set order when available.
+            ordered_names: list[str] = []
+            seen: set[str] = set()
+            for variant in (r.get("proposal_set") or []):
+                if isinstance(variant, dict):
+                    nm = str(variant.get("name") or "")
+                    if nm and nm not in seen:
+                        ordered_names.append(nm)
+                        seen.add(nm)
+            for per_model in models.values():
+                if isinstance(per_model, dict):
+                    for nm in per_model:
+                        if nm not in seen:
+                            ordered_names.append(nm)
+                            seen.add(nm)
+            # Render raters in stable label order (rater_1, rater_2, …)
+            # so a given column means the same model across every round
+            # without ever printing the model slug.
+            ordered_slugs = sorted(
+                (s for s in models if s in rater_label),
+                key=lambda s: rater_label[s],
+            )
+            for nm in ordered_names:
+                parts: list[str] = []
+                for model_slug in ordered_slugs:
+                    per_model = models.get(model_slug)
+                    if not isinstance(per_model, dict):
+                        continue
+                    label = rater_label[model_slug]
+                    cell = per_model.get(nm)
+                    if isinstance(cell, dict) and cell.get("score") is not None:
+                        reason = str(cell.get("reason") or "").replace("\n", " ")
+                        if len(reason) > 80:
+                            reason = reason[:77] + "..."
+                        parts.append(
+                            f"{label}={float(cell['score']):.1f} "
+                            f"(\"{reason}\")"
+                        )
+                    else:
+                        parts.append(f"{label}=n/a")
+                rows.append(f"  - {nm}: " + ", ".join(parts))
+            errors = ens.get("errors") or {}
+            if errors:
+                err_labels = ", ".join(
+                    sorted(
+                        rater_label.get(str(s), "rater_?")
+                        for s in errors
+                    )
+                )
+                rows.append(f"  · raters unavailable this round: {err_labels}")
+        return "\n".join(rows)
+
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
+        ]
+        # Advisory architecture profile (launcher-supplied). Prompt-context
+        # only; the live TraceLens ``analysis_md`` snapshot below remains the
+        # ground truth for bottleneck classification. Omit entirely when no
+        # profile was loaded so non-arch sessions render exactly as before.
+        _arch_line = render_model_arch_compact(self.model_arch)
+        if _arch_line:
+            lines.append(
+                f"model_arch(advisory; subordinate to TraceLens analysis_md)={_arch_line}"
+            )
+        lines += [
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
             f"current_best={self.current_best or '(none)'}",
@@ -4205,8 +4145,7 @@ class SharedState:
             # were removed. The plateau judges also consume this on
             # legacy resume sessions when ``explore_search`` is empty.
             f"params_no_promote_streak={self.params_no_promote_streak}",
-            f"params_search={self._format_params_search()}",
-            f"backends_search={self._format_backends_search()}",
+            f"explore_search={self._format_explore_search()}",
             f"discovered_flags={self._format_discovered_flags()}",
             f"backend_winners_history={self._format_backend_winners_history()}",
             f"synergy_attempted={len(self.synergy_attempted)} combos",
@@ -4383,13 +4322,10 @@ class SharedState:
     ) -> dict[str, Any]:
         """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]``.
 
-        ``params_search.accepted`` is built from ``_variant_to_dict()`` and
-        does NOT persist ``gain_pct``; the matching ``tested[fingerprint]``
-        entry does. ``backends_search.accepted`` already stamps gain on
-        promote (legacy ledger written via resume migration only), so
-        this is a no-op there. Pulling the value across at render time
-        keeps the renderer symmetric and avoids a second writer for
-        accepted entries.
+        Some ``explore_search.accepted`` entries do NOT persist
+        ``gain_pct``; the matching ``tested[fingerprint]`` entry does.
+        Pulling the value across at render time keeps the renderer
+        symmetric and avoids a second writer for accepted entries.
         """
         if (
             entry.get("gain_pct") is not None
@@ -4455,11 +4391,8 @@ class SharedState:
             )
         return "\n".join(out)
 
-    def _format_params_search(self) -> str:
-        return self._format_search_state(self.params_search)
-
-    def _format_backends_search(self) -> str:
-        return self._format_search_state(self.backends_search)
+    def _format_explore_search(self) -> str:
+        return self._format_search_state(self.explore_search)
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
@@ -4646,4 +4579,4 @@ class SharedState:
         )
 
 
-__all__ = ["SharedState"]
+__all__ = ["SharedState", "render_model_arch_compact"]

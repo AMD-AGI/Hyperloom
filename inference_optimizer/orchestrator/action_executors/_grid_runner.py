@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # an already-tested ``--block-size 128`` under a freshly invented name silently
 # re-burned the wall clock. The fingerprint hashes the *content* that actually
 # changes Magpie behavior (server args + env overrides) so any rename ends up
-# at the same key in ``SharedState.{params_search,backends_search}.tested``.
+# at the same key in ``SharedState.explore_search.tested``.
 #
 # Normalization rules:
 #   * args: ``shlex.split`` → sorted token tuple. Sorting is intentionally
@@ -952,8 +952,16 @@ def apply_runtime_benchmark_overrides(
     envs = bench.setdefault("envs", {})
     for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
         val = os.environ.get(env_key, "").strip()
-        if val:
-            envs[env_key] = int(val)
+        if not val:
+            continue
+        # TP yaml-explicit wins: a stale state.tp re-exported on resume
+        # must not silently downgrade a YAML-pinned TP (e.g. baseline
+        # config TP=2 → sglang TP=1 because state.tp defaulted to 1).
+        if env_key == "TP":
+            yaml_tp = envs.get("TP")
+            if yaml_tp not in (None, 0, "", "0"):
+                continue
+        envs[env_key] = int(val)
 
     explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
     if explicit_rocr:

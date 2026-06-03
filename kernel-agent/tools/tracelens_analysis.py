@@ -1493,7 +1493,12 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
         return "FlyDSL"
     name = str(candidate.get("name") or "").lower()
     if any(t in name for t in ("gemm", "matmul", "rocblas", "hipblas",
-                                "cijk", "sgemm", "hgemm")):
+                                "cijk", "sgemm", "hgemm",
+                                # PyTorch op-name variants the priority-1
+                                # csv lookup misses when unified_perf_summary
+                                # is absent (raw-trace path or empty op
+                                # category column).
+                                "::mm", "::addmm", "::bmm")):
         return "GEMM"
     if any(t in name for t in ("attention", "attn", "fmha",
                                 "paged_attention", "flash")):
@@ -1578,13 +1583,50 @@ def analyze_trace_files(trace_files: list[Path], top_k: int) -> list[dict[str, A
     return _finalize_candidates(top, total_dur=total_dur)
 
 
+def load_op_category_map(
+    perf_report_csv_dir: Path | str,
+) -> dict[str, str]:
+    """Read ``{name: raw TraceLens op category}`` from unified_perf_summary.csv.
+
+    TraceLens emits one row per (name, shape); we keep the first
+    non-empty op category per name (stable across shapes for one op).
+    Returns ``{}`` when the csv is unavailable so callers degrade
+    gracefully to the name-heuristic fallback in ``derive_kernel_category``.
+    """
+    csv_path = Path(perf_report_csv_dir) / "unified_perf_summary.csv"
+    if not csv_path.is_file():
+        return {}
+    import csv as _csv
+    out: dict[str, str] = {}
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            for row in _csv.DictReader(f):
+                name = str(row.get("name") or "").strip()
+                cat = str(row.get("op category") or "").strip()
+                if name and cat and name not in out:
+                    out[name] = cat
+    except (OSError, _csv.Error):
+        return {}
+    return out
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]], *, total_dur: float | None = None,
+    perf_report_csv_dir: Path | str | None = None,
 ) -> list[dict[str, Any]]:
     """Apply source resolution / pybind upgrade / backend recommend / notes.
 
     Shared post-processing for parsed candidate rows. Mutates ``top`` in place.
+
+    When ``perf_report_csv_dir`` is provided, populate each item's
+    ``tracelens_category`` from TraceLens's unified_perf_summary.csv so
+    ``derive_kernel_category`` takes its priority-1 (upstream) branch
+    instead of falling through to the name heuristic.
     """
+    op_cat_map = (
+        load_op_category_map(perf_report_csv_dir)
+        if perf_report_csv_dir is not None else {}
+    )
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
     for idx, item in enumerate(top, 1):
@@ -1676,6 +1718,14 @@ def _finalize_candidates(
         item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
         item["recommended_backends"] = recommend_backends(item)
         item["optimization_notes"] = build_notes(item)
+        # TraceLens csv lookup activates derive_kernel_category's
+        # priority-1 (upstream) path. Only overrides when there is no
+        # pre-set tracelens_category (analysis.md parsing path may set
+        # it directly).
+        if op_cat_map and not str(item.get("tracelens_category") or "").strip():
+            csv_cat = op_cat_map.get(str(item.get("name") or ""))
+            if csv_cat:
+                item["tracelens_category"] = csv_cat
         # Surface a stable kernel_category for GEAK to dispatch on, plus a
         # source_path mirror for downstream prompt/report consumers. Shape is
         # already populated in `shapes`.
@@ -3112,6 +3162,9 @@ def main() -> int:
                         agent_candidates = _finalize_candidates(
                             raw_agent_candidates,
                             total_dur=total_dur or None,
+                            perf_report_csv_dir=(
+                                skill_result.output_dir / "perf_report_csvs"
+                            ),
                         )
                         append_log(
                             log_path,

@@ -120,17 +120,42 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "- `sglang/python/sglang/srt/scheduler/` and `sglang/python/sglang/srt/managers/`.",
         "- KB anchor `framework.*` (cuda_graph / batching / chunked_prefill / kv_cache).",
         "",
-        "**Winning techniques to consider**",
+        "**Config levers (cheap, try first — these are env/flag changes)**",
         "- `--enable-chunked-prefill` + matched `--max-num-batched-tokens`.",
         "- `--enforce-eager=false` + cuda graph capture for stable batch sizes.",
         "- `--kv-cache-dtype fp8_e4m3` when the gap is HBM-bound (gate accuracy!).",
         "- `--max-num-seqs` tuning at concurrency boundaries.",
+        "- AITER umbrella (`VLLM_ROCM_USE_AITER=1`) is **ALWAYS_ON** on MI300X;",
+        "  `VLLM_ROCM_USE_AITER_RMSNORM=0` / `...PAGED_ATTN=1` are **NEVER_TOUCH**",
+        "  (crash / dead var). Do NOT propose flags in the NEVER_TOUCH set.",
+        "",
+        "**Source-patch playbook (the high-ceiling work — author real code)**",
+        "Config tuning has a low ceiling. When the gap persists after the cheap",
+        "levers (or the orchestrator escalates you for a code patch), modify the",
+        "framework **source** and write a unified diff into your worktree",
+        "`patches/` dir (see the patch protocol section). Map the profile gap to",
+        "the module:",
+        "- **Scheduler / batch composition gap** (low batch occupancy, decode",
+        "  starvation) → `scheduler.py` batch policy: prefill/decode interleave,",
+        "  `max_num_batched_tokens` chunk split, waiting-queue admission order.",
+        "- **KV-cache / block-manager gap** (HBM-bound, fragmentation) →",
+        "  block_manager / paged-cache: block-size policy, eviction, prefix-cache",
+        "  reuse. Keep `block_size >= 16`.",
+        "- **CUDA-graph / capture gap** (host-bound, dispatch overhead) →",
+        "  capture-size set, inductor graph partition, eager-fallback conditions.",
+        "- **Chunked-prefill granularity** → split-size heuristic in the",
+        "  scheduler, not just the flag.",
+        "Keep patches small (target ≤5 files); preserve upstream call-order",
+        "contracts (e.g. vLLM `scheduler.add_seq_group` ordering) or you will",
+        "break chunked-prefill / spec-decode interactions.",
         "",
         "**Pitfalls (historical REVERTs)**",
         "- Raising `--max-num-seqs` past 512 on MI300X → OOM on 671B MoE models.",
         "- `cuda_graph` + dynamic batch sizes → silent recapture cost > savings.",
         "- Chunked prefill without `--max-num-batched-tokens` → tail latency",
         "  regressions invisible to throughput-only benches.",
+        "- `torch.compile` on MLA + FP8 (DeepSeek-R1 NSA path) → incompatible;",
+        "  disable compile on that path.",
     ]
 
 
@@ -577,7 +602,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.extend(workload_rows)
     if inp.arch_notes:
         rows.append("")
-        rows.append(f"Architecture notes: {inp.arch_notes}")
+        rows.append(f"Model architecture (advisory): {inp.arch_notes}")
     return rows
 
 

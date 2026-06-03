@@ -252,6 +252,7 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
                 {
                     "kernel_id": "k1",
                     "name": "rmsnorm_kernel",
+                    "kernel_category": "LayerNorm",
                     "gpu_pct": 8.2,
                     "bottleneck": "memory",
                     "bound_type": "memory",
@@ -283,4 +284,8 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
     assert row["compute_utilization_pct"] == 9.1
     assert row["bandwidth_utilization_pct"] == 72.4
     assert row["suggestion"] == "reduce memory traffic"
+    # kernel_category propagates from TraceLens hot_kernels so downstream
+    # consumers (kernel_attempt_summary.by_kernel[].kernel_category) get
+    # the bucket label instead of an empty string.
+    assert row["kernel_category"] == "LayerNorm"
     assert cached["kernel_roofline_top15"][0] == row
