@@ -2917,6 +2917,23 @@ DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
 _VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
 
 
+def _robustness_server_configured(args: argparse.Namespace) -> bool:
+    """Return True when a robustness-server endpoint is configured.
+
+    The server is the only source that gives the agent a cluster-wide
+    view on multi-node — once it is wired the agent runs with
+    ``disable_local_probe`` / ``enable_cluster_pod_metrics`` and the
+    sandbox-local ``LocalProbeSource`` false positives are silenced.
+    We treat the server as configured when the operator passes
+    ``--robustness-server-url`` or sets ``ROBUSTNESS_SERVER_URL`` in the
+    environment.
+    """
+    url = (getattr(args, "robustness_server_url", None) or "").strip()
+    if url:
+        return True
+    return bool((os.environ.get("ROBUSTNESS_SERVER_URL") or "").strip())
+
+
 def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     """Resolve the active robustness backend choice.
 
@@ -2925,25 +2942,29 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     ``args.robustness_backend``); ``None`` falls back to
     :data:`DEFAULT_ROBUSTNESS_BACKEND`. Hard-fails on an invalid value.
 
-    Multi-node auto-downgrade: when ``args.nodes >= 2`` the
-    robustness-agent's ``LocalProbeSource`` family targets
-    sandbox-local resources only — ``ray status``, the inference
-    server health URL, GPU / FD / disk / shm metrics, etc. On
-    multi-node every one of those resources lives in a separate
-    Kubernetes pod (head pod / worker pod / RayJob submitter),
-    unreachable from the sandbox by design. Each probe failure
-    surfaces as a HIGH-severity false positive symptom
-    (``ray_head_dead``, ``local_server_unreachable``,
-    ``gpu_memory_leaked``, ...) that
-    drowns the bus, eats ActionLadder cooldown slots, and risks
-    tripping ``escalate_strategy_change`` chains that stall
-    Orchestration. Until ``robustness-agent`` grows multi-node-aware
-    probe targeting, the cleanest path is to disable the real
-    backend on multi-node and rely on the mock heartbeat. Operators
-    who explicitly pass ``--robustness-agent`` get a WARNING and
-    the auto-downgrade is honoured anyway; passing
-    ``--robustness-mock`` suppresses the WARNING. Single-node
-    behaviour is unchanged.
+    Multi-node policy: when ``args.nodes >= 2`` the robustness-agent's
+    ``LocalProbeSource`` family targets sandbox-local resources only
+    (``ray status``, the inference server health URL, GPU / FD / disk /
+    shm metrics, ...). On multi-node every one of those lives in a
+    separate Kubernetes pod, unreachable from the sandbox by design, so
+    each probe failure surfaces as a HIGH-severity false positive
+    (``ray_head_dead``, ``local_server_unreachable``, ...).
+
+    The fix is to source signals from robustness-server instead of the
+    local sandbox. So on multi-node:
+
+    * if a robustness-server is configured (``--robustness-server-url``
+      or ``ROBUSTNESS_SERVER_URL``) we keep the ``agent`` backend — it
+      runs with ``disable_local_probe`` / ``enable_cluster_pod_metrics``
+      (see :func:`_build_robustness_options`) and the cluster source
+      replaces the sandbox-local probes;
+    * if no server is configured the agent has no cluster-wide view and
+      would fall back to the noisy LocalProbe, so we auto-downgrade to
+      the heartbeat-only ``mock``.
+
+    Operators who explicitly pass ``--robustness-agent`` without a
+    server on multi-node get a WARNING; passing ``--robustness-mock``
+    suppresses it. Single-node behaviour is unchanged.
     """
     chosen = getattr(args, "robustness_backend", None)
     explicit = chosen is not None
@@ -2959,22 +2980,33 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
         )
         sys.exit(2)
     nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2 and chosen == "agent":
+    if nodes >= 2 and chosen == "agent" and not _robustness_server_configured(args):
         if explicit:
             print(
-                f"WARN: --robustness-agent selected but nodes={nodes} — "
-                f"robustness-agent's LocalProbe family targets "
-                f"sandbox-local resources (ray, inference server, "
-                f"GPU, ...) that all live in separate pods "
-                f"on multi-node and surface as HIGH false positives. "
-                f"Auto-downgrading to --robustness-mock; pass "
-                f"--robustness-mock explicitly to suppress this "
-                f"warning. See inference_optimizer/multi_node/SKILL.md "
+                f"WARN: --robustness-agent selected but nodes={nodes} and "
+                f"no robustness-server configured — the agent's LocalProbe "
+                f"family targets sandbox-local resources (ray, inference "
+                f"server, GPU, ...) that all live in separate pods on "
+                f"multi-node and surface as HIGH false positives. "
+                f"Auto-downgrading to --robustness-mock; configure "
+                f"--robustness-server-url / ROBUSTNESS_SERVER_URL to keep "
+                f"the agent backend, or pass --robustness-mock explicitly "
+                f"to suppress this warning. See "
+                f"inference_optimizer/multi_node/SKILL.md "
                 f"(Robustness limitation in multi-node mode).",
                 file=sys.stderr,
             )
         chosen = "mock"
     return chosen
+
+
+_MULTI_NODE_WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (
+    "ROBUSTNESS_WORKLOAD_UID",
+    "CLAW_WORKLOAD_UID",
+    "WORKLOAD_UID",
+    "KUBE_WORKLOAD_UID",
+    "RAY_JOB_ID",
+)
 
 
 def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
@@ -2983,17 +3015,22 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     Only emits keys the operator actually passed so the runtime CLI
     falls back to its own defaults / env-discovery for the rest.
 
-    Multi-node auto-disable: when ``args.nodes >= 2`` the inference
-    server runs in the head pod (separate Kubernetes pod from the
-    sandbox where the robustness-agent subprocess lives), so the
-    hardcoded ``http://127.0.0.1:8888/health`` probe baked into
-    ``robustness_agent.config.Config.auto_probe_inference_server``
-    can never succeed and floods the bus with false-positive
-    ``local_server_unreachable`` symptoms each tick. Disable the
-    auto-probe by default in multi-node so single-node semantics stay
-    intact while multi-node stops emitting the bogus alert. Operators
-    who configure an explicit cluster-local probe target can re-enable
-    via a future ``--robustness-auto-probe-inference-server`` flag.
+    Multi-node policy: when ``--nodes >= 2`` the agent must source its
+    signals from the cluster (robustness-server) rather than the local
+    sandbox, otherwise the per-pod LocalProbe trips false ``ray_head_dead``
+    / ``local_server_unreachable`` symptoms on every worker that does not
+    host the inference server. We therefore default ``disable_local_probe``
+    and ``enable_cluster_pod_metrics`` to True in that mode (unless the
+    operator explicitly opted out) and forward a workload_uid hint so the
+    server can resolve every pod that belongs to the same RayJob.
+
+    For the same reason the hardcoded ``http://127.0.0.1:8888/health``
+    probe baked into ``Config.auto_probe_inference_server`` can never
+    succeed when the inference server lives in the head pod, so we also
+    disable the auto-probe and lift the ``no_levers_found`` elapsed-time
+    floor to 60 min (sglang cold start + baseline + profile + turnaround
+    alone burns 35-50 min before the first explore family runs).
+    Single-node semantics stay untouched.
     """
     options: dict[str, Any] = {}
     server_url = getattr(args, "robustness_server_url", None)
@@ -3002,8 +3039,49 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     llm_rca = getattr(args, "robustness_llm_rca", None)
     if llm_rca is not None:
         options["llm_rca_enabled"] = bool(llm_rca)
+
     nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2:
+    multi_node = nodes >= 2
+    if nodes > 1:
+        options["nodes"] = nodes
+
+    workload_uid = (getattr(args, "robustness_workload_uid", None) or "").strip()
+    if not workload_uid:
+        for key in _MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
+            candidate = (os.environ.get(key) or "").strip()
+            if candidate:
+                workload_uid = candidate
+                break
+    if workload_uid:
+        options["workload_uid"] = workload_uid
+
+    disable_local = getattr(args, "robustness_disable_local_probe", None)
+    if disable_local is None and multi_node:
+        disable_local = True
+    if disable_local is not None:
+        options["disable_local_probe"] = bool(disable_local)
+
+    enable_pod_metrics = getattr(args, "robustness_enable_cluster_pod_metrics", None)
+    if enable_pod_metrics is None and multi_node:
+        enable_pod_metrics = True
+    if enable_pod_metrics is not None:
+        options["enable_cluster_pod_metrics"] = bool(enable_pod_metrics)
+
+    categories_raw = getattr(args, "robustness_pod_metrics_categories", None)
+    if categories_raw:
+        if isinstance(categories_raw, (list, tuple)):
+            cat_iter = categories_raw
+        else:
+            cat_iter = str(categories_raw).split(",")
+        cat_list = [c.strip() for c in cat_iter if str(c).strip()]
+        if cat_list:
+            options["pod_metrics_categories"] = cat_list
+
+    if multi_node:
+        # The inference server runs in the head pod, so the hardcoded
+        # 127.0.0.1:8888 health probe can never succeed and would flood
+        # the bus with false-positive ``local_server_unreachable``
+        # symptoms each tick — disable the auto-probe in multi-node.
         options["auto_probe_inference_server"] = False
         # B3 no_levers_found floor — multi-node large-model spends
         # 35-50 min on sglang cold start + baseline + profile +
@@ -3015,6 +3093,7 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
         # without finding a lever. Single-node default (45.0) stays
         # untouched.
         options["progress_no_levers_min_minutes"] = 60.0
+
     return options
 
 
@@ -5217,6 +5296,56 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="robustness_llm_rca",
         action="store_false",
         help="Forward llm_rca_enabled=false into request.options.",
+    )
+    opt.add_argument(
+        "--robustness-workload-uid",
+        dest="robustness_workload_uid",
+        type=str,
+        default=None,
+        help="Forward workload_uid into request.options. The robustness-server "
+             "resolves it to every pod (head + workers) backing the RayJob via "
+             "the cluster/workloads/{uid}/hierarchy endpoint. Falls back to "
+             "$CLAW_WORKLOAD_UID / $WORKLOAD_UID / $RAY_JOB_ID when unset.",
+    )
+    opt.add_argument(
+        "--robustness-disable-local-probe",
+        dest="robustness_disable_local_probe",
+        action="store_true",
+        default=None,
+        help="Force disable_local_probe=true. The robustness-agent silences "
+             "its LocalProbe fallback so per-pod sandbox checks (ps, rocm-smi, "
+             "local HTTP) cannot emit false-positive symptoms.",
+    )
+    opt.add_argument(
+        "--no-robustness-disable-local-probe",
+        dest="robustness_disable_local_probe",
+        action="store_false",
+        help="Force disable_local_probe=false (keep the LocalProbe fallback "
+             "even in multi-node mode).",
+    )
+    opt.add_argument(
+        "--robustness-enable-cluster-pod-metrics",
+        dest="robustness_enable_cluster_pod_metrics",
+        action="store_true",
+        default=None,
+        help="Force enable_cluster_pod_metrics=true so the robustness-agent "
+             "fans out per-pod metrics through robustness-server and feeds "
+             "the local_health rules with cluster-decoded GPU snapshots.",
+    )
+    opt.add_argument(
+        "--no-robustness-enable-cluster-pod-metrics",
+        dest="robustness_enable_cluster_pod_metrics",
+        action="store_false",
+        help="Force enable_cluster_pod_metrics=false.",
+    )
+    opt.add_argument(
+        "--robustness-pod-metrics-categories",
+        dest="robustness_pod_metrics_categories",
+        type=str,
+        default=None,
+        help="Comma-separated metric categories forwarded into "
+             "pod_metrics_categories (e.g. 'gpu,memory'). Default 'gpu' is "
+             "applied by the runtime when this flag is omitted.",
     )
     opt.add_argument("--orch-prompt", type=str, default=None,
                       help="Override Orchestration system prompt (file path or inline)")
