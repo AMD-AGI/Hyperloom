@@ -3067,7 +3067,13 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         we must not silently fall through and optimize the un-quantized
         source model when the user explicitly asked for quantization.
     """
+    # Free-text --quantize wins; otherwise resolve the structured
+    # --quantize-scheme enum (the UI/backend path) to a prompt.
     prompt = getattr(args, "quantize", None)
+    if not prompt:
+        from .orchestrator.quantization_schemes import resolve_scheme_prompt
+
+        prompt = resolve_scheme_prompt(getattr(args, "quantize_scheme", None))
     if not prompt:
         return
     if getattr(args, "resume", False):
@@ -3994,6 +4000,15 @@ def _build_parser() -> argparse.ArgumentParser:
              "then rewrites --model to the exported quantized model so the "
              "rest of the run optimizes the quantized model. Ignored on "
              "--resume.",
+    )
+    from .orchestrator.quantization_schemes import QUANT_SCHEME_CHOICES
+    opt.add_argument(
+        "--quantize-scheme", choices=QUANT_SCHEME_CHOICES, default=None,
+        metavar="SCHEME",
+        help="Structured alternative to --quantize for UI/backends: pick a "
+             "curated quantization scheme (resolved to a prompt internally). "
+             f"Choices: {', '.join(QUANT_SCHEME_CHOICES)}. 'none' or omit = no "
+             "quantization. Ignored if --quantize (free text) is also given.",
     )
     opt.add_argument(
         "--gpu-type", choices=["mi300x", "mi325x", "mi355x"], default=None,

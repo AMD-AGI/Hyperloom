@@ -499,6 +499,11 @@ inference_optimizer optimize \
   export dir — the adapter folds `--model` + a per-model export dir under the
   workspace root (`<workspace_root>/quantization/<model>/quantized`) into the
   prompt automatically.
+- **Structured path for UI/backends**: instead of free text, pass
+  `--quantize-scheme <enum>` (one of `none` / `fp8` / `int8` / `int4_wo_128` /
+  `mxfp4` / `mxfp4_fp8`); it resolves to a curated prompt internally
+  (`orchestrator/quantization_schemes.py`). `none` or omit = no quantization.
+  Free-text `--quantize` takes priority when both are given.
 - Behavior: one-shot, **skipped on `--resume`**. On a failed/unusable
   quantization the run **hard-stops (`SystemExit(3)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.

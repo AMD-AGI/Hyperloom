@@ -22,6 +22,7 @@ import pytest
 
 from inference_optimizer import cli
 from inference_optimizer.orchestrator import quantization_request_handlers as qrh
+from inference_optimizer.orchestrator import quantization_schemes as qs
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,35 @@ def test_quantize_flag_defaults_none():
 def test_quantize_flag_captures_prompt():
     args = _parse(["--quantize", "fp8, exclude lm_head"])
     assert args.quantize == "fp8, exclude lm_head"
+
+
+def test_quantize_scheme_flag_parses():
+    args = _parse(["--quantize-scheme", "fp8"])
+    assert args.quantize_scheme == "fp8"
+
+
+def test_quantize_scheme_rejects_unknown_choice():
+    with pytest.raises(SystemExit):  # argparse rejects invalid choice
+        _parse(["--quantize-scheme", "fp16_made_up"])
+
+
+# ---------------------------------------------------------------------------
+# Group A2 — scheme registry
+# ---------------------------------------------------------------------------
+
+def test_resolve_scheme_none_returns_none():
+    assert qs.resolve_scheme_prompt(None) is None
+    assert qs.resolve_scheme_prompt("none") is None
+
+
+def test_resolve_scheme_known_returns_prompt():
+    p = qs.resolve_scheme_prompt("fp8")
+    assert p and "fp8" in p and "lm_head" in p
+
+
+def test_resolve_scheme_unknown_raises():
+    with pytest.raises(ValueError):
+        qs.resolve_scheme_prompt("bogus")
 
 
 # ---------------------------------------------------------------------------
@@ -130,9 +160,10 @@ def test_adapter_failed_exits_3(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 class _Args:
-    def __init__(self, *, model, quantize=None, resume=False):
+    def __init__(self, *, model, quantize=None, quantize_scheme=None, resume=False):
         self.model = Path(model)
         self.quantize = quantize
+        self.quantize_scheme = quantize_scheme
         self.resume = resume
 
 
@@ -180,3 +211,53 @@ def test_prelude_rewrites_model_on_success(tmp_path, monkeypatch):
 
     assert str(args.model) == str(tmp_path / "out" / "quantized")
     assert os.environ["MODEL_PATH"] == str(tmp_path / "out" / "quantized")
+
+
+def test_prelude_noop_when_scheme_none(monkeypatch):
+    called = {"n": 0}
+
+    async def _should_not_run(**kwargs):  # pragma: no cover - asserts non-call
+        called["n"] += 1
+        return "x"
+
+    monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
+    args = _Args(model="/models/src", quantize=None, quantize_scheme="none")
+    asyncio.run(cli._run_quantization_prelude(args))
+    assert called["n"] == 0
+    assert str(args.model) == "/models/src"
+
+
+def test_prelude_uses_scheme_enum_when_no_freetext(tmp_path, monkeypatch):
+    import inference_optimizer.paths as paths
+
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    seen = {}
+
+    async def _fake_async(*, prompt, source_model, workspace):
+        seen["prompt"] = prompt
+        return str(tmp_path / "q")
+
+    monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
+    args = _Args(model="/models/src", quantize=None, quantize_scheme="fp8")
+    asyncio.run(cli._run_quantization_prelude(args))
+    # the fp8 enum resolved to its curated prompt
+    assert "fp8" in seen["prompt"]
+    assert str(args.model) == str(tmp_path / "q")
+
+
+def test_prelude_freetext_takes_priority_over_scheme(tmp_path, monkeypatch):
+    import inference_optimizer.paths as paths
+
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    seen = {}
+
+    async def _fake_async(*, prompt, source_model, workspace):
+        seen["prompt"] = prompt
+        return str(tmp_path / "q")
+
+    monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
+    args = _Args(
+        model="/models/src", quantize="custom mxfp4 prompt", quantize_scheme="fp8"
+    )
+    asyncio.run(cli._run_quantization_prelude(args))
+    assert seen["prompt"] == "custom mxfp4 prompt"  # free text wins
