@@ -4576,7 +4576,9 @@ class SharedState:
                 if isinstance(s, dict) and s.get("kernel_id")
             ]
             if rendered_sk:
-                skipped_suffix = f" skipped=[{'; '.join(rendered_sk)}]"
+                skipped_suffix = (
+                    f" skipped_kernels_top=[{'; '.join(rendered_sk)}]"
+                )
         # T3 / T4 finishing-touches: when TraceLens emitted a routing
         # signal (high GPU idle → prefer params; permanent failure →
         # don't keep waiting on kernel candidates), surface it inline

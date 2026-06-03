@@ -1209,6 +1209,22 @@ async def run_optimization_handler(
             single_payload["kernel_id"] = _reconcile_kernel_id(
                 single_payload.get("kernel_id"), candidates,
             )
+        else:
+            # No routable hot candidate (the common TraceLens-failure case
+            # where every candidate is non-routable and lives only in
+            # ``skipped_kernels``). The downstream reusable-native guard
+            # rejects this kernel anyway, but it keys the rejection off the
+            # payload id -- so canonicalize an aliased id (``kn001`` ->
+            # ``k001``) against the full candidate set first, so the
+            # rejection lands on the real ``k00x`` instead of accumulating
+            # hallucinated aliases in ``rejected_kernel_ids``. A pure
+            # hallucination that resolves to nothing is left untouched.
+            canon = _resolve_candidate_id(
+                single_payload.get("kernel_id"),
+                _all_kernel_candidates(payload),
+            )
+            if canon:
+                single_payload["kernel_id"] = canon
         single_payload["_single_kernel"] = True
         return await _run_optimization_single(single_payload, session_dir=session_dir)
     return await _run_optimization_batch(
@@ -1324,27 +1340,87 @@ def _reconcile_kernel_id(
     """Resolve the LLM-supplied kernel_id to a real candidate id.
 
     Resolution order: exact ``kernel_id``/``name`` match, then normalized
-    ``kernel_id`` match, otherwise fall back to the first candidate. The
-    fallback is safe here because this path only runs when there is a single
-    eligible candidate, so "the kernel the LLM meant" is unambiguous.
+    ``kernel_id`` match. Only a missing id falls back to the first candidate;
+    a non-empty id that cannot be reconciled is left untouched so the
+    downstream guard/CLI can skip it rather than guessing a target.
     """
     req = str(requested or "")
     if req:
         for cand in candidates:
-            if str(cand.get("kernel_id") or "") == req or str(cand.get("name") or "") == req:
-                return req
+            cid = str(cand.get("kernel_id") or "")
+            if cid == req or str(cand.get("name") or "") == req:
+                return cid or req
         target = _normalize_kernel_id(req)
         for cand in candidates:
             cid = str(cand.get("kernel_id") or "")
             if _normalize_kernel_id(cid) == target:
                 return cid
-    fallback = str(candidates[0].get("kernel_id") or "")
-    if req and req != fallback:
         log.warning(
-            "kernel_id %r did not match any candidate %s; falling back to %r",
-            req, [str(c.get("kernel_id") or "") for c in candidates], fallback,
+            "kernel_id %r did not match any candidate %s; leaving unchanged",
+            req, [str(c.get("kernel_id") or "") for c in candidates],
         )
+        return req
+    fallback = str(candidates[0].get("kernel_id") or "")
     return fallback
+
+
+def _resolve_candidate_id(
+    requested: Any, candidates: list[dict[str, Any]],
+) -> str:
+    """Return the canonical ``k00x`` id for ``requested`` or ``""``.
+
+    Mirrors ``kernel_optimization.find_candidate`` resolution (exact
+    ``kernel_id``, then a unique routable ``name``, then a normalized
+    ``kn``/``rn`` prefix) but, unlike :func:`_reconcile_kernel_id`, has no
+    first-candidate fallback: a pure hallucination that matches nothing
+    returns ``""`` so the caller leaves the id untouched. Used to
+    canonicalize aliased ids against the full ``hot ∪ skipped`` set when
+    there is no routable hot candidate to reconcile against.
+    """
+    req = str(requested or "")
+    if not req:
+        return ""
+    for cand in candidates:
+        if str(cand.get("kernel_id") or "") == req:
+            return req
+    name_matches = [
+        cand
+        for cand in candidates
+        if str(cand.get("name") or "") == req
+        and cand.get("reusable_native_kernel") is not False
+        and cand.get("source_file")
+    ]
+    if len(name_matches) == 1:
+        return str(name_matches[0].get("kernel_id") or "")
+    target = _normalize_kernel_id(req)
+    for cand in candidates:
+        if _normalize_kernel_id(str(cand.get("kernel_id") or "")) == target:
+            return str(cand.get("kernel_id") or "")
+    return ""
+
+
+def _all_kernel_candidates(payload: dict) -> list[dict[str, Any]]:
+    """Load every candidate (``hot_kernels`` ∪ ``skipped_kernels``).
+
+    The batch dispatcher reads only ``hot_kernels``; this union mirrors the
+    kernel-agent CLI's ``load_candidates`` so id canonicalization can still
+    resolve against the skipped rows when ``hot_kernels`` is empty.
+    """
+    candidates_path = payload.get("candidates_path")
+    if not candidates_path:
+        return []
+    try:
+        data = json.loads(Path(candidates_path).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for key in ("hot_kernels", "kernel_candidates", "skipped_kernels"):
+        value = data.get(key)
+        if isinstance(value, list):
+            out.extend(item for item in value if isinstance(item, dict))
+    return out
 
 
 def _batch_kernel_candidates(
