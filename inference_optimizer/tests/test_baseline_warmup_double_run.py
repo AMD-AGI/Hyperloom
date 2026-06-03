@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -284,6 +285,61 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path):
     assert result["status"] == "failed"
     assert state["calls"] == 1
     assert "baseline_warmup_round_failed" in result.get("nonfatal_warnings", [])
+
+
+def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
+    """The overtime-kill anchor (``subprocess_runtime_sec`` ->
+    ``baseline_runtime_sec``) must reflect round 1's FULL server-boot +
+    client wall-clock, NOT round 2's client-only reuse time.
+
+    Otherwise the ExploreExecutor's soft-kill deadline
+    (``baseline_runtime_sec * kill_ratio``) is anchored to the tiny
+    client-only round-2 time and would kill normal full-run variants as
+    KILLED_OVERTIME. Round 1 (full run) sleeps longer than round 2
+    (reuse) here so the assertion is deterministic.
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    state = {"calls": 0}
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        # Round 1 (full boot + client) is slow; round 2 (client-only
+        # reuse) is fast. The executor measures wall-clock around this
+        # call, so distinct sleeps make the anchor check deterministic.
+        if state["calls"] == 0:
+            time.sleep(0.6)
+            tput = _COLD_TPUT
+        else:
+            tput = _HOT_TPUT
+        state["calls"] += 1
+        _fake_workspace(slot, tput=tput)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2
+    # Anchor reflects the slow round-1 full run...
+    assert result["subprocess_runtime_sec"] >= 0.5
+    # ...and round 2's client-only time is kept separately and is smaller.
+    assert "measure_round_runtime_sec" in result
+    assert result["measure_round_runtime_sec"] < result["subprocess_runtime_sec"]
 
 
 def test_teardown_lifecycle_server_removes_state_files(tmp_path):
