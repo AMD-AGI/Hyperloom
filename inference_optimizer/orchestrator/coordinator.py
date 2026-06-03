@@ -72,6 +72,10 @@ from .policy import (
     RESEARCH_LANE_NAME,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from .gpu_pool import (
+    SpecialistGpuPool,
+    resolve_gpu_specialist_devices,
+)
 from .resource_lock import (
     KNOWN_LANES,
     ResourceLockManager,
@@ -774,6 +778,12 @@ class Coordinator:
         # Persistent session state (state.json) — load existing for resume;
         # save() is called whenever the Coordinator mutates a persistent field.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        self.gpu_specialist_pool = SpecialistGpuPool(
+            self.db,
+            gpu_ids=resolve_gpu_specialist_devices(
+                int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0)
+            ),
+        )
         # sync research_lane capacity from SharedState into
         # the lane_capacity table. CLI/manifest
         # flow already pinned the value onto SharedState at session
@@ -1357,6 +1367,8 @@ class Coordinator:
             explore_enabled=self._explore_enabled(),
             max_hours=max_hours_arg,
         )
+        if str(state.phase or "").upper() == "EXPLORE":
+            await self._maybe_enqueue_explore_research_scout()
         if next_phase is None:
             # IR-7 — on plateau but no steward verdict yet,
             # compute_next_phase returns None and we enqueue the
@@ -1711,6 +1723,12 @@ class Coordinator:
                 )
                 if cid:
                     ids.add(cid)
+        # Fold in PR ids the research scout already mined so the two
+        # mechanisms never re-process the same PR.
+        for pid in getattr(state, "research_scout_seen_pr_ids", None) or []:
+            pid = str(pid or "").strip()
+            if pid:
+                ids.add(pid)
         return ids
 
     def _framework_pr_tried_refs(self) -> list[str]:
@@ -2562,6 +2580,33 @@ class Coordinator:
             if lane in KNOWN_LANES
         ]
         return lanes, int(getattr(meta, "lease_ttl_sec", 0) or 0)
+
+    def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
+        """Summarise warm-start ``what_worked`` items the scout can skip.
+
+        Returns a list of ``{name, source}`` for proven optimizations from
+        the prior session's recipe so the research scout focuses on net-new
+        priors instead of re-mining already-validated ones. Empty when no
+        warm recipe / no ``what_worked`` rows. Fail-soft.
+        """
+        state = self.shared_state
+        warm = getattr(state, "warm_start_recipe", None) or {}
+        if not isinstance(warm, dict) or not warm:
+            return []
+        recipe = warm.get("recipe") or {}
+        recipe_attrs = (recipe.get("attrs") or recipe) if isinstance(recipe, dict) else {}
+        what_worked = recipe_attrs.get("what_worked") or []
+        if not isinstance(what_worked, list):
+            return []
+        out: list[dict[str, str]] = []
+        for row in what_worked:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            out.append({"name": name, "source": str(row.get("source") or "").strip()})
+        return out
 
     def _inject_warm_recipe_history_into_ledger(self) -> int:
         """GAP 1 supporting helper — pre-fill ``explore_search.rejected``
@@ -3996,6 +4041,212 @@ class Coordinator:
             )
         return task
 
+    async def _enqueue_internal_research_scout_task(
+        self, *, reason: str, round_id: int,
+    ) -> "Task | None":
+        """Enqueue a Coordinator-owned research-scout specialist task.
+
+        Read-only collector dispatched without an LLM propose step (same
+        internal-dispatch shape as the steward). Idempotency is keyed by
+        the qualifying round so repeated ticks within one round collapse
+        to a single scout. Returns ``None`` when a task already exists
+        for this round or enqueue fails (fail-soft).
+        """
+        if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
+            return None
+        idempotency_key = f"internal-research-scout-round{int(round_id)}"
+        try:
+            seen = sorted(self._framework_pr_known_candidate_ids())
+        except Exception:  # noqa: BLE001 — defensive
+            seen = list(
+                getattr(self.shared_state, "research_scout_seen_pr_ids", []) or []
+            )
+        params: dict[str, Any] = {
+            "domain": "research_scout_specialist",
+            "gap_canonical_id": f"gap.research_scout.round{int(round_id)}",
+            "gap_symptom": (
+                "Collect proven priors (reference launch scripts, model "
+                "config.json architecture features, cross-framework / "
+                "NVIDIA research) into prioritised research hints with "
+                "sources; do not benchmark or patch."
+            ),
+            "gap_layer": "research",
+            "max_turns": 10,
+            "source": "coordinator_internal",
+            "reason": str(reason),
+            "seen_pr_ids": seen,
+            "readonly": True,
+        }
+        proven = self._warm_recipe_proven_items()
+        if proven:
+            params["already_proven"] = proven
+        await self._warm_specialist_params(params)
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=["research_lane"],
+                allowed_tools=[
+                    "Read", "Grep", "Glob", "Write",
+                    "WebSearch", "WebFetch",
+                ],
+                side_effects=["writes_results"],
+                lease_ttl_sec=1800,
+            )
+        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+            log.exception(
+                "research-scout: enqueue failed (round=%d)", int(round_id),
+            )
+            return None
+        if not was_existing:
+            self.shared_state.bump_research_scout_runs()
+            self.shared_state.research_scout_last_round = int(round_id)
+            self.shared_state.save(self.session_dir)
+            log.info(
+                "research-scout dispatched: task_id=%s round=%d reason=%s "
+                "runs=%d",
+                task.task_id, int(round_id), reason,
+                self.shared_state.research_scout_runs,
+            )
+        return task
+
+    async def _maybe_enqueue_prelude_research_scout(self) -> None:
+        """Force-dispatch the PRELUDE research scout (not LLM-proposable).
+
+        Always writes the ``research_hints.md`` skeleton first so the
+        artifact exists even if the scout produces nothing or is disabled.
+        """
+        try:
+            from . import research_hints as _research_hints
+            _research_hints.write_hints_skeleton(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: hints skeleton write failed")
+        if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
+            return
+        try:
+            await self._enqueue_internal_research_scout_task(
+                reason="prelude_initial", round_id=0,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: PRELUDE dispatch failed")
+
+    async def _maybe_enqueue_explore_research_scout(self) -> None:
+        """Re-dispatch the scout every K EXPLORE rounds (append-only)."""
+        state = self.shared_state
+        if not bool(getattr(state, "research_scout_enabled", True)):
+            return
+        interval = max(1, int(getattr(state, "research_scout_interval", 3) or 3))
+        round_id = int((state.explore_search or {}).get("cursor") or 0)
+        if round_id <= 0 or (round_id % interval) != 0:
+            return
+        if int(getattr(state, "research_scout_last_round", -1)) == round_id:
+            return
+        try:
+            await self._enqueue_internal_research_scout_task(
+                reason="explore_periodic", round_id=round_id,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: EXPLORE re-dispatch failed")
+
+    def _aggregate_research_evidence(
+        self, done_payload: dict[str, Any],
+    ) -> None:
+        """De-dup a specialist's reported research evidence into the
+        exploration-depth tracker. No-op when no ``research`` block."""
+        block = done_payload.get("research")
+        if not isinstance(block, dict):
+            return
+
+        def _ids(key: str) -> list[Any]:
+            vals = block.get(key)
+            return list(vals) if isinstance(vals, list) else []
+
+        added = self.shared_state.register_research_evidence(
+            prs_fetched=_ids("prs_fetched"),
+            pr_diffs_read=_ids("pr_diffs_read"),
+            nvidia_refs_compared=_ids("nvidia_refs") or _ids(
+                "nvidia_refs_compared"
+            ),
+        )
+        if any(added.values()):
+            log.info("depth: research evidence added %s", added)
+
+    def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
+        """Persist scout output: hints, competitor target, gap seeds, dedup.
+
+        All steps are fail-soft — a malformed research block degrades to
+        a no-op rather than aborting the specialist-done handler.
+        """
+        from . import research_hints as _research_hints
+
+        block = done_payload.get("research")
+        if not isinstance(block, dict):
+            block = {}
+        hints = block.get("hints") or []
+        try:
+            added, dropped = _research_hints.append_hints(
+                self.session_dir, hints,
+            )
+            if dropped:
+                log.info(
+                    "research-scout: dropped %d sourceless hint(s)", dropped,
+                )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: append_hints failed")
+            added = 0
+        try:
+            _research_hints.write_competitor_target(
+                self.session_dir, block.get("competitor_target"),
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: competitor_target write failed")
+        # Share inspected PR ids with the FRAMEWORK_PR dedup set.
+        pr_ids: list[Any] = []
+        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
+            vals = block.get(key)
+            if isinstance(vals, list):
+                pr_ids.extend(vals)
+        try:
+            self.shared_state.register_seen_pr_ids(pr_ids)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: register_seen_pr_ids failed")
+        # Seed high-priority hints as gaps[] so EXPLORE tries them early.
+        try:
+            self._seed_gaps_from_research_hints()
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("research-scout: gap seeding failed")
+        log.info(
+            "research-scout harvested: hints_added=%d seen_pr_ids=%d",
+            added, len(self.shared_state.research_scout_seen_pr_ids or []),
+        )
+
+    def _seed_gaps_from_research_hints(self) -> None:
+        """Inject research hints as advisory gaps[] seeds (idempotent)."""
+        from . import research_hints as _research_hints
+
+        hints = _research_hints.load_hints(self.session_dir)
+        for idx, hint in enumerate(hints):
+            what = str(hint.get("what") or "").strip()
+            if not what:
+                continue
+            tags = hint.get("domain_tags") or []
+            cid = f"gap.research_hint.{idx}"
+            try:
+                self.shared_state.upsert_gap({
+                    "canonical_id": cid,
+                    "symptom": what,
+                    "layer": "research_hint",
+                    "severity": "medium",
+                    "domain_hint": str(tags[0]) if tags else "",
+                    "source": "research_scout",
+                    "provenance": str(hint.get("source") or ""),
+                })
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "research-scout: upsert_gap failed for %s", cid,
+                )
+
     async def _maybe_enqueue_steward(self) -> None:
         """IR-7 — enqueue a steward task when phase_state says we need one.
 
@@ -4391,7 +4642,13 @@ class Coordinator:
         finally:
             if self.shared_state.closing_phase:
                 self.shared_state.closing_phase = False
-            self.shared_state.set_stop_reason(stop_reason or "unknown")
+            # Resuming an already-terminal session re-enters the loop past
+            # its deadline and can break out before the local stop_reason is
+            # reassigned; preserve any prior persisted reason instead of
+            # downgrading it to "unknown".
+            self.shared_state.set_stop_reason(
+                stop_reason or self.shared_state.stop_reason or "unknown"
+            )
             self.shared_state.save(self.session_dir)
             log.info(
                 "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
@@ -4533,7 +4790,7 @@ class Coordinator:
                 {"kind": "reactor_exception", "agent": agent_name,
                  "error": f"{type(exc).__name__}: {str(exc)[:500]}"},
             )
-            self.shared_state.crash_count += 1
+            self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
             return
         # Reset the streak — a successful turn proves the backend is alive
@@ -4749,6 +5006,14 @@ class Coordinator:
             if required_step:
                 sections.append("=== Execution checklist (Coordinator-enforced) ===")
                 sections.append(required_step)
+            try:
+                mix_hint = self.shared_state.to_intervention_mix_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: intervention_mix_summary failed")
+                mix_hint = ""
+            if mix_hint:
+                sections.append("=== Intervention mix (advisory) ===")
+                sections.append(mix_hint)
 
         # Cortex T0 warm-start snapshot + structured
         # gaps[] ledger injected into the Orchestration
@@ -4773,6 +5038,25 @@ class Coordinator:
             if gaps_block:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
+            try:
+                from . import research_hints as _research_hints
+                hints_block = _research_hints.summarise_for_prompt(
+                    self.session_dir,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: research_hints summary failed")
+                hints_block = ""
+            if hints_block:
+                sections.append("=== Research hints (advisory) ===")
+                sections.append(hints_block)
+            try:
+                gap_block = self._target_gap_advisory_block()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: target gap advisory failed")
+                gap_block = ""
+            if gap_block:
+                sections.append("=== External target gap (advisory) ===")
+                sections.append(gap_block)
             # Advisory multi-model proposal scores (ProposalScorer).
             # One reference among many — parallel to gaps / KB /
             # analysis.md, NOT a ranking directive (Inv-9.1). Section
@@ -4785,6 +5069,18 @@ class Coordinator:
             if scores_block:
                 sections.append("=== Specialist proposal scores (advisory) ===")
                 sections.append(scores_block)
+            # Priors-match: which recently proposed variants align with
+            # proven research hints / the dominant external gap. Advisory
+            # ordering signal only (NOT a score, NOT a gate); omitted
+            # when nothing matches.
+            try:
+                priors_block = self._priors_match_advisory_block()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: priors-match advisory failed")
+                priors_block = ""
+            if priors_block:
+                sections.append("=== Priors-match (advisory ordering) ===")
+                sections.append(priors_block)
 
             # PR-A8 / D3 (Arbor-into-Hyperloom): surface the intervention-mix
             # ledger so Orchestration escalates to a code-patch specialist
@@ -7717,23 +8013,37 @@ class Coordinator:
         state = self.shared_state
         plane = self.knowledge_plane
 
+        from .specialist_domains import normalize_dispatch_tags
+
         domain = str(params.get("domain") or "").strip()
+        # Knowledge-domain tags drive multi-anchor prompt assembly. A
+        # single ``domain`` is honoured as the legacy single-tag alias.
+        tags = normalize_dispatch_tags(params)
 
         # PR feed (Gap-02 ↔ Gap-01 contract): if the plane is wired and
-        # PR Monitor is enabled, fetch the per-domain warm cache. Any
-        # exception falls back to an empty list + non-fatal warning.
+        # PR Monitor is enabled, fetch the warm cache for each dispatch
+        # domain and merge. Any exception falls back to an empty list +
+        # non-fatal warning.
         if plane is not None and "pr_feed" not in params:
-            try:
-                prs, _warnings = plane.pr_feed_warm(domain=domain)
-                params["pr_feed"] = [
-                    self._pr_summary_to_dict(p) for p in prs
-                ]
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "specialist warmup: pr_feed_warm(domain=%r) failed: %r",
-                    domain, exc,
-                )
-                params.setdefault("pr_feed", [])
+            pr_domains = [domain] if domain else list(tags)
+            merged_prs: list[dict[str, Any]] = []
+            seen_pr_keys: set[str] = set()
+            for pr_dom in pr_domains:
+                try:
+                    prs, _warnings = plane.pr_feed_warm(domain=pr_dom)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "specialist warmup: pr_feed_warm(domain=%r) failed: %r",
+                        pr_dom, exc,
+                    )
+                    continue
+                for p in prs:
+                    pd = self._pr_summary_to_dict(p)
+                    key = str(pd.get("url") or pd.get("title") or id(pd))
+                    if key not in seen_pr_keys:
+                        seen_pr_keys.add(key)
+                        merged_prs.append(pd)
+            params["pr_feed"] = merged_prs
         else:
             params.setdefault("pr_feed", [])
 
@@ -7763,15 +8073,16 @@ class Coordinator:
                     _hw_raw.rsplit("/", 1)[-1].lower()
                     .replace(" ", "_").replace("/", "_")
                 ) if _hw_raw else ""
-                subgraph = plane.select_kb_for_domain(
-                    domain, hw_slug=hw_slug or None,
+                kb_tags = list(tags) or ([domain] if domain else [])
+                subgraph = plane.select_kb_for_domains(
+                    kb_tags, hw_slug=hw_slug or None,
                 )
                 params["kb_subgraph"] = subgraph or {}
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    "specialist warmup: select_kb_for_domain(domain=%r) "
+                    "specialist warmup: select_kb_for_domains(tags=%r) "
                     "failed: %r",
-                    domain, exc,
+                    tags, exc,
                 )
                 params.setdefault("kb_subgraph", {})
         else:
@@ -7870,6 +8181,27 @@ class Coordinator:
             )
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
+
+        if "target_gap_notes" not in params:
+            try:
+                _gap_notes = self._target_gap_advisory_block()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: specialist target gap advisory failed")
+                _gap_notes = ""
+            if _gap_notes:
+                params["target_gap_notes"] = _gap_notes
+
+        if "research_hints" not in params:
+            try:
+                from . import research_hints as _research_hints
+                _hints_block = _research_hints.summarise_for_prompt(
+                    self.session_dir,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: specialist research hints failed")
+                _hints_block = ""
+            if _hints_block:
+                params["research_hints"] = _hints_block
 
         # fill gap-specific anchors from the
         # gaps[] ledger. Orchestration carries a ``gap_canonical_id``
@@ -8439,6 +8771,29 @@ class Coordinator:
                     task.task_id,
                 )
 
+        # Aggregate any research evidence (PR / diff / NVIDIA refs)
+        # reported by this specialist into the exploration-depth tracker.
+        # Applies to every domain that self-reports a ``research`` block
+        # (pr_intel + research_scout), de-duped across the session.
+        try:
+            self._aggregate_research_evidence(done_payload)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "depth: research-evidence aggregation failed for task=%s",
+                task.task_id,
+            )
+
+        # Harvest research-scout output: persist hints + competitor
+        # target, seed advisory gaps, and dedup PR ids against
+        # FRAMEWORK_PR. Fail-soft; never blocks the round.
+        if domain == "research_scout_specialist":
+            try:
+                self._harvest_research_scout(done_payload)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "research-scout harvest failed for task=%s", task.task_id,
+                )
+
         # refresh the gaps ledger after a
         # specialist round closes. The dedupe-by-canonical-id keeps the
         # list bounded; the per-gap attempt log captures the
@@ -8465,7 +8820,6 @@ class Coordinator:
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
             )
-
         # B3 (auto-apply unlock): if this specialist authored source
         # patches, push them to the Critic now so the integrate_patch
         # gate can pass and the patch actually reaches the serving GPU.
@@ -8478,6 +8832,215 @@ class Coordinator:
                 "B3: specialist patch autosubmit failed for task=%s",
                 task.task_id,
             )
+
+    def _target_gap_advisory_block(self) -> str:
+        """Build the advisory "External target gap" prompt block.
+
+        Compares our current-best per-GPU throughput / TPOT against the
+        LLM-authored competitor target and renders a direction hint when
+        the TPOT ratio dominates. Returns an empty string when the
+        feature is disabled, no sourced competitor target exists, or our
+        side has no comparable numbers. Advisory only — never gates.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "target_advisory_enabled", True)):
+            return ""
+        from . import research_hints as _research_hints
+
+        target = _research_hints.load_competitor_target(self.session_dir)
+        if not target:
+            return ""
+        best = getattr(state, "current_best", None)
+        if not isinstance(best, dict):
+            return ""
+        tput = best.get("tput")
+        tpot = best.get("tpot_mean_ms")
+        tp = int(getattr(state, "tp", 0) or 0)
+        our_tput_per_gpu = (
+            float(tput) / tp
+            if isinstance(tput, (int, float)) and tput > 0 and tp > 0
+            else None
+        )
+        our_tpot_ms = float(tpot) if isinstance(tpot, (int, float)) and tpot > 0 else None
+        conc = int(getattr(state, "conc", 0) or 0) or None
+        gap = _research_hints.gap_analysis(
+            target,
+            our_tput_per_gpu=our_tput_per_gpu,
+            our_tpot_ms=our_tpot_ms,
+            conc=conc,
+        )
+        return _research_hints.full_gap_summary(gap)
+
+    def _current_primary_gap(self) -> str | None:
+        """Resolve the dominant external gap direction ('latency' /
+        'throughput') from the LLM-authored competitor target, or
+        ``None`` when advisory is off / no comparable target exists.
+
+        Fail-soft: any read / parse problem yields ``None``.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "target_advisory_enabled", True)):
+            return None
+        try:
+            from . import research_hints as _research_hints
+
+            target = _research_hints.load_competitor_target(self.session_dir)
+            if not target:
+                return None
+            best = getattr(state, "current_best", None)
+            if not isinstance(best, dict):
+                return None
+            tput = best.get("tput")
+            tpot = best.get("tpot_mean_ms")
+            tp = int(getattr(state, "tp", 0) or 0)
+            our_tput_per_gpu = (
+                float(tput) / tp
+                if isinstance(tput, (int, float)) and tput > 0 and tp > 0
+                else None
+            )
+            our_tpot_ms = (
+                float(tpot)
+                if isinstance(tpot, (int, float)) and tpot > 0 else None
+            )
+            conc = int(getattr(state, "conc", 0) or 0) or None
+            gap = _research_hints.gap_analysis(
+                target,
+                our_tput_per_gpu=our_tput_per_gpu,
+                our_tpot_ms=our_tpot_ms,
+                conc=conc,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            return None
+        if not isinstance(gap, dict):
+            return None
+        return str(gap.get("primary_gap") or "").strip() or None
+
+    def _recent_proposed_variants(
+        self, *, max_rounds: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Collect proposal_set rows from the most recent specialist rounds.
+
+        Mirrors the window :meth:`SharedState.to_proposal_scores_summary`
+        renders so the priors-match annotation lines up with the scores
+        the prompt already shows. Deduped by variant name; fail-soft.
+        """
+        rounds = [
+            r for r in (getattr(self.shared_state, "specialist_rounds", []) or [])
+            if isinstance(r, dict) and isinstance(r.get("proposal_set"), list)
+        ]
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for r in rounds[-max_rounds:]:
+            for variant in r.get("proposal_set") or []:
+                if not isinstance(variant, dict):
+                    continue
+                name = str(variant.get("name") or "").strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    out.append(variant)
+        return out
+
+    def _priors_match_advisory_block(self) -> str:
+        """Flag recently proposed variants that align with proven priors
+        or the dominant external gap so Orchestration tries them earlier.
+
+        Advisory only — affects prompt ordering, never Objective /
+        scoring / gates. Empty string when nothing matches. Fail-soft.
+        """
+        try:
+            from . import research_hints as _research_hints
+
+            variants = self._recent_proposed_variants()
+            if not variants:
+                return ""
+            hints = _research_hints.load_hints(self.session_dir)
+            primary_gap = self._current_primary_gap()
+            return _research_hints.priors_match_summary(
+                variants, hints, primary_gap=primary_gap,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            return ""
+
+    def _apply_depth_gate_to_verdict(
+        self, *, raw_rec: str, next_gap: str, task: "Task",
+    ) -> tuple[str, str]:
+        """Rewrite a stop / advance verdict to ``continue_explore`` when
+        exploration depth is insufficient.
+
+        Returns the (possibly rewritten) ``(recommendation, next_gap)``.
+        IR-6 budget exhaustion bypasses the gate entirely; a disabled
+        gate or a satisfied depth check leaves the verdict untouched.
+        """
+        state = self.shared_state
+        try:
+            if not state.depth_gate_enabled():
+                return raw_rec, next_gap
+        except Exception:  # noqa: BLE001 — defensive
+            return raw_rec, next_gap
+
+        # IR-6 is the only thing the depth gate must never override.
+        try:
+            force_exit, _ = _phase_state.should_force_exit_explore(
+                state, budget_pct=self._phase_budget_pct,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            force_exit = False
+        if force_exit:
+            log.info(
+                "depth-gate: IR-6 budget force-exit active; honouring "
+                "steward '%s' (task=%s)", raw_rec, task.task_id,
+            )
+            return raw_rec, next_gap
+
+        try:
+            satisfied, blockers, next_action = _phase_state.depth_gate(
+                state, **self._depth_gate_thresholds(),
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("depth-gate: evaluation failed; honouring steward")
+            return raw_rec, next_gap
+        if satisfied:
+            return raw_rec, next_gap
+
+        # Rewrite to continue and seed a concrete deepening gap.
+        round_id = int((state.explore_search or {}).get("cursor") or 0)
+        gap_cid = f"gap.depth.round{round_id}"
+        symptom = next_action or (
+            "exploration too shallow: " + ", ".join(blockers)
+        )
+        try:
+            state.upsert_gap({
+                "canonical_id": gap_cid,
+                "symptom": symptom,
+                "layer": "exploration_depth",
+                "severity": "high",
+                "source": "depth_gate",
+            })
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("depth-gate: upsert_gap failed")
+        log.info(
+            "depth-gate: rewrote steward '%s' -> 'continue_explore' "
+            "(blockers=%s, next_action=%r, task=%s)",
+            raw_rec, blockers, next_action, task.task_id,
+        )
+        return "continue_explore", gap_cid
+
+    def _depth_gate_thresholds(self) -> dict[str, int]:
+        """Resolve depth-gate thresholds from SharedState overrides,
+        falling back to the phase_state defaults."""
+        overrides = getattr(self.shared_state, "depth_gate_thresholds", None)
+        out: dict[str, int] = {}
+        if isinstance(overrides, dict):
+            for key in (
+                "scout_runs_min", "prs_fetched_min", "pr_diffs_read_min",
+                "nvidia_refs_min", "code_patches_min", "reverts_to_evaluate",
+            ):
+                if overrides.get(key) is not None:
+                    try:
+                        out[key] = int(overrides[key])
+                    except (TypeError, ValueError):
+                        pass
+        return out
 
     async def _maybe_autosubmit_specialist_patches(
         self, *, task: "Task", done_payload: dict[str, Any],
@@ -8614,11 +9177,14 @@ class Coordinator:
         * ``continue_explore`` → append ``next_gap_canonical_id`` to
           ``state.gaps[]``, reset ``params_no_promote_streak`` and
           per-domain empty streak counters, set
-          ``steward_continuation_used=True``.
+          ``steward_continuation_used=True`` (audit marker only).
 
-        Antiloop: only one continuation per session. A second
-        ``continue_explore`` is coerced to ``advance_to_kernel`` so
-        the EXPLORE→KERNEL transition becomes mandatory.
+        A ``stop_session`` / ``advance_to_kernel`` verdict is run through
+        the exploration-depth gate: if the session has not explored
+        deeply enough it is rewritten to ``continue_explore`` with a
+        concrete deepening instruction. This can repeat; the only
+        backstop is the IR-6 budget gate (checked first), which lets the
+        original stop / advance through once budget is exhausted.
 
         Infrastructure failures (stale heartbeat, subprocess timeout, empty
         synthesis) schedule up to :data:`_STEWARD_MAX_INFRA_RETRIES` fresh
@@ -8687,20 +9253,6 @@ class Coordinator:
                     raw_rec, task.task_id,
                 )
                 raw_rec = "stop_session"
-        # Antiloop: only one continuation per session.
-        if (
-            raw_rec == "continue_explore"
-            and bool(getattr(
-                self.shared_state, "steward_continuation_used", False,
-            ))
-        ):
-            log.info(
-                "steward: continue_explore requested but continuation "
-                "already used this session; coercing to "
-                "'advance_to_kernel' (task=%s)",
-                task.task_id,
-            )
-            raw_rec = "advance_to_kernel"
         next_gap = str(
             done_payload.get("next_gap_canonical_id") or ""
         ).strip()
@@ -8711,6 +9263,19 @@ class Coordinator:
                 task.task_id,
             )
             raw_rec = "advance_to_kernel"
+
+        # Exploration-depth gate (deterministic stop guard). When the
+        # steward wants to stop / advance but the session has not
+        # explored deeply enough, rewrite the verdict to
+        # ``continue_explore`` and inject a concrete deepening
+        # instruction. This may fire any number of times — the only
+        # backstop is the IR-6 budget gate, which is checked first:
+        # once the budget is (about to be) exhausted the depth gate is
+        # bypassed and the original stop / advance stands.
+        if raw_rec in ("stop_session", "advance_to_kernel"):
+            raw_rec, next_gap = self._apply_depth_gate_to_verdict(
+                raw_rec=raw_rec, next_gap=next_gap, task=task,
+            )
 
         # Record the assessment unconditionally so the audit trail
         # captures it even when the recommendation was coerced.
@@ -8822,12 +9387,21 @@ class Coordinator:
             or task.task_id
         )
         truncated_from = done_payload.get("proposals_truncated_from")
+        from .specialist_domains import normalize_dispatch_tags
+
+        # Knowledge-domain tags for breakdown attribution. The reported
+        # ``tags`` (if any) take precedence over the originating dispatch
+        # params; both fall back to the single-domain alias.
+        tags = normalize_dispatch_tags(done_payload)
+        if not tags:
+            tags = normalize_dispatch_tags(task.params or {})
         entry: dict[str, Any] = {
             "round_id":          round_id,
             "task_id":           task.task_id,
             "source":            source or "coordinator",
             "completed_at":      datetime.now(timezone.utc).isoformat(),
             "domain":            str(done_payload.get("domain") or ""),
+            "tags":              list(tags),
             "gap_canonical_id":  str(done_payload.get("gap_canonical_id") or ""),
             "empty":             bool(done_payload.get("empty"))
                                   or len(proposals) == 0,
@@ -8841,6 +9415,12 @@ class Coordinator:
                 done_payload.get("residual_questions") or []
             ),
         }
+        gpu_ids = done_payload.get("allocated_gpu_ids") or []
+        if isinstance(gpu_ids, list) and gpu_ids:
+            entry["allocated_gpu_ids"] = [
+                int(g) for g in gpu_ids
+                if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
+            ]
         if isinstance(truncated_from, int) and truncated_from > len(proposals):
             entry["proposals_truncated_from"] = truncated_from
         return entry
@@ -9052,6 +9632,14 @@ class Coordinator:
                         self.shared_state.record_kernel_integrate_result(result)
                     decision = str(result.get("decision", "")).upper()
                     if decision == "KEEP":
+                        if isinstance(result, dict) and not result.get(
+                            "gap_canonical_id"
+                        ):
+                            payload_gap = str(
+                                merged_payload.get("gap_canonical_id") or ""
+                            ).strip()
+                            if payload_gap:
+                                result["gap_canonical_id"] = payload_gap
                         await self._record_integrate_keep(result)
                     self.shared_state.save(self.session_dir)
                 # Bug B fix: the request was just answered programmatically,
@@ -9385,6 +9973,9 @@ class Coordinator:
             "workspace": result.get("workspace"),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        integrate_gap_cid = str(result.get("gap_canonical_id") or "").strip()
+        if integrate_gap_cid:
+            entry["gap_canonical_id"] = integrate_gap_cid
         key = (entry["kernel_id"], entry["patch_path"], entry["target_file"])
         existing = {
             (item.get("kernel_id"), item.get("patch_path"), item.get("target_file"))
@@ -9415,6 +10006,7 @@ class Coordinator:
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": result.get("ttft_mean_ms"),
             "e2el_mean_ms": result.get("e2el_mean_ms"),
+            "tpot_mean_ms": result.get("tpot_mean_ms"),
             "workspace": result.get("workspace"),
         }
         if self.shared_state.baseline_tput > 0:
@@ -9475,11 +10067,11 @@ class Coordinator:
         Mapping:
         * ``task.kind == "explore"``       → ``change_type = "config"``
           (every explore KEEP is a config tweak per v0.8 M3).
-        * ``task.kind == "integrate_patch"`` AND the executor reported
-          ``status == "kept"`` → ``change_type = "code_patch"``.
-        * ``integrate_patch`` with any other status (reverted /
-          apply_failed / rejected_by_critic / applied_no_bench) →
-          NOT recorded; only successful KEEPs roll the counter.
+        * ``task.kind == "integrate_patch"`` records a
+          ``code_patch_attempt`` whenever the executor ran, satisfying the
+          depth gate's "try a code patch" condition. ``status == "kept"``
+          records ``code_patch`` instead, which additionally resets the
+          config-only escalation counter.
 
         Best-effort: the caller wraps in try/except so any field
         access failure is non-fatal.
@@ -9521,7 +10113,16 @@ class Coordinator:
             )
             return
         if kind == "integrate_patch":
-            if str(result.get("status") or "") != "kept":
+            status = str(result.get("status") or "").strip().lower()
+            if not status:
+                return
+            if status != "kept":
+                self.shared_state.record_intervention(
+                    change_type="code_patch_attempt",
+                    action="integrate_patch",
+                    task_id=task.task_id,
+                    delta_pct=result.get("delta_pct"),
+                )
                 return
             self.shared_state.record_intervention(
                 change_type="code_patch",
@@ -9668,7 +10269,7 @@ class Coordinator:
             return
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
-        spawned: list[tuple[Task, asyncio.Task[SubAgentResult]]] = []
+        spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         for task in queued:
             lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
@@ -9702,11 +10303,65 @@ class Coordinator:
                     holders[lane] = int(holders.get(lane, 0)) + 1
             else:
                 lease = None
+            gpu_lease = None
+            extra_context: dict[str, Any] = {}
+            if task.kind == "specialist":
+                params = task.params or {}
+                needs_gpu_raw = params.get("needs_gpu", False)
+                needs_gpu = (
+                    needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
+                    if isinstance(needs_gpu_raw, str)
+                    else bool(needs_gpu_raw)
+                )
+                if needs_gpu:
+                    try:
+                        gpu_count = int(params.get("gpu_count", 1) or 1)
+                    except (TypeError, ValueError):
+                        gpu_count = 1
+                    try:
+                        max_turns = int(params.get("max_turns", 8) or 8)
+                    except (TypeError, ValueError):
+                        max_turns = 8
+                    try:
+                        per_turn_s = float(
+                            params.get("specialist_per_turn_max_seconds")
+                            or os.environ.get(
+                                "INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS",
+                                "600",
+                            )
+                            or 600.0
+                        )
+                    except (TypeError, ValueError):
+                        per_turn_s = 600.0
+                    gpu_ttl_sec = max(
+                        int(task.lease_ttl_sec or 0),
+                        int(max(1, max_turns) * max(1.0, per_turn_s)),
+                    )
+                    gpu_lease = await self.gpu_specialist_pool.try_acquire(
+                        count=gpu_count,
+                        holder_id=task.task_id,
+                        task_id=task.task_id,
+                        ttl_sec=gpu_ttl_sec,
+                    )
+                    if gpu_lease is None:
+                        if lease is not None:
+                            await self.locks.release(lease)
+                            for lane in lease.lanes:
+                                holders[lane] = max(
+                                    0, int(holders.get(lane, 0)) - 1,
+                                )
+                        continue
+                    extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
             spawned.append((
                 task,
                 asyncio.create_task(
-                    self.sub.run_task(task, prebound_lease=lease),
+                    self.sub.run_task(
+                        task,
+                        prebound_lease=lease,
+                        extra_context=extra_context,
+                    ),
                 ),
+                gpu_lease,
             ))
         if not spawned:
             return
@@ -9716,9 +10371,17 @@ class Coordinator:
         # (run_task catches inside its body) but defensively absorb
         # anything that leaks here too.
         results = await asyncio.gather(
-            *(t for _, t in spawned), return_exceptions=True,
+            *(t for _, t, _ in spawned), return_exceptions=True,
         )
-        for (task, _), maybe_result in zip(spawned, results):
+        for (task, _, gpu_lease), maybe_result in zip(spawned, results):
+            if gpu_lease is not None:
+                try:
+                    await self.gpu_specialist_pool.release(gpu_lease)
+                except Exception:  # noqa: BLE001 — defensive cleanup
+                    log.exception(
+                        "dispatcher: failed to release GPU specialist lease "
+                        "for task=%s", task.task_id,
+                    )
             if isinstance(maybe_result, BaseException):
                 log.exception(
                     "dispatcher: spawned task %s raised: %r",
@@ -10751,6 +11414,62 @@ class Coordinator:
             })
         return out
 
+    def _collect_attempt_provenance(
+        self,
+    ) -> tuple[dict[str, str], dict[str, str], list[dict[str, Any]]]:
+        """Map proven optimizations back to their research-hint origin.
+
+        Walks the gaps[] attempts ledger and returns:
+
+        * ``kept_sources`` — ``{variant_name: provenance}`` for KEEP
+          attempts whose gap carries an external ``provenance`` (e.g. a
+          research-hint PR/blog URL). Also keyed by ``kernel_id`` when
+          the attempt carries one.
+        * ``kept_by_gap`` — ``{gap_canonical_id: provenance}`` for every
+          gap that both carries a ``provenance`` and has at least one
+          KEEP attempt. This is the primary, naming-independent lookup:
+          a stack entry stamped with its ``gap_canonical_id`` resolves
+          its source even when its ``name`` (explore ``variant_name`` vs.
+          kernel ``kernel_id``) never matches the attempt's key.
+        * ``reverted_rows`` — ``what_failed``-shaped rows for REVERT
+          attempts, carrying the variant name, a reason, the measured
+          gain, and the originating source when known.
+
+        Fail-soft: any malformed gap/attempt row is skipped.
+        """
+        kept_sources: dict[str, str] = {}
+        kept_by_gap: dict[str, str] = {}
+        reverted_rows: list[dict[str, Any]] = []
+        gaps = getattr(self.shared_state, "gaps", []) or []
+        for gap in gaps:
+            if not isinstance(gap, dict):
+                continue
+            provenance = str(gap.get("provenance") or "").strip()
+            canonical = str(gap.get("canonical_id") or "").strip()
+            for attempt in gap.get("attempts") or []:
+                if not isinstance(attempt, dict):
+                    continue
+                variant = str(attempt.get("variant_name") or "").strip()
+                kernel = str(attempt.get("kernel_id") or "").strip()
+                outcome = str(attempt.get("outcome") or "").strip().upper()
+                if outcome == "KEEP" and provenance:
+                    if variant:
+                        kept_sources.setdefault(variant, provenance)
+                    if kernel:
+                        kept_sources.setdefault(kernel, provenance)
+                    if canonical:
+                        kept_by_gap.setdefault(canonical, provenance)
+                elif outcome == "REVERT" and (variant or kernel):
+                    row: dict[str, Any] = {
+                        "name": variant or kernel,
+                        "reason": "reverted",
+                        "gain_pct": attempt.get("gain_pct"),
+                    }
+                    if provenance:
+                        row["source"] = provenance
+                    reverted_rows.append(row)
+        return kept_sources, kept_by_gap, reverted_rows
+
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
         """Materialise the recipe-shaped view of :class:`SharedState`.
 
@@ -10806,6 +11525,10 @@ class Coordinator:
                 ).strip()
                 if stack_args:
                     best_config["extra_sglang_args"] = stack_args
+        sediment_on = bool(getattr(ss, "recipe_sediment_enabled", True))
+        kept_sources, kept_by_gap, reverted_rows = (
+            self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
+        )
         what_worked: list[dict[str, Any]] = []
         for idx, entry in enumerate(opt_stack):
             if not isinstance(entry, dict):
@@ -10813,8 +11536,14 @@ class Coordinator:
             gain_per: float | None = None
             if idx < len(gain_per_stack):
                 gain_per = gain_per_stack[idx]
-            what_worked.append({
-                "name":              str(entry.get("name") or ""),
+            name = str(
+                entry.get("variant_name")
+                or entry.get("name")
+                or entry.get("kernel_id")
+                or ""
+            )
+            row: dict[str, Any] = {
+                "name":              name,
                 "extra_sglang_args": str(
                     entry.get("extra_server_args")
                     or entry.get("extra_sglang_args")
@@ -10822,7 +11551,19 @@ class Coordinator:
                 ),
                 "extra_envs":        dict(entry.get("extra_envs") or {}),
                 "gain_pct":          gain_per,
-            })
+            }
+            # Prefer the gap-id provenance stamped on the entry at KEEP
+            # time (naming-independent across explore / kernel stages);
+            # fall back to matching the entry's name / kernel_id.
+            entry_gap = str(entry.get("gap_canonical_id") or "").strip()
+            src = (
+                (kept_by_gap.get(entry_gap) if entry_gap else None)
+                or kept_sources.get(name)
+                or kept_sources.get(str(entry.get("kernel_id") or ""))
+            )
+            if src:
+                row["source"] = src
+            what_worked.append(row)
         what_failed: list[dict[str, Any]] = []
         for failure in last_failures[-10:]:
             if isinstance(failure, dict):
@@ -10830,6 +11571,8 @@ class Coordinator:
                     "name":  str(failure.get("name") or failure.get("action") or ""),
                     "reason": str(failure.get("reason") or failure.get("error_class") or ""),
                 })
+        for rev in reverted_rows:
+            what_failed.append(rev)
         kernel_optimizations = self._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
         cumulative_total = float(getattr(ss, "cumulative_gain", 0.0) or 0.0)
@@ -11089,11 +11832,16 @@ class Coordinator:
 
     def _lift_to_current_best(
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
+        *, gap_canonical_id: str = "",
     ) -> None:
         """Update SharedState.current_best + recompute cumulative_gain.
 
         Helper for both the 1-shot KEEP threshold path and the
         cross-round consistent-winner path in _promote_to_shared_state.
+
+        ``gap_canonical_id`` (when known) is stamped onto the appended
+        stack entry so recipe sedimentation can resolve the entry's
+        research-hint provenance by gap id rather than by name.
         """
         previous = self.shared_state.current_best or {}
         if not self.shared_state.optimization_stack:
@@ -11134,7 +11882,7 @@ class Coordinator:
             }
             key = (task_kind, str(variant_name or ""))
             if key not in existing:
-                self.shared_state.optimization_stack.append({
+                stack_entry: dict[str, Any] = {
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
@@ -11147,7 +11895,10 @@ class Coordinator:
                         bv.get("workspace") if isinstance(bv, dict) else None
                     ),
                     "ts": datetime.now(timezone.utc).isoformat(),
-                })
+                }
+                if gap_canonical_id:
+                    stack_entry["gap_canonical_id"] = gap_canonical_id
+                self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into ``gain_per_stack_entry`` so indexes
                 # stay aligned across the two parallel lists. See the
                 # SharedState docstring for the V1 StackGainEntry contract.
@@ -11169,6 +11920,7 @@ class Coordinator:
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
+            "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
         if self.shared_state.baseline_tput > 0:
@@ -11252,6 +12004,7 @@ class Coordinator:
                 "tput": float(tput) if isinstance(tput, (int, float)) else None,
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
+                "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "workspace": result.get("workspace"),
             }
             changed = True
@@ -11325,6 +12078,8 @@ class Coordinator:
                 await self._maybe_enqueue_prelude_initial_analysis_after_baseline(
                     baseline_tput=float(tput),
                 )
+                # Step 4 — research scout (parallel, read-only, CPU-only).
+                await self._maybe_enqueue_prelude_research_scout()
         elif task_kind == "replay_warm_recipe":
             # GAP 1 — separate promote path so the replay result does
             # NOT overwrite ``baseline_tput`` / ``current_best`` via
@@ -11417,6 +12172,7 @@ class Coordinator:
                     "tput": float(tput),
                     "ttft_mean_ms": result.get("ttft_mean_ms"),
                     "e2el_mean_ms": result.get("e2el_mean_ms"),
+                    "tpot_mean_ms": result.get("tpot_mean_ms"),
                     "workspace": result.get("workspace"),
                 }
                 if self.shared_state.baseline_tput > 0:
@@ -11648,11 +12404,20 @@ class Coordinator:
                     and isinstance(best_tput, (int, float))
                     and best_tput > 0
                 ):
+                    explore_gap_cid = (
+                        str((task.params or {}).get("gap_canonical_id") or "").strip()
+                        if task is not None else ""
+                    )
                     self._lift_to_current_best(
                         "explore", float(best_tput), best_winner,
+                        gap_canonical_id=explore_gap_cid,
                     )
                     promoted = True
                     changed = True
+            try:
+                self.shared_state.note_explore_outcome(promoted=promoted)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("depth: note_explore_outcome failed")
             if promoted:
                 # Reset the plateau proxy on a successful KEEP so
                 # the M2 transitional fallback in phase_state stays

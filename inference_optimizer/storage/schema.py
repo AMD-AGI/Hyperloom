@@ -15,6 +15,9 @@ Five tables consolidated into a single WAL database
 * ``events``         — A2A message bus source-of-truth, AUTOINCREMENT seq
 * ``cursors``        — per-agent ``last_processed_seq`` for idempotent replay
 * ``tasks``          — DelegatedTask lifecycle state machine
+* ``gpu_leases``     — specialist GPU pool leases. Separate from serving
+                       lanes so short GPU specialist experiments can be
+                       capacity-limited without blocking benchmark/profile.
 
 We deliberately *don't* declare FK constraints between ``tasks`` and
 ``leases`` / ``events`` because lifetimes don't match: a task can complete
@@ -26,12 +29,13 @@ from __future__ import annotations
 
 import sqlite3
 
-# bump from 1 → 2 to mark the leases PK widening +
+# bump from 2 → 3 to add the specialist GPU pool leases table.
+# v2 marked the leases PK widening +
 # lane_capacity table introduction. ``ensure_schema`` migrates v1 DBs
 # in place by recreating ``leases`` with the new PK; the migration is
 # defensive against active sessions because BEGIN IMMEDIATE serialises
 # the rebuild.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 # default lane capacities. ``research_lane`` defaults to 1
@@ -132,6 +136,20 @@ _DDL = [
     "CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_idem ON tasks(idempotency_key)",
     # ------------------------------------------------------------------
+    # gpu_leases — specialist GPU pool (separate from serving lanes)
+    # ------------------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS gpu_leases (
+        gpu_id       INTEGER PRIMARY KEY,
+        holder_id    TEXT    NOT NULL,
+        task_id      TEXT    NOT NULL,
+        acquired_at  TEXT    NOT NULL,
+        expires_at   TEXT    NOT NULL,
+        heartbeat_at TEXT    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_gpu_leases_expires ON gpu_leases(expires_at)",
+    # ------------------------------------------------------------------
     # schema_version — tracks future migrations
     # ------------------------------------------------------------------
     """
@@ -144,7 +162,7 @@ _DDL = [
 
 
 _MANAGED_TABLES = (
-    "leases", "lane_capacity", "events", "cursors",
+    "leases", "lane_capacity", "gpu_leases", "events", "cursors",
     "tasks", "schema_version",
 )
 

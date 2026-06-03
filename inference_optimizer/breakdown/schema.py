@@ -681,7 +681,11 @@ class SpecialistTranscriptRef(TypedDict, total=False):
 
 class SpecialistRound(TypedDict, total=False):
     """One element of ``specialist_runs``."""
-    round_id: int
+    # ``round_id`` is whatever ``record_specialist_round`` stored: a
+    # numeric round counter, an "explore-NNN" label, or a task-id hash
+    # when one specialist task anchors the round. Coerced numeric when
+    # possible (see ``_coerce_round_id``), otherwise left as a string.
+    round_id: int | str
     dispatched_at: str
     completed_at: str
     domains: list[str]

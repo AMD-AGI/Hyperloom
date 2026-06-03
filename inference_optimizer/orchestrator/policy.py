@@ -28,6 +28,7 @@ v0.6 changes vs v0.5:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,8 +43,10 @@ from .phase_state import (
     is_action_allowed_in_phase,
 )
 from .specialist_domains import (
+    KNOWLEDGE_DOMAIN_TAG_SET,
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_MAX_TURNS_HARD_CAP,
+    normalize_dispatch_tags,
 )
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
@@ -179,9 +182,8 @@ SPECIALIST_ACTION_NAME: str = "specialist"
 # verdict before bench (Inv-5.1 / Inv-3 single-tenant GPU preserved).
 INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
-# PR-A9 (Arbor-into-Hyperloom): the merged explore action — kept
-# as a named constant alongside SPECIALIST_ACTION_NAME so the
-# explore-provenance gate has a single source of truth.
+# Merged explore action — kept as a named constant alongside
+# SPECIALIST_ACTION_NAME so explore-grid caps have a single source of truth.
 EXPLORE_ACTION_NAME: str = "explore"
 
 # the sweep action; named constant so the
@@ -191,31 +193,102 @@ EXPLORE_ACTION_NAME: str = "explore"
 SWEEP_ACTION_NAME: str = "sweep"
 CONC_SWEEP_ACTION_NAME: str = "conc_sweep"
 
-# Provenance values that pass the explore-provenance gate. Anything
-# else (``llm_direct``, missing, unknown) is denied. ``dynamic`` is a
-# strict single-literal stamp; composite forms are rejected.
-EXPLORE_PERMISSIVE_PROVENANCE_PREFIXES: tuple[str, ...] = (
-    "specialist:",
-)
-EXPLORE_PERMISSIVE_PROVENANCE_LITERALS: frozenset[str] = frozenset({
-    "default_grid",
-    "dynamic",
-})
-
 # Specialist / Explore parallelism caps — single source of truth
 # imported by cli.py, specialist_runner.py, specialist_prompt_builder.py,
 # and prompt_builder.py so the limits never drift between layers.
-#   * ``MAX_RESEARCH_LANE_CAPACITY`` — hard cap on concurrent specialist
-#     sub-agents (the M6 ceiling; CLI clamps higher operator values down
-#     to this without warning).
+#   * concurrent CPU/research-lane specialists scale with the visible
+#     GPU count (``2 × GPU``), detected at runtime; a conservative
+#     default applies when detection fails.
 #   * ``DEFAULT_SPECIALIST_MAX_PROPOSALS`` — per-specialist proposal_set
 #     cap; enforced both in the specialist prompt (self-curation) and on
 #     the SpecialistRunner write path (hard truncate before persist).
-#   * ``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS`` — number of
-#     ``provenance='specialist:*'`` variants Orchestration may stack in
-#     one ``explore`` grid. ``default_grid`` variants are unaffected
-#     (cold-start path).
-MAX_RESEARCH_LANE_CAPACITY: int = 6
+#   * ``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS`` — fallback per-round
+#     specialist fan-out used only when SharedState capacity is unset.
+
+# Conservative research-lane ceiling used when the GPU count cannot be
+# probed (keeps the loop alive on CPU-only boxes / sandboxes).
+RESEARCH_LANE_CEILING_FALLBACK: int = 2
+
+
+def detect_gpu_count() -> int:
+    """Best-effort visible-GPU count.
+
+    Reads ``HIP_VISIBLE_DEVICES`` / ``CUDA_VISIBLE_DEVICES`` first
+    (cheapest, honours the operator's masking), then falls back to
+    ``rocm-smi``. Returns 0 when nothing can be probed so callers can
+    apply their conservative default.
+    """
+    for env_name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        raw = raw.strip()
+        if raw == "":
+            return 0
+        ids = [tok for tok in raw.split(",") if tok.strip() != ""]
+        if ids:
+            return len(ids)
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["rocm-smi", "--showid"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        return 0
+    except Exception:  # noqa: BLE001
+        return 0
+    if proc.returncode != 0:
+        return 0
+    indices: set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("GPU["):
+            idx, _, _ = stripped[4:].partition("]")
+            if idx:
+                indices.add(idx)
+    return len(indices)
+
+
+def research_lane_ceiling() -> int:
+    """Dynamic ceiling on concurrent CPU/research-lane specialists.
+
+    ``2 × visible GPU count``; falls back to
+    :data:`RESEARCH_LANE_CEILING_FALLBACK` when no GPU can be probed.
+    """
+    gpus = detect_gpu_count()
+    if gpus > 0:
+        return 2 * gpus
+    return RESEARCH_LANE_CEILING_FALLBACK
+
+
+def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
+    """Configured GPU specialist capacity for this session.
+
+    The GPU specialist pool is intentionally separate from serving lanes.
+    A value of 0 disables ``needs_gpu=true`` specialist dispatch.
+    """
+    if shared_state is not None:
+        try:
+            return max(0, int(
+                getattr(shared_state, "gpu_specialist_capacity", 0) or 0
+            ))
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return max(0, int(
+            os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", "0")
+            or "0"
+        ))
+    except ValueError:
+        return 0
+
+
+# Snapshot the ceiling at import for callers that need a plain int
+# (CLI clamp, schema). Recomputed lazily by :func:`research_lane_ceiling`
+# wherever a fresh probe is preferable.
+MAX_RESEARCH_LANE_CAPACITY: int = research_lane_ceiling()
 
 # Canonical name of the LLM-sub-agent resource lane shared by
 # specialists + dynamic_action; kept in lockstep with
@@ -614,6 +687,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # and mirrored into SharedState. Locking it as CORE prevents an LLM
     # from raising capacity mid-flight.
     "research_lane_capacity",
+    "gpu_specialist_capacity",
     # phase-machine escalation plumbing (KB_design §3.8 §7.3 /
     # §3.13 M7). Coordinator's ``_handle_escalate_strategy_change``
     # writes ``pending_escalate_hint`` via the validated
@@ -890,16 +964,11 @@ class PolicyGate:
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
             self._validate_integrate_patch_critic_gate(payload)
             # Continue into the standard registry + phase checks below.
-        # PR-A9 (Arbor-into-Hyperloom) — single-agent explore is retired.
-        # Every explore grid variant must trace to either a specialist
-        # (provenance='specialist:<domain>') or the cold-start default
-        # grid (provenance='default_grid'). The legacy 'llm_direct'
-        # provenance — where the orchestration LLM authored the grid
-        # from a single prompt window without any specialist research —
-        # is denied here so the EXPLORE phase becomes specialist-first
-        # for every round, matching Arbor's optimization loop.
+        # EXPLORE grids carry an advisory ``provenance`` field for the
+        # audit trail; all-``llm_direct`` grids are accepted. The only
+        # enforced explore-grid limit is the per-round specialist fan-out
+        # cap below.
         if action_name == EXPLORE_ACTION_NAME:
-            self._validate_explore_provenance(payload)
             self._validate_explore_grid_size(payload)
         # sweep_phase_singleton: deny LLM-emitted
         # sweep when the Coordinator's SWEEP-entry hook already
@@ -1007,16 +1076,14 @@ class PolicyGate:
             self._validate_conc_sweep_singleton(
                 payload, intent_kind="propose_action",
             )
-        # PR-A9 + explore_specialist_grid_max_one — same explore-grid
-        # gates as the delegate channel. Without these, an LLM that
+        # Same explore-grid caps as the delegate channel. Without these, an LLM that
         # cannot delegate{action_name='explore', ...} (e.g. wrong role
         # or phase guard fires first) can still propose_action an
         # explore grid full of llm_direct or many specialist:* variants
-        # and have the Coordinator materialise it. Mirror both rules
-        # here so the propose advisory path can never sidestep PR-A9
-        # or the new per-round specialist cap.
+        # and have the Coordinator materialise it. Mirror the cap here
+        # so the propose advisory path can never sidestep the per-round
+        # specialist limit.
         if action_name == EXPLORE_ACTION_NAME:
-            self._validate_explore_provenance(payload)
             self._validate_explore_grid_size(payload)
         self._validate_fp8_only_action(action_name, intent_kind="propose_action")
         # F3-5: explore-attempt minimum guard — kernel_opt requires at
@@ -1567,78 +1634,6 @@ class PolicyGate:
         # tools that don't pass through PolicyGate.
 
     # ------------------------------------------------------------------
-    # R2 ``specialist_dispatch_source``
-    # ------------------------------------------------------------------
-    def _validate_explore_provenance(
-        self, payload: dict[str, Any],
-    ) -> None:
-        """PR-A9 (Arbor-into-Hyperloom): retire single-agent explore.
-
-        Every explore-variant must trace to either:
-
-        * a specialist's ``proposal_set`` entry
-          (``provenance='specialist:<domain>'``); OR
-        * the cold-start default grid
-          (``provenance='default_grid'``).
-
-        The legacy ``provenance='llm_direct'`` — where the Orchestration
-        LLM authored the variant from a single prompt window without
-        any specialist research — is denied. The denial hint instructs
-        the LLM to dispatch a specialist first OR stamp the variant as
-        ``default_grid`` for the cold-start path. This keeps every
-        EXPLORE round specialist-first while still letting cold-start
-        rounds proceed when no specialist proposal_set exists yet.
-
-        Empty grid (or grid omitted) is NOT denied here — the executor
-        surfaces a structured ``empty_grid`` failure instead.
-        """
-        params = payload.get("params") or {}
-        if not isinstance(params, dict):
-            return
-        grid = params.get("grid")
-        if not isinstance(grid, list) or not grid:
-            return
-        permitted_count = 0
-        denied_examples: list[str] = []
-        for v in grid:
-            if not isinstance(v, dict):
-                continue
-            prov = str(v.get("provenance") or "").strip()
-            if (
-                prov in EXPLORE_PERMISSIVE_PROVENANCE_LITERALS
-                or any(
-                    prov.startswith(p)
-                    for p in EXPLORE_PERMISSIVE_PROVENANCE_PREFIXES
-                )
-            ):
-                permitted_count += 1
-            else:
-                denied_examples.append(
-                    f"{v.get('name', '?')}={prov or '<missing>'}"
-                )
-        if permitted_count == 0:
-            raise PolicyDenied(
-                "explore: every grid variant carries the legacy "
-                "provenance='llm_direct' (or no provenance at all, "
-                "which defaults to 'llm_direct'). PR-A9 retired the "
-                "single-agent explore path; EXPLORE rounds must "
-                "trace each variant to a specialist proposal_set "
-                "or the cold-start default_grid.",
-                rule="explore_requires_specialist_provenance",
-                hint=(
-                    "Either:\n"
-                    "  1. delegate{action_name='specialist', "
-                    "params={domain, gap_canonical_id, ...}} first, "
-                    "wait for the specialist_done, then re-emit "
-                    "explore with grid variants stamped "
-                    "provenance='specialist:<domain>'; OR\n"
-                    "  2. stamp every cold-start variant with "
-                    "provenance='default_grid' (signals 'no specialist "
-                    "yet — use the executor's built-in grid')."
-                ),
-            )
-
-    # ------------------------------------------------------------------
     # ``explore_specialist_grid_max_one`` — cap on how many
     # ``provenance='specialist:*'`` variants Orchestration may stack
     # into one explore round. ``default_grid`` variants are unaffected
@@ -1648,18 +1643,18 @@ class PolicyGate:
     #
     # The cap is dynamic: it tracks the session's
     # ``research_lane_capacity`` (how many specialists may fan out in
-    # parallel per round), clamped to ``MAX_RESEARCH_LANE_CAPACITY`` (6).
-    # The historical hard-1 (``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS``)
-    # remains the fallback when SharedState / the field is unavailable.
-    # The rule id is kept as ``explore_specialist_grid_max_one`` for
-    # audit-trail / breakdown stability even though the numeric cap may
-    # now exceed one.
+    # parallel per round), clamped to the GPU-derived research-lane
+    # ceiling (``2 × visible GPU``). The historical hard-1
+    # (``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS``) remains the fallback
+    # when SharedState / the field is unavailable. The rule id is kept
+    # as ``explore_specialist_grid_max_one`` for audit-trail / breakdown
+    # stability even though the numeric cap may now exceed one.
     # ------------------------------------------------------------------
     def _effective_specialist_grid_cap(self) -> int:
         """Per-round cap on ``provenance='specialist:*'`` explore variants.
 
-        Tracks ``SharedState.research_lane_capacity`` (clamped to
-        ``MAX_RESEARCH_LANE_CAPACITY``); falls back to
+        Tracks ``SharedState.research_lane_capacity`` (clamped to the
+        GPU-derived research-lane ceiling); falls back to
         ``MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS`` (1) when SharedState
         is unavailable or the field is unset / non-positive.
         """
@@ -1671,7 +1666,7 @@ class PolicyGate:
             except (TypeError, ValueError):
                 rlc = 0
         if rlc > 0:
-            cap = min(MAX_RESEARCH_LANE_CAPACITY, rlc)
+            cap = min(research_lane_ceiling(), rlc)
         else:
             cap = MAX_SPECIALIST_SOURCED_EXPLORE_VARIANTS
         return max(1, cap)
@@ -1969,7 +1964,8 @@ class PolicyGate:
         (Inv-11.2). Order matches §3.5 §11 / §3.13 M5 §4.
 
         - source role must be Orchestration (R2 main).
-        - ``params.domain`` ∈ SPECIALIST_DOMAIN_KEYS.
+        - each ``params.tags`` entry ∈ knowledge-domain vocabulary
+          (``params.domain`` accepted as a single-tag alias).
         - ``params.gap_canonical_id`` non-empty.
         - ``params.max_turns`` (if set) ≤ SPECIALIST_MAX_TURNS_HARD_CAP.
         """
@@ -1991,28 +1987,43 @@ class PolicyGate:
             raise PolicyDenied(
                 "delegate{action='specialist'}: params must be a dict",
                 rule="specialist_dispatch_source",
-                hint="pass params={domain, gap_canonical_id, ...} per §3.5 §6",
+                hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
+
+        # Resolve the dispatch tag list. ``params.tags`` is the canonical
+        # form (one or more knowledge-domain tags); a single
+        # ``params.domain`` is honoured as a backward-compatible alias
+        # and mapped to its knowledge-domain anchor.
+        tags = normalize_dispatch_tags(params)
+        if not tags:
+            raise PolicyDenied(
+                "delegate{action='specialist'}: at least one tag is "
+                "required (params.tags or the legacy params.domain alias)",
+                rule="specialist_unknown_domain",
+                hint=(
+                    f"set params.tags to a non-empty subset of "
+                    f"{sorted(KNOWLEDGE_DOMAIN_TAG_SET)!r}"
+                ),
+            )
+        # Each tag must belong to the controlled knowledge-domain
+        # vocabulary. Specialist keys resolve to their anchor inside
+        # ``normalize_dispatch_tags`` so both forms are accepted.
+        unknown_tags = [t for t in tags if t not in KNOWLEDGE_DOMAIN_TAG_SET]
+        if unknown_tags:
+            raise PolicyDenied(
+                f"delegate{{action='specialist'}}: unknown knowledge-domain "
+                f"tag(s)={unknown_tags!r}",
+                rule="specialist_unknown_domain",
+                hint=(
+                    f"every tag must be one of "
+                    f"{sorted(KNOWLEDGE_DOMAIN_TAG_SET)!r}"
+                ),
+            )
+
+        # ``domain`` alias retained for the sub_kind lookup below. When a
+        # multi-tag dispatch carries no explicit ``domain`` the sub_kind
+        # path is inert (sub_kind catalogues are per specialist key).
         domain = str(params.get("domain") or "").strip()
-        if not domain:
-            raise PolicyDenied(
-                "delegate{action='specialist'}: params.domain is required",
-                rule="specialist_dispatch_source",
-                hint=(
-                    f"set params.domain to one of "
-                    f"{sorted(SPECIALIST_DOMAIN_KEYS)!r}"
-                ),
-            )
-        if domain not in SPECIALIST_DOMAIN_KEYS:
-            raise PolicyDenied(
-                f"delegate{{action='specialist'}}: unknown domain={domain!r}",
-                rule="specialist_dispatch_source",
-                hint=(
-                    f"params.domain must be one of "
-                    f"{sorted(SPECIALIST_DOMAIN_KEYS)!r} "
-                    f""
-                ),
-            )
 
         # Per-domain sub_kind validation. Default sub_kind (None / "")
         # is always allowed — the specialist runs the canonical per-
@@ -2066,6 +2077,52 @@ class PolicyGate:
                     hint=(
                         f"max_turns must be in (0, {SPECIALIST_MAX_TURNS_HARD_CAP}]; "
                         f"the prompt default is 8."
+                    ),
+                )
+
+        needs_gpu_raw = params.get("needs_gpu", False)
+        if isinstance(needs_gpu_raw, str):
+            needs_gpu = needs_gpu_raw.strip().lower() in (
+                "1", "true", "yes", "y", "on",
+            )
+        else:
+            needs_gpu = bool(needs_gpu_raw)
+        if needs_gpu:
+            gpu_count_raw = params.get("gpu_count", 1)
+            try:
+                gpu_count = int(gpu_count_raw)
+            except (TypeError, ValueError) as exc:
+                raise PolicyDenied(
+                    "delegate{action='specialist'}: gpu_count must be "
+                    f"an integer, got {gpu_count_raw!r}",
+                    rule="specialist_gpu_request_invalid",
+                ) from exc
+            if gpu_count <= 0:
+                raise PolicyDenied(
+                    "delegate{action='specialist'}: gpu_count must be > 0 "
+                    "when needs_gpu=true",
+                    rule="specialist_gpu_request_invalid",
+                )
+            ceiling = gpu_specialist_ceiling(self.shared_state)
+            if ceiling <= 0:
+                raise PolicyDenied(
+                    "delegate{action='specialist'}: needs_gpu=true but the "
+                    "GPU specialist pool is disabled",
+                    rule="specialist_gpu_pool_disabled",
+                    hint=(
+                        "Start the session with --gpu-specialist-capacity > 0 "
+                        "or set INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY "
+                        "before dispatching GPU specialists."
+                    ),
+                )
+            if gpu_count > ceiling:
+                raise PolicyDenied(
+                    f"delegate{{action='specialist'}}: gpu_count={gpu_count} "
+                    f"exceeds GPU specialist capacity={ceiling}",
+                    rule="specialist_gpu_request_exceeds_capacity",
+                    hint=(
+                        "Lower params.gpu_count or start a session with a "
+                        "larger GPU specialist pool."
                     ),
                 )
 

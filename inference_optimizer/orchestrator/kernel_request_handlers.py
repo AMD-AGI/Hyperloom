@@ -97,6 +97,9 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
+# Shape sources trusted for kernel-opt dispatch. TraceLens emits
+# ``torch_trace``; ``tuning_csv`` is reserved for a profiled tuning sweep.
+_ALLOWED_SHAPE_PROVENANCE = frozenset({"torch_trace", "tuning_csv"})
 def _reusable_source_roots() -> tuple[str, ...]:
     """Framework install roots for patchability checks (dynamic discovery).
 
@@ -519,6 +522,100 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "source_file": source_file,
         }
     payload.setdefault("source_file", source_file)
+    return None
+
+
+def _allow_empty_kernel_shape(payload: dict) -> bool:
+    """Escape hatch (default off) for the non-empty-shape dispatch gate.
+
+    Set per-request via ``payload['allow_empty_kernel_shape']`` or
+    globally via ``HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1``.
+    """
+    if bool(payload.get("allow_empty_kernel_shape")):
+        return True
+    return str(
+        os.environ.get("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validate_kernel_shape_and_paths(
+    payload: dict, *, session_dir: Path,
+) -> HandlerResult | None:
+    """Reject a kernel-opt dispatch that has no trace-anchored shape or
+    whose source / workspace paths do not exist.
+
+    Kernel shapes in Hyperloom come only from TraceLens trace extraction;
+    a candidate that reached dispatch with an empty ``shapes`` list would
+    burn a GEAK / OOB budget with no shape anchor. The check guides the
+    Orchestration back to ``trace_analyze`` instead. ``shape_provenance``
+    is surfaced for audit and lets a future non-trace source be rejected.
+    """
+    # ``dry_run`` exercises the dispatch plumbing without launching a
+    # backend, so there is no GPU budget to protect and the fake fixture
+    # paths used by tests need not exist.
+    if bool(payload.get("dry_run")):
+        return None
+    candidate = _load_candidate_metadata(payload)
+    kernel_id = str(payload.get("kernel_id") or "")
+    name = str(candidate.get("name") or payload.get("kernel_name") or kernel_id)
+
+    shapes = candidate.get("shapes")
+    if not isinstance(shapes, list):
+        shapes = []
+    provenance = str(
+        candidate.get("shape_provenance")
+        or payload.get("shape_provenance")
+        or ""
+    ).strip()
+    if not shapes and not _allow_empty_kernel_shape(payload):
+        return {
+            "status": "failed",
+            "error_class": "empty_kernel_shape",
+            "error": (
+                "selected kernel candidate has no trace-anchored shape; "
+                "re-run trace_analyze to capture shapes before optimizing "
+                "(or pass --allow-empty-kernel-shape to override)"
+            ),
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "shape_provenance": provenance,
+        }
+    if provenance and provenance not in _ALLOWED_SHAPE_PROVENANCE:
+        return {
+            "status": "failed",
+            "error_class": "untrusted_shape_provenance",
+            "error": (
+                f"shape_provenance={provenance!r} is not a trusted source; "
+                f"expected one of {sorted(_ALLOWED_SHAPE_PROVENANCE)}"
+            ),
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "shape_provenance": provenance,
+        }
+
+    source_file = str(
+        payload.get("source_file") or candidate.get("source_file") or ""
+    ).strip()
+    if source_file and not Path(source_file).exists():
+        return {
+            "status": "failed",
+            "error_class": "missing_source_path",
+            "error": f"kernel source path does not exist: {source_file}",
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "source_file": source_file,
+        }
+    workspace_path = str(
+        payload.get("workspace_path") or session_dir or ""
+    ).strip()
+    if workspace_path and not Path(workspace_path).exists():
+        return {
+            "status": "failed",
+            "error_class": "missing_workspace_path",
+            "error": f"kernel workspace path does not exist: {workspace_path}",
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+        }
     return None
 
 
@@ -1734,6 +1831,11 @@ async def _run_optimization_single(
     guard = _validate_reusable_native_kernel(payload)
     if guard is not None:
         return guard
+    shape_guard = _validate_kernel_shape_and_paths(
+        payload, session_dir=session_dir,
+    )
+    if shape_guard is not None:
+        return shape_guard
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}

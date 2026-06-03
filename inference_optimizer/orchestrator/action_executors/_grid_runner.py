@@ -750,6 +750,7 @@ class VariantResult:
     duration_seconds: float | None = None
     ttft_mean_ms: float | None = None
     e2el_mean_ms: float | None = None
+    tpot_mean_ms: float | None = None
     workspace: str | None = None
     report_path: str | None = None
     raw_result_path: str | None = None
@@ -799,6 +800,7 @@ class VariantResult:
             "duration_seconds":   self.duration_seconds,
             "ttft_mean_ms":       self.ttft_mean_ms,
             "e2el_mean_ms":       self.e2el_mean_ms,
+            "tpot_mean_ms":       self.tpot_mean_ms,
             "workspace":          self.workspace,
             "report_path":        self.report_path,
             "raw_result_path":    self.raw_result_path,
@@ -1637,6 +1639,7 @@ async def run_grid(
             duration_seconds=measurement.get("duration_seconds"),
             ttft_mean_ms=measurement.get("ttft_mean_ms"),
             e2el_mean_ms=measurement.get("e2el_mean_ms"),
+            tpot_mean_ms=measurement.get("tpot_mean_ms"),
             workspace=str(workspace),
             report_path=str(report_path) if report_path.exists() else None,
             raw_result_path=measurement.get("raw_result_path"),

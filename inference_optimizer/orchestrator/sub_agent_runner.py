@@ -131,6 +131,7 @@ class SubAgentRunner:
         task: Task,
         *,
         prebound_lease: Lease | None = None,
+        extra_context: dict | None = None,
     ) -> SubAgentResult:
         """Acquire required lanes, transition queued→running, execute, transition out.
 
@@ -185,6 +186,8 @@ class SubAgentRunner:
                 extra["workspace"] = str(workspace)
             if self.session_dir is not None:
                 extra["session_dir"] = str(self.session_dir)
+            if extra_context:
+                extra.update(dict(extra_context))
             ctx = RunnerContext(task=task, lease=lease, extra=extra)
             try:
                 result_payload = await runner(ctx)

@@ -569,6 +569,79 @@ class KnowledgePlane:
             "warnings": warnings,
         }
 
+    def select_kb_for_domains(
+        self,
+        tags: list[str],
+        *,
+        budget_steps: int = 4,
+        budget_branches: int = 20,
+        hw_slug: str | None = None,
+    ) -> dict[str, Any]:
+        """Traverse the Cortex KB for each knowledge-domain tag and merge.
+
+        Each tag selects a KB anchor (knowledge-domain tags are anchors;
+        specialist keys are resolved to their anchor). The per-tag
+        traversals are merged with order-preserving dedup so the prompt
+        builder renders a single combined ``## 4. KB SUB-GRAPH`` block.
+
+        Fail-soft: a tag whose traversal fails contributes its warnings
+        only; an empty tag list yields an empty merged subgraph.
+        """
+        from .specialist_domains import domain_for_tag
+
+        anchors: list[str] = []
+        merged: dict[str, Any] = {
+            "anchor": "",
+            "anchors": [],
+            "tags": [],
+            "domain": "",
+            "points": [],
+            "neighbors": [],
+            "paths": [],
+            "candidates": [],
+            "warnings": [],
+        }
+        seen: dict[str, set[str]] = {
+            "points": set(), "neighbors": set(),
+            "paths": set(), "candidates": set(),
+        }
+
+        def _extend(key: str, values: list[str]) -> None:
+            bucket = merged[key]
+            for v in values:
+                if v not in seen[key]:
+                    seen[key].add(v)
+                    bucket.append(v)
+
+        for tag in tags:
+            dom = domain_for_tag(tag)
+            # ``select_kb_for_domain`` resolves a catalogue key to its
+            # anchor; pass the catalogue key when known, else the tag
+            # itself (treated as the anchor by the fallback path).
+            lookup = dom.key if dom is not None else str(tag)
+            sub = self.select_kb_for_domain(
+                lookup,
+                budget_steps=budget_steps,
+                budget_branches=budget_branches,
+                hw_slug=hw_slug,
+            )
+            anchor = str(sub.get("anchor") or "").strip()
+            if anchor and anchor not in anchors:
+                anchors.append(anchor)
+            merged["tags"].append(str(tag))
+            _extend("points", list(sub.get("points") or []))
+            _extend("neighbors", list(sub.get("neighbors") or []))
+            _extend("paths", list(sub.get("paths") or []))
+            _extend("candidates", list(sub.get("candidates") or []))
+            for w in sub.get("warnings") or []:
+                if w not in merged["warnings"]:
+                    merged["warnings"].append(w)
+
+        merged["anchors"] = anchors
+        merged["anchor"] = anchors[0] if anchors else ""
+        merged["domain"] = ",".join(merged["tags"])
+        return merged
+
     def pr_feed_warm_all_domains(
         self,
         *,
