@@ -146,7 +146,15 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         "recover",
     }),
     PHASE_SWEEP: frozenset({
-        "sweep", "recover",
+        # ``conc_sweep`` is a Coordinator-internal post-sweep action
+        # (PHASE_SWEEP only, on by default; disable via
+        # ``--no-enable-conc-sweep``) that benchmarks both baseline
+        # and ``current_best`` across a CONC ladder. Like ``sweep``
+        # it is discovery-only and never
+        # promotes; PolicyGate denies LLM-proposed
+        # ``delegate{action_name='conc_sweep'}`` because the auto-enqueue
+        # at sweep-task completion is the sole legitimate entry point.
+        "sweep", "conc_sweep", "recover",
     }),
     PHASE_CLOSE: frozenset({
         "report", "session_breakdown",
@@ -186,6 +194,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "explore_phase_budget_exhausted",
     "kernel_phase_budget_exhausted",
     "sweep_done",
+    "conc_sweep_done",                  # SWEEP → CLOSE when conc_sweep settles
     "sweep_budget_exhausted",
     "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
     "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
@@ -255,6 +264,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     "plateau_kernel",
     "no_kernel_skipped",
     "sweep_done",
+    "conc_sweep_done",
     "explore_force_exit_low_budget",
     "framework_pr_phase_done",
     "framework_pr_plateau",
@@ -1247,12 +1257,23 @@ def exit_normal_sweep(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """SWEEP normal exit. sweep_done OR budget exhausted."""
+    """SWEEP normal exit. sweep_done OR conc_sweep_done OR budget exhausted.
+
+    Bug #12 fix: previously only sweep_done / budget_exhausted were
+    honoured. When sweep was singleton-blocked but conc_sweep ran to
+    completion, the phase had no exit signal and idled until budget
+    exhaustion (wasting hours of GPU on repeated conc_sweep proposals).
+    """
     last_sweep = getattr(state, "last_sweep", None) or {}
     if isinstance(last_sweep, dict):
         status = str(last_sweep.get("status") or "").lower()
         if status in ("succeeded", "partial", "completed"):
             return "sweep_done", {"sweep_status": status}
+    last_conc = getattr(state, "last_conc_sweep", None) or {}
+    if isinstance(last_conc, dict):
+        cs_status = str(last_conc.get("status") or "").lower()
+        if cs_status in ("succeeded", "partial", "completed", "skipped"):
+            return "conc_sweep_done", {"conc_sweep_status": cs_status}
     remaining = phase_budget_remaining_seconds(
         state, budget_pct=budget_pct, now_unix=now_unix,
     )

@@ -272,6 +272,104 @@ def test_125_finalize_outputs_source_path_field():
     assert out[0]["kernel_category"] == "LayerNorm"
 
 
+def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
+    """Layer-2 fix: aten::mm gets GEMM via TraceLens csv, not heuristic.
+
+    derive_kernel_category's priority-1 branch (use upstream TraceLens
+    category) was dead: tracelens_category was never populated from
+    TraceLens's unified_perf_summary.csv, so aten::mm fell through to
+    the name heuristic and landed as "unknown". This pins the wiring:
+    pass perf_report_csv_dir to _finalize_candidates and aten::mm must
+    classify as GEMM via the csv lookup.
+    """
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "unified_perf_summary.csv").write_text(
+        "name,op category,extra\n"
+        "aten::mm,GEMM,ignored\n",
+        encoding="utf-8",
+    )
+    candidates = [{
+        "name": "aten::mm",
+        "duration_us": 100.0,
+        "call_count": 1,
+        "source_file": "",
+        "source_type": "unknown",
+        "shapes": [[15360, 2048]],
+    }]
+    out = tla._finalize_candidates(
+        candidates, total_dur=100.0,
+        perf_report_csv_dir=csv_dir,
+    )
+    assert out[0]["tracelens_category"] == "GEMM"
+    assert out[0]["kernel_category"] == "GEMM"
+
+
+def test_load_op_category_map_parses_unified_perf_summary(tmp_path):
+    """load_op_category_map: {name -> raw TraceLens op category}.
+
+    Keeps the first non-empty op category per name (rows are per-shape;
+    categories are stable across shapes for one op).
+    """
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "unified_perf_summary.csv").write_text(
+        "name,op category,extra\n"
+        "aten::mm,GEMM,row1\n"
+        "aten::mm,GEMM,row2\n"
+        "aiter::ck_moe_stage1,MoE_unfused,row3\n"
+        "aten::copy_,elementwise,row4\n"
+        "noise_op,,row5\n",
+        encoding="utf-8",
+    )
+    m = tla.load_op_category_map(csv_dir)
+    assert m == {
+        "aten::mm": "GEMM",
+        "aiter::ck_moe_stage1": "MoE_unfused",
+        "aten::copy_": "elementwise",
+    }
+
+
+def test_load_op_category_map_missing_returns_empty(tmp_path):
+    """csv absent / wrong path => {} so callers degrade to the
+    name heuristic. Backward-compatible with sessions that never
+    produced a perf_report_csvs/ dir (TraceLens pre-5/30 flow)."""
+    assert tla.load_op_category_map(tmp_path / "nonexistent") == {}
+    (tmp_path / "perf_report_csvs").mkdir()
+    assert tla.load_op_category_map(tmp_path / "perf_report_csvs") == {}
+
+
+def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
+    """Backward compatibility: no csv => exact same behavior as today.
+
+    Without perf_report_csv_dir the heuristic still tags aiter::ck_moe_*
+    as MoE via name substring, proving the csv path is purely additive."""
+    candidates = [{
+        "name": "aiter::ck_moe_stage1",
+        "duration_us": 100.0,
+        "call_count": 1,
+        "source_file": "",
+        "source_type": "unknown",
+        "shapes": [[1, 1]],
+    }]
+    out = tla._finalize_candidates(
+        candidates, total_dur=100.0,
+        perf_report_csv_dir=tmp_path / "does_not_exist",
+    )
+    assert out[0].get("tracelens_category", "") == ""
+    assert out[0]["kernel_category"] == "MoE"
+
+
+def test_normalize_upstream_category_handles_moe_aux_and_collective():
+    """New mappings let TraceLens csv values normalize cleanly:
+    MoE_aux (moe_sorting / topk) and CustomCollective (reg_all_gather)."""
+    from tracelens_skill_runner import normalize_upstream_category
+    assert normalize_upstream_category("MoE_aux") == "MoE"
+    assert normalize_upstream_category("moe_aux") == "MoE"
+    assert normalize_upstream_category("CustomCollective") == "Communication"
+    assert normalize_upstream_category("customcollective") == "Communication"
+
+
 def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     import json as _json
     from argparse import Namespace
